@@ -52,6 +52,9 @@ macro_rules! impl_lifecycle_persist {
                 let Self {
                     $($map_f: _,)*
                     $($scalar_f: _,)*
+                    // Session-ephemeral: paired with non-persisted actor `active_nanite_repairs` and per-actor post-unlock seq.
+                    nanite_paste_shortfall: _,
+                    post_unlock_committed_seq: _,
                 } = self;
                 let def = Self::default();
                 $(
@@ -745,6 +748,8 @@ mod tests {
             .into_iter()
             .collect(),
             server_runtime_json: Some("{\"roundtrip\":true}".to_string()),
+            nanite_paste_shortfall: Default::default(),
+            post_unlock_committed_seq: Default::default(),
         };
 
         repo.tx("seed_all_lifecycle_fields", |wtx| -> Result<(), TxError> {

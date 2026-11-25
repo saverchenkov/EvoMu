@@ -316,16 +316,26 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
         make_ball(ship2, 606, landing_pos),
         make_combat_state(100.0, 100.0, 100.0, 100.0),
     );
+    let mut ops = super::super::post_unlock::PostUnlockOps::default();
     {
         let bp = sys.ballpark.read().unwrap();
         let st = sys.actor_state.read().unwrap();
-        persist_landed_warps_in_db(
+        super::collect_landed_warps_for_post_unlock_with_in_flight(
             &bp,
             &[DestinyEvent::OnDeactivatingWarp { ball_id: ship2 }],
             &Some(Arc::clone(&ctx.db)),
             &st.ball_space_entry_epochs,
+            false,
+            &mut ops,
         );
     }
+    let _ = super::super::post_unlock::execute_post_unlock_ops(
+        Some(&ctx.db),
+        None,
+        ops,
+        None,
+        None,
+    );
     let saved_pos = ctx.db.with_snapshot(|s| s.item_positions.get(&ship2).copied());
     assert_eq!(saved_pos, Some(landing_pos.to_array()));
 
@@ -589,6 +599,59 @@ async fn celestials_gate_cloak_wormhole_group_velocity_and_fast_forward_boundari
     assert!((sim_elapsed - before - 120.0).abs() < 1e-9);
 }
 
+fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) -> SystemHandle {
+    let (event_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
+    let (view_tx, view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
+    let view_tx = Arc::new(view_tx);
+    let tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
+    let h = SystemHandle {
+        solar_system_id: 30_000_142,
+        cmd_tx,
+        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
+        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
+        post_unlock_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        completed_post_unlock_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        event_tx,
+        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        ballpark: Arc::new(super::BallparkHandle::new(
+            Ballpark::new(30_000_142),
+            Arc::clone(&view_tx),
+            Arc::clone(&tidi_bits),
+        )),
+        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx,
+        view_rx,
+        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        tidi_factor_bits: tidi_bits,
+        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
+        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
+        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
+        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
+    };
+    h.ballpark.attach_actor_state(&h.actor_state);
+    h
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     let ctx = test_ctx();
@@ -680,51 +743,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     // Closed-channel SystemHandle covers every "Solar system actor stopped" error branch
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<SystemCommand>(1);
     drop(cmd_rx);
-    let (event_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
-    let (dead_view_tx, dead_view_rx) =
-        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
-    let dead_view_tx = Arc::new(dead_view_tx);
-    let dead_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
-    let dead = SystemHandle {
-        solar_system_id: 30_000_142,
-        cmd_tx,
-        event_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(super::BallparkHandle::new(
-            Ballpark::new(30_000_142),
-            Arc::clone(&dead_view_tx),
-            Arc::clone(&dead_tidi_bits),
-        )),
-        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        view_tx: dead_view_tx,
-        view_rx: dead_view_rx,
-        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: dead_tidi_bits,
-        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
-        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
-        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
-        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-    };
-    dead.ballpark.attach_actor_state(&dead.actor_state);
+    let dead = make_dummy_system_handle(cmd_tx);
 
     assert!(dead.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(dead.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -884,51 +903,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
             drop(cmd);
         }
     });
-    let (drop_evt_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
-    let (drop_view_tx, drop_view_rx) =
-        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
-    let drop_view_tx = Arc::new(drop_view_tx);
-    let drop_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
-    let drop_h = SystemHandle {
-        solar_system_id: 30_000_142,
-        cmd_tx: drop_tx,
-        event_tx: drop_evt_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(super::BallparkHandle::new(
-            Ballpark::new(30_000_142),
-            Arc::clone(&drop_view_tx),
-            Arc::clone(&drop_tidi_bits),
-        )),
-        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        view_tx: drop_view_tx,
-        view_rx: drop_view_rx,
-        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: drop_tidi_bits,
-        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
-        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
-        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
-        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-    };
-    drop_h.ballpark.attach_actor_state(&drop_h.actor_state);
+    let drop_h = make_dummy_system_handle(drop_tx);
     assert!(drop_h.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(drop_h.set_ball_max_velocity(1, 100.0).await.is_err());
     assert!(drop_h.spawn_ball_with_combat(make_ball(1, 606, DVec3::ZERO), CombatState::default()).await.is_err());
@@ -1374,51 +1349,7 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
 async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
     drop(cmd_rx);
-    let (event_tx, _) = tokio::sync::broadcast::channel(4);
-    let (handle_view_tx, handle_view_rx) =
-        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
-    let handle_view_tx = Arc::new(handle_view_tx);
-    let handle_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
-    let handle = SystemHandle {
-        solar_system_id: 30_000_142,
-        cmd_tx,
-        event_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(super::BallparkHandle::new(
-            eve_destiny::Ballpark::new(30_000_142),
-            Arc::clone(&handle_view_tx),
-            Arc::clone(&handle_tidi_bits),
-        )),
-        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        view_tx: handle_view_tx,
-        view_rx: handle_view_rx,
-        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: handle_tidi_bits,
-        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
-        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
-        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
-        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-    };
-    handle.ballpark.attach_actor_state(&handle.actor_state);
+    let handle = make_dummy_system_handle(cmd_tx);
 
     assert!(handle.spawn_ball(make_ball(1, 587, DVec3::ZERO)).await.is_err());
     assert!(handle.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -1735,4 +1666,267 @@ async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_b
             hull_hp: 500.0,
         })
     );
+}
+
+fn seed_test_ship_in_sys(db: &WorldRepository, sys_id: u32, char_id: i64, ship_id: i64) {
+    db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_id, make_item(ship_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1));
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn world_repository_writer_hold_does_not_block_system_actor_movement_locks_or_step() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (ship_id, target_id) = (777_001_001_i64, 777_001_002_i64);
+    seed_test_ship_in_sys(&ctx.db, sys_id, 90_000_001, ship_id);
+    let mut stationary_ship = make_ball(ship_id, 606, DVec3::new(1_000.0, 2_000.0, 3_000.0));
+    stationary_ship.velocity = DVec3::ZERO;
+    stationary_ship.speed_fraction = 0.0;
+    stationary_ship.mode = MovementMode::Stop;
+    sys.spawn_ball_with_meta(
+        stationary_ship,
+        make_combat_state(500.0, 500.0, 500.0, 200.0),
+        SlimItemMeta { group_id: 25, category_id: 6, owner_id: 90_000_001, ..Default::default() },
+    ).await.unwrap();
+    sys.spawn_ball_with_combat(
+        make_ball(target_id, 606, DVec3::new(5_000.0, 2_000.0, 3_000.0)),
+        make_combat_state(500.0, 500.0, 500.0, 200.0),
+    ).await.unwrap();
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let db_hold = Arc::clone(&ctx.db);
+    let writer_thread = std::thread::spawn(move || {
+        db_hold.with_mut_snapshot(|_| {
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+        });
+    });
+    held_rx.recv().unwrap();
+
+    let new_pos = DVec3::new(12_345.0, 67_890.0, 11_111.0);
+    let op_start = std::time::Instant::now();
+    let _ = sys.ask_step_tick_only(1.0).await.unwrap();
+    let _ = sys.set_speed_fraction(ship_id, 0.5).await.unwrap();
+    sys.add_target_lock(ship_id, TargetLock {
+        target_id, lock_time_ms: 1000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0),
+    }).await.unwrap();
+    let set_pos_task = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_id, new_pos).await } });
+    let mem_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+    let mut mem_updated = false;
+    while tokio::time::Instant::now() < mem_deadline {
+        if sys.get_ball_position_sync(ship_id) == Some(new_pos) { mem_updated = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(mem_updated, "set_ball_position must update actor ballpark memory promptly while DB writer is held");
+    let op_elapsed = op_start.elapsed();
+    assert!(op_elapsed < std::time::Duration::from_millis(750), "SystemActor blocked on 1.5s writer hold: {op_elapsed:?}");
+    assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 1);
+    assert!(!set_pos_task.is_finished(), "SetBallPosition reply must wait until DB commit after writer release (W4)");
+
+    writer_thread.join().unwrap();
+    assert!(set_pos_task.await.unwrap());
+    assert_eq!(ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied()), Some([new_pos.x, new_pos.y, new_pos.z]));
+}
+
+#[test]
+fn bf2_ship_combat_hp_batch_preserves_command_order_coalesces_duplicates_and_checks_system() {
+    use super::super::post_unlock::{execute_post_unlock_ops, CombatHpDbUpdate, PostUnlockOps};
+
+    let ctx = test_ctx();
+    let (sys_a, sys_b, ship_id, char_id) = (30_000_142_u32, 30_000_144_u32, 777_002_001_i64, 90_000_001_i64);
+    seed_test_ship_in_sys(&ctx.db, sys_a, char_id, ship_id);
+    let hp_upd = |ball_id, cs, req| CombatHpDbUpdate {
+        ball_id, combat_state: cs, expected_system: Some(sys_a), require_persisted_entity: req,
+    };
+
+    // 1. Command ordering: [HealCombatState(req=false, cap=100), SetCapacitor(req=true, cap=25)] -> cap=25.0.
+    let mut cs_heal = make_combat_state(500.0, 500.0, 500.0, 100.0);
+    cs_heal.capacitor = 100.0;
+    let mut cs_cap25 = cs_heal.clone();
+    cs_cap25.capacitor = 25.0;
+    let mut ops_order = PostUnlockOps::default();
+    ops_order.push_ship_combat_hp(hp_upd(ship_id, cs_heal.clone(), false));
+    ops_order.push_ship_combat_hp(hp_upd(ship_id, cs_cap25, true));
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_order, None, None);
+    let cap_meta = ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied())
+        .expect("capacitor meta should persist for cap < max_cap");
+    assert!((cap_meta.shield_hp - 26.0).abs() < 1e-6);
+
+    // 2. Duplicate ball_id coalescing: [100 -> 50 -> 100] converges to 100 (meta cleared), not 50.
+    let mut cs_80 = cs_heal.clone();
+    cs_80.capacitor = 80.0;
+    let mut ops_seed = PostUnlockOps::default();
+    ops_seed.push_ship_combat_hp(hp_upd(ship_id, cs_80, true));
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_seed, None, None);
+    let mut cs_50 = cs_heal.clone();
+    cs_50.capacitor = 50.0;
+    let mut ops_dup = PostUnlockOps::default();
+    ops_dup.push_ship_combat_hp(hp_upd(ship_id, cs_heal.clone(), true));
+    ops_dup.push_ship_combat_hp(hp_upd(ship_id, cs_50, true));
+    ops_dup.push_ship_combat_hp(hp_upd(ship_id, cs_heal.clone(), false));
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_dup, None, None);
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-ship_id)).copied()).is_none());
+
+    // 3. Cross-system stale write check: move ship to sys_b -> sys_a Heal update is ignored.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(sys_b);
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_b;
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id, crate::sp6_lifecycle::PersistedCombatHp { shield_hp: 10.0, armor_hp: 20.0, hull_hp: 30.0 },
+        );
+    });
+    let mut stale_heal = PostUnlockOps::default();
+    stale_heal.push_ship_combat_hp(hp_upd(ship_id, cs_heal, false));
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, stale_heal, None, None);
+    let persisted = ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied()).unwrap();
+    assert!((persisted.shield_hp - 10.0).abs() < 1e-6, "stale sys_a update overwrote sys_b: {persisted:?}");
+
+    // 4. Ordered execution (W5) on unpersisted synthetic ball: req=false applies, req=true rejected.
+    let unpersisted_ball = 999_888_777_i64;
+    let mut cs_u_heal = make_combat_state(400.0, 400.0, 400.0, 100.0);
+    cs_u_heal.shield_hp = 350.0;
+    let mut cs_u_cap = cs_u_heal.clone();
+    cs_u_cap.capacitor = 25.0;
+    let mut ops_u = PostUnlockOps::default();
+    ops_u.push_ship_combat_hp(hp_upd(unpersisted_ball, cs_u_heal, false));
+    ops_u.push_ship_combat_hp(hp_upd(unpersisted_ball, cs_u_cap.clone(), true));
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_u, None, None);
+    let p_u = ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&unpersisted_ball).copied()).unwrap();
+    assert!((p_u.shield_hp - 350.0).abs() < 1e-6);
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-unpersisted_ball)).copied()).is_none());
+    let mut ops_u2 = PostUnlockOps::default();
+    ops_u2.push_ship_combat_hp(hp_upd(unpersisted_ball, cs_u_cap, false));
+    let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops_u2, None, None);
+    let p_cap = ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&(-unpersisted_ball)).copied()).unwrap();
+    assert!((p_cap.shield_hp - 26.0).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_empty_ops_db_reply_waits_behind_earlier_post_unlock_write_fifo() {
+    let ctx = test_ctx();
+    let sys = ctx.systems.get_or_spawn(30_000_142_u32);
+    let ast_id = 777_003_001_i64;
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let db_hold = Arc::clone(&ctx.db);
+    let writer_thread = std::thread::spawn(move || {
+        db_hold.with_mut_snapshot(|_| { held_tx.send(()).unwrap(); let _ = release_rx.recv(); });
+    });
+    held_rx.recv().unwrap();
+
+    let ast = AsteroidState {
+        asteroid_id: ast_id, belt_id: 40_000_001, type_id: 1230, initial_units: 500, remaining_units: 500,
+        unit_volume: 0.1, depleted: false, respawn_at_tick: None,
+    };
+    let ball = make_ball(ast_id, 1230, DVec3::new(100.0, 0.0, 0.0));
+    let fut1 = sys.spawn_asteroid(ast.clone(), ball.clone());
+    let fut2 = sys.spawn_asteroid(ast, ball);
+    tokio::pin!(fut1);
+    tokio::pin!(fut2);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(80), &mut fut2).await.is_err());
+
+    let _ = release_tx.send(());
+    writer_thread.join().unwrap();
+    assert!(fut2.await.is_ok());
+    assert!(ctx.db.with_snapshot(|s| s.asteroids.contains_key(&ast_id)));
+    assert!(fut1.await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_force_decloak_awaits_orphaned_db_cloak_cleanup_and_skips_deact_hook_under_world_lock() {
+    use super::super::post_unlock::{
+        execute_post_unlock_ops, DeferredDeactivationHookOp, PostUnlockIntent, PostUnlockOps,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.actor_state.write().unwrap().sde_opt = None;
+    let (ship_id, mod_id, char_id) = (777_004_001_i64, 777_004_002_i64, 90_000_001_i64);
+
+    let hook_hits = Arc::new(AtomicUsize::new(0));
+    let hook_hits_cb = Arc::clone(&hook_hits);
+    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_sid, _cid, _cyc| {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        hook_hits_cb.fetch_add(1, Ordering::SeqCst);
+    }));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_id, make_item(ship_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1));
+        snap.items.insert(mod_id, make_item(mod_id, 11578, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.module_active_states.insert(mod_id);
+    });
+    let mut cs = make_combat_state(500.0, 500.0, 500.0, 200.0);
+    cs.is_cloaked = true;
+    cs.is_covert_cloak = true;
+    sys.spawn_ball_with_meta(
+        make_ball(ship_id, 606, DVec3::ZERO), cs,
+        SlimItemMeta { group_id: 25, category_id: 6, owner_id: char_id, char_id: Some(char_id), is_cloaked: true, ..Default::default() },
+    ).await.unwrap();
+
+    sys.force_decloak(ship_id, Some(char_id), super::super::ProtectionBreakReason::ModuleActivation, 1_000).await.unwrap();
+    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&mod_id)));
+    assert_eq!(hook_hits.load(Ordering::SeqCst), 1);
+
+    let unsafe_hook_hits = Arc::new(AtomicUsize::new(0));
+    let unsafe_hook_cb = Arc::clone(&unsafe_hook_hits);
+    let unsafe_hook: super::super::ModuleDeactivationHook = Arc::new(move |_, _, _| { unsafe_hook_cb.fetch_add(1, Ordering::SeqCst); });
+    let mut unsafe_ops = PostUnlockOps::default();
+    unsafe_ops.push(PostUnlockIntent::DeactivationHook(DeferredDeactivationHookOp {
+        solar_system_id: sys_id, char_id: Some(char_id), fallback_owner_id: Some(char_id),
+        cycle: ActiveModuleCycle { ship_id, module_id: mod_id, ..Default::default() },
+    }));
+    ctx.db.with_mut_snapshot(|_| { let _ = execute_post_unlock_ops(Some(&ctx.db), None, unsafe_ops, Some(&unsafe_hook), None); });
+    assert_eq!(unsafe_hook_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_cancel_ship_nanite_repairs_under_leaf_lock_enqueues_instead_of_dropping() {
+    let ctx = test_ctx();
+    let sys = ctx.systems.get_or_spawn(30_000_142_u32);
+    let (ship_id, mod_id, char_id) = (777_005_001_i64, 777_005_002_i64, 90_000_001_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut m = make_item(mod_id, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1);
+        m.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 120.0);
+        snap.items.insert(mod_id, m);
+    });
+    sys.actor_state.write().unwrap().active_nanite_repairs.push(ActiveNaniteRepair {
+        ship_id, char_id, module_id: mod_id, initial_damage_hp: 40.0, duration_s: 10.0,
+        elapsed_s: 0.0, paste_total_needed: 5, paste_consumed_so_far: 5,
+    });
+    let leaf_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_LEAF }> = eve_db::lock_rank::RankedRwLock::new(());
+    let leaf_guard = leaf_lock.write().unwrap();
+    sys.cancel_ship_nanite_repairs_sync(ship_id, true);
+    drop(leaf_guard);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut updated_dmg = None;
+    while tokio::time::Instant::now() < deadline {
+        updated_dmg = ctx.db.with_snapshot(|s| s.items.get(&mod_id).and_then(|it| it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()));
+        if updated_dmg.is_some_and(|v| (v - 40.0).abs() < 1e-6) { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(updated_dmg.is_some_and(|v| (v - 40.0).abs() < 1e-6), "got {updated_dmg:?}");
+}
+
+#[test]
+fn p2_2_execute_post_unlock_ops_enforces_assert_locks_disallowed_under_actor_lock() {
+    use super::super::post_unlock::{execute_post_unlock_ops, PostUnlockIntent, PostUnlockOps};
+    let ctx = test_ctx();
+    let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> = eve_db::lock_rank::RankedRwLock::new(());
+    let mut ops = PostUnlockOps::default();
+    ops.push(PostUnlockIntent::RemovedShipBall(777_006_001));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _bp = bp_lock.read().unwrap();
+        let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops, None, None);
+    }));
+    assert!(res.is_err(), "execute_post_unlock_ops must panic via assert_locks_disallowed when RANK_BALLPARK is held");
 }

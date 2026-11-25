@@ -2205,6 +2205,117 @@ impl WorldStateSnapshot {
         }
     }
 
+    /// Clears persisted module active state and active charge tracking for `module_id` (`#1170`).
+    #[inline]
+    pub fn clear_module_active_state(&mut self, module_id: i64) {
+        self.module_active_states.remove(&module_id);
+        self.module_active_charges.remove(&module_id);
+    }
+
+    /// Clears persisted module active states and active charges for all persistent items
+    /// directly fitted on or contained inside `ship_id` (`#1170`).
+    pub fn clear_ship_active_module_states(&mut self, ship_id: i64) {
+        let mod_ids: Vec<i64> = self
+            .items
+            .values()
+            .filter(|it| it.location_id == ship_id)
+            .map(|it| it.item_id)
+            .collect();
+        for mid in mod_ids {
+            self.clear_module_active_state(mid);
+        }
+    }
+
+    /// Returns `true` if `ship_id` has any persistent item with active state or active charge (`#1170`).
+    #[inline]
+    pub fn ship_has_any_active_module_or_charge(&self, ship_id: i64) -> bool {
+        (!self.module_active_states.is_empty() || !self.module_active_charges.is_empty())
+            && self.items.values().any(|it| it.location_id == ship_id && (self.module_active_states.contains(&it.item_id) || self.module_active_charges.contains_key(&it.item_id)))
+    }
+
+    /// Marks `module_id` offline and clears its active state upon thermal burnout (`#1170`).
+    pub fn mark_module_burned_out(&mut self, module_id: i64) {
+        self.module_online_states.insert(module_id, false);
+        self.module_active_states.remove(&module_id);
+    }
+
+    /// Inserts a newly loaded module charge stack into `self.items` (`#1170`).
+    pub fn insert_loaded_charge_item(&mut self, item: InventoryItemRecord) {
+        self.items.insert(item.item_id, item);
+    }
+
+    /// Decrements persisted charge quantity on `item_id` by `qty`, removing the row when depleted.
+    /// Returns `true` if the stack reached 0 and was removed.
+    pub fn decrement_or_remove_charge_item(&mut self, item_id: i64, qty: i32) -> bool {
+        let mut depleted = false;
+        if let Some(ci) = self.items.get_mut(&item_id) {
+            ci.quantity = ci.quantity.saturating_sub(qty);
+            if ci.quantity == 0 {
+                depleted = true;
+            }
+        }
+        if depleted {
+            self.items.remove(&item_id);
+        }
+        depleted
+    }
+
+    /// Deducts `total_needed` charges from a ship cargo ammo stack during auto-reload (`#1170`).
+    pub fn deduct_cargo_ammo_for_reload(&mut self, stack_id: i64, total_needed: i32) {
+        let mut remove_stack = false;
+        if let Some(st) = self.items.get_mut(&stack_id) {
+            if st.quantity > total_needed {
+                st.quantity -= total_needed;
+                st.version += 1;
+            } else {
+                remove_stack = true;
+            }
+        }
+        if remove_stack {
+            self.items.remove(&stack_id);
+        }
+    }
+
+    /// Applies one volatility damage tick to a loaded crystal stack, consuming one crystal unit
+    /// when damage reaches `1.0` and removing the item when the last unit shatters.
+    /// Returns `true` if the entire stack shattered and was removed.
+    pub fn step_volatile_crystal_charge(
+        &mut self,
+        item_id: i64,
+        dmg_step: f64,
+        attr_damage: u16,
+        attr_hp: u16,
+    ) -> bool {
+        let mut destroy_stack = false;
+        if let Some(c_item) = self.items.get_mut(&item_id) {
+            let cur_dmg = c_item
+                .dynamic_attributes
+                .get(&attr_damage)
+                .copied()
+                .unwrap_or(0.0);
+            let max_hp = 1.0_f64;
+            let next_dmg = cur_dmg + dmg_step;
+            if next_dmg >= max_hp - 1e-6 {
+                if c_item.quantity > 1 {
+                    c_item.quantity -= 1;
+                    c_item.dynamic_attributes.insert(attr_damage, 0.0);
+                    c_item.dynamic_attributes.insert(attr_hp, 1.0);
+                } else {
+                    destroy_stack = true;
+                }
+            } else {
+                c_item.dynamic_attributes.insert(attr_damage, next_dmg);
+                c_item
+                    .dynamic_attributes
+                    .insert(attr_hp, (max_hp - next_dmg).max(0.0));
+            }
+        }
+        if destroy_stack {
+            self.items.remove(&item_id);
+        }
+        destroy_stack
+    }
+
     /// Materializes a transient item into a persistent row in `self.items` (`#1087`).
     ///
     /// Intended for the death/loot pipeline when surviving NPC or scene items become persistent drops.

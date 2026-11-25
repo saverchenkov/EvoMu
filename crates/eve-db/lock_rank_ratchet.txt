@@ -29,8 +29,6 @@
 60	40	crates/eve-server/src/services/insurgency_complex_ops_ext.rs::notify_moderate_outpost_bc_bonus::db
 60	40	crates/eve-server/src/services/quasar_social_chat.rs::load_wormhole_speakers_from_db::db
 60	40	crates/eve-server/src/sp6_lifecycle/cluster_tick_unit_tests.rs::social_extras_leaf_lock_and_no_nested_world_snapshots_825_838_891_909::db
-60	40	crates/eve-server/src/system_actor/cycles.rs::cleanup_removed_module_cycle::db_ref
-60	40	crates/eve-server/src/system_actor/disruptors.rs::try_remove_module_cycle::db_ref
 60	40	crates/eve-server/tests/it/test_security_p0_drones_crimewatch.rs::test_drone_mine_repeatedly_and_shipping_storage::db
 60	60	crates/eve-db/src/accounts.rs::get_online_session::auth_runtime
 60	60	crates/eve-server/src/quasar_gateway.rs::handle_public_request::server_hijack_state

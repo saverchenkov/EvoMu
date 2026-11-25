@@ -191,55 +191,196 @@ pub(crate) fn handle_apply_ecm_burst(
 
 impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
-        let (removed, db_opt) = {
+        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
+        let (deact_guard, ticket) = {
             let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let super::SystemActorState {
-                active_module_cycles,
-                external_active_modules,
-                base_scramble_strengths,
-                base_core_strengths,
-                db_opt,
-                ..
-            } = &mut *st;
-            let mut removed_cycle = None;
-            if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
-                let rem = active_module_cycles.remove(pos);
-                super::cycles::cleanup_removed_module_cycle(&mut bp, &rem, db_opt);
-                super::cycles_tackle::reconcile_tackle_and_bubbles(
-                    self.solar_system_id,
-                    &mut bp,
+            let mut ops = super::post_unlock::PostUnlockOps::default();
+            let (db_opt_c, sde_opt_c) = {
+                let super::SystemActorState {
                     active_module_cycles,
+                    external_active_modules,
                     base_scramble_strengths,
                     base_core_strengths,
                     db_opt,
-                    deact_guard.as_ref(),
+                    sde_opt,
+                    ..
+                } = &mut *st;
+                if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
+                    let rem = active_module_cycles.remove(pos);
+                    super::cycles::cleanup_removed_module_cycle_collecting(
+                        &mut bp,
+                        &rem,
+                        db_opt,
+                        &mut ops,
+                    );
+                    super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
+                        self.solar_system_id,
+                        &mut bp,
+                        active_module_cycles,
+                        base_scramble_strengths,
+                        base_core_strengths,
+                        db_opt,
+                        deact_guard.as_ref(),
+                        &mut ops,
+                    );
+                }
+                super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+                super::protection::sync_active_module_ships_cache(
+                    active_module_cycles,
+                    external_active_modules,
+                    &self.active_module_ships,
                 );
-                removed_cycle = Some(rem);
-            }
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            super::protection::sync_active_module_ships_cache(
-                active_module_cycles,
-                external_active_modules,
-                &self.active_module_ships,
-            );
-            let res = (removed_cycle, db_opt.clone());
+                (db_opt.clone(), sde_opt.clone())
+            };
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));
-            res
+            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                self,
+                db_opt_c.as_ref(),
+                sde_opt_c.as_ref(),
+                ops,
+                caller_can_wait,
+            );
+            (deact_guard, ticket)
         };
-        if let Some(removed) = removed {
-            if let Some(db_ref) = db_opt {
-                if !db_ref.is_write_locked_by_current_thread() {
-                    db_ref.with_mut_snapshot(|snap| {
-                        snap.module_active_states.remove(&removed.module_id);
-                        snap.module_active_charges.remove(&removed.module_id);
-                    });
+        super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
+    }
+}
+
+pub(in crate::system_actor) fn apply_destiny_event_in_actor(
+    ballpark: &mut Ballpark,
+    ball_id: BallId,
+    event: eve_destiny::DestinyEvent,
+) -> bool {
+    use eve_destiny::{DestinyEvent, MovementMode};
+    let known = ballpark.balls.contains_key(&ball_id)
+        || matches!(event, DestinyEvent::OnSovereigntyChanged { .. });
+    if known {
+        let scope = ballpark.balls.contains_key(&ball_id).then_some(ball_id);
+        match event {
+            DestinyEvent::SetBallFree {
+                ball_id: id,
+                is_free,
+            } if id == ball_id => {
+                ballpark.set_ball_free(id, is_free);
+            }
+            DestinyEvent::SetBallHarmonic {
+                ball_id: id,
+                harmonic,
+            } if id == ball_id => {
+                ballpark.set_ball_harmonic(id, harmonic);
+            }
+            DestinyEvent::SetBallInteractive {
+                ball_id: id,
+                is_interactive,
+            } => {
+                if ballpark.ball_interactive_overrides.get(&id).copied() != Some(is_interactive)
+                    && !ballpark.set_ball_interactive(id, is_interactive)
+                {
+                    ballpark.ball_interactive_overrides.insert(id, is_interactive);
+                    ballpark.emit_event(
+                        scope,
+                        DestinyEvent::SetBallInteractive {
+                            ball_id: id,
+                            is_interactive,
+                        },
+                    );
                 }
+            }
+            DestinyEvent::SetBallRadius {
+                ball_id: id,
+                radius,
+            } if id == ball_id => {
+                ballpark.set_ball_radius(id, radius);
+            }
+            DestinyEvent::OnSovereigntyChanged { alliance_id, .. } => {
+                ballpark.set_sovereignty(alliance_id);
+            }
+            DestinyEvent::OnClientControllerEvent {
+                ball_id: id,
+                target_id,
+                event_name,
+                value,
+                delay,
+            } if id == ball_id => {
+                ballpark.emit_client_controller_event(id, target_id, event_name, value, delay);
+            }
+            DestinyEvent::OnShipStateUpdate { module_states } => {
+                ballpark.update_ship_module_states(ball_id, module_states);
+            }
+            DestinyEvent::OnDbuffUpdated {
+                ball_id: id,
+                dbuffs,
+            } if id == ball_id => {
+                ballpark.update_dbuffs(id, dbuffs);
+            }
+            DestinyEvent::OnDotVictimUpdated {
+                ball_id: id,
+                flat_dps,
+                pct_dps,
+                remaining_ticks,
+                expiry_filetime,
+            } if id == ball_id => {
+                ballpark.apply_breacher_dot_with_expiry(
+                    id,
+                    flat_dps,
+                    pct_dps,
+                    remaining_ticks,
+                    expiry_filetime,
+                );
+            }
+            DestinyEvent::OnDroneStateChange {
+                drone_id,
+                owner_id,
+                controller_id,
+                activity_state,
+                type_id,
+                controller_owner_id,
+                target_id,
+            } if drone_id == ball_id => {
+                ballpark.update_drone_state(
+                    drone_id,
+                    owner_id,
+                    controller_id,
+                    activity_state,
+                    type_id,
+                    controller_owner_id,
+                    target_id,
+                );
+            }
+            DestinyEvent::GotoDirection {
+                ball_id: id,
+                direction,
+            } if id == ball_id => {
+                let _ = ballpark.set_mode(
+                    id,
+                    MovementMode::GotoDirection {
+                        direction: glam::DVec3::from_array(direction),
+                    },
+                );
+            }
+            DestinyEvent::SetSpeedFraction {
+                ball_id: id,
+                fraction,
+            } if id == ball_id => {
+                ballpark.set_speed_fraction(id, fraction);
+            }
+            DestinyEvent::Stop { ball_id: id } if id == ball_id => {
+                let _ = ballpark.set_mode(id, MovementMode::Stop);
+            }
+            other => {
+                if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &other {
+                    if let Some(meta) = ballpark.ball_slim_meta.get_mut(slim_id) {
+                        meta.char_id = (*slim_id == ball_id).then_some(meta.owner_id);
+                    }
+                }
+                ballpark.emit_event(scope, other);
             }
         }
     }
+    known
 }
 
 #[cfg(test)]

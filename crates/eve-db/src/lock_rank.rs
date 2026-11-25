@@ -1230,6 +1230,38 @@ mod imp {
         }
     }
 
+    pub(crate) fn assert_locks_disallowed(
+        disallowed_ranks: &[u16],
+        acquired_rank: u16,
+        context: &'static str,
+        site: &'static Location<'static>,
+    ) {
+        let tid = std::thread::current().id();
+        let violation = {
+            let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
+            map.get(&tid).and_then(|stack| {
+                stack
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|e| disallowed_ranks.contains(&e.rank))
+                    .copied()
+                    .map(|v| (v.rank, v.site, stack_summary(&stack.entries)))
+            })
+        };
+        if let Some((held_rank, held_site, summary)) = violation {
+            report_violation(
+                held_rank,
+                held_site,
+                acquired_rank,
+                site,
+                &summary,
+                context,
+                false,
+            );
+        }
+    }
+
     pub(crate) fn held_ranks() -> Vec<u16> {
         let tid = std::thread::current().id();
         let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
@@ -1274,6 +1306,17 @@ pub fn assert_no_locks_held() {
 #[track_caller]
 pub fn assert_locks_below(max_rank: u16) {
     imp::assert_locks_below(max_rank, Location::caller());
+}
+
+/// Asserts that none of `disallowed_ranks` are currently held on this thread.
+#[inline]
+#[track_caller]
+pub fn assert_locks_disallowed(
+    disallowed_ranks: &[u16],
+    acquired_rank: u16,
+    context: &'static str,
+) {
+    imp::assert_locks_disallowed(disallowed_ranks, acquired_rank, context, Location::caller());
 }
 
 /// Returns the list of lock ranks currently held on this thread (diagnostic/test helper).
@@ -2096,6 +2139,40 @@ mod tests {
             );
         });
         assert!(unratcheted_violation_count() > before_mutex);
+        let _ = std::fs::remove_file(&ratchet_path);
+        assert!(held_lock_ranks().is_empty());
+    }
+
+    #[test]
+    fn assert_locks_disallowed_panics_without_ratchet_for_ballpark_and_actor_state() {
+        let bp: RankedRwLock<u32, RANK_BALLPARK> = RankedRwLock::new(1);
+        let st: RankedRwLock<u32, RANK_ACTOR_STATE> = RankedRwLock::new(2);
+        let ratchet_path = temp_ratchet_path("disallowed_actor_locks");
+
+        imp::with_test_mode(LockRankMode::Record, Some(ratchet_path.clone()), || {
+            for is_ballpark in [true, false] {
+                let before = unratcheted_violation_count();
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if is_ballpark {
+                        let _g = bp.read().unwrap();
+                        assert_locks_disallowed(
+                            &[RANK_BALLPARK, RANK_ACTOR_STATE],
+                            RANK_WORLD_INNER,
+                            "WorldRepository::tx forbidden under RANK_BALLPARK or RANK_ACTOR_STATE",
+                        );
+                    } else {
+                        let _g = st.write().unwrap();
+                        assert_locks_disallowed(
+                            &[RANK_BALLPARK, RANK_ACTOR_STATE],
+                            RANK_WORLD_INNER,
+                            "WorldRepository::tx forbidden under RANK_BALLPARK or RANK_ACTOR_STATE",
+                        );
+                    }
+                }));
+                assert!(res.is_err(), "disallowed rank must panic even in Record mode");
+                assert!(unratcheted_violation_count() > before);
+            }
+        });
         let _ = std::fs::remove_file(&ratchet_path);
         assert!(held_lock_ranks().is_empty());
     }

@@ -9,6 +9,16 @@ use crate::router::notify_registry::{
     TypedNotification,
 };
 use crate::system_actor::*;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use super::post_unlock_test_shims::{
+    apply_weapon_cycle_damage, cleanup_removed_module_cycle, emit_cycle_deactivation,
+    remove_all_ship_module_cycles, remove_all_ship_module_cycles_preserving_own_db,
+    remove_non_warp_ship_module_cycles, restore_taken_own_cycles_in_actor,
+    step_cycles_and_capacitor, step_cycles_and_capacitor_with_epochs,
+    step_cycles_and_capacitor_with_missiles_and_tidi,
+    teardown_attacker_locks_and_cycles_for_destroyed_balls,
+};
 use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{BallId, Ballpark, MovementMode};
 use glam::DVec3;
@@ -402,7 +412,8 @@ pub(crate) fn apply_resolved_weapon_damage(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_weapon_cycle_damage(
+pub(crate) fn apply_weapon_cycle_damage_collecting(
+    solar_system_id: SolarSystemId,
     cycle: &ActiveModuleCycle,
     ballpark: &mut Ballpark,
     rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
@@ -411,6 +422,7 @@ pub(crate) fn apply_weapon_cycle_damage(
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     let Some(target_id) = cycle.target_id else {
         return;
@@ -520,57 +532,21 @@ pub(crate) fn apply_weapon_cycle_damage(
         destroyed_balls,
         pending_destroyed_outbox,
     );
+    if effective_damage.total() > 0.0 && db_opt.is_some() {
+        if let Some(cs) = ballpark.combat_states.get(&target_id) {
+            post_unlock.push_ship_combat_hp(super::post_unlock::CombatHpDbUpdate {
+                ball_id: target_id,
+                combat_state: cs.clone(),
+                expected_system: Some(solar_system_id),
+                require_persisted_entity: true,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn step_cycles_and_capacitor(
-    solar_system_id: SolarSystemId,
-    ballpark: &mut Ballpark,
-    active_module_cycles: &mut Vec<ActiveModuleCycle>,
-    pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
-    active_nanite_repairs: &mut Vec<ActiveNaniteRepair>,
-    ship_rack_heat: &mut HashMap<BallId, [f64; 3]>,
-    rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
-    base_scramble_strengths: &HashMap<BallId, i32>,
-    base_core_strengths: &HashMap<BallId, i32>,
-    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
-    tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
-    pending_cycle_actions: &mut Vec<PendingCycleAction>,
-    dt: f64,
-    deactivation_hook: Option<&ModuleDeactivationHook>,
-) -> Vec<(BallId, Option<CharacterId>)> {
-    let empty_epochs = HashMap::new();
-    let empty_projections = HashMap::new();
-    let mut empty_cycle_start = std::collections::HashSet::new();
-    step_cycles_and_capacitor_with_epochs(
-        solar_system_id,
-        ballpark,
-        active_module_cycles,
-        pending_anchoring_disruptors,
-        active_nanite_repairs,
-        ship_rack_heat,
-        rah_incoming_damage,
-        base_scramble_strengths,
-        base_core_strengths,
-        sde_opt,
-        db_opt,
-        &empty_epochs,
-        &empty_projections,
-        &mut empty_cycle_start,
-        mechanic_rng_opt,
-        tactical_state,
-        pending_cycle_actions,
-        dt,
-        deactivation_hook,
-    )
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn step_cycles_and_capacitor_with_epochs(
+pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -585,43 +561,31 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
     ball_space_entry_epochs: &HashMap<BallId, u64>,
     fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
     weapon_cycle_start_modules: &mut std::collections::HashSet<(BallId, i64)>,
+    pending_missile_launches: &mut Vec<super::PendingMissileLaunch>,
     mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    sim_elapsed_secs: f64,
     dt: f64,
+    tidi_factor: f64,
+    reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
+    pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<(BallId, Option<CharacterId>)> {
-    let mut unused_launches = Vec::new();
-    step_cycles_and_capacitor_with_missiles_and_tidi(
-        solar_system_id,
-        ballpark,
-        active_module_cycles,
-        pending_anchoring_disruptors,
-        active_nanite_repairs,
-        ship_rack_heat,
-        rah_incoming_damage,
-        base_scramble_strengths,
-        base_core_strengths,
-        sde_opt,
-        db_opt,
-        ball_space_entry_epochs,
-        fit_projections,
-        weapon_cycle_start_modules,
-        &mut unused_launches,
-        mechanic_rng_opt,
-        tactical_state,
-        pending_cycle_actions,
-        0.0,
-        dt,
-        1.0,
-        None,
-        deactivation_hook,
-        None,
+    step_cycles_with_reservations_collecting(
+        solar_system_id, ballpark, active_module_cycles, pending_anchoring_disruptors,
+        active_nanite_repairs, ship_rack_heat, rah_incoming_damage, base_scramble_strengths,
+        base_core_strengths, sde_opt, db_opt, ball_space_entry_epochs, fit_projections,
+        weapon_cycle_start_modules, pending_missile_launches, mechanic_rng_opt, tactical_state,
+        pending_cycle_actions, sim_elapsed_secs, dt, tidi_factor, reload_sim_remaining,
+        deactivation_hook, pending_destroyed_outbox, db_opt.as_deref().map(|db| db.published_snapshot_arc()),
+        HashMap::new(), HashMap::new(), post_unlock,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
+pub(crate) fn step_cycles_with_reservations_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -646,6 +610,10 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
     mut reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    tick_snap_opt: Option<Arc<eve_db::WorldStateSnapshot>>,
+    mut virtual_item_qty: HashMap<i64, i32>,
+    mut virtual_crystal_dmg: HashMap<i64, f64>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let tidi_factor = if tidi_factor.is_finite() {
         tidi_factor.clamp(0.10, 1.0)
@@ -653,6 +621,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
         1.0
     };
     let mut destroyed_balls = Vec::new();
+    let mut virtual_paste_used: HashMap<BallId, i32> = HashMap::new();
     crate::services::tactical_modules::step_wubble_probes_and_debuffs(
         ballpark,
         sde_opt,
@@ -677,37 +646,14 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
         dt,
     );
 
-    // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`)
+    // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`);
+    // worker-side `should_open_db_tx` skips opening a DB tx when tethered ships have no damaged modules.
     let tethered_ships: Vec<BallId> = ballpark.combat_states.iter().filter_map(|(&bid, cs)| cs.is_tethered.then_some(bid)).collect();
-    if !tethered_ships.is_empty() {
-        let tether_repair_hp = 2.0 * dt.max(0.0);
-        if let Some(db_ref) = db_opt {
-            // Fast read-only pre-check avoids taking the global DB write lock on every 1 Hz tick
-            // when tethered ships have no fitted module heat damage (`#1207`).
-            let has_heat_damage = db_ref.with_snapshot(|snap| {
-                snap.items.values().any(|it| {
-                    tethered_ships.contains(&it.location_id)
-                        && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
-                        && it.dynamic_attributes.contains_key(&eve_sde::attr_ids::DAMAGE)
-                })
-            });
-            if has_heat_damage {
-                db_ref.with_mut_snapshot(|snap| {
-                    for it in snap.items.values_mut() {
-                        if tethered_ships.contains(&it.location_id) && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171) {
-                            if let Some(cur_dmg) = it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied() {
-                                let new_dmg = (cur_dmg - tether_repair_hp).max(0.0);
-                                if new_dmg <= 1e-6 {
-                                    it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                                } else {
-                                    it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, new_dmg);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        }
+    if !tethered_ships.is_empty() && db_opt.is_some() {
+        post_unlock.push(super::post_unlock::PostUnlockIntent::RepairTetherModuleHeal {
+            ship_ids: tethered_ships,
+            heal_hp: 2.0 * dt.max(0.0),
+        });
     }
 
     // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`):
@@ -724,42 +670,27 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
         let target_consumed = ((total_needed as f64) * next_progress - 1e-9)
             .ceil()
             .clamp(1.0, total_needed as f64) as i32;
-        let mut halted_for_paste = false;
-        let mut effective_progress = next_progress;
-        if let Some(db_ref) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
-            db_ref.with_mut_snapshot(|snap| {
-                if target_consumed > nr.paste_consumed_so_far {
-                    let delta = target_consumed - nr.paste_consumed_so_far;
-                    let taken = crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
-                        snap,
-                        nr.char_id,
-                        nr.ship_id,
-                        delta,
-                    );
-                    nr.paste_consumed_so_far += taken;
-                    if taken < delta {
-                        halted_for_paste = true;
-                        effective_progress = ((nr.paste_consumed_so_far as f64) / (total_needed as f64)).clamp(0.0, 1.0);
+        if let Some(db_ref) = db_opt.as_ref() {
+            match super::post_unlock::collect_nanite_repair_tick(
+                db_ref,
+                nr,
+                next_elapsed,
+                next_progress,
+                target_consumed,
+                &mut virtual_paste_used,
+                post_unlock,
+            ) {
+                super::post_unlock::NaniteTickCollect::Defer => return true,
+                super::post_unlock::NaniteTickCollect::Applied {
+                    halted_for_paste,
+                    effective_progress,
+                } => {
+                    if halted_for_paste {
+                        nr.elapsed_s = nr.duration_s * effective_progress;
+                        return false;
                     }
                 }
-                let done_now = !halted_for_paste && (next_elapsed + 1e-6 >= nr.duration_s);
-                let rem_dmg = if done_now {
-                    0.0
-                } else {
-                    nr.initial_damage_hp * (1.0 - effective_progress).clamp(0.0, 1.0)
-                };
-                if let Some(m_item) = snap.items.get_mut(&nr.module_id) {
-                    if rem_dmg <= 1e-6 {
-                        m_item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                    } else {
-                        m_item.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, rem_dmg);
-                    }
-                }
-            });
-        }
-        if halted_for_paste {
-            nr.elapsed_s = nr.duration_s * effective_progress;
-            return false;
+            }
         }
         nr.elapsed_s = next_elapsed;
         nr.elapsed_s + 1e-6 < nr.duration_s
@@ -931,70 +862,22 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                 }
             }
             let mut consumed_ok = true;
-            if let Some(db_ref) = db_opt {
+            if let Some(tick_snap) = tick_snap_opt.as_deref() {
                 let launchers: Vec<i64> = if cycle.linked_turrets.is_empty() {
                     vec![cycle.module_id]
                 } else {
                     cycle.linked_turrets.clone()
                 };
-                let mut reload_fire_diffs = Vec::new();
-                db_ref.with_mut_snapshot(|snap| {
-                    let mut pre_items: HashMap<i64, Option<eve_db::InventoryItemRecord>> =
-                        HashMap::new();
-                    let mut chosen: Vec<i64> = Vec::with_capacity(launchers.len());
-                    for &lid in &launchers {
-                        let Some(l_flag) = snap.items.get(&lid).map(|i| i.flag) else {
-                            consumed_ok = false;
-                            break;
-                        };
-                        let cid_opt = snap
-                            .items
-                            .values()
-                            .find(|i| {
-                                i.location_id == cycle.ship_id
-                                    && i.flag == l_flag
-                                    && i.item_id != lid
-                                    && (cycle.ammo_type_id.is_none()
-                                        || Some(i.type_id) == cycle.ammo_type_id)
-                                    && i.quantity > 0
-                            })
-                            .map(|i| i.item_id);
-                        if let Some(cid) = cid_opt {
-                            chosen.push(cid);
-                        } else {
-                            consumed_ok = false;
-                            break;
-                        }
-                    }
-                    if consumed_ok {
-                        for cid in chosen {
-                            pre_items
-                                .entry(cid)
-                                .or_insert_with(|| snap.items.get(&cid).cloned());
-                            if let Some(ci) = snap.items.get_mut(&cid) {
-                                ci.quantity = ci.quantity.saturating_sub(1);
-                                if ci.quantity == 0 {
-                                    snap.items.remove(&cid);
-                                }
-                            }
-                        }
-                        for (id, pre) in pre_items {
-                            let post = snap.items.get(&id).cloned();
-                            if pre != post {
-                                reload_fire_diffs.push((pre, post));
-                            }
-                        }
-                    }
-                });
-                if !reload_fire_diffs.is_empty() {
-                    if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
-                        pending_cycle_actions.push(PendingCycleAction::CycleChargeItemMutations {
-                            char_id: cid,
-                            ship_id: cycle.ship_id,
-                            diffs: reload_fire_diffs,
-                        });
-                    }
-                }
+                let eff_char_id = cycle.owner_char_id.filter(|&c| c > 0);
+                consumed_ok = super::post_unlock::collect_launcher_consume(
+                    tick_snap,
+                    eff_char_id,
+                    cycle.ship_id,
+                    &launchers,
+                    cycle.ammo_type_id,
+                    &mut virtual_item_qty,
+                    post_unlock,
+                );
             }
             if !consumed_ok {
                 if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
@@ -1035,29 +918,30 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     .remove(&cycle.ship_id)
                     .unwrap_or([1.0, 0.0, 0.0, 0.0]);
                 if let Some(db_ref) = db_opt {
-                    let mut new_resonances = [0.85, 0.85, 0.85, 0.85];
-                    db_ref.with_mut_snapshot(|snap| {
-                        let cur = if let Some(tr) = snap.transient_item_attributes.get(&cycle.module_id) {
-                            [
-                                tr.get(&267).copied().unwrap_or(0.85),
-                                tr.get(&268).copied().unwrap_or(0.85),
-                                tr.get(&269).copied().unwrap_or(0.85),
-                                tr.get(&270).copied().unwrap_or(0.85),
-                            ]
-                        } else {
-                            [0.85, 0.85, 0.85, 0.85]
-                        };
-                        new_resonances = step_rah_resonances(cur, inc_dmg, cycle.rah_shift_amount);
-                        let m_entry = snap.transient_item_attributes.entry(cycle.module_id).or_default();
-                        m_entry.insert(267, new_resonances[0]);
-                        m_entry.insert(268, new_resonances[1]);
-                        m_entry.insert(269, new_resonances[2]);
-                        m_entry.insert(270, new_resonances[3]);
-                        let s_entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
-                        s_entry.insert(267, new_resonances[0]);
-                        s_entry.insert(268, new_resonances[1]);
-                        s_entry.insert(269, new_resonances[2]);
-                        s_entry.insert(270, new_resonances[3]);
+                    let cur = ballpark
+                        .combat_states
+                        .get(&cycle.ship_id)
+                        .and_then(|cs| cs.rah_armor_resonance)
+                        .map(|r| [r[0], r[3], r[2], r[1]])
+                        .unwrap_or_else(|| {
+                            db_ref
+                                .try_with_snapshot(|snap| {
+                                    snap.transient_item_attributes.get(&cycle.module_id).map(|tr| [
+                                        tr.get(&267).copied().unwrap_or(0.85),
+                                        tr.get(&268).copied().unwrap_or(0.85),
+                                        tr.get(&269).copied().unwrap_or(0.85),
+                                        tr.get(&270).copied().unwrap_or(0.85),
+                                    ])
+                                })
+                                .flatten()
+                                .unwrap_or([0.85, 0.85, 0.85, 0.85])
+                        });
+                    let new_resonances =
+                        step_rah_resonances(cur, inc_dmg, cycle.rah_shift_amount);
+                    post_unlock.push(super::post_unlock::PostUnlockIntent::RahResonances {
+                        ship_id: cycle.ship_id,
+                        module_id: cycle.module_id,
+                        resonances: new_resonances,
                     });
                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                         cs.rah_armor_resonance = Some([
@@ -1083,19 +967,21 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             max_ships,
                             max_caps,
                         ) {
-                            super::persist_ball_positions_in_db(
+                            super::collect_ball_positions_for_post_unlock(
                                 ballpark,
                                 &jumped_ids,
                                 db_opt,
                                 ball_space_entry_epochs,
+                                post_unlock,
                             );
                         }
                     } else if ballpark.micro_jump(cycle.ship_id, jump_dist).is_ok() {
-                        super::persist_ball_positions_in_db(
+                        super::collect_ball_positions_for_post_unlock(
                             ballpark,
                             &[cycle.ship_id],
                             db_opt,
                             ball_space_entry_epochs,
+                            post_unlock,
                         );
                     }
                 }
@@ -1122,7 +1008,8 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     && !cycle.weapon_is_guided_missile
                     && !weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
                 {
-                    apply_weapon_cycle_damage(
+                    apply_weapon_cycle_damage_collecting(
+                        solar_system_id,
                         cycle,
                         ballpark,
                         rah_incoming_damage,
@@ -1131,6 +1018,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         pending_cycle_actions,
                         &mut destroyed_balls,
                         pending_destroyed_outbox,
+                        post_unlock,
                     );
                 }
                 let src_cap_info = ballpark
@@ -1152,13 +1040,11 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         + ((cycle.current_spool_cycles as f64) * cycle.mutadaptive_spool_step)
                             .min(cycle.mutadaptive_spool_max);
                     cycle.current_spool_cycles = cycle.current_spool_cycles.saturating_add(1);
-                    if let Some(db_ref) = db_opt {
+                    if db_opt.is_some() {
                         let spooled_rep = cycle.remote_armor_amount * mult;
-                        db_ref.with_mut_snapshot(|snap| {
-                            snap.transient_item_attributes
-                                .entry(cycle.module_id)
-                                .or_default()
-                                .insert(84, spooled_rep);
+                        post_unlock.push(super::post_unlock::PostUnlockIntent::TransientAttrSets {
+                            item_id: cycle.module_id,
+                            attrs: vec![(84, spooled_rep)],
                         });
                     }
                     mult
@@ -1277,25 +1163,10 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
             let mut burned_out = false;
             if cycle.ehe_hull_resists.is_some() || matches!(cycle.module_type_id, 40714..=40718) {
                 burned_out = true;
-                if let Some(db_ref) = db_opt {
-                    db_ref.with_mut_snapshot(|snap| {
-                        if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                            let max_hp = m_item
-                                .dynamic_attributes
-                                .get(&eve_sde::attr_ids::HP_STRUCT)
-                                .copied()
-                                .unwrap_or(40.0);
-                            m_item
-                                .dynamic_attributes
-                                .insert(eve_sde::attr_ids::DAMAGE, max_hp);
-                        }
-                        snap.module_online_states.insert(cycle.module_id, false);
-                        snap.module_active_states.remove(&cycle.module_id);
-                        crate::router::ServerContext::clear_persisted_module_overload(
-                            snap,
-                            cycle.ship_id,
-                            cycle.module_id,
-                        );
+                if db_opt.is_some() {
+                    post_unlock.push(super::post_unlock::PostUnlockIntent::ModuleBurnout {
+                        ship_id: cycle.ship_id,
+                        module_id: cycle.module_id,
                     });
                 }
             }
@@ -1326,9 +1197,6 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         .get(&tid)
                         .is_some_and(|cs| cs.structure_hp <= 0.0)
             });
-            let mut crystal_shattered_empty = false;
-            let mut guided_reload_started = false;
-            let mut guided_reload_ms = 0.0_f64;
             let guided_next_out_of_range = cycle.weapon_is_guided_missile
                 && cycle.repeat > 0
                 && matches!(
@@ -1339,329 +1207,38 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     ),
                     (Some(sb), Some(tb), Some(max_r)) if sb.surface_distance(tb) > max_r
                 );
-            let mut cycle_item_diffs: Vec<(
-                Option<eve_db::InventoryItemRecord>,
-                Option<eve_db::InventoryItemRecord>,
-            )> = Vec::new();
-            if let Some(db_ref) = db_opt {
-                let ammo_is_non_volatile_crystal = cycle
-                    .ammo_type_id
-                    .and_then(|tid| sde_opt.as_ref().and_then(|sde| sde.types.get(&tid)))
-                    .is_some_and(|t| matches!(t.group_id, 86 | 374 | 375 | 482 | 663))
-                    && cycle.crystal_volatility_damage <= 0.0;
-                if !cycle.linked_turrets.is_empty()
-                    && cycle.crystal_volatility_damage >= 0.0
-                    && !ammo_is_non_volatile_crystal
-                    && !guided_next_out_of_range
-                {
-                    db_ref.with_mut_snapshot(|snap| {
-                        let mut pre_items: HashMap<i64, Option<eve_db::InventoryItemRecord>> =
-                            HashMap::new();
-                        for &turret_id in &cycle.linked_turrets {
-                            let turret_flag = snap.items.get(&turret_id).map(|i| i.flag);
-                            if let Some(t_flag) = turret_flag {
-                                let charge_id_opt = snap
-                                    .items
-                                    .values()
-                                    .find(|i| {
-                                        i.location_id == cycle.ship_id
-                                            && i.flag == t_flag
-                                            && i.item_id != turret_id
-                                            && (cycle.ammo_type_id.is_none()
-                                                || Some(i.type_id) == cycle.ammo_type_id)
-                                            && i.quantity > 0
-                                    })
-                                    .map(|i| i.item_id);
-                                if let Some(cid) = charge_id_opt {
-                                    pre_items
-                                        .entry(cid)
-                                        .or_insert_with(|| snap.items.get(&cid).cloned());
-                                    if cycle.crystal_volatility_chance > 0.0
-                                        && cycle.crystal_volatility_damage > 0.0
-                                    {
-                                        let mut destroy_stack = false;
-                                        if let Some(c_item) = snap.items.get_mut(&cid) {
-                                            let cur_dmg = c_item
-                                                .dynamic_attributes
-                                                .get(&eve_sde::attr_ids::DAMAGE)
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            let max_hp = 1.0_f64;
-                                            let next_dmg = cur_dmg + cycle.crystal_volatility_damage;
-                                            if next_dmg >= max_hp - 1e-6 {
-                                                if c_item.quantity > 1 {
-                                                    c_item.quantity -= 1;
-                                                    c_item
-                                                        .dynamic_attributes
-                                                        .insert(eve_sde::attr_ids::DAMAGE, 0.0);
-                                                    c_item
-                                                        .dynamic_attributes
-                                                        .insert(eve_sde::attr_ids::HP_STRUCT, 1.0);
-                                                } else {
-                                                    destroy_stack = true;
-                                                }
-                                            } else {
-                                                c_item
-                                                    .dynamic_attributes
-                                                    .insert(eve_sde::attr_ids::DAMAGE, next_dmg);
-                                                c_item.dynamic_attributes.insert(
-                                                    eve_sde::attr_ids::HP_STRUCT,
-                                                    (max_hp - next_dmg).max(0.0),
-                                                );
-                                            }
-                                        }
-                                        if destroy_stack {
-                                            snap.items.remove(&cid);
-                                            snap.module_active_charges.remove(&turret_id);
-                                            crystal_shattered_empty = true;
-                                        }
-                                    } else if cycle.crystal_volatility_damage >= 0.0 {
-                                        // Projectile / hybrid / missile charges consume 1 unit per shot.
-                                        // When `dogmaIM.Activate` pre-consumed round #1 at cycle #1 start (t=0),
-                                        // each subsequent cycle (k+1) consumes its round at cycle start (i.e. at the
-                                        // end of cycle k when `cycle.repeat > 0 && !burned_out`), and a round that
-                                        // reduces `quantity` from 1 -> 0 chambers the final shot for cycle k+1
-                                        // instead of aborting cycle k+1 early.
-                                        let pre_consumed_mode =
-                                            cycle.crystal_volatility_chance < 0.0;
-                                        if pre_consumed_mode {
-                                            if cycle.repeat > 0 && !burned_out && !target_destroyed_in_cycle {
-                                                if let Some(c_item) = snap.items.get_mut(&cid) {
-                                                    c_item.quantity = c_item.quantity.saturating_sub(1);
-                                                    if c_item.quantity == 0 {
-                                                        snap.items.remove(&cid);
-                                                    }
-                                                }
-                                            }
-                                        } else if let Some(c_item) = snap.items.get_mut(&cid) {
-                                            c_item.quantity = c_item.quantity.saturating_sub(1);
-                                            if c_item.quantity == 0 {
-                                                snap.items.remove(&cid);
-                                                snap.module_active_charges.remove(&turret_id);
-                                                crystal_shattered_empty = true;
-                                            }
-                                        }
-                                    }
-                                } else if cycle.ammo_type_id.or(cycle.missile_charge_type_id).is_some()
-                                    && cycle.damage_vector.total() > 0.0
-                                {
-                                    snap.items.retain(|_, i| {
-                                        !(i.location_id == cycle.ship_id
-                                            && i.flag == t_flag
-                                            && i.item_id != turret_id
-                                            && i.quantity <= 0)
-                                    });
-                                    snap.module_active_charges.remove(&turret_id);
-                                    crystal_shattered_empty = true;
-                                }
-                            }
-                        }
-                        if crystal_shattered_empty && cycle.crystal_volatility_damage == 0.0 {
-                            if let Some(ammo_tid) = cycle.ammo_type_id.or(cycle.missile_charge_type_id) {
-                                let num_mods = cycle.linked_turrets.len().max(1) as i32;
-                                let cargo_stack_opt = snap
-                                    .items
-                                    .values()
-                                    .filter(|i| {
-                                        i.location_id == cycle.ship_id
-                                            && matches!(
-                                                i.flag,
-                                                eve_db::InventoryFlag::Cargo
-                                                    | eve_db::InventoryFlag::SpecializedAmmoHold
-                                            )
-                                            && i.type_id == ammo_tid
-                                            && i.quantity > 0
-                                    })
-                                    .max_by_key(|i| i.quantity)
-                                    .map(|i| (i.item_id, i.owner_id, i.quantity));
-                                if let Some((stack_id, owner_id, avail_qty)) = cargo_stack_opt {
-                                    if avail_qty >= num_mods {
-                                        pre_items
-                                            .entry(stack_id)
-                                            .or_insert_with(|| snap.items.get(&stack_id).cloned());
-                                        let charge_vol = sde_opt
-                                            .as_ref()
-                                            .and_then(|sde| sde.types.get(&ammo_tid))
-                                            .map(|t| t.volume.max(0.0001))
-                                            .unwrap_or(0.0025);
-                                        let (rounds_per_mod, reload_time_ms) = sde_opt
-                                            .as_ref()
-                                            .and_then(|sde| sde.types.get(&cycle.module_type_id))
-                                            .map(|mt| {
-                                                let r = if cycle.missile_charge_capacity > 0 {
-                                                    cycle.missile_charge_capacity as i32
-                                                } else if mt.capacity > 0.0 {
-                                                    ((mt.capacity / charge_vol) + 1e-9).floor() as i32
-                                                } else {
-                                                    1
-                                                };
-                                                let rt = if cycle.weapon_is_guided_missile
-                                                    && cycle.missile_reload_ms > 0.0
-                                                {
-                                                    cycle.missile_reload_ms
-                                                } else if matches!(mt.group_id, 511 | 1245) {
-                                                    mt.default_attributes
-                                                        .get(&1795)
-                                                        .copied()
-                                                        .filter(|&v| v > 0.0)
-                                                        .unwrap_or(35_000.0)
-                                                } else {
-                                                    mt.default_attributes
-                                                        .get(&1795)
-                                                        .copied()
-                                                        .unwrap_or(10_000.0)
-                                                };
-                                                (r.max(1), rt)
-                                            })
-                                            .unwrap_or_else(|| {
-                                                let r = (cycle.missile_charge_capacity as i32).max(1);
-                                                let rt = if cycle.missile_reload_ms > 0.0 {
-                                                    cycle.missile_reload_ms
-                                                } else {
-                                                    10_000.0
-                                                };
-                                                (r, rt)
-                                            });
-                                        let actual_per_mod =
-                                            rounds_per_mod.min(avail_qty / num_mods).max(1);
-                                        let total_needed = actual_per_mod * num_mods;
-                                        if let Some(st) = snap.items.get_mut(&stack_id) {
-                                            if st.quantity > total_needed {
-                                                st.quantity -= total_needed;
-                                                st.version += 1;
-                                            } else {
-                                                snap.items.remove(&stack_id);
-                                            }
-                                        }
-                                        for &tid in &cycle.linked_turrets {
-                                            if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
-                                                let mut new_cid = snap.alloc_entity_id();
-                                                while snap.items.contains_key(&new_cid) {
-                                                    new_cid = snap.alloc_entity_id();
-                                                }
-                                                pre_items.insert(new_cid, None);
-                                                snap.items.insert(
-                                                    new_cid,
-                                                    eve_db::InventoryItemRecord {
-                                                        item_id: new_cid,
-                                                        type_id: ammo_tid,
-                                                        owner_id,
-                                                        location_id: cycle.ship_id,
-                                                        flag: tf,
-                                                        quantity: actual_per_mod,
-                                                        singleton: false,
-                                                        version: 1,
-                                                        ..Default::default()
-                                                    },
-                                                );
-                                                snap.module_active_charges.insert(tid, ammo_tid);
-                                            }
-                                        }
-                                        let now_unix = db_ref.clock().now_unix_secs();
-                                        let reload_sim_secs = reload_time_ms / 1000.0;
-                                        let scaled_wall_secs = if tidi_factor < 0.995 {
-                                            (reload_sim_secs / tidi_factor).ceil().max(1.0) as u64
-                                        } else {
-                                            reload_sim_secs.ceil() as u64
-                                        };
-                                        let reload_until = now_unix + scaled_wall_secs;
-                                        for &tid in &cycle.linked_turrets {
-                                            if let Some(ref mut sim_map) = reload_sim_remaining {
-                                                sim_map.insert(
-                                                    tid,
-                                                    ModuleReloadSimEntry {
-                                                        remaining_sim_s: reload_sim_secs,
-                                                        min_wall_until_unix: now_unix.saturating_add(
-                                                            reload_sim_secs.ceil().max(1.0) as u64,
-                                                        ),
-                                                        tidi_stretched: tidi_factor < 0.995,
-                                                    },
-                                                );
-                                            }
-                                            snap.cluster_and_runtime
-                                                .module_reload_until_unix
-                                                .insert(tid, reload_until);
-                                        }
-                                        snap.cluster_and_runtime.auto_reloaded_event.insert(
-                                            cycle.module_id,
-                                            (
-                                                cycle.linked_turrets.clone(),
-                                                ammo_tid,
-                                                reload_time_ms,
-                                            ),
-                                        );
-                                        if cycle.weapon_is_guided_missile
-                                            && cycle.repeat > 0
-                                            && !burned_out
-                                            && !target_destroyed_in_cycle
-                                        {
-                                            guided_reload_started = true;
-                                            guided_reload_ms = reload_time_ms;
-                                            if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0)
-                                            {
-                                                pending_cycle_actions.push(
-                                                    PendingCycleAction::AutoReloadStarted {
-                                                        char_id: cid,
-                                                        module_ids: cycle.linked_turrets.clone(),
-                                                        charge_type_id: ammo_tid,
-                                                        time_ms: reload_time_ms,
-                                                        reload_until_unix: reload_until,
-                                                        sim_deadline_s: sim_elapsed_secs
-                                                            + (reload_time_ms / 1000.0),
-                                                        notified: false,
-                                                    },
-                                                );
-                                            }
-                                        }
-                                    } else if cycle.weapon_is_guided_missile
-                                        && cycle.repeat > 0
-                                        && !burned_out
-                                        && !target_destroyed_in_cycle
-                                    {
-                                        if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
-                                            pending_cycle_actions.push(
-                                                PendingCycleAction::NoChargesDeactivated {
-                                                    char_id: cid,
-                                                    module_type_id: cycle.module_type_id,
-                                                    notified: false,
-                                                },
-                                            );
-                                        }
-                                    }
-                                } else if cycle.weapon_is_guided_missile
-                                    && cycle.repeat > 0
-                                    && !burned_out
-                                    && !target_destroyed_in_cycle
-                                {
-                                    if let Some(cid) = cycle.owner_char_id.filter(|&c| c > 0) {
-                                        pending_cycle_actions.push(
-                                            PendingCycleAction::NoChargesDeactivated {
-                                                char_id: cid,
-                                                module_type_id: cycle.module_type_id,
-                                                notified: false,
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        let mut keys: Vec<i64> = pre_items.keys().copied().collect();
-                        keys.sort_by_key(|id| {
-                            (
-                                pre_items.get(id).and_then(|o| o.as_ref()).is_none(),
-                                *id,
-                            )
-                        });
-                        for id in keys {
-                            let pre = pre_items.remove(&id).flatten();
-                            let post = snap.items.get(&id).cloned();
-                            if pre != post {
-                                cycle_item_diffs.push((pre, post));
-                            }
-                        }
-                    });
-                }
-            }
+            let eff_char_id = cycle
+                .owner_char_id
+                .filter(|&c| c > 0)
+                .or_else(|| {
+                    ballpark
+                        .ball_slim_meta
+                        .get(&cycle.ship_id)
+                        .map(|m| m.owner_id)
+                        .filter(|&c| c > 0)
+                });
+            let (crystal_shattered_empty, guided_reload_started, guided_reload_ms) =
+                if let (Some(db_ref), Some(tick_snap)) = (db_opt, tick_snap_opt.as_deref()) {
+                    super::post_unlock::collect_cycle_ammo_step(
+                        tick_snap,
+                        db_ref.clock().now_unix_secs(),
+                        cycle,
+                        eff_char_id,
+                        sde_opt,
+                        sim_elapsed_secs,
+                        tidi_factor,
+                        burned_out,
+                        target_destroyed_in_cycle,
+                        guided_next_out_of_range,
+                        &mut reload_sim_remaining,
+                        pending_cycle_actions,
+                        &mut virtual_item_qty,
+                        &mut virtual_crystal_dmg,
+                        post_unlock,
+                    )
+                } else {
+                    (false, false, 0.0)
+                };
 
             let mut salvage_next_cap_deducted = false;
             let mut salvage_deducted_cap_gj = 0.0;
@@ -1677,79 +1254,36 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                 if let Some(db_ref) = db_opt { cycle.started_at_unix = db_ref.clock().now_unix_secs(); }
                 // Handle ASB, AAR, and Cap Booster charge consumption for the next cycle (`DG-4`)
                 if cycle.is_asb {
-                    let mut consumed_charge = false;
-                    if let Some(db_ref) = db_opt {
-                        db_ref.with_mut_snapshot(|snap| {
-                            if let Some(m_flag) = snap.items.get(&cycle.module_id).map(|i| i.flag) {
-                                if let Some(cid) = snap
-                                    .items
-                                    .values()
-                                    .find(|i| {
-                                        i.location_id == cycle.ship_id
-                                            && i.flag == m_flag
-                                            && i.item_id != cycle.module_id
-                                            && i.quantity > 0
-                                    })
-                                    .map(|i| i.item_id)
-                                {
-                                    consumed_charge = true;
-                                    let pre = snap.items.get(&cid).cloned();
-                                    let mut rem = 0;
-                                    if let Some(ci) = snap.items.get_mut(&cid) {
-                                        ci.quantity = ci.quantity.saturating_sub(1);
-                                        rem = ci.quantity;
-                                    }
-                                    if rem == 0 {
-                                        snap.items.remove(&cid);
-                                    }
-                                    let post = snap.items.get(&cid).cloned();
-                                    if pre != post {
-                                        cycle_item_diffs.push((pre, post));
-                                    }
-                                }
-                            }
-                        });
-                    }
+                    let consumed_charge = tick_snap_opt.as_deref().is_some_and(|tick_snap| {
+                        super::post_unlock::collect_ship_charge_consume(
+                            tick_snap,
+                            eff_char_id,
+                            cycle.ship_id,
+                            cycle.module_id,
+                            super::post_unlock::ShipChargeConsumeKind::Asb,
+                            &mut virtual_item_qty,
+                            post_unlock,
+                        )
+                    });
                     if consumed_charge {
                         cycle.cap_need_per_cycle = 0.0;
                     } else {
                         cycle.cap_need_per_cycle = cycle.asb_fallback_cap_need;
                     }
                 } else if cycle.is_aar {
-                    let mut fueled = false;
-                    if let Some(db_ref) = db_opt {
-                        db_ref.with_mut_snapshot(|snap| {
-                            if let Some(m_flag) = snap.items.get(&cycle.module_id).map(|i| i.flag) {
-                                if let Some(cid) = snap
-                                    .items
-                                    .values()
-                                    .find(|i| {
-                                        i.location_id == cycle.ship_id
-                                            && i.flag == m_flag
-                                            && i.item_id != cycle.module_id
-                                            && i.type_id == 28668
-                                            && i.quantity >= cycle.aar_paste_rate.max(1)
-                                    })
-                                    .map(|i| i.item_id)
-                                {
-                                    fueled = true;
-                                    let pre = snap.items.get(&cid).cloned();
-                                    let mut rem = 0;
-                                    if let Some(ci) = snap.items.get_mut(&cid) {
-                                        ci.quantity -= cycle.aar_paste_rate.max(1);
-                                        rem = ci.quantity;
-                                    }
-                                    if rem == 0 {
-                                        snap.items.remove(&cid);
-                                    }
-                                    let post = snap.items.get(&cid).cloned();
-                                    if pre != post {
-                                        cycle_item_diffs.push((pre, post));
-                                    }
-                                }
-                            }
-                        });
-                    }
+                    let fueled = tick_snap_opt.as_deref().is_some_and(|tick_snap| {
+                        super::post_unlock::collect_ship_charge_consume(
+                            tick_snap,
+                            eff_char_id,
+                            cycle.ship_id,
+                            cycle.module_id,
+                            super::post_unlock::ShipChargeConsumeKind::AarPaste {
+                                paste_rate: cycle.aar_paste_rate,
+                            },
+                            &mut virtual_item_qty,
+                            post_unlock,
+                        )
+                    });
                     let rep_amt = if fueled {
                         cycle.aar_base_armor_repair * 3.0
                     } else {
@@ -1761,39 +1295,17 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         cycle.armor_repair_amount = rep_amt;
                     }
                 } else if cycle.cap_booster_inject_amount > 0.0 {
-                    let mut consumed_charge = false;
-                    if let Some(db_ref) = db_opt {
-                        db_ref.with_mut_snapshot(|snap| {
-                            if let Some(m_flag) = snap.items.get(&cycle.module_id).map(|i| i.flag) {
-                                if let Some(cid) = snap
-                                    .items
-                                    .values()
-                                    .find(|i| {
-                                        i.location_id == cycle.ship_id
-                                            && i.flag == m_flag
-                                            && i.item_id != cycle.module_id
-                                            && i.quantity > 0
-                                    })
-                                    .map(|i| i.item_id)
-                                {
-                                    consumed_charge = true;
-                                    let pre = snap.items.get(&cid).cloned();
-                                    let mut rem = 0;
-                                    if let Some(ci) = snap.items.get_mut(&cid) {
-                                        ci.quantity = ci.quantity.saturating_sub(1);
-                                        rem = ci.quantity;
-                                    }
-                                    if rem == 0 {
-                                        snap.items.remove(&cid);
-                                    }
-                                    let post = snap.items.get(&cid).cloned();
-                                    if pre != post {
-                                        cycle_item_diffs.push((pre, post));
-                                    }
-                                }
-                            }
-                        });
-                    }
+                    let consumed_charge = tick_snap_opt.as_deref().is_some_and(|tick_snap| {
+                        super::post_unlock::collect_ship_charge_consume(
+                            tick_snap,
+                            eff_char_id,
+                            cycle.ship_id,
+                            cycle.module_id,
+                            super::post_unlock::ShipChargeConsumeKind::CapBooster,
+                            &mut virtual_item_qty,
+                            post_unlock,
+                        )
+                    });
                     if consumed_charge {
                         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                             cs.capacitor = (cs.capacitor + cycle.cap_booster_inject_amount)
@@ -1863,7 +1375,8 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     } else if weapon_cycle_start_modules.contains(&(cycle.ship_id, cycle.module_id))
                         && cycle.damage_vector.total() > 0.0
                     {
-                        apply_weapon_cycle_damage(
+                        apply_weapon_cycle_damage_collecting(
+                            solar_system_id,
                             cycle,
                             ballpark,
                             rah_incoming_damage,
@@ -1872,6 +1385,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             pending_cycle_actions,
                             &mut destroyed_balls,
                             pending_destroyed_outbox,
+                            post_unlock,
                         );
                     }
                     if matches!(mod_grp, 72 | 80 | 201 | 353 | 650) {
@@ -1976,33 +1490,6 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     }
                 }
             }
-            if !cycle_item_diffs.is_empty() {
-                let eff_char_id = cycle
-                    .owner_char_id
-                    .filter(|&c| c > 0)
-                    .or_else(|| {
-                        ballpark
-                            .ball_slim_meta
-                            .get(&cycle.ship_id)
-                            .map(|m| m.owner_id)
-                            .filter(|&c| c > 0)
-                    })
-                    .or_else(|| {
-                        cycle_item_diffs
-                            .iter()
-                            .find_map(|(pre, post)| {
-                                pre.as_ref().or(post.as_ref()).map(|r| r.owner_id)
-                            })
-                            .filter(|&c| c > 0)
-                    });
-                if let Some(cid) = eff_char_id {
-                    pending_cycle_actions.push(PendingCycleAction::CycleChargeItemMutations {
-                        char_id: cid,
-                        ship_id: cycle.ship_id,
-                        diffs: cycle_item_diffs,
-                    });
-                }
-            }
             if mod_grp == 1122 {
                 if let (Some(cid), Some(wid)) = (cycle.owner_char_id, cycle.target_id) {
                     pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
@@ -2058,8 +1545,14 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                 continue;
             }
         }
-        cleanup_removed_module_cycle(ballpark, &finished, db_opt);
-        emit_cycle_deactivation(solar_system_id, &finished, ballpark, db_opt, deactivation_hook);
+        cleanup_removed_module_cycle_collecting(ballpark, &finished, db_opt, post_unlock);
+        emit_cycle_deactivation_collecting(
+            solar_system_id,
+            &finished,
+            ballpark,
+            deactivation_hook.is_some(),
+            post_unlock,
+        );
     }
     active_module_cycles.extend(lance_requeues);
     weapon_cycle_start_modules.retain(|&(sid, mid)| {
@@ -2067,7 +1560,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
             .iter()
             .any(|c| c.ship_id == sid && c.module_id == mid)
     });
-    reconcile_tackle_and_bubbles(
+    super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
         solar_system_id,
         ballpark,
         active_module_cycles,
@@ -2075,11 +1568,17 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
         base_core_strengths,
         db_opt,
         deactivation_hook,
+        post_unlock,
     );
     destroyed_balls
 }
 
-pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
+pub(crate) fn cleanup_removed_module_cycle_collecting(
+    ballpark: &mut Ballpark,
+    removed: &ActiveModuleCycle,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
+) {
     let mut needs_recompute = false;
     if removed.target_id.is_some() {
         ballpark.remove_module_ecm_jam(removed.ship_id, removed.module_id, removed.target_id);
@@ -2109,41 +1608,11 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
         }
         needs_recompute = true;
     }
-    if removed.is_adc || removed.ehe_hull_resists.is_some() {
-        if let Some(db_ref) = db_opt {
-            db_ref.with_mut_snapshot(|snap| {
-                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
-                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
-                        tr.remove(&aid);
-                    }
-                }
-            });
-        }
-    }
-    if removed.mutadaptive_spool_step > 0.0 {
-        if let Some(db_ref) = db_opt {
-            db_ref.with_mut_snapshot(|snap| {
-                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
-                    tr.remove(&84);
-                }
-            });
-        }
-    }
     if removed.is_rah {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
             cs.rah_armor_resonance = None;
         }
         needs_recompute = true;
-        if let Some(db_ref) = db_opt {
-            db_ref.with_mut_snapshot(|snap| {
-                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
-                    for aid in 267..=270 { tr.remove(&aid); }
-                }
-                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
-                    for aid in 267..=270 { tr.remove(&aid); }
-                }
-            });
-        }
     }
     if removed.immobilize_self {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
@@ -2154,55 +1623,52 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
     if needs_recompute {
         ballpark.recompute_ball_attributes(removed.ship_id);
     }
-    if removed.hic_bubble_radius_m.is_some() { ballpark.remove_warp_bubble(removed.module_id); }
-    if removed.grants_interdiction_nullification { ballpark.set_interdiction_nullified(removed.ship_id, false); }
-    if let Some(db_ref) = db_opt {
-        db_ref.with_mut_snapshot(|snap| {
-            snap.module_active_states.remove(&removed.module_id);
-            snap.module_active_charges.remove(&removed.module_id);
-            for &tid in &removed.linked_turrets {
-                snap.module_active_charges.remove(&tid);
-            }
-        });
+    if removed.hic_bubble_radius_m.is_some() {
+        ballpark.remove_warp_bubble(removed.module_id);
+    }
+    if removed.grants_interdiction_nullification {
+        ballpark.set_interdiction_nullified(removed.ship_id, false);
+    }
+    if db_opt.is_some() {
+        post_unlock.push(super::post_unlock::PostUnlockIntent::ModuleCycleCleanup(
+            super::post_unlock::ModuleCycleCleanupDbOp::from_cycle(removed),
+        ));
     }
 }
 
-pub(crate) fn emit_cycle_deactivation(
+pub(crate) fn emit_cycle_deactivation_collecting(
     solar_system_id: SolarSystemId,
     cycle: &ActiveModuleCycle,
     ballpark: &Ballpark,
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    hook: Option<&ModuleDeactivationHook>,
+    has_deact_hook: bool,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
-    if cycle.module_id < 0
+    if !has_deact_hook
+        || cycle.module_id < 0
         || super::cycles_tackle::parse_minion_cycle_parent(&cycle.effect_name).is_some()
     {
         return;
     }
-    let Some(h) = hook else { return; };
     let char_id = cycle
         .owner_char_id
-        .or_else(|| ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id))
-        .or_else(|| {
-            db_opt.as_ref().and_then(|db| {
-                db.with_snapshot(|s| {
-                    s.characters
-                        .values()
-                        .find(|c| c.active_ship_id == cycle.ship_id)
-                        .map(|c| c.character_id)
-                        .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
-                })
-            })
-        })
-        .or_else(|| ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| (m.owner_id > 0).then_some(m.owner_id)));
-    if let Some(cid) = char_id {
-        h(solar_system_id, cid, cycle);
-    }
+        .or_else(|| ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id));
+    let fallback_owner_id = ballpark
+        .ball_slim_meta
+        .get(&cycle.ship_id)
+        .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
+    post_unlock.push(super::post_unlock::PostUnlockIntent::DeactivationHook(
+        super::post_unlock::DeferredDeactivationHookOp {
+            solar_system_id,
+            char_id,
+            fallback_owner_id,
+            cycle: cycle.clone(),
+        },
+    ));
 }
 
 /// Parity: [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
 /// Only modules that specifically grant interdiction nullification (warp core stabilizers / nullifiers) remain.
-pub(crate) fn remove_non_warp_ship_module_cycles(
+pub(crate) fn remove_non_warp_ship_module_cycles_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -2211,20 +1677,21 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ship_id: BallId,
     deactivation_hook: Option<&ModuleDeactivationHook>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     let mut removed_cycles = Vec::new();
     let mut i = 0;
     while i < active_module_cycles.len() {
         if active_module_cycles[i].ship_id == ship_id && !active_module_cycles[i].grants_interdiction_nullification {
             let removed = active_module_cycles.swap_remove(i);
-            cleanup_removed_module_cycle(ballpark, &removed, db_opt);
+            cleanup_removed_module_cycle_collecting(ballpark, &removed, db_opt, post_unlock);
             removed_cycles.push(removed);
         } else {
             i += 1;
         }
     }
     if !removed_cycles.is_empty() {
-        reconcile_tackle_and_bubbles(
+        super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
             solar_system_id,
             ballpark,
             active_module_cycles,
@@ -2232,10 +1699,17 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
             base_core_strengths,
             db_opt,
             deactivation_hook,
+            post_unlock,
         );
         ballpark.recompute_ball_attributes(ship_id);
         for removed in &removed_cycles {
-            emit_cycle_deactivation(solar_system_id, removed, ballpark, db_opt, deactivation_hook);
+            emit_cycle_deactivation_collecting(
+                solar_system_id,
+                removed,
+                ballpark,
+                deactivation_hook.is_some(),
+                post_unlock,
+            );
         }
     }
 }
@@ -2252,14 +1726,8 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
 /// `module_deactivation_hook` so attackers/fleetmates clear DB active state, receive
 /// deactivation notifications, and flush `projected_ewar` / `remote_assistance` before
 /// destination `build_ship_combat_state` runs or during rollback (`#1237`, `#1467`).
-fn is_db_write_reentrant(db_opt: &Option<Arc<eve_db::WorldRepository>>) -> bool {
-    db_opt
-        .as_ref()
-        .is_some_and(|db| db.is_write_locked_by_current_thread())
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
+pub(crate) fn remove_all_ship_module_cycles_preserving_own_db_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -2269,9 +1737,8 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
     ship_id: i64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
     preserve_own_db_active_states: bool,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<(ActiveModuleCycle, Option<i64>)> {
-    let reentrant_db = is_db_write_reentrant(db_opt);
-    let effective_db = if reentrant_db { &None } else { db_opt };
     let no_db = None;
     let mut removed_cycles = Vec::new();
     for i in (0..active_module_cycles.len()).rev() {
@@ -2280,9 +1747,9 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
             let cycle_db = if preserve_own_db_active_states && removed.ship_id == ship_id {
                 &no_db
             } else {
-                effective_db
+                db_opt
             };
-            cleanup_removed_module_cycle(ballpark, &removed, cycle_db);
+            cleanup_removed_module_cycle_collecting(ballpark, &removed, cycle_db, post_unlock);
             let char_id = removed.owner_char_id.or_else(|| {
                 ballpark
                     .ball_slim_meta
@@ -2292,38 +1759,38 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db(
             removed_cycles.push((removed, char_id));
         }
     }
-    if !preserve_own_db_active_states {
-        if let Some(db_ref) = effective_db {
-            let dirty = db_ref.with_snapshot(|s| {
-                (!s.module_active_states.is_empty() || !s.module_active_charges.is_empty())
-                    && s.items.values().any(|it| it.location_id == ship_id && (s.module_active_states.contains(&it.item_id) || s.module_active_charges.contains_key(&it.item_id)))
-            });
-            if dirty {
-                db_ref.with_mut_snapshot(|s| {
-                    for it in s.items.values().filter(|it| it.location_id == ship_id) {
-                        s.module_active_states.remove(&it.item_id);
-                        s.module_active_charges.remove(&it.item_id);
-                    }
-                });
-            }
-        }
+    if !preserve_own_db_active_states && db_opt.is_some() {
+        post_unlock.push(super::post_unlock::PostUnlockIntent::ShipCycleClearAll(ship_id));
     }
     if !removed_cycles.is_empty() {
-        let hook = if reentrant_db { None } else { deactivation_hook };
-        reconcile_tackle_and_bubbles(solar_system_id, ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, effective_db, hook);
-        if !reentrant_db {
-            for (removed, _) in &removed_cycles {
-                if preserve_own_db_active_states && removed.ship_id == ship_id {
-                    continue;
-                }
-                emit_cycle_deactivation(solar_system_id, removed, ballpark, effective_db, deactivation_hook);
+        super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
+            solar_system_id,
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            deactivation_hook,
+            post_unlock,
+        );
+        for (removed, _) in &removed_cycles {
+            if preserve_own_db_active_states && removed.ship_id == ship_id {
+                continue;
             }
+            emit_cycle_deactivation_collecting(
+                solar_system_id,
+                removed,
+                ballpark,
+                deactivation_hook.is_some(),
+                post_unlock,
+            );
         }
     }
     removed_cycles
 }
 
-pub(crate) fn remove_all_ship_module_cycles(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_all_ship_module_cycles_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -2332,8 +1799,9 @@ pub(crate) fn remove_all_ship_module_cycles(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ship_id: i64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<(ActiveModuleCycle, Option<i64>)> {
-    remove_all_ship_module_cycles_preserving_own_db(
+    remove_all_ship_module_cycles_preserving_own_db_collecting(
         solar_system_id,
         ballpark,
         active_module_cycles,
@@ -2343,13 +1811,14 @@ pub(crate) fn remove_all_ship_module_cycles(
         ship_id,
         deactivation_hook,
         false,
+        post_unlock,
     )
 }
 
 /// Restores preserved own ship module cycles after a failed DB-preserving `TakeBall`
 /// rollback, cleaning DB/hook state for any targeted cycles whose target locks were lost (`#1237`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn restore_taken_own_cycles_in_actor(
+pub(crate) fn restore_taken_own_cycles_in_actor_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -2360,6 +1829,7 @@ pub(crate) fn restore_taken_own_cycles_in_actor(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     removed_own_cycles: Vec<ActiveModuleCycle>,
     force_recompute: bool,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     if removed_own_cycles.is_empty() {
         if force_recompute {
@@ -2382,30 +1852,32 @@ pub(crate) fn restore_taken_own_cycles_in_actor(
             broken_lock_cycles.push(cycle);
         }
     }
-    let reentrant_db = is_db_write_reentrant(db_opt);
-    let effective_db = if reentrant_db { &None } else { db_opt };
     for cycle in &broken_lock_cycles {
-        cleanup_removed_module_cycle(ballpark, cycle, effective_db);
+        cleanup_removed_module_cycle_collecting(ballpark, cycle, db_opt, post_unlock);
     }
     if restored_any {
-        let hook = if reentrant_db { None } else { deactivation_hook };
-        reconcile_tackle_and_bubbles(
+        super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
             solar_system_id,
             ballpark,
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
-            effective_db,
-            hook,
+            db_opt,
+            deactivation_hook,
+            post_unlock,
         );
         ballpark.recompute_ball_attributes(ball_id);
     } else if force_recompute {
         ballpark.recompute_ball_attributes(ball_id);
     }
-    if !reentrant_db {
-        for cycle in &broken_lock_cycles {
-            emit_cycle_deactivation(solar_system_id, cycle, ballpark, effective_db, deactivation_hook);
-        }
+    for cycle in &broken_lock_cycles {
+        emit_cycle_deactivation_collecting(
+            solar_system_id,
+            cycle,
+            ballpark,
+            deactivation_hook.is_some(),
+            post_unlock,
+        );
     }
 }
 
@@ -2459,127 +1931,6 @@ pub(crate) fn emit_propulsion_stop_fx_before_detach(
     }
 }
 
-/// Advances active sim-clock-governed turret/launcher reload timers by `dt_sim` while updating
-/// persisted `module_reload_until_unix` deadlines when system TiDi `< 1.0` (`#1081`).
-pub(crate) fn step_module_reloads_sim_clock(
-    reload_sim_remaining: &mut HashMap<i64, ModuleReloadSimEntry>,
-    reload_sim_deadlines_opt: Option<&eve_db::lock_rank::RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, { eve_db::lock_rank::RANK_LEAF }>>,
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    dt_sim: f64,
-    tidi_factor: f64,
-) {
-    if reload_sim_remaining.is_empty() && db_opt.is_none() {
-        return;
-    }
-    let tidi = if tidi_factor.is_finite() {
-        tidi_factor.clamp(0.10, 1.0)
-    } else {
-        1.0
-    };
-    let mut finished = Vec::new();
-    let mut active_updates = Vec::new();
-    for (&mod_id, entry) in reload_sim_remaining.iter_mut() {
-        entry.remaining_sim_s -= dt_sim.max(0.0);
-        if entry.remaining_sim_s <= 1e-6 {
-            finished.push(mod_id);
-        } else {
-            let was_stretched = entry.tidi_stretched;
-            if tidi < 0.995 {
-                entry.tidi_stretched = true;
-            }
-            active_updates.push((
-                mod_id,
-                entry.remaining_sim_s,
-                entry.min_wall_until_unix,
-                was_stretched,
-            ));
-        }
-    }
-    for mod_id in &finished {
-        reload_sim_remaining.remove(mod_id);
-    }
-    if !finished.is_empty() || !active_updates.is_empty() {
-        if let Some(db) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
-            let now_unix = db.clock().now_unix_secs();
-            // Do not truncate un-dilated deadlines downward when fractional sim ticks outpace integer
-            // wall clock; only relax entries that were previously stretched under TiDi.
-            let desired_updates: Vec<(i64, u64, bool)> = active_updates
-                .iter()
-                .filter_map(|&(mod_id, rem, min_wall_until, was_stretched)| {
-                    if tidi < 0.995 {
-                        Some((
-                            mod_id,
-                            now_unix.saturating_add((rem / tidi).ceil().max(1.0) as u64),
-                            true,
-                        ))
-                    } else if was_stretched {
-                        let relaxed = now_unix
-                            .saturating_add(rem.ceil().max(1.0) as u64)
-                            .max(min_wall_until);
-                        Some((mod_id, relaxed, false))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let should_write = !finished.is_empty()
-                || db.with_snapshot(|snap| {
-                    desired_updates.iter().any(|&(mod_id, new_until, is_dilated)| {
-                        match snap
-                            .cluster_and_runtime
-                            .module_reload_until_unix
-                            .get(&mod_id)
-                            .copied()
-                        {
-                            Some(cur) => cur != new_until && (is_dilated || cur > new_until),
-                            None => is_dilated,
-                        }
-                    })
-                });
-            if should_write {
-                db.with_mut_snapshot(|snap| {
-                    for mod_id in &finished {
-                        snap.cluster_and_runtime.module_reload_until_unix.remove(mod_id);
-                    }
-                    for &(mod_id, new_until, is_dilated) in &desired_updates {
-                        let update = snap
-                            .cluster_and_runtime
-                            .module_reload_until_unix
-                            .get(&mod_id)
-                            .copied()
-                            .is_some_and(|cur| is_dilated || cur > new_until)
-                            || (is_dilated
-                                && !snap
-                                    .cluster_and_runtime
-                                    .module_reload_until_unix
-                                    .contains_key(&mod_id));
-                        if update {
-                            snap.cluster_and_runtime
-                                .module_reload_until_unix
-                                .insert(mod_id, new_until);
-                        }
-                    }
-                });
-            }
-            if tidi >= 0.995 {
-                for &(mod_id, _, _) in &desired_updates {
-                    if let Some(entry) = reload_sim_remaining.get_mut(&mod_id) {
-                        entry.tidi_stretched = false;
-                    }
-                }
-            }
-        }
-        if !finished.is_empty() {
-            if let Some(deadlines) = reload_sim_deadlines_opt {
-                let mut dead_guard = deadlines.write().unwrap_or_else(|e| e.into_inner());
-                for mod_id in &finished {
-                    dead_guard.remove(mod_id);
-                }
-            }
-        }
-    }
-}
-
 impl SystemHandle {
     pub fn has_active_modules_or_cloak_sync(&self, ball_id: BallId) -> bool {
         if self.active_module_ships.read().unwrap_or_else(|e| e.into_inner()).contains(&ball_id) {
@@ -2599,8 +1950,13 @@ impl SystemHandle {
     }
 
     pub fn try_step_full_tick(&self, dt: f64) -> u64 {
+        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
+            super::post_unlock::begin_tick_charge_reservations(
+                self.solar_system_id, &mut st, &self.completed_post_unlock_seq,
+            );
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
@@ -2613,6 +1969,7 @@ impl SystemHandle {
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
             warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix, ..
         } = &mut *st;
+        let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
         let tidi = self.tidi_factor();
         let dt_sim = if dt > 0.0 && dt.is_finite() {
             dt * tidi
@@ -2627,7 +1984,14 @@ impl SystemHandle {
             );
         }
         let dt = dt_sim;
-        respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
+        super::belts::respawn_due_asteroids_collecting(
+            &mut bp,
+            asteroids,
+            asteroid_templates,
+            sde_opt,
+            db_opt,
+            &mut post_unlock_ops,
+        );
         sync_player_slim_items(&mut bp, db_opt);
         if let Some(db) = db_opt.as_ref() {
             let now_unix = db.clock().now_unix_secs();
@@ -2640,7 +2004,14 @@ impl SystemHandle {
             super::missiles::snapshot_missile_positions(&bp, active_guided_missiles);
         let events = bp.step(dt);
         super::missiles::flush_pending_missile_deploy_fx(&mut bp, pending_missile_deploy_fx);
-        super::persist_landed_warps_in_db(&bp, &events, db_opt, ball_space_entry_epochs);
+        super::collect_landed_warps_for_post_unlock_with_in_flight(
+            &bp,
+            &events,
+            db_opt,
+            ball_space_entry_epochs,
+            self.has_in_flight_post_unlock() || !post_unlock_ops.is_empty(),
+            &mut post_unlock_ops,
+        );
         super::clear_landed_warp_tracking_from_events(&bp, &events, warp_state);
         flush_target_lost_notifications(
             &bp,
@@ -2654,25 +2025,18 @@ impl SystemHandle {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if let Some(lock_hook) = lock_hook_opt {
+        if lock_hook_opt.is_some() {
             for ev in &events {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                     if mode == "locked" {
-                        let char_id_opt = bp.ball_slim_meta.get(source_id).and_then(|m| m.char_id).or_else(|| {
-                            db_opt.as_ref().and_then(|db| db.with_snapshot(|s| {
-                                s.characters
-                                    .values()
-                                    .find(|c| c.active_ship_id == *source_id)
-                                    .map(|c| c.character_id)
-                                    .or_else(|| {
-                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
-                                            .active_pilot_by_structure
-                                            .get(source_id)
-                                            .copied()
-                                    })
-                            }))
-                        });
-                        if let Some(cid) = char_id_opt.filter(|&c| c > 0) { lock_hook(cid, *target_id); }
+                        let _ = super::cycles_tackle::emit_target_lock_completed_collecting(
+                            &bp,
+                            db_opt,
+                            *source_id,
+                            *target_id,
+                            true,
+                            &mut post_unlock_ops,
+                        );
                     }
                 }
             }
@@ -2689,7 +2053,7 @@ impl SystemHandle {
         for ev in &events {
             if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                 if mode == "lost" {
-                    super::cycles_tackle::on_target_unlocked_in_actor(
+                    super::cycles_tackle::on_target_unlocked_in_actor_collecting(
                         self.solar_system_id,
                         &mut bp,
                         active_module_cycles,
@@ -2699,6 +2063,7 @@ impl SystemHandle {
                         *source_id,
                         Some(*target_id),
                         deact_hook_guard.as_ref(),
+                        &mut post_unlock_ops,
                     );
                 }
             }
@@ -2710,12 +2075,13 @@ impl SystemHandle {
             sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        step_module_reloads_sim_clock(
+        super::post_unlock::step_module_reloads_sim_clock_collecting(
             module_reload_sim_remaining,
             Some(module_reload_sim_deadlines.as_ref()),
             db_opt,
             dt,
             tidi,
+            &mut post_unlock_ops,
         );
         let mut destroyed = Vec::new();
         let pending_destroyed = pending_destroyed_balls.clone();
@@ -2731,7 +2097,7 @@ impl SystemHandle {
             Some(&pending_destroyed),
             dt,
         );
-        destroyed.extend(step_cycles_and_capacitor_with_missiles_and_tidi(
+        destroyed.extend(step_cycles_with_reservations_collecting(
             self.solar_system_id,
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
@@ -2739,6 +2105,7 @@ impl SystemHandle {
             pending_missile_launches,
             mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
             Some(module_reload_sim_remaining), deact_hook_guard.as_ref(), Some(&pending_destroyed),
+            tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas, &mut post_unlock_ops,
         ));
         super::missiles::flush_pending_missile_launches(
             &mut bp,
@@ -2801,7 +2168,7 @@ impl SystemHandle {
                 drone_next_ready_unix.remove(&did);
             }
         }
-        teardown_attacker_locks_and_cycles_for_destroyed_balls(
+        teardown_attacker_locks_and_cycles_for_destroyed_balls_collecting(
             self.solar_system_id,
             &mut bp,
             active_module_cycles,
@@ -2812,6 +2179,7 @@ impl SystemHandle {
             notify_tx_opt.as_ref(),
             deact_hook_guard.as_ref(),
             &dead_ids,
+            &mut post_unlock_ops,
         );
         for &(target_ball_id, _) in &destroyed {
             crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
@@ -2825,6 +2193,7 @@ impl SystemHandle {
             }
         }
         let (drained_destroyed, destroyed_lease) = pending_destroyed.checkout_for_step();
+        let has_destroyed = !drained_destroyed.is_empty();
         let mut death_futs = Vec::new();
         for &(target_ball_id, owner_char_id) in &drained_destroyed {
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
@@ -2833,17 +2202,20 @@ impl SystemHandle {
         }
         let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let step_fut = step_hook_guard.map(|hook| hook(self.solar_system_id, dt, drained_destroyed));
-        if let Some(db) = db_opt {
-            crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-                db,
-                self.solar_system_id,
-                bp.combat_states.iter().filter_map(|(&bid, cs)| {
-                    (bp.balls.contains_key(&bid)
-                        && !bp.is_static_ball(bid)
-                        && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11))
-                    .then_some((bid, cs))
-                }),
-            );
+        if db_opt.is_some() {
+            for (&bid, cs) in &bp.combat_states {
+                if bp.balls.contains_key(&bid)
+                    && !bp.is_static_ball(bid)
+                    && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
+                {
+                    post_unlock_ops.push_ship_combat_hp(super::post_unlock::CombatHpDbUpdate {
+                        ball_id: bid,
+                        combat_state: cs.clone(),
+                        expected_system: Some(self.solar_system_id),
+                        require_persisted_entity: true,
+                    });
+                }
+            }
         }
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         {
@@ -2852,9 +2224,17 @@ impl SystemHandle {
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
             mod_guard.extend(external_active_modules.iter().map(|&(sid, _)| sid));
         }
-        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         let tick = bp.current_tick;
+        let ops_was_empty = post_unlock_ops.is_empty();
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
+        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
+        let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
+            self,
+            &mut st,
+            post_unlock_ops,
+            caller_can_wait,
+        );
+        let waited_sync = wait_ticket.is_wait_worker();
         drop(st);
         let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
         let warp_events = broadcast.events.clone();
@@ -2864,11 +2244,21 @@ impl SystemHandle {
             broadcast,
         );
         drop(bp);
-        crate::system_actor::flush_post_unlock_actions(&self.post_unlock_actions);
+        super::post_unlock::finish_post_unlock_after_unlock(
+            self,
+            deact_hook_guard.as_ref(),
+            lock_hook_opt.as_ref(),
+            wait_ticket,
+        );
         self.record_warp_stops_from_events(&warp_events);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             if !death_futs.is_empty() || step_fut.is_some() || destroyed_lease.is_some() {
+                let barrier_h = (!waited_sync && (!ops_was_empty || has_destroyed || self.has_in_flight_post_unlock()))
+                    .then(|| self.clone());
                 let _ = handle.spawn(async move {
+                    if let Some(h) = barrier_h {
+                        let _ = h.wait_for_post_unlock_barrier().await;
+                    }
                     for fut in death_futs {
                         fut.await;
                     }
@@ -3221,7 +2611,7 @@ pub(crate) fn flush_target_lost_notifications(
 /// Immediately clears all locks and stops every attacker's target-bound module cycles
 /// targeting any ball in `destroyed_ids` within the same tick (`#1082`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
+pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -3238,6 +2628,7 @@ pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
     >,
     deactivation_hook: Option<&ModuleDeactivationHook>,
     destroyed_ids: &[BallId],
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     if destroyed_ids.is_empty() {
         return;
@@ -3296,7 +2687,7 @@ pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
     attacker_targets.sort_unstable();
     attacker_targets.dedup();
     for (source_id, dead_id) in attacker_targets {
-        super::cycles_tackle::on_target_unlocked_in_actor(
+        super::cycles_tackle::on_target_unlocked_in_actor_collecting(
             solar_system_id,
             ballpark,
             active_module_cycles,
@@ -3306,6 +2697,7 @@ pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
             source_id,
             Some(dead_id),
             deactivation_hook,
+            post_unlock,
         );
     }
     let new_lost_count = lost_events.len();

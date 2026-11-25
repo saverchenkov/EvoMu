@@ -64,6 +64,7 @@ pub(crate) struct PreparedSystemActivation {
     pub(in crate::system_actor) ballpark_shared: Arc<BallparkHandle>,
     pub(in crate::system_actor) actor_state_shared:
         Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+    pub(in crate::system_actor) initial_post_unlock_ops: super::post_unlock::PostUnlockOps,
     pub(in crate::system_actor) staged_claims: StagedSeedClaims,
 }
 

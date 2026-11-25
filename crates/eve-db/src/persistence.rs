@@ -1530,7 +1530,11 @@ impl WorldRepository {
         let ephemeral_changed =
             before.transient_item_attributes != writer.working.transient_item_attributes
                 || before.sessions != writer.working.sessions
-                || before.transient_items != writer.working.transient_items;
+                || before.transient_items != writer.working.transient_items
+                || before.sp6_lifecycle.nanite_paste_shortfall
+                    != writer.working.sp6_lifecycle.nanite_paste_shortfall
+                || before.sp6_lifecycle.post_unlock_committed_seq
+                    != writer.working.sp6_lifecycle.post_unlock_committed_seq;
 
         if did_mutate || has_clock_offset {
             #[cfg(any(test, feature = "legacy-json-snapshot"))]
@@ -1707,6 +1711,11 @@ impl WorldRepository {
     }
 
     #[track_caller]
+    pub fn published_snapshot_arc(&self) -> std::sync::Arc<WorldStateSnapshot> {
+        self.read_state()
+    }
+
+    #[track_caller]
     pub fn with_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&WorldStateSnapshot) -> R,
@@ -1867,6 +1876,14 @@ impl WorldRepository {
         self.bump_combat_state_epoch();
         self.bump_combat_runtime_epoch();
         Ok(())
+    }
+
+    /// Holds `published.write()` to deterministically test non-blocking `try_with_snapshot` contention (`#1170`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn hold_published_write_for_test(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, std::sync::Arc<WorldStateSnapshot>> {
+        self.published.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 

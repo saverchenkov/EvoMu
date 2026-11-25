@@ -770,6 +770,7 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             };
             let sys = ctx.systems.get_or_spawn(sys_id);
+            let _ = sys.wait_for_post_unlock_barrier().await;
             let is_cloaked = sys.view().is_ball_cloaked(ship_id);
             if is_cloaked {
                 return Some(Err(
@@ -924,6 +925,7 @@ pub(crate) async fn handle_dogma_ops(
                         ship_id,
                         initial_paste,
                     );
+                    snap.sp6_lifecycle.nanite_paste_shortfall.remove(&(ship_id, module_id));
                     Ok(())
                 });
 

@@ -1057,7 +1057,8 @@ enum ReconcileBeltAction {
     ScheduleNew(u64),
 }
 
-pub(super) fn reconcile_spawned_belt_asteroids(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconcile_spawned_belt_asteroids_collecting(
     ballpark: &mut Ballpark,
     solar_system_id: SolarSystemId,
     spawned: Vec<AsteroidState>,
@@ -1066,6 +1067,7 @@ pub(super) fn reconcile_spawned_belt_asteroids(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     belt_interval_secs: u64,
     downtime_utc_secs: u64,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<AsteroidState> {
     let (existing_qtys, persisted_due, now_unix): (
         HashMap<i64, i64>,
@@ -1188,41 +1190,33 @@ pub(super) fn reconcile_spawned_belt_asteroids(
             populated.push(ast);
         }
     }
-    if let Some(db) = db_opt {
-        if !to_spawn.is_empty()
-            || !to_respawn.is_empty()
-            || !persist_due_belts.is_empty()
-            || !clear_due_belts.is_empty()
-        {
-            db.with_mut_snapshot(|snap| {
-                for record in to_spawn {
-                    snap.asteroids.entry(record.asteroid_id).or_insert(record);
-                }
-                for record in to_respawn {
-                    snap.asteroids.insert(record.asteroid_id, record);
-                }
-                for (belt_id, due_unix) in persist_due_belts {
-                    snap.mining_and_ess_state
-                        .belt_respawn_due_unix
-                        .insert(belt_id, due_unix);
-                }
-                for belt_id in clear_due_belts {
-                    snap.mining_and_ess_state
-                        .belt_respawn_due_unix
-                        .remove(&belt_id);
-                }
+    if db_opt.is_some() {
+        for rec in to_spawn {
+            post_unlock.push(super::post_unlock::PostUnlockIntent::BeltAsteroidInsertIfAbsent(rec));
+        }
+        for rec in to_respawn {
+            post_unlock.push(super::post_unlock::PostUnlockIntent::BeltAsteroidUpsert(rec));
+        }
+        for (belt_id, due_unix) in persist_due_belts {
+            post_unlock.push(super::post_unlock::PostUnlockIntent::BeltRespawnDueUpsert {
+                belt_id,
+                due_unix,
             });
+        }
+        for belt_id in clear_due_belts {
+            post_unlock.push(super::post_unlock::PostUnlockIntent::BeltRespawnDueClear(belt_id));
         }
     }
     populated
 }
 
-pub(super) fn respawn_due_asteroids(
+pub(super) fn respawn_due_asteroids_collecting(
     ballpark: &mut Ballpark,
     asteroids: &mut HashMap<BallId, AsteroidState>,
     asteroid_templates: &HashMap<BallId, (AsteroidState, Ball)>,
     sde_opt: &Option<Arc<SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<BallId> {
     let Some(db) = db_opt else {
         return Vec::new();
@@ -1248,7 +1242,6 @@ pub(super) fn respawn_due_asteroids(
                 })
             });
         if belt_empty_and_due {
-            let mut restored_records = Vec::new();
             for (&id, (orig_ast, orig_ball)) in asteroid_templates {
                 if orig_ast.belt_id == belt_id {
                     restore_asteroid_from_template(
@@ -1260,14 +1253,17 @@ pub(super) fn respawn_due_asteroids(
                         sde_opt,
                     );
                     let init_qty = i64::try_from(orig_ast.initial_units).unwrap_or(i64::MAX);
-                    restored_records.push((
-                        id,
+                    post_unlock.push(super::post_unlock::PostUnlockIntent::BeltAsteroidUpsert(
                         eve_db::AsteroidRecord {
                             asteroid_id: id,
                             belt_id: orig_ast.belt_id,
                             type_id: orig_ast.type_id,
                             solar_system_id: ballpark.solar_system_id,
-                            position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
+                            position: (
+                                orig_ball.position.x,
+                                orig_ball.position.y,
+                                orig_ball.position.z,
+                            ),
                             quantity: init_qty,
                             initial_quantity: init_qty,
                             radius: orig_ball.radius,
@@ -1276,14 +1272,9 @@ pub(super) fn respawn_due_asteroids(
                     respawned.push(id);
                 }
             }
-            db.with_mut_snapshot(|snap| {
-                for (id, record) in restored_records {
-                    snap.asteroids.insert(id, record);
-                }
-                snap.mining_and_ess_state
-                    .belt_respawn_due_unix
-                    .remove(&belt_id);
-            });
+            post_unlock.push(super::post_unlock::PostUnlockIntent::BeltRespawnDueClear(
+                belt_id,
+            ));
         }
     }
     respawned
@@ -1292,12 +1283,13 @@ pub(super) fn respawn_due_asteroids(
 /// Daily 11:00 UTC downtime maintenance respawn for an active solar system:
 /// - Respawns any asteroid belt (`belt_id > 0`) where all asteroids in that belt are depleted (`Asteroids_and_ore.md:69`).
 /// - Respawns any depleted ice asteroid (`group_id == 465`) back to `initial_units`.
-pub(crate) fn respawn_depleted_belts_on_downtime_inner(
+pub(crate) fn respawn_depleted_belts_on_downtime_inner_collecting(
     ballpark: &mut Ballpark,
     asteroids: &mut HashMap<BallId, AsteroidState>,
     asteroid_templates: &HashMap<BallId, (AsteroidState, Ball)>,
     sde_opt: &Option<Arc<SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> usize {
     let mut belt_ids: Vec<BallId> = asteroid_templates
         .values()
@@ -1350,41 +1342,35 @@ pub(crate) fn respawn_depleted_belts_on_downtime_inner(
     for id in to_restore {
         if let Some((orig_ast, orig_ball)) = asteroid_templates.get(&id) {
             restore_asteroid_from_template(id, orig_ast, orig_ball, ballpark, asteroids, sde_opt);
-            if let Some(db) = db_opt {
+            if db_opt.is_some() {
                 let init_qty = i64::try_from(orig_ast.initial_units).unwrap_or(i64::MAX);
-                db.with_mut_snapshot(|snap| {
-                    snap.asteroids.insert(
-                        id,
-                        eve_db::AsteroidRecord {
-                            asteroid_id: id,
-                            belt_id: orig_ast.belt_id,
-                            type_id: orig_ast.type_id,
-                            solar_system_id: ballpark.solar_system_id,
-                            position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
-                            quantity: init_qty,
-                            initial_quantity: init_qty,
-                            radius: orig_ball.radius,
-                        },
-                    );
-                });
+                post_unlock.push(super::post_unlock::PostUnlockIntent::BeltAsteroidUpsert(
+                    eve_db::AsteroidRecord {
+                        asteroid_id: id,
+                        belt_id: orig_ast.belt_id,
+                        type_id: orig_ast.type_id,
+                        solar_system_id: ballpark.solar_system_id,
+                        position: (orig_ball.position.x, orig_ball.position.y, orig_ball.position.z),
+                        quantity: init_qty,
+                        initial_quantity: init_qty,
+                        radius: orig_ball.radius,
+                    },
+                ));
             }
         }
     }
-    if let Some(db) = db_opt {
-        if !restored_belts.is_empty() {
-            db.with_mut_snapshot(|snap| {
-                for belt_id in restored_belts {
-                    snap.mining_and_ess_state
-                        .belt_respawn_due_unix
-                        .remove(&belt_id);
-                }
-            });
+    if db_opt.is_some() && !restored_belts.is_empty() {
+        for belt_id in restored_belts {
+            post_unlock.push(super::post_unlock::PostUnlockIntent::BeltRespawnDueClear(
+                belt_id,
+            ));
         }
     }
     count
 }
 
-pub(super) fn handle_mine_asteroid(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_mine_asteroid_collecting(
     solar_system_id: SolarSystemId,
     asteroid_id: BallId,
     requested_units: u64,
@@ -1396,6 +1382,7 @@ pub(super) fn handle_mine_asteroid(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     belt_interval_atomic: &std::sync::atomic::AtomicU64,
     downtime_utc_atomic: &std::sync::atomic::AtomicU64,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Result<MiningExtractionResult, String> {
     if let Some(ast) = asteroids.get_mut(&asteroid_id) {
         if ast.remaining_units == 0 {
@@ -1442,19 +1429,15 @@ pub(super) fn handle_mine_asteroid(
             } else {
                 None
             };
-            if persist_db || depleted || belt_due_unix.is_some() {
-                if let Some(db) = db_opt {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(a) = snap.asteroids.get_mut(&asteroid_id) {
-                            a.quantity = i64::try_from(remaining_units).unwrap_or(0);
-                        }
-                        if let Some(due_unix) = belt_due_unix {
-                            snap.mining_and_ess_state
-                                .belt_respawn_due_unix
-                                .insert(belt_id, due_unix);
-                        }
-                    });
-                }
+            if (persist_db || depleted || belt_due_unix.is_some()) && db_opt.is_some() {
+                post_unlock.push(super::post_unlock::PostUnlockIntent::MineAsteroid(
+                    super::post_unlock::MineAsteroidDbUpdate {
+                        asteroid_id,
+                        belt_id,
+                        remaining_units,
+                        belt_due_unix,
+                    },
+                ));
             }
             if depleted {
                 let _ = ballpark.remove_ball(asteroid_id);
@@ -1524,3 +1507,8 @@ pub(super) fn sync_player_slim_items(
 #[cfg(test)]
 #[path = "belts_tests.rs"]
 mod belts_tests;
+
+#[cfg(test)]
+pub(crate) use belts_tests::respawn_depleted_belts_on_downtime_inner;
+#[cfg(test)]
+pub(super) use belts_tests::{handle_mine_asteroid, respawn_due_asteroids};

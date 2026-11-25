@@ -669,6 +669,7 @@ pub struct StepOutput {
     pub cycle_actions: Vec<PendingCycleAction>,
     pub condition_checkpoint: Option<Vec<ConditionCheckpointEntry>>,
     pub broadcast: Option<TickBroadcast>,
+    pub(crate) has_post_unlock_work: bool,
 }
 
 /// Structured actor outbox produced by an immediate [`SystemCommand::FireWeaponCycleVolley`].
@@ -677,6 +678,7 @@ pub struct WeaponVolleyOutput {
     pub destroyed: Vec<(BallId, Option<CharacterId>)>,
     pub(crate) destroyed_lease: Option<Arc<PendingDestroyedDeliveryGuard>>,
     pub actions: Vec<PendingCycleAction>,
+    pub(crate) has_post_unlock_work: bool,
 }
 
 /// Per-session `beyonce.UpdateStateRequest` cooldown state stored per `ServerContext` on `SystemRegistry` (`#1169`).
@@ -887,6 +889,9 @@ pub(crate) struct SystemActorState {
     pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
     pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     pub drone_next_ready_unix: HashMap<BallId, u64>,
+    pub next_post_unlock_seq: u64,
+    pub pending_item_qty_deltas: std::collections::VecDeque<(u64, ItemId, i32)>,
+    pub pending_crystal_dmg_deltas: std::collections::VecDeque<(u64, ItemId, f64)>,
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`
@@ -1224,7 +1229,7 @@ pub enum SystemCommand {
         reply: oneshot::Sender<StepOutput>,
     },
     FlushConditionCheckpoint {
-        reply: oneshot::Sender<Vec<ConditionCheckpointEntry>>,
+        reply: oneshot::Sender<usize>,
     },
     FastForwardClock {
         ship_id: BallId,
@@ -1405,6 +1410,10 @@ pub enum SystemCommand {
         ship_id: BallId,
         module_id: i64,
         reply: oneshot::Sender<Option<(f64, i32)>>,
+    },
+    CancelShipNaniteRepairs {
+        ship_id: BallId,
+        refund_paste: bool,
     },
     RecordIncomingArmorDamage {
         ship_id: BallId,

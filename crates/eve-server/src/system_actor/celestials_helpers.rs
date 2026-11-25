@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::{BallparkHandle, SystemHandle};
+use crate::system_actor::post_unlock;
 use eve_db::lock_rank::{
     assert_locks_below, held_lock_ranks, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
 };
@@ -399,93 +400,67 @@ const SUBWARP_FLUSH_DISPLACEMENT_SQ_M2: f64 = 100.0 * 100.0;
 /// Periodic sub-warp position flush cadence in 1 Hz ticks when moving slowly (`< 100 m/s`).
 const SUBWARP_FLUSH_INTERVAL_TICKS: u64 = 5;
 
+/// Collects explicit changed `ball_ids` coordinates from `ballpark` into `post_unlock.item_positions`
+/// when backed by `snap.items` and not stale (`#741`, `#1170`).
+pub(crate) fn collect_ball_positions_for_post_unlock(
+    ballpark: &Ballpark,
+    ball_ids: &[BallId],
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    post_unlock: &mut post_unlock::PostUnlockOps,
+) {
+    if db_opt.is_none() || ball_ids.is_empty() {
+        return;
+    }
+    let solar_system_id = ballpark.solar_system_id;
+    let mut updates = Vec::new();
+    for &bid in ball_ids {
+        if ballpark.is_static_ball(bid)
+            || ballpark.ball_slim_meta.get(&bid).is_some_and(|m| m.category_id == 11)
+        {
+            continue;
+        }
+        let Some(b) = ballpark.balls.get(&bid).filter(|b| b.position.is_finite()) else {
+            continue;
+        };
+        updates.push((bid, b.position.to_array(), solar_system_id, ball_space_entry_epochs.get(&bid).copied()));
+    }
+    post_unlock.push_item_positions(updates);
+}
+
 /// Persists explicit `ball_ids` coordinates from `ballpark` into `snap.item_positions`
-/// when backed by `snap.items` and changed (`#741`).
+/// when backed by `snap.items` and changed (`#741`). Unit tests only (`W2`, `W6`).
+#[cfg(test)]
 pub(crate) fn persist_ball_positions_in_db(
     ballpark: &Ballpark,
     ball_ids: &[BallId],
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
 ) {
-    let Some(db) = db_opt
-        .as_ref()
-        .filter(|db| !db.is_write_locked_by_current_thread())
-    else {
-        return;
-    };
-    if ball_ids.is_empty() {
-        return;
+    let mut ops = post_unlock::PostUnlockOps::default();
+    collect_ball_positions_for_post_unlock(
+        ballpark,
+        ball_ids,
+        db_opt,
+        ball_space_entry_epochs,
+        &mut ops,
+    );
+    if !ops.is_empty() {
+        let _ = post_unlock::execute_post_unlock_ops(db_opt.as_ref(), None, ops, None, None);
     }
-    let solar_system_id = ballpark.solar_system_id;
-    let updates: Vec<(BallId, [f64; 3])> = db.with_snapshot(|snap| {
-        let mut out = Vec::new();
-        for &bid in ball_ids {
-            if ballpark.is_static_ball(bid)
-                || ballpark
-                    .ball_slim_meta
-                    .get(&bid)
-                    .is_some_and(|m| m.category_id == 11)
-            {
-                continue;
-            }
-            let Some(b) = ballpark.balls.get(&bid) else {
-                continue;
-            };
-            if !b.position.is_finite() {
-                continue;
-            }
-            let changed = match snap.item_positions.get(&bid) {
-                None => true,
-                Some(&prev) => (DVec3::from_array(prev) - b.position).length_squared() > 1e-6,
-            };
-            if !changed
-                || !snap.items.contains_key(&bid)
-                || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    ball_space_entry_epochs.get(&bid).copied(),
-                )
-            {
-                continue;
-            }
-            out.push((bid, b.position.to_array()));
-        }
-        out
-    });
-    if updates.is_empty() {
-        return;
-    }
-    let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        for (bid, pos_arr) in updates {
-            if snap.items.contains_key(&bid)
-                && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    ball_space_entry_epochs.get(&bid).copied(),
-                )
-            {
-                snap.item_positions.insert(bid, pos_arr);
-            }
-        }
-        Ok(())
-    });
 }
 
-/// Persists dynamic ship/item coordinates into `snap.item_positions` on warp exit (`OnDeactivatingWarp`),
-/// explicit `SetBallPosition` / `Stop` events, and periodic / resting sub-warp movement flushes,
-/// while performing zero snapshot writes when persisted items are stationary (`#741`).
-pub(crate) fn persist_landed_warps_in_db(
+/// Collects dynamic ship/item coordinates into `post_unlock`, on warp exit,
+/// explicit `SetBallPosition` / `Stop` events, and periodic / resting sub-warp movement flushes (`#741`, `#1170`).
+pub(crate) fn collect_landed_warps_for_post_unlock_with_in_flight(
     ballpark: &Ballpark,
     events: &[eve_destiny::DestinyEvent],
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
+    has_in_flight: bool,
+    post_unlock: &mut post_unlock::PostUnlockOps,
 ) {
-    let Some(db) = db_opt
-        .as_ref()
-        .filter(|db| !db.is_write_locked_by_current_thread())
-    else {
+    let Some(db) = db_opt.as_ref() else {
         return;
     };
     let solar_system_id = ballpark.solar_system_id;
@@ -502,7 +477,7 @@ pub(crate) fn persist_landed_warps_in_db(
             _ => {}
         }
     }
-    let updates: Vec<(BallId, [f64; 3])> = db.with_snapshot(|snap| {
+    let collect_unfiltered = || {
         let mut out = Vec::new();
         for (&bid, b) in &ballpark.balls {
             if ballpark.is_static_ball(bid)
@@ -524,57 +499,105 @@ pub(crate) fn persist_landed_warps_in_db(
             {
                 continue;
             }
-            let should_write = match snap.item_positions.get(&bid) {
-                None => {
-                    is_immediate
-                        || !matches!(b.mode, eve_destiny::MovementMode::Stop)
-                        || b.velocity.length_squared() > 1e-6
-                }
-                Some(&prev) => {
-                    let delta_sq = (DVec3::from_array(prev) - b.position).length_squared();
-                    if is_immediate {
-                        delta_sq > 1e-6
-                    } else {
-                        delta_sq > 1e-4
-                            && (delta_sq >= SUBWARP_FLUSH_DISPLACEMENT_SQ_M2
-                                || ballpark.current_tick % SUBWARP_FLUSH_INTERVAL_TICKS == 0
-                                || (matches!(b.mode, eve_destiny::MovementMode::Stop)
-                                    && b.velocity.length_squared() <= 1.0))
-                    }
-                }
-            };
-            if should_write
-                && snap.items.contains_key(&bid)
-                && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    ball_space_entry_epochs.get(&bid).copied(),
-                )
+            if is_immediate
+                || ballpark.current_tick % SUBWARP_FLUSH_INTERVAL_TICKS == 0
+                || !matches!(b.mode, eve_destiny::MovementMode::Stop)
+                || b.velocity.length_squared() > 1e-6
             {
-                out.push((bid, b.position.to_array()));
+                let epoch_opt = ball_space_entry_epochs.get(&bid).copied();
+                out.push((bid, b.position.to_array(), solar_system_id, epoch_opt));
             }
         }
         out
-    });
-    if updates.is_empty() {
-        return;
-    }
-    let _ = db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        for (bid, pos_arr) in updates {
-            if snap.items.contains_key(&bid)
-                && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                    snap,
-                    bid,
-                    Some(solar_system_id),
-                    ball_space_entry_epochs.get(&bid).copied(),
-                )
-            {
-                snap.item_positions.insert(bid, pos_arr);
+    };
+    let updates: Vec<(BallId, [f64; 3], SolarSystemId, Option<u64>)> =
+        if db.is_write_locked_by_current_thread() || has_in_flight {
+            collect_unfiltered()
+        } else if let Some(filtered) = db.try_with_snapshot(|snap| {
+            let mut out = Vec::new();
+            for (&bid, b) in &ballpark.balls {
+                if ballpark.is_static_ball(bid)
+                    || ballpark
+                        .ball_slim_meta
+                        .get(&bid)
+                        .is_some_and(|m| m.category_id == 11)
+                    || !b.position.is_finite()
+                {
+                    continue;
+                }
+                let is_immediate = immediate_ids.contains(&bid);
+                if !is_immediate
+                    && matches!(
+                        b.mode,
+                        eve_destiny::MovementMode::Warp { phase, .. }
+                            if phase != eve_destiny::WarpPhase::Aligning
+                    )
+                {
+                    continue;
+                }
+                let should_write = match snap.item_positions.get(&bid) {
+                    None => {
+                        is_immediate
+                            || !matches!(b.mode, eve_destiny::MovementMode::Stop)
+                            || b.velocity.length_squared() > 1e-6
+                    }
+                    Some(&prev) => {
+                        let delta_sq = (DVec3::from_array(prev) - b.position).length_squared();
+                        if is_immediate {
+                            delta_sq > 1e-6
+                        } else {
+                            delta_sq > 1e-4
+                                && (delta_sq >= SUBWARP_FLUSH_DISPLACEMENT_SQ_M2
+                                    || ballpark.current_tick % SUBWARP_FLUSH_INTERVAL_TICKS == 0
+                                    || (matches!(b.mode, eve_destiny::MovementMode::Stop)
+                                        && b.velocity.length_squared() <= 1.0))
+                        }
+                    }
+                };
+                let epoch_opt = ball_space_entry_epochs.get(&bid).copied();
+                if should_write
+                    && snap.items.contains_key(&bid)
+                    && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                        snap,
+                        bid,
+                        Some(solar_system_id),
+                        epoch_opt,
+                    )
+                {
+                    out.push((bid, b.position.to_array(), solar_system_id, epoch_opt));
+                }
             }
-        }
-        Ok(())
-    });
+            out
+        }) {
+            filtered
+        } else {
+            collect_unfiltered()
+        };
+    post_unlock.push_item_positions(updates);
+}
+
+/// Persists dynamic ship/item coordinates into `snap.item_positions` on warp exit (`OnDeactivatingWarp`),
+/// explicit `SetBallPosition` / `Stop` events, and periodic / resting sub-warp movement flushes,
+/// while performing zero snapshot writes when persisted items are stationary (`#741`). Unit tests only (`W2`, `W6`).
+#[cfg(test)]
+pub(crate) fn persist_landed_warps_in_db(
+    ballpark: &Ballpark,
+    events: &[eve_destiny::DestinyEvent],
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+) {
+    let mut ops = post_unlock::PostUnlockOps::default();
+    collect_landed_warps_for_post_unlock_with_in_flight(
+        ballpark,
+        events,
+        db_opt,
+        ball_space_entry_epochs,
+        false,
+        &mut ops,
+    );
+    if !ops.is_empty() {
+        let _ = post_unlock::execute_post_unlock_ops(db_opt.as_ref(), None, ops, None, None);
+    }
 }
 
 /// Records the initial checkpoint baseline and `space_entry_epoch` when a dynamic ball enters the actor (`T-2`, `T-5`).
@@ -929,13 +952,13 @@ pub(crate) fn update_system_hibernation_flag(
     }
 }
 
-/// Passively recharges stationary or unstepped ships during `fast_forward_clock` and persists updated HP/capacitor to DB.
-fn recharge_and_persist_ship_combat_state_on_fast_forward(
+/// Passively recharges stationary or unstepped ships during `fast_forward_clock` and collects updated HP/capacitor for post-unlock DB flush.
+fn recharge_ship_combat_state_on_fast_forward_collecting(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     ship_id: BallId,
     unstepped_secs: u64,
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    post_unlock: &mut post_unlock::PostUnlockOps,
 ) {
     if unstepped_secs == 0 {
         return;
@@ -962,12 +985,13 @@ fn recharge_and_persist_ship_combat_state_on_fast_forward(
     } else {
         None
     };
-    if let (Some(cs), Some(db)) = (updated, db_opt) {
-        crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-            db,
-            solar_system_id,
-            std::iter::once((ship_id, &cs)),
-        );
+    if let Some(cs) = updated {
+        post_unlock.push_ship_combat_hp(post_unlock::CombatHpDbUpdate {
+            ball_id: ship_id,
+            combat_state: cs,
+            expected_system: Some(solar_system_id),
+            require_persisted_entity: true,
+        });
     }
 }
 
@@ -1003,6 +1027,7 @@ pub(crate) fn fast_forward_clock_in_actor(
     );
 }
 
+#[cfg(test)]
 #[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     solar_system_id: SolarSystemId,
@@ -1033,6 +1058,8 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     );
 }
 
+#[allow(dead_code, clippy::too_many_arguments)]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
     solar_system_id: SolarSystemId,
@@ -1048,6 +1075,45 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
     broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
     warp_state: &mut crate::system_actor::types::ActorWarpState,
 ) {
+    let mut ops = post_unlock::PostUnlockOps::default();
+    fast_forward_clock_in_actor_collecting(
+        solar_system_id,
+        ballpark,
+        ship_id,
+        secs,
+        sim_elapsed_secs,
+        db_opt,
+        ball_space_entry_epochs,
+        ball_positions_actor,
+        scrambled_balls_actor,
+        event_tx_actor,
+        broadcast_seq_gate,
+        warp_state,
+        false,
+        &mut ops,
+    );
+    if !ops.is_empty() {
+        let _ = post_unlock::execute_post_unlock_ops(db_opt.as_ref(), None, ops, None, None);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fast_forward_clock_in_actor_collecting(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    ship_id: BallId,
+    secs: u64,
+    sim_elapsed_secs: &mut f64,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
+    broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
+    warp_state: &mut crate::system_actor::types::ActorWarpState,
+    has_in_flight: bool,
+    post_unlock: &mut post_unlock::PostUnlockOps,
+) {
     let Some(ball0) = ballpark.balls.get(&ship_id) else {
         return;
     };
@@ -1058,12 +1124,12 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
         .get(&ship_id)
         .is_some_and(|cs| cs.is_invulnerable());
     if !is_moving && !was_invuln {
-        recharge_and_persist_ship_combat_state_on_fast_forward(
+        recharge_ship_combat_state_on_fast_forward_collecting(
             solar_system_id,
             ballpark,
             ship_id,
             secs,
-            db_opt,
+            post_unlock,
         );
         return;
     }
@@ -1079,7 +1145,14 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
         *sim_elapsed_secs += 1.0;
         sim_steps += 1;
         let evs = ballpark.step(1.0);
-        persist_landed_warps_in_db(ballpark, &evs, db_opt, ball_space_entry_epochs);
+        collect_landed_warps_for_post_unlock_with_in_flight(
+            ballpark,
+            &evs,
+            db_opt,
+            ball_space_entry_epochs,
+            has_in_flight || !post_unlock.is_empty(),
+            post_unlock,
+        );
         clear_landed_warp_tracking_from_events(ballpark, &evs, warp_state);
         let warp_exited = evs.iter().any(|e| {
             matches!(
@@ -1109,20 +1182,21 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
     }
     let unstepped_secs = secs.saturating_sub(sim_steps);
     if unstepped_secs > 0 {
-        recharge_and_persist_ship_combat_state_on_fast_forward(
+        recharge_ship_combat_state_on_fast_forward_collecting(
             solar_system_id,
             ballpark,
             ship_id,
             unstepped_secs,
-            db_opt,
+            post_unlock,
         );
     } else if sim_steps > 0 {
-        if let (Some(cs), Some(db)) = (ballpark.combat_states.get(&ship_id), db_opt) {
-            crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-                db,
-                solar_system_id,
-                std::iter::once((ship_id, cs)),
-            );
+        if let Some(cs) = ballpark.combat_states.get(&ship_id) {
+            post_unlock.push_ship_combat_hp(post_unlock::CombatHpDbUpdate {
+                ball_id: ship_id,
+                combat_state: cs.clone(),
+                expected_system: Some(solar_system_id),
+                require_persisted_entity: true,
+            });
         }
     }
     // Preserve `initial_tick` instead of bumping `ballpark.current_tick` ahead of live clients:
@@ -1157,7 +1231,13 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
             all_events.insert(0, pos_ev);
             all_events.insert(1, vel_ev);
         }
-        persist_ball_positions_in_db(ballpark, &[ship_id], db_opt, ball_space_entry_epochs);
+        collect_ball_positions_for_post_unlock(
+            ballpark,
+            &[ship_id],
+            db_opt,
+            ball_space_entry_epochs,
+            post_unlock,
+        );
     }
     crate::system_actor::sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
     let broadcast = crate::system_actor::build_tick_broadcast(solar_system_id, ballpark, all_events);
@@ -1326,6 +1406,51 @@ impl SystemHandle {
             .map(DVec3::from_array)
             .unwrap_or(DVec3::ZERO);
         Some((pos, vel))
+    }
+
+    /// Synchronously collects dirty condition checkpoint entries and routes persistence through this
+    /// system's ordered `post_unlock_worker` (`W1`, `W2`, `W3`, `W6`, `#1170`, `#919`).
+    pub fn flush_dirty_condition_checkpoint_sync(&self) -> usize {
+        let caller_can_wait = post_unlock::caller_can_wait_for_handle(self);
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticket = {
+            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let entries = collect_dirty_condition_checkpoint_entries(&mut st, &bp);
+            if !entries.is_empty() && st.db_opt.is_some() {
+                let mut ops = post_unlock::PostUnlockOps::default();
+                ops.push(post_unlock::PostUnlockIntent::ConditionCheckpoint {
+                    solar_system_id: self.solar_system_id,
+                    entries,
+                    written_out: Some(std::sync::Arc::clone(&written)),
+                });
+                post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                    self, st.db_opt.as_ref(), st.sde_opt.as_ref(), ops, caller_can_wait,
+                )
+            } else {
+                post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                    self, st.db_opt.as_ref(), st.sde_opt.as_ref(), post_unlock::PostUnlockOps::default(), caller_can_wait,
+                )
+            }
+        };
+        post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
+        written.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait_for_post_unlock_barrier(&self) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let item = post_unlock::PostUnlockWorkItem {
+            db_opt: None,
+            sde_opt: None,
+            ops: post_unlock::PostUnlockOps::default(),
+            replies: vec![Box::new(move || { let _ = tx.send(()); })],
+            in_flight_guard: None,
+            work_seq: 0,
+        };
+        if self.post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(item)).is_err() {
+            return false;
+        }
+        rx.await.is_ok()
     }
 }
 

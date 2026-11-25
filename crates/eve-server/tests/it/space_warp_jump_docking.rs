@@ -5626,6 +5626,8 @@ async fn test_stargate_post_spawn_rollback_preserves_origin_modules_charges_and_
         rolled_back,
         "post-spawn cancellation must remove destination ball and restore origin ball"
     );
+    let _ = dest_h.flush_condition_checkpoint().await;
+    let _ = src_h.flush_condition_checkpoint().await;
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char_id].solar_system_id, gate.from_solar_system_id);

@@ -148,17 +148,18 @@ fn strip_cloak_cycles_for_ship(
                 .actor_st
                 .weapon_cycle_start_modules
                 .remove(&(ship_id, removed.module_id));
-            cleanup_removed_module_cycle(
+            cycles::cleanup_removed_module_cycle_collecting(
                 exec_ctx.ballpark,
                 &removed,
                 &exec_ctx.actor_st.db_opt,
+                exec_ctx.post_unlock_ops,
             );
-            super::cycles::emit_cycle_deactivation(
+            super::cycles::emit_cycle_deactivation_collecting(
                 exec_ctx.solar_system_id,
                 &removed,
                 exec_ctx.ballpark,
-                &exec_ctx.actor_st.db_opt,
-                deact_guard.as_ref(),
+                deact_guard.as_ref().is_some(),
+                exec_ctx.post_unlock_ops,
             );
             removed_ids.insert(removed.module_id);
             removed_cycles.push(RemovedCloakCycleInfo {
@@ -195,17 +196,28 @@ fn strip_cloak_cycles_for_ship(
                 .collect()
         });
         if !orphaned_db_cloaks.is_empty() {
-            db_ref.with_mut_snapshot(|snap| {
-                for &(mod_id, _, _) in &orphaned_db_cloaks {
-                    snap.module_active_states.remove(&mod_id);
-                    snap.module_active_charges.remove(&mod_id);
-                }
-            });
             let owner_char_id = exec_ctx
                 .ballpark
                 .ball_slim_meta
                 .get(&ship_id)
                 .and_then(|meta| meta.char_id);
+            let fallback_owner = exec_ctx
+                .ballpark
+                .ball_slim_meta
+                .get(&ship_id)
+                .and_then(|meta| (meta.owner_id > 0).then_some(meta.owner_id));
+            let snapshot_char_id = if owner_char_id.is_some() {
+                owner_char_id
+            } else {
+                db_ref.with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .find(|c| c.active_ship_id == ship_id)
+                        .map(|c| c.character_id)
+                        .or_else(|| s.items.get(&ship_id).map(|it| it.owner_id))
+                })
+            }
+            .or(fallback_owner);
             for (mod_id, mod_type_id, is_covert) in orphaned_db_cloaks {
                 let effect_name = if is_covert {
                     "cloakingWarpSafe".to_string()
@@ -220,13 +232,25 @@ fn strip_cloak_cycles_for_ship(
                     effect_name: effect_name.clone(),
                     ..ActiveModuleCycle::default()
                 };
-                super::cycles::emit_cycle_deactivation(
-                    exec_ctx.solar_system_id,
-                    &synth_cycle,
-                    exec_ctx.ballpark,
-                    &exec_ctx.actor_st.db_opt,
-                    deact_guard.as_ref(),
+                exec_ctx.post_unlock_ops.push(
+                    super::post_unlock::PostUnlockIntent::ModuleCycleCleanup(
+                        super::post_unlock::ModuleCycleCleanupDbOp::from_cycle(&synth_cycle),
+                    ),
                 );
+                if deact_guard.is_some() {
+                    if let Some(cid) = snapshot_char_id {
+                        exec_ctx.post_unlock_ops.push(
+                            super::post_unlock::PostUnlockIntent::DeactivationHook(
+                                super::post_unlock::DeferredDeactivationHookOp {
+                                    solar_system_id: exec_ctx.solar_system_id,
+                                    char_id: Some(cid),
+                                    fallback_owner_id: None,
+                                    cycle: synth_cycle,
+                                },
+                            ),
+                        );
+                    }
+                }
                 removed_cycles.push(RemovedCloakCycleInfo {
                     module_id: mod_id,
                     module_type_id: mod_type_id,
@@ -237,11 +261,11 @@ fn strip_cloak_cycles_for_ship(
         }
     }
     if !removed_cycles.is_empty() {
-        reconcile_tackle_and_bubbles(
+        cycles_tackle::reconcile_tackle_and_bubbles_collecting(
             exec_ctx.solar_system_id,
             exec_ctx.ballpark, &mut exec_ctx.actor_st.active_module_cycles,
             &exec_ctx.actor_st.base_scramble_strengths, &exec_ctx.actor_st.base_core_strengths,
-            &exec_ctx.actor_st.db_opt, deact_guard.as_ref(),
+            &exec_ctx.actor_st.db_opt, deact_guard.as_ref(), exec_ctx.post_unlock_ops,
         );
         sync_active_ships_cache(exec_ctx);
     }
@@ -665,7 +689,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             );
             let is_warp = matches!(ball.mode, eve_destiny::MovementMode::Warp { .. });
             let deact_guard = read_deact_hook(exec_ctx);
-            let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
+            let tick = cycles_tackle::spawn_ball_with_combat_in_actor_collecting(
                 exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
@@ -677,6 +701,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 ball,
                 combat_state,
                 slim_meta,
+                exec_ctx.post_unlock_ops,
             );
             if was_warping && !is_warp {
                 exec_ctx.actor_st.warp_state.clear_ball(ball_id, true);
@@ -685,7 +710,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ball_id);
             snapshot_tackle_totals_in_actor(exec_ctx);
             sync_positions_in_actor(exec_ctx);
-            defer_reply(exec_ctx.deferred_replies, reply, Ok(tick));
+            defer_cmd_reply(exec_ctx, reply, Ok(tick));
             None
         }
         SystemCommand::BreakGateCloak { ball_id, reply } => {
@@ -713,7 +738,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 real_now_unix,
                 None,
             );
-            defer_reply(exec_ctx.deferred_replies, reply, Ok(events));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(events));
             None
         }
         SystemCommand::ForceDecloak {
@@ -730,7 +755,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 reason,
                 real_now_unix,
             );
-            defer_reply(exec_ctx.deferred_replies, reply, Ok(events));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(events));
             None
         }
         SystemCommand::GetProtectionSnapshot { ball_id, reply } => {
@@ -752,11 +777,19 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|_, g| !(g.sys_id == exec_ctx.solar_system_id && g.ship_id == ball_id));
             if !exec_ctx.ballpark.balls.contains_key(&ball_id) {
+                if !preserve_db_active_states {
+                    SystemHandle::drain_ship_nanite_repairs_collecting(
+                        &mut exec_ctx.actor_st.active_nanite_repairs,
+                        ball_id,
+                        true,
+                        exec_ctx.post_unlock_ops,
+                    );
+                }
                 let _ = exec_ctx.ballpark.remove_ball(ball_id);
                 exec_ctx.actor_st.protection_registry.remove(&ball_id);
                 super::drones::clear_drone_runtime_in_state(exec_ctx.actor_st, ball_id);
                 exec_ctx.actor_st.warp_state.clear_ball(ball_id, true);
-                defer_reply(exec_ctx.deferred_replies, reply, None);
+                defer_barrier_cmd_reply(exec_ctx, reply, None);
                 return None;
             }
             let tick = exec_ctx.ballpark.current_tick;
@@ -790,17 +823,19 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             } else {
                 None
             };
-            let removed_cycles = remove_all_ship_module_cycles_preserving_own_db(
-                exec_ctx.solar_system_id,
-                exec_ctx.ballpark,
-                &mut exec_ctx.actor_st.active_module_cycles,
-                &exec_ctx.actor_st.base_scramble_strengths,
-                &exec_ctx.actor_st.base_core_strengths,
-                &exec_ctx.actor_st.db_opt,
-                ball_id,
-                deact_guard.as_ref(),
-                preserve_db_active_states,
-            );
+            let removed_cycles =
+                cycles::remove_all_ship_module_cycles_preserving_own_db_collecting(
+                    exec_ctx.solar_system_id,
+                    exec_ctx.ballpark,
+                    &mut exec_ctx.actor_st.active_module_cycles,
+                    &exec_ctx.actor_st.base_scramble_strengths,
+                    &exec_ctx.actor_st.base_core_strengths,
+                    &exec_ctx.actor_st.db_opt,
+                    ball_id,
+                    deact_guard.as_ref(),
+                    preserve_db_active_states,
+                    exec_ctx.post_unlock_ops,
+                );
             let mut removed_own_cycles: Vec<ActiveModuleCycle> = if preserve_db_active_states {
                 removed_cycles
                     .into_iter()
@@ -814,7 +849,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 before_cycles.saturating_sub(exec_ctx.actor_st.active_module_cycles.len());
             let lock_count = exec_ctx.ballpark.clear_target_locks(ball_id);
             if lock_count > 0 {
-                on_target_unlocked_in_actor(
+                cycles_tackle::on_target_unlocked_in_actor_collecting(
                     exec_ctx.solar_system_id,
                     exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
@@ -824,6 +859,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     ball_id,
                     None,
                     deact_guard.as_ref(),
+                    exec_ctx.post_unlock_ops,
                 );
             }
             exec_ctx.actor_st.base_scramble_strengths.remove(&ball_id);
@@ -847,9 +883,17 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             } else {
                 exec_ctx.ballpark.remove_ball(ball_id)
             };
+            if removed.is_some() && !preserve_db_active_states {
+                SystemHandle::drain_ship_nanite_repairs_collecting(
+                    &mut exec_ctx.actor_st.active_nanite_repairs,
+                    ball_id,
+                    true,
+                    exec_ctx.post_unlock_ops,
+                );
+            }
             sync_positions_and_active_ships(exec_ctx);
-            defer_reply(
-                exec_ctx.deferred_replies,
+            defer_barrier_cmd_reply(
+                exec_ctx,
                 reply,
                 removed.map(|ball| TakenBall {
                     tick,
@@ -872,18 +916,14 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             };
             let ball_id = taken.ball.id;
             if only_if_absent && exec_ctx.ballpark.balls.contains_key(&ball_id) {
-                defer_reply(
-                    exec_ctx.deferred_replies,
-                    reply,
-                    Ok(exec_ctx.ballpark.current_tick),
-                );
+                defer_barrier_cmd_reply(exec_ctx, reply, Ok(exec_ctx.ballpark.current_tick));
                 return None;
             }
             let removed_own_cycles = std::mem::take(&mut taken.removed_own_cycles);
             let pre_cleanup_combat_flags = taken.pre_cleanup_combat_flags.take();
             exec_ctx.ball_spawn_tokens.remove(&ball_id);
             let deact_guard = read_deact_hook(exec_ctx);
-            let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
+            let tick = cycles_tackle::spawn_ball_with_combat_in_actor_collecting(
                 exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
@@ -895,6 +935,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 taken.ball,
                 taken.combat_state.unwrap_or_default(),
                 taken.slim_meta,
+                exec_ctx.post_unlock_ops,
             );
             if let Some(flags) = pre_cleanup_combat_flags {
                 if let Some(cs) = exec_ctx.ballpark.combat_states.get_mut(&ball_id) {
@@ -907,7 +948,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 }
             }
             let force_recompute = pre_cleanup_combat_flags.is_some();
-            restore_taken_own_cycles_in_actor(
+            cycles::restore_taken_own_cycles_in_actor_collecting(
                 exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 &mut exec_ctx.actor_st.active_module_cycles,
@@ -918,11 +959,12 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 deact_guard.as_ref(),
                 removed_own_cycles,
                 force_recompute,
+                exec_ctx.post_unlock_ops,
             );
             *exec_ctx.spawned_checkpoint_ball = Some(ball_id);
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ball_id);
             sync_positions_and_active_ships(exec_ctx);
-            defer_reply(exec_ctx.deferred_replies, reply, Ok(tick));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(tick));
             None
         }
         SystemCommand::GetTargetLocks { ball_id, reply } => {
@@ -936,7 +978,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             reply,
         } => {
             let res = execute_add_target_lock_in_actor(exec_ctx, source_id, lock).map(|_| ());
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::AddTargetLockBreakingProtection {
@@ -945,7 +987,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             reply,
         } => {
             let res = execute_add_target_lock_in_actor(exec_ctx, source_id, lock);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         cmd @ (SystemCommand::RemoveTargetLock { .. }
@@ -972,7 +1014,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             };
             if removed {
                 let deact_guard = read_deact_hook(exec_ctx);
-                on_target_unlocked_in_actor(
+                cycles_tackle::on_target_unlocked_in_actor_collecting(
                     exec_ctx.solar_system_id,
                     exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
@@ -982,9 +1024,10 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     source_id,
                     Some(target_id),
                     deact_guard.as_ref(),
+                    exec_ctx.post_unlock_ops,
                 );
             }
-            defer_reply(exec_ctx.deferred_replies, reply, removed);
+            defer_barrier_cmd_reply(exec_ctx, reply, removed);
             None
         }
         cmd @ (SystemCommand::ClearTargetLocks { .. }
@@ -1003,7 +1046,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             };
             if count > 0 {
                 let deact_guard = read_deact_hook(exec_ctx);
-                on_target_unlocked_in_actor(
+                cycles_tackle::on_target_unlocked_in_actor_collecting(
                     exec_ctx.solar_system_id,
                     exec_ctx.ballpark,
                     &mut exec_ctx.actor_st.active_module_cycles,
@@ -1013,9 +1056,10 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     source_id,
                     None,
                     deact_guard.as_ref(),
+                    exec_ctx.post_unlock_ops,
                 );
             }
-            defer_reply(exec_ctx.deferred_replies, reply, count);
+            defer_barrier_cmd_reply(exec_ctx, reply, count);
             None
         }
         SystemCommand::FastForwardClock {
@@ -1027,7 +1071,12 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.ballpark.balls.get(&ship_id).map(|b| &b.mode),
                 Some(eve_destiny::MovementMode::Warp { .. })
             );
-            super::fast_forward_clock_in_actor_with_epochs_and_seq(
+            let ff_in_flight = exec_ctx
+                .post_unlock_in_flight_actor
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+                || !exec_ctx.post_unlock_ops.is_empty();
+            super::fast_forward_clock_in_actor_collecting(
                 exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
                 ship_id,
@@ -1040,6 +1089,8 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.event_tx_actor,
                 Some(exec_ctx.broadcast_seq_gate_actor),
                 &mut exec_ctx.actor_st.warp_state,
+                ff_in_flight,
+                exec_ctx.post_unlock_ops,
             );
             sync_all_protection_registry_in_actor(exec_ctx.ballpark, exec_ctx.actor_st);
             exec_ctx.sim_elapsed_secs_bits_actor.store(
@@ -1057,7 +1108,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(ship_id, tokio::time::Instant::now());
             }
-            defer_reply(exec_ctx.deferred_replies, reply, ());
+            defer_barrier_cmd_reply(exec_ctx, reply, ());
             None
         }
         other => Some(other),

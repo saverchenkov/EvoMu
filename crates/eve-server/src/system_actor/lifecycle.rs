@@ -178,6 +178,7 @@ pub struct SystemContentSeedContext<'a> {
     pub mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
     pub(in crate::system_actor) staged_special_site_balls: HashSet<i64>,
     pub(in crate::system_actor) staged_wh_ore_anomalies: HashSet<String>,
+    pub(in crate::system_actor) staged_post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
 }
 
 /// Context passed to [`SystemContentProvider::tick`] and [`SystemContentProvider::expire`]
@@ -554,7 +555,7 @@ impl SystemContentSeedContext<'_> {
     ) {
         let sde_opt = self.sde.cloned();
         let db_opt = self.db.cloned();
-        super::cycles_tackle::spawn_ball_with_combat_in_actor(
+        super::cycles_tackle::spawn_ball_with_combat_in_actor_collecting(
             self.ballpark.solar_system_id,
             self.ballpark,
             &mut self.actor_state.active_module_cycles,
@@ -566,6 +567,7 @@ impl SystemContentSeedContext<'_> {
             ball,
             combat_state,
             slim_meta,
+            self.staged_post_unlock_ops,
         );
     }
 
@@ -607,19 +609,21 @@ impl SystemContentSeedContext<'_> {
             &sde_opt,
             &mut ast_ball,
         );
-        if let Some(db) = self.db.filter(|_| self.db_read_safe) {
-            if db.get_asteroid(ball_id).is_none() {
-                let _ = db.spawn_asteroid(eve_db::AsteroidRecord {
-                    asteroid_id: ball_id,
-                    belt_id: asteroid.belt_id,
-                    type_id: ast_ball.type_id,
-                    solar_system_id: self.solar_system_id,
-                    position: (ast_ball.position.x, ast_ball.position.y, ast_ball.position.z),
-                    quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
-                    initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
-                    radius: ast_ball.radius,
-                });
-            }
+        if self.db.is_some() {
+            self.staged_post_unlock_ops.push(
+                super::post_unlock::PostUnlockIntent::BeltAsteroidInsertIfAbsent(
+                    eve_db::AsteroidRecord {
+                        asteroid_id: ball_id,
+                        belt_id: asteroid.belt_id,
+                        type_id: ast_ball.type_id,
+                        solar_system_id: self.solar_system_id,
+                        position: (ast_ball.position.x, ast_ball.position.y, ast_ball.position.z),
+                        quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
+                        initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
+                        radius: ast_ball.radius,
+                    },
+                ),
+            );
         }
         self.actor_state
             .asteroid_templates

@@ -1180,7 +1180,7 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
     assert!(handle.take_auto_stepped_at(12345));
     assert!(!handle.take_auto_stepped_at(12345));
 
-    {
+    let (ops_warp, ops_all) = {
         let mut st = handle.actor_state.write().unwrap();
         st.active_module_cycles.push(ActiveModuleCycle {
             ship_id,
@@ -1199,7 +1199,8 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
         });
         let state = &mut *st;
         let mut bp = handle.ballpark.write().unwrap();
-        remove_non_warp_ship_module_cycles(
+        let mut ops_warp = super::post_unlock::PostUnlockOps::default();
+        super::cycles::remove_non_warp_ship_module_cycles_collecting(
             bp.solar_system_id,
             &mut bp,
             &mut state.active_module_cycles,
@@ -1208,16 +1209,14 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
             &state.db_opt,
             ship_id,
             None,
+            &mut ops_warp,
         );
         assert_eq!(state.active_module_cycles.len(), 1);
         assert_eq!(state.active_module_cycles[0].module_id, mod_null);
 
-        // Put mod_norm back in DB and call remove_all_ship_module_cycles to test dirty DB cleanup
-        db.with_mut_snapshot(|snap| {
-            snap.module_active_states.insert(mod_norm);
-            snap.module_active_charges.insert(mod_norm, 3);
-        });
-        let removed = remove_all_ship_module_cycles(
+        // Put mod_norm back in DB and collect remove_all_ship_module_cycles cleanup before flushing outside locks
+        let mut ops_all = super::post_unlock::PostUnlockOps::default();
+        let removed = super::cycles::remove_all_ship_module_cycles_collecting(
             bp.solar_system_id,
             &mut bp,
             &mut state.active_module_cycles,
@@ -1226,9 +1225,17 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
             &state.db_opt,
             ship_id,
             None,
+            &mut ops_all,
         );
         assert_eq!(removed.len(), 1);
-    }
+        (ops_warp, ops_all)
+    };
+    let _ = super::post_unlock::execute_post_unlock_ops(Some(&db), None, ops_warp, None, None);
+    db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(mod_norm);
+        snap.module_active_charges.insert(mod_norm, 3);
+    });
+    let _ = super::post_unlock::execute_post_unlock_ops(Some(&db), None, ops_all, None, None);
 
     assert!(!handle.has_active_modules_or_cloak_sync(ship_id));
     let tick = handle.try_step_full_tick(1.0);
