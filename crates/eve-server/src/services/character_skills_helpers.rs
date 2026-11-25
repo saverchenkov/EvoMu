@@ -779,7 +779,17 @@ fn validate_injector_for_char(
             format!("Skill injector item {item_id} not found"),
         ));
     };
-    if !snap.is_item_consumable_by(&item, char_id, current_dock, current_ship) {
+    let injector_opts = eve_db::ConsumeExactOptions {
+        active_ship_id: current_ship,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::StackableCommodity,
+        )
+    };
+    if !snap.is_item_consumable_by(&item, char_id, current_dock, current_ship)
+        || (!item.singleton && snap.validate_item_for_consumption(&item, &injector_opts).is_err())
+    {
         return Err(err(
             "InjectorNotAccessible",
             "Skill injector is not owned or accessible by character",
@@ -1343,6 +1353,13 @@ mod r3_injector_policy_tests {
         });
 
         for &bad_id in &large_bad_ids {
+            assert_eq!(
+                handle_check_injection_constraints(&ctx, &sess, &[PyRep::Integer(bad_id), PyRep::Integer(1)])
+                    .unwrap_err()
+                    .code,
+                "InjectorNotAccessible",
+                "CheckInjectionConstraints must reject non-commodity Large injector {bad_id}"
+            );
             assert!(
                 handle_split_skill_injector(&ctx, &sess, &[PyRep::Integer(bad_id), PyRep::Integer(1)])
                     .is_err(),
@@ -1367,12 +1384,21 @@ mod r3_injector_policy_tests {
         });
 
         for &bad_id in &small_bad_ids {
+            assert_eq!(
+                handle_check_injection_constraints(&ctx, &sess, &[PyRep::Integer(bad_id), PyRep::Integer(1)])
+                    .unwrap_err()
+                    .code,
+                "InjectorNotAccessible",
+                "CheckInjectionConstraints must reject non-commodity Small injector {bad_id}"
+            );
             assert!(
                 handle_combine_skill_injector(&ctx, &sess, &[PyRep::Integer(bad_id), PyRep::Integer(5)])
                     .is_err(),
                 "CombineSkillInjector must reject non-commodity Small injector {bad_id}"
             );
         }
+        handle_check_injection_constraints(&ctx, &sess, &[PyRep::Integer(clean_large_id), PyRep::Integer(1)])
+            .expect("clean CheckInjectionConstraints");
         ctx.db.with_snapshot(|snap| {
             assert_eq!(snap.items[&clean_large_id].quantity, 1);
             for &bad_id in &small_bad_ids {

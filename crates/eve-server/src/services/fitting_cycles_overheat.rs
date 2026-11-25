@@ -65,6 +65,25 @@ pub fn resolve_module_heat_id(
     rack_heat_attr_id_for_flag(flag_id)
 }
 
+pub(crate) fn is_valid_loaded_assembled_charge(
+    snap: &eve_db::WorldStateSnapshot,
+    actor_char_id: Option<i64>,
+    active_ship_id: Option<i64>,
+    item: &eve_db::InventoryItemRecord,
+) -> bool {
+    let expected_owner = actor_char_id.unwrap_or(item.owner_id);
+    let opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        active_ship_id,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            actor_char_id,
+            expected_owner,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    snap.validate_item_for_consumption(item, &opts).is_ok()
+}
+
 pub struct AncillaryRepairPrep {
     pub is_asb: bool,
     pub asb_fallback_cap_need: f64,
@@ -116,14 +135,21 @@ pub fn plan_ancillary_module(
     let mut cap_need = initial_cap_need;
     if is_asb {
         let cid_opt = ctx.db.with_snapshot(|snap| {
+            let actor_owner = snap
+                .items
+                .get(&ship_id)
+                .or_else(|| snap.items.get(&module_id))
+                .map(|s| s.owner_id);
             snap.items
                 .values()
-                .find(|i| {
+                .filter(|i| {
                     i.location_id == ship_id
                         && (i.flag as u16) == flag_id
                         && i.item_id != module_id
                         && i.quantity > 0
+                        && is_valid_loaded_assembled_charge(snap, actor_owner, Some(ship_id), i)
                 })
+                .min_by_key(|i| i.item_id)
                 .map(|i| i.item_id)
         });
         if let Some(cid) = cid_opt {
@@ -154,15 +180,22 @@ pub fn plan_ancillary_module(
     let mut remote_armor_amount = initial_remote_armor;
     if is_aar {
         let cid_opt = ctx.db.with_snapshot(|snap| {
+            let actor_owner = snap
+                .items
+                .get(&ship_id)
+                .or_else(|| snap.items.get(&module_id))
+                .map(|s| s.owner_id);
             snap.items
                 .values()
-                .find(|i| {
+                .filter(|i| {
                     i.location_id == ship_id
                         && (i.flag as u16) == flag_id
                         && i.item_id != module_id
                         && i.type_id == 28668
                         && i.quantity >= aar_paste_rate
+                        && is_valid_loaded_assembled_charge(snap, actor_owner, Some(ship_id), i)
                 })
+                .min_by_key(|i| i.item_id)
                 .map(|i| i.item_id)
         });
         let fueled = if let Some(cid) = cid_opt {
@@ -230,12 +263,15 @@ pub fn prepare_ancillary_module(
     if let Some((cid, qty)) = prep.pending_charge_consume.take() {
         let consumed = ctx.db.with_mut_snapshot(|snap| {
             let pre = snap.items.get(&cid).cloned()?;
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                None,
-                pre.owner_id,
-                eve_db::ItemClassPolicy::ExactAssembledItem,
-            );
-            opts.reject_fitted = false;
+            let opts = eve_db::ConsumeExactOptions {
+                reject_fitted: false,
+                active_ship_id: Some(ship_id),
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    pre.owner_id,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                )
+            };
             let post = snap.consume_exact_item_quantity(cid, qty, opts).ok()?;
             Some((pre, post))
         });
@@ -249,6 +285,17 @@ pub fn prepare_ancillary_module(
                 pre.quantity,
                 post.as_ref().map_or(0, |p| p.quantity),
             );
+        } else {
+            if prep.is_asb {
+                prep.cap_need = prep.asb_fallback_cap_need;
+            }
+            if prep.is_aar {
+                if mod_type.group_id == 1698 {
+                    prep.remote_armor_amount = prep.aar_base_armor_repair;
+                } else {
+                    prep.armor_repair_amount = prep.aar_base_armor_repair;
+                }
+            }
         }
     }
     prep
@@ -582,4 +629,142 @@ pub fn check_nanite_repair_overheat_lockout(
 #[cfg(test)]
 #[path = "fitting_cycles_overheat_tests.rs"]
 mod fitting_cycles_overheat_tests;
+
+#[cfg(test)]
+mod r5_ancillary_policy_tests {
+    use super::*;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_dogma::{FittedModule, ModuleState, ShipFittingEngine};
+    use eve_sde::InvType;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn ancillary_planner_and_prepare_reject_bpc_and_courier_charges() {
+        let mut ctx = ServerContext::new();
+        let sde = Arc::make_mut(&mut ctx.sde);
+        let mk_mod = |type_id: u32, group_id: u32, attrs: &[(u16, f64)]| -> InvType {
+            let mut t = InvType::default();
+            t.type_id = type_id;
+            t.group_id = group_id;
+            t.category_id = 7;
+            t.name = format!("Mod {type_id}");
+            for &(k, v) in attrs {
+                t.default_attributes.insert(k, v);
+            }
+            t
+        };
+        sde.types.insert(995_201, mk_mod(995_201, 1156, &[(6, 120.0), (73, 4_000.0)]));
+        sde.types.insert(995_202, mk_mod(995_202, 1199, &[(6, 80.0), (56, 4.0), (73, 5_000.0), (84, 150.0)]));
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 1_000_995_201_i64;
+        let asb_id = 1_000_995_202_i64;
+        let aar_id = 1_000_995_203_i64;
+        let bpc_cap_id = 1_000_995_204_i64;
+        let courier_paste_id = 1_000_995_205_i64;
+
+        let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+        for (mid, tid, flag, ctid, cqty) in [
+            (asb_id, 995_201_u32, InventoryFlag::MedSlot0 as u16, 11_283_u32, 1_i32),
+            (aar_id, 995_202_u32, InventoryFlag::LoSlot0 as u16, 28_668_u32, 4_i32),
+        ] {
+            fit.modules.insert(
+                mid,
+                FittedModule {
+                    item_id: mid,
+                    type_id: tid,
+                    flag_id: flag,
+                    state: ModuleState::Active,
+                    charge_type_id: Some(ctid),
+                    charge_quantity: cqty,
+                    damage_hp: 0.0,
+                    max_hp: 40.0,
+                    dynamic_attribute_overrides: HashMap::new(),
+                },
+            );
+        }
+        fit.recalculate_stats(&ctx.sde);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: 30_000_142,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_cap_id,
+                InventoryItemRecord {
+                    item_id: bpc_cap_id,
+                    type_id: 11_283,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::MedSlot0,
+                    quantity: 2,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                courier_paste_id,
+                InventoryItemRecord {
+                    item_id: courier_paste_id,
+                    type_id: 28_668,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::LoSlot0,
+                    quantity: 8,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(courier_paste_id, format!("courier_cargo:{char_id}:9"));
+        });
+
+        let asb_prep = prepare_ancillary_module(
+            &ctx,
+            ship_id,
+            asb_id,
+            InventoryFlag::MedSlot0 as u16,
+            &ctx.sde.types[&995_201],
+            &fit,
+            false,
+            120.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert!((asb_prep.cap_need - 120.0).abs() < 1e-6);
+        assert!(asb_prep.pending_charge_consume.is_none());
+
+        let aar_prep = prepare_ancillary_module(
+            &ctx,
+            ship_id,
+            aar_id,
+            InventoryFlag::LoSlot0 as u16,
+            &ctx.sde.types[&995_202],
+            &fit,
+            false,
+            80.0,
+            150.0,
+            0.0,
+            1.0,
+        );
+        assert!((aar_prep.armor_repair_amount - 150.0).abs() < 1e-6);
+        assert!(aar_prep.pending_charge_consume.is_none());
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&bpc_cap_id].quantity, 2);
+            assert_eq!(snap.items[&courier_paste_id].quantity, 8);
+        });
+    }
+}
 

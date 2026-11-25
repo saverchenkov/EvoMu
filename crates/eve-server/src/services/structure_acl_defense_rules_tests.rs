@@ -1690,6 +1690,52 @@ fn structure_no_core_skips_bpc_core_and_installs_valid_sibling() {
     });
 }
 
+#[test]
+fn fuel_state_rejects_foreign_only_bay_stack_without_unbacked_fallback() {
+    let mut ctx = test_ctx();
+    let st_tid = 35_832_u32;
+    let fuel_tid = 4247_u32;
+    clone_type_with(&mut ctx.sde, 35_832, st_tid, 1657, 65, &[]);
+    clone_type_with(&mut ctx.sde, 34, fuel_tid, 1136, 4, &[]);
+    let corp_id = 98_752_i64;
+    let sid = 10_000_996_300_i64;
+    let foreign_fuel_id = 82_201_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: st_tid,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Foreign Bay Fuel Test".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 30,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_fuel_id,
+            InventoryItemRecord {
+                item_id: foreign_fuel_id,
+                type_id: fuel_tid,
+                owner_id: corp_id + 1,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(available_structure_fuel_blocks(&ctx, snap, sid), 0);
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 1));
+        assert_eq!(snap.items[&foreign_fuel_id].quantity, 5);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 30);
+    });
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;

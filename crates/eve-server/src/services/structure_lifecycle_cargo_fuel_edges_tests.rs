@@ -1191,6 +1191,70 @@ async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&valid_fuel_id));
         assert_eq!(snap.items[&bpc_fuel_id].quantity, 20);
-        assert_eq!(snap.structures[&st_id].fuel_blocks, 20);
+        assert_eq!(snap.structures[&st_id].fuel_blocks, 0);
+    });
+
+    // R4-01 (1): Even with stale st.fuel_blocks > bpc_qty, both 1-arg and quantity-mode jettison fail without minting clean fuel blocks.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&st_id).unwrap().fuel_blocks = 30;
+        snap.items.get_mut(&bpc_fuel_id).unwrap().quantity = 10;
+    });
+    for args in [
+        vec![PyRep::Integer(st_id)],
+        vec![PyRep::Integer(st_id), PyRep::Integer(i64::from(FUEL_BLOCK_TYPE)), PyRep::Integer(10)],
+    ] {
+        assert_eq!(
+            handle_jettison_structure_fuel(&ctx, &mut s_dir, &args)
+                .await
+                .unwrap_err()
+                .code,
+            "InsufficientStructureFuel"
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 10);
+        assert_eq!(snap.structures[&st_id].fuel_blocks, 30);
+        assert!(!snap.items.values().any(|i| i.type_id == FUEL_BLOCK_TYPE && i.flag == InventoryFlag::Cargo));
+    });
+
+    // R4-01 (2): Foreign-owner-only bay stack alongside st.fuel_blocks > 0 must block unbacked fallback across readers, consumers, and jettison.
+    let foreign_fuel_id = 900_912_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&bpc_fuel_id);
+        snap.items.insert(
+            foreign_fuel_id,
+            InventoryItemRecord {
+                item_id: foreign_fuel_id,
+                type_id: FUEL_BLOCK_TYPE,
+                owner_id: corp_id + 55,
+                location_id: st_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            crate::services::structure_acl_defense_rules::available_structure_fuel_blocks(&ctx, snap, st_id),
+            0
+        );
+        assert!(!crate::services::structure_acl_defense_rules::consume_structure_fuel_blocks(&ctx, snap, st_id, 1));
+    });
+    for args in [
+        vec![PyRep::Integer(st_id)],
+        vec![PyRep::Integer(st_id), PyRep::Integer(i64::from(FUEL_BLOCK_TYPE)), PyRep::Integer(5)],
+    ] {
+        assert_eq!(
+            handle_jettison_structure_fuel(&ctx, &mut s_dir, &args)
+                .await
+                .unwrap_err()
+                .code,
+            "InsufficientStructureFuel"
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&foreign_fuel_id].quantity, 5);
+        assert_eq!(snap.structures[&st_id].fuel_blocks, 30);
+        assert!(!snap.items.values().any(|i| i.type_id == FUEL_BLOCK_TYPE && i.flag == InventoryFlag::Cargo));
     });
 }

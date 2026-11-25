@@ -64,6 +64,18 @@ fn is_weapon_autoload_stack_consumable(
     if item.singleton && !is_crystal_singleton {
         return false;
     }
+    let opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        active_ship_id: Some(ship_id),
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    if snap.validate_item_for_consumption(item, &opts).is_err() {
+        return false;
+    }
     ServerContext::is_charge_compatible_with_weapon(mod_type, ct)
 }
 
@@ -175,6 +187,35 @@ pub(crate) struct CommittedWeaponAutoload {
     pub created_slot_charges: Vec<(i64, i64)>,
 }
 
+fn consume_cycle_assembled_charge(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    mod_type_id: u32,
+    charge_id: i64,
+    qty: i32,
+) -> Result<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
+    let pre = snap.items.get(&charge_id).cloned().ok_or_else(|| {
+        BridgeRpcError::no_charges_loaded(
+            mod_type_id as i64,
+            format!("Loaded charge {charge_id} not found"),
+        )
+    })?;
+    let opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        active_ship_id: Some(ship_id),
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    let post = snap
+        .consume_exact_item_quantity(charge_id, qty, opts)
+        .map_err(|e| BridgeRpcError::no_charges_loaded(mod_type_id as i64, e.to_string()))?;
+    Ok((pre, post))
+}
+
 pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     ctx: &ServerContext,
     snap: &mut eve_db::WorldStateSnapshot,
@@ -273,22 +314,14 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     let mut final_slot_charges = Vec::with_capacity(created_slot_charges.len());
     if plan.consume_one_round_per_slot {
         for (tid, cid) in created_slot_charges {
-            if let Some(pre) = snap.items.get(&cid).cloned() {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                    None,
-                    pre.owner_id,
-                    eve_db::ItemClassPolicy::ExactAssembledItem,
-                );
-                opts.reject_fitted = false;
-                if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
-                    if post.is_none() {
-                        snap.module_active_charges.remove(&tid);
-                    } else {
-                        final_slot_charges.push((tid, cid));
-                    }
-                    cycle_consume_diffs.push((pre, post));
-                }
+            let (pre, post) =
+                consume_cycle_assembled_charge(snap, char_id, ship_id, mod_type.type_id, cid, 1)?;
+            if post.is_none() {
+                snap.module_active_charges.remove(&tid);
+            } else {
+                final_slot_charges.push((tid, cid));
             }
+            cycle_consume_diffs.push((pre, post));
         }
     } else {
         final_slot_charges = created_slot_charges;
@@ -1793,46 +1826,40 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                     }
                 }
                 if let Some(cid) = deferred.cap_booster_charge_id {
-                    if let Some(pre) = snap.items.get(&cid).cloned() {
-                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                            None,
-                            pre.owner_id,
-                            eve_db::ItemClassPolicy::ExactAssembledItem,
-                        );
-                        opts.reject_fitted = false;
-                        if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
-                            diffs.push((pre, post));
-                        }
-                    }
+                    let (pre, post) = consume_cycle_assembled_charge(
+                        snap,
+                        char_id,
+                        ship_id,
+                        mod_type.type_id,
+                        cid,
+                        1,
+                    )?;
+                    diffs.push((pre, post));
                 }
                 if let Some((cid, qty)) = deferred.ancillary_charge_to_consume {
-                    if let Some(pre) = snap.items.get(&cid).cloned() {
-                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                            None,
-                            pre.owner_id,
-                            eve_db::ItemClassPolicy::ExactAssembledItem,
-                        );
-                        opts.reject_fitted = false;
-                        if let Ok(post) = snap.consume_exact_item_quantity(cid, qty, opts) {
-                            diffs.push((pre, post));
-                        }
-                    }
+                    let (pre, post) = consume_cycle_assembled_charge(
+                        snap,
+                        char_id,
+                        ship_id,
+                        mod_type.type_id,
+                        cid,
+                        qty,
+                    )?;
+                    diffs.push((pre, post));
                 }
                 for (turret_id, charge_id) in deferred.turret_charge_consumptions {
-                    if let Some(pre) = snap.items.get(&charge_id).cloned() {
-                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                            None,
-                            pre.owner_id,
-                            eve_db::ItemClassPolicy::ExactAssembledItem,
-                        );
-                        opts.reject_fitted = false;
-                        if let Ok(post) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
-                            if post.is_none() {
-                                snap.module_active_charges.remove(&turret_id);
-                            }
-                            diffs.push((pre, post));
-                        }
+                    let (pre, post) = consume_cycle_assembled_charge(
+                        snap,
+                        char_id,
+                        ship_id,
+                        mod_type.type_id,
+                        charge_id,
+                        1,
+                    )?;
+                    if post.is_none() {
+                        snap.module_active_charges.remove(&turret_id);
                     }
+                    diffs.push((pre, post));
                 }
                 Ok((committed_autoload_info, diffs))
             },

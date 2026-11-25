@@ -1455,6 +1455,268 @@ async fn capital_module_fuel_rejects_non_commodity_stacks() {
     assert_eq!(ctx.db.with_snapshot(|snap| snap.items[&fuel_item_id].quantity), 250);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_cycle_charges_and_weapon_autoload_reject_bpc_and_courier_items() {
+    use crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge;
+
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 96_101_990_i64;
+    let ship_id = 96_101_991_i64;
+    let mod_id = 96_101_992_i64;
+    let station_id = 60_003_760_i64;
+
+    // Type 484 = 125mm Gatling AutoCannon I (charge group 83), Type 178 = Nuclear S (compatible projectile ammo)
+    let mut mod_t = ctx.sde.types.get(&484).expect("autocannon type").clone();
+    mod_t.capacity = 2.5;
+    let fm = eve_dogma::FittedModule {
+        item_id: mod_id,
+        type_id: 484,
+        flag_id: InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: Some(178),
+        charge_quantity: 5,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let mod_state = eve_dogma::DogmaItemState::from_sde(char_id, 484, &ctx.sde);
+
+    let bpc_cap_id = 96_102_001_i64;
+    let courier_anc_id = 96_102_002_i64;
+    let bpc_turret_id = 96_102_003_i64;
+    let bpc_cargo_ammo_id = 96_102_004_i64;
+    let courier_ammo_hold_id = 96_102_005_i64;
+    let valid_turret_id = 96_102_006_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_cap_id,
+            InventoryItemRecord {
+                item_id: bpc_cap_id,
+                type_id: 263,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 3,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_anc_id,
+            InventoryItemRecord {
+                item_id: courier_anc_id,
+                type_id: 263,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot1,
+                quantity: 4,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(courier_anc_id, "courier_cargo:88".into());
+        snap.items.insert(
+            bpc_turret_id,
+            InventoryItemRecord {
+                item_id: bpc_turret_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 5,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_cargo_ammo_id,
+            InventoryItemRecord {
+                item_id: bpc_cargo_ammo_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_ammo_hold_id,
+            InventoryItemRecord {
+                item_id: courier_ammo_hold_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedAmmoHold,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(courier_ammo_hold_id, "courier_cargo:89".into());
+        snap.items.insert(
+            valid_turret_id,
+            InventoryItemRecord {
+                item_id: valid_turret_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 5,
+                ..Default::default()
+            },
+        );
+        snap.module_active_charges.insert(mod_id, 178);
+    });
+
+    // Shared cycle charge predicate must reject BPC & courier stacks and accept clean commodity stack
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&bpc_cap_id],
+        ));
+        assert!(!is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&courier_anc_id],
+        ));
+        assert!(!is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&bpc_turret_id],
+        ));
+        assert!(is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&valid_turret_id],
+        ));
+    });
+
+    // plan_weapon_autoload skips BPC Cargo and courier_cargo SpecializedAmmoHold stacks
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, mod_id, &mod_t)
+        .expect("autoload query ok")
+        .is_none());
+
+    // Even if a PendingWeaponAutoload directly targets a BPC or courier stack, commit rejects it atomically
+    for bad_stack in [bpc_cargo_ammo_id, courier_ammo_hold_id] {
+        let mut d = DeferredPostCycleEffects::default();
+        d.weapon_autoload = Some(PendingWeaponAutoload {
+            cargo_stack_id: bad_stack,
+            ammo_type_id: 178,
+            owner_id: char_id,
+            total_take: 10,
+            slot_allocations: vec![(mod_id, InventoryFlag::HiSlot0, 10)],
+            consume_one_round_per_slot: true,
+        });
+        let err = commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "NoCharges");
+    }
+
+    // commit_post_cycle_activation_effects surfaces explicit Err for BPC/courier cap booster, ancillary, and turret charges
+    let mut d_cap = DeferredPostCycleEffects::default();
+    d_cap.cap_booster_charge_id = Some(bpc_cap_id);
+    assert_eq!(
+        commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_cap,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoChargesLoaded"
+    );
+
+    let mut d_anc = DeferredPostCycleEffects::default();
+    d_anc.ancillary_charge_to_consume = Some((courier_anc_id, 1));
+    assert_eq!(
+        commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_anc,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoChargesLoaded"
+    );
+
+    let mut d_turret = DeferredPostCycleEffects::default();
+    d_turret.turret_charge_consumptions = vec![(mod_id, bpc_turret_id)];
+    assert_eq!(
+        commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_turret,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoChargesLoaded"
+    );
+
+    // None of the invalid stacks or module_active_charges were touched
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_cap_id].quantity, 3);
+        assert_eq!(snap.items[&courier_anc_id].quantity, 4);
+        assert_eq!(snap.items[&bpc_turret_id].quantity, 5);
+        assert_eq!(snap.items[&bpc_cargo_ammo_id].quantity, 50);
+        assert_eq!(snap.items[&courier_ammo_hold_id].quantity, 50);
+        assert_eq!(snap.module_active_charges.get(&mod_id), Some(&178));
+    });
+
+    // Valid assembled turret charge consumes cleanly
+    let mut d_ok = DeferredPostCycleEffects::default();
+    d_ok.turret_charge_consumptions = vec![(mod_id, valid_turret_id)];
+    commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_ok,
+    )
+    .await
+    .expect("valid turret charge commits cleanly");
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.items[&valid_turret_id].quantity), 4);
+}
+
 #[cfg(test)]
 #[path = "fitting_ewar_capital_extra_unit_tests.rs"]
 mod extra_unit_tests;

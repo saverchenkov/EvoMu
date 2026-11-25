@@ -398,16 +398,20 @@ pub async fn activate_interdiction_sphere_launcher(
                 let cargo_probe_opt = snap
                     .items
                     .values()
-                    .find(|i| is_cargo_probe(i) && i.type_id == probe_type_id)
+                    .filter(|i| is_cargo_probe(i) && i.type_id == probe_type_id)
+                    .min_by_key(|i| i.item_id)
                     .or_else(|| {
-                        snap.items.values().find(|i| {
-                            is_cargo_probe(i)
-                                && ctx
-                                    .sde
-                                    .types
-                                    .get(&i.type_id)
-                                    .is_some_and(|t| matches!(t.group_id, 548 | 4088))
-                        })
+                        snap.items
+                            .values()
+                            .filter(|i| {
+                                is_cargo_probe(i)
+                                    && ctx
+                                        .sde
+                                        .types
+                                        .get(&i.type_id)
+                                        .is_some_and(|t| matches!(t.group_id, 548 | 4088))
+                            })
+                            .min_by_key(|i| i.item_id)
                     })
                     .map(|i| (i.item_id, i.type_id));
                 if let Some((cargo_id, reload_tid)) = cargo_probe_opt {

@@ -1283,26 +1283,36 @@ pub async fn dispatch_special_structure_attack(
             client_error: None,
         });
     }
-    if !charges.is_empty() {
-        ctx.db.try_with_mut_snapshot(|snap| {
-            for cid in charges {
-                let owner_id = snap
+    let charge_opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    let mut charge_counts: std::collections::BTreeMap<i64, i32> = std::collections::BTreeMap::new();
+    for &cid in charges {
+        let entry = charge_counts.entry(cid).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+    if !charge_counts.is_empty() {
+        ctx.db.with_snapshot(|snap| {
+            for (&cid, &needed) in &charge_counts {
+                let item = snap
                     .items
-                    .get(cid)
-                    .map(|ch| ch.owner_id)
+                    .get(&cid)
                     .ok_or_else(|| BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))?;
-                let opts = eve_db::ConsumeExactOptions {
-                    reject_fitted: false,
-                    ..eve_db::ConsumeExactOptions::for_owner_exact(
-                        None,
-                        owner_id,
-                        eve_db::ItemClassPolicy::ExactAssembledItem,
-                    )
-                };
-                snap.consume_exact_item_quantity(*cid, 1, opts)
+                snap.validate_item_for_consumption(item, &charge_opts)
                     .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
+                if item.quantity < needed {
+                    return Err(BridgeRpcError::no_charges_loaded(
+                        0,
+                        format!("Charge {cid} needs {needed} units (has {})", item.quantity),
+                    ));
+                }
             }
-            Ok(())
+            Ok::<(), BridgeRpcError>(())
         })?;
     }
     let rep = if st_type_id == TYPE_MERCENARY_DEN {
@@ -1321,11 +1331,16 @@ pub async fn dispatch_special_structure_attack(
     } else {
         crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await?
     };
-    ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
+        for (&cid, &needed) in &charge_counts {
+            snap.consume_exact_item_quantity(cid, needed, charge_opts.clone())
+                .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
+        }
         if let Some(s) = snap.structures.get_mut(&structure_id) {
             s.last_damage_tick = tick;
         }
-    });
+        Ok::<(), BridgeRpcError>(())
+    })?;
     Ok(rep)
 }
 
@@ -1725,6 +1740,86 @@ mod r3_charge_policy_tests {
             assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
             assert_eq!(snap.structures[&den_id].last_damage_tick, 0);
             assert_eq!(snap.items[&bpc_charge_id].quantity, 2);
+        });
+
+        // R4-04: Foreign-owned charge rejects before dealing damage; valid charge stays intact if target damage fails.
+        let foreign_charge_id = 1_099_000_113_i64;
+        let valid_charge_id = 1_099_000_114_i64;
+        let dead_den_id = 1_099_000_115_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                foreign_charge_id,
+                InventoryItemRecord {
+                    item_id: foreign_charge_id,
+                    type_id: 200,
+                    owner_id: char_id + 99,
+                    location_id: 1_099_000_100,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 2,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                valid_charge_id,
+                InventoryItemRecord {
+                    item_id: valid_charge_id,
+                    type_id: 200,
+                    owner_id: char_id,
+                    location_id: 1_099_000_100,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 3,
+                    ..Default::default()
+                },
+            );
+            snap.structures.insert(
+                dead_den_id,
+                UpwellStructureRecord {
+                    structure_id: dead_den_id,
+                    type_id: TYPE_MERCENARY_DEN,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    name: "Destroyed Den".into(),
+                    state: "Destroyed".into(),
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx,
+                char_id,
+                den_id,
+                TYPE_MERCENARY_DEN,
+                false,
+                1_000.0,
+                78,
+                &[foreign_charge_id],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "NoChargesLoaded"
+        );
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx,
+                char_id,
+                dead_den_id,
+                TYPE_MERCENARY_DEN,
+                false,
+                1_000.0,
+                79,
+                &[valid_charge_id],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "StructureDestroyed"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.items[&foreign_charge_id].quantity, 2);
+            assert_eq!(snap.items[&valid_charge_id].quantity, 3);
         });
     }
 }

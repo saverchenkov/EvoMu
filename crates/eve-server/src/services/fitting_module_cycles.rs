@@ -715,18 +715,25 @@ async fn activate_survey_probe_launcher(
 ) -> Result<PyRep, BridgeRpcError> {
     let launcher_cap = mod_type.capacity.max(10.0);
     let slot_flag = InventoryFlag::from_u16(flag_id);
+    let no_probes = || BridgeRpcError {
+        code: "NoProbesLoaded".into(),
+        message: "Survey probe launcher has no survey probes loaded".into(),
+        client_error: None,
+    };
     // Auto-reload from Cargo / SpecializedAmmoHold if launcher slot is empty, then consume 1 probe,
     // and auto-reload again if the last probe in the launcher slot was just consumed.
-    let Some((probe_id, probe_type_id, remaining_in_launcher, auto_reloaded, item_diffs)) =
-        ctx.db.with_mut_snapshot(|snap| {
+    let (probe_id, probe_type_id, remaining_in_launcher, auto_reloaded, item_diffs) =
+        ctx.db.try_with_mut_snapshot(|snap| {
             let mut touched_pre: HashMap<i64, Option<eve_db::InventoryItemRecord>> = HashMap::new();
             let mut in_slot_id = snap
                 .items
                 .values()
-                .find(|i| {
+                .filter(|i| {
                     i.location_id == ship_id && (i.flag as u16) == flag_id && i.item_id != module_id && i.quantity > 0
                         && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
+                        && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(snap, Some(char_id), Some(ship_id), i)
                 })
+                .min_by_key(|i| i.item_id)
                 .map(|i| (i.item_id, i.type_id));
             let reload_into_slot = |snap: &mut eve_db::WorldStateSnapshot,
                                     touched_pre: &mut HashMap<i64, Option<eve_db::InventoryItemRecord>>|
@@ -734,10 +741,12 @@ async fn activate_survey_probe_launcher(
                 let (src_id, p_tid, avail) = snap
                     .items
                     .values()
-                    .find(|i| {
+                    .filter(|i| {
                         i.location_id == ship_id && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold) && i.quantity > 0
                             && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
+                            && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(snap, Some(char_id), Some(ship_id), i)
                     })
+                    .min_by_key(|i| i.item_id)
                     .map(|i| (i.item_id, i.type_id, i.quantity))?;
                 let p_vol = ctx.sde.types.get(&p_tid).map(|t| t.volume.max(1.0)).unwrap_or(10.0);
                 let move_qty = avail.min(((launcher_cap / p_vol).floor() as i32).max(1));
@@ -766,11 +775,11 @@ async fn activate_survey_probe_launcher(
                     in_slot_id = Some((nid, ptid));
                 }
             }
-            let (charge_item_id, probe_type_id) = in_slot_id?;
+            let (charge_item_id, probe_type_id) = in_slot_id.ok_or_else(no_probes)?;
             if let Some(cur_slot_it) = snap.items.get(&charge_item_id).cloned() {
                 touched_pre.entry(charge_item_id).or_insert(Some(cur_slot_it));
             }
-            let c_owner = snap.items.get(&charge_item_id).map(|ci| ci.owner_id)?;
+            let c_owner = snap.items.get(&charge_item_id).map(|ci| ci.owner_id).ok_or_else(no_probes)?;
             let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
                 Some(char_id),
                 c_owner,
@@ -781,7 +790,7 @@ async fn activate_survey_probe_launcher(
             let mut rem = match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {
                 Ok(Some(it)) => it.quantity,
                 Ok(None) => 0,
-                Err(_) => return None,
+                Err(_) => return Err(no_probes()),
             };
             let mut auto_reloaded = 0;
             if rem == 0 {
@@ -796,11 +805,8 @@ async fn activate_survey_probe_launcher(
             let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
                 touched_pre.into_iter().map(|(iid, pre_opt)| (pre_opt, snap.items.get(&iid).cloned())).collect();
             diffs.sort_by_key(|(pre, post)| post.as_ref().or(pre.as_ref()).map_or(0, |r| r.item_id));
-            Some((snap.next_entity_id, probe_type_id, rem, auto_reloaded, diffs))
-        })
-    else {
-        return Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into(), client_error: None });
-    };
+            Ok((snap.next_entity_id, probe_type_id, rem, auto_reloaded, diffs))
+        })?;
     ctx.invalidate_and_push_fit(ship_id);
     emit_ship_charge_sublocation_diffs(ctx, char_id, ship_id, &item_diffs);
 
@@ -1657,7 +1663,22 @@ fn prepare_cycle_params_sync(
     let mut cap_booster_inject_amount = 0.0;
     if mod_type.group_id == 76 {
         let Some((cid, charge_tid)) = ctx.db.with_snapshot(|snap| {
-            snap.items.values().find(|i| i.location_id == ship_id && (i.flag as u16) == m.flag_id && i.item_id != module_id && i.quantity > 0).map(|i| (i.item_id, i.type_id))
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && (i.flag as u16) == m.flag_id
+                        && i.item_id != module_id
+                        && i.quantity > 0
+                        && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(
+                            snap,
+                            Some(char_id),
+                            Some(ship_id),
+                            i,
+                        )
+                })
+                .min_by_key(|i| i.item_id)
+                .map(|i| (i.item_id, i.type_id))
         }) else {
             return Err(BridgeRpcError::no_charges_loaded(mod_type.type_id as i64, "Capacitor Booster has no Cap Booster charges loaded"));
         };
@@ -1710,7 +1731,19 @@ fn prepare_cycle_params_sync(
         let first_charge_tid = ctx.db.with_snapshot(|snap| {
             linked_turrets.iter().find_map(|&tid| {
                 let tf = snap.items.get(&tid).map(|i| i.flag)?;
-                snap.items.values().find(|i| is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)).map(|i| i.type_id)
+                snap.items
+                    .values()
+                    .filter(|i| {
+                        is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)
+                            && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(
+                                snap,
+                                Some(char_id),
+                                Some(ship_id),
+                                i,
+                            )
+                    })
+                    .min_by_key(|i| i.item_id)
+                    .map(|i| i.type_id)
             })
         });
         let is_non_volatile_crystal = first_charge_tid.and_then(|ctid| ctx.sde.types.get(&ctid))
@@ -1729,7 +1762,20 @@ fn prepare_cycle_params_sync(
             ctx.db.with_snapshot(|snap| {
                 for &tid in &linked_turrets {
                     if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
-                        if let Some(ci) = snap.items.values().find(|i| is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)) {
+                        if let Some(ci) = snap
+                            .items
+                            .values()
+                            .filter(|i| {
+                                is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)
+                                    && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(
+                                        snap,
+                                        Some(char_id),
+                                        Some(ship_id),
+                                        i,
+                                    )
+                            })
+                            .min_by_key(|i| i.item_id)
+                        {
                             active_burst_charge_tid = Some(ci.type_id);
                             let ch_state_opt = fit.charge_state(tid, &ctx.sde).filter(|cs| cs.type_id == ci.type_id);
                             match classify_charge_volatility(&ctx.sde, ctx.sde.types.get(&ci.type_id), ch_state_opt.as_ref()) {

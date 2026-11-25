@@ -1011,14 +1011,12 @@ pub fn sync_seeded_structure_fuel_bay(
 
 fn is_bay_fuel_block_item(
     ctx: &ServerContext,
-    st_owner_corp: i64,
     structure_id: i64,
     i: &eve_db::InventoryItemRecord,
 ) -> bool {
     i.location_id == structure_id
         && is_structure_fuel_flag(i.flag)
         && i.quantity > 0
-        && (st_owner_corp == 0 || i.owner_id == st_owner_corp)
         && is_fuel_block_type(ctx, i.type_id)
 }
 
@@ -1034,7 +1032,7 @@ fn is_eligible_fuel_block_stack(
     } else {
         i.owner_id
     };
-    is_bay_fuel_block_item(ctx, st_owner_corp, structure_id, i)
+    is_bay_fuel_block_item(ctx, structure_id, i)
         && snap
             .validate_item_for_consumption(
                 i,
@@ -1047,7 +1045,7 @@ fn is_eligible_fuel_block_stack(
             .is_ok()
 }
 
-fn collect_structure_fuel_block_state(
+pub(crate) fn collect_structure_fuel_block_state(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     structure_id: i64,
@@ -1061,7 +1059,7 @@ fn collect_structure_fuel_block_state(
     let mut eligible_bay_blocks: u32 = 0;
     let mut item_ids: Vec<i64> = Vec::new();
     for i in snap.items.values() {
-        if is_bay_fuel_block_item(ctx, st_owner_corp, structure_id, i) {
+        if is_bay_fuel_block_item(ctx, structure_id, i) {
             has_any_bay_stack = true;
             if is_eligible_fuel_block_stack(ctx, snap, st_owner_corp, structure_id, i) {
                 eligible_bay_blocks =

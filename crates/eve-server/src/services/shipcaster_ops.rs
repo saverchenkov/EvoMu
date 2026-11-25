@@ -205,6 +205,20 @@ pub async fn deploy_fw_beacon_constructor(
         .shipcaster_sde_components()
         .map_err(|e| rpc_err("SdeError", e.to_string()))?;
 
+    let ensure_no_existing_beacon = |st: &ClusterMiscRuntimeState| -> Result<(), BridgeRpcError> {
+        if st
+            .landing_pads
+            .iter()
+            .any(|p| p.solar_system_id == sys_id && matches!(p.faction_id, 500_001..=500_004) && !p.is_disrupted)
+        {
+            return Err(rpc_err(
+                "BeaconAlreadyExistsInSystem",
+                "A Shipcaster Beacon or Constructor is already deployed in this solar system",
+            ));
+        }
+        Ok(())
+    };
+
     let pad = ctx.db.try_with_mut_snapshot(|snap| {
         if !snap.fw_system_occupations.contains_key(&sys_id) {
             return Err(rpc_err(
@@ -255,57 +269,48 @@ pub async fn deploy_fw_beacon_constructor(
             ));
         }
         let c_tid = item.type_id;
+        let built_type_id = spec.built_item_type_id;
         let required_materials: BTreeMap<u32, u32> = spec
             .input_items
             .iter()
             .map(|(&tid, entry)| (tid, entry.required_qty))
             .collect();
+        with_misc_state(ctx, ensure_no_existing_beacon)?;
         let alloc_id = snap.next_entity_id + 1;
-        let new_pad = with_misc_state(ctx, |st| {
-            if st
-                .landing_pads
-                .iter()
-                .any(|p| p.solar_system_id == sys_id && matches!(p.faction_id, 500_001..=500_004) && !p.is_disrupted)
-            {
-                return Err(rpc_err(
-                    "BeaconAlreadyExistsInSystem",
-                    "A Shipcaster Beacon or Constructor is already deployed in this solar system",
-                ));
-            }
-            let record = LandingPadRecord {
-                item_id: alloc_id,
-                type_id: c_tid,
-                built_type_id: spec.built_item_type_id,
-                solar_system_id: sys_id,
-                faction_id: pad_faction as i32,
-                is_built: false,
-                link_timestamp: 0,
-                is_disrupted: false,
-                position,
-                required_materials,
-                contributed_materials: BTreeMap::new(),
-            };
-            st.landing_pads.push(record.clone());
-            Ok(record)
+        snap.consume_exact_item_quantity(
+            constructor_item_id,
+            1,
+            eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                char_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "ConstructorLocked".into(),
+            message: e.to_string(),
+            client_error: None,
         })?;
         snap.next_entity_id = alloc_id;
-        if let Some(con_owner) = snap.items.get(&constructor_item_id).map(|i| i.owner_id) {
-            snap.consume_exact_item_quantity(
-                constructor_item_id,
-                1,
-                eve_db::ConsumeExactOptions::for_owner_exact(
-                    Some(char_id),
-                    con_owner,
-                    eve_db::ItemClassPolicy::ExactAssembledItem,
-                ),
-            )
-            .map_err(|e| BridgeRpcError {
-                code: "ConstructorLocked".into(),
-                message: e.to_string(),
-                client_error: None,
-            })?;
-        }
-        Ok::<LandingPadRecord, BridgeRpcError>(new_pad)
+        Ok::<LandingPadRecord, BridgeRpcError>(LandingPadRecord {
+            item_id: alloc_id,
+            type_id: c_tid,
+            built_type_id,
+            solar_system_id: sys_id,
+            faction_id: pad_faction as i32,
+            is_built: false,
+            link_timestamp: 0,
+            is_disrupted: false,
+            position,
+            required_materials,
+            contributed_materials: BTreeMap::new(),
+        })
+    })?;
+
+    let pad = with_misc_state(ctx, |st| {
+        ensure_no_existing_beacon(st)?;
+        st.landing_pads.push(pad.clone());
+        Ok(pad)
     })?;
 
     persist_misc_state(ctx);
@@ -1284,4 +1289,116 @@ pub(crate) const RPCS: &[RpcEntry] = &[
 #[cfg(test)]
 #[path = "shipcaster_ops_edges_tests.rs"]
 mod shipcaster_ops_edges_tests;
+
+#[cfg(test)]
+mod r5_shipcaster_policy_tests {
+    use super::*;
+    use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
+    use crate::services::cluster_macho_misc_services::with_misc_state;
+    use eve_db::{FwSystemOccupationRecord, InventoryFlag, InventoryItemRecord};
+
+    #[tokio::test]
+    async fn deploy_fw_beacon_constructor_rejects_bpc_and_courier_without_leaking_pad() {
+        let ctx = test_ctx();
+        let char_id: i64 = 90_000_001;
+        let ship_id: i64 = 995_800_001;
+        let lowsec_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .find(|s| {
+                let r = (s.security_status * 10.0).round() / 10.0;
+                s.solar_system_id < 30_100_000 && r > 0.0 && r < 0.45
+            })
+            .map(|s| s.solar_system_id)
+            .expect("lowsec system");
+        let comps = ctx.sde.shipcaster_sde_components().expect("comps");
+        let (&ctor_tid, ctor_spec) = comps.under_construction.iter().next().expect("underConstruction");
+        let ctor_faction = comps
+            .landing_pad_factions
+            .get(&ctor_spec.built_item_type_id)
+            .copied()
+            .unwrap_or(500_001) as i64;
+        let mut sess = auth_session(1, char_id, 98_000_001, lowsec_sys);
+        sess.ship_id = Some(ship_id);
+        sess.station_id = None;
+        with_misc_state(&ctx, |st| {
+            st.landing_pads.retain(|p| p.solar_system_id != lowsec_sys);
+        });
+        let bpc_ctor_id = 995_800_010_i64;
+        let courier_ctor_id = 995_800_011_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.fw_system_occupations.insert(
+                lowsec_sys,
+                FwSystemOccupationRecord {
+                    solar_system_id: lowsec_sys,
+                    owner_faction_id: ctor_faction,
+                    occupier_faction_id: ctor_faction,
+                    victory_points: 0,
+                    victory_points_threshold: 3_000,
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.war_faction_id = Some(ctor_faction);
+            }
+            snap.items.insert(
+                bpc_ctor_id,
+                InventoryItemRecord {
+                    item_id: bpc_ctor_id,
+                    type_id: ctor_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                courier_ctor_id,
+                InventoryItemRecord {
+                    item_id: courier_ctor_id,
+                    type_id: ctor_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(courier_ctor_id, format!("courier_cargo:{char_id}:77"));
+        });
+        let sys_h = ctx.systems.get_or_spawn(lowsec_sys);
+        let _ = sys_h
+            .spawn_ball(eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(100_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+
+        for bad_id in [bpc_ctor_id, courier_ctor_id] {
+            let err = deploy_fw_beacon_constructor(&ctx, &sess, bad_id, DVec3::new(100_500.0, 0.0, 0.0))
+                .await
+                .expect_err("BPC/courier beacon constructor must reject");
+            assert_eq!(err.code, "ConstructorLocked");
+        }
+        let pad_count = with_misc_state(&ctx, |st| {
+            st.landing_pads.iter().filter(|p| p.solar_system_id == lowsec_sys).count()
+        });
+        assert_eq!(pad_count, 0);
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&bpc_ctor_id].quantity, 1);
+            assert_eq!(snap.items[&courier_ctor_id].quantity, 1);
+        });
+    }
+}
 
