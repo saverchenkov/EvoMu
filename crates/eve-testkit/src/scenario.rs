@@ -28,6 +28,11 @@ use std::pin::Pin;
 /// Canonical fixed seed used by [`DeterministicRng`] unless a test opts into an explicit seed (`#1540`).
 pub const DEFAULT_TEST_SEED: u64 = 0x00C5_5EED_0000_0001;
 
+/// Default non-zero `(sim_time - wallclock)` offset (`-300_000 ms`, i.e., `-5 min`) applied to
+/// space fixtures in [`ScenarioBuilder`] so wire notifications carrying `SimFileTime` vs
+/// `WallFileTime` diverge deterministically even when `TiDi = 1.0` (`#1196`).
+pub const DEFAULT_SPACE_SIM_CLOCK_OFFSET_MS: i64 = -300_000;
+
 /// SplitMix64 deterministic PRNG so tests never rely on process hash seeds or ambient entropy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeterministicRng {
@@ -214,6 +219,9 @@ pub trait ScenarioWorldBackend {
     fn ensure_station_market_liquidity(&mut self, station_id: i64, requirements: &[(TypeId, i64)]);
     fn ship_in_space_ballpark<'a>(&'a mut self, solar_system_id: u32, ship_id: i64) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + 'a>>;
     fn advance_secs(&self, secs: u64);
+    /// Anchors `solar_system_id`'s simulation clock with a non-zero `(sim_time - wallclock)` offset
+    /// in milliseconds at `TiDi = 1.0` (`#1196`).
+    fn configure_space_sim_clock_offset(&self, _solar_system_id: u32, _sim_minus_wall_ms: i64) {}
 }
 
 /// Fluent player-driven scenario builder with deterministic defaults and preset builders (`#1540`).
@@ -222,6 +230,9 @@ pub struct ScenarioBuilder {
     pub rng: DeterministicRng,
     pub seed: u64,
     pub actors: Vec<ActorSpec>,
+    /// Optional `(sim_time - wallclock)` offset (ms) anchored on space solar systems during build
+    /// (`Some(DEFAULT_SPACE_SIM_CLOCK_OFFSET_MS)` by default; `None` disables explicit anchoring).
+    pub sim_clock_offset_ms: Option<i64>,
 }
 
 const RIFTER_HULL_TYPE_ID: TypeId = 587;
@@ -235,7 +246,19 @@ impl ScenarioBuilder {
     pub fn new() -> Self { Self::with_seed(DEFAULT_TEST_SEED) }
 
     pub fn with_seed(seed: u64) -> Self {
-        Self { rng: DeterministicRng::new(seed), seed, actors: Vec::new() }
+        Self {
+            rng: DeterministicRng::new(seed),
+            seed,
+            actors: Vec::new(),
+            sim_clock_offset_ms: Some(DEFAULT_SPACE_SIM_CLOCK_OFFSET_MS),
+        }
+    }
+
+    /// Overrides the `(sim_time - wallclock)` offset (in milliseconds) anchored on space solar
+    /// systems when [`ScenarioBuilder::build`] places actors in space (`#1196`).
+    pub fn with_sim_clock_offset_ms(mut self, sim_minus_wall_ms: Option<i64>) -> Self {
+        self.sim_clock_offset_ms = sim_minus_wall_ms;
+        self
     }
 
     pub fn add_actor(mut self, actor: ActorSpec) -> Self {
@@ -443,6 +466,7 @@ impl ScenarioBuilder {
         }
 
         // Step 3: Acquire hangar items, assemble & board ship, fit modules, load ammo, undock.
+        let mut anchored_space_systems: Vec<u32> = Vec::new();
         for idx in 0..self.actors.len() {
             let (station_id, char_id) = (built[idx].station_id.expect("actor docked before fitting"), built[idx].character_id);
             let mut market_reqs = self.actors[idx].station_hangar_items.clone();
@@ -506,12 +530,29 @@ impl ScenarioBuilder {
             }
 
             if self.actors[idx].in_space {
+                if let Some(offset_ms) = self.sim_clock_offset_ms.filter(|&o| o != 0) {
+                    if !anchored_space_systems.contains(&built[idx].solar_system_id) {
+                        backend.configure_space_sim_clock_offset(
+                            built[idx].solar_system_id,
+                            offset_ms,
+                        );
+                        anchored_space_systems.push(built[idx].solar_system_id);
+                    }
+                }
                 rpc_ok(&mut built[idx].harness, "stationSvc", "Undock", &[]).await;
                 backend.advance_secs(15);
                 backend.sync_actor_session(built[idx].harness.transport_mut());
                 let view = backend.actor_session_view(built[idx].harness.transport());
                 built[idx].station_id = view.station_id;
-                if let Some(sys) = view.solar_system_id { built[idx].solar_system_id = sys; }
+                if let Some(sys) = view.solar_system_id {
+                    if let Some(offset_ms) = self.sim_clock_offset_ms.filter(|&o| o != 0) {
+                        if !anchored_space_systems.contains(&sys) {
+                            backend.configure_space_sim_clock_offset(sys, offset_ms);
+                            anchored_space_systems.push(sys);
+                        }
+                    }
+                    built[idx].solar_system_id = sys;
+                }
                 built[idx].expectation.expect_in_space = Some(true);
             } else {
                 built[idx].expectation.expect_in_space = Some(false);

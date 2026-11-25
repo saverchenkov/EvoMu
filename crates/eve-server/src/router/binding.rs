@@ -6,9 +6,9 @@ pub(crate) use super::binding_transition_policy::{
 
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
 use crate::router::notify_registry::{
-    emit_typed_target_to_char_capped, OnChargeBeingLoadedToModule, OnGodmaShipEffect,
-    OnMachoObjectDisconnect, OnMultiEvent, OnNewSkillQueueSaved, OnSkillQueuePausedServer,
-    OnSpecialFX, TypedNotification,
+    emit_typed_target_to_char_capped, GodmaEffectStartOrTime, OnChargeBeingLoadedToModule,
+    OnGodmaShipEffect, OnMachoObjectDisconnect, OnMultiEvent, OnNewSkillQueueSaved,
+    OnSkillQueuePausedServer, OnSpecialFX, TypedNotification,
 };
 use crate::router::{NotificationTarget, PendingMachoNotification};
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
@@ -1786,7 +1786,7 @@ impl ServerContext {
             }
 
             let effect_id = effect_id_for_module_sde(sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
-            let now = step_ctx.now_system_sim_filetime_ticks(solar_system_id);
+            let now = step_ctx.now_system_sim_filetime(solar_system_id);
             let environment = PyRep::Tuple(vec![
                 PyRep::Integer(cycle.module_id),
                 PyRep::Integer(char_id),
@@ -1802,16 +1802,16 @@ impl ServerContext {
                 char_id,
                 user_id,
                 OnGodmaShipEffect::DEFAULT_ID_TYPE,
-                now,
+                now.as_ticks(),
                 512,
                 OnGodmaShipEffect {
                     item_id: cycle.module_id,
                     effect: PyRep::Integer(effect_id),
-                    start_or_time: PyRep::Integer(now),
+                    start_or_time: GodmaEffectStartOrTime::SimTime(now),
                     start: Some(PyRep::Integer(0)),
                     active: Some(PyRep::Integer(0)),
                     environment: Some(environment),
-                    start_time: Some(PyRep::Integer(now)),
+                    start_time: Some(now),
                     duration: Some(PyRep::Real(0.0)),
                     repeat: Some(PyRep::Integer(0)),
                     error: Some(PyRep::None),
@@ -1864,7 +1864,7 @@ impl ServerContext {
                                 active: 0,
                                 duration: cycle.duration_s * 1000.0,
                                 repeat: 0,
-                                start_time: now,
+                                start_time: now.as_ticks(),
                                 time_from_start: 0.0,
                                 graphic_info: None,
                             };
@@ -1880,7 +1880,7 @@ impl ServerContext {
                                         recip_cid,
                                         recip_uid,
                                         OnSpecialFX::DEFAULT_ID_TYPE,
-                                        now,
+                                        now.as_ticks(),
                                         512,
                                         notif,
                                     );
@@ -1912,7 +1912,7 @@ impl ServerContext {
                     char_id,
                     user_id,
                     OnChargeBeingLoadedToModule::DEFAULT_ID_TYPE,
-                    now,
+                    now.as_ticks(),
                     512,
                     OnChargeBeingLoadedToModule {
                         item_ids: mod_ids,

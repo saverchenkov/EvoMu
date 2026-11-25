@@ -645,4 +645,38 @@ mod clock_domain_unit_tests {
         bad_factor["tidi_factor"] = serde_json::json!(0.01);
         assert!(serde_json::from_value::<SolarSystemSimClock>(bad_factor).is_err());
     }
+
+    #[test]
+    fn wall_and_sim_filetime_saturating_and_epoch_helpers_stay_domain_distinct() {
+        let secs = 1_760_000_123_u64;
+        let wall_ms = WallUnixMs::from_secs_saturating(secs);
+        assert_eq!(wall_ms, WallUnixMs::from_millis(secs * 1_000));
+        let wall_ft = WallFileTime::from_unix_secs_saturating(secs);
+        assert_eq!(wall_ft, wall_ms.to_wall_filetime_saturating());
+        assert_eq!(wall_ft.to_unix_secs_floor(), Some(secs));
+        assert_eq!(WallFileTime::UNIX_EPOCH.to_unix_secs_floor(), Some(0));
+        assert_eq!(WallFileTime::ZERO.to_unix_secs_floor(), None);
+        assert_eq!(
+            WallUnixMs::from_millis(u64::MAX).to_wall_filetime_saturating(),
+            WallFileTime::from_ticks(i64::MAX)
+        );
+        assert_eq!(
+            wall_ft.saturating_add_secs(60).saturating_sub_secs(60),
+            wall_ft
+        );
+
+        let sys_now = WallUnixMs::system_now();
+        assert!(sys_now.as_secs() >= 1_700_000_000);
+
+        let sim_ft = SimDilatedMs::from_millis(secs * 1_000 - 300_000).to_sim_filetime_saturating();
+        assert_eq!(
+            sim_ft.saturating_add_ms(300_000).as_ticks(),
+            wall_ft.as_ticks()
+        );
+        assert_eq!(sim_ft.saturating_add_secs(5).saturating_sub_secs(5), sim_ft);
+        assert_eq!(
+            SimDilatedMs::from_millis(u64::MAX).to_sim_filetime_saturating(),
+            SimFileTime::from_ticks(i64::MAX)
+        );
+    }
 }

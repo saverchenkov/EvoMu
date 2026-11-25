@@ -1271,10 +1271,11 @@ pub fn record_system_interference_activity(
         activity_delta,
         INTERFERENCE_DECAY_WINDOW_SECS,
     ) {
-        let local_state = crate::services::pve_special_sites::build_interference_state_keyval(
+        let local_state = crate::services::pve_special_sites::build_interference_state_keyval_at(
             solar_system_id,
             level,
             new_band,
+            ctx.now_unix(),
         );
         crate::router::notify_registry::push_typed_session_notification(
             session,

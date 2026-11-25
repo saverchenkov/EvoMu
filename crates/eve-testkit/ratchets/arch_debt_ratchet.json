@@ -974,18 +974,11 @@
       "files": {}
     },
     "system_time_now_in_gameplay": {
-      "zero_required": false,
+      "zero_required": true,
       "owning_issue": 1196,
       "regex": "\\bSystemTime\\s*::\\s*now\\s*\\(",
       "description": "Direct SystemTime::now() wall-clock calls bypassing ctx.now_unix() virtual clock (#1196).",
-      "files": {
-        "bug_reporting.rs": 2,
-        "flight_recorder.rs": 1,
-        "lifecycle.rs": 1,
-        "log_ring_buffer.rs": 1,
-        "services/pve_special_sites.rs": 1,
-        "services/quasar_debug_race_ship_services.rs": 1
-      }
+      "files": {}
     },
     "is_write_locked_by_current_thread": {
       "zero_required": false,

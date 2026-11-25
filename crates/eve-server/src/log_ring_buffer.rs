@@ -6,7 +6,6 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_RING_CAPACITY: usize = 500;
 
@@ -46,10 +45,7 @@ impl LogRingBuffer {
         target: impl Into<String>,
         message: impl Into<String>,
     ) {
-        let now_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_millis = eve_db::WallUnixMs::system_now().as_millis();
 
         let entry = LogRingEntry {
             timestamp_millis: now_millis,

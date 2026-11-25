@@ -666,3 +666,717 @@ async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
     }
     assert!(!ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
 }
+
+#[tokio::test]
+async fn anchor_system_sim_clock_offset_diverges_wall_and_sim_domains_at_tidi_1() {
+    use crate::services::serverops_cluster::set_system_tidi_factor;
+    use eve_db::clock::{SimFileTime, WallFileTime, FILETIME_TICKS_PER_MS};
+
+    let base = 1_750_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(user_id, 9_102, Some(char_id), true, base)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+    });
+
+    // Anchor a non-zero (sim_time - wallclock) offset (-300_000 ms) while TiDi remains 1.0x.
+    let offset_ms = -300_000_i64;
+    let sim_clock = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, offset_ms, 1.0);
+    assert_eq!(sim_clock.sim_minus_wall_offset_ms(), Some(offset_ms));
+    assert!((sim_clock.tidi_factor() - 1.0).abs() < 1e-9);
+
+    let wall_0: WallFileTime = ctx.now_machonet_wall_filetime();
+    let sim_0: SimFileTime = ctx
+        .peek_system_sim_filetime(sys_id)
+        .expect("anchored system must expose peek_system_sim_filetime");
+    assert_eq!(sim_clock.last_wall_filetime(), Some(wall_0));
+    assert_eq!(sim_clock.sim_filetime(), sim_0);
+    assert_eq!(
+        sim_0.as_ticks() - wall_0.as_ticks(),
+        offset_ms * FILETIME_TICKS_PER_MS,
+        "SimFileTime must trail WallFileTime by -300_000 ms even at TiDi = 1.0"
+    );
+
+    // Anchoring with a non-1.0 TiDi factor synchronizes manual_tidi_overrides and live SystemHandle.
+    let tidi_sys = 30_000_144_u32;
+    let tidi_clock = ctx.anchor_system_sim_clock_with_offset_ms(tidi_sys, offset_ms, 0.25);
+    assert_eq!(tidi_clock.last_wall_filetime(), Some(wall_0));
+    assert_eq!(
+        Some(tidi_clock.sim_filetime()),
+        ctx.peek_system_sim_filetime(tidi_sys)
+    );
+    assert!((tidi_clock.tidi_factor() - 0.25).abs() < 1e-9);
+    assert!(
+        (crate::services::serverops_cluster::get_system_tidi_factor(&ctx, tidi_sys) - 0.25).abs()
+            < 1e-9
+    );
+    assert!(
+        (ctx.systems.get_or_spawn(tidi_sys).tidi_factor() - 0.25).abs() < 1e-9,
+        "lazy-spawned SystemHandle must inherit 0.25 TiDi from anchored manual_tidi_overrides"
+    );
+    // Re-anchoring an already-spawned system updates its live SystemHandle TiDi factor cleanly.
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(tidi_sys, offset_ms, 0.50);
+    assert!(
+        (ctx.systems.get_handle(tidi_sys).unwrap().tidi_factor() - 0.50).abs() < 1e-9
+    );
+
+    // Advance 10 real seconds at TiDi = 1.0: both clocks advance +10s preserving the -300_000 ms offset.
+    ctx.advance_secs(10);
+    let wall_1 = ctx.now_machonet_wall_filetime();
+    let sim_1 = ctx.now_system_sim_filetime_for_char(char_id);
+    assert_eq!(wall_1, wall_0.saturating_add_secs(10));
+    assert_eq!(sim_1, sim_0.saturating_add_secs(10));
+    assert_eq!(sim_1.as_ticks() - wall_1.as_ticks(), offset_ms * FILETIME_TICKS_PER_MS);
+
+    // Unrebased /advancetime keeps MachoNet wallclock steady while translating virtual expiry into
+    // client-aligned WallFileTime vs anchored SimFileTime domains without mixing them.
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    assert_eq!(ctx.now_machonet_wall_filetime(), wall_1);
+    let virtual_expiry = ctx.now_unix_secs() + 45;
+    let wall_exp = ctx.virtual_unix_to_machonet_wall_filetime(virtual_expiry);
+    let sim_exp = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, virtual_expiry);
+    assert_eq!(wall_exp, wall_1.saturating_add_secs(45));
+    assert_eq!(sim_exp, sim_1.saturating_add_secs(45));
+    assert_eq!(sim_exp.as_ticks() - wall_exp.as_ticks(), offset_ms * FILETIME_TICKS_PER_MS);
+
+    // Lowering TiDi to 0.50 advances SimFileTime by half wall time while preserving monotonicity.
+    let applied = set_system_tidi_factor(&ctx, sys_id, 0.50);
+    assert!((applied - 0.50).abs() < 1e-9);
+    ctx.advance_secs(20);
+    let wall_2 = ctx.now_machonet_wall_filetime();
+    let sim_2_peek = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock");
+    let sim_2 = ctx.now_system_sim_filetime_for_char(char_id);
+    assert_eq!(wall_2, wall_1.saturating_add_secs(20));
+    assert_eq!(sim_2_peek, sim_1.saturating_add_secs(10));
+    assert_eq!(sim_2, sim_2_peek);
+    assert_eq!(
+        sim_2.as_ticks() - wall_2.as_ticks(),
+        (offset_ms - 10_000) * FILETIME_TICKS_PER_MS
+    );
+    // At 0.50x TiDi, remaining wall duration (+40s) maps to +20s in SimFileTime.
+    let sim_exp_tidi =
+        ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, ctx.now_unix_secs() + 40);
+    assert_eq!(sim_exp_tidi, sim_2.saturating_add_secs(20));
+}
+
+#[tokio::test]
+async fn unanchored_and_anchored_invuln_notifications_track_virtual_server_clock() {
+    use eve_db::clock::FILETIME_TICKS_PER_MS;
+    use eve_machonet::SessionState;
+
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    ctx.advance_secs(10);
+
+    // 1. Unanchored system: both OnInvulunOnUndockingUpdated and OnRestoringInvulnUpdated
+    // track VirtualServerClock (now_machonet_wall_filetime) instead of host SystemTime::now().
+    let sys_unanchored = 30_000_142_u32;
+    let station_a = 60_003_760_i64;
+    let char_a = 90_000_001_i64;
+    let ship_a = 910_000_101_i64;
+    let (user_a, corp_a) = ctx.db.with_snapshot(|s| {
+        let c = &s.characters[&char_a];
+        (c.user_id, c.corporation_id)
+    });
+    ctx.db
+        .acquire_online_lock(user_a, 9_201, Some(char_a), true, ctx.now_unix_secs())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.station_id = Some(station_a);
+            ch.structure_id = None;
+            ch.solar_system_id = sys_unanchored;
+            ch.active_ship_id = ship_a;
+        }
+        snap.items.insert(
+            ship_a,
+            make_item(ship_a, 587, char_a, station_a, InventoryFlag::Hangar),
+        );
+    });
+    let mut sess_a = SessionState::new(9_201);
+    sess_a.user_id = Some(user_a);
+    sess_a.character_id = Some(char_a);
+    sess_a.corporation_id = Some(corp_a);
+    sess_a.solar_system_id = Some(sys_unanchored);
+    sess_a.station_id = Some(station_a);
+    sess_a.ship_id = Some(ship_a);
+
+    crate::services::station_structure::handle(
+        &ctx,
+        &mut sess_a,
+        "stationSvc",
+        "Undock",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("unanchored undock ok");
+
+    let wall_a0 = ctx.now_machonet_wall_filetime();
+    let expected_undock_end_a = wall_a0.saturating_add_secs(30).as_ticks();
+    let notifs_a = ctx.drain_notifications_for_char(char_a);
+    let restoring_a0 = notifs_a
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("unanchored OnRestoringInvulnUpdated");
+    assert_eq!(restoring_a0.args[1].as_i64(), Some(expected_undock_end_a));
+    let undocking_a0 = notifs_a
+        .iter()
+        .find(|n| n.event == "OnInvulunOnUndockingUpdated")
+        .expect("unanchored OnInvulunOnUndockingUpdated");
+    assert_eq!(undocking_a0.args[1].as_i64(), Some(expected_undock_end_a));
+
+    ctx.advance_secs(25);
+    let wall_a1 = ctx.now_machonet_wall_filetime();
+    assert_eq!(wall_a1, wall_a0.saturating_add_secs(25));
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(
+        &ctx,
+        char_a,
+        ship_a,
+        150_000_000,
+    );
+    let notifs_a1 = ctx.drain_notifications_for_char(char_a);
+    let restoring_a1 = notifs_a1
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("unanchored OnRestoringInvulnUpdated after advance_secs");
+    assert_eq!(
+        restoring_a1.args[1].as_i64(),
+        Some(wall_a1.as_ticks() + 150_000_000)
+    );
+
+    ctx.advance_secs_without_sim_clock_rebase(300);
+    assert_eq!(ctx.now_machonet_wall_filetime(), wall_a1);
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(
+        &ctx,
+        char_a,
+        ship_a,
+        150_000_000,
+    );
+    let notifs_a2 = ctx.drain_notifications_for_char(char_a);
+    let restoring_a2 = notifs_a2
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("unanchored OnRestoringInvulnUpdated after unrebased advance");
+    assert_eq!(
+        restoring_a2.args[1].as_i64(),
+        Some(wall_a1.as_ticks() + 150_000_000)
+    );
+
+    // 2. Offset-anchored system (-300_000 ms): both notifications shift by the system's anchored
+    // SimFileTime offset and track subsequent VirtualServerClock progression.
+    let sys_anchored = 30_000_144_u32;
+    let station_b = 60_003_761_i64;
+    let char_b = 90_000_777_i64;
+    let ship_b = 910_000_777_i64;
+    let offset_ms = -300_000_i64;
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_anchored, offset_ms, 1.0);
+    ctx.advance_secs(1);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == user_a)
+            .expect("user_a account")
+            .clone();
+        acc.user_id = char_b as u64;
+        acc.username = format!("invuln_{char_b}");
+        snap.accounts.insert(acc.username.clone(), acc);
+
+        let mut ch = snap.characters[&char_a].clone();
+        ch.character_id = char_b;
+        ch.user_id = char_b as u64;
+        ch.name = "Anchored Invuln Pilot".into();
+        ch.station_id = Some(station_b);
+        ch.structure_id = None;
+        ch.solar_system_id = sys_anchored;
+        ch.active_ship_id = ship_b;
+        snap.characters.insert(char_b, ch);
+        snap.items.insert(
+            ship_b,
+            make_item(ship_b, 587, char_b, station_b, InventoryFlag::Hangar),
+        );
+    });
+    ctx.db
+        .acquire_online_lock(char_b as u64, 9_202, Some(char_b), true, ctx.now_unix_secs())
+        .unwrap();
+    let mut sess_b = SessionState::new(9_202);
+    sess_b.user_id = Some(char_b as u64);
+    sess_b.character_id = Some(char_b);
+    sess_b.corporation_id = Some(corp_a);
+    sess_b.solar_system_id = Some(sys_anchored);
+    sess_b.station_id = Some(station_b);
+    sess_b.ship_id = Some(ship_b);
+
+    crate::services::station_structure::handle(
+        &ctx,
+        &mut sess_b,
+        "stationSvc",
+        "Undock",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("anchored undock ok");
+
+    let wall_b0 = ctx.now_machonet_wall_filetime();
+    let sim_b0 = ctx
+        .peek_system_sim_filetime(sys_anchored)
+        .expect("anchored sys sim time");
+    assert_eq!(
+        sim_b0.as_ticks() - wall_b0.as_ticks(),
+        offset_ms * FILETIME_TICKS_PER_MS
+    );
+    let expected_undock_end_b = sim_b0.saturating_add_secs(30).as_ticks();
+    let notifs_b = ctx.drain_notifications_for_char(char_b);
+    let restoring_b0 = notifs_b
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("anchored OnRestoringInvulnUpdated");
+    assert_eq!(restoring_b0.args[1].as_i64(), Some(expected_undock_end_b));
+    let undocking_b0 = notifs_b
+        .iter()
+        .find(|n| n.event == "OnInvulunOnUndockingUpdated")
+        .expect("anchored OnInvulunOnUndockingUpdated");
+    // Same-tick monotonic #1081 clamp increments +1 tick per same-millisecond sim-clock read in Undock.
+    let undocking_b0_ts = undocking_b0
+        .args[1]
+        .as_i64()
+        .expect("anchored OnInvulunOnUndockingUpdated timestamp");
+    assert!(
+        (expected_undock_end_b..=expected_undock_end_b + 5).contains(&undocking_b0_ts),
+        "anchored OnInvulunOnUndockingUpdated ({undocking_b0_ts}) must match sim_b0+30s ({expected_undock_end_b}) within same-tick #1081 monotonic clamp"
+    );
+
+    ctx.advance_secs(12);
+    let sim_b1 = ctx
+        .peek_system_sim_filetime(sys_anchored)
+        .expect("anchored sys sim time after advance");
+    assert_eq!(sim_b1, sim_b0.saturating_add_secs(12));
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(
+        &ctx,
+        char_b,
+        ship_b,
+        200_000_000,
+    );
+    let notifs_b1 = ctx.drain_notifications_for_char(char_b);
+    let restoring_b1 = notifs_b1
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("anchored OnRestoringInvulnUpdated after advance");
+    assert_eq!(
+        restoring_b1.args[1].as_i64(),
+        Some(sim_b1.as_ticks() + 200_000_000)
+    );
+}
+
+#[tokio::test]
+async fn pure_1x_offset_anchor_does_not_freeze_reactivation_cooldowns_after_step_manual() {
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 910_196_101_i64;
+    let mod_id = 910_196_102_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None),
+        );
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, 90001, char_id, ship_id, InventoryFlag::HiSlot0),
+        );
+    });
+
+    // Anchor default ScenarioBuilder -300_000 ms offset at 1.0x and advance physics once (`step_manual`)
+    // so `cur_sys_sim_s > 0.0`, then record a 10s reactivation delay.
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 1.0);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(
+        ctx.resolve_sys_tidi_mode(Some(sys_id)),
+        (1.0, false),
+        "pure 1.0x offset anchor must not mark tidi_history_systems"
+    );
+
+    ctx.record_module_reactivation_delay(ship_id, mod_id, 10.0);
+    assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+
+    // Advance virtual time via ctx.advance_secs (without stepping physics): remaining cooldown must shrink
+    // and expire after 11s instead of freezing or pushing expiry forward.
+    let exp_initial = ctx
+        .resolve_active_reactivation_cooldown(ship_id, mod_id)
+        .expect("initial active cooldown");
+    ctx.advance_secs(5);
+    assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+    let exp_after_5s = ctx
+        .resolve_active_reactivation_cooldown(ship_id, mod_id)
+        .expect("remaining cooldown at +5s");
+    assert!(
+        (exp_after_5s - exp_initial).abs() < 1e-6,
+        "expiry timestamp must stay constant across ctx.advance_secs instead of drifting forward"
+    );
+    ctx.advance_secs(6);
+    assert!(
+        !ctx.is_module_in_reactivation_delay(ship_id, mod_id),
+        "reactivation cooldown must expire across ctx.advance_secs on a 1.0x offset-anchored system"
+    );
+
+    // Genuine TiDi (< 1.0) followed by clearing back to 1.0x STILL records tidi_history_systems = true.
+    crate::services::serverops_cluster::set_system_tidi_factor(&ctx, sys_id, 0.50);
+    assert_eq!(ctx.resolve_sys_tidi_mode(Some(sys_id)), (0.50, true));
+    crate::services::serverops_cluster::clear_manual_system_tidi_override(&ctx, sys_id);
+    assert_eq!(ctx.resolve_sys_tidi_mode(Some(sys_id)), (1.0, true));
+}
+
+#[tokio::test]
+async fn anchor_tidi_on_occupied_system_preserves_pre_anchor_delta_pins_autoscaler_and_entry_reemits_timers() {
+    use crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
+    use crate::services::serverops_cluster::{
+        emit_sim_clock_rebase_on_entry_if_needed, set_system_tidi_factor,
+    };
+    use eve_db::clock::FILETIME_TICKS_PER_MS;
+    use eve_db::clock::FILETIME_TICKS_PER_SEC;
+    use eve_proto::PyRep;
+
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_a = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let user_a = ctx.db.with_snapshot(|s| s.characters[&char_a].user_id);
+    ctx.db
+        .acquire_online_lock(user_a, 9_301, Some(char_a), true, base)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_a;
+        }
+    });
+
+    let pvp_exp = base + 900;
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_a).pvp_timer_until_unix = pvp_exp;
+    }
+    emit_crimewatch_timer_notifications(&ctx, char_a, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    ctx.advance_secs(5);
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let pre_sim_ft = ctx.now_machonet_wallclock_filetime_ticks();
+
+    // Anchor occupied system with -300_000 ms offset + 0.25 TiDi:
+    // must emit true non-zero DoSimClockRebase((pre_sim_ft, pre_sim_ft - 300s)), pin autoscaler,
+    // and re-emit scaled OnPvpTimerUpdate.
+    let offset_ms = -300_000_i64;
+    let sim_clock = ctx.anchor_system_sim_clock_with_offset_ms(sys_a, offset_ms, 0.25);
+    assert_eq!(sim_clock.sim_filetime().as_ticks(), pre_sim_ft + offset_ms * FILETIME_TICKS_PER_MS);
+    {
+        let cn = ctx.systems.cluster_nodes.read().unwrap();
+        let auto = cn
+            .system_tidi_autoscalers
+            .get(&sys_a)
+            .expect("autoscaler entry must be pinned");
+        assert_eq!(auto.pinned_factor, Some(0.25));
+    }
+    let notifs_a = ctx.drain_notifications_for_char(char_a);
+    let rebase_pos = notifs_a
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase when anchoring occupied system");
+    let pvp_pos = notifs_a
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("re-emitted OnPvpTimerUpdate after anchor rebase");
+    assert!(rebase_pos < pvp_pos);
+    let PyRep::Tuple(times) = &notifs_a[rebase_pos].args[0] else {
+        panic!("DoSimClockRebase tuple");
+    };
+    assert_eq!(times[0].as_i64(), Some(pre_sim_ft));
+    assert_eq!(
+        times[1].as_i64(),
+        Some(pre_sim_ft + offset_ms * FILETIME_TICKS_PER_MS)
+    );
+    let expected_pvp_a =
+        sim_clock.sim_filetime().as_ticks() + ((895 * FILETIME_TICKS_PER_SEC) / 4);
+    assert_eq!(notifs_a[pvp_pos].args[1].as_i64(), Some(expected_pvp_a));
+
+    // Occupied-system anchor broadcast must mark `char_a` rebased at the committed generation so
+    // an immediate UpdateStateRequest / entry check emits 0 duplicate DoSimClockRebase shifts.
+    assert!(
+        !emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_a, sys_a),
+        "already-broadcast in-space pilot must not receive a duplicate entry DoSimClockRebase"
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_a)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
+
+    // Subsequent TiDi transition via `emit_sim_clock_rebase` must likewise keep `char_rebased_system_gen` synced.
+    let _ = set_system_tidi_factor(&ctx, sys_a, 0.50);
+    let tidi_notifs_a = ctx.drain_notifications_for_char(char_a);
+    assert_eq!(
+        tidi_notifs_a
+            .iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        1
+    );
+    assert!(
+        !emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_a, sys_a),
+        "TiDi broadcast must also mark in-space pilot rebased at the new generation"
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_a)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
+
+    // Entry rebase into a dilated 0.25x system also re-emits scaled active CrimeWatch timers.
+    let sys_b = 30_000_144_u32;
+    let char_b = 90_000_888_i64;
+    set_system_tidi_factor(&ctx, sys_b, 0.25);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == user_a)
+            .expect("user_a account")
+            .clone();
+        acc.user_id = char_b as u64;
+        acc.username = format!("entry_{char_b}");
+        snap.accounts.insert(acc.username.clone(), acc);
+
+        let mut ch = snap.characters[&char_a].clone();
+        ch.character_id = char_b;
+        ch.user_id = char_b as u64;
+        ch.name = "Entry TiDi Pilot".into();
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+        ch.solar_system_id = sys_b;
+        snap.characters.insert(char_b, ch);
+    });
+    ctx.db
+        .acquire_online_lock(char_b as u64, 9_302, Some(char_b), true, ctx.now_unix())
+        .unwrap();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_b).pvp_timer_until_unix = ctx.now_unix_secs() + 400;
+    }
+    emit_crimewatch_timer_notifications(&ctx, char_b, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    // Move char_b into space in dilated `sys_b` and trigger entry rebase.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_b) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_b;
+        }
+    });
+    assert!(emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_b, sys_b));
+    let entry_notifs = ctx.drain_notifications_for_char(char_b);
+    let r_pos = entry_notifs
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("entry DoSimClockRebase");
+    let p_pos = entry_notifs
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("entry OnPvpTimerUpdate re-emitted after entry DoSimClockRebase");
+    assert!(r_pos < p_pos);
+    let sim_b = ctx.peek_system_sim_filetime(sys_b).unwrap();
+    assert_eq!(
+        entry_notifs[p_pos].args[1].as_i64(),
+        Some(sim_b.as_ticks() + 100 * FILETIME_TICKS_PER_SEC)
+    );
+}
+
+#[tokio::test]
+async fn backward_reanchor_resets_last_sim_activation_clamp_to_match_peek_sim_filetime() {
+    use crate::services::serverops_cluster::set_system_tidi_factor;
+
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+    });
+
+    // Seed higher `last_sim_activation_ft_by_system` via TiDi and same-tick read, then re-anchor backward (-300_000 ms).
+    let _ = set_system_tidi_factor(&ctx, sys_id, 0.50);
+    let wall_0 = ctx.now_machonet_wall_filetime();
+    let _ = ctx.now_system_sim_filetime(Some(sys_id));
+
+    let sim_clock = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 0.25);
+    let peek_0 = ctx
+        .peek_system_sim_filetime(sys_id)
+        .expect("backward re-anchored sim clock");
+    assert_eq!(sim_clock.sim_filetime(), peek_0);
+    assert_eq!(
+        peek_0.as_ticks(),
+        wall_0.saturating_sub_secs(300).as_ticks(),
+        "peek_system_sim_filetime must trail wall_0 by 300s"
+    );
+
+    // `now_system_sim_filetime` must NOT stay clamped +300s ahead at the pre-anchor activation stamp.
+    let now_0 = ctx.now_system_sim_filetime(Some(sys_id));
+    assert!(
+        now_0.as_ticks() >= peek_0.as_ticks() && now_0.as_ticks() <= peek_0.as_ticks() + 1,
+        "now_system_sim_filetime ({now_0:?}) must align with peek_0 ({peek_0:?}), not stale wall_0 ({wall_0:?})"
+    );
+    assert!(now_0.as_ticks() < wall_0.as_ticks());
+    let now_char = ctx.now_system_sim_filetime_for_char(char_id);
+    assert!(
+        now_char.as_ticks() >= peek_0.as_ticks() && now_char.as_ticks() <= peek_0.as_ticks() + 2
+    );
+    let exp_sim = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, ctx.now_unix_secs() + 40);
+    assert_eq!(exp_sim, peek_0.saturating_add_secs(10));
+
+    ctx.advance_secs(4);
+    let peek_1 = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(peek_1, peek_0.saturating_add_secs(1));
+    assert_eq!(ctx.now_system_sim_filetime(Some(sys_id)), peek_1);
+
+    // Pure 1.0x backward anchor bumps rebase_generation_by_system once (not 1 -> 2) and avoids stale clamp.
+    let pure_sys = 30_000_144_u32;
+    let pure_clock = ctx.anchor_system_sim_clock_with_offset_ms(pure_sys, -300_000, 1.0);
+    let pure_peek = ctx.peek_system_sim_filetime(pure_sys).unwrap();
+    assert_eq!(pure_clock.sim_filetime(), pure_peek);
+    let pure_now = ctx.now_system_sim_filetime(Some(pure_sys));
+    assert!(
+        pure_now.as_ticks() >= pure_peek.as_ticks() && pure_now.as_ticks() <= pure_peek.as_ticks() + 1
+    );
+    let gen = ctx
+        .systems
+        .cluster_nodes
+        .read()
+        .unwrap()
+        .rebase_generation_by_system
+        .get(&pure_sys)
+        .copied();
+    assert_eq!(gen, Some(1), "single anchor must bump rebase generation once");
+}
+
+#[tokio::test]
+async fn character_jump_clock_does_not_leak_across_non_stargate_relocations() {
+    use crate::services::serverops_cluster::sync_jump_clock_and_emit_rebase_if_needed;
+
+    let ctx = edge_ctx(1_800_000_000);
+    let char_id = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let sys_c = 30_000_145_u32;
+    let sys_d = 30_000_146_u32;
+
+    // Jump into dilated `sys_b`, then advance wallclock while dilated anchor sits on `sys_b`.
+    assert!(sync_jump_clock_and_emit_rebase_if_needed(&ctx, char_id, sys_a, sys_b, 1.0, 0.25).is_some());
+    ctx.advance_secs(16);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Non-stargate relocation into unanchored 1.0x `sys_c`, followed by stargate jump `sys_c -> sys_d`,
+    // must ignore stale `(sys_b, ...)` `character_jump_clocks` and emit no spurious rebase.
+    assert_eq!(
+        sync_jump_clock_and_emit_rebase_if_needed(&ctx, char_id, sys_c, sys_d, 1.0, 1.0),
+        None
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn clear_manual_system_tidi_override_resets_unspawned_anchored_sim_clock_to_1x() {
+    use crate::services::serverops_cluster::{
+        clear_manual_system_tidi_override, get_system_tidi_factor,
+    };
+
+    let ctx = edge_ctx(1_800_000_000);
+    let sys_id = 30_000_144_u32;
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let clock_0 = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 0.25);
+    assert!(
+        ctx.systems.get_handle(sys_id).is_none(),
+        "anchor_system_sim_clock_with_offset_ms must not spawn SystemHandle"
+    );
+    ctx.advance_secs(20);
+    let sim_at_clear = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(sim_at_clear, clock_0.sim_filetime().saturating_add_secs(5));
+
+    // Clearing the manual override while still unspawned must re-anchor `sim_clock_anchoring` to 1.0x.
+    assert!((clear_manual_system_tidi_override(&ctx, sys_id) - 1.0).abs() < 1e-9);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    assert!((get_system_tidi_factor(&ctx, sys_id) - 1.0).abs() < 1e-9);
+    {
+        let cn = ctx.systems.cluster_nodes.read().unwrap();
+        let (_, _, anchored_tidi) = cn
+            .sim_clock_anchoring
+            .get(&sys_id)
+            .copied()
+            .expect("sim_clock_anchoring preserved at 1.0x after clear");
+        assert!((anchored_tidi - 1.0).abs() < 1e-9);
+    }
+
+    ctx.advance_secs(10);
+    let sim_after_10s = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(
+        sim_after_10s,
+        sim_at_clear.saturating_add_secs(10),
+        "unspawned cleared system must advance at 1.0x, not stale 0.25x"
+    );
+    assert_eq!(ctx.now_system_sim_filetime(Some(sys_id)), sim_after_10s);
+
+    // Subsequent lazy spawn must inherit 1.0x and keep advancing consistently at 1.0x.
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    assert!((handle.tidi_factor() - 1.0).abs() < 1e-9);
+    ctx.advance_secs(10);
+    let sim_after_spawn = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(sim_after_spawn, sim_after_10s.saturating_add_secs(10));
+    assert_eq!(ctx.now_system_sim_filetime(Some(sys_id)), sim_after_spawn);
+
+    // Clearing when unspawned system was only anchored at 1.0x (-300_000 ms) preserves offset and stays 1.0x.
+    let pure_sys = 30_000_145_u32;
+    let pure_0 = ctx.anchor_system_sim_clock_with_offset_ms(pure_sys, -300_000, 1.0);
+    assert!((clear_manual_system_tidi_override(&ctx, pure_sys) - 1.0).abs() < 1e-9);
+    ctx.advance_secs(8);
+    assert_eq!(
+        ctx.peek_system_sim_filetime(pure_sys).unwrap(),
+        pure_0.sim_filetime().saturating_add_secs(8)
+    );
+}

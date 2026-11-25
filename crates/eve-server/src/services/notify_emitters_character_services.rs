@@ -928,14 +928,18 @@ pub(crate) fn dispatch_chatban_slash(
     let mode = parts.get(1).copied().unwrap_or("3600");
     let is_perm = mode.eq_ignore_ascii_case("perm") || mode.eq_ignore_ascii_case("permanent");
     let now_unix = ctx.now_unix();
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_machonet_wall_filetime();
     let (expiry_unix, expiry_ft, reason) = if is_perm {
-        (u64::MAX, i64::MAX, "Permanent GM chat ban".to_string())
+        (
+            u64::MAX,
+            eve_db::clock::WallFileTime::from_ticks(i64::MAX),
+            "Permanent GM chat ban".to_string(),
+        )
     } else {
         let secs = mode.parse::<i64>().unwrap_or(3600).max(1);
         (
             now_unix.saturating_add(secs as u64),
-            now_ft.saturating_add(secs.saturating_mul(10_000_000)),
+            now_ft.saturating_add_secs(secs),
             "Temporary GM chat ban".to_string(),
         )
     };
@@ -962,7 +966,7 @@ pub(crate) fn dispatch_chatban_slash(
     Ok(PyRep::keyval([
         ("characterID", PyRep::Integer(target_cid)),
         ("permanent", PyRep::Bool(is_perm)),
-        ("banExpiry", PyRep::Integer(expiry_ft)),
+        ("banExpiry", PyRep::Integer(expiry_ft.as_ticks())),
     ]))
 }
 
@@ -1119,8 +1123,8 @@ pub(crate) fn dispatch_shutdown_slash(
     if let Some(raw_secs) = parts.first().and_then(|s| s.parse::<u64>().ok()) {
         let secs: u64 = raw_secs.max(60).min(86400 * 30);
         let reason = parts.get(1).copied().unwrap_or("ServerRestart");
-        let now_ft = ctx.now_machonet_wallclock_filetime_ticks();
-        let target_ft = now_ft.saturating_add((secs as i64).saturating_mul(10_000_000));
+        let now_ft = ctx.now_machonet_wall_filetime();
+        let target_ft = now_ft.saturating_add_secs(secs as i64);
         {
             let mut st = ctx.cluster_state.write().unwrap_or_else(|e| e.into_inner());
             st.shutdown_in_progress = true;
@@ -1140,7 +1144,7 @@ pub(crate) fn dispatch_shutdown_slash(
         );
         return Ok(PyRep::keyval([
             ("shutdownInitiated", PyRep::Bool(true)),
-            ("targetFt", PyRep::Integer(target_ft)),
+            ("targetFt", PyRep::Integer(target_ft.as_ticks())),
         ]));
     }
     Err(unknown_slash_error(inv.raw))

@@ -8,9 +8,11 @@ use serde_json::Value;
 
 use super::client_compat::normalize_macho_notification_with_sde;
 use super::notify_registry::{
-    all_registered_notifications, BallparkScene, OnCapitalSystemChanged,
-    OnCrimewatchEngagementEnded, OnMailSent, OnNpcTimerUpdate, OnSeasonStarted, TypedNotification,
+    all_registered_notifications, BallparkScene, GodmaEffectStartOrTime, OnCapitalSystemChanged,
+    OnCrimewatchEngagementEnded, OnMailSent, OnNpcTimerUpdate, OnSeasonStarted, ToNotifyArg,
+    TypedNotification,
 };
+use eve_db::clock::{SimFileTime, WallFileTime};
 use eve_proto::PyRep;
 
 fn load_client_notify_spec_map() -> serde_json::Map<String, Value> {
@@ -266,16 +268,25 @@ fn typed_notification_into_args_preserves_registered_arity() {
 
     let timer_min = OnNpcTimerUpdate {
         state: 401,
-        expiry_time: PyRep::Integer(1_335_000_000_000_000_00),
+        expiry_time: Some(SimFileTime::from_ticks(1_335_000_000_000_000_00)),
         do_alert: None,
     };
     assert_eq!(timer_min.into_args().len(), 2);
     let timer_max = OnNpcTimerUpdate {
         state: 401,
-        expiry_time: PyRep::Integer(1_335_000_000_000_000_00),
+        expiry_time: Some(SimFileTime::from_ticks(1_335_000_000_000_000_00)),
         do_alert: Some(true),
     };
     assert_eq!(timer_max.into_args().len(), 3);
+    let timer_idle = OnNpcTimerUpdate {
+        state: 400,
+        expiry_time: None,
+        do_alert: None,
+    };
+    assert_eq!(
+        timer_idle.into_args(),
+        vec![PyRep::Integer(400), PyRep::None]
+    );
 
     use super::notify_registry::{
         DoBallsAddedShipRef, OnAsteroidRevealed, OnAsteroidRevealedDetailed, OnGodmaFlushLocation,
@@ -610,11 +621,13 @@ fn typed_notification_into_args_preserves_registered_arity() {
         OnGodmaShipEffect {
             item_id: 100_000_020,
             effect: PyRep::Integer(10),
-            start_or_time: PyRep::Integer(1_335_000_000_000_000_00),
+            start_or_time: GodmaEffectStartOrTime::SimTime(SimFileTime::from_ticks(
+                1_335_000_000_000_000_00
+            )),
             start: Some(PyRep::Integer(0)),
             active: Some(PyRep::Integer(0)),
             environment: Some(PyRep::Tuple(Vec::new())),
-            start_time: Some(PyRep::Integer(1_335_000_000_000_000_00)),
+            start_time: Some(SimFileTime::from_ticks(1_335_000_000_000_000_00)),
             duration: Some(PyRep::Real(0.0)),
             repeat: Some(PyRep::Integer(0)),
             error: Some(PyRep::None),
@@ -623,6 +636,36 @@ fn typed_notification_into_args_preserves_registered_arity() {
         .into_args()
         .len(),
         10
+    );
+    assert_eq!(
+        OnGodmaShipEffect {
+            item_id: 100_000_020,
+            effect: PyRep::Integer(10),
+            start_or_time: GodmaEffectStartOrTime::SimTime(SimFileTime::from_ticks(
+                1_335_000_000_000_000_00
+            )),
+            start: Some(PyRep::Integer(0)),
+            active: Some(PyRep::Integer(0)),
+            environment: Some(PyRep::Tuple(Vec::new())),
+            start_time: Some(SimFileTime::from_ticks(1_335_000_000_000_000_00)),
+            duration: Some(PyRep::Real(0.0)),
+            repeat: Some(PyRep::Integer(0)),
+            error: Some(PyRep::None),
+            actual_stop_time: Some(Some(SimFileTime::from_ticks(1_335_000_050_000_000_00))),
+        }
+        .into_args()
+        .len(),
+        11
+    );
+    let wall_sample = WallFileTime::from_ticks(1_335_000_000_000_000_00);
+    let sim_sample = SimFileTime::from_ticks(1_334_997_000_000_000_00);
+    assert_eq!(
+        wall_sample.into_notify_arg(),
+        PyRep::Integer(1_335_000_000_000_000_00)
+    );
+    assert_eq!(
+        sim_sample.into_notify_arg(),
+        PyRep::Integer(1_334_997_000_000_000_00)
     );
 
     use super::notify_registry::{OnMoonScanComplete, OnRemoveMoonProbe, OnScanNoMaterials};

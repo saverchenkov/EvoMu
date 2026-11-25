@@ -669,7 +669,9 @@ pub async fn handle(
                     },
                 );
             }
-            let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
+            let invuln_end_ft = ctx
+                .now_system_sim_filetime(Some(ch.solar_system_id))
+                .saturating_add_secs(30);
             crate::quasar_gateway::isolate_side_effect("station_structure.undock.achievements", || {
                 ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["undockFromStation"], 1, ctx.now_unix(), &ctx.quasar_gateway);
             });

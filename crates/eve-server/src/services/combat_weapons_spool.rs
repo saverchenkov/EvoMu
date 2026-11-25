@@ -10,7 +10,8 @@
 use std::collections::{BTreeMap, HashMap};
 use glam::DVec3;
 use crate::router::notify_registry::{
-    OnGodmaShipEffect, OnModulesDeactivating, OnWeaponBanksChanged, OnWeaponGroupDestroyed,
+    GodmaEffectStartOrTime, OnGodmaShipEffect, OnModulesDeactivating, OnWeaponBanksChanged,
+    OnWeaponGroupDestroyed,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
@@ -94,7 +95,7 @@ pub fn stop_entropic_spool_and_deactivate(
         OnGodmaShipEffect {
             item_id: module_id,
             effect: PyRep::String("online".into()),
-            start_or_time: PyRep::Bool(false),
+            start_or_time: GodmaEffectStartOrTime::Flag(false),
             start: None,
             active: None,
             environment: None,

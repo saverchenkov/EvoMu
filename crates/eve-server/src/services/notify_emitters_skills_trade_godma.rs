@@ -397,11 +397,9 @@ pub fn emit_subscription_changed_server(ctx: &ServerContext, char_id: i64, new_g
 // parity: notify:OnSubscriptionTimeUpdateServer
 pub fn emit_subscription_time_update_server(ctx: &ServerContext, user_id: u64, until_unix: u64) {
     let omega_ft = if until_unix > 0 {
-        (until_unix as i64)
-            .saturating_add(11_644_473_600)
-            .saturating_mul(10_000_000)
+        ctx.wall_unix_to_filetime(until_unix)
     } else {
-        0
+        eve_db::clock::WallFileTime::ZERO
     };
     let char_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
         let mut ids: Vec<i64> = snap

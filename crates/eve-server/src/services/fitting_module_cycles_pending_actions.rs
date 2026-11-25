@@ -101,7 +101,7 @@ async fn deactivate_repeating_cycle_after_action_with_policy(
         crate::router::notify_registry::OnGodmaShipEffect {
             item_id: module_id,
             effect: godma_effect,
-            start_or_time: PyRep::Bool(false),
+            start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::Flag(false),
             start: None,
             active: None,
             environment: None,

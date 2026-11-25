@@ -2005,7 +2005,7 @@ async fn gm_heal_uses_system_sim_clock_after_advancetime_for_attr_changes() {
     );
 
     // Advance virtual clock by 6,000s (as `advance_server_time(6000)` does) without rebasing client sim clock.
-    ctx.advance_virtual_clock(6_000);
+    ctx.advance_secs_without_sim_clock_rebase(6_000);
     let _ = ctx.drain_notifications_for_char(char_id);
     let sim_before = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
 

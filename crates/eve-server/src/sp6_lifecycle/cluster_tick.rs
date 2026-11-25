@@ -2938,6 +2938,7 @@ fn reconcile_physics_overrun_sim_clock(
             }
             cn.sim_clock_anchoring
                 .insert(sys_id, (now_wall_ft, new_ft, eff_factor));
+            cn.tidi_history_systems.insert(sys_id);
             let gen = cn.rebase_generation_by_system.entry(sys_id).or_insert(0);
             *gen = gen.saturating_add(1);
             let gen_val = *gen;

@@ -1234,9 +1234,9 @@ pub async fn relocate_ship(
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         OnJumpTimersUpdated {
-            jump_activation: crate::sp6_lifecycle::unix_to_filetime(now + cd_secs),
-            jump_fatigue: crate::sp6_lifecycle::unix_to_filetime(now + fat_secs),
-            last_updated: crate::sp6_lifecycle::unix_to_filetime(now),
+            jump_activation: ctx.wall_unix_to_filetime(now + cd_secs),
+            jump_fatigue: ctx.wall_unix_to_filetime(now + fat_secs),
+            last_updated: ctx.wall_unix_to_filetime(now),
             do_alert: true,
         },
     );

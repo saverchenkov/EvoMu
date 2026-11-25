@@ -29,10 +29,6 @@ fn save_downtime_state(snap: &mut WorldStateSnapshot, st: &PersistedDowntimeStat
     snap.cluster_and_runtime.cluster_downtime_state = st.clone();
 }
 
-fn unix_to_filetime(unix_secs: u64) -> i64 {
-    (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
-}
-
 /// DERIVED: Heuristic constellation-to-worker-node mapping (`workers[(constellation_id as usize) % pool_len]`).
 fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: SolarSystemId, workers: &[u32]) -> u32 {
     let pool_len = workers.len().max(1);
@@ -45,9 +41,81 @@ fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: Solar
     workers[(key as usize) % pool_len]
 }
 
-fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _old_factor: f64, new_factor: f64) {
+fn project_anchored_sim_ft(anchor: (i64, i64, f64), now_wall_ft: i64) -> i64 {
+    let (anchor_wall_ft, anchor_sim_ft, factor) = anchor;
+    let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
+    let eff = factor.clamp(0.10, 1.0);
+    let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * eff).round() as i64;
+    anchor_sim_ft.saturating_add(dilated_elapsed_ft)
+}
+
+fn broadcast_sim_clock_rebase_to_space_chars(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    old_sim_ft: i64,
+    new_sim_ft: i64,
+    rebase_gen: u64,
+) {
+    // Deliver solar-system TiDi rebases only to online in-space pilots (matching
+    // `emit_sim_clock_rebase_if_advanced` in `notify_emitters_tournaments_anomalies`); docked
+    // station sessions have no Ballpark, run hangar timers against `blue.os.GetSimTime()`, and
+    // receive any pending rebase via `emit_sim_clock_rebase_on_entry_if_needed` on undock.
+    let mut in_space_chars: Vec<i64> = {
+        let candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| {
+                    c.solar_system_id == solar_system_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                })
+                .map(|c| (c.character_id, c.user_id))
+                .collect()
+        });
+        candidates
+            .into_iter()
+            .filter(|&(cid, uid)| ctx.is_character_online(cid, uid))
+            .map(|(cid, _)| cid)
+            .collect()
+    };
+    in_space_chars.sort_unstable();
+    in_space_chars.dedup();
+    if !in_space_chars.is_empty() {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if cn.rebase_generation_by_system.get(&solar_system_id).copied() == Some(rebase_gen) {
+            for &char_id in &in_space_chars {
+                cn.char_rebased_system_gen
+                    .insert(char_id, (solar_system_id, rebase_gen));
+            }
+        }
+    }
+    // parity: notify:DoSimClockRebase
+    for &char_id in &in_space_chars {
+        ctx.emit_typed_with_id_type(
+            NotificationTarget::Character(char_id),
+            "solarsystemid2",
+            crate::router::notify_registry::DoSimClockRebase {
+                times: PyRep::Tuple(vec![
+                    PyRep::Integer(old_sim_ft),
+                    PyRep::Integer(new_sim_ft),
+                ]),
+            },
+        );
+    }
+    crate::services::combat_crimewatch::crimewatch_timers::reemit_active_crimewatch_timers_on_tidi_change(
+        ctx,
+        &in_space_chars,
+        ctx.now_unix(),
+    );
+}
+
+fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, old_factor: f64, new_factor: f64) {
     let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
-    let (old_sim_ft, new_sim_ft) = {
+    let (old_sim_ft, new_sim_ft, rebase_gen) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
@@ -75,10 +143,16 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _o
         } else {
             (now_wall_ft, now_wall_ft)
         };
+        let clamped_new = new_factor.clamp(0.10, 1.0);
         cn.sim_clock_anchoring
-            .insert(solar_system_id, (now_wall_ft, new_ft, new_factor.clamp(0.10, 1.0)));
+            .insert(solar_system_id, (now_wall_ft, new_ft, clamped_new));
+        let delta = crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+        if clamped_new < 1.0 - delta || old_factor < 1.0 - delta {
+            cn.tidi_history_systems.insert(solar_system_id);
+        }
         let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
         *gen = gen.saturating_add(1);
+        let committed_gen = *gen;
         let prev_act = cn
             .last_sim_activation_ft_by_system
             .get(&solar_system_id)
@@ -86,45 +160,15 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _o
             .unwrap_or(0);
         cn.last_sim_activation_ft_by_system
             .insert(solar_system_id, new_ft.max(prev_act));
-        (old_ft, new_ft)
+        (old_ft, new_ft, committed_gen)
     };
-    // Deliver solar-system TiDi rebases only to online in-space pilots (matching
-    // `emit_sim_clock_rebase_if_advanced` in `notify_emitters_tournaments_anomalies`); docked
-    // station sessions have no Ballpark, run hangar timers against `blue.os.GetSimTime()`, and
-    // receive any pending rebase via `emit_sim_clock_rebase_on_entry_if_needed` on undock.
-    let mut in_space_chars: Vec<i64> = {
-        let candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .filter(|c| {
-                    c.solar_system_id == solar_system_id
-                        && c.station_id.is_none()
-                        && c.structure_id.is_none()
-                })
-                .map(|c| (c.character_id, c.user_id))
-                .collect()
-        });
-        candidates
-            .into_iter()
-            .filter(|&(cid, uid)| ctx.is_character_online(cid, uid))
-            .map(|(cid, _)| cid)
-            .collect()
-    };
-    in_space_chars.sort_unstable();
-    in_space_chars.dedup();
-    // parity: notify:DoSimClockRebase
-    for char_id in in_space_chars {
-        ctx.emit_typed_with_id_type(
-            NotificationTarget::Character(char_id),
-            "solarsystemid2",
-            crate::router::notify_registry::DoSimClockRebase {
-                times: PyRep::Tuple(vec![
-                    PyRep::Integer(old_sim_ft),
-                    PyRep::Integer(new_sim_ft),
-                ]),
-            },
-        );
-    }
+    broadcast_sim_clock_rebase_to_space_chars(
+        ctx,
+        solar_system_id,
+        old_sim_ft,
+        new_sim_ft,
+        rebase_gen,
+    );
 }
 
 /// Emits `DoSimClockRebase((oldSimTime, newSimTime))` **once** directly to `char_id` on login
@@ -183,6 +227,9 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
                 .insert(solar_system_id, (now_wall_ft, seeded.1, factor.clamp(0.10, 1.0)));
             seeded
         };
+        if is_dilated || is_lagged {
+            cn.tidi_history_systems.insert(solar_system_id);
+        }
         let prev_act = cn
             .last_sim_activation_ft_by_system
             .get(&solar_system_id)
@@ -207,6 +254,11 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
             ]),
         },
     );
+    crate::services::combat_crimewatch::crimewatch_timers::reemit_active_crimewatch_timers_on_tidi_change(
+        ctx,
+        &[char_id],
+        ctx.now_unix(),
+    );
     true
 }
 
@@ -224,48 +276,71 @@ pub fn sync_jump_clock_and_emit_rebase_if_needed(
     let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
     let old_factor = if from_tidi.is_finite() { from_tidi.clamp(0.10, 1.0) } else { 1.0 };
     let new_factor = if to_tidi.is_finite() { to_tidi.clamp(0.10, 1.0) } else { 1.0 };
-    let should_emit = new_factor < 1.0 || (old_factor - new_factor).abs() > 1e-6;
-    let (old_sim_ft, new_sim_ft) = {
+    let delta = crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+    let (should_emit, old_sim_ft, dest_sim_ft) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let (prev_wall_ft, prev_sim_ft, prev_factor) = cn
+        let from_anchor = cn.sim_clock_anchoring.get(&from_sys).copied();
+        let jump_anchor = cn
             .character_jump_clocks
             .get(&char_id)
             .copied()
-            .or_else(|| cn.sim_clock_anchoring.get(&from_sys).copied())
-            .unwrap_or((now_wall_ft, now_wall_ft, old_factor));
-        let elapsed_wall_ft = now_wall_ft.saturating_sub(prev_wall_ft);
-        let eff_prev = prev_factor.clamp(0.10, 1.0);
-        let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * eff_prev).round() as i64;
-        let cur_sim_ft = prev_sim_ft.saturating_add(dilated_elapsed_ft);
-        // Jumping out of a dilated system advances the preserved jump clock by elapsed wall time;
-        // staying in or entering dilation keeps monotonic continuity from the previous anchor.
-        let target_sim_ft = if eff_prev < 1.0 {
-            prev_sim_ft.saturating_add(elapsed_wall_ft).max(cur_sim_ft)
+            .and_then(|(stored_sys, wall_ft, sim_ft, factor)| {
+                (stored_sys == from_sys).then_some((wall_ft, sim_ft, factor))
+            });
+        let cur_sim_ft = if let Some(anchor) = from_anchor.or(jump_anchor) {
+            project_anchored_sim_ft(anchor, now_wall_ft)
         } else {
-            cur_sim_ft
+            now_wall_ft
         };
+
+        let to_anchor = cn.sim_clock_anchoring.get(&to_sys).copied();
+        let target_sim_ft = if let Some(anchor) = to_anchor {
+            project_anchored_sim_ft(anchor, now_wall_ft)
+        } else {
+            now_wall_ft
+        };
+
+        let emit = new_factor < 1.0
+            || (old_factor - new_factor).abs() > 1e-6
+            || ((from_anchor.is_some() || to_anchor.is_some())
+                && (target_sim_ft - cur_sim_ft).abs() >= eve_db::clock::FILETIME_TICKS_PER_MS);
+
         cn.character_jump_clocks
-            .insert(char_id, (now_wall_ft, target_sim_ft, new_factor));
-        if new_factor < 1.0 - crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA {
+            .insert(char_id, (to_sys, now_wall_ft, target_sim_ft, new_factor));
+        if new_factor < 1.0 - delta {
             cn.sim_clock_anchoring
                 .entry(to_sys)
                 .or_insert((now_wall_ft, target_sim_ft, new_factor));
+            cn.tidi_history_systems.insert(to_sys);
         }
-        if should_emit {
-            let rebase_new = target_sim_ft.max(cur_sim_ft);
+        let from_rebased = from_anchor.is_none()
+            || (target_sim_ft - now_wall_ft).abs() < eve_db::clock::FILETIME_TICKS_PER_MS
+            || {
+                let from_gen = cn
+                    .rebase_generation_by_system
+                    .get(&from_sys)
+                    .copied()
+                    .unwrap_or(1);
+                cn.char_rebased_system_gen.get(&char_id).copied() == Some((from_sys, from_gen))
+            };
+        if emit || (to_anchor.is_some() && from_rebased) {
             let gen = *cn.rebase_generation_by_system.entry(to_sys).or_insert(1);
             cn.char_rebased_system_gen.insert(char_id, (to_sys, gen));
-            let prev_act = cn
-                .last_sim_activation_ft_by_system
-                .get(&to_sys)
-                .copied()
-                .unwrap_or(0);
-            cn.last_sim_activation_ft_by_system
-                .insert(to_sys, rebase_new.max(prev_act));
+            if emit {
+                let prev_act = cn
+                    .last_sim_activation_ft_by_system
+                    .get(&to_sys)
+                    .copied()
+                    .unwrap_or(0);
+                if prev_act < target_sim_ft {
+                    cn.last_sim_activation_ft_by_system
+                        .insert(to_sys, target_sim_ft);
+                }
+            }
         } else if cn
             .char_rebased_system_gen
             .get(&char_id)
@@ -273,22 +348,151 @@ pub fn sync_jump_clock_and_emit_rebase_if_needed(
         {
             cn.char_rebased_system_gen.remove(&char_id);
         }
-        (cur_sim_ft, target_sim_ft)
+        (emit, cur_sim_ft, target_sim_ft)
     };
     if should_emit {
-        let rebase_new = new_sim_ft.max(old_sim_ft);
         ctx.emit_typed(
             NotificationTarget::Character(char_id),
             crate::router::notify_registry::DoSimClockRebase {
                 times: PyRep::Tuple(vec![
                     PyRep::Integer(old_sim_ft),
-                    PyRep::Integer(rebase_new),
+                    PyRep::Integer(dest_sim_ft),
                 ]),
             },
         );
-        Some((old_sim_ft, rebase_new))
+        crate::services::combat_crimewatch::crimewatch_timers::reemit_active_crimewatch_timers_on_tidi_change(
+            ctx,
+            &[char_id],
+            ctx.now_unix(),
+        );
+        Some((old_sim_ft, dest_sim_ft))
     } else {
         None
+    }
+}
+
+/// Synchronizes `sim_clock_anchoring`, `tidi_history_systems`, `manual_tidi_overrides`,
+/// `system_tidi_autoscalers`, and `SystemHandle` for `anchor_system_sim_clock_with_offset_ms` (`#1196`)
+/// without holding `cluster_nodes` across `self.systems` (`RANK_SERVICE_STATE 35 -> RANK_SYSTEM_REGISTRY 10`),
+/// resets stale activation clamps on explicit re-anchoring, and rebases any already-in-space pilots
+/// using the true pre-anchor simulation clock delta.
+pub(crate) fn sync_anchored_system_tidi(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    target_factor: f64,
+    anchor_wall_ft: i64,
+    anchor_sim_ft: i64,
+) {
+    let clamped_tidi = if target_factor.is_finite() {
+        target_factor.clamp(0.10, 1.0)
+    } else {
+        1.0
+    };
+    let delta = crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+    let has_tidi_override = (clamped_tidi - 1.0).abs() >= delta;
+    // Acquire rank-10 system handle lookup BEFORE taking rank-35 `cluster_nodes.write()`.
+    let existing_handle = ctx.systems.get_handle(solar_system_id);
+    let prev_handle_tidi = existing_handle.as_ref().map(|h| h.tidi_factor());
+    let now_secs = ctx.now_unix() as f64;
+    let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
+
+    let (prev_sim_ft, prev_effective_factor, had_override, will_emit, rebase_gen) = {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let (prev_sim, prev_anchor_factor) = if let Some(&prev_anchor) =
+            cn.sim_clock_anchoring.get(&solar_system_id)
+        {
+            (
+                project_anchored_sim_ft(prev_anchor, now_wall_ft),
+                prev_anchor.2.clamp(0.10, 1.0),
+            )
+        } else {
+            (anchor_wall_ft, 1.0)
+        };
+        let had_ov = cn.manual_tidi_overrides.contains_key(&solar_system_id)
+            || prev_handle_tidi.is_some_and(|f| (f - 1.0).abs() >= delta);
+        let prev_eff = prev_handle_tidi
+            .or_else(|| cn.manual_tidi_overrides.get(&solar_system_id).copied())
+            .unwrap_or(prev_anchor_factor)
+            .clamp(0.10, 1.0);
+        let old_handle_factor = prev_handle_tidi.unwrap_or(prev_eff);
+        let emit_rebase = if has_tidi_override {
+            (clamped_tidi - prev_eff).abs() >= delta
+                || (clamped_tidi - old_handle_factor).abs() >= delta
+                || anchor_sim_ft != prev_sim
+        } else if had_ov {
+            (1.0 - old_handle_factor).abs() >= delta || anchor_sim_ft != prev_sim
+        } else {
+            anchor_sim_ft != prev_sim
+        };
+
+        cn.sim_clock_anchoring
+            .insert(solar_system_id, (anchor_wall_ft, anchor_sim_ft, clamped_tidi));
+        let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
+        if emit_rebase {
+            *gen = gen.saturating_add(1);
+        } else {
+            *gen = (*gen).max(1);
+        }
+        let committed_gen = *gen;
+        cn.last_sim_activation_ft_by_system
+            .insert(solar_system_id, anchor_sim_ft);
+
+        if has_tidi_override {
+            cn.tidi_history_systems.insert(solar_system_id);
+            cn.manual_tidi_overrides.insert(solar_system_id, clamped_tidi);
+            let autoscaler_enabled = cn.latency_auto_tidi_enabled;
+            let autoscaler = cn
+                .system_tidi_autoscalers
+                .entry(solar_system_id)
+                .or_insert_with(|| {
+                    crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                        solar_system_id,
+                        autoscaler_enabled,
+                    )
+                });
+            autoscaler.pin_manual(now_secs, clamped_tidi);
+        } else if had_ov {
+            cn.manual_tidi_overrides.remove(&solar_system_id);
+            let autoscaler_enabled = cn.latency_auto_tidi_enabled;
+            let autoscaler = cn
+                .system_tidi_autoscalers
+                .entry(solar_system_id)
+                .or_insert_with(|| {
+                    crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                        solar_system_id,
+                        autoscaler_enabled,
+                    )
+                });
+            autoscaler.clear_manual(now_secs);
+        }
+        (prev_sim, prev_eff, had_ov, emit_rebase, committed_gen)
+    };
+
+    if has_tidi_override {
+        // Update an already-live SystemHandle if spawned; otherwise `manual_tidi_overrides` and the
+        // persisted owner note initialize `initial_tidi` on lazy system activation (`#1542`).
+        let _ = existing_handle
+            .map(|h| h.set_tidi_factor_raw(clamped_tidi))
+            .unwrap_or(prev_effective_factor);
+        persist_system_tidi_note(ctx, solar_system_id, clamped_tidi);
+    } else if had_override {
+        persist_system_tidi_note(ctx, solar_system_id, 1.0);
+        let _ = existing_handle
+            .map(|h| h.set_tidi_factor_raw(1.0))
+            .unwrap_or(prev_effective_factor);
+    }
+    if will_emit {
+        broadcast_sim_clock_rebase_to_space_chars(
+            ctx,
+            solar_system_id,
+            prev_sim_ft,
+            anchor_sim_ft,
+            rebase_gen,
+        );
     }
 }
 
@@ -355,13 +559,16 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
 /// transitions, and forces factor `1.0` deterministically (`#1081`). Skips rebase if already `1.0`.
 pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u32) -> f64 {
     let now_secs = ctx.now_unix() as f64;
-    {
+    // Acquire rank-10 handle lookup BEFORE rank-35 `cluster_nodes.write()` (matches `sync_anchored_system_tidi`).
+    let existing_handle = ctx.systems.get_handle(solar_system_id);
+    let (prev_override, prev_anchor_factor) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        cn.manual_tidi_overrides.remove(&solar_system_id);
+        let prev_ov = cn.manual_tidi_overrides.remove(&solar_system_id);
+        let prev_anchor = cn.sim_clock_anchoring.get(&solar_system_id).map(|a| a.2);
         let autoscaler_enabled = cn.latency_auto_tidi_enabled;
         let autoscaler = cn
             .system_tidi_autoscalers
@@ -373,13 +580,20 @@ pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u
                 )
             });
         autoscaler.clear_manual(now_secs);
-    }
+        (prev_ov, prev_anchor)
+    };
     persist_system_tidi_note(ctx, solar_system_id, 1.0);
-    if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+    let delta = crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+    if let Some(handle) = existing_handle {
         let old_factor = handle.set_tidi_factor_raw(1.0);
-        if (1.0 - old_factor).abs() >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
-        {
-            emit_sim_clock_rebase(ctx, solar_system_id, old_factor, 1.0);
+        let prev_factor = prev_override.or(prev_anchor_factor).unwrap_or(old_factor);
+        if (1.0 - old_factor).abs() >= delta || (1.0 - prev_factor).abs() >= delta {
+            emit_sim_clock_rebase(ctx, solar_system_id, prev_factor, 1.0);
+        }
+    } else {
+        let prev_factor = prev_anchor_factor.or(prev_override).unwrap_or(1.0);
+        if (1.0 - prev_factor).abs() >= delta {
+            emit_sim_clock_rebase(ctx, solar_system_id, prev_factor, 1.0);
         }
     }
     1.0
@@ -1048,16 +1262,15 @@ fn emit_cluster_shutdown_initiated(
 ) -> Vec<crate::router::cache_notifications::PendingMachoNotification> {
     // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments
     // and requires `when > blue.os.GetWallclockTime()` for `FormatTimeIntervalWritten`.
-    // Rebase virtual `now_unix` timestamps into client wallclock time (`now_unix - unrebased_clock_offset_secs`),
-    // matching `machoNet.GetTime` and `SafeLogoffTimer2` when `timeControl.AdvanceClock` has shifted sim time.
-    let effective_when_unix = shutdown_when_unix
-        .max(ctx.now_unix().saturating_add(60))
-        .saturating_sub(ctx.unrebased_clock_offset_secs());
+    // Rebase virtual `now_unix` timestamps into client wallclock `WallFileTime` (`now_unix - unrebased_clock_offset_secs`),
+    // matching `machoNet.GetTime` and `SafeLogoffTimer2` when `timeControl.AdvanceClock` has shifted sim time (#1586).
+    let effective_when_unix = shutdown_when_unix.max(ctx.now_unix().saturating_add(60));
+    let when = ctx.virtual_unix_to_machonet_wall_filetime(effective_when_unix);
     ctx.emit_typed(
         NotificationTarget::All,
         crate::router::notify_registry::OnClusterShutdownInitiated {
             explanation_label: "UI/Shared/ShutdownNotificationTitle".into(),
-            when: unix_to_filetime(effective_when_unix),
+            when,
             duration: duration_minutes,
         },
     )
@@ -1964,6 +2177,11 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("cluster", "ReinforceNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
     rpc_entry("cluster", "RebalanceNodes", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
 ];
+
+#[cfg(test)]
+fn unix_to_filetime(unix_secs: u64) -> i64 {
+    eve_db::clock::WallFileTime::from_unix_secs_saturating(unix_secs).as_ticks()
+}
 
 #[cfg(test)] #[path = "serverops_cluster_tests.rs"] mod serverops_cluster_tests;
 

@@ -131,8 +131,12 @@ pub fn emit_interference_changed_clusterwide(
     level: f64,
     band: u8,
 ) {
-    let local_state =
-        crate::services::pve_special_sites::build_interference_state_keyval(sys_id, level, band);
+    let local_state = crate::services::pve_special_sites::build_interference_state_keyval_at(
+        sys_id,
+        level,
+        band,
+        ctx.now_unix(),
+    );
     ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
         crate::router::notify_registry::OnSolarsystemInterferenceChanged {

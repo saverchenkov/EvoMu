@@ -474,7 +474,9 @@ pub fn emit_restoring_invuln_updated(
     ship_id: i64,
     duration_ft: i64,
 ) {
-    let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(duration_ft);
+    let end_ft = ctx
+        .now_system_sim_filetime_for_char(char_id)
+        .saturating_add_ticks(duration_ft);
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         OnRestoringInvulnUpdated {

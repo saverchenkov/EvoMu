@@ -10,6 +10,7 @@ use crate::router::cache_notifications::{
     next_notification_seq_id, push_or_stage_pending_notification, PendingMachoNotification,
 };
 use crate::router::{NotificationTarget, ServerContext};
+use eve_db::clock::{SimFileTime, WallFileTime};
 use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
 use std::collections::HashMap;
@@ -73,6 +74,35 @@ impl ToNotifyArg for String {
 impl ToNotifyArg for &str {
     fn into_notify_arg(self) -> PyRep {
         PyRep::String(self.to_string())
+    }
+}
+
+impl ToNotifyArg for WallFileTime {
+    fn into_notify_arg(self) -> PyRep {
+        PyRep::Integer(self.as_ticks())
+    }
+}
+
+impl ToNotifyArg for SimFileTime {
+    fn into_notify_arg(self) -> PyRep {
+        PyRep::Integer(self.as_ticks())
+    }
+}
+
+/// Wire argument for `OnGodmaShipEffect`'s 3rd positional slot (`t_or_start`), which carries
+/// either a boolean start/stop flag (minimal 3-arg form) or a simulation timestamp (10/11-arg form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GodmaEffectStartOrTime {
+    Flag(bool),
+    SimTime(SimFileTime),
+}
+
+impl ToNotifyArg for GodmaEffectStartOrTime {
+    fn into_notify_arg(self) -> PyRep {
+        match self {
+            Self::Flag(b) => PyRep::Bool(b),
+            Self::SimTime(ft) => ft.into_notify_arg(),
+        }
     }
 }
 
@@ -1120,7 +1150,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(90_000_002), PyRep::String("Help".into())]],
     },
     OnCharacterTemporarilyBanned => "OnCharacterTemporarilyBanned" ("charid") {
-        fields: { ban_expiry: i64 },
+        fields: { ban_expiry: WallFileTime },
         samples: || vec![vec![PyRep::Integer(1_335_000_000_000_000_00)]],
     },
     OnCharacterUnbanned => "OnCharacterUnbanned" ("charid") {
@@ -1161,7 +1191,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::String("UI/System/ShutdownCancelled".into())]],
     },
     OnClusterShutdownInitiated => "OnClusterShutdownInitiated" ("clientID") {
-        fields: { explanation_label: String, when: i64, duration: i64 },
+        fields: { explanation_label: String, when: WallFileTime, duration: i64 },
         samples: || vec![vec![
             PyRep::String("UI/System/ShutdownInitiated".into()),
             PyRep::Integer(1_335_000_000_000_000_00),
@@ -1200,7 +1230,7 @@ define_notifications! {
         samples: || vec![vec![]],
     },
     OnCrimewatchEngagementCreated => "OnCrimewatchEngagementCreated" ("charid") {
-        fields: { other_char_id: i64, timeout: i64 },
+        fields: { other_char_id: i64, timeout: WallFileTime },
         samples: || vec![vec![PyRep::Integer(90_000_002), PyRep::Integer(1_335_000_000_000_000_00)]],
     },
     OnCrimewatchEngagementEnded => "OnCrimewatchEngagementEnded" ("charid") {
@@ -1216,7 +1246,7 @@ define_notifications! {
         ],
     },
     OnCriminalTimerUpdate => "OnCriminalTimerUpdate" ("charid") {
-        fields: { state: i64, expiry_time: PyRep },
+        fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
         samples: || vec![
             vec![PyRep::Integer(301), PyRep::Integer(1_335_000_000_000_000_00)],
@@ -1251,7 +1281,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Bool(true), PyRep::Bool(true)]],
     },
     OnDisapprovalTimerUpdate => "OnDisapprovalTimerUpdate" ("charid") {
-        fields: { state: i64, expiry_time: PyRep },
+        fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
         samples: || vec![
             vec![PyRep::Integer(501), PyRep::Integer(1_335_000_000_000_000_00)],
@@ -1263,7 +1293,7 @@ define_notifications! {
             from_char_id: i64,
             from_corp_id: i64,
             from_alliance_id: Option<i64>,
-            expiry_time: i64,
+            expiry_time: WallFileTime,
         },
         samples: || vec![vec![
             PyRep::Integer(90_000_002),
@@ -1691,7 +1721,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::List(vec![PyRep::Integer(101)])]],
     },
     OnNpcTimerUpdate => "OnNpcTimerUpdate" ("charid") {
-        fields: { state: i64, expiry_time: PyRep },
+        fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
         samples: || vec![
             vec![PyRep::Integer(401), PyRep::Integer(1_335_000_000_000_000_00)],
@@ -1824,7 +1854,7 @@ define_notifications! {
         samples: || vec![vec![]],
     },
     OnPvpTimerUpdate => "OnPvpTimerUpdate" ("charid") {
-        fields: { state: i64, expiry_time: PyRep },
+        fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
         samples: || vec![
             vec![PyRep::Integer(201), PyRep::Integer(1_335_000_000_000_000_00)],
@@ -1853,7 +1883,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::keyval([("regionID", PyRep::Integer(10_000_002))])]],
     },
     OnRestoringInvulnUpdated => "OnRestoringInvulnUpdated" ("charid") {
-        fields: { ship_id: i64, end_time: i64, duration: i64 },
+        fields: { ship_id: i64, end_time: SimFileTime, duration: i64 },
         samples: || vec![vec![
             PyRep::Integer(100_000_010),
             PyRep::Integer(1_335_000_000_000_000_00),
@@ -2024,7 +2054,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(1)]],
     },
     OnSubscriptionTimeUpdateServer => "OnSubscriptionTimeUpdateServer" ("charid") {
-        fields: { omega_time: i64 },
+        fields: { omega_time: WallFileTime },
         samples: || vec![vec![PyRep::Integer(1_335_000_000_000_000_00)]],
     },
     OnSystemActivityUpdated => "OnSystemActivityUpdated" ("solarsystemid") {
@@ -2121,7 +2151,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Dict(Vec::new())]],
     },
     OnWeaponsTimerUpdate => "OnWeaponsTimerUpdate" ("charid") {
-        fields: { state: i64, expiry_time: PyRep },
+        fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
         samples: || vec![
             vec![PyRep::Integer(101), PyRep::Integer(1_335_000_000_000_000_00)],
@@ -2265,7 +2295,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(90_000_001), PyRep::Integer(1_700_000_000)]],
     },
     OnCrimewatchEngagementStartTimeout => "OnCrimewatchEngagementStartTimeout" ("charid") {
-        fields: { other_char_id: i64, timeout: i64 },
+        fields: { other_char_id: i64, timeout: WallFileTime },
         samples: || vec![vec![
             PyRep::Integer(90_000_002),
             PyRep::Integer(1_335_000_000_000_000_00),
@@ -2439,7 +2469,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Dict(Vec::new())]],
     },
     OnKillRightCreated => "OnKillRightCreated" ("charid") {
-        fields: { kill_right_id: i64, from_id: i64, to_id: i64, expiry_time: i64 },
+        fields: { kill_right_id: i64, from_id: i64, to_id: i64, expiry_time: WallFileTime },
         samples: || vec![vec![
             PyRep::Integer(1),
             PyRep::Integer(90_000_001),
@@ -3142,7 +3172,7 @@ define_notifications! {
         ]],
     },
     OnInvulunOnUndockingUpdated => "OnInvulunOnUndockingUpdated" ("charid") {
-        fields: { ship_id: i64, end_time: i64, duration: PyRep },
+        fields: { ship_id: i64, end_time: SimFileTime, duration: PyRep },
         samples: || vec![vec![
             PyRep::Integer(100_000_001),
             PyRep::Integer(133_500_000_000_000_000),
@@ -3826,7 +3856,7 @@ define_notifications! {
             item_id: i64,
             type_id: i64,
             active_effects: PyRep,
-            time: i64,
+            time: SimFileTime,
         },
         samples: || vec![vec![
             PyRep::Integer(100_000_020),
@@ -3860,16 +3890,16 @@ define_notifications! {
         ]],
     },
     OnGodmaShipEffect => "OnGodmaShipEffect" ("charid") {
-        fields: { item_id: i64, effect: PyRep, start_or_time: PyRep },
+        fields: { item_id: i64, effect: PyRep, start_or_time: GodmaEffectStartOrTime },
         optional: {
             start: Option<PyRep>,
             active: Option<PyRep>,
             environment: Option<PyRep>,
-            start_time: Option<PyRep>,
+            start_time: Option<SimFileTime>,
             duration: Option<PyRep>,
             repeat: Option<PyRep>,
             error: Option<PyRep>,
-            actual_stop_time: Option<PyRep>,
+            actual_stop_time: Option<Option<SimFileTime>>,
         },
         samples: || vec![vec![
             PyRep::Integer(200_018_015),
@@ -3895,7 +3925,7 @@ define_notifications! {
             module_id: i64,
             target_ball_id: i64,
             jamming_type: String,
-            start_time: i64,
+            start_time: SimFileTime,
             duration: f64,
         },
         samples: || vec![vec![
@@ -3912,7 +3942,7 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(100_000_010)]],
     },
     OnJumpCloakUpdated => "OnJumpCloakUpdated" ("charid") {
-        fields: { ship_id: i64, end_time: i64, duration: i64 },
+        fields: { ship_id: i64, end_time: SimFileTime, duration: i64 },
         samples: || vec![vec![
             PyRep::Integer(100_000_010),
             PyRep::Integer(1_335_000_600_000_000_00),
@@ -3937,9 +3967,9 @@ define_notifications! {
     },
     OnJumpTimersUpdated => "OnJumpTimersUpdated" ("charid") {
         fields: {
-            jump_activation: i64,
-            jump_fatigue: i64,
-            last_updated: i64,
+            jump_activation: WallFileTime,
+            jump_fatigue: WallFileTime,
+            last_updated: WallFileTime,
             do_alert: bool,
         },
         samples: || vec![vec![

@@ -23,6 +23,7 @@ use crate::router::notify_registry::{
 };
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use crate::services::inventory_fitting::fitting_containers_ships;
+use eve_db::clock::SimFileTime;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 
@@ -142,13 +143,13 @@ pub fn emit_weapons_timer_update(
     ctx: &ServerContext,
     char_id: i64,
     state_code: i64,
-    expiry_val: PyRep,
+    expiry_time: Option<SimFileTime>,
 ) {
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         OnWeaponsTimerUpdate {
             state: state_code,
-            expiry_time: expiry_val,
+            expiry_time,
             do_alert: None,
         },
     );
@@ -160,13 +161,13 @@ pub fn emit_pvp_timer_update(
     ctx: &ServerContext,
     char_id: i64,
     state_code: i64,
-    expiry_val: PyRep,
+    expiry_time: Option<SimFileTime>,
 ) {
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         OnPvpTimerUpdate {
             state: state_code,
-            expiry_time: expiry_val,
+            expiry_time,
             do_alert: None,
         },
     );
@@ -178,13 +179,13 @@ pub fn emit_criminal_timer_update(
     ctx: &ServerContext,
     char_id: i64,
     state_code: i64,
-    expiry_val: PyRep,
+    expiry_time: Option<SimFileTime>,
 ) {
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         OnCriminalTimerUpdate {
             state: state_code,
-            expiry_time: expiry_val,
+            expiry_time,
             do_alert: None,
         },
     );

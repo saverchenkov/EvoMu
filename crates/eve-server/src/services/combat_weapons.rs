@@ -5,7 +5,7 @@
 use super::*;
 
 fn emit_limited_engagement_created(ctx: &ServerContext, char_a: i64, char_b: i64) {
-    let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+    let timeout_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(300);
     ctx.emit_typed(
         NotificationTarget::Character(char_a),
         crate::router::notify_registry::OnCrimewatchEngagementCreated {

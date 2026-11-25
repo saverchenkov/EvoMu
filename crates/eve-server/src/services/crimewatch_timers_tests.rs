@@ -766,6 +766,205 @@ fn war_interference_assistance_honors_ally_expiry_and_alliance_allies() {
     }
 }
 
+#[tokio::test]
+async fn crimewatch_timers_scale_sim_expiries_under_tidi_and_reemit_on_tidi_change() {
+    use crate::services::serverops_cluster::{
+        clear_manual_system_tidi_override, set_system_tidi_factor,
+    };
+    use eve_db::clock::{SimFileTime, VirtualServerClock, FILETIME_TICKS_PER_SEC};
+
+    let base = 1_800_000_000_u64;
+    let (ctx, _old_sess, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(std::sync::Arc::new(VirtualServerClock::with_fixed_base(base)));
+    let idle_char_id = 90_000_009_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == 1)
+            .expect("account 1")
+            .clone();
+        acc.user_id = 9;
+        acc.username = "idle_pilot_9".into();
+        snap.accounts.insert(acc.username.clone(), acc);
+
+        let mut ch = snap.characters[&char_id].clone();
+        ch.character_id = idle_char_id;
+        ch.user_id = 9;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(idle_char_id, ch);
+    });
+    ctx.db
+        .acquire_online_lock(1, 501, Some(char_id), true, base)
+        .expect("fighter online lock");
+    ctx.db
+        .acquire_online_lock(9, 509, Some(idle_char_id), true, base)
+        .expect("idle pilot online lock");
+
+    // Start in 0.25x TiDi and drain initial DoSimClockRebase notifications.
+    let applied_025 = set_system_tidi_factor(&ctx, sys_id, 0.25);
+    assert!((applied_025 - 0.25).abs() < 1e-9);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(idle_char_id);
+
+    let weapon_exp = base + 60;
+    let pvp_exp = base + 900;
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        st.weapon_timer_until_unix = weapon_exp;
+        st.pvp_timer_until_unix = pvp_exp;
+    }
+
+    let sim_0: SimFileTime = ctx.peek_system_sim_filetime(sys_id).expect("0.25 TiDi clock");
+    emit_crimewatch_timer_notifications(&ctx, char_id, ctx.now_unix());
+    let notifs_0 = ctx.drain_notifications_for_char(char_id);
+    let w_notif_0 = notifs_0
+        .iter()
+        .find(|n| n.event == "OnWeaponsTimerUpdate")
+        .expect("initial OnWeaponsTimerUpdate");
+    assert_eq!(w_notif_0.args[0].as_i64(), Some(101));
+    let w_exp_sim_0 = w_notif_0.args[1].as_i64().expect("weapons sim expiry");
+    assert_eq!(
+        w_exp_sim_0,
+        sim_0.as_ticks() + 15 * FILETIME_TICKS_PER_SEC,
+        "60s wall weapon timer in 0.25x TiDi must expire at +15s SimFileTime"
+    );
+    let p_notif_0 = notifs_0
+        .iter()
+        .find(|n| n.event == "OnPvpTimerUpdate")
+        .expect("initial OnPvpTimerUpdate");
+    assert_eq!(p_notif_0.args[0].as_i64(), Some(201));
+    let p_exp_sim_0 = p_notif_0.args[1].as_i64().expect("pvp sim expiry");
+    assert_eq!(p_exp_sim_0, sim_0.as_ticks() + 225 * FILETIME_TICKS_PER_SEC);
+
+    let mut sess = SessionState::default();
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    let kw = HashMap::new();
+    let cs_0 = handle_crimewatch(&ctx, &mut sess, "crimewatch", "GetClientStates", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Tuple(cs0_parts) = cs_0 else {
+        panic!("GetClientStates tuple");
+    };
+    let PyRep::Tuple(cs0_timers) = &cs0_parts[0] else {
+        panic!("GetClientStates timers tuple");
+    };
+    let PyRep::Tuple(cs0_w) = &cs0_timers[0] else {
+        panic!("weapons timer entry");
+    };
+    assert_eq!(cs0_w[0].as_i64(), Some(101));
+    assert_eq!(cs0_w[1].as_i64(), Some(w_exp_sim_0));
+
+    // Advance 20 real wall seconds in 0.25x TiDi -> SimTime advances +5s, 40s wall left (10s sim).
+    // Active -> cooldown transition (101 -> 102, 201 -> 202) keeps invariant SimFileTime expiry.
+    ctx.advance_secs(20);
+    let sim_20 = ctx.peek_system_sim_filetime(sys_id).expect("sim at +20s");
+    assert_eq!(sim_20, sim_0.saturating_add_secs(5));
+    emit_crimewatch_timer_notifications(&ctx, char_id, ctx.now_unix());
+    let notifs_20 = ctx.drain_notifications_for_char(char_id);
+    let w_notif_20 = notifs_20
+        .iter()
+        .find(|n| n.event == "OnWeaponsTimerUpdate")
+        .expect("101 -> 102 OnWeaponsTimerUpdate");
+    assert_eq!(w_notif_20.args[0].as_i64(), Some(102));
+    assert_eq!(
+        w_notif_20.args[1].as_i64(),
+        Some(w_exp_sim_0),
+        "remaining SimFileTime expiry must remain invariant while TiDi holds at 0.25x"
+    );
+    let p_notif_20 = notifs_20
+        .iter()
+        .find(|n| n.event == "OnPvpTimerUpdate")
+        .expect("201 -> 202 OnPvpTimerUpdate");
+    assert_eq!(p_notif_20.args[0].as_i64(), Some(202));
+    assert_eq!(p_notif_20.args[1].as_i64(), Some(p_exp_sim_0));
+
+    // Drain any clock-advance rebase delivered to idle_char_id during advance_secs(20) before
+    // testing the 0.25 -> 0.50 TiDi transition isolatedly.
+    let _ = ctx.drain_notifications_for_char(idle_char_id);
+
+    // Transition TiDi 0.25 -> 0.50: DoSimClockRebase fires and active timers re-emit scaled expiries;
+    // idle pilots only receive DoSimClockRebase with zero CrimeWatch timer churn.
+    let applied_050 = set_system_tidi_factor(&ctx, sys_id, 0.50);
+    assert!((applied_050 - 0.50).abs() < 1e-9);
+    let idle_notifs = ctx.drain_notifications_for_char(idle_char_id);
+    assert_eq!(
+        idle_notifs.iter().filter(|n| n.event == "DoSimClockRebase").count(),
+        1
+    );
+    assert!(
+        idle_notifs
+            .iter()
+            .all(|n| !n.event.ends_with("TimerUpdate")),
+        "idle pilot must not receive CrimeWatch timer churn on TiDi change"
+    );
+    let tidi50_notifs = ctx.drain_notifications_for_char(char_id);
+    let rebase_pos = tidi50_notifs
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase emitted first");
+    let w_pos = tidi50_notifs
+        .iter()
+        .position(|n| n.event == "OnWeaponsTimerUpdate")
+        .expect("active weapons timer re-emitted on TiDi transition");
+    assert!(rebase_pos < w_pos);
+    // 40s wall left at 0.50x TiDi -> sim_20 + 20s sim ticks.
+    assert_eq!(tidi50_notifs[w_pos].args[0].as_i64(), Some(102));
+    assert_eq!(
+        tidi50_notifs[w_pos].args[1].as_i64(),
+        Some(sim_20.as_ticks() + 20 * FILETIME_TICKS_PER_SEC)
+    );
+    let p_50 = tidi50_notifs
+        .iter()
+        .find(|n| n.event == "OnPvpTimerUpdate")
+        .expect("active pvp timer re-emitted on TiDi transition");
+    // 880s wall left at 0.50x TiDi -> sim_20 + 440s sim ticks.
+    assert_eq!(p_50.args[0].as_i64(), Some(202));
+    assert_eq!(
+        p_50.args[1].as_i64(),
+        Some(sim_20.as_ticks() + 440 * FILETIME_TICKS_PER_SEC)
+    );
+
+    // Advance 20 real wall seconds in 0.50x TiDi -> sim advances +10s (sim_20 + 10s), 20s wall left.
+    // Restore TiDi 0.50 -> 1.0: re-emits 102 with sim_40 + 20s and matches GetClientStates.
+    ctx.advance_secs(20);
+    let sim_40 = ctx.peek_system_sim_filetime(sys_id).expect("sim at +40s");
+    assert_eq!(sim_40, sim_20.saturating_add_secs(10));
+    let restored = clear_manual_system_tidi_override(&ctx, sys_id);
+    assert!((restored - 1.0).abs() < 1e-9);
+    let tidi100_notifs = ctx.drain_notifications_for_char(char_id);
+    let w_100 = tidi100_notifs
+        .iter()
+        .find(|n| n.event == "OnWeaponsTimerUpdate")
+        .expect("active weapons timer re-emitted when TiDi clears to 1.0");
+    let expected_w_100 = sim_40.as_ticks() + 20 * FILETIME_TICKS_PER_SEC;
+    assert_eq!(w_100.args[0].as_i64(), Some(102));
+    assert_eq!(w_100.args[1].as_i64(), Some(expected_w_100));
+
+    let cs_1 = handle_crimewatch(&ctx, &mut sess, "crimewatch", "GetClientStates", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Tuple(cs1_parts) = cs_1 else {
+        panic!("GetClientStates tuple");
+    };
+    let PyRep::Tuple(cs1_timers) = &cs1_parts[0] else {
+        panic!("GetClientStates timers tuple");
+    };
+    let PyRep::Tuple(cs1_w) = &cs1_timers[0] else {
+        panic!("weapons timer entry");
+    };
+    assert_eq!(cs1_w[0].as_i64(), Some(102));
+    assert_eq!(cs1_w[1].as_i64(), Some(expected_w_100));
+}
+
 #[cfg(test)]
 #[path = "crimewatch_timers_extra_unit_tests.rs"]
 mod crimewatch_timers_extra_unit_tests;

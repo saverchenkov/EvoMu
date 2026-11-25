@@ -664,3 +664,175 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         assert!(snap.market_orders.get(&expired_oid).map_or(true, |o| o.vol_remaining == 0));
     });
 }
+
+#[tokio::test]
+async fn test_mid_cycle_tidi_transition_dilates_remaining_duration_and_aligns_wire_timestamps() {
+    use eve_db::clock::{SimFileTime, FILETIME_TICKS_PER_MS};
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut s_jita = setup_pilot(&ctx, 19_201, "demo", "demo-secret", P1).await;
+    s_jita.station_id = None;
+    s_jita.solar_system_id = Some(JITA_SYSTEM_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&P1) {
+            c1.station_id = None;
+            c1.structure_id = None;
+            c1.solar_system_id = JITA_SYSTEM_ID;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(P1);
+
+    // Anchor Jita with a non-zero -300_000 ms (sim - wall) offset at TiDi = 1.0 before cycling.
+    let initial_clock = ctx.anchor_system_sim_clock_with_offset_ms(JITA_SYSTEM_ID, -300_000, 1.0);
+    assert_eq!(initial_clock.sim_minus_wall_offset_ms(), Some(-300_000));
+    let wall_t0 = ctx.now_machonet_wall_filetime();
+    let sim_t0 = ctx
+        .peek_system_sim_filetime(JITA_SYSTEM_ID)
+        .expect("anchored Jita sim clock");
+    assert_eq!(sim_t0.as_ticks() - wall_t0.as_ticks(), -300_000 * FILETIME_TICKS_PER_MS);
+
+    let jita_sys = ctx.systems.get_or_spawn(JITA_SYSTEM_ID);
+    let jita_ship = 910_010_i64;
+    let mod_id = 910_011_i64;
+    jita_sys
+        .spawn_ball_with_combat(spawn_test_ship_ball(jita_ship), CombatState::new())
+        .await
+        .unwrap();
+    jita_sys
+        .add_module_cycle(ActiveModuleCycle {
+            ship_id: jita_ship,
+            module_id: mod_id,
+            module_type_id: 10_838,
+            owner_char_id: Some(P1),
+            duration_s: 6.0,
+            repeat: 0,
+            armor_repair_amount: 40.0,
+            damage_vector: DamageVector::new(0.0, 0.0, 0.0, 0.0),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Phase 1 (1.0x TiDi): 2 wall ticks -> 2.0s sim elapsed, 4.0s remaining.
+    for _ in 0..2 {
+        ctx.advance_secs(1);
+        jita_sys.step_manual(1.0).await.unwrap();
+    }
+    assert!((jita_sys.sim_elapsed_secs() - 2.0).abs() < 1e-6);
+    assert!(
+        jita_sys.has_module_cycle(jita_ship, mod_id).await,
+        "6.0s module cycle must remain active at 2.0s sim elapsed"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(P1)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "Phase 1 ticks must not prematurely complete 6.0s module cycle"
+    );
+
+    // Mid-cycle TiDi change #1: 1.00 -> 0.25. Remaining 4.0s sim duration now requires 16 wall seconds.
+    let applied_025 = set_system_tidi_factor(&ctx, JITA_SYSTEM_ID, 0.25);
+    assert!((applied_025 - 0.25).abs() < 1e-9);
+    let notifs_025 = ctx.drain_notifications_for_char(P1);
+    assert!(
+        notifs_025.iter().any(|n| n.event == "DoSimClockRebase"),
+        "Mid-cycle TiDi shift 1.0 -> 0.25 must emit DoSimClockRebase: {notifs_025:?}"
+    );
+    assert!(
+        !notifs_025.iter().any(|n| n.event == "OnGodmaShipEffect"),
+        "Mid-cycle TiDi shift must not prematurely end active cycle"
+    );
+
+    // Phase 2 (0.25x TiDi): 8 wall ticks -> +2.0s sim elapsed (4.0s total), 2.0s sim remaining.
+    for _ in 0..8 {
+        ctx.advance_secs(1);
+        jita_sys.step_manual(1.0).await.unwrap();
+    }
+    assert!((jita_sys.sim_elapsed_secs() - 4.0).abs() < 1e-6);
+    assert!(
+        jita_sys.has_module_cycle(jita_ship, mod_id).await,
+        "Dilated 6.0s cycle must still have 2.0s sim remaining after 8 wall ticks at 0.25 TiDi"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(P1)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "Phase 2 ticks must not prematurely complete dilated module cycle"
+    );
+
+    // Mid-cycle TiDi change #2: 0.25 -> 0.50. Remaining 2.0s sim duration now requires 4 wall seconds.
+    let applied_050 = set_system_tidi_factor(&ctx, JITA_SYSTEM_ID, 0.50);
+    assert!((applied_050 - 0.50).abs() < 1e-9);
+    let notifs_050 = ctx.drain_notifications_for_char(P1);
+    let rebase_050 = notifs_050
+        .iter()
+        .find(|n| n.event == "DoSimClockRebase")
+        .expect("Mid-cycle TiDi shift 0.25 -> 0.50 must emit DoSimClockRebase");
+    let (old_sim_ft, new_sim_ft) = match rebase_050.args.first() {
+        Some(PyRep::Tuple(t)) if t.len() == 2 => (
+            t[0].as_i64().expect("DoSimClockRebase oldSimTime"),
+            t[1].as_i64().expect("DoSimClockRebase newSimTime"),
+        ),
+        other => panic!("unexpected DoSimClockRebase payload: {other:?}"),
+    };
+    assert_eq!(old_sim_ft - new_sim_ft, 60_000_000);
+    assert_eq!(
+        new_sim_ft,
+        sim_t0.saturating_add_secs(4).as_ticks(),
+        "Rebased newSimTime must align with 4.0s cumulative sim time anchored at -300_000 ms"
+    );
+
+    // Phase 3 (0.50x TiDi): 3 wall ticks -> 5.5s sim elapsed (still active); 4th tick -> 6.0s (finishes).
+    for _ in 0..3 {
+        ctx.advance_secs(1);
+        jita_sys.step_manual(1.0).await.unwrap();
+    }
+    assert!((jita_sys.sim_elapsed_secs() - 5.5).abs() < 1e-6);
+    assert!(
+        jita_sys.has_module_cycle(jita_ship, mod_id).await,
+        "Cycle must still remain active at 5.5s sim elapsed (0.5s remaining)"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(P1)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "OnGodmaShipEffect deactivation must not fire before final dilated tick"
+    );
+
+    ctx.advance_secs(1);
+    jita_sys.step_manual(1.0).await.unwrap();
+    assert!((jita_sys.sim_elapsed_secs() - 6.0).abs() < 1e-6);
+    assert!(
+        !jita_sys.has_module_cycle(jita_ship, mod_id).await,
+        "Cycle must complete cleanly after 4th wall tick at 0.50 TiDi (6.0s total sim elapsed)"
+    );
+
+    let final_notifs = ctx.drain_notifications_for_char(P1);
+    let stop_godma = final_notifs
+        .iter()
+        .find(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(mod_id)
+        })
+        .expect("Completing cycle must emit OnGodmaShipEffect deactivation");
+    let stop_sim_ft = SimFileTime::from_ticks(
+        stop_godma.args[2]
+            .as_i64()
+            .expect("OnGodmaShipEffect start_or_time SimFileTime"),
+    );
+    assert_eq!(stop_godma.args[6].as_i64(), Some(stop_sim_ft.as_ticks()));
+    let expected_sim_end = ctx
+        .peek_system_sim_filetime(JITA_SYSTEM_ID)
+        .expect("anchored Jita sim clock");
+    let wall_end = ctx.now_machonet_wall_filetime();
+    assert_eq!(expected_sim_end, sim_t0.saturating_add_secs(6));
+    assert_eq!(wall_end, wall_t0.saturating_add_secs(14));
+    assert_eq!(stop_sim_ft, expected_sim_end);
+    assert_eq!(
+        wall_end.as_ticks() - stop_sim_ft.as_ticks(),
+        308 * 10_000_000,
+        "Wire OnGodmaShipEffect deactivation timestamp must align with SimFileTime (-300s offset + 8s cumulative TiDi dilation)"
+    );
+}

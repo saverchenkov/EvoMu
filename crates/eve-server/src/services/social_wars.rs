@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 
 use crate::domain::wars::{self, AllyNegotiationAction, MutualWarAcceptOutcome};
+#[cfg(test)]
+use crate::domain::wars::unix_to_filetime;
 use crate::router::ServerContext;
 use eve_db::{IskCents, PersistedNegKind as NegKind, WorldStateSnapshot};
 use eve_machonet::SessionState;
@@ -20,8 +22,8 @@ use social_wars_helpers::{
     already_at_war, corp_represents_war_side, emit_mutual_wars_updated, emit_war_changed,
     entity_matches_war_owner, err, is_ally_neg_active_at, is_valid_war_hq, is_war_participant_corp,
     neg_rows_for_caller, opt_unix_to_filetime_py, resolve_entity_alliance_id, resolve_war_stat_id,
-    rpc_err, same_alliance, sync_wars, unix_to_filetime, war_crowset, war_eligible, war_row,
-    NEG_COLUMNS, WAR_COLUMNS, WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
+    rpc_err, same_alliance, sync_wars, unix_to_wall_filetime, wall_ft_py, war_crowset,
+    war_eligible, war_row, NEG_COLUMNS, WAR_COLUMNS, WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
 };
 
 struct WarKill {
@@ -197,15 +199,11 @@ fn handle_war_stat_set_session_check(
 }
 
 fn parse_war_unix_timestamp(rep: &PyRep) -> Option<u64> {
-    const WIN_FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
-    const WIN_TICKS_PER_SEC: i64 = 10_000_000;
     let raw = rep.as_i64()?;
-    if raw >= WIN_FILETIME_UNIX_EPOCH {
-        u64::try_from((raw - WIN_FILETIME_UNIX_EPOCH) / WIN_TICKS_PER_SEC).ok()
-    } else if raw >= 0 {
-        u64::try_from(raw).ok()
+    if let Some(secs) = eve_db::clock::WallFileTime::from_ticks(raw).to_unix_secs_floor() {
+        Some(secs)
     } else {
-        None
+        u64::try_from(raw).ok()
     }
 }
 
@@ -374,13 +372,13 @@ fn handle_war_registry_gm_rpc(
                 Ok(vec![
                     (
                         "timeDeclared",
-                        PyRep::Integer(unix_to_filetime(upd.prev_declared_unix)),
-                        PyRep::Integer(unix_to_filetime(declared_unix)),
+                        wall_ft_py(unix_to_wall_filetime(upd.prev_declared_unix)),
+                        wall_ft_py(unix_to_wall_filetime(declared_unix)),
                     ),
                     (
                         "timeStarted",
-                        PyRep::Integer(unix_to_filetime(upd.prev_started_unix)),
-                        PyRep::Integer(unix_to_filetime(upd.new_started_unix)),
+                        wall_ft_py(unix_to_wall_filetime(upd.prev_started_unix)),
+                        wall_ft_py(unix_to_wall_filetime(upd.new_started_unix)),
                     ),
                 ])
             }
@@ -544,8 +542,8 @@ pub(super) fn handle_wars(
                 ("declaredByID", PyRep::Integer(my_corp)),
                 ("againstID", PyRep::Integer(defender)),
                 ("warHQ", PyRep::Integer(hq)),
-                ("timeDeclared", PyRep::Integer(unix_to_filetime(now))),
-                ("timeStarted", PyRep::Integer(unix_to_filetime(now + WAR_TIMER_SECS))),
+                ("timeDeclared", wall_ft_py(unix_to_wall_filetime(now))),
+                ("timeStarted", wall_ft_py(unix_to_wall_filetime(now + WAR_TIMER_SECS))),
                 ("billCost", PyRep::Real(WAR_DECLARATION_FEE_ISK as f64)),
             ])))
         }
@@ -687,7 +685,7 @@ pub(super) fn handle_wars(
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
                 return err("WarNotFound", format!("War {wid} not found"));
             };
-            Some(Ok(PyRep::Integer(unix_to_filetime(w.started_unix))))
+            Some(Ok(wall_ft_py(unix_to_wall_filetime(w.started_unix))))
         }
 
         ("warRegistry", "timeStarted") => {
@@ -702,7 +700,7 @@ pub(super) fn handle_wars(
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
                 return err("WarNotFound", format!("War {wid} not found"));
             };
-            Some(Ok(PyRep::Integer(unix_to_filetime(wars::war_started_unix(&w)))))
+            Some(Ok(wall_ft_py(unix_to_wall_filetime(wars::war_started_unix(&w)))))
         }
 
         ("warRegistry", "timeFinished") => {
@@ -940,15 +938,15 @@ pub(super) fn handle_wars(
                 ("status", PyRep::String(status.into())),
             ];
             if let Some((effective, expiry)) = outcome {
-                out.push(("timeFinished", PyRep::Integer(unix_to_filetime(effective))));
-                out.push(("peaceTreatyExpiry", PyRep::Integer(unix_to_filetime(expiry))));
+                out.push(("timeFinished", wall_ft_py(unix_to_wall_filetime(effective))));
+                out.push(("peaceTreatyExpiry", wall_ft_py(unix_to_wall_filetime(expiry))));
                 emit_war_changed(
                     ctx,
                     n.war_id,
                     vec![(
                         "timeFinished",
                         PyRep::None,
-                        PyRep::Integer(unix_to_filetime(effective)),
+                        wall_ft_py(unix_to_wall_filetime(effective)),
                     )],
                 );
             } else {
@@ -984,7 +982,7 @@ pub(super) fn handle_wars(
             ];
             if let Some(effective) = outcome.effective_unix {
                 out.push(("allyID", PyRep::Integer(outcome.ally_id)));
-                out.push(("timeStarted", PyRep::Integer(unix_to_filetime(effective))));
+                out.push(("timeStarted", wall_ft_py(unix_to_wall_filetime(effective))));
                 emit_war_changed(
                     ctx,
                     outcome.war_id,
@@ -1005,13 +1003,13 @@ pub(super) fn handle_wars(
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
-            let finish_ft = unix_to_filetime(finish);
+            let finish_ft = wall_ft_py(unix_to_wall_filetime(finish));
             emit_war_changed(
                 ctx,
                 war_id,
-                vec![("timeFinished", PyRep::None, PyRep::Integer(finish_ft))],
+                vec![("timeFinished", PyRep::None, finish_ft.clone())],
             );
-            Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("timeFinished", PyRep::Integer(finish_ft))])))
+            Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("timeFinished", finish_ft)])))
         }
 
         ("warsInfoMgr" | "warRegistry", "SetOpenForAllies") => {
@@ -1057,7 +1055,7 @@ pub(super) fn handle_wars(
                         let start = n.effective_unix.unwrap_or(now);
                         vec![
                             PyRep::Integer(n.from_corp),
-                            PyRep::Integer(unix_to_filetime(start)),
+                            wall_ft_py(unix_to_wall_filetime(start)),
                             PyRep::Real(n.isk.to_wire_f64()),
                             PyRep::Bool(is_ally_neg_active_at(snap, n, now)),
                         ]
@@ -1080,7 +1078,7 @@ pub(super) fn handle_wars(
                         ("otherOwnerID", PyRep::Integer(self.other_owner_id)),
                         (
                             "expiryDate",
-                            PyRep::Integer(unix_to_filetime(self.expiry_unix)),
+                            wall_ft_py(unix_to_wall_filetime(self.expiry_unix)),
                         ),
                         ("peaceReason", PyRep::Integer(4)),
                     ])
@@ -1170,7 +1168,7 @@ pub(super) fn handle_wars(
                     .insert((my_corp, to_corp), now);
             });
             emit_mutual_wars_updated(ctx, char_id, my_corp, to_corp);
-            Some(Ok(PyRep::keyval([("fromID", PyRep::Integer(my_corp)), ("toID", PyRep::Integer(to_corp)), ("sentDate", PyRep::Integer(unix_to_filetime(now)))])))
+            Some(Ok(PyRep::keyval([("fromID", PyRep::Integer(my_corp)), ("toID", PyRep::Integer(to_corp)), ("sentDate", wall_ft_py(unix_to_wall_filetime(now)))])))
         }
 
         ("mutualWarInviteMgr", "GetPendingInvitesForSession") => {
@@ -1183,7 +1181,7 @@ pub(super) fn handle_wars(
                         vec![
                             PyRep::Integer(f),
                             PyRep::Integer(t),
-                            PyRep::Integer(unix_to_filetime(ts)),
+                            wall_ft_py(unix_to_wall_filetime(ts)),
                         ]
                     })
                     .collect()
@@ -1317,8 +1315,8 @@ pub(super) fn handle_wars(
                             PyRep::Integer(aid),
                             PyRep::keyval([
                                 ("allyID", PyRep::Integer(aid)),
-                                ("timeStarted", PyRep::Integer(unix_to_filetime(started))),
-                                ("timeFinished", PyRep::Integer(unix_to_filetime(finished))),
+                                ("timeStarted", wall_ft_py(unix_to_wall_filetime(started))),
+                                ("timeFinished", wall_ft_py(unix_to_wall_filetime(finished))),
                             ]),
                         )
                     })
@@ -1498,7 +1496,7 @@ fn handle_war_statistic_kills(
                 PyRep::Integer(k.victim_corp),
                 k.victim_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
                 PyRep::Integer(k.victim_ship_type_id as i64),
-                PyRep::Integer(unix_to_filetime(k.kill_time_unix)),
+                wall_ft_py(unix_to_wall_filetime(k.kill_time_unix)),
             ]
         })
         .collect();

@@ -493,10 +493,7 @@ impl BugIncidentBundle {
         stack_key: impl Into<String>,
         trace: impl Into<String>,
     ) -> Self {
-        let now_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_millis = eve_db::WallUnixMs::system_now().as_millis();
 
         let iso_time = crate::esi::sample_routes::format_iso8601_utc(now_millis / 1000);
         let incident_id = Uuid::new_v4().to_string();
@@ -1358,10 +1355,7 @@ fn handle_post_bug_issue(
         .map(|(d, s)| (d.trim().to_string(), s))
         .unwrap_or_else(|| (raw_description.trim().to_string(), ""));
 
-    let now_millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let now_millis = eve_db::WallUnixMs::system_now().as_millis();
     let iso_time = crate::esi::sample_routes::format_iso8601_utc(now_millis / 1000);
     let incident_id = Uuid::new_v4().to_string();
     let seq = ctx.bug_reporting.next_seq();
