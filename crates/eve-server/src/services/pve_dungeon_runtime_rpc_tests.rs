@@ -438,6 +438,166 @@ async fn on_dungeon_approach_is_read_pure_until_trigger_fires_and_allocates_mono
     assert_ne!(ids_1.1, ids_2.1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_indexed_multi_room_dng_inst_traversal_and_enter_next_room_observatory_guard() {
+    use crate::services::pve_dungeon_runtime::with_dungeon_runtime_store;
+    use crate::services::pve_exploration::handle_pve_exploration;
+    use crate::services::pve_fob_observatory::{get_observatory_site_state, spawn_observatory_flashpoint};
+
+    let pochven_sys = shared_sde()
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("SDE has Pochven solar system");
+    let char_id: i64 = 90_040_015;
+    let ship_id: i64 = 1_020_000_005;
+    let (ctx, mut sess) = make_ctx_and_ship(pochven_sys, char_id, ship_id, 1_000_000.0);
+    let _ = spawn_observatory_flashpoint(&ctx, pochven_sys)
+        .await
+        .expect("spawn Observatory Flashpoint");
+    let obs = get_observatory_site_state(&ctx, pochven_sys).expect("observatory persisted");
+    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(obs.gate_pos)).await;
+    let world_ark_before = sys_handle
+        .get_ball_snapshot(obs.world_ark_id)
+        .await
+        .unwrap()
+        .expect("World Ark spawned");
+    let kw = HashMap::new();
+
+    // R4-P1-02: keeper.EnterNextDungeonRoom(obs.gate_id) must route through Observatory guards
+    // (rejecting solo pilot) and must never invoke generic runtime gate activation or reconcile overwrite.
+    let enter_obs_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "EnterNextDungeonRoom",
+        &[PyRep::Integer(obs.gate_id)],
+        &kw,
+    )
+    .await
+    .expect("Observatory gate handled")
+    .expect_err("solo pilot must be rejected by Observatory fleet guard");
+    assert_ne!(enter_obs_err.code, "DungeonNotFound");
+    assert!(
+        try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &[PyRep::Integer(obs.gate_id)])
+            .await
+            .is_none(),
+        "Flashpoint integer gate_id must be excluded from generic dungeon runtime gate activation"
+    );
+    let (_, ship_after_obs) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(ship_after_obs.position.distance(DVec3::from_array(obs.gate_pos)) < 1.0);
+    let world_ark_after = sys_handle
+        .get_ball_snapshot(obs.world_ark_id)
+        .await
+        .unwrap()
+        .expect("World Ark still present");
+    assert_eq!(world_ark_after.1.radius, world_ark_before.1.radius);
+
+    // R4-P1-01 (Part A): 3-room 0-indexed (0, 1, 2) traversal without entry gate: Room 0 -> Room 1 -> Room 2.
+    let (diff1_did, _) = find_difficulty1_and_any_dungeon(&ctx.sde);
+    let (r0_pos, r1_pos, r2_pos) = (
+        [85_000_000.0, 0.0, 0.0],
+        [85_500_000.0, 0.0, 0.0],
+        [86_000_000.0, 0.0, 0.0],
+    );
+    let (g0_id, g1_id) = (77_990_001_i64, 77_990_002_i64);
+    let mk_room = |idx: usize, pos: [f64; 3], dest: [f64; 3], gid: Option<i64>| DungeonRuntimeRoom {
+        room_index: idx,
+        room_id: 9780 + (idx as i64),
+        room_name: format!("Z{idx}"),
+        position: pos,
+        gate_destination_pos: dest,
+        gated: idx > 0,
+        gate_ball_id: gid,
+        gate_locked: false,
+        ..Default::default()
+    };
+    let inst_no_entry = DungeonRuntimeInstance {
+        instance_id: 978_001,
+        dungeon_id: diff1_did,
+        dungeon_name: "ZeroIndexed".into(),
+        category: "Deadspace".into(),
+        archetype: "Deadspace".into(),
+        solar_system_id: pochven_sys,
+        owner_char_id: char_id,
+        base_position: r0_pos,
+        current_room_index: 0,
+        rooms: vec![
+            mk_room(0, r0_pos, r0_pos, Some(g0_id)),
+            mk_room(1, r1_pos, [r1_pos[0] - 5_000.0, 0.0, 0.0], Some(g1_id)),
+            mk_room(2, r2_pos, [r2_pos[0] - 5_000.0, 0.0, 0.0], None),
+        ],
+        created_unix: 1_775_300_000,
+        ..Default::default()
+    };
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(978_001, inst_no_entry);
+    });
+    let tag_a = [PyRep::String("DNG-INST-978001".into())];
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(r0_pos[0] + 5_000.0, 0.0, 0.0)).await;
+    let step1 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &tag_a)
+        .await
+        .expect("R0->R1")
+        .expect("R0 gate succeeds");
+    assert_eq!(step1.dict_get("roomID").and_then(|v| v.as_i64()), Some(9781));
+
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(r1_pos[0] + 5_000.0, 0.0, 0.0)).await;
+    let step2 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &tag_a)
+        .await
+        .expect("R1->R2")
+        .expect("R1 gate must resolve rooms[1], not loop back to rooms[0]");
+    assert_eq!(step2.dict_get("roomID").and_then(|v| v.as_i64()), Some(9782));
+    assert!(
+        try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &tag_a)
+            .await
+            .is_none(),
+        "final room must not expose another gate"
+    );
+
+    // R4-P1-01 (Part B): entry-gated 0-indexed (0, 1, 2) must keep entry->Room 0 unambiguous from rooms[1].room_index == 1.
+    let eg_pos = [89_900_000.0, 0.0, 0.0];
+    let eg_id = 77_990_010_i64;
+    let mut r0 = mk_room(0, [90_000_000.0, 0.0, 0.0], [90_000_000.0, 0.0, 0.0], Some(77_990_011));
+    r0.gated = true;
+    r0.disallow_mwd = Some(true);
+    let inst_with_entry = DungeonRuntimeInstance {
+        instance_id: 978_002,
+        dungeon_id: diff1_did,
+        dungeon_name: "ZeroIndexedEntry".into(),
+        category: "Deadspace".into(),
+        archetype: "Deadspace".into(),
+        solar_system_id: pochven_sys,
+        owner_char_id: char_id,
+        base_position: eg_pos,
+        entry_gate_pos: Some(eg_pos),
+        entry_gate_ball_id: Some(eg_id),
+        current_room_index: 0,
+        rooms: vec![
+            r0,
+            mk_room(1, [90_500_000.0, 0.0, 0.0], [90_495_000.0, 0.0, 0.0], Some(77_990_012)),
+            mk_room(2, [91_000_000.0, 0.0, 0.0], [90_995_000.0, 0.0, 0.0], None),
+        ],
+        created_unix: 1_775_300_000,
+        ..Default::default()
+    };
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(978_002, inst_with_entry);
+    });
+    let tag_b = [PyRep::String("DNG-INST-978002".into())];
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(eg_pos)).await;
+    let e0 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &tag_b).await.unwrap().unwrap();
+    assert_eq!(e0.dict_get("roomID").and_then(|v| v.as_i64()), Some(9780));
+    assert!(is_ship_in_mwd_disallowed_dungeon_pocket(&ctx, pochven_sys, DVec3::new(90_000_000.0, 0.0, 0.0)));
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(90_005_000.0, 0.0, 0.0)).await;
+    let e1 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &tag_b).await.unwrap().unwrap();
+    assert_eq!(e1.dict_get("roomID").and_then(|v| v.as_i64()), Some(9781));
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(90_505_000.0, 0.0, 0.0)).await;
+    let e2 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &tag_b).await.unwrap().unwrap();
+    assert_eq!(e2.dict_get("roomID").and_then(|v| v.as_i64()), Some(9782));
+}
+
 #[cfg(test)]
 #[path = "pve_dungeon_runtime_rpc_extra_unit_tests.rs"]
 mod pve_dungeon_runtime_rpc_extra_unit_tests;

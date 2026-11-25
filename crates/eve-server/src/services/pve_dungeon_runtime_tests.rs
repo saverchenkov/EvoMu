@@ -1704,6 +1704,7 @@ async fn failed_instance_loot_grace_expiry_despawns_without_marking_completed() 
         assert!(rt.despawned);
         assert!(rt.failed);
         assert!(!rt.completed);
+        assert!(!rt.rooms[0].cleared);
         assert!(rt.completed_unix.is_none());
         assert!(rt.loot_grace_until_unix.is_none());
         assert!(!snap.items.contains_key(&cont_id) && !snap.item_positions.contains_key(&cont_id));

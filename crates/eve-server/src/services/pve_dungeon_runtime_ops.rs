@@ -181,9 +181,13 @@ pub(super) fn apply_complete_dungeon_instance_snap(
                 grp.npc_ball_tags.clear();
                 grp.npc_ball_names.clear();
                 grp.npc_ball_bounties.clear();
-                grp.cleared = true;
+                if !was_failed {
+                    grp.cleared = true;
+                }
             }
-            r.cleared = true;
+            if !was_failed {
+                r.cleared = true;
+            }
             for obj in &mut r.objects {
                 let keep_for_loot =
                     has_loot && obj.is_container && obj.spawned && !obj.destroyed;

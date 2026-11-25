@@ -35,7 +35,10 @@ pub async fn try_activate_dungeon_runtime_gate(
 
     let match_info = ctx.db.with_snapshot(|snap| {
         for inst in snap.dungeon_runtime.instances.values() {
-            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
+            if instance_is_finished(inst)
+                || inst.solar_system_id != sys_id
+                || inst.category == "Flashpoint"
+            {
                 continue;
             }
             if let Some(gate_id) = arg_int {
@@ -78,9 +81,10 @@ pub async fn try_activate_dungeon_runtime_gate(
                 }
             }
             if let Some(s) = arg_str {
-                if inst.category != "Flashpoint" && s == format!("DNG-INST-{}", inst.instance_id) {
+                if s == format!("DNG-INST-{}", inst.instance_id) {
                     if inst.current_room_index == 0
                         && (inst.entry_gate_pos.is_some() || inst.entry_gate_ball_id.is_some())
+                        && inst.rooms.first().is_some_and(|r| !r.entered)
                     {
                         return Some((
                             inst.instance_id,
@@ -96,11 +100,15 @@ pub async fn try_activate_dungeon_runtime_gate(
                             .first()
                             .filter(|r| {
                                 r.room_index == 0
-                                    && (r.gate_ball_id.is_some() || !r.gate_links.is_empty())
+                                    && (r.gate_ball_id.is_some()
+                                        || !r.gate_links.is_empty()
+                                        || (r.entered && inst.rooms.len() > 1))
                             })
                             .map(|r| (0usize, r))
                     } else {
-                        let idx = inst.current_room_index - 1;
+                        let idx = inst
+                            .room_vec_index_by_room_index(inst.current_room_index)
+                            .unwrap_or(inst.current_room_index - 1);
                         inst.rooms.get(idx).map(|r| (idx, r))
                     };
                     let Some((cur_idx, cur_room)) = cur_pair else {
@@ -259,6 +267,13 @@ pub async fn try_activate_dungeon_runtime_gate(
         record_dungeon_actor(inst, char_id);
         let room = inst.rooms.get(target_room_idx)?.clone();
         inst.current_room_index = if room.room_index > 0 {
+            room.room_index
+        } else if inst
+            .rooms
+            .iter()
+            .enumerate()
+            .any(|(i, r)| i != target_room_idx && r.room_index == target_room_idx + 1)
+        {
             room.room_index
         } else {
             target_room_idx + 1
@@ -1621,9 +1636,12 @@ pub async fn on_dungeon_item_looted(
                 && !inst.despawned
                 && inst.loot_grace_until_unix.or(inst.despawn_after_unix).is_some()
                 && inst.rooms.iter().any(|r| {
-                    r.objects
-                        .iter()
-                        .any(|o| o.is_container && o.spawned && o.ball_id == container_ball_id)
+                    r.objects.iter().any(|o| {
+                        o.is_container
+                            && o.spawned
+                            && !o.destroyed
+                            && o.ball_id == container_ball_id
+                    })
                 })
                 && !has_unlooted_containers_in_snap(snap, inst)
             {
@@ -1768,15 +1786,16 @@ fn resolve_current_pocket_room_at_pos(
     ship_pos: DVec3,
 ) -> Option<&DungeonRuntimeRoom> {
     if inst.current_room_index == 0 {
-        return None;
+        return inst.rooms.first().filter(|r| {
+            r.room_index == 0 && r.entered && room_contains_ship_pos(inst, 0, r, ship_pos)
+        });
     }
-    inst.rooms
-        .iter()
-        .enumerate()
-        .find(|(r_idx, r)| {
-            r.room_index == inst.current_room_index && room_contains_ship_pos(inst, *r_idx, r, ship_pos)
+    inst.room_vec_index_by_room_index(inst.current_room_index)
+        .and_then(|idx| {
+            inst.rooms
+                .get(idx)
+                .filter(|r| room_contains_ship_pos(inst, idx, r, ship_pos))
         })
-        .map(|(_, r)| r)
         .or_else(|| {
             let idx = inst.current_room_index - 1;
             inst.rooms
@@ -1794,10 +1813,7 @@ pub fn is_ship_in_mwd_disallowed_dungeon_pocket(
 ) -> bool {
     read_dungeon_runtime_store(ctx, |store| {
         for inst in store.instances.values() {
-            if instance_is_finished(inst)
-                || inst.solar_system_id != sys_id
-                || inst.current_room_index == 0
-            {
+            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                 continue;
             }
             if let Some(room) = resolve_current_pocket_room_at_pos(inst, ship_pos) {
