@@ -46,10 +46,24 @@ pub async fn try_activate_dungeon_runtime_gate(
                         inst.entry_gate_pos,
                         inst.entry_gate_locked,
                         gate_id,
+                        None,
                     ));
                 }
                 for (r_idx, r) in inst.rooms.iter().enumerate() {
-                    if r.gate_ball_id == Some(gate_id) && r_idx + 1 < inst.rooms.len() {
+                    if !r.gate_links.is_empty() {
+                        if let Some(gl) = r.gate_links.iter().find(|gl| gl.gate_ball_id == Some(gate_id)) {
+                            if gl.target_room_index < inst.rooms.len() {
+                                return Some((
+                                    inst.instance_id,
+                                    gl.target_room_index,
+                                    Some(gl.gate_position),
+                                    gl.locked,
+                                    gate_id,
+                                    Some(gl.destination_pos),
+                                ));
+                            }
+                        }
+                    } else if r.gate_ball_id == Some(gate_id) && r_idx + 1 < inst.rooms.len() {
                         let gate_pos = Some([r.position[0] + 5_000.0, r.position[1], r.position[2]]);
                         return Some((
                             inst.instance_id,
@@ -57,6 +71,7 @@ pub async fn try_activate_dungeon_runtime_gate(
                             gate_pos,
                             r.gate_locked,
                             gate_id,
+                            None,
                         ));
                     }
                 }
@@ -65,17 +80,28 @@ pub async fn try_activate_dungeon_runtime_gate(
                 if s == format!("DNG-INST-{}", inst.instance_id) {
                     let next_idx = inst.current_room_index.min(inst.rooms.len().saturating_sub(1));
                     let cur_room = inst.rooms.get(inst.current_room_index.saturating_sub(1));
+                    if let Some(gl) = cur_room.and_then(|r| r.gate_links.first()) {
+                        let target = gl.target_room_index.min(inst.rooms.len().saturating_sub(1));
+                        return Some((
+                            inst.instance_id,
+                            target,
+                            Some(gl.gate_position),
+                            gl.locked,
+                            gl.gate_ball_id.unwrap_or(0),
+                            Some(gl.destination_pos),
+                        ));
+                    }
                     let gate_id = cur_room.and_then(|r| r.gate_ball_id).unwrap_or(0);
                     let gate_pos = cur_room.map(|r| [r.position[0] + 5_000.0, r.position[1], r.position[2]]);
                     let locked = cur_room.is_some_and(|r| r.gate_locked);
-                    return Some((inst.instance_id, next_idx, gate_pos, locked, gate_id));
+                    return Some((inst.instance_id, next_idx, gate_pos, locked, gate_id, None));
                 }
             }
         }
         None
     });
 
-    let (instance_id, target_room_idx, gate_pos_opt, gate_locked, gate_id) = match_info?;
+    let (instance_id, target_room_idx, gate_pos_opt, gate_locked, gate_id, dest_override) = match_info?;
 
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
@@ -193,7 +219,7 @@ pub async fn try_activate_dungeon_runtime_gate(
             inst.dungeon_name.clone(),
             room.room_id,
             room.room_index,
-            room.gate_destination_pos,
+            dest_override.unwrap_or(room.gate_destination_pos),
             inst.rooms.len(),
             inst.created_unix,
             room.disallow_mwd.unwrap_or(inst.disallow_mwd),
@@ -484,6 +510,7 @@ fn parse_rooms_from_pyrep(
                                 .dict_get("radius")
                                 .and_then(finite_f64)
                                 .filter(|&v| v >= 0.0)
+                                .map(|v| v.clamp(0.0, 1_000_000.0))
                                 .unwrap_or(5_000.0);
                             let anchor = target_obj_idx
                                 .and_then(|oi| objects.get(oi))
@@ -545,7 +572,11 @@ fn parse_rooms_from_pyrep(
                         );
                         let dpos = parse_finite_vec3(
                             l_rep.dict_get("destinationPos"),
-                            [room_pos[0] + 500_000.0 - 10_000.0, room_pos[1], room_pos[2]],
+                            [
+                                base_pos[0] + (target_room_index as f64) * 500_000.0 - 10_000.0,
+                                base_pos[1],
+                                base_pos[2],
+                            ],
                         );
                         gate_links.push(DungeonGateLink {
                             target_room_index,
@@ -586,6 +617,10 @@ fn parse_rooms_from_pyrep(
             });
         }
         if !parsed.is_empty() {
+            let room_count = parsed.len();
+            for room in &mut parsed {
+                room.gate_links.retain(|gl| gl.target_room_index < room_count);
+            }
             return parsed;
         }
     }
@@ -1210,6 +1245,9 @@ pub async fn spawn_sde_dungeon_runtime_instance(
         id
     });
     materialize_dungeon_room_entities(ctx, sys_id, inst_id, 0).await?;
+    if !has_entry_gate {
+        on_dungeon_room_entered(ctx, sys_id, inst_id, 0, owner_char_id).await;
+    }
     Ok(inst_id)
 }
 
@@ -1306,6 +1344,9 @@ pub async fn spawn_dungeon_instance(
     });
 
     materialize_dungeon_room_entities(ctx, sys_id, inst_id, 0).await?;
+    if !has_entry_gate {
+        on_dungeon_room_entered(ctx, sys_id, inst_id, 0, char_id).await;
+    }
 
     let rep = read_dungeon_runtime_store(ctx, |store| {
         store
