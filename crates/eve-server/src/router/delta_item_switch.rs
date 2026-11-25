@@ -1968,6 +1968,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
     )>,
     dispatch_scope_info: Option<&(u64, Option<String>)>,
     origin_scope: CompareOriginScope,
+    explicit_acting_char_id: Option<i64>,
     online: &impl OnlineCharacterLookup,
     snap_after: &WorldStateSnapshot,
     changes: &ChangeSet,
@@ -2160,9 +2161,11 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
             }
         }
 
-        let acting_char_id = in_dispatch
-            .then(super::dispatch_active_char::active_dispatch_char)
-            .flatten();
+        let acting_char_id = explicit_acting_char_id.or_else(|| {
+            in_dispatch
+                .then(super::dispatch_active_char::active_dispatch_char)
+                .flatten()
+        });
         let classified_recipients = collect_switched_item_recipients_for_change(
             in_dispatch,
             shadow_outside_dry_run,

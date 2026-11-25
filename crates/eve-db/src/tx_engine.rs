@@ -634,6 +634,7 @@ pub struct TxNotificationEffect {
 #[derive(Default)]
 pub struct Effects {
     pub notifications: Vec<TxNotificationEffect>,
+    pub acting_char_id: Option<i64>,
     callbacks: Vec<Box<dyn FnOnce(&ChangeSet) + Send>>,
 }
 

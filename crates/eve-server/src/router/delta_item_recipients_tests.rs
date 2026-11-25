@@ -932,3 +932,160 @@ async fn step3b1_acting_pilot_skips_destroyed_ship_holder_and_keeps_live_ship_an
         after_live_summary.projected_by_rule
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step3b1_destroyed_space_holder_drops_leak_when_deleted_and_notifies_when_loot_relocated() {
+    let ctx = test_ctx();
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let acting_pilot = 90_000_001_i64;
+    let owner_pilot = 90_000_002_i64;
+    let acting_ship = 995_936_001_i64;
+    let owner_ship = 995_936_002_i64;
+    let doomed_box = 995_936_010_i64;
+    let doomed_box_loot = 995_936_011_i64;
+    let salvage_wreck = 995_936_020_i64;
+    let salvage_loot = 995_936_021_i64;
+    let spawned_can = 995_936_022_i64;
+
+    setup_online_pilot_in_station(&ctx, acting_pilot, station_id, sys_id, acting_ship);
+    setup_online_pilot_in_station(&ctx, owner_pilot, station_id, sys_id, owner_ship);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, loc, flag, qty, single) in [
+            (doomed_box, 23_u32, i64::from(sys_id), InventoryFlag::None, 1, true),
+            (doomed_box_loot, 34_u32, doomed_box, InventoryFlag::Cargo, 40, false),
+            (salvage_wreck, 26_557_u32, i64::from(sys_id), InventoryFlag::None, 1, true),
+            (salvage_loot, 34_u32, salvage_wreck, InventoryFlag::Cargo, 25, false),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner_pilot,
+                    location_id: loc,
+                    flag,
+                    quantity: qty,
+                    singleton: single,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(acting_pilot);
+    let _ = ctx.drain_notifications_for_char(owner_pilot);
+
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+
+    // 1. Destroying a foreign space container/deployable AND deleting its enclosed contents
+    //    (`ItemHolderKind::Space`, `after_opt.is_none()`) must emit zero `OnItemChange` to actor.
+    with_active_dispatch_char(Some(acting_pilot), async {
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "dogmaIM.Activate".to_string(),
+            );
+            ctx.db
+                .tx("destroy_space_box", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.remove(&doomed_box_loot);
+                    tx.snap.items.remove(&doomed_box);
+                    Ok(())
+                })
+                .expect("destroy space box commit");
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+    })
+    .await;
+
+    let actor_destroy_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(acting_pilot)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
+    assert!(
+        actor_destroy_notifs.is_empty(),
+        "destroying space container with deleted contents must emit 0 OnItemChange to attacker: {actor_destroy_notifs:?}"
+    );
+    let owner_destroy_ids: Vec<i64> = ctx
+        .drain_notifications_for_char(owner_pilot)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| {
+            n.args
+                .first()
+                .and_then(|r| r.dbrow_get("itemID"))
+                .and_then(eve_proto::PyRep::as_i64)
+        })
+        .collect();
+    assert!(
+        owner_destroy_ids.contains(&doomed_box) && owner_destroy_ids.contains(&doomed_box_loot),
+        "owner must still receive OnItemChange for destroyed container + contents: {owner_destroy_ids:?}"
+    );
+
+    // 2. Relocating surviving loot out of a deleted space wreck into a newly created jetcan
+    //    (`ItemHolderKind::Space`, `after_opt.is_some()`) notifies the salvager via `RULE_HOLDER_ACTING_PILOT`.
+    with_active_dispatch_char(Some(acting_pilot), async {
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            let _rpc = push_dispatch_rpc_method_guard(
+                &*ctx.pending_notifications,
+                &ctx.notify_tx,
+                "entity.CmdSalvage".to_string(),
+            );
+            ctx.db
+                .tx("salvage_relocate_loot", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(
+                        spawned_can,
+                        InventoryItemRecord {
+                            item_id: spawned_can,
+                            type_id: 23,
+                            owner_id: owner_pilot,
+                            location_id: i64::from(sys_id),
+                            flag: InventoryFlag::None,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                    if let Some(loot) = tx.snap.items.get_mut(&salvage_loot) {
+                        loot.location_id = spawned_can;
+                        loot.version += 1;
+                    }
+                    tx.snap.items.remove(&salvage_wreck);
+                    Ok(())
+                })
+                .expect("salvage relocate commit");
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+    })
+    .await;
+
+    let actor_salvage_ids: Vec<i64> = ctx
+        .drain_notifications_for_char(acting_pilot)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .filter_map(|n| {
+            n.args
+                .first()
+                .and_then(|r| r.dbrow_get("itemID"))
+                .and_then(eve_proto::PyRep::as_i64)
+        })
+        .collect();
+    assert_eq!(
+        actor_salvage_ids,
+        vec![salvage_loot],
+        "salvaging foreign wreck with loot must emit OnItemChange for moved loot to acting pilot"
+    );
+    let summary = projected_item_switch_summary(&ctx);
+    assert_eq!(
+        summary.projected_by_rule.get(RULE_HOLDER_ACTING_PILOT).copied(),
+        Some(1),
+        "projected_by_rule={:?}",
+        summary.projected_by_rule
+    );
+}

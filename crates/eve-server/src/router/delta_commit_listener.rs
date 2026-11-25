@@ -475,6 +475,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     &notify_tx,
                     staging_scope_info.as_ref(),
                     origin_scope,
+                    effects.acting_char_id,
                     &*db,
                     snap,
                     changes,

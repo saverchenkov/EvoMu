@@ -31,9 +31,9 @@ enum CommitSalvageError {
     Wal(String),
 }
 
-impl eve_db::FromWalError for CommitSalvageError {
-    fn from_wal_error(err: String) -> Self {
-        Self::Wal(err)
+impl eve_db::FromTxError for CommitSalvageError {
+    fn from_tx_error(err: eve_db::TxError) -> Self {
+        Self::Wal(err.to_string())
     }
 }
 
@@ -73,8 +73,9 @@ fn salvage_vol_for_materials(ctx: &ServerContext, materials: &[(u32, i32)]) -> f
         .sum()
 }
 
-/// Commits yielded salvage items, optional loot-transfer jetcan, and wreck item removal, then
-/// emits `OnItemChange` notifications after releasing the repository lock.
+/// Commits yielded salvage items, optional loot-transfer jetcan, and wreck item removal,
+/// tagging `char_id` on `wtx.effects.acting_char_id` so commit-driven item projection notifies the
+/// salvager on both RPC and tick-driven salvaging cycles.
 #[allow(clippy::too_many_arguments)]
 fn commit_salvaged_wreck_inventory_and_notify(
     ctx: &ServerContext,
@@ -87,7 +88,9 @@ fn commit_salvaged_wreck_inventory_and_notify(
 ) -> Result<Option<(i64, i64)>, CommitSalvageError> {
     let salvage_vol = salvage_vol_for_materials(ctx, salvage_materials);
     let ship_cap_opt = resolve_ship_cargo_capacity(ctx, char_id, ship_id);
-    let spawned_can_opt = ctx.db.try_with_mut_snapshot(|snap| {
+    let spawned_can_opt = ctx.db.tx("commit_salvaged_wreck", |wtx| {
+        wtx.effects.acting_char_id = Some(char_id);
+        let snap = &mut *wtx.snap;
         let Some(old_wreck) = snap.items.get(&wreck_id).cloned() else {
             return Err(CommitSalvageError::WreckMissing);
         };
