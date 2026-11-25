@@ -777,6 +777,14 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|_, g| !(g.sys_id == exec_ctx.solar_system_id && g.ship_id == ball_id));
             if !exec_ctx.ballpark.balls.contains_key(&ball_id) {
+                if !preserve_db_active_states {
+                    SystemHandle::drain_ship_nanite_repairs_collecting(
+                        &mut exec_ctx.actor_st.active_nanite_repairs,
+                        ball_id,
+                        true,
+                        exec_ctx.post_unlock_ops,
+                    );
+                }
                 let _ = exec_ctx.ballpark.remove_ball(ball_id);
                 exec_ctx.actor_st.protection_registry.remove(&ball_id);
                 super::drones::clear_drone_runtime_in_state(exec_ctx.actor_st, ball_id);
@@ -875,6 +883,14 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             } else {
                 exec_ctx.ballpark.remove_ball(ball_id)
             };
+            if removed.is_some() && !preserve_db_active_states {
+                SystemHandle::drain_ship_nanite_repairs_collecting(
+                    &mut exec_ctx.actor_st.active_nanite_repairs,
+                    ball_id,
+                    true,
+                    exec_ctx.post_unlock_ops,
+                );
+            }
             sync_positions_and_active_ships(exec_ctx);
             defer_barrier_cmd_reply(
                 exec_ctx,

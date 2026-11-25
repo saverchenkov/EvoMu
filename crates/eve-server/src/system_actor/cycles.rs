@@ -567,9 +567,49 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
     sim_elapsed_secs: f64,
     dt: f64,
     tidi_factor: f64,
+    reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
+) -> Vec<(BallId, Option<CharacterId>)> {
+    step_cycles_with_reservations_collecting(
+        solar_system_id, ballpark, active_module_cycles, pending_anchoring_disruptors,
+        active_nanite_repairs, ship_rack_heat, rah_incoming_damage, base_scramble_strengths,
+        base_core_strengths, sde_opt, db_opt, ball_space_entry_epochs, fit_projections,
+        weapon_cycle_start_modules, pending_missile_launches, mechanic_rng_opt, tactical_state,
+        pending_cycle_actions, sim_elapsed_secs, dt, tidi_factor, reload_sim_remaining,
+        deactivation_hook, pending_destroyed_outbox, HashMap::new(), HashMap::new(), post_unlock,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_cycles_with_reservations_collecting(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
+    active_nanite_repairs: &mut Vec<ActiveNaniteRepair>,
+    ship_rack_heat: &mut HashMap<BallId, [f64; 3]>,
+    rah_incoming_damage: &mut HashMap<BallId, [f64; 4]>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    fit_projections: &HashMap<BallId, eve_dogma::FitProjection>,
+    weapon_cycle_start_modules: &mut std::collections::HashSet<(BallId, i64)>,
+    pending_missile_launches: &mut Vec<super::PendingMissileLaunch>,
+    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
+    tactical_state: &dyn AnyRwLock<crate::services::tactical_modules::TacticalModulesState>,
+    pending_cycle_actions: &mut Vec<PendingCycleAction>,
+    sim_elapsed_secs: f64,
+    dt: f64,
+    tidi_factor: f64,
     mut reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    mut virtual_item_qty: HashMap<i64, i32>,
+    mut virtual_crystal_dmg: HashMap<i64, f64>,
     post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let tidi_factor = if tidi_factor.is_finite() {
@@ -579,8 +619,6 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
     };
     let mut destroyed_balls = Vec::new();
     let mut virtual_paste_used: HashMap<BallId, i32> = HashMap::new();
-    let mut virtual_item_qty: HashMap<i64, i32> = HashMap::new();
-    let mut virtual_crystal_dmg: HashMap<i64, f64> = HashMap::new();
     crate::services::tactical_modules::step_wubble_probes_and_debuffs(
         ballpark,
         sde_opt,
@@ -1911,6 +1949,8 @@ impl SystemHandle {
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let (virtual_item_deltas, virtual_crystal_dmg_deltas) =
+            super::post_unlock::seed_pending_charge_reservations(&mut st, &self.completed_post_unlock_seq);
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
@@ -2051,7 +2091,7 @@ impl SystemHandle {
             Some(&pending_destroyed),
             dt,
         );
-        destroyed.extend(step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
+        destroyed.extend(step_cycles_with_reservations_collecting(
             self.solar_system_id,
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
@@ -2059,7 +2099,7 @@ impl SystemHandle {
             pending_missile_launches,
             mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
             Some(module_reload_sim_remaining), deact_hook_guard.as_ref(), Some(&pending_destroyed),
-            &mut post_unlock_ops,
+            virtual_item_deltas, virtual_crystal_dmg_deltas, &mut post_unlock_ops,
         ));
         super::missiles::flush_pending_missile_launches(
             &mut bp,
@@ -2179,19 +2219,16 @@ impl SystemHandle {
             mod_guard.extend(external_active_modules.iter().map(|&(sid, _)| sid));
         }
         let tick = bp.current_tick;
-        let db_opt_cloned = db_opt.clone();
-        let sde_opt_cloned = sde_opt.clone();
         let ops_was_empty = post_unlock_ops.is_empty();
-        let wait_ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+        let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
+        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
+        let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
             self,
-            db_opt_cloned.as_ref(),
-            sde_opt_cloned.as_ref(),
+            &mut st,
             post_unlock_ops,
             caller_can_wait,
         );
         let waited_sync = wait_ticket.is_wait_worker();
-        let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
-        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         drop(st);
         let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
         let warp_events = broadcast.events.clone();

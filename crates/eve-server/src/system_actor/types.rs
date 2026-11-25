@@ -889,6 +889,9 @@ pub(crate) struct SystemActorState {
     pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
     pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     pub drone_next_ready_unix: HashMap<BallId, u64>,
+    pub next_post_unlock_seq: u64,
+    pub pending_item_qty_deltas: std::collections::VecDeque<(u64, ItemId, i32)>,
+    pub pending_crystal_dmg_deltas: std::collections::VecDeque<(u64, ItemId, f64)>,
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`

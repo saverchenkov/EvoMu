@@ -11,7 +11,7 @@ use eve_db::lock_rank::{held_lock_ranks, RankedMutex, RankedRwLock, RANK_ACTOR_S
 use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord, TxError, WorldRepository};
 use eve_destiny::BallId;
 use eve_sde::{attr_ids, SdeRegistry, SolarSystemId, TypeId};
-use std::{collections::HashMap, sync::{atomic::{AtomicUsize, Ordering}, Arc, OnceLock}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock}};
 
 use super::types::{
     ActiveModuleCycle, CharacterId, ConditionCheckpointEntry, ItemId, ModuleDeactivationHook,
@@ -161,6 +161,8 @@ impl PostUnlockIntent {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PostUnlockOps {
     pub intents: Vec<PostUnlockIntent>,
+    pub item_qty_deltas: Vec<(ItemId, i32)>,
+    pub crystal_dmg_deltas: Vec<(ItemId, f64)>,
 }
 
 impl PostUnlockOps {
@@ -476,7 +478,7 @@ pub(crate) fn collect_launcher_consume(
     ship_id: BallId,
     launchers: &[ItemId],
     ammo_type_id: Option<TypeId>,
-    virtual_item_qty: &mut HashMap<ItemId, i32>,
+    virtual_item_deltas: &mut HashMap<ItemId, i32>,
     post_unlock: &mut PostUnlockOps,
 ) -> bool {
     let Some(chosen) = db.with_snapshot(|snap| {
@@ -484,25 +486,26 @@ pub(crate) fn collect_launcher_consume(
         let mut chosen = Vec::with_capacity(launchers.len());
         for &lid in launchers {
             let l_flag = snap.items.get(&lid).map(|i| i.flag)?;
-            let (cid, qty) = snap.items.values()
+            let cid = snap.items.values()
                 .filter_map(|i| {
-                    let q = virtual_item_qty.get(&i.item_id).copied().unwrap_or(i.quantity)
+                    let q = i.quantity
+                        + virtual_item_deltas.get(&i.item_id).copied().unwrap_or(0)
                         - local_used.get(&i.item_id).copied().unwrap_or(0);
                     (i.location_id == ship_id && i.flag == l_flag && i.item_id != lid
                         && (ammo_type_id.is_none() || Some(i.type_id) == ammo_type_id) && q > 0)
-                        .then_some((i.item_id, i.quantity))
+                        .then_some(i.item_id)
                 })
                 .next()?;
             *local_used.entry(cid).or_insert(0) += 1;
-            chosen.push((cid, qty));
+            chosen.push(cid);
         }
         Some(chosen)
     }) else {
         return false;
     };
-    for (cid, avail) in chosen {
-        let entry = virtual_item_qty.entry(cid).or_insert(avail);
-        *entry = (*entry - 1).max(0);
+    for cid in chosen {
+        *virtual_item_deltas.entry(cid).or_insert(0) -= 1;
+        post_unlock.item_qty_deltas.push((cid, -1));
     }
     post_unlock.push(PostUnlockIntent::MissileLauncherConsume(LauncherConsumeDbOp {
         char_id: eff_char_id, ship_id, launchers: launchers.to_vec(), ammo_type_id,
@@ -523,8 +526,8 @@ pub(crate) fn collect_cycle_ammo_step(
     guided_next_out_of_range: bool,
     reload_sim_remaining: &mut Option<&mut HashMap<i64, super::types::ModuleReloadSimEntry>>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
-    virtual_item_qty: &mut HashMap<ItemId, i32>,
-    virtual_crystal_dmg: &mut HashMap<ItemId, f64>,
+    virtual_item_deltas: &mut HashMap<ItemId, i32>,
+    virtual_crystal_dmg_deltas: &mut HashMap<ItemId, f64>,
     post_unlock: &mut PostUnlockOps,
 ) -> (bool, bool, f64) {
     let ammo_is_non_volatile_crystal = cycle.ammo_type_id
@@ -541,7 +544,7 @@ pub(crate) fn collect_cycle_ammo_step(
     let consume_pre_round_for_next_cycle = pre_consumed_mode && cycle.repeat > 0 && !burned_out && !target_destroyed_in_cycle;
     let now_unix = db.clock().now_unix_secs();
 
-    enum TurretSim { CrystalDamage { cid: ItemId, next_dmg: f64, next_qty: i32 }, RoundConsume { cid: ItemId, next_qty: i32 }, Empty, NoOp }
+    enum TurretSim { Delta { cid: ItemId, dq: i32, dd: f64 }, Empty, NoOp }
 
     let (crystal_shattered_empty, turret_sims, cargo_opt) = db.with_snapshot(|snap| {
         let mut shattered = false;
@@ -549,10 +552,10 @@ pub(crate) fn collect_cycle_ammo_step(
         let mut local_qty: HashMap<ItemId, i32> = HashMap::new();
         let mut local_dmg: HashMap<ItemId, f64> = HashMap::new();
         let cur_q = |id: ItemId, orig: i32, lq: &HashMap<ItemId, i32>| -> i32 {
-            lq.get(&id).copied().unwrap_or_else(|| virtual_item_qty.get(&id).copied().unwrap_or(orig))
+            orig + virtual_item_deltas.get(&id).copied().unwrap_or(0) + lq.get(&id).copied().unwrap_or(0)
         };
         let cur_d = |id: ItemId, orig: f64, ld: &HashMap<ItemId, f64>| -> f64 {
-            ld.get(&id).copied().unwrap_or_else(|| virtual_crystal_dmg.get(&id).copied().unwrap_or(orig))
+            (orig + virtual_crystal_dmg_deltas.get(&id).copied().unwrap_or(0.0) + ld.get(&id).copied().unwrap_or(0.0)).max(0.0)
         };
 
         for &turret_id in &cycle.linked_turrets {
@@ -570,25 +573,23 @@ pub(crate) fn collect_cycle_ammo_step(
                 if cycle.crystal_volatility_chance > 0.0 && cycle.crystal_volatility_damage > 0.0 {
                     let next_dmg = dmg + cycle.crystal_volatility_damage;
                     if next_dmg >= 1.0 - 1e-6 {
+                        *local_qty.entry(cid).or_insert(0) -= 1;
                         if qty > 1 {
-                            local_qty.insert(cid, qty - 1);
-                            local_dmg.insert(cid, 0.0);
-                            sims.push(TurretSim::CrystalDamage { cid, next_dmg: 0.0, next_qty: qty - 1 });
+                            *local_dmg.entry(cid).or_insert(0.0) -= dmg;
+                            sims.push(TurretSim::Delta { cid, dq: -1, dd: -dmg });
                         } else {
-                            local_qty.insert(cid, 0);
                             shattered = true;
-                            sims.push(TurretSim::CrystalDamage { cid, next_dmg, next_qty: 0 });
+                            sims.push(TurretSim::Delta { cid, dq: -1, dd: 0.0 });
                         }
                     } else {
-                        local_dmg.insert(cid, next_dmg);
-                        sims.push(TurretSim::CrystalDamage { cid, next_dmg, next_qty: qty });
+                        *local_dmg.entry(cid).or_insert(0.0) += cycle.crystal_volatility_damage;
+                        sims.push(TurretSim::Delta { cid, dq: 0, dd: cycle.crystal_volatility_damage });
                     }
                 } else if cycle.crystal_volatility_damage >= 0.0 {
                     if !pre_consumed_mode || consume_pre_round_for_next_cycle {
-                        let nq = qty.saturating_sub(1);
-                        local_qty.insert(cid, nq);
-                        if !pre_consumed_mode && nq == 0 { shattered = true; }
-                        sims.push(TurretSim::RoundConsume { cid, next_qty: nq });
+                        *local_qty.entry(cid).or_insert(0) -= 1;
+                        if !pre_consumed_mode && qty <= 1 { shattered = true; }
+                        sims.push(TurretSim::Delta { cid, dq: -1, dd: 0.0 });
                     } else {
                         sims.push(TurretSim::NoOp);
                     }
@@ -625,14 +626,16 @@ pub(crate) fn collect_cycle_ammo_step(
     let mut any_turret_change = false;
     for sim in turret_sims {
         match sim {
-            TurretSim::CrystalDamage { cid, next_dmg, next_qty } => {
+            TurretSim::Delta { cid, dq, dd } => {
                 any_turret_change = true;
-                virtual_item_qty.insert(cid, next_qty);
-                virtual_crystal_dmg.insert(cid, next_dmg);
-            }
-            TurretSim::RoundConsume { cid, next_qty } => {
-                any_turret_change = true;
-                virtual_item_qty.insert(cid, next_qty);
+                if dq != 0 {
+                    *virtual_item_deltas.entry(cid).or_insert(0) += dq;
+                    post_unlock.item_qty_deltas.push((cid, dq));
+                }
+                if dd != 0.0 {
+                    *virtual_crystal_dmg_deltas.entry(cid).or_insert(0.0) += dd;
+                    post_unlock.crystal_dmg_deltas.push((cid, dd));
+                }
             }
             TurretSim::Empty => any_turret_change = true,
             TurretSim::NoOp => {}
@@ -669,7 +672,9 @@ pub(crate) fn collect_cycle_ammo_step(
                     if cycle.missile_reload_ms > 0.0 { cycle.missile_reload_ms } else { 10_000.0 },
                 ));
                 let actual_per_mod = rounds_per_mod.min(avail_qty / num_mods).max(1);
-                virtual_item_qty.insert(stack_id, (avail_qty - actual_per_mod * num_mods).max(0));
+                let pulled = actual_per_mod * num_mods;
+                *virtual_item_deltas.entry(stack_id).or_insert(0) -= pulled;
+                post_unlock.item_qty_deltas.push((stack_id, -pulled));
                 let reload_sim_secs = reload_time_ms / 1000.0;
                 let scaled_wall_secs = if tidi_factor < 0.995 { (reload_sim_secs / tidi_factor).ceil().max(1.0) as u64 } else { reload_sim_secs.ceil() as u64 };
                 let reload_until = now_unix + scaled_wall_secs;
@@ -723,7 +728,7 @@ pub(crate) fn collect_ship_charge_consume(
     ship_id: BallId,
     module_id: ItemId,
     kind: ShipChargeConsumeKind,
-    virtual_item_qty: &mut HashMap<ItemId, i32>,
+    virtual_item_deltas: &mut HashMap<ItemId, i32>,
     post_unlock: &mut PostUnlockOps,
 ) -> bool {
     let found = db.with_snapshot(|snap| {
@@ -733,14 +738,15 @@ pub(crate) fn collect_ship_charge_consume(
             ShipChargeConsumeKind::AarPaste { paste_rate } => (paste_rate.max(1), true),
         };
         snap.items.values().filter_map(|i| {
-            let q = virtual_item_qty.get(&i.item_id).copied().unwrap_or(i.quantity);
+            let q = i.quantity + virtual_item_deltas.get(&i.item_id).copied().unwrap_or(0);
             (i.location_id == ship_id && i.flag == m_flag && i.item_id != module_id
                 && (!only_paste || i.type_id == 28668) && q >= min_needed)
-                .then_some((i.item_id, q, min_needed))
+                .then_some((i.item_id, min_needed))
         }).next()
     });
-    let Some((cid, avail, dec)) = found else { return false; };
-    virtual_item_qty.insert(cid, (avail - dec).max(0));
+    let Some((cid, dec)) = found else { return false; };
+    *virtual_item_deltas.entry(cid).or_insert(0) -= dec;
+    post_unlock.item_qty_deltas.push((cid, -dec));
     post_unlock.push(PostUnlockIntent::ShipChargeConsume(ShipChargeConsumeDbOp {
         char_id: eff_char_id, ship_id, module_id, kind,
     }));
@@ -1175,8 +1181,48 @@ pub(in crate::system_actor) fn send_post_unlock_item(
         }
         Err(tokio::sync::mpsc::error::SendError(PostUnlockMsg::Shutdown)) => {
             in_flight.fetch_sub(1, Ordering::SeqCst);
-            Err(PostUnlockWorkItem { db_opt: None, sde_opt: None, ops: PostUnlockOps::default(), replies: Vec::new(), in_flight_guard: None })
+            Err(PostUnlockWorkItem { db_opt: None, sde_opt: None, ops: PostUnlockOps::default(), replies: Vec::new(), in_flight_guard: None, work_seq: 0 })
         }
+    }
+}
+
+pub(in crate::system_actor) fn seed_pending_charge_reservations(
+    actor_st: &mut SystemActorState,
+    completed_seq: &AtomicU64,
+) -> (HashMap<ItemId, i32>, HashMap<ItemId, f64>) {
+    let done = completed_seq.load(Ordering::Acquire);
+    while actor_st.pending_item_qty_deltas.front().is_some_and(|&(seq, _, _)| seq <= done) {
+        actor_st.pending_item_qty_deltas.pop_front();
+    }
+    while actor_st.pending_crystal_dmg_deltas.front().is_some_and(|&(seq, _, _)| seq <= done) {
+        actor_st.pending_crystal_dmg_deltas.pop_front();
+    }
+    let mut qty = HashMap::new();
+    for &(_, id, dq) in &actor_st.pending_item_qty_deltas { *qty.entry(id).or_insert(0) += dq; }
+    let mut dmg = HashMap::new();
+    for &(_, id, dd) in &actor_st.pending_crystal_dmg_deltas { *dmg.entry(id).or_insert(0.0) += dd; }
+    (qty, dmg)
+}
+
+pub(in crate::system_actor) fn enqueue_actor_cmd_post_unlock_ops(
+    actor_st: &mut SystemActorState,
+    tx_opt: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
+    in_flight: &Arc<AtomicUsize>,
+    mut ops: PostUnlockOps,
+) {
+    if ops.is_empty() { return; }
+    let Some(tx) = tx_opt else { return; };
+    actor_st.next_post_unlock_seq = actor_st.next_post_unlock_seq.saturating_add(1);
+    let work_seq = actor_st.next_post_unlock_seq;
+    let qty_deltas = std::mem::take(&mut ops.item_qty_deltas);
+    let dmg_deltas = std::mem::take(&mut ops.crystal_dmg_deltas);
+    let item = PostUnlockWorkItem {
+        db_opt: actor_st.db_opt.clone(), sde_opt: actor_st.sde_opt.clone(),
+        ops, replies: Vec::new(), in_flight_guard: None, work_seq,
+    };
+    if send_post_unlock_item(tx, in_flight, item).is_ok() {
+        for (id, dq) in qty_deltas { actor_st.pending_item_qty_deltas.push_back((work_seq, id, dq)); }
+        for (id, dd) in dmg_deltas { actor_st.pending_crystal_dmg_deltas.push_back((work_seq, id, dd)); }
     }
 }
 
@@ -1192,13 +1238,14 @@ impl PostUnlockWaitTicket {
     }
 }
 
-fn enqueue_work_ticket(
+fn enqueue_work_ticket_with_seq(
     handle: &super::SystemHandle,
     db_opt: Option<&Arc<WorldRepository>>,
     sde_opt: Option<&Arc<SdeRegistry>>,
     ops: PostUnlockOps,
     caller_can_wait: bool,
-) -> PostUnlockWaitTicket {
+    work_seq: u64,
+) -> (bool, PostUnlockWaitTicket) {
     let (done_tx, done_rx) = if caller_can_wait {
         let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
         (Some(tx), Some(rx))
@@ -1210,12 +1257,12 @@ fn enqueue_work_ticket(
         replies.push(Box::new(move || { let _ = tx.send(()); }));
     }
     let item = PostUnlockWorkItem {
-        db_opt: db_opt.cloned(), sde_opt: sde_opt.cloned(), ops, replies, in_flight_guard: None,
+        db_opt: db_opt.cloned(), sde_opt: sde_opt.cloned(), ops, replies, in_flight_guard: None, work_seq,
     };
     match send_post_unlock_item(&handle.post_unlock_tx, &handle.post_unlock_in_flight, item) {
-        Ok(()) => done_rx.map_or(PostUnlockWaitTicket::None, PostUnlockWaitTicket::WaitWorker),
-        Err(unsent) if unsent.ops.is_empty() => PostUnlockWaitTicket::None,
-        Err(unsent) if caller_can_wait => PostUnlockWaitTicket::RunDirectAfterUnlock(Box::new(unsent)),
+        Ok(()) => (true, done_rx.map_or(PostUnlockWaitTicket::None, PostUnlockWaitTicket::WaitWorker)),
+        Err(unsent) if unsent.ops.is_empty() => (false, PostUnlockWaitTicket::None),
+        Err(unsent) if caller_can_wait => (false, PostUnlockWaitTicket::RunDirectAfterUnlock(Box::new(unsent))),
         Err(unsent) => {
             tracing::warn!(
                 solar_system_id = handle.solar_system_id,
@@ -1225,21 +1272,44 @@ fn enqueue_work_ticket(
             for send_reply in unsent.replies {
                 send_reply();
             }
-            PostUnlockWaitTicket::None
+            (false, PostUnlockWaitTicket::None)
         }
     }
 }
 
 /// Enqueues `ops` onto `handle.post_unlock_tx` under actor locks, or an empty-ops FIFO barrier when work is in flight (`W1`, `W4`).
 pub(in crate::system_actor) fn enqueue_post_unlock_or_barrier_under_locks(handle: &super::SystemHandle, db_opt: Option<&Arc<WorldRepository>>, sde_opt: Option<&Arc<SdeRegistry>>, ops: PostUnlockOps, caller_can_wait: bool) -> PostUnlockWaitTicket {
-    if !ops.is_empty() { enqueue_work_ticket(handle, db_opt, sde_opt, ops, caller_can_wait) }
+    if !ops.is_empty() { enqueue_work_ticket_with_seq(handle, db_opt, sde_opt, ops, caller_can_wait, 0).1 }
     else if caller_can_wait && handle.has_in_flight_post_unlock() { enqueue_barrier_under_locks(handle) }
     else { PostUnlockWaitTicket::None }
 }
 
+pub(in crate::system_actor) fn enqueue_tick_post_unlock_or_barrier_under_locks(
+    handle: &super::SystemHandle,
+    actor_st: &mut SystemActorState,
+    mut ops: PostUnlockOps,
+    caller_can_wait: bool,
+) -> PostUnlockWaitTicket {
+    if ops.is_empty() {
+        return enqueue_post_unlock_or_barrier_under_locks(handle, actor_st.db_opt.as_ref(), actor_st.sde_opt.as_ref(), ops, caller_can_wait);
+    }
+    actor_st.next_post_unlock_seq = actor_st.next_post_unlock_seq.saturating_add(1);
+    let work_seq = actor_st.next_post_unlock_seq;
+    let qty_deltas = std::mem::take(&mut ops.item_qty_deltas);
+    let dmg_deltas = std::mem::take(&mut ops.crystal_dmg_deltas);
+    let (queued, ticket) = enqueue_work_ticket_with_seq(
+        handle, actor_st.db_opt.as_ref(), actor_st.sde_opt.as_ref(), ops, caller_can_wait, work_seq,
+    );
+    if queued {
+        for (id, dq) in qty_deltas { actor_st.pending_item_qty_deltas.push_back((work_seq, id, dq)); }
+        for (id, dd) in dmg_deltas { actor_st.pending_crystal_dmg_deltas.push_back((work_seq, id, dd)); }
+    }
+    ticket
+}
+
 /// Enqueues an empty-ops FIFO barrier onto `handle.post_unlock_tx` while actor locks are held (`W4`, `BF-3`).
 pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::SystemHandle) -> PostUnlockWaitTicket {
-    enqueue_work_ticket(handle, None, None, PostUnlockOps::default(), true)
+    enqueue_work_ticket_with_seq(handle, None, None, PostUnlockOps::default(), true, 0).1
 }
 
 /// Finishes waiting or fallback execution strictly **after** all actor locks are dropped (`W2`, `W3`).
@@ -1252,6 +1322,9 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
             let unsent = *unsent;
             if safe_sync {
                 let extra_actions = execute_post_unlock_ops(unsent.db_opt.as_ref(), unsent.sde_opt.as_ref(), unsent.ops, deact_guard, lock_guard);
+                if unsent.work_seq > 0 {
+                    handle.completed_post_unlock_seq.store(unsent.work_seq, Ordering::Release);
+                }
                 if !extra_actions.is_empty() { handle.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions); }
                 super::flush_post_unlock_actions(&handle.post_unlock_actions);
             } else {
@@ -1268,6 +1341,7 @@ pub(in crate::system_actor) struct PostUnlockWorkItem {
     pub(in crate::system_actor) ops: PostUnlockOps,
     pub(in crate::system_actor) replies: Vec<Box<dyn FnOnce() + Send>>,
     pub(in crate::system_actor) in_flight_guard: Option<PostUnlockInFlightGuard>,
+    pub(in crate::system_actor) work_seq: u64,
 }
 
 pub(in crate::system_actor) enum PostUnlockMsg {
@@ -1297,6 +1371,7 @@ impl Drop for PostUnlockShutdownGuard { fn drop(&mut self) { self.send_shutdown(
 pub(in crate::system_actor) fn spawn_post_unlock_worker(
     solar_system_id: SolarSystemId,
     worker_thread_id: Arc<OnceLock<std::thread::ThreadId>>,
+    completed_seq_worker: Arc<AtomicU64>,
     actor_state_worker: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
     deact_hook_worker: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
@@ -1312,10 +1387,13 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
         let process_item = |item: PostUnlockWorkItem| {
             let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
-            let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard } = item;
+            let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard, work_seq } = item;
             let extra_actions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 execute_post_unlock_ops(db_opt.as_ref(), sde_opt.as_ref(), ops, deact_hook.as_ref(), lock_hook.as_ref())
             })).unwrap_or_else(|_| { tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker"); Vec::new() });
+            if work_seq > 0 {
+                completed_seq_worker.store(work_seq, Ordering::Release);
+            }
             if !extra_actions.is_empty() {
                 actor_state_worker.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
             }

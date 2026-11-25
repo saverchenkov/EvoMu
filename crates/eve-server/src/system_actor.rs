@@ -286,6 +286,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
         &'a Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
     pub(in crate::system_actor) mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
     pub(in crate::system_actor) post_unlock_in_flight_actor: &'a std::sync::atomic::AtomicUsize,
+    pub(in crate::system_actor) completed_post_unlock_seq_actor: &'a std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug)]
@@ -1364,9 +1365,12 @@ impl SystemRegistry {
         let post_unlock_worker_thread_id = Arc::new(std::sync::OnceLock::new());
         let post_unlock_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
+        let completed_post_unlock_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let completed_post_unlock_seq_actor = Arc::clone(&completed_post_unlock_seq);
         let (post_unlock_tx, post_unlock_worker_join) = post_unlock::spawn_post_unlock_worker(
             solar_system_id,
             post_unlock_worker_thread_id.clone(),
+            Arc::clone(&completed_post_unlock_seq),
             actor_state_actor.clone(),
             module_deactivation_hook_actor.clone(),
             target_lock_completed_hook_actor.clone(),
@@ -1382,6 +1386,7 @@ impl SystemRegistry {
                     ops: initial_post_unlock_ops,
                     replies: Vec::new(),
                     in_flight_guard: None,
+                    work_seq: 0,
                 },
             );
         }
@@ -1509,6 +1514,7 @@ impl SystemRegistry {
                     explicit_update_state_guards_actor: &explicit_update_state_guards_actor,
                     mechanic_rng: &mechanic_rng,
                     post_unlock_in_flight_actor: &post_unlock_in_flight_actor,
+                    completed_post_unlock_seq_actor: &completed_post_unlock_seq_actor,
                 };
                 if let Some(cmd) = protection::handle_protection_or_lifecycle_command(&mut exec_ctx, cmd) {
                     if let Some(cmd) = activation_ops::handle_activation_and_movement_command(&mut exec_ctx, cmd) {
@@ -2196,22 +2202,12 @@ impl SystemRegistry {
                     })
                 }
                 })();
-                if !cmd_post_unlock_ops.is_empty() {
-                    let item = post_unlock::PostUnlockWorkItem {
-                        db_opt: actor_st.db_opt.clone(),
-                        sde_opt: actor_st.sde_opt.clone(),
-                        ops: cmd_post_unlock_ops,
-                        replies: Vec::new(),
-                        in_flight_guard: None,
-                    };
-                    if let Some(ref tx) = post_unlock_tx_opt.0 {
-                        let _ = post_unlock::send_post_unlock_item(
-                            tx,
-                            &post_unlock_in_flight_actor,
-                            item,
-                        );
-                    }
-                }
+                post_unlock::enqueue_actor_cmd_post_unlock_ops(
+                    &mut actor_st,
+                    post_unlock_tx_opt.0.as_ref(),
+                    &post_unlock_in_flight_actor,
+                    cmd_post_unlock_ops,
+                );
                 out
                 };
                 (
@@ -2278,6 +2274,7 @@ impl SystemRegistry {
                         ops: post_unlock::PostUnlockOps::default(),
                         replies: batch_deferred_db_replies,
                         in_flight_guard: None,
+                        work_seq: 0,
                     };
                     if let Some(ref tx) = post_unlock_tx_opt.0 {
                         if let Err(unsent) = post_unlock::send_post_unlock_item(
@@ -2388,6 +2385,7 @@ impl SystemRegistry {
             post_unlock_tx: post_unlock_tx_handle,
             post_unlock_worker_thread_id,
             post_unlock_in_flight,
+            completed_post_unlock_seq,
             event_tx,
             ball_positions,
             scrambled_balls,

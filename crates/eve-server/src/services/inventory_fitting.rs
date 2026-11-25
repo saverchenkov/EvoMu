@@ -89,6 +89,15 @@ fn check_fitting_dock(ctx: &ServerContext, session: &SessionState, char_id: i64)
     })
 }
 
+pub(crate) async fn wait_in_space_post_unlock_barrier(ctx: &ServerContext, session: &SessionState) {
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return;
+    }
+    if let Some(sys) = session.solar_system_id.and_then(|id| ctx.systems.get_handle(id)) {
+        let _ = sys.wait_for_post_unlock_barrier().await;
+    }
+}
+
 #[inline(never)]
 pub async fn handle(
     ctx: &ServerContext,
@@ -119,6 +128,15 @@ pub async fn handle(
         }
     }
     let method = super::inventory_fitting_rpc::resolve_launch_probes_alias(service, method);
+    if matches!(
+        (service, method),
+        (
+            "invbroker",
+            "Add" | "MultiAdd" | "Jettison" | "TrashItems" | "SplitStack" | "StackAll" | "MultiMerge" | "DestroyFitting" | "ClearCharges"
+        ) | ("ship", "Jettison" | "Drop")
+    ) {
+        wait_in_space_post_unlock_barrier(ctx, session).await;
+    }
     if let Some(res) = super::inventory_fitting_rpc::handle_invbroker_sync(
         ctx,
         session,

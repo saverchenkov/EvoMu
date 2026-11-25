@@ -1445,6 +1445,7 @@ impl SystemHandle {
             ops: post_unlock::PostUnlockOps::default(),
             replies: vec![Box::new(move || { let _ = tx.send(()); })],
             in_flight_guard: None,
+            work_seq: 0,
         };
         if self.post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(item)).is_err() {
             return false;

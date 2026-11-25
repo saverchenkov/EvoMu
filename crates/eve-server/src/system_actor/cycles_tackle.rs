@@ -2092,7 +2092,12 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         Some(exec_ctx.pending_destroyed_actor),
         dt_sim,
     );
-    let mut destroyed_balls = cycles::step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
+    let (virtual_item_deltas, virtual_crystal_dmg_deltas) =
+        super::post_unlock::seed_pending_charge_reservations(
+            exec_ctx.actor_st,
+            exec_ctx.completed_post_unlock_seq_actor,
+        );
+    let mut destroyed_balls = cycles::step_cycles_with_reservations_collecting(
         exec_ctx.solar_system_id, exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &mut exec_ctx.actor_st.pending_anchoring_disruptors,
@@ -2116,6 +2121,8 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         Some(&mut exec_ctx.actor_st.module_reload_sim_remaining),
         deact_guard.as_ref(),
         Some(exec_ctx.pending_destroyed_actor),
+        virtual_item_deltas,
+        virtual_crystal_dmg_deltas,
         exec_ctx.post_unlock_ops,
     );
     destroyed_balls.extend(missile_destroyed);

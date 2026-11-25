@@ -322,6 +322,7 @@ pub struct SystemHandle {
     pub(in crate::system_actor) post_unlock_tx: tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockMsg>,
     pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
     pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    pub(in crate::system_actor) completed_post_unlock_seq: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
     pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
@@ -1048,7 +1049,6 @@ impl SystemHandle {
         accept_docking_target: Option<(BallId, DVec3)>,
         preserve_db_active_states: bool,
     ) -> Option<super::TakenBall> {
-        self.cancel_ship_nanite_repairs_sync(ball_id, true);
         self.ball_positions
             .write()
             .unwrap_or_else(|e| e.into_inner())
