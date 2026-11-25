@@ -586,12 +586,28 @@ fn gh1195_t1_targeting_warp_phase_and_activate_in_warp_map_without_custom_info()
     use RejectionFacts as F;
     use UserErrorKey as K;
 
-    for &(phase, blocks, warp_key) in WARP_PHASE_REJECTION_TABLE {
-        assert_eq!(phase.blocks_active_warp_actions(), blocks);
-        assert_eq!(phase.active_warp_error_key(), warp_key);
-        let mod_key = if blocks { Some(K::DeniedActivateInWarp) } else { None };
-        assert_eq!(phase.active_module_error_key(), mod_key);
+    for policy in WARP_PHASE_REJECTION_TABLE {
+        assert_eq!(policy.phase.blocks_active_warp_actions(), policy.blocks_active_warp);
+        assert_eq!(policy.phase.blocks_warp_restricted_actions(), policy.blocks_restricted_ops);
+        assert_eq!(policy.phase.active_warp_error_key(), policy.active_warp_key);
+        assert_eq!(policy.phase.active_module_error_key(), policy.active_module_key);
+        assert_eq!(policy.phase.restricted_warp_error_key(), policy.restricted_op_key);
     }
+
+    let restricted_align_err = E::ship_in_warp_for_restricted_phase(
+        Some(501),
+        "StargateJump",
+        WarpPhaseKind::Aligning,
+        "Cannot jump while warping",
+    );
+    assert_eq!(
+        restricted_align_err.rejection_facts(),
+        Some(&F::ShipInWarp {
+            ship_id: Some(501),
+            action: "StargateJump".into(),
+            warp_phase: Some("Aligning".into()),
+        })
+    );
 
     let warp_phase_err = E::ship_already_in_warp_for_phase(
         Some(501),
@@ -612,11 +628,19 @@ fn gh1195_t1_targeting_warp_phase_and_activate_in_warp_map_without_custom_info()
     );
     assert_eq!(warp_key, "ShipInWarp");
 
-    let act_warp_err = E::cant_activate_in_warp(
+    let act_warp_err = E::cant_activate_in_warp_for_phase(
         Some(501),
         "Activate",
-        Some("Accelerating".into()),
+        WarpPhaseKind::Accelerating,
         "Cannot activate while in warp",
+    );
+    assert_eq!(
+        act_warp_err.rejection_facts(),
+        Some(&F::ShipInWarp {
+            ship_id: Some(501),
+            action: "Activate".into(),
+            warp_phase: Some("Accelerating".into()),
+        })
     );
     let act_ce = act_warp_err.to_client_error("dogmaIM", "Activate");
     assert_eq!(act_ce.presentation(), UserErrorPresentation::Notify);
@@ -650,7 +674,7 @@ fn gh1195_t1_targeting_warp_phase_and_activate_in_warp_map_without_custom_info()
     assert_eq!(far_key, "TargetTooFar");
     assert_eq!(dict_get(&far_dict, "targetname").and_then(PyRep::as_str), Some("Guristas Scout"));
     assert_eq!(dict_get(&far_dict, "module"), Some(&PyRep::Integer(587)));
-    assert_eq!(dict_get(&far_dict, "distance"), Some(&PyRep::Real(15_000.0)));
+    assert_eq!(dict_get(&far_dict, "distance"), Some(&PyRep::Real(42_500.0)));
 
     for (key, reason, msg) in [
         (K::TargetCantValidate, "target_not_present", "Target ball missing"),

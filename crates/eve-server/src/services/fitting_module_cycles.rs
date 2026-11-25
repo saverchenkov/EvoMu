@@ -2032,6 +2032,8 @@ async fn commit_cycle_to_actor_and_effects(
     kwargs: &HashMap<String, PyRep>, prep: &mut EwarCapitalPrep, params: &PreparedCycleParams, kin: &WeaponKinematics,
 ) -> Result<((f64, f64), Option<PyRep>), BridgeRpcError> {
     let cycle = build_active_module_cycle_sync(ctx, sys_id, char_id, ship_id, module_id, m, mod_type, mod_state, fit, target_id_opt, is_overloaded, is_mwd_or_mjd, effect_name, prep, params, kin);
+    let required_cap_gj = cycle.cap_need_per_cycle;
+    let effective_max_cap = cycle.effective_max_capacitor;
     let allow_while_warping = mod_type.group_id == 4117 || is_warp_safe_cloak_module(ctx, mod_type);
     let allow_while_cloaked = matches!(mod_type.group_id, 330 | 481 | 4117);
     let replace_existing_cycle = mod_type.group_id == 72;
@@ -2049,7 +2051,22 @@ async fn commit_cycle_to_actor_and_effects(
         false,
     )
     .await
-    .map_err(|e| map_atomic_cycle_activation_error(ctx, m.type_id, e))?;
+    .map_err(|e| {
+        map_atomic_cycle_activation_error_for_ship(
+            ctx,
+            sys,
+            char_id,
+            ship_id,
+            m.type_id,
+            Some(required_cap_gj),
+            effective_max_cap,
+            e,
+        )
+    });
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(fut) => return Err(fut.await),
+    };
     if let Err(e) = evaluate_module_cycle_aggression_or_assistance(ctx, sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt).await {
         let _ = sys.remove_module_cycle(ship_id, module_id).await;
         return Err(e);

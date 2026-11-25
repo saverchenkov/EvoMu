@@ -527,18 +527,20 @@ impl ServerContext {
                 if matches!(intent, MovementIntent::BookmarkWarp { .. }) {
                     if let MovementMode::Warp { phase, .. } = ball.mode {
                         let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
-                        return Err(BridgeRpcError::with_client_error(
-                            "ShipNotInSpace",
-                            "Active ship is already in warp",
-                            eve_proto::ClientError::rejected(
-                                eve_proto::UserErrorKey::ShipInWarp,
-                                eve_proto::RejectionFacts::ShipInWarp {
-                                    ship_id: Some(ship_id),
-                                    action: "BookmarkWarp".into(),
-                                    warp_phase: Some(kind.as_str().to_owned()),
-                                },
-                            ),
-                        ));
+                        if kind.blocks_warp_restricted_actions() {
+                            return Err(BridgeRpcError::with_client_error(
+                                "ShipNotInSpace",
+                                "Active ship is already in warp",
+                                eve_proto::ClientError::rejected(
+                                    eve_proto::UserErrorKey::ShipInWarp,
+                                    eve_proto::RejectionFacts::ShipInWarp {
+                                        ship_id: Some(ship_id),
+                                        action: "BookmarkWarp".into(),
+                                        warp_phase: Some(kind.as_str().to_owned()),
+                                    },
+                                ),
+                            ));
+                        }
                     }
                 } else {
                     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(
@@ -548,26 +550,28 @@ impl ServerContext {
             } else if let MovementMode::Warp { phase, .. } = ball.mode {
                 if !allow_arriving_warp {
                     let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
-                    if matches!(intent, MovementIntent::RandomFilament { .. }) {
-                        return Err(BridgeRpcError::with_client_error(
-                            "CannotActivateFilamentInWarp",
+                    if kind.blocks_warp_restricted_actions() {
+                        if matches!(intent, MovementIntent::RandomFilament { .. }) {
+                            return Err(BridgeRpcError::with_client_error(
+                                "CannotActivateFilamentInWarp",
+                                "Cannot perform movement while ship is in warp",
+                                eve_proto::ClientError::rejected(
+                                    eve_proto::UserErrorKey::ShipInWarp,
+                                    eve_proto::RejectionFacts::ShipInWarp {
+                                        ship_id: Some(ship_id),
+                                        action: "RandomFilament".into(),
+                                        warp_phase: Some(kind.as_str().to_owned()),
+                                    },
+                                ),
+                            ));
+                        }
+                        return Err(BridgeRpcError::ship_in_warp_for_restricted_phase(
+                            Some(ship_id),
+                            "ValidateShipMovement",
+                            kind,
                             "Cannot perform movement while ship is in warp",
-                            eve_proto::ClientError::rejected(
-                                eve_proto::UserErrorKey::ShipInWarp,
-                                eve_proto::RejectionFacts::ShipInWarp {
-                                    ship_id: Some(ship_id),
-                                    action: "RandomFilament".into(),
-                                    warp_phase: Some(kind.as_str().to_owned()),
-                                },
-                            ),
                         ));
                     }
-                    return Err(BridgeRpcError::ship_in_warp_for_phase(
-                        Some(ship_id),
-                        "ValidateShipMovement",
-                        kind,
-                        "Cannot perform movement while ship is in warp",
-                    ));
                 }
             }
         }

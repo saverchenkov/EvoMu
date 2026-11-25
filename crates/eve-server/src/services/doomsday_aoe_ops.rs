@@ -332,12 +332,15 @@ where
         ));
     };
     if let MovementMode::Warp { phase, .. } = titan_ball_initial.mode {
-        return Err(BridgeRpcError::cant_activate_in_warp(
-            Some(ship_id),
-            "ActivateDoomsday",
-            Some(format!("{phase:?}")),
-            "Cannot activate Doomsday superweapon while in warp",
-        ));
+        let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+        if kind.blocks_active_warp_actions() {
+            return Err(BridgeRpcError::cant_activate_in_warp_for_phase(
+                Some(ship_id),
+                "ActivateDoomsday",
+                kind,
+                "Cannot activate Doomsday superweapon while in warp",
+            ));
+        }
     }
     let ship_pos = titan_ball_initial.position;
     if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(

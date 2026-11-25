@@ -950,7 +950,7 @@ pub(crate) async fn handle_cmd_stop(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdStop", "Active ship is not spawned in Ballpark"));
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -1051,7 +1051,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdSetSpeedFraction", "Active ship is not spawned in Ballpark"));
     };
     let warp_exit_noop = crate::services::nav_warp_interdiction::check_warp_exit_approach_or_reject(
         &current_ball,
@@ -1165,7 +1165,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), method, "Active ship is not spawned in Ballpark"));
     };
     let warp_exit_noop = crate::services::nav_warp_interdiction::check_warp_exit_approach_or_reject(
         &current_ball,
@@ -1287,7 +1287,7 @@ pub(crate) async fn handle_cmd_align_to(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdAlignTo", "Active ship is not spawned in Ballpark"));
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     let target_pos_opt = if let Some(bm_id) = bookmark_id {

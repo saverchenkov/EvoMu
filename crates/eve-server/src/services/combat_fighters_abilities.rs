@@ -60,12 +60,15 @@ async fn check_fighter_and_parent_operational_state(
     if parent_ship_id > 0 {
         if let Ok(Some((_, parent_ball))) = sys_handle.get_ball_snapshot(parent_ship_id).await {
             if let eve_destiny::MovementMode::Warp { phase, .. } = parent_ball.mode {
-                return Err(BridgeRpcError::ship_in_warp(
-                    Some(parent_ship_id),
-                    "FighterAbility",
-                    Some(format!("{phase:?}")),
-                    format!("Carrier {parent_ship_id} cannot command fighter abilities while warping"),
-                ));
+                let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+                if kind.blocks_active_warp_actions() {
+                    return Err(BridgeRpcError::ship_in_warp_for_phase(
+                        Some(parent_ship_id),
+                        "FighterAbility",
+                        kind,
+                        format!("Carrier {parent_ship_id} cannot command fighter abilities while warping"),
+                    ));
+                }
             }
             if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
                 ctx,

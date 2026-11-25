@@ -785,7 +785,7 @@ pub async fn handle(
                     ship_id,
                     Some(char_id),
                     Some(sys_id),
-                    "AnchorStructure",
+                    "Dock",
                     format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
                 )));
             };

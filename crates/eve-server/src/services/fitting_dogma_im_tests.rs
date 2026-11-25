@@ -4753,16 +4753,21 @@ async fn gh1195_t1_add_target_and_probe_invalid_target_emit_typed_user_errors_wi
     assert_eq!(far_key, eve_proto::UserErrorKey::TargetTooFar);
     assert!(far_args.iter().any(|(k, _)| k == "targetname"));
     assert!(far_args.iter().any(|(k, v)| k == "module" && *v == PyRep::Integer(587)));
-    assert!(far_args.iter().any(|(k, _)| k == "distance"));
     assert!(matches!(
         far_err.rejection_facts(),
         Some(eve_proto::RejectionFacts::TargetingFailed {
             ship_id: Some(s),
             target_id: Some(t),
             reason,
-            distance_m: Some(_),
-            max_range_m: Some(_),
-        }) if *s == ship_id && *t == far_target_id && reason == "exceeds_max_target_range"
+            distance_m: Some(d),
+            max_range_m: Some(max_r),
+        }) if *s == ship_id
+            && *t == far_target_id
+            && reason == "exceeds_max_target_range"
+            && *d > *max_r
+            && far_args.iter().any(|(k, v)| {
+                k == "distance" && matches!(v, PyRep::Real(arg_d) if (*arg_d - *d).abs() < 1e-3)
+            })
     ));
 
     // 2. Active cloak -> CantTargetWhileCloaked; decloak recalibration delay -> DeniedTargetAfterCloak

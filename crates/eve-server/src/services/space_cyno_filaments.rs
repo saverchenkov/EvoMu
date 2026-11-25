@@ -1589,12 +1589,14 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     }
     if let MovementMode::Warp { phase, .. } = current_ball.mode {
         let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
-        return Err(BridgeRpcError::ship_in_warp_for_phase(
-            Some(ship_id),
-            "BeaconJumpFleet",
-            kind,
-            "Cannot jump while in warp",
-        ));
+        if kind.blocks_warp_restricted_actions() {
+            return Err(BridgeRpcError::ship_in_warp_for_restricted_phase(
+                Some(ship_id),
+                "BeaconJumpFleet",
+                kind,
+                "Cannot jump while in warp",
+            ));
+        }
     }
     if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot jump while warp scrambled".into(), client_error: None });

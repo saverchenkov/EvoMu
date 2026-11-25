@@ -183,7 +183,7 @@ pub(crate) async fn handle_dogma_ops(
                     Some(source_id),
                     Some(target_id),
                     super::fitting_dogma_im::resolve_target_display_name(ctx, target_id),
-                    fit_res.as_ref().map_or(0, |f| f.ship.type_id as i64),
+                    fit_res.as_ref().map_or(ship_ball.type_id as i64, |f| f.ship.type_id as i64),
                     dist,
                     max_range,
                     format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"),

@@ -7,7 +7,7 @@
 
 #[path = "client_error_facts.rs"]
 mod client_error_facts;
-pub use client_error_facts::{RejectionFacts, WarpPhaseKind, WARP_PHASE_REJECTION_TABLE};
+pub use client_error_facts::{RejectionFacts, WarpPhaseKind, WarpPhasePolicy, WARP_PHASE_REJECTION_TABLE};
 
 use crate::{marshal, BridgeRpcError, PyRep};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

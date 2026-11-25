@@ -98,14 +98,15 @@ pub(crate) async fn check_space_module_cloak_and_warp_readonly(
 ) -> Result<(), BridgeRpcError> {
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
         if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
-            if phase != eve_destiny::WarpPhase::Aligning {
+            let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+            if kind.blocks_active_warp_actions() {
                 // Interdiction Nullifiers (`4117`) preserve their dedicated `CannotActivateInWarp` check;
                 // Covert Ops Cloaks (`330` warp-safe) are allowed in warp.
                 if mod_type.group_id != 4117 && !is_warp_safe_cloak_module(ctx, mod_type) {
-                    return Err(BridgeRpcError::cant_activate_in_warp(
+                    return Err(BridgeRpcError::cant_activate_in_warp_for_phase(
                         Some(ship_id),
                         &mod_type.name,
-                        Some(format!("{phase:?}")),
+                        kind,
                         "Cannot activate modules while in warp",
                     ));
                 }
@@ -307,11 +308,12 @@ pub(crate) async fn check_space_action_cloak_and_warp_readonly(
 ) -> Result<(), BridgeRpcError> {
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
         if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
-            if phase != eve_destiny::WarpPhase::Aligning {
-                return Err(BridgeRpcError::cant_activate_in_warp(
+            let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+            if kind.blocks_active_warp_actions() {
+                return Err(BridgeRpcError::cant_activate_in_warp_for_phase(
                     Some(ship_id),
                     action_label,
-                    Some(format!("{phase:?}")),
+                    kind,
                     format!("Cannot {action_label} while in warp"),
                 ));
             }
@@ -441,16 +443,64 @@ pub(crate) fn is_slot_loaded_charge_or_script_item(
 }
 
 /// Maps `SystemActor` atomic activation rejection messages to structured `BridgeRpcError`s (`#1486`).
-pub(crate) fn map_atomic_cycle_activation_error(
+/// Structured failure context captured around atomic module activation (`#1195`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AtomicCycleErrorContext {
+    pub(crate) ship_id: i64,
+    pub(crate) char_id: Option<i64>,
+    pub(crate) solar_system_id: Option<u32>,
+    pub(crate) required_gj: Option<f64>,
+    pub(crate) available_gj: Option<f64>,
+    pub(crate) warp_phase: Option<eve_proto::WarpPhaseKind>,
+}
+
+fn projected_available_capacitor_gj(
+    cs: &eve_destiny::CombatState,
+    effective_max_capacitor: Option<f64>,
+) -> f64 {
+    let mut max_cap = cs.max_capacitor;
+    let mut cap = cs.capacitor;
+    if let Some(eff_cap_max) = effective_max_capacitor.filter(|v| v.is_finite() && *v > 0.0) {
+        if !max_cap.is_finite() || max_cap <= 0.0 {
+            max_cap = eff_cap_max;
+        }
+        if !cap.is_finite() {
+            cap = eff_cap_max;
+        } else if (max_cap - 250.0).abs() <= 1e-6
+            && (cap - 250.0).abs() <= 1e-6
+            && eff_cap_max > 250.0
+        {
+            cap = eff_cap_max;
+        } else {
+            cap = cap.min(eff_cap_max);
+        }
+    }
+    if cap.is_finite() && cap >= 0.0 {
+        cap
+    } else {
+        0.0
+    }
+}
+
+/// Maps atomic module-activation failure strings using captured ship, capacitor, and warp facts (`#1195`).
+pub(crate) fn map_atomic_cycle_activation_error_with_ctx(
     ctx: &ServerContext,
     module_type_id: u32,
+    err_ctx: &AtomicCycleErrorContext,
     err: String,
 ) -> BridgeRpcError {
     if err.contains("ModuleAlreadyActive") {
         return super::module_already_active_rpc_error(ctx, Some(module_type_id), err);
     }
+    let ship_id_opt = (err_ctx.ship_id > 0).then_some(err_ctx.ship_id);
     if err.contains("not in space") {
-        return BridgeRpcError::ship_not_in_space(0, None, None, "Activate", err);
+        return BridgeRpcError::ship_not_in_space(
+            err_ctx.ship_id.max(0),
+            err_ctx.char_id,
+            err_ctx.solar_system_id,
+            "Activate",
+            err,
+        );
     }
     if err.contains("CannotActivateCloaked") {
         return BridgeRpcError::with_client_error(
@@ -467,7 +517,22 @@ pub(crate) fn map_atomic_cycle_activation_error(
         );
     }
     if err.contains("CantActivateInWarp") {
-        return BridgeRpcError::cant_activate_in_warp(None, "Activate", None, err);
+        if let Some(kind) = err_ctx.warp_phase {
+            if kind.blocks_active_warp_actions() {
+                return BridgeRpcError::cant_activate_in_warp_for_phase(
+                    ship_id_opt,
+                    "Activate",
+                    kind,
+                    err,
+                );
+            }
+        }
+        return BridgeRpcError::cant_activate_in_warp(
+            ship_id_opt,
+            "Activate",
+            err_ctx.warp_phase.map(|k| k.as_str().to_owned()),
+            err,
+        );
     }
     if err.contains("capacitor") || err.contains("Capacitor") {
         let mod_name = ctx
@@ -475,10 +540,68 @@ pub(crate) fn map_atomic_cycle_activation_error(
             .types
             .get(&module_type_id)
             .map_or("Module", |t| t.name.as_str());
-        return BridgeRpcError::not_enough_capacitor(None, mod_name, 0.0, 0.0, err);
+        let required_gj = err_ctx
+            .required_gj
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .or_else(|| {
+                ctx.sde
+                    .types
+                    .get(&module_type_id)
+                    .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::CAPACITOR_NEED).copied())
+                    .filter(|v| v.is_finite() && *v > 0.0)
+            })
+            .unwrap_or(0.0);
+        let available_gj = err_ctx
+            .available_gj
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0);
+        return BridgeRpcError::not_enough_capacitor(
+            ship_id_opt,
+            mod_name,
+            required_gj,
+            available_gj,
+            err,
+        );
     }
     let custom = format!("ModuleActivationFailed: {err}");
     BridgeRpcError::with_client_error("ModuleActivationFailed", err, eve_proto::ClientError::CustomInfo(custom))
+}
+
+/// Maps atomic cycle-activation actor rejections to typed [`BridgeRpcError`]s enriched from live ship state (`#1195`).
+pub(crate) async fn map_atomic_cycle_activation_error_for_ship(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_type_id: u32,
+    required_gj_hint: Option<f64>,
+    effective_max_capacitor: Option<f64>,
+    err: String,
+) -> BridgeRpcError {
+    let mut err_ctx = AtomicCycleErrorContext {
+        ship_id,
+        char_id: (char_id > 0).then_some(char_id),
+        solar_system_id: Some(sys.solar_system_id),
+        required_gj: required_gj_hint,
+        available_gj: None,
+        warp_phase: None,
+    };
+    if err.contains("CantActivateInWarp") {
+        if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
+            if let eve_destiny::MovementMode::Warp { phase, .. } = ball.mode {
+                err_ctx.warp_phase =
+                    Some(crate::services::nav_warp_interdiction::warp_phase_kind(phase));
+            }
+        }
+    } else if err.contains("capacitor") || err.contains("Capacitor") {
+        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+            err_ctx.available_gj = Some(projected_available_capacitor_gj(
+                &cs,
+                effective_max_capacitor,
+            ));
+        }
+    }
+    map_atomic_cycle_activation_error_with_ctx(ctx, module_type_id, &err_ctx, err)
 }
 
 #[cfg(test)]

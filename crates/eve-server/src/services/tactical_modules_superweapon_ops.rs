@@ -475,7 +475,7 @@ async fn commit_lancer_activation_and_break_protection(
     mod_type_id: u32,
     cap_cost: f64,
 ) -> Result<(), BridgeRpcError> {
-    crate::router::box_fut(|| {
+    match crate::router::box_fut(|| {
         crate::services::inventory_fitting::fitting_module_cycles::commit_lancer_activation_atomic_with_notifications(
             ctx,
             sys,
@@ -486,14 +486,22 @@ async fn commit_lancer_activation_and_break_protection(
         )
     })
     .await
-    .map(|_| ())
-    .map_err(|err| {
-        crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            mod_type_id,
-            err,
-        )
-    })
+    {
+        Ok(_) => Ok(()),
+        Err(err) => Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                mod_type_id,
+                Some(cap_cost),
+                None,
+                err,
+            )
+            .await,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -529,7 +537,9 @@ async fn commit_superweapon_cycle_and_break_protection(
     cycle: crate::system_actor::ActiveModuleCycle,
 ) -> Result<(), BridgeRpcError> {
     let mod_type_id = cycle.module_type_id;
-    crate::router::box_fut(|| {
+    let cap_need = cycle.cap_need_per_cycle;
+    let effective_max_cap = cycle.effective_max_capacitor;
+    match crate::router::box_fut(|| {
         crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
             ctx,
             sys,
@@ -543,14 +553,22 @@ async fn commit_superweapon_cycle_and_break_protection(
         )
     })
     .await
-    .map(|_| ())
-    .map_err(|err| {
-        crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            mod_type_id,
-            err,
-        )
-    })
+    {
+        Ok(_) => Ok(()),
+        Err(err) => Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                mod_type_id,
+                Some(cap_need),
+                effective_max_cap,
+                err,
+            )
+            .await,
+        ),
+    }
 }
 
 fn module_in_reactivation_delay_error(message: String) -> BridgeRpcError {

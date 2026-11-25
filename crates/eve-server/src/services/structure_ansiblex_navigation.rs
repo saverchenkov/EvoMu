@@ -271,12 +271,14 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     };
     if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
         let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
-        return Err(BridgeRpcError::ship_in_warp_for_phase(
-            Some(ship_id),
-            "AnsiblexJump",
-            kind,
-            "Cannot jump through structure stargate while in warp",
-        ));
+        if kind.blocks_warp_restricted_actions() {
+            return Err(BridgeRpcError::ship_in_warp_for_restricted_phase(
+                Some(ship_id),
+                "AnsiblexJump",
+                kind,
+                "Cannot jump through structure stargate while in warp",
+            ));
+        }
     }
     if old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(err("WarpScrambled", "Cannot jump through structure stargate while warp scrambled"));

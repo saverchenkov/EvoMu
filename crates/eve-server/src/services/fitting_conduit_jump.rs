@@ -245,7 +245,7 @@ pub(crate) async fn bridge_to_resolved_beacon(
         portal.ok_or_else(|| err("NoJumpPortalGenerator", "No online jump portal generator fitted"))?;
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
     let portal_type = ctx.sde.types.get(&portal_tid).ok_or_else(|| {
-        BridgeRpcError::module_not_found(0, Some(ship_id), Some(portal_tid as i64), false, "Portal type unknown")
+        BridgeRpcError::module_not_found(portal_id, Some(ship_id), Some(portal_tid as i64), false, "Portal type unknown")
     })?;
     if !hull_allowed(ctx, portal_type, ship_type) {
         return Err(err(
@@ -361,6 +361,8 @@ pub(crate) async fn bridge_to_resolved_beacon(
     );
     cycle.owner_char_id = Some(char_id);
     cycle.started_at_unix = now_reserve;
+    let cycle_cap_need = cycle.cap_need_per_cycle;
+    let cycle_eff_max_cap = cycle.effective_max_capacitor;
     if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_replace_notifications(
         ctx,
         &sys,
@@ -376,11 +378,19 @@ pub(crate) async fn bridge_to_resolved_beacon(
     .await
     {
         clear_bridge_claim();
-        return Err(crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            portal_tid,
-            e,
-        ));
+        return Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                &sys,
+                char_id,
+                ship_id,
+                portal_tid,
+                Some(cycle_cap_need),
+                cycle_eff_max_cap,
+                e,
+            )
+            .await,
+        );
     }
     if act_type != 0 && act_qty > 0 {
         if let Err(e) = consume_or_err(ctx, ship_id, act_type, act_qty, |have| {

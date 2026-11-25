@@ -189,12 +189,14 @@ pub(crate) async fn board_stored_ship(
             if let Ok(Some((_, cb))) = sys.get_ball_snapshot(cur).await {
                 if let eve_destiny::MovementMode::Warp { phase, .. } = cb.mode {
                     let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
-                    return Err(BridgeRpcError::ship_in_warp_for_phase(
-                        Some(cur),
-                        "BoardShipFromBay",
-                        kind,
-                        "Cannot board stored ship while in warp",
-                    ));
+                    if kind.blocks_warp_restricted_actions() {
+                        return Err(BridgeRpcError::ship_in_warp_for_restricted_phase(
+                            Some(cur),
+                            "BoardShipFromBay",
+                            kind,
+                            "Cannot board stored ship while in warp",
+                        ));
+                    }
                 }
             }
             if sys.is_ball_scrambled(cur).await.unwrap_or(false) {
@@ -218,8 +220,23 @@ pub(crate) async fn board_stored_ship(
                     let rad = s.items.get(&host_id).and_then(|i| ctx.sde.types.get(&i.type_id)).map(|t| t.radius).unwrap_or(50.0);
                     s.item_positions.get(&host_id).map(|p| (DVec3::new(p[0], p[1], p[2]), rad))
                 }));
-            let (Some(cur_pos), Some((host_pos, host_radius))) = (cur_pos, host_snap) else {
-                return Err(BridgeRpcError::ship_not_in_space(host_id, Some(char_id), Some(sys_id), "BoardShipFromBay", format!("Bay host {host_id} is not on grid")));
+            let Some(cur_pos) = cur_pos else {
+                return Err(BridgeRpcError::ship_not_in_space(
+                    cur,
+                    Some(char_id),
+                    Some(sys_id),
+                    "BoardShipFromBay",
+                    format!("Active ship {cur} is not on grid"),
+                ));
+            };
+            let Some((host_pos, host_radius)) = host_snap else {
+                return Err(BridgeRpcError::ship_not_in_space(
+                    host_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "BoardShipFromBay",
+                    format!("Bay host {host_id} is not on grid"),
+                ));
             };
             let dist = cur_pos.distance(host_pos);
             if dist > BAY_ACCESS_RANGE_M {

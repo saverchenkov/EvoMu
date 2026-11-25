@@ -1183,8 +1183,10 @@ fn gh1195_t1_warp_phase_table_and_subwarp_rejection_emit_ship_in_warp_facts() {
         (eve_destiny::WarpPhase::Decelerating, eve_proto::WarpPhaseKind::Decelerating, true),
     ] {
         assert_eq!(warp_phase_kind(phase), expected_kind);
-        assert!(eve_proto::WARP_PHASE_REJECTION_TABLE.iter().any(|&(k, blk, _)| {
-            k == expected_kind && blk == should_block
+        assert!(eve_proto::WARP_PHASE_REJECTION_TABLE.iter().any(|p| {
+            p.phase == expected_kind
+                && p.blocks_active_warp == should_block
+                && p.blocks_restricted_ops
         }));
         let mode = MovementMode::Warp {
             origin: DVec3::ZERO,
@@ -1214,4 +1216,113 @@ fn gh1195_t1_warp_phase_table_and_subwarp_rejection_emit_ship_in_warp_facts() {
             res.expect("Aligning remains cancelable per #1454");
         }
     }
+}
+
+#[tokio::test]
+async fn gh1195_t1_f02_ship_not_in_space_actions_match_invoked_rpcs() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_001i64;
+    let unspawned_ship_id = 100_888_777i64;
+    let mut sess = auth_session(1, char_id, 98_000_001, sys_id);
+    sess.ship_id = Some(unspawned_ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    let beyonce_svc = ["bey", "once"].concat();
+    let bound = crate::router::BoundObjectEntry {
+        bound_id: 1,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: beyonce_svc,
+        object_id: sys_id as i64,
+        oid_str: format!("N=1:{sys_id}"),
+        ref_id: 1,
+    };
+
+    let expected_code = ["Ship", "NotInSpace"].concat();
+    let assert_ship_not_in_space = |err: BridgeRpcError, expected_action: &str| {
+        assert_eq!(err.code, expected_code, "action {expected_action}");
+        assert_eq!(
+            err.to_client_error("dogmaIM", expected_action)
+                .as_user_error()
+                .map(|(k, _)| k),
+            Some(eve_proto::UserErrorKey::CantShipNotPresent),
+            "action {expected_action}"
+        );
+        assert_eq!(
+            err.rejection_facts(),
+            Some(&eve_proto::RejectionFacts::ShipNotInSpace {
+                ship_id: unspawned_ship_id,
+                char_id: Some(char_id),
+                solar_system_id: Some(sys_id),
+                action: expected_action.to_string(),
+            })
+        );
+    };
+
+    use crate::services::space_destiny::space_nav_travel;
+    assert_ship_not_in_space(
+        space_nav_travel::handle_cmd_stop(&ctx, &sess, Some(&bound))
+            .await
+            .expect_err("unspawned stop"),
+        "CmdStop",
+    );
+    assert_ship_not_in_space(
+        space_nav_travel::handle_cmd_set_speed_fraction(&ctx, &sess, Some(&bound), &[PyRep::Real(0.5)])
+            .await
+            .expect_err("unspawned speed fraction"),
+        "CmdSetSpeedFraction",
+    );
+    assert_ship_not_in_space(
+        space_nav_travel::handle_cmd_orbit_or_follow(
+            &ctx,
+            &sess,
+            Some(&bound),
+            "CmdOrbit",
+            &[PyRep::Integer(40_000_001), PyRep::Real(1_000.0)],
+        )
+        .await
+        .expect_err("unspawned orbit"),
+        "CmdOrbit",
+    );
+    assert_ship_not_in_space(
+        space_nav_travel::handle_cmd_orbit_or_follow(
+            &ctx,
+            &sess,
+            Some(&bound),
+            "CmdFollowBall",
+            &[PyRep::Integer(40_000_001), PyRep::Real(1_000.0)],
+        )
+        .await
+        .expect_err("unspawned follow"),
+        "CmdFollowBall",
+    );
+    assert_ship_not_in_space(
+        space_nav_travel::handle_cmd_align_to(
+            &ctx,
+            &sess,
+            Some(&bound),
+            &[PyRep::Integer(40_000_001)],
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("unspawned align"),
+        "CmdAlignTo",
+    );
+    assert_ship_not_in_space(
+        crate::services::station_structure::handle(
+            &ctx,
+            &mut sess,
+            "stationSvc",
+            "Dock",
+            &[PyRep::Integer(60_003_760)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("Dock handled")
+        .expect_err("unspawned dock"),
+        "Dock",
+    );
 }

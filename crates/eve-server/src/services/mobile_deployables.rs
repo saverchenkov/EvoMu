@@ -1176,12 +1176,14 @@ pub async fn handle_activate_micro_jump_unit(
     }
     if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
         let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
-        return Err(BridgeRpcError::ship_in_warp_for_phase(
-            Some(ship_id),
-            "ActivateMMJU",
-            kind,
-            "Cannot activate Mobile Micro Jump Unit while warping",
-        ));
+        if kind.blocks_warp_restricted_actions() {
+            return Err(BridgeRpcError::ship_in_warp_for_restricted_phase(
+                Some(ship_id),
+                "ActivateMMJU",
+                kind,
+                "Cannot activate Mobile Micro Jump Unit while warping",
+            ));
+        }
     }
     let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
     if ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {
