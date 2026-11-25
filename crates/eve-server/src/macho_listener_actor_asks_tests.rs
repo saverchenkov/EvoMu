@@ -1418,8 +1418,7 @@ async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_ne
     sess.structure_id = Some(struct_id);
     sess.live_notify_listener = true;
 
-    let mut sys_rx: Option<tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>> =
-        None;
+    let mut sys_rx = sys_handle.subscribe();
     let mut subscribed_sys_id = None;
     let mut wire_state = SessionWireState::new(sid, client_id);
     let mut deferred_ship_id = None;
@@ -1527,13 +1526,13 @@ async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_ne
         wire_state.needs_awaiting_set_state_resync(),
         "BF-2: Upwell View Outside -> Undock timeout must set awaiting_tick_set_state_resync even after enter_space cleared last_wire_epoch_and_stamp"
     );
+    assert_eq!(subscribed_sys_id, Some(sys_id));
     let (mut client_rd, mut server_wr) = tokio::io::duplex(64 * 1024);
-    let mut rx = sys_rx.take().expect("Undock attached sys_rx");
     let pause_undock = pause_holder.lock().unwrap().take().unwrap();
     assert_next_tick_recovers_set_state_without_client_rpc(
         &ctx,
         &sys_handle,
-        &mut rx,
+        &mut sys_rx,
         &mut wire_state,
         &mut server_wr,
         &mut client_rd,
@@ -1585,8 +1584,7 @@ async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_ne
     // 3) Negative control: an unbootstrapped initial `beyonce.GetFormations` timeout (returning
     //    `ErrorResponse`) must leave `needs_awaiting_set_state_resync() == false`.
     let mut unboot_ws = SessionWireState::new(sid + 2, client_id + 2);
-    let mut unboot_rx: Option<tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>> =
-        Some(sys_handle.subscribe());
+    let mut unboot_rx = sys_handle.subscribe();
     let mut unboot_sub_sys = Some(sys_id);
     let mut unboot_def_ship = None;
     let pause_unboot = PausedActorGuard::pause(&sys_handle);
@@ -1650,7 +1648,7 @@ async fn prepare_dock_warp_settle_bounded_prevents_station_dock_hang_and_recover
 
     let pause_guard = PausedActorGuard::pause(&sys_handle);
     let started = std::time::Instant::now();
-    let err = prepare_dock_warp_settle_bounded(
+    let res = prepare_dock_warp_settle_bounded(
         &ctx,
         &sess,
         &mut wire_state,
@@ -1659,8 +1657,13 @@ async fn prepare_dock_warp_settle_bounded_prevents_station_dock_hang_and_recover
         &[PyRep::Integer(60_003_760)],
         Duration::from_millis(80),
     )
-    .await
-    .expect_err("BF-3: paused actor must bound prepare_dock_warp_settle instead of hanging");
+    .await;
+    let err = match res {
+        Ok(_) => {
+            panic!("BF-3: paused actor must bound prepare_dock_warp_settle instead of hanging")
+        }
+        Err(err) => err,
+    };
     assert!(started.elapsed() < Duration::from_millis(500));
     assert_eq!(err.code, "ServiceTemporarilyUnavailable");
     assert!(matches!(
