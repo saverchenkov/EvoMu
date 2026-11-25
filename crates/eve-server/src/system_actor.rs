@@ -835,6 +835,72 @@ impl SystemRegistry {
             .unwrap_or(1.0)
     }
 
+    /// Resolves effective `(tidi_factor, has_tidi_history)` for live or cold `solar_system_id`
+    /// (`G1A-R3-P1-01`), respecting `#1196`'s `tidi_history_systems` distinction from pure `1.0x` anchors.
+    pub(crate) fn resolve_effective_tidi_mode(
+        &self,
+        solar_system_id: SolarSystemId,
+        db_read_safe: bool,
+    ) -> (f64, bool) {
+        if solar_system_id == 0 {
+            return (1.0, false);
+        }
+        let live_tidi = self.get_handle(solar_system_id).map(|h| h.tidi_factor());
+        let held_svc = held_lock_ranks().iter().any(|&r| r >= RANK_SERVICE_STATE);
+        let (manual_override, cn_tidi_hist) = {
+            let cn = if held_svc {
+                self.cluster_nodes
+                    .read_unranked()
+                    .unwrap_or_else(|e| e.into_inner())
+            } else {
+                self.cluster_nodes.read().unwrap_or_else(|e| e.into_inner())
+            };
+            (
+                cn.manual_tidi_overrides.get(&solar_system_id).copied(),
+                cn.tidi_history_systems.contains(&solar_system_id),
+            )
+        };
+        let tidi = live_tidi
+            .or(manual_override)
+            .or_else(|| {
+                if db_read_safe
+                    && !held_lock_ranks()
+                        .iter()
+                        .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
+                {
+                    self.db.as_ref().and_then(|db| {
+                        db.with_snapshot(|snap| {
+                            let nid =
+                                -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
+                            snap.owner_notes
+                                .get(&nid)
+                                .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+                        })
+                    })
+                } else {
+                    None
+                }
+            })
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.10, 1.0);
+        let gate_tidi_hist = if held_svc {
+            self.cooldown_persist_gates
+                .try_lock()
+                .ok()
+                .and_then(|g| g.get(&solar_system_id).map(|gate| gate.has_tidi_history()))
+                .unwrap_or(false)
+        } else {
+            self.cooldown_persist_gates
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&solar_system_id).map(|gate| gate.has_tidi_history()))
+                .unwrap_or(false)
+        };
+        let has_tidi_history = tidi < 0.999_999 || cn_tidi_hist || gate_tidi_hist;
+        (tidi, has_tidi_history)
+    }
+
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
         self.get_handle(solar_system_id)
             .map(|h| h.take_pending_cycle_actions())
@@ -873,22 +939,30 @@ impl SystemRegistry {
         }
     }
 
-    pub(crate) fn is_system_non_cold(&self, solar_system_id: SolarSystemId) -> bool {
-        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
-            self.is_system_non_cold_try(solar_system_id)
-        } else {
-            self.systems
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&solar_system_id)
-        }
-    }
-
-    pub(crate) fn is_system_non_cold_try(&self, solar_system_id: SolarSystemId) -> bool {
-        self.systems
-            .read_unranked()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&solar_system_id)
+    pub(crate) fn transitioning_system_ids(
+        &self,
+        exclude_sys_opt: Option<SolarSystemId>,
+    ) -> Vec<SolarSystemId> {
+        let collect_transitioning =
+            |guard: &HashMap<SolarSystemId, lifecycle_sm::SystemLifecycleSlot>| {
+                guard
+                    .iter()
+                    .filter(|&(&id, slot)| {
+                        Some(id) != exclude_sys_opt && slot.live_handle().is_none()
+                    })
+                    .map(|(&id, _)| id)
+                    .collect::<Vec<_>>()
+            };
+        let mut ids: Vec<SolarSystemId> =
+            if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+                let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
+                collect_transitioning(&guard)
+            } else {
+                let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+                collect_transitioning(&guard)
+            };
+        ids.sort_unstable();
+        ids
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
@@ -1170,50 +1244,35 @@ impl SystemRegistry {
                 }
             }
         }
-        let initial_tidi = self
-            .cluster_nodes
-            .read()
-            .ok()
-            .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
-            .or_else(|| {
-                if db_read_safe {
-                    self.db.as_ref().and_then(|db| {
-                        db.with_snapshot(|snap| {
-                            let nid =
-                                -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-                            snap.owner_notes
-                                .get(&nid)
-                                .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-                        })
-                    })
+        let (initial_tidi, mut has_tidi_history) =
+            self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
+        let persist_gate = self.cooldown_persist_gate(solar_system_id);
+        let (persist_epoch, initial_cooldowns, drained_transitions) = {
+            let mut gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let persist_epoch = persist_gate.bump_epoch();
+            if has_tidi_history {
+                persist_gate.mark_tidi_history();
+            } else if persist_gate.has_tidi_history() {
+                has_tidi_history = true;
+            }
+            let initial_cooldowns = if db_read_safe {
+                if let Some(ref db) = db_opt {
+                    ewar_cooldowns::load_active_system_module_cooldowns_for_boot(
+                        db,
+                        solar_system_id,
+                        initial_tidi,
+                        has_tidi_history,
+                        0.0,
+                    )
                 } else {
-                    None
+                    HashMap::new()
                 }
-            })
-            .unwrap_or(1.0)
-            .clamp(0.10, 1.0);
-        let has_tidi_history = initial_tidi < 0.999_999
-            || self
-                .cluster_nodes
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .sim_clock_anchoring
-                .contains_key(&solar_system_id);
-        let persist_epoch = self.cooldown_persist_gate(solar_system_id).bump_epoch();
-        let initial_cooldowns = if db_read_safe {
-            if let Some(ref db) = db_opt {
-                ewar_cooldowns::load_active_system_module_cooldowns_for_boot(
-                    db,
-                    solar_system_id,
-                    initial_tidi,
-                    has_tidi_history,
-                    0.0,
-                )
             } else {
                 HashMap::new()
-            }
-        } else {
-            HashMap::new()
+            };
+            let drained = std::mem::take(&mut gate_guard.pending_transitions);
+            persist_gate.clear_pending_transitions_flag();
+            (persist_epoch, initial_cooldowns, drained)
         };
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
@@ -1242,6 +1301,13 @@ impl SystemRegistry {
             fighters: initial_fighters, fighters_lifecycle_gen: generation, fighters_needs_sqlite_hydration: initial_fighters_needs_hydration, fighters_persist: Arc::clone(&self.fighter_persist),
             ..Default::default()
         };
+        let _ = module_cooldowns::apply_pending_transitions_to_actor_state(
+            solar_system_id,
+            &mut initial_actor_state,
+            initial_tidi,
+            has_tidi_history,
+            drained_transitions,
+        );
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
         if db_read_safe {
             let dyn_ids: Vec<BallId> = initial_ballpark
@@ -2236,6 +2302,12 @@ impl SystemRegistry {
                     })
                 }
                 })();
+                if cur_tidi_cmd < 0.999_999 {
+                    cooldown_persist_gate_actor.mark_tidi_history();
+                    actor_st.has_tidi_history = true;
+                } else if cooldown_persist_gate_actor.has_tidi_history() {
+                    actor_st.has_tidi_history = true;
+                }
                 post_unlock::enqueue_actor_cmd_post_unlock_ops(
                     &mut actor_st,
                     post_unlock_tx_opt.0.as_ref(),

@@ -540,13 +540,12 @@ impl PersistedServerRuntimeState {
             );
         }
         crate::system_actor::import_legacy_monolith_module_cooldowns_in_db(
+            &ctx.systems,
             &ctx.db,
             ctx.now_unix_secs() as f64,
-            |sid| ctx.resolve_sys_tidi_mode(Some(sid)),
             self.module_reactivation_cooldowns,
         );
-        ctx.systems
-            .rehydrate_active_system_cooldowns_from_db(|sid| ctx.resolve_sys_tidi_mode(Some(sid)));
+        ctx.systems.rehydrate_active_system_cooldowns_from_db();
         *ctx.phased_asteroid_fields
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.phased_asteroid_fields;
@@ -1013,12 +1012,11 @@ impl ServerContext {
                     Some(self.sde.as_ref()),
                 );
                 crate::system_actor::migrate_and_prune_module_cooldowns_in_db(
+                    &self.systems,
                     &self.db,
                     self.now_unix_secs() as f64,
-                    |sid| self.resolve_sys_tidi_mode(Some(sid)),
                 );
-                self.systems
-                    .rehydrate_active_system_cooldowns_from_db(|sid| self.resolve_sys_tidi_mode(Some(sid)));
+                self.systems.rehydrate_active_system_cooldowns_from_db();
                 self.retire_legacy_runtime_monolith_in_db();
                 return;
             }

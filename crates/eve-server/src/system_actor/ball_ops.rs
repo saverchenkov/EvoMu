@@ -42,6 +42,7 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
     removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
     pub(in crate::system_actor) post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
+    pub(in crate::system_actor) tidi_factor: f64,
 }
 
 impl<'a> BallOpsCtx<'a> {
@@ -58,6 +59,7 @@ impl<'a> BallOpsCtx<'a> {
             ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
             post_unlock_ops: exec_ctx.post_unlock_ops,
+            tidi_factor: super::clamp_tidi_factor_bits(exec_ctx.tidi_factor_bits_actor),
         }
     }
 
@@ -124,6 +126,7 @@ fn run_direct_ball_op_on_current_thread<R>(
     op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
 ) -> R {
     let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(handle);
+    let tidi = handle.tidi_factor();
     let (out, ticket) = {
         let mut ballpark = handle
             .ballpark
@@ -154,7 +157,11 @@ fn run_direct_ball_op_on_current_thread<R>(
             ball_spawn_tokens: None,
             removed_checkpoint_ball: None,
             post_unlock_ops: &mut ops,
+            tidi_factor: tidi,
         };
+        if tidi < 0.999_999 || handle.cooldown_persist_gate.has_tidi_history() {
+            ctx.actor_st.has_tidi_history = true;
+        }
         let out = op(&mut ctx);
         protection::sync_active_module_ships_cache(
             &actor_st.active_module_cycles,

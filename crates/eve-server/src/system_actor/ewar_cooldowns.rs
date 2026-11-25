@@ -976,26 +976,13 @@ impl SystemHandle {
         jamming_type: &'static str,
     ) -> Result<(), String> {
         dispatch_actor_sync_with_deadline(
-            self,
-            "RecordActiveEwarStart",
-            ACTOR_CMD_TIMEOUT,
+            self, "RecordActiveEwarStart", ACTOR_CMD_TIMEOUT,
             (source_ship_id, module_id, target_ship_id, jamming_type),
             |(source_ship_id, module_id, target_ship_id, jamming_type), reply| {
-                SystemCommand::RecordActiveEwarStart {
-                    source_ship_id,
-                    module_id,
-                    target_ship_id,
-                    jamming_type,
-                    reply,
-                }
+                SystemCommand::RecordActiveEwarStart { source_ship_id, module_id, target_ship_id, jamming_type, reply }
             },
             |ctx, (source_ship_id, module_id, target_ship_id, jamming_type)| {
-                ctx.actor_st
-                    .ewar_state
-                    .active_ewar_starts
-                    .entry((source_ship_id, module_id))
-                    .or_default()
-                    .push((target_ship_id, jamming_type));
+                ctx.actor_st.ewar_state.active_ewar_starts.entry((source_ship_id, module_id)).or_default().push((target_ship_id, jamming_type));
                 Ok(())
             },
         )
@@ -1008,27 +995,14 @@ impl SystemHandle {
         targets: Vec<(i64, &'static str)>,
     ) -> Result<(), String> {
         dispatch_actor_sync_with_deadline(
-            self,
-            "ReplaceActiveEwarStarts",
-            ACTOR_CMD_TIMEOUT,
+            self, "ReplaceActiveEwarStarts", ACTOR_CMD_TIMEOUT,
             (source_ship_id, module_id, targets),
-            |(source_ship_id, module_id, targets), reply| SystemCommand::ReplaceActiveEwarStarts {
-                source_ship_id,
-                module_id,
-                targets,
-                reply,
-            },
+            |(source_ship_id, module_id, targets), reply| SystemCommand::ReplaceActiveEwarStarts { source_ship_id, module_id, targets, reply },
             |ctx, (source_ship_id, module_id, targets)| {
                 if targets.is_empty() {
-                    ctx.actor_st
-                        .ewar_state
-                        .active_ewar_starts
-                        .remove(&(source_ship_id, module_id));
+                    ctx.actor_st.ewar_state.active_ewar_starts.remove(&(source_ship_id, module_id));
                 } else {
-                    ctx.actor_st
-                        .ewar_state
-                        .active_ewar_starts
-                        .insert((source_ship_id, module_id), targets);
+                    ctx.actor_st.ewar_state.active_ewar_starts.insert((source_ship_id, module_id), targets);
                 }
                 Ok(())
             },
@@ -1042,14 +1016,8 @@ impl SystemHandle {
         allow_db_source_fallback: bool,
     ) -> Result<ModuleEwarFlushSnapshot, String> {
         call_actor_result_with_deadline(self, "FlushModuleEwar", ACTOR_CMD_TIMEOUT, |reply| {
-            SystemCommand::FlushModuleEwar {
-                source_ship_id,
-                source_module_id,
-                allow_db_source_fallback,
-                reply,
-            }
-        })
-        .await
+            SystemCommand::FlushModuleEwar { source_ship_id, source_module_id, allow_db_source_fallback, reply }
+        }).await
     }
 
     pub fn flush_module_ewar_sync(
@@ -1059,47 +1027,26 @@ impl SystemHandle {
         allow_db_source_fallback: bool,
     ) -> Result<ModuleEwarFlushSnapshot, String> {
         dispatch_actor_sync_with_deadline(
-            self,
-            "FlushModuleEwar",
-            ACTOR_CMD_TIMEOUT,
+            self, "FlushModuleEwar", ACTOR_CMD_TIMEOUT,
             (source_ship_id, source_module_id, allow_db_source_fallback),
             |(source_ship_id, source_module_id, allow_db_source_fallback), reply| {
-                SystemCommand::FlushModuleEwar {
-                    source_ship_id,
-                    source_module_id,
-                    allow_db_source_fallback,
-                    reply,
-                }
+                SystemCommand::FlushModuleEwar { source_ship_id, source_module_id, allow_db_source_fallback, reply }
             },
-            |ctx, (source_ship_id, source_module_id, allow_db_source_fallback)| {
-                flush_module_ewar_in_actor(
-                    ctx,
-                    source_ship_id,
-                    source_module_id,
-                    allow_db_source_fallback,
-                )
-            },
+            |ctx, (s, m, fb)| flush_module_ewar_in_actor(ctx, s, m, fb),
         )
     }
 
     pub async fn clear_ewar_state(&self) -> Result<(), String> {
         call_actor_result_with_deadline(self, "ClearEwarState", ACTOR_CMD_TIMEOUT, |reply| {
             SystemCommand::ClearEwarState { reply }
-        })
-        .await
+        }).await
     }
 
     pub fn clear_ewar_state_sync(&self) -> Result<(), String> {
         dispatch_actor_sync_with_deadline(
-            self,
-            "ClearEwarState",
-            ACTOR_CMD_TIMEOUT,
-            (),
+            self, "ClearEwarState", ACTOR_CMD_TIMEOUT, (),
             |(), reply| SystemCommand::ClearEwarState { reply },
-            |ctx, ()| {
-                ctx.actor_st.ewar_state = ActorEwarState::default();
-                Ok(())
-            },
+            |ctx, ()| { ctx.actor_st.ewar_state = ActorEwarState::default(); Ok(()) },
         )
     }
 
@@ -1112,7 +1059,7 @@ impl SystemHandle {
 
     fn persist_cooldown_payload(&self, mut payload: ModuleCooldownPersistPayload) -> bool {
         payload.tidi_factor = self.tidi_factor();
-        if payload.tidi_factor < 0.999_999 {
+        if payload.tidi_factor < 0.999_999 || self.cooldown_persist_gate.has_tidi_history() {
             payload.has_tidi_history = true;
         }
         persist_cooldown_payload_with_gate(

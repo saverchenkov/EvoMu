@@ -1664,6 +1664,9 @@ impl SystemHandle {
         } else {
             1.0
         };
+        if clamped < 0.999_999 {
+            self.cooldown_persist_gate.mark_tidi_history();
+        }
         if (clamped - prev_clamped).abs() > f64::EPSILON
             && !eve_db::lock_rank::held_lock_ranks()
                 .iter()

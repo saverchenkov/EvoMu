@@ -234,6 +234,9 @@ impl super::SystemHandle {
                 );
                 (db_opt.clone(), sde_opt.clone())
             };
+            st.has_tidi_history = st.has_tidi_history
+                || self.tidi_factor() < 0.999_999
+                || self.cooldown_persist_gate.has_tidi_history();
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));
             let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(

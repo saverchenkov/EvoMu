@@ -2269,6 +2269,7 @@ impl SystemHandle {
         let tick = bp.current_tick;
         let ops_was_empty = post_unlock_ops.is_empty();
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
+        st.has_tidi_history = st.has_tidi_history || tidi < 0.999_999 || self.cooldown_persist_gate.has_tidi_history();
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         self.publish_view_from(&bp, Some(&st));
         let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
