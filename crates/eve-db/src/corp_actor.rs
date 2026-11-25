@@ -232,11 +232,14 @@ fn corp_role_breakdown_for_record(
         }
     }
 
+    // Pending global role grants (`unmatured_role_bits`) suppress global `out.roles` only;
+    // location-scoped fields are suppressed only by unmatured title or scoped pending grants
+    // so an unrelated pending global grant never strips existing `roles_at_hq`/`base`/`other`.
     out.unmatured_mask = unmatured_role_bits | unmatured_title_bits;
     out.roles &= !out.unmatured_mask;
-    out.roles_at_hq &= !(out.unmatured_mask | unmatured_scoped_bits[0]);
-    out.roles_at_base &= !(out.unmatured_mask | unmatured_scoped_bits[1]);
-    out.roles_at_other &= !(out.unmatured_mask | unmatured_scoped_bits[2]);
+    out.roles_at_hq &= !(unmatured_title_bits | unmatured_scoped_bits[0]);
+    out.roles_at_base &= !(unmatured_title_bits | unmatured_scoped_bits[1]);
+    out.roles_at_other &= !(unmatured_title_bits | unmatured_scoped_bits[2]);
     (out, unmatured_scoped_bits)
 }
 
@@ -313,7 +316,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
             roles |= bd.roles_at_other;
             scoped_unmatured |= unmatured_scoped[2];
         }
-        roles &= !scoped_unmatured;
+        roles &= !(bd.unmatured_mask | scoped_unmatured);
     }
     (false, roles)
 }
