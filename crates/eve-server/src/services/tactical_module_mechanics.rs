@@ -86,18 +86,24 @@ pub fn validate_module_fitting_constraints(
             })
             .count();
         if fitted_same_group >= max_count {
-            let code = if mod_t.group_id == 1672 {
-                "MaxGroupFitted"
+            let msg = format!(
+                "UserError: MaxGroupFittedExceeded — maximum of {} {} can be fitted per ship",
+                max_count, mod_t.name
+            );
+            return Err(if mod_t.group_id == 1672 {
+                BridgeRpcError {
+                    code: "MaxGroupFitted".into(),
+                    message: msg,
+                    client_error: None,
+                }
             } else {
-                "FittingValidationFailed"
-            };
-            return Err(BridgeRpcError {
-                code: code.into(),
-                message: format!(
-                    "UserError: MaxGroupFittedExceeded — maximum of {} {} can be fitted per ship",
-                    max_count, mod_t.name
-                ),
-                client_error: None,
+                BridgeRpcError::fitting_validation_failed(
+                    Some(ship_id),
+                    Some(item_id),
+                    Some(mod_t.type_id as i64),
+                    &mod_t.name,
+                    msg,
+                )
             });
         }
     }
@@ -157,11 +163,13 @@ pub async fn activate_interdiction_sphere_launcher(
     }
 
     let Some((current_tick, ship_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ActivateInterdictionSphereLauncher",
+            format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        ));
     };
     let ship_pos = ship_ball.position;
     let now_unix = ctx.now_unix_secs();

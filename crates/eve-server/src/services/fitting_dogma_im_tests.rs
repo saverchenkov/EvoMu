@@ -4645,3 +4645,190 @@ async fn destroy_fitting_on_corp_upwell_structure_emits_on_item_change_for_loade
     assert_eq!(charge_changes[0].1.owner_id, corp_id);
     assert_eq!(charge_changes[0].1.location_id, 6);
 }
+
+#[tokio::test]
+async fn gh1195_t1_add_target_and_probe_invalid_target_emit_typed_user_errors_without_custom_info() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_399_001i64;
+    let unspawned_char_id = 96_399_002i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_399_100i64;
+    let unspawned_ship_id = 96_399_101i64;
+    let near_target_id = 96_399_200i64;
+    let far_target_id = 96_399_201i64;
+    let probe_id = 96_399_202i64;
+    let missing_target_id = 96_399_999i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.values().next().cloned().expect("seed char");
+        for (cid, uid, sid, name) in [
+            (char_id, 96_399_1u64, ship_id, "TypedTargetPilot"),
+            (unspawned_char_id, 96_399_2u64, unspawned_ship_id, "UnspawnedPilot"),
+        ] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.name = name.into();
+            ch.corporation_id = 1_000_009;
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+        }
+        for (iid, owner, tid) in [
+            (ship_id, char_id, 587u32),
+            (unspawned_ship_id, unspawned_char_id, 587u32),
+            (near_target_id, 96_399_888i64, 587u32),
+            (far_target_id, 96_399_889i64, 587u32),
+            (probe_id, 96_399_890i64, 22_778u32),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, pos, owner, grp, cat) in [
+        (ship_id, 587u32, DVec3::ZERO, char_id, 25u32, 6u32),
+        (near_target_id, 587u32, DVec3::new(4_000.0, 0.0, 0.0), 96_399_888i64, 25u32, 6u32),
+        (far_target_id, 587u32, DVec3::new(500_000.0, 0.0, 0.0), 96_399_889i64, 25u32, 6u32),
+        (probe_id, 22_778u32, DVec3::new(3_000.0, 0.0, 0.0), 96_399_890i64, 548u32, 8u32),
+    ] {
+        let _ = sys
+            .spawn_ball_with_meta(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_350_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+                SlimItemMeta {
+                    group_id: grp,
+                    category_id: cat,
+                    owner_id: owner,
+                    char_id: Some(owner),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+
+    let mut sess = SessionState::default();
+    sess.user_id = Some(96_399_1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    // 1. Distance > maxTargetRange -> TargetTooFar + TargetingFailed RejectionFacts
+    let far_err = handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "AddTarget", &[PyRep::Integer(far_target_id)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect_err("out-of-range target must fail");
+    assert_eq!(far_err.code, "TargetingFailed");
+    let far_ce = far_err.to_client_error("dogmaIM", "AddTarget");
+    let (far_key, far_args) = far_ce.as_user_error().expect("typed UserError, not CustomInfo");
+    assert_eq!(far_key, eve_proto::UserErrorKey::TargetTooFar);
+    assert!(far_args.iter().any(|(k, _)| k == "targetname"));
+    assert!(far_args.iter().any(|(k, v)| k == "module" && *v == PyRep::Integer(587)));
+    assert!(far_args.iter().any(|(k, _)| k == "distance"));
+    assert!(matches!(
+        far_err.rejection_facts(),
+        Some(eve_proto::RejectionFacts::TargetingFailed {
+            ship_id: Some(s),
+            target_id: Some(t),
+            reason,
+            distance_m: Some(_),
+            max_range_m: Some(_),
+        }) if *s == ship_id && *t == far_target_id && reason == "exceeds_max_target_range"
+    ));
+
+    // 2. Active cloak -> CantTargetWhileCloaked; decloak recalibration delay -> DeniedTargetAfterCloak
+    let _ = sys.modify_combat_state(ship_id, |cs| {
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+    }).await;
+    let cloak_err = handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "AddTarget", &[PyRep::Integer(near_target_id)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect_err("cloaked ship cannot lock");
+    assert_eq!(
+        cloak_err.to_client_error("dogmaIM", "AddTarget").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantTargetWhileCloaked)
+    );
+
+    let _ = sys.modify_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.decloak_targeting_delay_remaining_s = 5.0;
+    }).await;
+    let delay_err = handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "AddTarget", &[PyRep::Integer(near_target_id)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect_err("decloak delay cannot lock");
+    assert_eq!(
+        delay_err.to_client_error("dogmaIM", "AddTarget").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::DeniedTargetAfterCloak)
+    );
+    let _ = sys.modify_combat_state(ship_id, |cs| cs.decloak_targeting_delay_remaining_s = 0.0).await;
+
+    // 3. Missing target ball -> TargetCantValidate
+    let missing_err = handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "AddTarget", &[PyRep::Integer(missing_target_id)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect_err("missing target ball must fail");
+    assert_eq!(
+        missing_err.to_client_error("dogmaIM", "AddTarget").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::TargetCantValidate)
+    );
+
+    // 4. Untargetable interdiction probe -> InvalidTarget -> InvalidTargetForModule + InvalidTarget facts
+    let probe_err = handle_dogma_im(&ctx, &mut sess, None, "dogmaIM", "AddTarget", &[PyRep::Integer(probe_id)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect_err("probe cannot be targeted");
+    assert_eq!(probe_err.code, "InvalidTarget");
+    assert_eq!(
+        probe_err.to_client_error("dogmaIM", "AddTarget").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::InvalidTargetForModule)
+    );
+    assert!(matches!(
+        probe_err.rejection_facts(),
+        Some(eve_proto::RejectionFacts::InvalidTarget { target_id: Some(t), .. }) if *t == probe_id
+    ));
+
+    // 5. Missing source ship ball -> CantShipNotPresent
+    let mut unspawned_sess = sess;
+    unspawned_sess.user_id = Some(96_399_2);
+    unspawned_sess.character_id = Some(unspawned_char_id);
+    unspawned_sess.ship_id = Some(unspawned_ship_id);
+    let no_ship_err = handle_dogma_im(&ctx, &mut unspawned_sess, None, "dogmaIM", "AddTarget", &[PyRep::Integer(near_target_id)], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect_err("unspawned source ship must fail");
+    assert_eq!(
+        no_ship_err.to_client_error("dogmaIM", "AddTarget").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantShipNotPresent)
+    );
+}

@@ -324,11 +324,7 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
 
 pub(crate) fn map_destiny_nav_err(e: String) -> BridgeRpcError {
     if e.starts_with("ShipAlreadyInWarp") {
-        BridgeRpcError {
-            code: "ShipAlreadyInWarp".into(),
-            message: e,
-            client_error: None,
-        }
+        BridgeRpcError::ship_already_in_warp(None, "DestinyCommand", None, e)
     } else {
         BridgeRpcError {
             code: "DestinyCommandFailed".into(),
@@ -425,7 +421,13 @@ pub(crate) async fn handle_cmd_goto_point(
         .await
         .map_err(|e| err("DestinyCommandFailed", e))?
     else {
-        return Err(err("ShipNotInSpace", "Active ship is not spawned in Ballpark".into()));
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "CmdGotoPoint",
+            "Active ship is not spawned in Ballpark",
+        ));
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -669,8 +671,10 @@ pub(crate) async fn validate_and_prepare_jump_capacitor(
     let max_cap = cs.max_capacitor.max(0.0);
     let cap_needed = max_cap * cap_frac;
     if cs.capacitor + 1e-4 < cap_needed {
-        return Err(err(
-            "NotEnoughCapacitor",
+        return Err(BridgeRpcError::jump_not_enough_capacitor(
+            Some(ship_id),
+            cap_needed,
+            cs.capacitor,
             format!("Jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor),
         ));
     }
@@ -887,11 +891,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
@@ -950,11 +950,7 @@ pub(crate) async fn handle_cmd_stop(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -1055,11 +1051,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
     };
     let warp_exit_noop = crate::services::nav_warp_interdiction::check_warp_exit_approach_or_reject(
         &current_ball,
@@ -1159,17 +1151,13 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     let rpc = crate::router::RpcArgs::positional(args);
     let target_id = rpc
         .req_positive_i64(0, "targetID")
-        .map_err(|e| BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: e.message,
-            client_error: None,
-        })?;
+        .map_err(|e| BridgeRpcError::invalid_navigation_target(None, "invalid_target_id", e.message))?;
     if target_id == ship_id {
-        return Err(BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: "Cannot orbit, approach, or follow own ship".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::invalid_target_self(
+            ship_id,
+            "self_orbit_or_follow",
+            "Cannot orbit, approach, or follow own ship",
+        ));
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
@@ -1177,11 +1165,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
     };
     let warp_exit_noop = crate::services::nav_warp_interdiction::check_warp_exit_approach_or_reject(
         &current_ball,
@@ -1284,18 +1268,18 @@ pub(crate) async fn handle_cmd_align_to(
         .or_else(|| args.first().and_then(|a| a.as_i64()))
         .unwrap_or(0);
     if bookmark_id.is_none() && target_id <= 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: "Align target ID must be a positive integer".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::invalid_navigation_target(
+            None,
+            "invalid_align_target_id",
+            "Align target ID must be a positive integer",
+        ));
     }
     if bookmark_id.is_none() && target_id == ship_id {
-        return Err(BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: "Cannot align to own ship".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::invalid_target_self(
+            ship_id,
+            "self_align",
+            "Cannot align to own ship",
+        ));
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
@@ -1303,11 +1287,7 @@ pub(crate) async fn handle_cmd_align_to(
         message: e,
         client_error: None,
     })? else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     let target_pos_opt = if let Some(bm_id) = bookmark_id {

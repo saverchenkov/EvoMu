@@ -2326,7 +2326,13 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
         let cs = sys.get_combat_state(ship_id).await.ok().flatten();
         let cur_cap = cs.as_ref().map(|c| c.capacitor).unwrap_or(0.0);
         if cur_cap < cap_need {
-            return Err(BridgeRpcError { code: "NotEnoughCapacitor".into(), message: "Not enough capacitor to activate module".into(), client_error: None });
+            return Err(BridgeRpcError::not_enough_capacitor(
+                Some(ship_id),
+                &mod_type.name,
+                cap_need,
+                cur_cap,
+                "Not enough capacitor to activate module",
+            ));
         }
         let _ = sys.set_capacitor(ship_id, cur_cap - cap_need).await;
     }

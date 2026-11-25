@@ -29,11 +29,7 @@ async fn handoff_in_space_pilot_observer(
 }
 
 fn ship_not_in_space_err(message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError {
-        code: "ShipNotInSpace".into(),
-        message: message.into(),
-        client_error: None,
-    }
+    BridgeRpcError::ship_not_in_space(0, None, None, "ShipOperation", message)
 }
 
 #[derive(Clone, Copy)]
@@ -574,16 +570,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         "Active ship {old_ship_id} has no live ballpark entity in solar system {sys_id}"
                     ))));
                 };
-                if matches!(
-                    cur_b.mode,
-                    eve_destiny::MovementMode::Warp { phase, .. }
-                        if phase != eve_destiny::WarpPhase::Aligning
-                ) {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipInWarp".into(),
-                        message: "Cannot eject from ship while in active warp".into(),
-                        client_error: None,
-                    }));
+                if let eve_destiny::MovementMode::Warp { phase, .. } = cur_b.mode {
+                    if phase != eve_destiny::WarpPhase::Aligning {
+                        return Some(Err(BridgeRpcError::ship_in_warp(
+                            Some(old_ship_id),
+                            "Eject",
+                            Some(format!("{phase:?}")),
+                            "Cannot eject from ship while in active warp",
+                        )));
+                    }
                 }
                 match crate::services::space_nav_movement_guard::is_ship_module_cloaked_fail_closed(
                     ctx,
@@ -990,20 +985,21 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     ) {
                         return Some(Err(e));
                     }
-                    let in_active_warp = |m: &eve_destiny::MovementMode| {
-                        matches!(
-                            m,
-                            eve_destiny::MovementMode::Warp { phase, .. }
-                                if *phase != eve_destiny::WarpPhase::Aligning
-                        )
+                    let warp_phase = |m: &eve_destiny::MovementMode| match m {
+                        eve_destiny::MovementMode::Warp { phase, .. }
+                            if *phase != eve_destiny::WarpPhase::Aligning =>
+                        {
+                            Some(format!("{phase:?}"))
+                        }
+                        _ => None,
                     };
-                    if in_active_warp(&cb.mode) || in_active_warp(&tb.mode) {
-                        return Some(Err(BridgeRpcError {
-                            code: "ShipInWarp".into(),
-                            message: "Cannot board a ship while either vessel is in active warp"
-                                .into(),
-                            client_error: None,
-                        }));
+                    if let Some(phase_name) = warp_phase(&cb.mode).or_else(|| warp_phase(&tb.mode)) {
+                        return Some(Err(BridgeRpcError::ship_in_warp(
+                            Some(target_ship_id),
+                            "BoardShip",
+                            Some(phase_name),
+                            "Cannot board a ship while either vessel is in active warp",
+                        )));
                     }
                     let cb_eff =
                         crate::services::space_warp_jump::resolve_ship_ball_for_perimeter(ctx, &cb);

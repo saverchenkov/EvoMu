@@ -713,11 +713,13 @@ pub async fn activate_target_spectrum_breaker(
 
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
         if cs.capacitor + 1e-4 < cap_need {
-            return Err(BridgeRpcError {
-                code: "NotEnoughCapacitor".into(),
-                message: format!("Insufficient capacitor for {}: need {cap_need:.1} GJ", mod_type.name),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::not_enough_capacitor(
+                Some(ship_id),
+                &mod_type.name,
+                cap_need,
+                cs.capacitor,
+                format!("Insufficient capacitor for {}: need {cap_need:.1} GJ", mod_type.name),
+            ));
         }
         let _ = sys.set_capacitor(ship_id, (cs.capacitor - cap_need).max(0.0)).await;
     }

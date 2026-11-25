@@ -1087,14 +1087,16 @@ pub async fn execute_wreck_salvage_cycle_scheduled(
     if cap_cost > 0.0 {
         if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
             if cs.capacitor + 1e-6 < cap_cost {
-                return Err(eve_proto::BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!(
+                return Err(eve_proto::BridgeRpcError::not_enough_capacitor(
+                    Some(ship_id),
+                    mod_sde.map_or("Salvager", |t| t.name.as_str()),
+                    cap_cost,
+                    cs.capacitor,
+                    format!(
                         "Ship {ship_id} lacks capacitor ({:.1}/{:.1} GJ) to cycle salvager",
                         cs.capacitor, cap_cost
                     ),
-                    client_error: None,
-                });
+                ));
             }
             let _ = sys_handle
                 .set_capacitor(ship_id, (cs.capacitor - cap_cost).max(0.0))

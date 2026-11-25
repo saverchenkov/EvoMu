@@ -1126,11 +1126,7 @@ pub async fn handle_activate_micro_jump_unit(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Ship is not in space".into(),
-            client_error: None,
-        })?;
+        .ok_or_else(|| BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "ActivateMMJU", "Ship is not in space"))?;
     let mju_pos = DVec3::from_array(rec.position);
     if (ship_ball.position - mju_pos).length() > 2_500.0 {
         return Err(BridgeRpcError {
@@ -1178,8 +1174,14 @@ pub async fn handle_activate_micro_jump_unit(
             client_error: None,
         });
     }
-    if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot activate Mobile Micro Jump Unit while warping".into(), client_error: None });
+    if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
+        let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+        return Err(BridgeRpcError::ship_in_warp_for_phase(
+            Some(ship_id),
+            "ActivateMMJU",
+            kind,
+            "Cannot activate Mobile Micro Jump Unit while warping",
+        ));
     }
     let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
     if ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {

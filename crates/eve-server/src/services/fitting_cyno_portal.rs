@@ -913,14 +913,27 @@ async fn light_cyno(
         clear_cyno_claim();
         refund_ship_fuel_items(ctx, char_id, &reserved_fuel, Some(&fuel_guard));
         drop(fuel_guard);
+        if e.contains("CantActivateInWarp") {
+            return Err(BridgeRpcError::cant_activate_in_warp(
+                Some(ship_id),
+                "ActivateCynosuralField",
+                None,
+                e,
+            ));
+        }
+        if e.contains("not in space") {
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "ActivateCynosuralField",
+                e,
+            ));
+        }
         let code = if e.contains("ModuleAlreadyActive") {
             "ModuleAlreadyActive"
-        } else if e.contains("CantActivateInWarp") {
-            "CantActivateInWarp"
         } else if e.contains("CannotActivateCloaked") {
             "CannotActivateCloaked"
-        } else if e.contains("not in space") {
-            "ShipNotInSpace"
         } else {
             "ModuleActivationFailed"
         };
@@ -1394,7 +1407,15 @@ pub(crate) async fn caller_in_space(
             },
         )
         .await?;
-    let ball = validated.ball.ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
+    let ball = validated.ball.ok_or_else(|| {
+        BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "JumpPortal",
+            "Active ship is not in space",
+        )
+    })?;
     let now = ctx.now_unix();
     let release_portal_mod = {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());

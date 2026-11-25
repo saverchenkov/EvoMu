@@ -472,24 +472,18 @@ pub fn check_crimewatch_action_restriction(
                 | "jump_portal"
         ) && !is_capsule
         {
-            const ERR_EJECT_CRIM: &str = "CannotEjectInvolvedInCrime";
-            let mut code = match action {
-                "stargate_jump" => "CantJumpGlobalCriminalFlag",
-                "dock" => "CantDockGlobalCriminalFlag",
-                "wormhole_jump" | "wh_jump" => "CantEnterWormholeGlobalCriminalFlag",
-                "jump_drive" | "jump_bridge" | "jump_portal" => "CantBeaconJumpGlobalCriminalFlag",
-                "store_ship" | "switch_ship" => "CannotBoardShipInHighSecAsCriminal",
-                _ => "CantJumpGlobalCriminalFlag",
-            };
-            if action == "eject" {
-                code = ERR_EJECT_CRIM;
-            }
-            return Err(BridgeRpcError {
-                code: code.into(),
-                message: format!(
-                    "Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"
+            return Err(match action {
+                "stargate_jump" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantJumpGlobalCriminalFlag),
+                "dock" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantDockGlobalCriminalFlag),
+                "wormhole_jump" | "wh_jump" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantEnterWormholeGlobalCriminalFlag),
+                "jump_drive" | "jump_bridge" | "jump_portal" => BridgeRpcError::with_client_error(
+                    "CantBeaconJumpGlobalCriminalFlag",
+                    format!("Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"),
+                    eve_proto::ClientError::user(eve_proto::UserErrorKey::CantJumpGlobalCriminalFlag),
                 ),
-                client_error: None,
+                "store_ship" | "switch_ship" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotBoardShipInHighSecAsCriminal),
+                "eject" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotEjectInvolvedInCrime),
+                _ => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantJumpGlobalCriminalFlag),
             });
         }
     }
@@ -516,18 +510,16 @@ pub fn check_crimewatch_action_restriction(
                 | "filament"
                 | "activate_filament"
         ) {
-            const ERR_EJECT_WPN: &str = "CannotEjectActiveWeaponsTimer";
-            let mut code = match action {
-                "dock" => "WeaponsTimerActive",
-                "stargate_jump" | "jump_drive" | "jump_bridge" | "jump_portal" | "acceleration_gate" => "CannotJumpWithWeaponsTimer",
-                "store_ship" | "switch_ship" => "CannotStoreShipActiveWeaponsTimer",
-                "refit" | "refit_in_space" => "CannotRefitInSpaceWithActiveWeaponsTimer",
-                _ => "CannotJumpWithWeaponsTimer",
-            };
-            if action == "eject" {
-                code = ERR_EJECT_WPN;
-            }
-            return Err(BridgeRpcError::user_error(code));
+            return Err(match action {
+                "eject" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotEjectActiveWeaponsTimer),
+                "store_ship" | "switch_ship" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotStoreShipActiveWeaponsTimer),
+                "refit" | "refit_in_space" => BridgeRpcError::user_error("CannotRefitInSpaceWithActiveWeaponsTimer"),
+                "dock" => BridgeRpcError::weapons_timer_active(char_id, action, "weapons", false, "Cannot dock while weapons timer is active"),
+                "stargate_jump" | "jump_drive" | "jump_bridge" | "jump_portal" | "acceleration_gate" => {
+                    BridgeRpcError::cannot_jump_with_weapons_timer(char_id, action, "weapons", "Cannot jump while weapons timer is active")
+                }
+                _ => BridgeRpcError::cannot_jump_with_weapons_timer(char_id, action, "weapons", "Weapons timer active"),
+            });
         }
     }
 

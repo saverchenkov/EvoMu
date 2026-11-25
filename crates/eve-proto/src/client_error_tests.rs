@@ -275,7 +275,7 @@ fn gh1082_targeting_and_module_activation_user_error_keys_have_v24_dialog_ids() 
 
 #[test]
 fn warp_too_short_and_destination_gone_decode_as_v24_notify_errors() {
-    assert_eq!(UserErrorKey::ALL.len(), 118);
+    assert_eq!(UserErrorKey::ALL.len(), 124);
     for (key, wire_name, dialog_id) in [(UserErrorKey::WarpTooShort, "WarpTooShort", 3435), (UserErrorKey::WarpDestinationGone, "WarpDestinationGone", 1679)] {
         assert_eq!((key.as_str(), UserErrorKey::from_code(wire_name), key.v24_dialog_id(), key.v24_dialog_type(), key.presentation()), (wire_name, Some(key), Some(dialog_id), Some(3), UserErrorPresentation::Notify));
         assert!(key.default_args().is_empty());
@@ -429,6 +429,12 @@ fn gh1195_new_user_error_keys_have_verified_v24_dialog_metadata() {
         (K::ConContractInvalid, "ConContractInvalid", 5048, 2),
         (K::ConAuctionHasBids, "ConAuctionHasBids", 2045, 2),
         (K::ModuleNoLongerPresentForCharges, "ModuleNoLongerPresentForCharges", 1230, 3),
+        (K::TargetCantValidate, "TargetCantValidate", 1613, 3),
+        (K::CantTargetWhileCloaked, "CantTargetWhileCloaked", 2436, 3),
+        (K::DeniedTargetAfterCloak, "DeniedTargetAfterCloak", 781, 3),
+        (K::DeniedTargetingTargetCloaked, "DeniedTargetingTargetCloaked", 794, 3),
+        (K::UnableToTarget, "UnableToTarget", 1669, 3),
+        (K::DeniedActivateInWarp, "DeniedActivateInWarp", 774, 3),
     ];
 
     for &(key, name, dialog_id, dialog_type) in expected {
@@ -572,4 +578,107 @@ fn gh1195_typed_rejection_constructors_preserve_facts_and_wire_payloads_across_s
         &empty_name_ab.to_client_error("invbroker", "Add").to_macho_error_body(6),
     );
     assert_eq!(dict_get(&empty_ab_dict, "moduleName").and_then(PyRep::as_str), Some("Module"));
+}
+
+#[test]
+fn gh1195_t1_targeting_warp_phase_and_activate_in_warp_map_without_custom_info() {
+    use BridgeRpcError as E;
+    use RejectionFacts as F;
+    use UserErrorKey as K;
+
+    for &(phase, blocks, warp_key) in WARP_PHASE_REJECTION_TABLE {
+        assert_eq!(phase.blocks_active_warp_actions(), blocks);
+        assert_eq!(phase.active_warp_error_key(), warp_key);
+        let mod_key = if blocks { Some(K::DeniedActivateInWarp) } else { None };
+        assert_eq!(phase.active_module_error_key(), mod_key);
+    }
+
+    let warp_phase_err = E::ship_already_in_warp_for_phase(
+        Some(501),
+        "CmdGotoDirection",
+        WarpPhaseKind::Cruising,
+        "Ship already in warp",
+    );
+    assert_eq!(
+        warp_phase_err.rejection_facts(),
+        Some(&F::ShipInWarp {
+            ship_id: Some(501),
+            action: "CmdGotoDirection".into(),
+            warp_phase: Some("Cruising".into()),
+        })
+    );
+    let (warp_key, _) = decode_wrapped_user_error(
+        &warp_phase_err.to_client_error("beyonce", "CmdGotoDirection").to_macho_error_body(6),
+    );
+    assert_eq!(warp_key, "ShipInWarp");
+
+    let act_warp_err = E::cant_activate_in_warp(
+        Some(501),
+        "Activate",
+        Some("Accelerating".into()),
+        "Cannot activate while in warp",
+    );
+    let act_ce = act_warp_err.to_client_error("dogmaIM", "Activate");
+    assert_eq!(act_ce.presentation(), UserErrorPresentation::Notify);
+    let (act_key, act_dict) = decode_wrapped_user_error(&act_ce.to_macho_error_body(6));
+    assert_eq!(act_key, "DeniedActivateInWarp");
+    assert!(act_dict.is_empty());
+
+    let tgt_far = E::targeting_too_far(
+        Some(501),
+        Some(888),
+        "Guristas Scout",
+        587,
+        42_500.0,
+        15_000.0,
+        "Target distance (42500.0 m) exceeds maxTargetRange (15000.0 m)",
+    );
+    assert_eq!(tgt_far.code, "TargetingFailed");
+    assert_eq!(
+        tgt_far.rejection_facts(),
+        Some(&F::TargetingFailed {
+            ship_id: Some(501),
+            target_id: Some(888),
+            reason: "exceeds_max_target_range".into(),
+            distance_m: Some(42_500.0),
+            max_range_m: Some(15_000.0),
+        })
+    );
+    let (far_key, far_dict) = decode_wrapped_user_error(
+        &tgt_far.to_client_error("dogmaIM", "AddTarget").to_macho_error_body(6),
+    );
+    assert_eq!(far_key, "TargetTooFar");
+    assert_eq!(dict_get(&far_dict, "targetname").and_then(PyRep::as_str), Some("Guristas Scout"));
+    assert_eq!(dict_get(&far_dict, "module"), Some(&PyRep::Integer(587)));
+    assert_eq!(dict_get(&far_dict, "distance"), Some(&PyRep::Real(15_000.0)));
+
+    for (key, reason, msg) in [
+        (K::TargetCantValidate, "target_not_present", "Target ball missing"),
+        (K::CantTargetWhileCloaked, "ship_cloaked", "Ship cloaked"),
+        (K::DeniedTargetAfterCloak, "decloak_targeting_delay", "Recalibrating sensors"),
+        (K::DeniedTargetingTargetCloaked, "target_cloaked", "Target cloaked"),
+        (K::UnableToTarget, "target_untargetable", "Unable to lock"),
+    ] {
+        let err = E::targeting_failed(Some(501), Some(888), key, reason, msg);
+        let (wire_key, wire_dict) =
+            decode_wrapped_user_error(&err.to_client_error("dogmaIM", "AddTarget").to_macho_error_body(6));
+        assert_eq!(wire_key, key.as_str());
+        assert!(wire_dict.is_empty());
+    }
+
+    for (legacy_code, expected_wire) in [
+        ("TargetingFailed", "UnableToTarget"),
+        ("CantActivateInWarp", "DeniedActivateInWarp"),
+        ("DeniedActivateInWarp", "DeniedActivateInWarp"),
+    ] {
+        let legacy = E {
+            code: legacy_code.into(),
+            message: "legacy".into(),
+            client_error: None,
+        };
+        let (wire_key, _) =
+            decode_wrapped_user_error(&legacy.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
+        assert_eq!(wire_key, expected_wire);
+        assert_ne!(wire_key, "CustomInfo");
+    }
 }

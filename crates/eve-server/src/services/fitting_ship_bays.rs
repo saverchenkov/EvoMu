@@ -187,8 +187,14 @@ pub(crate) async fn board_stored_ship(
             }
             let sys = ctx.systems.get_or_spawn(sys_id);
             if let Ok(Some((_, cb))) = sys.get_ball_snapshot(cur).await {
-                if matches!(cb.mode, eve_destiny::MovementMode::Warp { .. }) {
-                    return Err(err("ShipInWarp", "Cannot board stored ship while in warp"));
+                if let eve_destiny::MovementMode::Warp { phase, .. } = cb.mode {
+                    let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+                    return Err(BridgeRpcError::ship_in_warp_for_phase(
+                        Some(cur),
+                        "BoardShipFromBay",
+                        kind,
+                        "Cannot board stored ship while in warp",
+                    ));
                 }
             }
             if sys.is_ball_scrambled(cur).await.unwrap_or(false) {
@@ -213,7 +219,7 @@ pub(crate) async fn board_stored_ship(
                     s.item_positions.get(&host_id).map(|p| (DVec3::new(p[0], p[1], p[2]), rad))
                 }));
             let (Some(cur_pos), Some((host_pos, host_radius))) = (cur_pos, host_snap) else {
-                return Err(err("ShipNotInSpace", format!("Bay host {host_id} is not on grid")));
+                return Err(BridgeRpcError::ship_not_in_space(host_id, Some(char_id), Some(sys_id), "BoardShipFromBay", format!("Bay host {host_id} is not on grid")));
             };
             let dist = cur_pos.distance(host_pos);
             if dist > BAY_ACCESS_RANGE_M {

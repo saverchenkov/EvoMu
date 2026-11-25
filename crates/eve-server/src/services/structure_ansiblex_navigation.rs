@@ -267,10 +267,16 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     .await?;
     let old_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((cur_tick, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else {
-        return Err(err("ShipNotInSpace", "Ship is not in space"));
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "AnsiblexJump", "Ship is not in space"));
     };
-    if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-        return Err(err("ShipInWarp", "Cannot jump through structure stargate while in warp"));
+    if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
+        let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+        return Err(BridgeRpcError::ship_in_warp_for_phase(
+            Some(ship_id),
+            "AnsiblexJump",
+            kind,
+            "Cannot jump through structure stargate while in warp",
+        ));
     }
     if old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(err("WarpScrambled", "Cannot jump through structure stargate while warp scrambled"));

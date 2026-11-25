@@ -891,8 +891,11 @@ async fn resolve_uncloaked_drone_ship(
     };
     if let Some((db_ship_id, db_sys_id)) = db_char {
         if db_sys_id != sys_id || db_ship_id != ship_id {
-            return Err(drone_rpc_err(
-                "ShipNotInSpace",
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                action_label,
                 format!("Caller ship {ship_id} is not active in solar system {sys_id}"),
             ));
         }
@@ -901,8 +904,11 @@ async fn resolve_uncloaked_drone_ship(
     let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, b))) => b,
         Ok(None) => {
-            return Err(drone_rpc_err(
-                "ShipNotInSpace",
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                action_label,
                 "Active ship is not spawned in space",
             ));
         }
@@ -1441,11 +1447,13 @@ pub async fn handle_npcs_drones(
             let db_launch = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&char_id) {
                     if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
-                        return Err(BridgeRpcError {
-                            code: "ShipNotInSpace".into(),
-                            message: format!("Ship {ship_id} is no longer undocked in system {sys_id}"),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError::ship_not_in_space(
+                            ship_id,
+                            Some(char_id),
+                            Some(sys_id),
+                            "LaunchDrones",
+                            format!("Ship {ship_id} is no longer undocked in system {sys_id}"),
+                        ));
                     }
                 }
                 let mut results = Vec::with_capacity(prepared_drones.len());
@@ -2186,10 +2194,21 @@ pub async fn handle_npcs_drones(
                 Err(e) => return Some(Err(e)),
             };
             if target_char_id == char_id || is_static_world_object(ctx, sys_id, target_char_id) {
-                return Some(Err(drone_rpc_err(
-                    "InvalidTarget",
-                    "Invalid drone assist/guard target",
-                )));
+                return Some(Err(if target_char_id == char_id {
+                    BridgeRpcError::invalid_target_self(
+                        target_char_id,
+                        "drone_assist_self",
+                        "Invalid drone assist/guard target",
+                    )
+                } else {
+                    BridgeRpcError::invalid_target(
+                        Some(target_char_id),
+                        None,
+                        "Drones",
+                        "invalid_assist_target",
+                        "Invalid drone assist/guard target",
+                    )
+                }));
             }
             let drone_filter: Option<Vec<i64>> = match args.get(1) {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {

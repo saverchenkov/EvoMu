@@ -318,11 +318,13 @@ async fn handle_weapons_inner(
         .ok()
         .flatten()
     else {
-        return Some(Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active ship {ship_id} is not spawned in space"),
-            client_error: None,
-        }));
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "FireWeapon",
+            format!("Active ship {ship_id} is not spawned in space"),
+        )));
     };
 
     let rpc = RpcArgs::new(args, kwargs);
@@ -409,11 +411,13 @@ async fn run_resolved_weapon_module(
         fit.modules.insert(module_id, fm.clone());
         fm
     } else {
-        return WeaponDispatchOutcome::EarlyDone(Some(Err(BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Module {module_id} not found on ship {ship_id}"),
-            client_error: None,
-        })));
+        return WeaponDispatchOutcome::EarlyDone(Some(Err(BridgeRpcError::module_not_found(
+            module_id,
+            Some(ship_id),
+            None,
+            false,
+            format!("Module {module_id} not found on ship {ship_id}"),
+        ))));
     };
     let mut resolved = Box::new(ResolvedWeaponFit { fit, m });
     if let Err(e) =
@@ -445,11 +449,13 @@ async fn run_resolved_weapon_module(
         })));
     }
     let Some(mod_type) = ctx.sde.types.get(&resolved.m.type_id) else {
-        return WeaponDispatchOutcome::EarlyDone(Some(Err(BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Module type {} not found in SDE", resolved.m.type_id),
-            client_error: None,
-        })));
+        return WeaponDispatchOutcome::EarlyDone(Some(Err(BridgeRpcError::module_not_found(
+            module_id,
+            Some(ship_id),
+            Some(resolved.m.type_id as i64),
+            false,
+            format!("Module type {} not found in SDE", resolved.m.type_id),
+        ))));
     };
     if method == "Overload" {
         if matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
@@ -512,11 +518,13 @@ async fn handle_weapons_after_cloak_guard(
         if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
             ctx, sys_handle, tid,
         ).await {
-            return WeaponDispatchOutcome::Dispatched(Some(Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
-                client_error: None,
-            })));
+            return WeaponDispatchOutcome::Dispatched(Some(Err(BridgeRpcError::invalid_target(
+                Some(tid),
+                Some(module_id),
+                &mod_type.name,
+                "interdiction_probe_untargetable",
+                "Interdiction probes cannot be targeted directly; use area-of-effect weapons",
+            ))));
         }
     }
     if (matches!(
@@ -1424,14 +1432,18 @@ async fn prepare_direct_weapon_shot(
         cap_before = cs.capacitor;
         if base_cap_need > 0.0 {
             if cs.capacitor + 1e-6 < base_cap_need {
-                return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!(
-                        "Weapon requires {base_cap_need:.2} GJ capacitor (have {:.2} GJ)",
-                        cs.capacitor
+                return std::ops::ControlFlow::Break(Some(Err(
+                    BridgeRpcError::not_enough_capacitor(
+                        Some(ship_id),
+                        &mod_type.name,
+                        base_cap_need,
+                        cs.capacitor,
+                        format!(
+                            "Weapon requires {base_cap_need:.2} GJ capacitor (have {:.2} GJ)",
+                            cs.capacitor
+                        ),
                     ),
-                    client_error: None,
-                })));
+                )));
             }
             cap_after = (cs.capacitor - base_cap_need).max(0.0);
             pending_cap_after = Some(cap_after);

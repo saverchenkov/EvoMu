@@ -293,8 +293,11 @@ async fn resolve_in_space_fighter_ship(
     let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, b))) => b,
         Ok(None) => {
-            return Err(fighter_rpc_err(
-                "ShipNotInSpace",
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                action_label,
                 "Active ship is not spawned in space",
             ));
         }
@@ -1093,11 +1096,13 @@ async fn handle_launch_fighters_from_tubes(
         if let Some(ch) = snap.characters.get(&char_id) {
             let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
             if entry_db_state.is_some_and(|e| cur_db_state != e) {
-                return Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "LaunchFighter",
+                    format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                ));
             }
         }
         let mut committed = Vec::with_capacity(claimed_tubes.len());
@@ -1324,11 +1329,12 @@ async fn handle_recall_fighters_to_tubes(
             .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
     });
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        let message = "Active ship is not spawned in space".to_string();
-        return Some(Err(BridgeRpcError::with_client_error(
-            "ShipNotInSpace",
-            message.clone(),
-            eve_proto::ClientError::CustomInfo(message),
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "RecallFighters",
+            "Active ship is not spawned in space",
         )));
     };
     let filter_ids = match parse_fighter_id_filter(args, true) {
@@ -1409,11 +1415,12 @@ async fn handle_recall_fighters_to_tubes(
     let mut recalled = Vec::new();
     for (bid, _) in prechecked {
         let Some((_, cur_ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-            let message = "Active ship is not spawned in space".to_string();
-            return Some(Err(BridgeRpcError::with_client_error(
-                "ShipNotInSpace",
-                message.clone(),
-                eve_proto::ClientError::CustomInfo(message),
+            return Some(Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "RecallFighters",
+                "Active ship is not spawned in space",
             )));
         };
         let Some((_, cur_f_ball)) = sys_handle.get_ball_snapshot(bid).await.ok().flatten() else {
@@ -1532,11 +1539,12 @@ async fn handle_recall_fighters_to_tubes(
                 sh.location_id != sys_id as i64 || sh.flag != InventoryFlag::None
             });
             if char_invalid || ship_moved {
-                let msg = format!("Ship {ship_id} is no longer undocked in solar system {sys_id}");
-                return Err(BridgeRpcError::with_client_error(
-                    "ShipNotInSpace",
-                    msg.clone(),
-                    eve_proto::ClientError::CustomInfo(msg),
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "RecallFighters",
+                    format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
                 ));
             }
             let mut refilled_units = 0i32;

@@ -1763,11 +1763,7 @@ pub(crate) async fn handle_dogma_im(
             )
             .await
             {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTarget".into(),
-                    message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::invalid_target(Some(target_id), None, "Interdiction Probe", "interdiction_probe_untargetable", "Interdiction probes cannot be targeted directly; use area-of-effect weapons")));
             }
             let is_upwell_target = target_id >= 1_000_000_000_000
                 || ctx.db.with_snapshot(|s| s.structures.contains_key(&target_id));
@@ -1778,15 +1774,15 @@ pub(crate) async fn handle_dogma_im(
                 .await;
             }
             let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.unwrap_or(None) else {
-                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Ship ball {ship_id} not found in system"), client_error: None }));
+                return Some(Err(BridgeRpcError::targeting_failed(Some(ship_id), Some(target_id), eve_proto::UserErrorKey::CantShipNotPresent, "ship_not_in_space", format!("Ship ball {ship_id} not found in system"))));
             };
             let Some((_, target_ball)) = sys.get_ball_snapshot(target_id).await.unwrap_or(None) else {
-                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target ball {target_id} not found in system"), client_error: None }));
+                return Some(Err(BridgeRpcError::targeting_failed(Some(ship_id), Some(target_id), eve_proto::UserErrorKey::TargetCantValidate, "target_not_present", format!("Target ball {target_id} not found in system"))));
             };
 
             if let Some(mut tcs) = sys.get_combat_state(target_id).await.ok().flatten() {
                 if tcs.max_structure_hp > 0.0 && tcs.structure_hp <= 0.0 {
-                    return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target {target_id} is destroyed"), client_error: None }));
+                    return Some(Err(BridgeRpcError::targeting_failed(Some(ship_id), Some(target_id), eve_proto::UserErrorKey::TargetCantValidate, "target_destroyed", format!("Target {target_id} is destroyed"))));
                 }
                 tcs.sync_action_breaks();
                 if tcs.blocks_targeted_effect() {
@@ -1803,7 +1799,8 @@ pub(crate) async fn handle_dogma_im(
                     return Some(Err(ship_jammed_rpc_error(ctx, target_id)));
                 }
                 if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0) || cs.decloak_targeting_delay_remaining_s > 0.0 {
-                    return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay".into(), client_error: None }));
+                    let cloak_key = if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 { eve_proto::UserErrorKey::CantTargetWhileCloaked } else { eve_proto::UserErrorKey::DeniedTargetAfterCloak };
+                    return Some(Err(BridgeRpcError::targeting_failed(Some(ship_id), Some(target_id), cloak_key, "cloak_or_decloak_delay", "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay")));
                 }
             }
 
@@ -1811,7 +1808,7 @@ pub(crate) async fn handle_dogma_im(
             let surface_offset = ship_ball.radius + target_ball.radius;
             let dist = ((ship_ball.position - target_ball.position).length() - surface_offset).max(0.0);
             if dist > max_range {
-                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"), client_error: None }));
+                return Some(Err(BridgeRpcError::targeting_too_far(Some(ship_id), Some(target_id), resolve_target_display_name(ctx, target_id), fit.ship.type_id as i64, dist, max_range, format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"))));
             }
 
             let unapplied_triage_ship_bonus: usize = fit
@@ -1939,7 +1936,7 @@ pub(crate) async fn handle_dogma_im(
             };
             let protection_events = match sys.add_target_lock_breaking_protection(ship_id, lock).await {
                 Ok(events) => events,
-                Err(e) => return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e, client_error: None })),
+                Err(e) => return Some(Err(BridgeRpcError::targeting_failed(Some(ship_id), Some(target_id), if e.contains("tethered") { eve_proto::UserErrorKey::DeniedTethered } else { eve_proto::UserErrorKey::UnableToTarget }, "lock_actor_rejected", e))),
             };
             crate::services::space_destiny::emit_protection_break_notifications(ctx, char_id, ship_id, &protection_events);
 

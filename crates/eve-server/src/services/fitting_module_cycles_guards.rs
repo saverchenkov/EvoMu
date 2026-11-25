@@ -97,19 +97,18 @@ pub(crate) async fn check_space_module_cloak_and_warp_readonly(
     mod_type: &eve_sde::InvType,
 ) -> Result<(), BridgeRpcError> {
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
-        if matches!(
-            ship_ball.mode,
-            eve_destiny::MovementMode::Warp { phase, .. }
-                if phase != eve_destiny::WarpPhase::Aligning
-        ) {
-            // Interdiction Nullifiers (`4117`) preserve their dedicated `CannotActivateInWarp` check;
-            // Covert Ops Cloaks (`330` warp-safe) are allowed in warp.
-            if mod_type.group_id != 4117 && !is_warp_safe_cloak_module(ctx, mod_type) {
-                return Err(BridgeRpcError {
-                    code: "CantActivateInWarp".into(),
-                    message: "Cannot activate modules while in warp".into(),
-                    client_error: None,
-                });
+        if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
+            if phase != eve_destiny::WarpPhase::Aligning {
+                // Interdiction Nullifiers (`4117`) preserve their dedicated `CannotActivateInWarp` check;
+                // Covert Ops Cloaks (`330` warp-safe) are allowed in warp.
+                if mod_type.group_id != 4117 && !is_warp_safe_cloak_module(ctx, mod_type) {
+                    return Err(BridgeRpcError::cant_activate_in_warp(
+                        Some(ship_id),
+                        &mod_type.name,
+                        Some(format!("{phase:?}")),
+                        "Cannot activate modules while in warp",
+                    ));
+                }
             }
         }
     }
@@ -307,16 +306,15 @@ pub(crate) async fn check_space_action_cloak_and_warp_readonly(
     action_label: &str,
 ) -> Result<(), BridgeRpcError> {
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
-        if matches!(
-            ship_ball.mode,
-            eve_destiny::MovementMode::Warp { phase, .. }
-                if phase != eve_destiny::WarpPhase::Aligning
-        ) {
-            return Err(BridgeRpcError {
-                code: "CantActivateInWarp".into(),
-                message: format!("Cannot {action_label} while in warp"),
-                client_error: None,
-            });
+        if let eve_destiny::MovementMode::Warp { phase, .. } = ship_ball.mode {
+            if phase != eve_destiny::WarpPhase::Aligning {
+                return Err(BridgeRpcError::cant_activate_in_warp(
+                    Some(ship_id),
+                    action_label,
+                    Some(format!("{phase:?}")),
+                    format!("Cannot {action_label} while in warp"),
+                ));
+            }
         }
     }
 
@@ -452,12 +450,7 @@ pub(crate) fn map_atomic_cycle_activation_error(
         return super::module_already_active_rpc_error(ctx, Some(module_type_id), err);
     }
     if err.contains("not in space") {
-        let custom = format!("ShipNotInSpace: {err}");
-        return BridgeRpcError::with_client_error(
-            "ShipNotInSpace",
-            err,
-            eve_proto::ClientError::CustomInfo(custom),
-        );
+        return BridgeRpcError::ship_not_in_space(0, None, None, "Activate", err);
     }
     if err.contains("CannotActivateCloaked") {
         return BridgeRpcError::with_client_error(
@@ -474,20 +467,15 @@ pub(crate) fn map_atomic_cycle_activation_error(
         );
     }
     if err.contains("CantActivateInWarp") {
-        let custom = format!("CantActivateInWarp: {err}");
-        return BridgeRpcError::with_client_error(
-            "CantActivateInWarp",
-            err,
-            eve_proto::ClientError::CustomInfo(custom),
-        );
+        return BridgeRpcError::cant_activate_in_warp(None, "Activate", None, err);
     }
     if err.contains("capacitor") || err.contains("Capacitor") {
-        let custom = format!("NotEnoughCapacitor: {err}");
-        return BridgeRpcError::with_client_error(
-            "NotEnoughCapacitor",
-            err,
-            eve_proto::ClientError::CustomInfo(custom),
-        );
+        let mod_name = ctx
+            .sde
+            .types
+            .get(&module_type_id)
+            .map_or("Module", |t| t.name.as_str());
+        return BridgeRpcError::not_enough_capacitor(None, mod_name, 0.0, 0.0, err);
     }
     let custom = format!("ModuleActivationFailed: {err}");
     BridgeRpcError::with_client_error("ModuleActivationFailed", err, eve_proto::ClientError::CustomInfo(custom))

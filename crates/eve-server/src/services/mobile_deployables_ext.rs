@@ -501,10 +501,15 @@ pub async fn handle_mmju_activate(
         .get_ball_snapshot(ship_id)
         .await
         .map_err(|e| err("DestinyCommandFailed", e))?
-        .ok_or_else(|| err("ShipNotInSpace", "Active ship is not spawned in space"))?;
+        .ok_or_else(|| BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "ActivateMMJU", "Active ship is not spawned in space"))?;
 
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-        return Err(err("ShipInWarp", "Cannot activate Mobile Micro Jump Unit while in warp"));
+    if let MovementMode::Warp { phase, .. } = ship_ball.mode {
+        return Err(BridgeRpcError::ship_in_warp(
+            Some(ship_id),
+            "ActivateMMJU",
+            Some(format!("{phase:?}")),
+            "Cannot activate Mobile Micro Jump Unit while in warp",
+        ));
     }
 
     let surface_dist = ((ship_ball.position - unit_pos).length() - ship_ball.radius - unit_radius).max(0.0);

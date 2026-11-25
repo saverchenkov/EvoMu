@@ -254,7 +254,7 @@ async fn try_start_or_resolve_cycle<'a>(
             })).unwrap_or(0)
     };
     let Some(mut m) = fit.modules.get(&module_id).cloned().or_else(|| resolve_snapshot_fitted_module(ctx, ship_id, module_id)) else {
-        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship"), client_error: None })));
+        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::module_not_found(module_id, Some(ship_id), None, false, format!("Module {module_id} not found on ship")))));
     };
     if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
         return std::ops::ControlFlow::Break(Some(Err(e)));
@@ -269,7 +269,7 @@ async fn try_start_or_resolve_cycle<'a>(
         return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleOffline".into(), message: format!("Module {module_id} is offline"), client_error: None })));
     }
     let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
-        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id), client_error: None })));
+        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::module_not_found(module_id, Some(ship_id), Some(m.type_id as i64), false, format!("Module type {} not found in SDE", m.type_id)))));
     };
     let is_weapon = is_weapon_group(mod_type.group_id);
     if method == "Overload" && matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
@@ -991,12 +991,13 @@ async fn reconcile_and_validate_cycle_activation(
         )
         .await
         {
-            return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons"
-                    .into(),
-                client_error: None,
-            })));
+            return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::invalid_target(
+                Some(target_id),
+                Some(module_id),
+                &mod_type.name,
+                "interdiction_probe_untargetable",
+                "Interdiction probes cannot be targeted directly; use area-of-effect weapons",
+            ))));
         }
         if target_id == ship_id
             && matches!(

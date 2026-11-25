@@ -393,7 +393,11 @@ async fn execute_subwarp_goto_point_failure_preserves_invuln_cloak_and_safe_logo
     )
     .await
     .unwrap_err();
-    assert_eq!(warp_err.code, ERR_SHIP_ALREADY_IN_WARP);
+    assert_eq!(warp_err.code, "ShipAlreadyInWarp");
+    assert_eq!(
+        warp_err.to_client_error("beyonce", "CmdGotoPoint").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::ShipInWarp)
+    );
 
     let cs_after_warp_err = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_after_warp_err.is_cloaked);
@@ -1150,7 +1154,15 @@ async fn warp_and_subwarp_commit_break_ballpark_protection_and_preserve_on_rejec
     )
     .await
     .unwrap_err();
-    assert_eq!(err_subwarp.code, ERR_SHIP_ALREADY_IN_WARP);
+    assert_eq!(err_subwarp.code, "ShipAlreadyInWarp");
+    assert_eq!(
+        err_subwarp.to_client_error("beyonce", "CmdGotoPoint").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::ShipInWarp)
+    );
+    assert!(matches!(
+        err_subwarp.rejection_facts(),
+        Some(eve_proto::RejectionFacts::ShipInWarp { warp_phase: Some(p), .. }) if p == "Cruising"
+    ));
     assert_eq!(
         sys_handle
             .get_combat_state(ship_id)
@@ -1160,4 +1172,46 @@ async fn warp_and_subwarp_commit_break_ballpark_protection_and_preserve_on_rejec
             .undock_invulnerable_remaining_ticks,
         50
     );
+}
+
+#[test]
+fn gh1195_t1_warp_phase_table_and_subwarp_rejection_emit_ship_in_warp_facts() {
+    for (phase, expected_kind, should_block) in [
+        (WarpPhase::Aligning, eve_proto::WarpPhaseKind::Aligning, false),
+        (WarpPhase::Accelerating, eve_proto::WarpPhaseKind::Accelerating, true),
+        (WarpPhase::Cruising, eve_proto::WarpPhaseKind::Cruising, true),
+        (WarpPhase::Decelerating, eve_proto::WarpPhaseKind::Decelerating, true),
+    ] {
+        assert_eq!(warp_phase_kind(phase), expected_kind);
+        assert!(eve_proto::WARP_PHASE_REJECTION_TABLE.iter().any(|&(k, blk, _)| {
+            k == expected_kind && blk == should_block
+        }));
+        let mode = MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1_000_000.0,
+            phase,
+            elapsed_warp_time: 1.0,
+        };
+        let res = ensure_not_in_active_warp(&mode);
+        if should_block {
+            let err = res.expect_err("active warp phase must reject");
+            assert_eq!(err.code, "ShipAlreadyInWarp");
+            assert_eq!(
+                err.to_client_error("beyonce", "CmdGotoPoint").as_user_error().map(|(k, _)| k),
+                Some(eve_proto::UserErrorKey::ShipInWarp)
+            );
+            assert_eq!(
+                err.rejection_facts(),
+                Some(&eve_proto::RejectionFacts::ShipInWarp {
+                    ship_id: None,
+                    action: "NavigationCommand".into(),
+                    warp_phase: Some(expected_kind.as_str().into()),
+                })
+            );
+        } else {
+            res.expect("Aligning remains cancelable per #1454");
+        }
+    }
 }

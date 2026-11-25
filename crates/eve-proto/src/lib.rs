@@ -18,9 +18,9 @@ pub mod quasar_wire;
 
 pub use client_error::{
     round_user_error_real_6dp, ClientError, IntoUserErrorArg, IskCents, ItemQty, ItemQtyError,
-    RejectionFacts, UserErrorArg, UserErrorKey, UserErrorPresentation,
+    RejectionFacts, UserErrorArg, UserErrorKey, UserErrorPresentation, WarpPhaseKind,
     MACHONETERR_WRAPPEDEXCEPTION, UI_LABEL_GATE_CLOSED, UI_LABEL_SHIP_TOO_LARGE,
-    V24_PROGRAMMATIC_USER_ERROR_KEYS, V24_USER_ERROR_LABELS,
+    V24_PROGRAMMATIC_USER_ERROR_KEYS, V24_USER_ERROR_LABELS, WARP_PHASE_REJECTION_TABLE,
 };
 
 pub use dbrow::{

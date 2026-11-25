@@ -153,11 +153,13 @@ async fn prepare_wormhole_jump_caller(
             })
         }
     }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(old_sys),
+            "WormholeJump",
+            "Active ship ball is not in space",
+        ));
     };
     let now_unix = ctx.now_unix();
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
@@ -497,7 +499,13 @@ async fn handle_random_jump_filament(
         Ok(v) => v,
         Err(e) => return Err(BridgeRpcError { code: "DestinyQueryFailed".into(), message: e, client_error: None }),
     }) else {
-        return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Active ship ball is not in space".into(), client_error: None });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(old_sys),
+            "FilamentJump",
+            "Active ship ball is not in space",
+        ));
     };
     let now_unix = ctx.now_unix();
     if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(
@@ -1034,10 +1042,14 @@ async fn handle_cmd_jump_to_structure_beacon(
             },
         )
         .await?;
-    let current_ball = validated_jump.ball.ok_or_else(|| BridgeRpcError {
-        code: "ShipNotInSpace".into(),
-        message: "Active ship is not spawned in space".into(),
-        client_error: None,
+    let current_ball = validated_jump.ball.ok_or_else(|| {
+        BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys_id),
+            "CynoJump",
+            "Active ship is not spawned in space",
+        )
     })?;
     if validated_jump
         .combat_state
@@ -1564,7 +1576,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
     let (_, current_ball) = cur_sys_handle.get_ball_snapshot(ship_id).await
         .map_err(|e| BridgeRpcError { code: "DestinyCommandFailed".into(), message: e, client_error: None })?
-        .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: "Active ship is not spawned in space".into(), client_error: None })?;
+        .ok_or_else(|| BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(cur_sys_id), "BeaconJumpFleet", "Active ship is not spawned in space"))?;
 
     if cur_sys_handle
         .get_combat_state(ship_id)
@@ -1575,8 +1587,14 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     {
         return Err(BridgeRpcError { code: "CannotJumpWhileCloaked".into(), message: "Cannot jump while cloaked".into(), client_error: None });
     }
-    if matches!(current_ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot jump while in warp".into(), client_error: None });
+    if let MovementMode::Warp { phase, .. } = current_ball.mode {
+        let kind = crate::services::nav_warp_interdiction::warp_phase_kind(phase);
+        return Err(BridgeRpcError::ship_in_warp_for_phase(
+            Some(ship_id),
+            "BeaconJumpFleet",
+            kind,
+            "Cannot jump while in warp",
+        ));
     }
     if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot jump while warp scrambled".into(), client_error: None });

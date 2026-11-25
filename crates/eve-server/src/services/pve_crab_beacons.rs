@@ -1026,7 +1026,15 @@ pub async fn handle_crab_component_call(
                 .await
                 .ok()
                 .flatten()
-                .ok_or_else(|| BridgeRpcError::user_error("ShipNotInSpace"))?;
+                .ok_or_else(|| {
+                    BridgeRpcError::ship_not_in_space(
+                        ship_id,
+                        Some(char_id),
+                        Some(sys_id),
+                        "CrabBeaconLink",
+                        "Active ship is not spawned in space",
+                    )
+                })?;
             let cs = sys_handle
                 .get_combat_state(ship_id)
                 .await

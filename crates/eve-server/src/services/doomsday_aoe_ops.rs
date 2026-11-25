@@ -233,10 +233,8 @@ where
             .get(&ship.type_id)
             .map(|t| t.group_id)
             .unwrap_or(0);
-        let module = snap.items.get(&module_id).ok_or_else(|| BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Doomsday module {module_id} not found"),
-            client_error: None,
+        let module = snap.items.get(&module_id).ok_or_else(|| {
+            BridgeRpcError::module_not_found(module_id, Some(ship_id), None, false, format!("Doomsday module {module_id} not found"))
         })?;
         let is_high_slot = matches!(
             module.flag,
@@ -325,14 +323,21 @@ where
     let sys = ctx.systems.get_or_spawn(sys_id);
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let Some(titan_ball_initial) = all_balls.iter().find(|b| b.id == ship_id).cloned() else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active Titan {ship_id} is not in space in solar system {sys_id}"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ActivateDoomsday",
+            format!("Active Titan {ship_id} is not in space in solar system {sys_id}"),
+        ));
     };
-    if matches!(titan_ball_initial.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError::user_error("CantActivateInWarp"));
+    if let MovementMode::Warp { phase, .. } = titan_ball_initial.mode {
+        return Err(BridgeRpcError::cant_activate_in_warp(
+            Some(ship_id),
+            "ActivateDoomsday",
+            Some(format!("{phase:?}")),
+            "Cannot activate Doomsday superweapon while in warp",
+        ));
     }
     let ship_pos = titan_ball_initial.position;
     if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
@@ -364,7 +369,13 @@ where
         .filter(|&v| v > 0.0)
         .unwrap_or(0.0);
     if cap_need > 0.0 && cs.capacitor < cap_need {
-        return Err(BridgeRpcError::user_error("NotEnoughCapacitor"));
+        return Err(BridgeRpcError::not_enough_capacitor(
+            Some(ship_id),
+            mod_type.map_or("Doomsday", |t| t.name.as_str()),
+            cap_need,
+            cs.capacitor,
+            format!("Insufficient capacitor: need {cap_need:.0} GJ, have {:.0} GJ", cs.capacitor),
+        ));
     }
 
     let max_range_m = mod_type
