@@ -9,7 +9,10 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 
-use eve_db::{ActiveMissionRecord, IskCents, OwnerNoteRecord, SolarSystemId, WorldStateSnapshot};
+use eve_db::{
+    IskCents, MissionInstanceStore, MissionState, OwnerNoteRecord, SolarSystemId,
+    WorldStateSnapshot,
+};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{AgentInfo, MissionTemplate, SdeRegistry, TypeId};
@@ -112,9 +115,9 @@ pub fn has_completed_mission_with_agent(
     agent_id: i64,
 ) -> bool {
     if snap
-        .active_missions
-        .values()
-        .any(|m| m.character_id == char_id && m.agent_id == agent_id && m.state == "Completed")
+        .missions
+        .iter_by_character(char_id)
+        .any(|m| m.agent_id == agent_id && m.state == MissionState::Completed)
     {
         return true;
     }
@@ -537,11 +540,9 @@ pub fn record_mission_completion_and_resolve_storyline(
     });
 
     let has_pending_offer = |agent_id: i64| -> bool {
-        snap.active_missions.values().any(|m| {
-            m.character_id == char_id
-                && m.agent_id == agent_id
-                && matches!(m.state.as_str(), "Offered" | "Accepted")
-        })
+        snap.missions
+            .iter_by_character(char_id)
+            .any(|m| m.agent_id == agent_id && m.state.is_active())
     };
 
     candidates
@@ -554,7 +555,7 @@ pub fn record_mission_completion_and_resolve_storyline(
 /// Selects a Storyline `MissionTemplate` matching `level` (`1..=5`) via SDE dungeon difficulty.
 pub fn select_storyline_mission_for_level<'a>(
     sde: &'a SdeRegistry,
-    active_missions: &HashMap<(CharacterId, u32), ActiveMissionRecord>,
+    missions: &MissionInstanceStore,
     char_id: CharacterId,
     level: u8,
 ) -> Option<&'a MissionTemplate> {
@@ -564,7 +565,7 @@ pub fn select_storyline_mission_for_level<'a>(
         .values()
         .filter(|sm| {
             is_storyline_template(sm)
-                && !active_missions.contains_key(&(char_id, sm.mission_id))
+                && !missions.contains_character_template(char_id, sm.mission_id)
                 && sm
                     .dungeon_id
                     .and_then(|did| sde.dungeons.get(&did))
@@ -577,7 +578,7 @@ pub fn select_storyline_mission_for_level<'a>(
             .values()
             .filter(|sm| {
                 is_storyline_template(sm)
-                    && !active_missions.contains_key(&(char_id, sm.mission_id))
+                    && !missions.contains_character_template(char_id, sm.mission_id)
             })
             .min_by_key(|sm| sm.mission_id)
     })

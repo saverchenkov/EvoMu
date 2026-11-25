@@ -863,12 +863,9 @@ fn epic_arc_faction_resolution_pirate_trig_detection_and_rnd_note_roundtrip() {
     assert!(!is_trig_or_edencom_entity(&ctx, 3_900_000 + 1_000_201));
     assert!(!is_trig_or_edencom_entity(&ctx, 999_999_999));
 
-    let nid_m1 = mission_meta_note_id(90_000_001, 100);
-    let nid_m2 = mission_meta_note_id(90_000_001, 101);
     let nid_rnd = rnd_research_note_id(90_000_001);
     let nid_arc = epic_arc_note_id(90_000_001);
     let nid_loc = locator_cooldown_note_id(90_000_001, 3_018_922);
-    assert!(nid_m1 < -5_000_000_000_000 && nid_m1 != nid_m2);
     assert!(nid_rnd < -5_100_000_000_000 && nid_arc < -5_200_000_000_000 && nid_loc < -5_300_000_000_000);
 
     ctx.db.with_mut_snapshot(|snap| {

@@ -7,7 +7,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 /// Daily downtime maintenance: purges stale NPC wrecks (`feat:lifecycle.wreck-downtime`)
-/// and resets uncompleted ("Accepted") missions by despawning remaining NPCs and restoring
+/// and resets uncompleted (`MissionState::Accepted`) missions by despawning remaining NPCs and restoring
 /// initial room/NPC state (`feat:lifecycle.mission-downtime-respawn`).
 // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn
 pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) -> (usize, usize) {
@@ -16,83 +16,90 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
     let mut missions_reset_count: usize = 0;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let st = snap.sp6_lifecycle.as_inner_mut();
-        let npc_wreck_ids: Vec<(i64, u32)> = snap
-            .items
-            .values()
-            .filter(|i| {
-                let is_wreck = i.type_id == 26557
-                    || ctx
-                        .sde
-                        .types
-                        .get(&i.type_id)
-                        .is_some_and(|t| t.group_id == 186);
-                let is_npc_wreck = st
-                    .space_object_meta
-                    .get(&i.item_id)
-                    .is_some_and(|m| m.is_npc_wreck);
-                is_wreck && is_npc_wreck && (30_000_000..=34_000_000).contains(&i.location_id)
-            })
-            .map(|i| (i.item_id, i.location_id as u32))
-            .collect();
+        {
+            let st = snap.sp6_lifecycle.as_inner_mut();
+            let npc_wreck_ids: Vec<(i64, u32)> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    let is_wreck = i.type_id == 26557
+                        || ctx
+                            .sde
+                            .types
+                            .get(&i.type_id)
+                            .is_some_and(|t| t.group_id == 186);
+                    let is_npc_wreck = st
+                        .space_object_meta
+                        .get(&i.item_id)
+                        .is_some_and(|m| m.is_npc_wreck);
+                    is_wreck && is_npc_wreck && (30_000_000..=34_000_000).contains(&i.location_id)
+                })
+                .map(|i| (i.item_id, i.location_id as u32))
+                .collect();
 
-        for (wid, sys_id) in npc_wreck_ids {
-            snap.items.remove(&wid);
-            snap.item_positions.remove(&wid);
-            st.space_object_meta.remove(&wid);
-            st.ship_combat_hp.remove(&wid);
-            snap.items.retain(|_, child| child.location_id != wid);
-            removed_wreck_balls.push((sys_id, wid));
+            for (wid, sys_id) in npc_wreck_ids {
+                snap.items.remove(&wid);
+                snap.item_positions.remove(&wid);
+                st.space_object_meta.remove(&wid);
+                st.ship_combat_hp.remove(&wid);
+                snap.items.retain(|_, child| child.location_id != wid);
+                removed_wreck_balls.push((sys_id, wid));
+            }
         }
 
-        // Despawn surviving mission NPCs and reset uncompleted ("Accepted") combat missions (`feat:lifecycle.mission-downtime-respawn`)
-        for (&map_key, mission) in snap.active_missions.iter_mut() {
-            if mission.state == "Accepted" {
-                let mkey = format!("{}:{}", mission.character_id, mission.mission_id);
-                let initial_count = st
-                    .mission_initial_npc_counts
-                    .get(&mkey)
-                    .copied()
-                    .unwrap_or(0);
-                let old_spawned_len = mission.spawned_npc_ball_ids.len() as u32;
-                let has_combat_wave =
-                    initial_count > 0 || old_spawned_len > 0 || mission.npcs_remaining > 0;
-                for &old_bid in &mission.spawned_npc_ball_ids {
-                    removed_mission_npcs.push((mission.solar_system_id, old_bid));
+        // Despawn surviving mission NPCs, reset uncompleted accepted combat missions
+        // (`feat:lifecycle.mission-downtime-respawn`), and clear stale wave metadata from
+        // non-accepted missions.
+        let downtime_ids: Vec<eve_db::MissionInstanceId> = snap
+            .missions
+            .iter()
+            .filter(|m| {
+                m.state == eve_db::MissionState::Accepted
+                    || m.encounter().is_some_and(|enc| {
+                        enc.initial_wave_count.is_some()
+                            || !enc.initial_wave_types.is_empty()
+                            || enc.awaiting_downtime_respawn
+                    })
+            })
+            .map(|m| m.instance_id)
+            .collect();
+        for iid in downtime_ids {
+            let _ = snap.missions.update(iid, |mission| {
+                if mission.state != eve_db::MissionState::Accepted {
+                    if let Some(enc) = mission.encounter_mut() {
+                        enc.initial_wave_count = None;
+                        enc.initial_wave_types.clear();
+                        enc.awaiting_downtime_respawn = false;
+                    }
+                    return;
                 }
-                mission.spawned_npc_ball_ids.clear();
+                let sys_id = mission.solar_system_id;
                 mission.current_room_id = 1;
+                let Some(enc) = mission.encounter_mut() else {
+                    return;
+                };
+                let initial_count = enc.initial_wave_count.unwrap_or(0);
+                let old_spawned_len = enc.spawned_npc_ball_ids.len() as u32;
+                let has_combat_wave =
+                    initial_count > 0 || old_spawned_len > 0 || enc.npcs_remaining > 0;
+                for &old_bid in &enc.spawned_npc_ball_ids {
+                    removed_mission_npcs.push((sys_id, old_bid));
+                }
+                enc.spawned_npc_ball_ids.clear();
                 if has_combat_wave {
                     let target_count = if initial_count > 0 {
                         initial_count
                     } else {
-                        old_spawned_len.max(mission.npcs_remaining).max(4)
+                        old_spawned_len.max(enc.npcs_remaining).max(4)
                     };
-                    mission.npcs_remaining = target_count;
-                    if !st.missions_awaiting_downtime_respawn.contains(&map_key) {
-                        st.missions_awaiting_downtime_respawn.push(map_key);
-                    }
+                    enc.npcs_remaining = target_count;
+                    enc.awaiting_downtime_respawn = true;
                     missions_reset_count += 1;
                 } else {
-                    mission.npcs_remaining = 0;
+                    enc.npcs_remaining = 0;
                 }
-            }
+            });
         }
-        let active_accepted_keys: std::collections::HashSet<String> = snap
-            .active_missions
-            .values()
-            .filter(|m| m.state == "Accepted")
-            .map(|m| format!("{}:{}", m.character_id, m.mission_id))
-            .collect();
-        st.mission_initial_npc_counts
-            .retain(|k, _| active_accepted_keys.contains(k));
-        st.mission_initial_npc_types
-            .retain(|k, _| active_accepted_keys.contains(k));
-        st.missions_awaiting_downtime_respawn.retain(|k| {
-            snap.active_missions
-                .get(k)
-                .is_some_and(|m| m.state == "Accepted")
-        });
     });
 
     let wrecks_removed_count = removed_wreck_balls.len();
@@ -389,70 +396,63 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
     let mut spawned_npcs: Vec<(u32, i64, u32, DVec3)> = Vec::new();
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut keys: Vec<(i64, u32)> = snap.active_missions.keys().copied().collect();
-        keys.sort_unstable();
-        for (cid, aid) in keys {
-            let awaiting = snap
-                .sp6_lifecycle
-                .missions_awaiting_downtime_respawn
-                .contains(&(cid, aid));
-            let Some((mission_id, cur_npcs)) =
-                snap.active_missions.get(&(cid, aid)).and_then(|mission| {
-                    let matches_target =
-                        target_mission_id.is_none_or(|mid| mission.mission_id == mid);
-                    let needs_respawn = awaiting
-                        || (mission.spawned_npc_ball_ids.is_empty() && mission.npcs_remaining > 0);
-                    (cid == char_id
-                        && mission.state == "Accepted"
-                        && mission.solar_system_id == solar_system_id
-                        && matches_target
-                        && needs_respawn)
-                        .then_some((mission.mission_id, mission.npcs_remaining))
-                })
-            else {
-                continue;
-            };
-            snap.sp6_lifecycle
-                .missions_awaiting_downtime_respawn
-                .retain(|&k| k != (cid, aid));
-            let mkey = format!("{cid}:{mission_id}");
-            let initial_count = snap
-                .sp6_lifecycle
-                .mission_initial_npc_counts
-                .get(&mkey)
-                .copied()
-                .unwrap_or(0);
-            if initial_count == 0 && cur_npcs == 0 {
-                continue;
-            }
-            let wave_count = if initial_count > 0 {
-                initial_count
-            } else {
-                cur_npcs
-            };
-            let wave_types = snap
-                .sp6_lifecycle
-                .mission_initial_npc_types
-                .get(&mkey)
-                .cloned();
-            let new_bids: Vec<i64> = (0..wave_count).map(|_| snap.alloc_entity_id()).collect();
-            if let Some(mission) = snap.active_missions.get_mut(&(cid, aid)) {
-                mission.npcs_remaining = wave_count;
-                mission.current_room_id = 1;
-                mission.spawned_npc_ball_ids.clear();
-                for (idx, npc_bid) in new_bids.into_iter().enumerate() {
-                    let npc_tid = wave_types
-                        .as_ref()
-                        .filter(|v| !v.is_empty())
-                        .map(|v| v[idx % v.len()])
-                        .unwrap_or(default_npc_tid);
-                    mission.spawned_npc_ball_ids.push(npc_bid);
-                    let angle = (idx as f64) * std::f64::consts::TAU / (wave_count as f64);
-                    let pos = pocket_origin
-                        + DVec3::new(angle.cos() * 4_500.0, 0.0, angle.sin() * 4_500.0);
-                    spawned_npcs.push((solar_system_id, npc_bid, npc_tid, pos));
+        let candidate_ids: Vec<eve_db::MissionInstanceId> = snap
+            .missions
+            .iter_by_character(char_id)
+            .map(|m| m.instance_id)
+            .collect();
+        for iid in candidate_ids {
+            let Some((wave_count, wave_types)) = snap.missions.get(iid).and_then(|mission| {
+                let enc = mission.encounter()?;
+                let matches_target =
+                    target_mission_id.is_none_or(|mid| mission.template_id == mid);
+                let needs_respawn = enc.awaiting_downtime_respawn
+                    || (enc.spawned_npc_ball_ids.is_empty() && enc.npcs_remaining > 0);
+                if mission.state != eve_db::MissionState::Accepted
+                    || mission.solar_system_id != solar_system_id
+                    || !matches_target
+                    || !needs_respawn
+                {
+                    return None;
                 }
+                let initial_count = enc.initial_wave_count.unwrap_or(0);
+                let wave_count = if initial_count > 0 {
+                    initial_count
+                } else {
+                    enc.npcs_remaining
+                };
+                Some((wave_count, enc.initial_wave_types.clone()))
+            }) else {
+                continue;
+            };
+            if wave_count == 0 {
+                let _ = snap.missions.update(iid, |mission| {
+                    if let Some(enc) = mission.encounter_mut() {
+                        enc.awaiting_downtime_respawn = false;
+                    }
+                });
+                continue;
             }
+            let new_bids: Vec<i64> = (0..wave_count).map(|_| snap.alloc_entity_id()).collect();
+            let _ = snap.missions.update(iid, |mission| {
+                mission.current_room_id = 1;
+                if let Some(enc) = mission.encounter_mut() {
+                    enc.npcs_remaining = wave_count;
+                    enc.awaiting_downtime_respawn = false;
+                    enc.spawned_npc_ball_ids.clear();
+                    for (idx, &npc_bid) in new_bids.iter().enumerate() {
+                        let npc_tid = wave_types
+                            .get(idx % wave_types.len().max(1))
+                            .copied()
+                            .unwrap_or(default_npc_tid);
+                        enc.spawned_npc_ball_ids.push(npc_bid);
+                        let angle = (idx as f64) * std::f64::consts::TAU / (wave_count as f64);
+                        let pos = pocket_origin
+                            + DVec3::new(angle.cos() * 4_500.0, 0.0, angle.sin() * 4_500.0);
+                        spawned_npcs.push((solar_system_id, npc_bid, npc_tid, pos));
+                    }
+                }
+            });
         }
     });
 

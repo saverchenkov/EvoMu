@@ -152,20 +152,34 @@ fn build_populated_snapshot() -> WorldStateSnapshot {
             last_extracted_unix: 1_700_001_000,
         },
     );
-    snap.active_missions.insert(
-        (cid, 101),
-        ActiveMissionRecord {
-            mission_id: 101,
+    snap.missions
+        .try_insert(MissionInstance {
+            instance_id: 200_000_101,
             character_id: cid,
             agent_id: 3_018_922,
+            template_id: 101,
+            state: MissionState::Accepted,
+            kind: MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Accepted".into(),
             current_room_id: 2,
-            npcs_remaining: 4,
-            spawned_npc_ball_ids: vec![910_001],
             bookmark_id: Some(620_001),
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: MissionObjective::Encounter(EncounterObjective {
+                npcs_remaining: 4,
+                spawned_npc_ball_ids: vec![910_001],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
     snap.mission_tally.insert(cid, 12);
     snap.standing_transactions.insert(
         cid,
@@ -420,7 +434,14 @@ fn load_snapshot_from_sqlite_restores_all_37_tables_and_post_processes_state() {
     assert_eq!(job.completed_character_id, Some(cid));
 
     assert_eq!(loaded.planetary_colonies[&(cid, 40_009_082)].command_center_level, 4);
-    assert_eq!(loaded.active_missions[&(cid, 101)].npcs_remaining, 4);
+    assert_eq!(
+        loaded
+            .missions
+            .get_by_character_template(cid, 101)
+            .expect("mission 101 loaded")
+            .npcs_remaining(),
+        4
+    );
     assert_eq!(loaded.mission_tally[&cid], 12);
     assert_eq!(loaded.standing_transactions[&cid][0].modification, 0.25);
     assert!(loaded.npe_progress[&cid].completed);
@@ -548,4 +569,463 @@ fn startup_migrations_persist_before_baseline_fingerprints_and_survive_first_tx_
 
     drop(repo);
     let _ = std::fs::remove_file(&tmp_path);
+}
+
+#[test]
+fn sqlite_legacy_missions_conversion_idempotency_and_unknown_state_quarantine() {
+    use crate::sqlite_store::domain_rows::KeyCodec;
+    use crate::sqlite_store::quarantine::list_quarantined_rows;
+
+    let tmp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let db_path = tmp_dir.join(format!("evomu_t3_legacy_missions_{pid}.sqlite"));
+    let bad_db_path = tmp_dir.join(format!("evomu_t3_legacy_missions_bad_{pid}.sqlite"));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&bad_db_path);
+
+    let cid1 = 90_000_001_i64;
+    let cid2 = 90_000_002_i64;
+
+    let seed_legacy_db = |path: &std::path::Path, include_bad_state: bool| {
+        let mut snap = WorldRepository::create_demo_snapshot();
+        if !snap.characters.contains_key(&cid2) {
+            let mut c2 = snap.characters[&cid1].clone();
+            c2.character_id = cid2;
+            c2.name = "Legacy Char 2".into();
+            snap.characters.insert(cid2, c2);
+        }
+        snap.missions.clear();
+        snap.next_entity_id = 200_000_000;
+        {
+            let mut conn = Connection::open(path).expect("open seed sqlite");
+            apply_migrations(&conn).expect("apply migrations");
+            replace_sqlite_from_snapshot(&mut conn, &snap).expect("seed snapshot");
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS mission_instances;
+                 CREATE TABLE missions (
+                     character_id INTEGER NOT NULL,
+                     mission_id INTEGER NOT NULL,
+                     agent_id INTEGER NOT NULL,
+                     solar_system_id INTEGER NOT NULL,
+                     state TEXT NOT NULL,
+                     current_room_id INTEGER NOT NULL,
+                     npcs_remaining INTEGER NOT NULL,
+                     record_json TEXT NOT NULL,
+                     PRIMARY KEY (character_id, mission_id),
+                     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+                 );",
+            )
+            .expect("recreate legacy missions table");
+
+            // Insert (cid2, 100) BEFORE (cid1, 200) in SQLite to prove deterministic (character_id, mission_id) ordering.
+            let enc_json = serde_json::json!({
+                "mission_id": 100,
+                "character_id": cid2,
+                "agent_id": 3_018_418,
+                "solar_system_id": 30_000_142,
+                "state": "Accepted",
+                "current_room_id": 2,
+                "npcs_remaining": 3,
+                "spawned_npc_ball_ids": [200_000_001],
+                "bookmark_id": 77_001
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
+                 VALUES (?1, 100, 3018418, 30000142, 'Accepted', 2, 3, ?2)",
+                rusqlite::params![cid2, enc_json],
+            )
+            .expect("insert legacy encounter row");
+
+            let courier_json = serde_json::json!({
+                "mission_id": 200,
+                "character_id": cid1,
+                "agent_id": 3_018_418,
+                "solar_system_id": 30_000_142,
+                "state": "Offered",
+                "current_room_id": 1,
+                "npcs_remaining": 0,
+                "spawned_npc_ball_ids": [],
+                "bookmark_id": null
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
+                 VALUES (?1, 200, 3018418, 30000142, 'Offered', 1, 0, ?2)",
+                rusqlite::params![cid1, courier_json],
+            )
+            .expect("insert legacy courier row");
+
+            if include_bad_state {
+                let bad_json = serde_json::json!({
+                    "mission_id": 999,
+                    "character_id": cid1,
+                    "agent_id": 3_018_418,
+                    "solar_system_id": 30_000_142,
+                    "state": "BogusState",
+                    "current_room_id": 1,
+                    "npcs_remaining": 0,
+                    "spawned_npc_ball_ids": [],
+                    "bookmark_id": null
+                })
+                .to_string();
+                conn.execute(
+                    "INSERT INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
+                     VALUES (?1, 999, 3018418, 30000142, 'BogusState', 1, 0, ?2)",
+                    rusqlite::params![cid1, bad_json],
+                )
+                .expect("insert legacy unknown-state row");
+            }
+
+            let meta1_nid = legacy_mission_meta_note_id(cid1, 200);
+            let meta1_note = OwnerNoteRecord {
+                note_id: meta1_nid,
+                character_id: -5,
+                item_id: 200,
+                label: format!("mission_meta:{cid1}:200"),
+                note: serde_json::json!({
+                    "offered_at_unix": 1_700_000_000u64,
+                    "offer_expiry_unix": 1_700_086_400u64,
+                    "required_delivery_type_id": 3810,
+                    "required_delivery_qty": 15,
+                    "granted_courier_item_id": 888_001,
+                    "granted_courier_qty": 15,
+                    "is_anomic_burner": false,
+                    "destination_station_id": 60_003_761,
+                    "origin_station_id": 60_003_760,
+                    "offered_level": 3,
+                    "completed_at_unix": 1_700_000_999u64,
+                    "chosen_branch": "DropMe"
+                })
+                .to_string(),
+                timestamp_unix: 1_700_000_000,
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    DOMAIN_OWNER_NOTES,
+                    meta1_nid.encode_key(),
+                    serde_json::to_string(&meta1_note).unwrap()
+                ],
+            )
+            .expect("insert meta1 note");
+
+            let meta2_nid = legacy_mission_meta_note_id(cid2, 100);
+            let meta2_note = OwnerNoteRecord {
+                note_id: meta2_nid,
+                character_id: -5,
+                item_id: 100,
+                label: format!("mission_meta:{cid2}:100"),
+                note: serde_json::json!({
+                    "offered_at_unix": 1_700_000_100u64,
+                    "offer_expiry_unix": 1_700_086_500u64,
+                    "accepted_at_unix": 1_700_000_200u64,
+                    "is_anomic_burner": true,
+                    "origin_station_id": 60_003_760,
+                    "offered_level": 4
+                })
+                .to_string(),
+                timestamp_unix: 1_700_000_100,
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    DOMAIN_OWNER_NOTES,
+                    meta2_nid.encode_key(),
+                    serde_json::to_string(&meta2_note).unwrap()
+                ],
+            )
+            .expect("insert meta2 note");
+
+            let wave_key = format!("{cid2}:100");
+            conn.execute(
+                "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, 'missions_awaiting_downtime_respawn', ?2)",
+                rusqlite::params![
+                    DOMAIN_SP6_LIFECYCLE,
+                    serde_json::to_string(&vec![(cid2, 100u32)]).unwrap()
+                ],
+            )
+            .expect("insert respawn list");
+            conn.execute(
+                "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, '3')",
+                rusqlite::params![
+                    DOMAIN_SP6_LIFECYCLE,
+                    format!("mission_initial_npc_counts/{}", wave_key.encode_key())
+                ],
+            )
+            .expect("insert initial npc count");
+            conn.execute(
+                "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, '[587,588]')",
+                rusqlite::params![
+                    DOMAIN_SP6_LIFECYCLE,
+                    format!("mission_initial_npc_types/{}", wave_key.encode_key())
+                ],
+            )
+            .expect("insert initial npc types");
+        }
+    };
+
+    // 1. Clean migration + idempotent second load
+    seed_legacy_db(&db_path, false);
+    let repo1 = WorldRepository::open_sqlite(&db_path).expect("first open_sqlite converts legacy missions");
+    let (m1_id, m2_id, hwm_after_first) = repo1.with_snapshot(|snap| {
+        let m1 = snap
+            .missions
+            .get_by_character_template(cid1, 200)
+            .expect("migrated courier mission");
+        assert_eq!(m1.state, MissionState::Offered);
+        assert_eq!(m1.kind, MissionKind::Courier);
+        assert_eq!(m1.destination_station_id(), Some(60_003_761));
+        assert_eq!(m1.granted_courier(), Some((Some(888_001), 15)));
+        assert_eq!(m1.offered_level, Some(3));
+        assert_eq!(m1.offered_at_unix, 1_700_000_000);
+
+        let m2 = snap
+            .missions
+            .get_by_character_template(cid2, 100)
+            .expect("migrated encounter mission");
+        assert_eq!(m2.state, MissionState::Accepted);
+        assert_eq!(m2.kind, MissionKind::Encounter);
+        assert!(m2.is_anomic_burner);
+        assert_eq!(m2.npcs_remaining(), 3);
+        assert_eq!(m2.spawned_npc_ball_ids(), &[200_000_001]);
+        assert_eq!(m2.initial_wave_count(), Some(3));
+        assert_eq!(m2.initial_wave_types(), &[587, 588]);
+        assert!(m2.awaiting_downtime_respawn());
+        assert!(m1.instance_id < m2.instance_id, "must allocate in (character_id, mission_id) order");
+        assert_ne!(m1.instance_id, 200_000_001);
+        assert_ne!(m2.instance_id, 200_000_001);
+
+        assert!(!snap.owner_notes.values().any(|n| n.label.starts_with("mission_meta:")));
+        (m1.instance_id, m2.instance_id, snap.next_entity_id)
+    });
+    repo1.with_sqlite_conn(|conn| {
+        assert!(!table_exists(conn, "missions").unwrap());
+        assert!(table_exists(conn, "mission_instances").unwrap());
+        let leftover_waves: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM domain_rows WHERE domain = ?1 AND (key = 'missions_awaiting_downtime_respawn' OR key LIKE 'mission_initial_npc_counts/%' OR key LIKE 'mission_initial_npc_types/%')",
+                rusqlite::params![DOMAIN_SP6_LIFECYCLE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover_waves, 0);
+        let leftover_notes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM domain_rows WHERE domain = ?1 AND value LIKE '%mission_meta:%'",
+                rusqlite::params![DOMAIN_OWNER_NOTES],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover_notes, 0);
+    });
+    let expected_missions = repo1.with_snapshot(|s| s.missions.clone());
+    drop(repo1);
+
+    let repo2 = WorldRepository::open_sqlite(&db_path).expect("second open_sqlite must be idempotent");
+    repo2.with_snapshot(|snap| {
+        assert_eq!(snap.missions, expected_missions);
+        assert_eq!(snap.missions.get_by_character_template(cid1, 200).unwrap().instance_id, m1_id);
+        assert_eq!(snap.missions.get_by_character_template(cid2, 100).unwrap().instance_id, m2_id);
+        assert_eq!(snap.next_entity_id, hwm_after_first);
+    });
+    drop(repo2);
+
+    // 2. Unknown state row: fail closed vs quarantine
+    seed_legacy_db(&bad_db_path, true);
+    let fail_closed = WorldRepository::open_sqlite_with_options(&bad_db_path, false);
+    assert!(fail_closed.is_err(), "unknown legacy mission state must fail closed");
+
+    let repo_q = WorldRepository::open_sqlite_with_options(&bad_db_path, true)
+        .expect("quarantine mode opens with valid rows");
+    repo_q.with_snapshot(|snap| {
+        assert_eq!(snap.missions.len(), 2);
+        assert!(snap.missions.get_by_character_template(cid1, 999).is_none());
+    });
+    repo_q.with_sqlite_conn(|conn| {
+        assert!(!table_exists(conn, "missions").unwrap());
+        let quarantined = list_quarantined_rows(conn).expect("quarantine_rows readable");
+        assert!(
+            quarantined.iter().any(|q| q.source_table == "missions" && q.key.contains("999")),
+            "unknown state row must be quarantined: {quarantined:?}"
+        );
+    });
+    drop(repo_q);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&bad_db_path);
+}
+
+#[test]
+fn sqlite_legacy_missions_anomic_delivery_direct_load_ddl_and_key_mismatch() {
+    use crate::sqlite_store::domain_rows::KeyCodec;
+    use crate::sqlite_store::quarantine::list_quarantined_rows;
+
+    let cid1 = 90_000_001_i64;
+    let cid2 = 90_000_002_i64;
+
+    let make_unmigrated_conn = |populated: bool, with_mismatch: bool| -> Connection {
+        let mut snap = WorldRepository::create_demo_snapshot();
+        if !snap.characters.contains_key(&cid2) {
+            let mut c2 = snap.characters[&cid1].clone();
+            c2.character_id = cid2;
+            c2.name = "Legacy Char 2".into();
+            snap.characters.insert(cid2, c2);
+        }
+        snap.missions.clear();
+        snap.next_entity_id = 200_000_000;
+
+        let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        apply_migrations(&conn).expect("apply migrations");
+        replace_sqlite_from_snapshot(&mut conn, &snap).expect("seed snapshot");
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS mission_instances;
+             CREATE TABLE missions (
+                 character_id INTEGER NOT NULL,
+                 mission_id INTEGER NOT NULL,
+                 agent_id INTEGER NOT NULL,
+                 solar_system_id INTEGER NOT NULL,
+                 state TEXT NOT NULL,
+                 current_room_id INTEGER NOT NULL,
+                 npcs_remaining INTEGER NOT NULL,
+                 record_json TEXT NOT NULL,
+                 PRIMARY KEY (character_id, mission_id),
+                 FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+             );",
+        )
+        .expect("replace mission_instances with legacy missions table");
+
+        if populated {
+            let delivery_json = serde_json::json!({
+                "mission_id": 250,
+                "character_id": cid1,
+                "agent_id": 3_018_418,
+                "solar_system_id": 30_000_142,
+                "state": "Accepted",
+                "current_room_id": 1,
+                "npcs_remaining": 0,
+                "spawned_npc_ball_ids": [],
+                "bookmark_id": null
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
+                 VALUES (?1, 250, 3018418, 30000142, 'Accepted', 1, 0, ?2)",
+                rusqlite::params![cid1, delivery_json],
+            )
+            .expect("insert legacy delivery row");
+
+            let meta_nid = legacy_mission_meta_note_id(cid1, 250);
+            let meta_note = OwnerNoteRecord {
+                note_id: meta_nid,
+                character_id: -5,
+                item_id: 250,
+                label: format!("mission_meta:{cid1}:250"),
+                note: serde_json::json!({
+                    "offered_at_unix": 1_700_000_000u64,
+                    "offer_expiry_unix": 1_700_086_400u64,
+                    "required_delivery_type_id": 34,
+                    "required_delivery_qty": 250,
+                    "is_anomic_burner": true,
+                    "origin_station_id": 60_003_760,
+                    "offered_level": 4
+                })
+                .to_string(),
+                timestamp_unix: 1_700_000_000,
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    DOMAIN_OWNER_NOTES,
+                    meta_nid.encode_key(),
+                    serde_json::to_string(&meta_note).unwrap()
+                ],
+            )
+            .expect("insert anomic delivery meta note");
+        }
+
+        if with_mismatch {
+            let mismatch_json = serde_json::json!({
+                "mission_id": 302,
+                "character_id": cid2,
+                "agent_id": 3_018_418,
+                "solar_system_id": 30_000_142,
+                "state": "Accepted",
+                "current_room_id": 1,
+                "npcs_remaining": 0,
+                "spawned_npc_ball_ids": [],
+                "bookmark_id": null
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
+                 VALUES (?1, 301, 3018418, 30000142, 'Accepted', 1, 0, ?2)",
+                rusqlite::params![cid1, mismatch_json],
+            )
+            .expect("insert mismatched legacy mission row");
+        }
+
+        conn
+    };
+
+    // 1. Direct load_snapshot_from_sqlite on empty unmigrated legacy missions table creates DDL + index.
+    let conn_empty = make_unmigrated_conn(false, false);
+    let snap_empty =
+        load_snapshot_from_sqlite(&conn_empty).expect("direct load on empty legacy missions");
+    assert!(snap_empty.missions.is_empty());
+    assert!(!table_exists(&conn_empty, "missions").unwrap());
+    assert!(table_exists(&conn_empty, "mission_instances").unwrap());
+    let idx_exists: i64 = conn_empty
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_mission_instances_character_id'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx_exists, 1);
+    let snap_empty_reload =
+        load_snapshot_from_sqlite(&conn_empty).expect("direct reload after empty legacy migration");
+    assert!(snap_empty_reload.missions.is_empty());
+
+    // 2. Direct load_snapshot_from_sqlite on populated legacy DB preserves is_anomic_burner delivery objectives (BF-01 & BF-02).
+    let conn_pop = make_unmigrated_conn(true, false);
+    let snap_pop =
+        load_snapshot_from_sqlite(&conn_pop).expect("direct load on populated legacy missions");
+    assert!(!table_exists(&conn_pop, "missions").unwrap());
+    assert!(table_exists(&conn_pop, "mission_instances").unwrap());
+    let migrated = snap_pop
+        .missions
+        .get_by_character_template(cid1, 250)
+        .expect("anomic burner delivery mission must migrate");
+    assert!(migrated.is_anomic_burner);
+    assert_ne!(migrated.kind, MissionKind::Encounter);
+    assert_eq!(migrated.required_delivery(), Some((34, 250)));
+    let snap_pop_reload =
+        load_snapshot_from_sqlite(&conn_pop).expect("reload persisted migrated mission_instances");
+    assert_eq!(snap_pop_reload.missions, snap_pop.missions);
+
+    // 3. Column vs JSON key mismatch fails closed without quarantine and quarantines under quarantine mode (BF-02).
+    let conn_bad_fc = make_unmigrated_conn(true, true);
+    let err = load_snapshot_from_sqlite_with_options(&conn_bad_fc, false)
+        .expect_err("column vs JSON key mismatch must fail closed");
+    assert!(err.contains("legacy mission key"), "unexpected err: {err}");
+    assert!(table_exists(&conn_bad_fc, "missions").unwrap());
+    assert!(!table_exists(&conn_bad_fc, "mission_instances").unwrap());
+
+    let conn_bad_q = make_unmigrated_conn(true, true);
+    let snap_q = load_snapshot_from_sqlite_with_options(&conn_bad_q, true)
+        .expect("quarantine mode succeeds and preserves valid rows");
+    assert_eq!(snap_q.missions.len(), 1);
+    assert!(snap_q.missions.get_by_character_template(cid1, 250).is_some());
+    assert!(snap_q.missions.get_by_character_template(cid1, 301).is_none());
+    assert!(snap_q.missions.get_by_character_template(cid2, 302).is_none());
+    assert!(!table_exists(&conn_bad_q, "missions").unwrap());
+    assert!(table_exists(&conn_bad_q, "mission_instances").unwrap());
+    let quarantined = list_quarantined_rows(&conn_bad_q).expect("quarantine rows readable");
+    assert!(
+        quarantined
+            .iter()
+            .any(|q| q.source_table == "missions" && q.key == format!("{cid1}:301")),
+        "key mismatch row must be quarantined: {quarantined:?}"
+    );
 }

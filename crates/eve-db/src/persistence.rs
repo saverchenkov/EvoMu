@@ -3,7 +3,7 @@
 use crate::cow::{CowCell, CowMap};
 #[cfg(test)]
 use crate::cow_collections::CowVecDiff;
-use crate::cow_collections::{CowActiveMissions, CowIdVec};
+use crate::cow_collections::CowIdVec;
 #[cfg(any(test, feature = "legacy-json-snapshot"))]
 use crate::lock_rank::RANK_WAL_LOCK;
 use crate::lock_rank::{
@@ -100,7 +100,7 @@ impl WorldStateWalDelta {
             && old.saved_fittings == new.saved_fittings
             && old.industry_jobs == new.industry_jobs
             && old.planetary_colonies == new.planetary_colonies
-            && old.active_missions == new.active_missions
+            && old.missions == new.missions
             && old.mission_tally == new.mission_tally
             && old.standing_transactions == new.standing_transactions
             && old.npe_progress == new.npe_progress
@@ -1083,7 +1083,7 @@ impl WorldRepository {
             contracts: CowCell::new(HashMap::new()),
             industry_jobs: CowCell::new(HashMap::new()),
             planetary_colonies: CowCell::new(HashMap::new()),
-            active_missions: CowActiveMissions::new(),
+            missions: crate::missions::MissionInstanceStore::new(),
             mission_tally: CowCell::new(HashMap::new()),
             standing_transactions: CowCell::new(HashMap::new()),
             npe_progress: CowCell::new(HashMap::new()),
@@ -1514,7 +1514,6 @@ impl WorldRepository {
         writer.working.wallet_journal.reconcile_indexes();
         writer.working.mails.reconcile_indexes();
         writer.working.char_lp_logs.reconcile_id_index();
-        writer.working.active_missions.reconcile_id_index();
 
         if !before.system_states.ptr_eq(&writer.working.system_states) {
             for (&sid, st) in &mut writer.working.system_states {

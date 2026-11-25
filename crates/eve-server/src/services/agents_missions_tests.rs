@@ -96,7 +96,7 @@ fn distribution_career_progress(ctx: &ServerContext, char_id: i64) -> u64 {
 }
 
 #[test]
-fn classify_mission_archetype_excludes_heraldry_trade_dc_and_rnd_hangar_turnin_from_courier() {
+fn decide_mission_kind_excludes_heraldry_trade_dc_and_rnd_hangar_turnin_from_courier() {
     let ctx = test_ctx();
     let iris = ctx
         .sde
@@ -113,12 +113,10 @@ fn classify_mission_archetype_excludes_heraldry_trade_dc_and_rnd_hangar_turnin_f
         "SDE mission 17013 sets is_courier=1, making runtime exclusion essential"
     );
 
-    let heraldry_arch = classify_mission_archetype(Some(heraldry_tmpl), None, Some(iris));
-    assert!(heraldry_arch.is_heraldry);
-    assert!(!heraldry_arch.is_courier);
-    assert!(!heraldry_arch.is_trade);
-    assert!(!heraldry_arch.is_data_center);
-    assert!(!heraldry_arch.is_kill);
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(heraldry_tmpl), Some(iris)),
+        eve_db::MissionKind::Heraldry
+    );
 
     let trade_tmpl = ctx
         .sde
@@ -131,9 +129,10 @@ fn classify_mission_archetype_excludes_heraldry_trade_dc_and_rnd_hangar_turnin_f
                     .is_some_and(|c| c.contains("Trade"))
         })
         .expect("SDE must contain a Trade mission with is_courier=1");
-    let trade_arch = classify_mission_archetype(Some(trade_tmpl), None, None);
-    assert!(trade_arch.is_trade);
-    assert!(!trade_arch.is_courier);
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(trade_tmpl), None),
+        eve_db::MissionKind::Trade
+    );
 
     let dc_agent = ctx
         .sde
@@ -141,10 +140,10 @@ fn classify_mission_archetype_excludes_heraldry_trade_dc_and_rnd_hangar_turnin_f
         .values()
         .find(|a| a.agent_type_id == 5)
         .expect("SDE must contain a Data Center agent");
-    let dc_arch = classify_mission_archetype(Some(trade_tmpl), None, Some(dc_agent));
-    assert!(dc_arch.is_data_center);
-    assert!(!dc_arch.is_trade);
-    assert!(!dc_arch.is_courier);
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(trade_tmpl), Some(dc_agent)),
+        eve_db::MissionKind::DataCenterTurnIn
+    );
 
     let rnd_agent = ctx
         .sde
@@ -163,38 +162,14 @@ fn classify_mission_archetype_excludes_heraldry_trade_dc_and_rnd_hangar_turnin_f
                     .is_some_and(|c| c.contains("BasicCourier"))
         })
         .expect("SDE must contain a BasicCourier mission");
-    let now = ctx.now_unix();
-    let rnd_hangar_meta = MissionTimingAndCargoMeta {
-        mission_id: courier_tmpl.mission_id,
-        agent_id: rnd_agent.agent_id,
-        offered_at_unix: now,
-        offer_expiry_unix: now + 86_400,
-        accepted_at_unix: Some(now),
-        accept_expiry_unix: Some(now + 604_800),
-        bonus_expiry_unix: Some(now + 3_600),
-        completed_at_unix: None,
-        required_delivery_type_id: Some(34),
-        required_delivery_qty: 20,
-        granted_courier_item_id: None,
-        granted_courier_qty: 0,
-        is_anomic_burner: false,
-        chosen_branch: None,
-        destination_station_id: None,
-        origin_station_id: rnd_agent.station_id,
-        offered_level: Some(1),
-    };
-    let rnd_hangar_arch =
-        classify_mission_archetype(Some(courier_tmpl), Some(&rnd_hangar_meta), Some(rnd_agent));
-    assert!(!rnd_hangar_arch.is_courier);
-
-    let mut rnd_dest_meta = rnd_hangar_meta;
-    rnd_dest_meta.destination_station_id = rnd_agent.station_id;
-    let rnd_dest_arch =
-        classify_mission_archetype(Some(courier_tmpl), Some(&rnd_dest_meta), Some(rnd_agent));
-    assert!(rnd_dest_arch.is_courier);
-
-    let normal_arch = classify_mission_archetype(Some(courier_tmpl), None, Some(iris));
-    assert!(normal_arch.is_courier);
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(courier_tmpl), Some(rnd_agent)),
+        eve_db::MissionKind::ResearchTurnIn
+    );
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(courier_tmpl), Some(iris)),
+        eve_db::MissionKind::Courier
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -636,14 +611,14 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
         .cloned()
         .expect("SDE must contain a Mining mission");
 
-    let arch_without_meta = classify_mission_archetype(Some(&courier_tmpl), None, Some(&rnd_ag));
-    assert!(arch_without_meta.is_rnd_turnin);
-    assert!(!arch_without_meta.is_courier);
-    assert!(!arch_without_meta.is_trade);
-
-    let arch_rnd_trade_tmpl = classify_mission_archetype(Some(&trade_tmpl), None, Some(&rnd_ag));
-    assert!(arch_rnd_trade_tmpl.is_rnd_turnin);
-    assert!(!arch_rnd_trade_tmpl.is_trade);
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(&courier_tmpl), Some(&rnd_ag)),
+        eve_db::MissionKind::ResearchTurnIn
+    );
+    assert_eq!(
+        eve_db::decide_mission_kind(Some(&trade_tmpl), Some(&rnd_ag)),
+        eve_db::MissionKind::ResearchTurnIn
+    );
 
     let char_id = 90_000_001_i64;
     let rnd_sys = rnd_ag.solar_system_id.unwrap();
@@ -1053,33 +1028,35 @@ async fn fw_initial_offer_target_sys_courier_origin_sys_and_epic_arc_v24_briefin
     );
 
     // 2. BF-1204-02 (courier origin system): uses origin_station's solar system even when sys_id == dest_sys.
-    let courier_meta = crate::services::agents_missions::agents_standings_arcs::MissionTimingAndCargoMeta {
-        mission_id: courier_mid,
-        agent_id: talk_agent_id,
-        offered_at_unix: 100,
-        offer_expiry_unix: 200,
-        accepted_at_unix: None,
-        accept_expiry_unix: None,
-        bonus_expiry_unix: None,
-        completed_at_unix: None,
-        required_delivery_type_id: Some(3814),
-        required_delivery_qty: 10,
-        granted_courier_item_id: None,
-        granted_courier_qty: 0,
-        is_anomic_burner: false,
-        chosen_branch: None,
-        destination_station_id: Some(dest_st.station_id),
-        origin_station_id: Some(origin_st.station_id),
-        offered_level: Some(2),
-    };
-    let courier_brief = build_mission_briefing_text(
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, courier_mid, talk_agent_id, dest_sys_id)
+                .required_delivery_type_id(Some(3814))
+                .required_delivery_qty(10)
+                .destination_station_id(Some(dest_st.station_id))
+                .origin_station_id(Some(origin_st.station_id))
+                .offered_level(Some(2)),
+        );
+    });
+    let mut dest_sess = docked_session(char_id, dest_sys_id, Some(dest_st.station_id));
+    let courier_info = handle_with_bound(
         &ctx,
-        talk_agent_id,
-        courier_mid,
-        "Cross-System Haul",
-        dest_sys_id,
-        Some(&courier_meta),
-    );
+        &mut dest_sess,
+        None,
+        "agentMgr",
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(talk_agent_id), PyRep::Integer(courier_mid as i64)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("courier GetMissionBriefingInfo handled")
+    .expect("courier GetMissionBriefingInfo succeeded");
+    let courier_brief = courier_info
+        .dict_get("briefing")
+        .and_then(PyRep::as_str)
+        .unwrap_or("");
     assert!(
         courier_brief.contains(&format!("from Origin Hub ({home_sys_name}) to Dest Hub ({dest_sys_name})")),
         "Courier briefing must label origin station with origin system name: {courier_brief}"
@@ -3347,4 +3324,112 @@ async fn agent_fleet_warp_deduplicates_invuln_cancel_and_enforces_destination_bu
             "char {cid} must receive exactly one OnExitingDungeon"
         );
     }
+}
+
+#[test]
+fn kill_hook_noop_for_non_mission_npc_and_idempotent_double_kill() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 2 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("SDE agent must exist");
+    let sys_id = ag.solar_system_id.unwrap();
+    let mid = ctx.sde.missions.keys().copied().min().unwrap_or(1);
+    let npc_a = 910_555_001_i64;
+    let npc_b = 910_555_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid, ag.agent_id, sys_id)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![npc_a, npc_b]),
+        );
+    });
+
+    let tx_before = ctx.db.tx_commit_count();
+    let epoch_before = ctx.db.state_epoch();
+    let missions_before = ctx.db.with_snapshot(|snap| snap.missions.clone());
+
+    // Non-mission NPC death is a zero-allocation, zero-commit no-op.
+    on_mission_npc_destroyed_core(&ctx.db, sys_id, 999_888_777, Some(char_id));
+    assert_eq!(ctx.db.tx_commit_count(), tx_before);
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert!(ctx
+        .db
+        .with_snapshot(|snap| snap.missions.ptr_eq(&missions_before)));
+
+    // Wrong-system mission NPC death is also a zero-commit no-op.
+    on_mission_npc_destroyed_core(&ctx.db, sys_id.saturating_add(1), npc_a, Some(char_id));
+    assert_eq!(ctx.db.tx_commit_count(), tx_before);
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert!(ctx
+        .db
+        .with_snapshot(|snap| snap.missions.ptr_eq(&missions_before)));
+
+    // Calling the kill hook twice for the same mission NPC decrements npcs_remaining exactly once.
+    on_mission_npc_destroyed_core(&ctx.db, sys_id, npc_a, Some(char_id));
+    on_mission_npc_destroyed_core(&ctx.db, sys_id, npc_a, Some(char_id));
+    let updated = ctx
+        .db
+        .with_snapshot(|snap| mission_fixture::get(snap, char_id, mid))
+        .expect("mission still present");
+    assert_eq!(updated.npcs_remaining, 1);
+    assert_eq!(updated.spawned_npc_ball_ids, vec![npc_b]);
+}
+
+#[test]
+fn decide_mission_kind_strict_exhaustive_over_real_sde_and_rejects_unknown() {
+    let sde = shared_sde();
+    assert!(
+        !sde.missions.is_empty(),
+        "SDE missions must be populated for exhaustive kind check"
+    );
+
+    let mut rep_agents: std::collections::BTreeMap<(u32, u32), &eve_sde::AgentInfo> =
+        std::collections::BTreeMap::new();
+    let mut sorted_agents: Vec<&eve_sde::AgentInfo> = sde.agents.values().collect();
+    sorted_agents.sort_by_key(|a| a.agent_id);
+    for ag in sorted_agents {
+        rep_agents
+            .entry((ag.agent_type_id, ag.division_id))
+            .or_insert(ag);
+    }
+
+    for tmpl in sde.missions.values() {
+        let k_none = eve_db::decide_mission_kind_strict(tmpl, None)
+            .unwrap_or_else(|e| panic!("mission {} failed strict kind: {e}", tmpl.mission_id));
+        assert_eq!(k_none, eve_db::decide_mission_kind(Some(tmpl), None));
+        for ag in rep_agents.values() {
+            let k_ag = eve_db::decide_mission_kind_strict(tmpl, Some(ag)).unwrap_or_else(
+                |e| {
+                    panic!(
+                        "mission {} + agent {} (type {}, div {}) failed strict kind: {e}",
+                        tmpl.mission_id, ag.agent_id, ag.agent_type_id, ag.division_id
+                    )
+                },
+            );
+            assert_eq!(k_ag, eve_db::decide_mission_kind(Some(tmpl), Some(ag)));
+        }
+    }
+
+    let unknown_tmpl = eve_sde::MissionTemplate {
+        mission_id: 9_999_999,
+        title: "Uncatalogued Future Mission".into(),
+        is_courier: false,
+        lp_alpha: 100,
+        lp_omega: 100,
+        has_standing_rewards: true,
+        content_template: Some("agent.missionTemplatizedContent_UnknownFutureType".into()),
+        dungeon_id: None,
+    };
+    assert!(
+        eve_db::decide_mission_kind_strict(&unknown_tmpl, None).is_err(),
+        "unknown SDE content_template must fail strict classification"
+    );
 }

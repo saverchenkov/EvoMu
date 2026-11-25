@@ -4,6 +4,25 @@ use rusqlite::{params, Connection};
 
 pub const CURRENT_SCHEMA_VERSION: i64 = 1;
 
+pub(super) const MISSION_INSTANCES_DDL_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS mission_instances (
+    instance_id INTEGER PRIMARY KEY,
+    character_id INTEGER NOT NULL,
+    agent_id INTEGER NOT NULL,
+    mission_id INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mission_instances_character_id ON mission_instances(character_id);
+"#;
+
+pub(super) fn apply_mission_instances_ddl(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(MISSION_INSTANCES_DDL_SQL)
+        .map_err(|e| e.to_string())
+}
+
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -173,19 +192,6 @@ CREATE TABLE IF NOT EXISTS planetary_colonies (
     record_json TEXT NOT NULL,
     PRIMARY KEY (owner_id, planet_id),
     FOREIGN KEY (owner_id) REFERENCES characters(character_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS missions (
-    character_id INTEGER NOT NULL,
-    mission_id INTEGER NOT NULL,
-    agent_id INTEGER NOT NULL,
-    solar_system_id INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    current_room_id INTEGER NOT NULL,
-    npcs_remaining INTEGER NOT NULL,
-    record_json TEXT NOT NULL,
-    PRIMARY KEY (character_id, mission_id),
-    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS mission_tally (
@@ -436,6 +442,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA_V1_SQL)
         .map_err(|e| e.to_string())?;
+    apply_mission_instances_ddl(conn)?;
     let now_unix = crate::clock::host_wall_unix_secs_and_nanos().0 as i64;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",

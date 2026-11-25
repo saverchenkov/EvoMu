@@ -478,20 +478,28 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
             last_extracted_unix: 100,
         },
     );
-    snap.active_missions.insert(
-        (cid, 1),
-        ActiveMissionRecord {
-            mission_id: 1,
+    snap.missions
+        .try_insert(crate::MissionInstance {
+            instance_id: 200_000_001,
             character_id: cid,
             agent_id: 3_018_922,
+            template_id: 1,
+            state: crate::MissionState::Offered,
+            kind: crate::MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Offered".into(),
             current_room_id: 0,
-            npcs_remaining: 0,
-            spawned_npc_ball_ids: vec![],
             bookmark_id: None,
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: crate::MissionObjective::Encounter(crate::EncounterObjective::default()),
+        })
+        .expect("insert mission");
     snap.mission_tally.insert(cid, 1);
     snap.standing_transactions.insert(
         cid,
@@ -644,7 +652,7 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
         "contracts",
         "industry_jobs",
         "planetary_colonies",
-        "missions",
+        "mission_instances",
         "mission_tally",
         "standings",
         "npe_progress",
@@ -696,7 +704,7 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
     cleared.contracts.clear();
     cleared.industry_jobs.clear();
     cleared.planetary_colonies.clear();
-    cleared.active_missions.clear();
+    cleared.missions.clear();
     cleared.mission_tally.clear();
     cleared.standing_transactions.clear();
     cleared.npe_progress.clear();

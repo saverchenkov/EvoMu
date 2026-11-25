@@ -274,19 +274,26 @@ async fn abandon_or_decline_reclaims_courier_cargo_and_tracks_npc_destruction() 
         );
         snap.item_custom_names
             .insert(55_001, format!("courier_cargo:{char_id}:100"));
-        mission_fixture::insert(
+        mission_fixture::insert_with_sde(
             snap,
+            &ctx.sde,
             MissionFixture::accepted(char_id, 100, 3_018_921, 30_000_142)
-                .npcs_remaining(2)
-                .spawned_npc_ball_ids(vec![900_001, 900_002])
                 .granted_courier_item_id(Some(55_001))
-                .granted_courier_qty(10),
+                .granted_courier_qty(10)
+                .destination_station_id(Some(60_003_761)),
+        );
+        mission_fixture::insert_with_sde(
+            snap,
+            &ctx.sde,
+            MissionFixture::accepted(char_id, 101, 3_018_921, 30_000_142)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![900_001, 900_002]),
         );
     });
 
     on_mission_npc_destroyed_core(&ctx.db, 30_000_142, 900_001, Some(char_id));
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, char_id, 100).unwrap().npcs_remaining, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 101).unwrap().npcs_remaining, 1);
     });
 
     let (new_state, penalty, was_acc) = abandon_or_decline_mission(&ctx, &session, char_id, 100)

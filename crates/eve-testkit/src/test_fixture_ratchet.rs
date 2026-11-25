@@ -194,6 +194,12 @@ const DIRECT_MISSION_STORE_IDENTIFIERS: &[&[u8]] = &[
     b"mission_initial_npc_types",
     b"missions_awaiting_downtime_respawn",
     b"mission_meta_note_id",
+    b"MissionInstance",
+    b"MissionInstanceStore",
+    b"EncounterObjective",
+    b"CourierObjective",
+    b"DeliveryObjective",
+    b"MissionObjective",
 ];
 
 const DIRECT_MISSION_META_PREFIX: &[u8] = b"mission_meta:";
@@ -652,7 +658,7 @@ mod tests {
         assert_eq!(count_direct_mission_store_access(clean_src), 0);
 
         let dirty_src = r##"
-            use eve_db::ActiveMissionRecord;
+            use eve_db::{ActiveMissionRecord, MissionInstance, MissionInstanceStore};
             let _ = snap.active_missions.get(&(1, 2));
             let _ = (load_mission_meta(s, 1, 2), save_mission_meta(s, 1, &m));
             let _: Option<MissionTimingAndCargoMeta> = None;
@@ -667,8 +673,9 @@ mod tests {
             let _ = (val.get("granted_courier_item_id"), val.get("granted_courier_qty"));
             let _ = "{\"offered_at_unix\": 10}";
             let _ = r#"{"destination_station_id": 60003760}"#;
+            let _ = MissionInstanceStore::new();
         "##;
-        assert_eq!(count_direct_mission_store_access(dirty_src), 15);
+        assert_eq!(count_direct_mission_store_access(dirty_src), 16);
     }
 
     #[test]

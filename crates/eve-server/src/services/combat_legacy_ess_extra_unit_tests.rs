@@ -963,12 +963,12 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
                 .npcs_remaining(3)
                 .spawned_npc_ball_ids(vec![925_001, 925_002, 925_003]),
         );
-        // Other-system mission with matching ball ID must NOT decrement
+        // Other-system mission with its own NPC ball ID must NOT decrement on wh_sys kill
         mission_fixture::insert(
             snap,
             MissionFixture::accepted(char_id, 11, 3_018_419, high_sys)
                 .npcs_remaining(1)
-                .spawned_npc_ball_ids(vec![925_001]),
+                .spawned_npc_ball_ids(vec![925_005]),
         );
     });
     spawn_combat_ball(&ctx, wh_sys, ship_id, 23_915, DVec3::ZERO, 2_000.0).await;
@@ -1037,6 +1037,11 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
         assert!(snap.items.contains_key(&859_999));
         // Primary AND arc NPCs decremented npcs_remaining 3 -> 1 in wh_sys; high_sys mission untouched
         assert_eq!(mission_fixture::get(snap, char_id, 10).unwrap().npcs_remaining, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 11).unwrap().npcs_remaining, 1);
+    });
+    // Cross-system kill hook for high_sys mission's NPC fired in wh_sys must NOT decrement mission 11
+    crate::services::agents_missions::on_mission_npc_destroyed_core(&ctx.db, wh_sys, 925_005, Some(char_id));
+    ctx.db.with_snapshot(|snap| {
         assert_eq!(mission_fixture::get(snap, char_id, 11).unwrap().npcs_remaining, 1);
     });
 

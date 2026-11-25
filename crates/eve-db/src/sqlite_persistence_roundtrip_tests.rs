@@ -112,7 +112,6 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 ..PersistedSpaceObjectMeta::default()
             },
         )]),
-        missions_awaiting_downtime_respawn: vec![(cid, 101)],
         ..Sp6PersistedState::default()
     }
     .into();

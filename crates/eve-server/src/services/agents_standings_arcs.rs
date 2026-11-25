@@ -28,31 +28,6 @@ const SKILL_DIPLOMACY: TypeId = 3357;
 const SKILL_CONNECTIONS: TypeId = 3359;
 const SKILL_CRIMINAL_CONNECTIONS: TypeId = 3361;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct MissionTimingAndCargoMeta {
-    pub mission_id: u32,
-    pub agent_id: i64,
-    pub offered_at_unix: u64,
-    pub offer_expiry_unix: u64,
-    pub accepted_at_unix: Option<u64>,
-    pub accept_expiry_unix: Option<u64>,
-    pub bonus_expiry_unix: Option<u64>,
-    pub completed_at_unix: Option<u64>,
-    pub required_delivery_type_id: Option<TypeId>,
-    pub required_delivery_qty: i32,
-    pub granted_courier_item_id: Option<i64>,
-    #[serde(default)]
-    pub granted_courier_qty: i32,
-    pub is_anomic_burner: bool,
-    pub chosen_branch: Option<String>,
-    #[serde(default)]
-    pub destination_station_id: Option<i64>,
-    #[serde(default)]
-    pub origin_station_id: Option<i64>,
-    #[serde(default)]
-    pub offered_level: Option<u8>,
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RndResearchEntry {
     pub agent_id: i64,
@@ -72,42 +47,6 @@ pub struct EpicArcStateEntry {
     pub chosen_branch: Option<String>,
     pub completed_at_unix: Option<u64>,
     pub cooldown_until_unix: Option<u64>,
-}
-
-fn mission_meta_note_id(char_id: i64, mission_id: u32) -> i64 {
-    let mixed = ((char_id.unsigned_abs() & 0xFFFF_FFFF) << 20) ^ (u64::from(mission_id) & 0xFFFFF);
-    -((mixed as i64).max(1) + 5_000_000_000_000)
-}
-
-pub fn load_mission_meta(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    mission_id: u32,
-) -> Option<MissionTimingAndCargoMeta> {
-    snap.owner_notes
-        .get(&mission_meta_note_id(char_id, mission_id))
-        .and_then(|n| serde_json::from_str(&n.note).ok())
-}
-
-pub fn save_mission_meta(
-    snap: &mut eve_db::WorldStateSnapshot,
-    char_id: i64,
-    meta: &MissionTimingAndCargoMeta,
-) {
-    let nid = mission_meta_note_id(char_id, meta.mission_id);
-    if let Ok(note) = serde_json::to_string(meta) {
-        snap.owner_notes.insert(
-            nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -5,
-                item_id: meta.mission_id as i64,
-                label: format!("mission_meta:{char_id}:{}", meta.mission_id),
-                note,
-                timestamp_unix: meta.offered_at_unix,
-            },
-        );
-    }
 }
 
 fn rnd_research_note_id(char_id: i64) -> i64 {
@@ -482,9 +421,9 @@ fn active_mission_matches_arc(
     ctx: &ServerContext,
     entry_arc_id: u32,
     entry_agent_id: i64,
-    mission: &eve_db::ActiveMissionRecord,
+    mission: &eve_db::MissionInstance,
 ) -> bool {
-    if let Some((spec_arc_id, _)) = epic_arc_mission_spec(mission.mission_id) {
+    if let Some((spec_arc_id, _)) = epic_arc_mission_spec(mission.template_id) {
         return spec_arc_id == entry_arc_id;
     }
     if mission.agent_id == entry_agent_id {
@@ -541,20 +480,11 @@ fn build_epic_arc_mission_entry(f: EpicArcMissionFields<'_>) -> (PyRep, PyRep) {
     )
 }
 
-fn active_epic_arc_accepted_date(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    mission_id: u32,
-    state: &str,
-    now_unix: u64,
-) -> PyRep {
-    if state == "Offered" {
+fn active_epic_arc_accepted_date(m: &eve_db::MissionInstance, now_unix: u64) -> PyRep {
+    if m.state == eve_db::MissionState::Offered {
         return PyRep::None;
     }
-    let accepted_unix = load_mission_meta(snap, char_id, mission_id)
-        .and_then(|meta| meta.accepted_at_unix)
-        .unwrap_or(now_unix);
-    unix_to_filetime_rep(accepted_unix)
+    unix_to_filetime_rep(m.accepted_at_unix.unwrap_or(now_unix))
 }
 
 struct EpicArcEmitCtx<'a> {
@@ -575,17 +505,13 @@ fn completed_epic_arc_mission_entry(
     entry: &EpicArcStateEntry,
     emit: &EpicArcEmitCtx<'_>,
 ) -> (PyRep, PyRep) {
-    let meta = load_mission_meta(snap, char_id, mission_id);
-    let accepted_unix = meta
-        .as_ref()
+    let accepted_unix = snap
+        .missions
+        .get_by_character_template(char_id, mission_id)
         .and_then(|mt| mt.accepted_at_unix)
         .or(entry.completed_at_unix)
         .unwrap_or(emit.now_unix);
-    let completed_unix = meta
-        .as_ref()
-        .and_then(|mt| mt.completed_at_unix)
-        .or(entry.completed_at_unix)
-        .unwrap_or(emit.now_unix);
+    let completed_unix = entry.completed_at_unix.unwrap_or(emit.now_unix);
     build_epic_arc_mission_entry(EpicArcMissionFields {
         mission_id,
         accepted_date: unix_to_filetime_rep(accepted_unix),
@@ -602,20 +528,12 @@ fn completed_epic_arc_mission_entry(
 }
 
 fn active_epic_arc_mission_entry(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    m: &eve_db::ActiveMissionRecord,
+    m: &eve_db::MissionInstance,
     emit: &EpicArcEmitCtx<'_>,
 ) -> (PyRep, PyRep) {
     build_epic_arc_mission_entry(EpicArcMissionFields {
-        mission_id: m.mission_id,
-        accepted_date: active_epic_arc_accepted_date(
-            snap,
-            char_id,
-            m.mission_id,
-            &m.state,
-            emit.now_unix,
-        ),
+        mission_id: m.template_id,
+        accepted_date: active_epic_arc_accepted_date(m, emit.now_unix),
         completed_date: PyRep::None,
         epic_arc_id: emit.arc_id,
         agent_id: m.agent_id,
@@ -633,7 +551,7 @@ struct EpicArcStatusCollector<'a> {
     snap: &'a eve_db::WorldStateSnapshot,
     char_id: i64,
     now_unix: u64,
-    active_missions: Vec<&'a eve_db::ActiveMissionRecord>,
+    open_missions: Vec<&'a eve_db::MissionInstance>,
     handled_mission_ids: HashSet<u32>,
     handled_active_ids: HashSet<u32>,
     by_arc: BTreeMap<u32, Vec<(PyRep, PyRep)>>,
@@ -646,20 +564,18 @@ impl<'a> EpicArcStatusCollector<'a> {
         char_id: i64,
         now_unix: u64,
     ) -> Self {
-        let mut active_missions: Vec<&'a eve_db::ActiveMissionRecord> = snap
-            .active_missions
-            .values()
-            .filter(|m| {
-                m.character_id == char_id && matches!(m.state.as_str(), "Offered" | "Accepted")
-            })
+        let mut open_missions: Vec<&'a eve_db::MissionInstance> = snap
+            .missions
+            .iter_by_character(char_id)
+            .filter(|m| m.state.is_active())
             .collect();
-        active_missions.sort_by_key(|m| m.mission_id);
+        open_missions.sort_by_key(|m| m.template_id);
         Self {
             ctx,
             snap,
             char_id,
             now_unix,
-            active_missions,
+            open_missions,
             handled_mission_ids: HashSet::new(),
             handled_active_ids: HashSet::new(),
             by_arc: BTreeMap::new(),
@@ -671,16 +587,16 @@ impl<'a> EpicArcStatusCollector<'a> {
         let on_cd = a
             .cooldown_until_unix
             .is_some_and(|until| self.now_unix < until);
-        let arc_active: Vec<&'a eve_db::ActiveMissionRecord> = self
-            .active_missions
+        let arc_active: Vec<&'a eve_db::MissionInstance> = self
+            .open_missions
             .iter()
             .copied()
             .filter(|m| {
-                !self.handled_active_ids.contains(&m.mission_id)
+                !self.handled_active_ids.contains(&m.template_id)
                     && active_mission_matches_arc(self.ctx, arc_id, a.agent_id, m)
             })
             .collect();
-        let active_ids: HashSet<u32> = arc_active.iter().map(|m| m.mission_id).collect();
+        let active_ids: HashSet<u32> = arc_active.iter().map(|m| m.template_id).collect();
         let is_restarted = a.completed_at_unix.is_some() && !on_cd && !arc_active.is_empty();
         let state_str = if !arc_active.is_empty() || a.completed_at_unix.is_none() {
             "Active"
@@ -729,14 +645,9 @@ impl<'a> EpicArcStatusCollector<'a> {
             }
         }
         for m in arc_active {
-            self.handled_active_ids.insert(m.mission_id);
-            self.handled_mission_ids.insert(m.mission_id);
-            missions_dict.push(active_epic_arc_mission_entry(
-                self.snap,
-                self.char_id,
-                m,
-                &emit,
-            ));
+            self.handled_active_ids.insert(m.template_id);
+            self.handled_mission_ids.insert(m.template_id);
+            missions_dict.push(active_epic_arc_mission_entry(m, &emit));
         }
         if missions_dict.is_empty() {
             let completed_date = if is_restarted {
@@ -763,13 +674,13 @@ impl<'a> EpicArcStatusCollector<'a> {
     }
 
     fn finish(mut self) -> Vec<(PyRep, PyRep)> {
-        for m in self.active_missions {
-            if self.handled_active_ids.contains(&m.mission_id)
-                || self.handled_mission_ids.contains(&m.mission_id)
+        for m in self.open_missions {
+            if self.handled_active_ids.contains(&m.template_id)
+                || self.handled_mission_ids.contains(&m.template_id)
             {
                 continue;
             }
-            let spec = epic_arc_mission_spec(m.mission_id);
+            let spec = epic_arc_mission_spec(m.template_id);
             if spec.is_none() && !is_epic_agent(self.ctx, m.agent_id) {
                 continue;
             }
@@ -783,8 +694,8 @@ impl<'a> EpicArcStatusCollector<'a> {
                 .get(&arc_id)
                 .and_then(|arc| arc.faction_id)
                 .map_or(agent_faction_id, i64::from);
-            self.handled_active_ids.insert(m.mission_id);
-            self.handled_mission_ids.insert(m.mission_id);
+            self.handled_active_ids.insert(m.template_id);
+            self.handled_mission_ids.insert(m.template_id);
             let emit = EpicArcEmitCtx {
                 arc_id,
                 faction_id,
@@ -798,12 +709,7 @@ impl<'a> EpicArcStatusCollector<'a> {
             self.by_arc
                 .entry(arc_id)
                 .or_default()
-                .push(active_epic_arc_mission_entry(
-                    self.snap,
-                    self.char_id,
-                    m,
-                    &emit,
-                ));
+                .push(active_epic_arc_mission_entry(m, &emit));
         }
         self.by_arc
             .into_iter()
@@ -2545,8 +2451,8 @@ pub(crate) fn handle_get_plausible_mission_ids(
         agent_ids.push(aid);
     } else {
         ctx.db.with_snapshot(|snap| {
-            for ((cid, _), m) in &snap.active_missions {
-                if *cid == char_id && m.agent_id > 0 {
+            for m in snap.missions.iter_by_character(char_id) {
+                if m.agent_id > 0 {
                     agent_ids.push(m.agent_id);
                 }
             }
@@ -2624,11 +2530,9 @@ pub(crate) fn handle_agent_has_epic_missions_for_character(
         return Some(Ok(PyRep::Bool(false)));
     };
     let has_active = ctx.db.with_snapshot(|snap| {
-        snap.active_missions.values().any(|m| {
-            m.character_id == char_id
-                && m.agent_id == agent_id
-                && matches!(m.state.as_str(), "Offered" | "Accepted")
-        })
+        snap.missions
+            .iter_by_character(char_id)
+            .any(|m| m.agent_id == agent_id && m.state.is_active())
     });
     if has_active {
         return Some(Ok(PyRep::Bool(true)));
@@ -2654,17 +2558,13 @@ pub(crate) fn handle_mission_tracker_list(
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let filter_mid = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok());
     let items = ctx.db.with_snapshot(|snap| {
-        let mut list: Vec<PyRep> = snap.active_missions.values()
-            .filter(|m| {
-                m.character_id == char_id
-                    && matches!(m.state.as_str(), "Offered" | "Accepted")
-                    && filter_mid.is_none_or(|f| f == m.mission_id)
-            })
+        let mut list: Vec<PyRep> = snap
+            .missions
+            .iter_by_character(char_id)
+            .filter(|m| m.state.is_active() && filter_mid.is_none_or(|f| f == m.template_id))
             .map(|m| {
-                let meta = load_mission_meta(snap, char_id, m.mission_id);
-                let obj_completed = m.npcs_remaining == 0
-                    && meta.as_ref().and_then(|mt| mt.required_delivery_type_id).is_none_or(|req_tid| {
-                        let req_q = meta.as_ref().map_or(1, |mt| mt.required_delivery_qty);
+                let obj_completed = m.npcs_remaining() == 0
+                    && m.required_delivery().is_none_or(|(req_tid, req_q)| {
                         snap.items
                             .values()
                             .filter(|it| it.owner_id == char_id && it.type_id == req_tid)
@@ -2673,18 +2573,18 @@ pub(crate) fn handle_mission_tracker_list(
                             >= req_q
                     });
                 PyRep::keyval([
-                    ("missionID", PyRep::Integer(m.mission_id as i64)),
+                    ("missionID", PyRep::Integer(m.template_id as i64)),
                     ("agentID", PyRep::Integer(m.agent_id)),
                     ("solarSystemID", PyRep::Integer(m.solar_system_id as i64)),
-                    ("state", PyRep::String(m.state.clone())),
+                    ("state", PyRep::String(m.state.as_str().to_owned())),
                     ("currentRoomID", PyRep::Integer(m.current_room_id as i64)),
-                    ("npcsRemaining", PyRep::Integer(m.npcs_remaining as i64)),
+                    ("npcsRemaining", PyRep::Integer(m.npcs_remaining() as i64)),
                     ("objectivesCompleted", PyRep::Bool(obj_completed)),
                     (
                         "info",
                         PyRep::String(format!(
                             "Mission {} for agent {}",
-                            m.mission_id, m.agent_id
+                            m.template_id, m.agent_id
                         )),
                     ),
                 ])
@@ -2711,8 +2611,8 @@ pub(crate) fn handle_is_in_active_dungeon_id(
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let sys_id = session.solar_system_id.unwrap_or(0);
     let in_dungeon = ctx.db.with_snapshot(|snap| {
-        snap.active_missions.values().any(|m| {
-            m.character_id == char_id && m.state == "Accepted" && m.solar_system_id == sys_id
+        snap.missions.iter_by_character(char_id).any(|m| {
+            m.state == eve_db::MissionState::Accepted && m.solar_system_id == sys_id
         })
     });
     Some(Ok(PyRep::Bool(in_dungeon)))
@@ -2829,7 +2729,7 @@ pub(crate) async fn handle_activate_acceleration_gate(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let Some(mission_id) = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).filter(|&mid| {
-        ctx.db.with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
+        ctx.db.with_snapshot(|snap| snap.missions.contains_character_template(char_id, mid))
     }) else {
         return None;
     };
@@ -2852,7 +2752,9 @@ pub(crate) async fn handle_activate_acceleration_gate(
             }));
         };
         let is_burner_gate = ctx.db.with_snapshot(|snap| {
-            load_mission_meta(snap, char_id, mission_id).is_some_and(|mt| mt.is_anomic_burner)
+            snap.missions
+                .get_by_character_template(char_id, mission_id)
+                .is_some_and(|mt| mt.is_anomic_burner)
                 || ctx.sde.missions.get(&mission_id).is_some_and(|t| t.title.contains("Anomic"))
         });
         let kind = if is_burner_gate {
@@ -2876,7 +2778,9 @@ pub(crate) async fn handle_activate_acceleration_gate(
     }
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         // Enforce Anomic Burner frigate/small-hull gate restriction (feat:pve.anomic-burner-missions)
-        let is_burner = load_mission_meta(snap, char_id, mission_id)
+        let is_burner = snap
+            .missions
+            .get_by_character_template(char_id, mission_id)
             .is_some_and(|mt| mt.is_anomic_burner)
             || ctx.sde.missions
                 .get(&mission_id)
@@ -2895,17 +2799,23 @@ pub(crate) async fn handle_activate_acceleration_gate(
                 }
             }
         }
-        let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
+        let Some(m) = snap.missions.get_by_character_template(char_id, mission_id) else {
             return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None });
         };
-        if m.state != "Accepted" {
-            return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}', not Accepted", m.state), client_error: None });
+        if m.state != eve_db::MissionState::Accepted {
+            return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}', not {}", m.state, eve_db::MissionState::Accepted), client_error: None });
         }
-        if m.npcs_remaining > 0 {
-            return Err(BridgeRpcError { code: "RoomNpcsRemaining".into(), message: format!("Cannot activate acceleration gate while {} room NPC(s) remain", m.npcs_remaining), client_error: None });
+        if m.npcs_remaining() > 0 {
+            return Err(BridgeRpcError { code: "RoomNpcsRemaining".into(), message: format!("Cannot activate acceleration gate while {} room NPC(s) remain", m.npcs_remaining()), client_error: None });
         }
-        m.current_room_id += 1;
-        Ok(m.current_room_id)
+        let mut next_room = m.current_room_id + 1;
+        snap.missions
+            .update_by_character_template(char_id, mission_id, |m| {
+                m.current_room_id += 1;
+                next_room = m.current_room_id;
+            })
+            .map_err(super::mission_store_rpc_err)?;
+        Ok(next_room)
     });
     match res {
         Ok(next_room) => Some(Ok(PyRep::keyval([

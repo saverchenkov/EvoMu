@@ -181,15 +181,10 @@
       }
     },
     "direct_mission_store_access": {
-      "rule": "No direct snap.active_missions, ActiveMissionRecord, load_mission_meta, save_mission_meta, MissionTimingAndCargoMeta, mission_meta_note_id, or sp6_lifecycle mission wave map access in crates/eve-server tests (excluding mission_fixture.rs); use eve_server::services::mission_fixture (#1496)",
-      "zero_required": false,
+      "rule": "No direct MissionInstance, MissionInstanceStore, objective record structs, legacy active_missions/ActiveMissionRecord/mission_meta/sp6_lifecycle mission wave map access, or hand-built instance records in crates/eve-server tests (excluding mission_fixture.rs); use eve_server::services::mission_fixture (#1496)",
+      "zero_required": true,
       "owning_issue": "#1496",
-      "files": {
-        "crates/eve-server/src/services/agents_missions_tests.rs": 2,
-        "crates/eve-server/src/services/agents_standings_arcs_edges_tests.rs": 2,
-        "crates/eve-server/src/sp6_lifecycle/cluster_tick_downtime_extra_tests.rs": 3,
-        "crates/eve-server/tests/it/rpc_negative_matrix.rs": 2
-      }
+      "files": {}
     }
   }
 }

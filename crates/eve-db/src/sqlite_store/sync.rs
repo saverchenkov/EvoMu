@@ -324,31 +324,29 @@ fn sync_part2_activity_tables(
         },
     )?;
 
-    // 14. active_missions
-    if before.active_missions != snap.active_missions {
-        for &(cid, mid) in before.active_missions.keys() {
-            if !snap.active_missions.contains_key(&(cid, mid)) {
+    // 14. mission_instances
+    if before.missions != snap.missions {
+        for instance_id in before.missions.keys() {
+            if !snap.missions.contains_instance_id(instance_id) {
                 tx.execute(
-                    "DELETE FROM missions WHERE character_id = ?1 AND mission_id = ?2",
-                    params![cid, mid as i64],
+                    "DELETE FROM mission_instances WHERE instance_id = ?1",
+                    params![instance_id],
                 )
                 .map_err(|e| e.to_string())?;
             }
         }
-        for (&(cid, mid), m) in &snap.active_missions {
-            if before.active_missions.get(&(cid, mid)) != Some(m) {
+        for m in snap.missions.iter() {
+            if before.missions.get(m.instance_id) != Some(m) {
                 let js = to_checked_json_string(m)?;
                 tx.execute(
-                    "INSERT OR REPLACE INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT OR REPLACE INTO mission_instances (instance_id, character_id, agent_id, mission_id, state, record_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![
-                        cid,
-                        mid as i64,
+                        m.instance_id,
+                        m.character_id,
                         m.agent_id,
-                        m.solar_system_id as i64,
-                        m.state,
-                        m.current_room_id as i64,
-                        m.npcs_remaining as i64,
+                        m.template_id as i64,
+                        m.state.as_str(),
                         js,
                     ],
                 )
@@ -870,7 +868,7 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM contracts;
          DELETE FROM industry_jobs;
          DELETE FROM planetary_colonies;
-         DELETE FROM missions;
+         DELETE FROM mission_instances;
          DELETE FROM mission_tally;
          DELETE FROM standings;
          DELETE FROM npe_progress;

@@ -149,13 +149,12 @@ fn canonical_fp_all_primitives_and_sorted_set_serde() {
     assert_ne!(Hasher::finish(&std_h), 0);
 
     let mut sp6 = Sp6PersistedState {
-        missions_awaiting_downtime_respawn: vec![(4001, 7)],
-        mission_initial_npc_counts: CowMap::from([("30000142:7".into(), 3)]),
-        mission_initial_npc_types: CowMap::from([("30000142:7".into(), vec![587, 588])]),
+        pvp_timers_until: CowMap::from([(4001, 7)]),
+        last_downtime_day_idx: Some(19_723),
         ..Sp6PersistedState::default()
     };
     let fp_a = canonical_fp(&sp6);
-    sp6.mission_initial_npc_types.get_mut("30000142:7").unwrap().push(589);
+    sp6.pvp_timers_until.insert(4001, 8);
     assert_ne!(fp_a, canonical_fp(&sp6));
 }
 

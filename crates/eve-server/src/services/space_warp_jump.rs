@@ -787,11 +787,10 @@ async fn handle_cmd_warp_to_stuff(
             }
             if resolved_pos.is_none() && !matches!(stuff_type, "epinstance" | "ep_instance") {
                 resolved_pos = ctx.db.with_snapshot(|snap| {
-                    if snap.active_missions.values().any(|m| {
-                        m.character_id == char_id
-                            && m.solar_system_id == sys_id
-                            && m.state == "Accepted"
-                            && (target_id == m.mission_id as i64 || target_id == m.agent_id as i64)
+                    if snap.missions.iter_by_character(char_id).any(|m| {
+                        m.solar_system_id == sys_id
+                            && m.state == eve_db::MissionState::Accepted
+                            && (target_id == m.template_id as i64 || target_id == m.agent_id as i64)
                     }) {
                         return Some(DVec3::new(250_000_000.0, 0.0, 250_000_000.0));
                     }

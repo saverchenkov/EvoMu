@@ -3,23 +3,25 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    apply_mission_completion_standings, classify_mission_archetype,
-    compute_character_mission_rewards, epic_arc_required_missions, finalize_mission_state_cleanup,
-    is_agent_colocated, is_fw_agent, is_rnd_agent, is_storyline_template, load_epic_arc_states,
-    load_mission_meta, load_rnd_research_entries, notify_standing_changes,
-    resolve_agent_and_corp_for_system, resolve_courier_mission_details,
+    apply_mission_completion_standings, compute_character_mission_rewards,
+    epic_arc_required_missions, finalize_mission_state_cleanup, is_agent_colocated, is_fw_agent,
+    is_rnd_agent, is_storyline_template, load_epic_arc_states, load_rnd_research_entries,
+    notify_standing_changes, resolve_agent_and_corp_for_system, resolve_courier_mission_details,
     resolve_epic_arc_id_for_agent, resolve_mining_mission_details,
     resolve_security_mission_encounter, resolve_target_mission_id, resolve_trade_mission_details,
-    rnd_tritanium_required_qty, save_epic_arc_states, save_mission_meta,
-    save_rnd_research_entries, CharacterMissionRewards, EpicArcStateEntry,
-    MissionTimingAndCargoMeta,
+    rnd_tritanium_required_qty, save_epic_arc_states, save_rnd_research_entries,
+    CharacterMissionRewards, EpicArcStateEntry,
 };
 use crate::router::notify_registry::{
     OnAgentMissionChange, OnAgentMissionObjectivesCompleted, OnAgentMissionObjectivesFailed,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_character_services::emit_agent_mission_dialogue;
-use eve_db::{ActiveMissionRecord, IskCents, StandingTransactionRecord, WalletJournalEntry};
+use eve_db::{
+    decide_mission_kind, CourierObjective, DeliveryObjective, EncounterObjective, IskCents,
+    MissionInstance, MissionKind, MissionObjective, MissionState, StandingTransactionRecord,
+    WalletJournalEntry,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -36,22 +38,24 @@ pub(super) async fn handle_mission_complete_action(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
-    let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, Some("Accepted"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, Some(MissionState::Accepted), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let Some(tmpl) = ctx.sde.missions.get(&mission_id).cloned() else {
         return Some(Err(BridgeRpcError { code: "UnknownMission".into(), message: format!("Mission {mission_id} does not exist in SDE"), client_error: None }));
     };
     let is_storyline = is_storyline_template(&tmpl);
-    let (active_agent_id, pre_dest_station, pre_is_dc, pre_is_trade, pre_is_courier) = ctx.db.with_snapshot(|snap| {
-        let m_agent = snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id);
-        let meta_opt = load_mission_meta(snap, char_id, mission_id);
-        let arch = classify_mission_archetype(
-            Some(&tmpl),
-            meta_opt.as_ref(),
-            ctx.sde.agents.get(&m_agent),
-        );
-        let dest_st = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
-        (m_agent, dest_st, arch.is_data_center, arch.is_trade, arch.is_courier)
-    });
+    let (active_agent_id, pre_dest_station, pre_is_dc, pre_is_trade, pre_is_courier) =
+        ctx.db.with_snapshot(|snap| {
+            let Some(m) = snap.missions.get_by_character_template(char_id, mission_id) else {
+                return (agent_id, None, false, false, false);
+            };
+            (
+                m.agent_id,
+                m.destination_station_id(),
+                m.kind == MissionKind::DataCenterTurnIn,
+                m.kind == MissionKind::Trade,
+                m.kind == MissionKind::Courier,
+            )
+        });
     if action_id == 6 {
         if let Some(ref agent_info) = ctx.sde.agents.get(&active_agent_id).cloned() {
             let at_courier_dest = pre_is_courier
@@ -92,13 +96,14 @@ pub(super) async fn handle_mission_complete_action(
     let now = ctx.now_unix();
 
     let is_expired = ctx.db.with_snapshot(|snap| {
-        load_mission_meta(snap, char_id, mission_id)
+        snap.missions
+            .get_by_character_template(char_id, mission_id)
             .and_then(|m| m.accept_expiry_unix)
             .is_some_and(|exp| exp > 0 && now > exp)
     });
     if is_expired {
         ctx.db.with_mut_snapshot(|snap| {
-            finalize_mission_state_cleanup(snap, char_id, mission_id, "Failed", true);
+            finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Failed, true);
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 let cur_ag = ch.standings.get(&active_agent_id).copied().unwrap_or(0.0);
                 ch.standings.insert(active_agent_id, (cur_ag - 0.10).max(-10.0));
@@ -142,57 +147,42 @@ pub(super) async fn handle_mission_complete_action(
     }
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let meta_opt = load_mission_meta(snap, char_id, mission_id);
-        let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
+        let Some(m) = snap.missions.get_by_character_template(char_id, mission_id) else {
             return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None });
         };
-        let agent_opt = ctx.sde.agents.get(&m.agent_id);
-        let arch = classify_mission_archetype(Some(&tmpl), meta_opt.as_ref(), agent_opt);
-        let is_rnd = arch.is_rnd_turnin;
-        let is_dc = arch.is_data_center;
-        let is_heraldry = arch.is_heraldry;
-        let is_trade = arch.is_trade;
-        let is_courier = arch.is_courier;
-        let is_kill = !is_dc && arch.is_kill;
-        let is_mining_mission = !is_rnd && !is_dc && !is_kill && !is_trade && !is_courier && !is_heraldry && {
-            let agent_div = ctx.sde.agents.get(&m.agent_id).map(|a| a.division_id).unwrap_or(0);
-            agent_div == 23 || {
-                let t = tmpl.title.to_lowercase();
-                let c = tmpl
-                    .content_template
-                    .as_deref().unwrap_or_default()
-                    .to_lowercase();
-                c.contains("mining")
-                    || t.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "mining" | "mineral" | "minerals" | "ore" | "ores"))
-            }
-        };
+        let m_kind = m.kind;
+        let m_state = m.state;
+        let m_npcs_remaining = m.npcs_remaining();
+        let m_agent_id = m.agent_id;
+        let m_origin_station_id = m.origin_station_id;
+        let m_dest_station_id = m.destination_station_id();
+        let m_granted_cid = m.granted_courier().and_then(|(cid, _)| cid);
+        let m_bonus_expiry = m.bonus_expiry_unix;
+        let m_req_delivery = m.required_delivery().map(|(tid, qty)| (tid, qty.max(1)));
+        let agent_opt = ctx.sde.agents.get(&m_agent_id);
+        let is_courier = m_kind == MissionKind::Courier;
+        let is_mining_mission = m_kind == MissionKind::Mining;
+        let is_kill = m_kind == MissionKind::Encounter;
 
-        if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission && !is_rnd && !is_courier && !is_trade && !is_dc && !is_heraldry) {
-            return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={})", m.state, m.npcs_remaining), client_error: None });
+        if m_state != MissionState::Accepted || (m_npcs_remaining > 0 && is_kill) {
+            return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={m_npcs_remaining})", m_state.as_str()), client_error: None });
         }
 
-        let req_delivery = meta_opt
-            .as_ref()
-            .and_then(|mt| {
-                mt.required_delivery_type_id
-                    .map(|tid| (tid, mt.required_delivery_qty.max(1)))
-            })
-            .or_else(|| {
-                if is_mining_mission {
-                    let md = resolve_mining_mission_details(ctx, &tmpl);
-                    Some((md.ore_type_id, md.required_units))
-                } else if is_trade {
-                    let td = resolve_trade_mission_details(ctx, &tmpl);
-                    Some((td.trade_type_id, td.trade_quantity))
-                } else if is_rnd {
-                    Some((34, rnd_tritanium_required_qty(agent_opt.map_or(1, |a| a.level))))
-                } else if is_dc {
-                    Some((17202, 1))
-                } else {
-                    None
-                }
-            });
-        let m_agent_id = m.agent_id;
+        let req_delivery = m_req_delivery.or_else(|| match m_kind {
+            MissionKind::Mining => {
+                let md = resolve_mining_mission_details(ctx, &tmpl);
+                Some((md.ore_type_id, md.required_units))
+            }
+            MissionKind::Trade => {
+                let td = resolve_trade_mission_details(ctx, &tmpl);
+                Some((td.trade_type_id, td.trade_quantity))
+            }
+            MissionKind::ResearchTurnIn => {
+                Some((34, rnd_tritanium_required_qty(agent_opt.map_or(1, |a| a.level))))
+            }
+            MissionKind::DataCenterTurnIn => Some((17202, 1)),
+            MissionKind::Courier | MissionKind::Heraldry | MissionKind::Encounter => None,
+        });
         if action_id == 7 && req_delivery.is_some() {
             return Err(BridgeRpcError {
                 code: "CannotCompleteRemotely".into(),
@@ -209,15 +199,13 @@ pub(super) async fn handle_mission_complete_action(
                 .agents
                 .get(&m_agent_id)
                 .and_then(|a| a.station_id)
-                .or_else(|| meta_opt.as_ref().and_then(|mt| mt.origin_station_id));
+                .or(m_origin_station_id);
             let active_ship_id = snap
                 .characters
                 .get(&char_id)
                 .map(|c| c.active_ship_id)
                 .filter(|&id| id > 0)
                 .or(session.ship_id);
-            let dest_station_id = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
-            let granted_cid = meta_opt.as_ref().and_then(|mt| mt.granted_courier_item_id);
             super::agents_mission_delivery::verify_and_consume_mission_delivery_items(
                 snap,
                 char_id,
@@ -229,16 +217,14 @@ pub(super) async fn handle_mission_complete_action(
                 current_station,
                 agent_station_id,
                 active_ship_id,
-                dest_station_id,
-                granted_cid,
+                m_dest_station_id,
+                m_granted_cid,
             )?;
         }
 
-        finalize_mission_state_cleanup(snap, char_id, mission_id, "Completed", false);
+        finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Completed, false);
 
-        let bonus_granted = meta_opt
-            .as_ref().and_then(|mt| mt.bonus_expiry_unix)
-            .is_none_or(|bexp| now <= bexp);
+        let bonus_granted = m_bonus_expiry.is_none_or(|bexp| now <= bexp);
         let bonus_paid = if bonus_granted { bonus_reward } else { 0 };
         let char_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id).unwrap_or(0);
         let lp_mult = crate::services::pve_special_sites::get_incursion_effects_for_system_in_snap(&ctx.sde, snap, char_sys)
@@ -382,68 +368,144 @@ pub(super) async fn handle_mission_complete_action(
             let storyline_agent_id = resolved_storyline_agent_id;
             if let Some(storyline_tmpl) = crate::services::pve_ess_reserve_banks::select_storyline_mission_for_level(
                 &ctx.sde,
-                &snap.active_missions,
+                &snap.missions,
                 char_id,
                 resolved_storyline_level,
             )
             {
                 let storyline_mission_id = storyline_tmpl.mission_id;
-                let sl_agent = ctx.sde.agents.get(&storyline_agent_id);
-                let sl_sys_id = sl_agent.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
-                let ct = storyline_tmpl.content_template.as_deref().unwrap_or_default();
-                let arch = classify_mission_archetype(Some(storyline_tmpl), None, sl_agent);
-                let is_trade = arch.is_trade;
-                let is_courier = arch.is_courier;
-                let is_kill = arch.is_kill;
-                let is_mining = !is_kill && !is_trade && !is_courier && !arch.is_heraldry && (ct.contains("BasicMining")
-                    || storyline_tmpl.title.to_lowercase().contains("mining")
-                    || sl_agent.is_some_and(|a| a.division_id == 23));
-                let (req_tid, req_qty, origin_sid, dest_sid, sl_npcs) = if is_courier {
-                    if let Some(sa) = sl_agent.and_then(|a| resolve_courier_mission_details(ctx, storyline_tmpl, a).ok()) {
-                        (Some(sa.cargo_type_id), sa.cargo_quantity, Some(sa.origin_station_id), Some(sa.destination_station_id), 0)
-                    } else {
-                        (None, 0, sl_agent.and_then(|a| a.station_id), None, 0)
-                    }
-                } else if is_trade {
-                    let td = resolve_trade_mission_details(ctx, storyline_tmpl);
-                    (Some(td.trade_type_id), td.trade_quantity, sl_agent.and_then(|a| a.station_id), None, 0)
-                } else if is_mining {
-                    let md = resolve_mining_mission_details(ctx, storyline_tmpl);
-                    (Some(md.ore_type_id), md.required_units, sl_agent.and_then(|a| a.station_id), None, 0)
-                } else if let Some(sa) = sl_agent {
-                    let mut scaled_sa = sa.clone();
-                    scaled_sa.level = resolved_storyline_level;
-                    let enc = resolve_security_mission_encounter(ctx, storyline_tmpl, &scaled_sa, sl_sys_id);
-                    (None, 0, sa.station_id, None, enc.wave_npc_count)
-                } else {
-                    (None, 0, None, None, 1)
-                };
-                save_mission_meta(
-                    snap,
-                    char_id,
-                    &MissionTimingAndCargoMeta {
-                        mission_id: storyline_mission_id,
-                        agent_id: storyline_agent_id,
-                        offered_at_unix: now,
-                        offer_expiry_unix: now + 604_800,
-                        accepted_at_unix: None,
-                        accept_expiry_unix: None,
-                        bonus_expiry_unix: None,
-                        completed_at_unix: None,
-                        required_delivery_type_id: req_tid,
-                        required_delivery_qty: req_qty,
-                        granted_courier_item_id: None,
-                        granted_courier_qty: 0,
-                        is_anomic_burner: false,
-                        chosen_branch: None,
-                        destination_station_id: dest_sid,
-                        origin_station_id: origin_sid,
-                        offered_level: Some(resolved_storyline_level),
-                    },
-                );
-                snap.active_missions
-                    .entry((char_id, storyline_mission_id))
-                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sl_sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
+                if !snap
+                    .missions
+                    .contains_character_template(char_id, storyline_mission_id)
+                {
+                    let sl_agent = ctx.sde.agents.get(&storyline_agent_id);
+                    let sl_sys_id = sl_agent.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
+                    let sl_kind = decide_mission_kind(Some(storyline_tmpl), sl_agent);
+                    let (sl_objective, origin_sid) = match sl_kind {
+                        MissionKind::Courier => {
+                            if let Some(sa) = sl_agent.and_then(|a| {
+                                resolve_courier_mission_details(ctx, storyline_tmpl, a).ok()
+                            }) {
+                                (
+                                    MissionObjective::Courier(CourierObjective {
+                                        cargo_type_id: Some(sa.cargo_type_id),
+                                        quantity: sa.cargo_quantity,
+                                        destination_station_id: Some(sa.destination_station_id),
+                                        granted_item_id: None,
+                                        granted_qty: 0,
+                                    }),
+                                    Some(sa.origin_station_id),
+                                )
+                            } else {
+                                (
+                                    MissionObjective::Courier(CourierObjective {
+                                        cargo_type_id: None,
+                                        quantity: 0,
+                                        destination_station_id: None,
+                                        granted_item_id: None,
+                                        granted_qty: 0,
+                                    }),
+                                    sl_agent.and_then(|a| a.station_id),
+                                )
+                            }
+                        }
+                        MissionKind::Trade => {
+                            let td = resolve_trade_mission_details(ctx, storyline_tmpl);
+                            (
+                                MissionObjective::Delivery(DeliveryObjective {
+                                    item_type_id: Some(td.trade_type_id),
+                                    quantity: td.trade_quantity,
+                                }),
+                                sl_agent.and_then(|a| a.station_id),
+                            )
+                        }
+                        MissionKind::Mining => {
+                            let md = resolve_mining_mission_details(ctx, storyline_tmpl);
+                            (
+                                MissionObjective::Delivery(DeliveryObjective {
+                                    item_type_id: Some(md.ore_type_id),
+                                    quantity: md.required_units,
+                                }),
+                                sl_agent.and_then(|a| a.station_id),
+                            )
+                        }
+                        MissionKind::ResearchTurnIn => (
+                            MissionObjective::Delivery(DeliveryObjective {
+                                item_type_id: Some(34),
+                                quantity: rnd_tritanium_required_qty(
+                                    sl_agent.map_or(1, |a| a.level),
+                                ),
+                            }),
+                            sl_agent.and_then(|a| a.station_id),
+                        ),
+                        MissionKind::DataCenterTurnIn => (
+                            MissionObjective::Delivery(DeliveryObjective {
+                                item_type_id: Some(17202),
+                                quantity: 1,
+                            }),
+                            sl_agent.and_then(|a| a.station_id),
+                        ),
+                        MissionKind::Heraldry => {
+                            (MissionObjective::None, sl_agent.and_then(|a| a.station_id))
+                        }
+                        MissionKind::Encounter => {
+                            if let Some(sa) = sl_agent {
+                                let mut scaled_sa = sa.clone();
+                                scaled_sa.level = resolved_storyline_level;
+                                let enc = resolve_security_mission_encounter(
+                                    ctx,
+                                    storyline_tmpl,
+                                    &scaled_sa,
+                                    sl_sys_id,
+                                );
+                                (
+                                    MissionObjective::Encounter(EncounterObjective {
+                                        npcs_remaining: enc.wave_npc_count,
+                                        spawned_npc_ball_ids: Vec::new(),
+                                        initial_wave_count: None,
+                                        initial_wave_types: Vec::new(),
+                                        awaiting_downtime_respawn: false,
+                                    }),
+                                    sa.station_id,
+                                )
+                            } else {
+                                (
+                                    MissionObjective::Encounter(EncounterObjective {
+                                        npcs_remaining: 1,
+                                        spawned_npc_ball_ids: Vec::new(),
+                                        initial_wave_count: None,
+                                        initial_wave_types: Vec::new(),
+                                        awaiting_downtime_respawn: false,
+                                    }),
+                                    None,
+                                )
+                            }
+                        }
+                    };
+                    let sl_instance_id = snap.alloc_entity_id();
+                    snap.missions
+                        .try_insert(MissionInstance {
+                            instance_id: sl_instance_id,
+                            character_id: char_id,
+                            agent_id: storyline_agent_id,
+                            template_id: storyline_mission_id,
+                            state: MissionState::Offered,
+                            kind: sl_kind,
+                            solar_system_id: sl_sys_id,
+                            current_room_id: 1,
+                            bookmark_id: None,
+                            origin_station_id: origin_sid,
+                            offered_level: Some(resolved_storyline_level),
+                            is_anomic_burner: false,
+                            offered_at_unix: now,
+                            offer_expiry_unix: now + 604_800,
+                            accepted_at_unix: None,
+                            accept_expiry_unix: None,
+                            bonus_expiry_unix: None,
+                            objective: sl_objective,
+                        })
+                        .map_err(super::mission_store_rpc_err)?;
+                }
             }
         }
         let delivery_station = ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id).or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id)).unwrap_or(0);
@@ -502,7 +564,7 @@ pub(super) async fn handle_mission_complete_action(
                 ("contentID", PyRep::Integer(mission_id as i64)),
                 ("agentID", PyRep::Integer(active_agent_id)),
                 ("title", PyRep::String(mission_title)),
-                ("state", PyRep::String("Completed".into())),
+                ("state", PyRep::String(MissionState::Completed.as_str().into())),
                 ("missionState", PyRep::Integer(4)),
                 ("agentSays", PyRep::String(complete_msg.clone())),
                 ("briefing", PyRep::String(complete_msg)),

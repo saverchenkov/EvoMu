@@ -17,7 +17,6 @@ use eve_db::{
 use eve_destiny::{Ball, MovementMode};
 use eve_sde::{AgentInfo, SdeRegistry, SolarSystemId};
 use glam::DVec3;
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 fn shared_sde() -> Arc<SdeRegistry> {
@@ -218,8 +217,8 @@ fn storyline_selection_militia_exclusion_and_ess_pulse_edge_cases() {
     if let Some(militia_corp) = sde.factions.values().find_map(|f| f.militia_corporation_id) {
         assert!(is_interbus_or_militia_corp(&sde, militia_corp));
     }
-    let active = HashMap::new();
-    let m_lvl1 = select_storyline_mission_for_level(&sde, &active, 90_000_001, 1);
+    let snap = WorldStateSnapshot::default();
+    let m_lvl1 = select_storyline_mission_for_level(&sde, &snap.missions, 90_000_001, 1);
     assert!(m_lvl1.is_some());
 
     // 2. ess_reserve_pulse_weight when pulses_total == 1 (peak == 1 -> returns 300)

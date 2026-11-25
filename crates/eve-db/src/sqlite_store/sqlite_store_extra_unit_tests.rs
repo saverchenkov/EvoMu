@@ -209,10 +209,10 @@ fn fp_market_contract_system_structure_and_slices_detect_mutations() {
 
     let mut sp6 = Sp6PersistedState::default();
     let sp6_0 = canonical_fp(&sp6);
-    sp6.mission_initial_npc_counts.insert("90000001:1".into(), 5);
+    sp6.pvp_timers_until.insert(90_000_001, 5);
     let sp6_1 = canonical_fp(&sp6);
     assert_ne!(sp6_0, sp6_1);
-    sp6.mission_initial_npc_types.insert("90000001:1".into(), vec![1001, 1002]);
+    sp6.npc_timers_until.insert(90_000_001, 10);
     assert_ne!(canonical_fp(&sp6), sp6_1);
 }
 

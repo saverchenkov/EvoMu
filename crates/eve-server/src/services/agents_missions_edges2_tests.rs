@@ -483,8 +483,12 @@ async fn mission_briefing_objective_journal_state_mapping_and_expiry_sweeps() {
     .unwrap_err();
     assert_eq!(err_missing.code, "MissionNotActive");
 
-    // Seed missions across states and objective types (Trade, Courier, Mining, Combat, unknown state)
+    // Seed missions across valid typed MissionState variants and objective types
     let now = ctx.now_unix() as u64;
+    assert!(
+        eve_db::MissionState::parse("MysteryState").is_none(),
+        "unrecognized mission state must not parse into MissionState"
+    );
     let states = [
         (71_001_u32, "Offered", "Trade", 1),
         (71_002_u32, "Accepted", "Courier", 2),
@@ -493,7 +497,6 @@ async fn mission_briefing_objective_journal_state_mapping_and_expiry_sweeps() {
         (71_005_u32, "Declined", "Combat", 5),
         (71_006_u32, "Quit", "Combat", 6),
         (71_007_u32, "Expired", "Combat", 3),
-        (71_008_u32, "MysteryState", "Courier", 0),
     ];
 
     ctx.db.with_mut_snapshot(|snap| {

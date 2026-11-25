@@ -48,7 +48,7 @@ fn full_snapshot_sync_rollback_and_reload_roundtrip() {
         snap.items.clear();
         snap.industry_jobs.clear();
         snap.planetary_colonies.clear();
-        snap.active_missions.clear();
+        snap.missions.clear();
         snap.standing_transactions.clear();
         snap.npe_progress.clear();
         snap.bookmarks.clear();

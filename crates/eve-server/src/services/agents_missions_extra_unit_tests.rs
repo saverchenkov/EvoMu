@@ -916,7 +916,8 @@ async fn agents_missions_push_over_90_regions() {
     assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "DoAction", &[PyRep::Integer(99), PyRep::Integer(99_999_888)], &kw).await.unwrap_err().code, "UnknownAgent");
     assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "GetMissionBriefingInfo", &[PyRep::Integer(3_008_416)], &kw).await.unwrap_err().code, "MissionNotActive");
 
-    // Journal unknown mission state arm (L418) + Quit (L1433) + RemoveOfferFromJournal (L1462-1474)
+    // Journal terminal mission state + Quit (L1433) + RemoveOfferFromJournal (L1462-1474)
+    assert!(eve_db::MissionState::parse("UnknownWeirdState").is_none());
     let any_ag = ctx.sde.agents.values().filter(|a| a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some() && a.level == 1).min_by_key(|a| a.agent_id).unwrap().clone();
     let mut sorted_mids: Vec<u32> = ctx.sde.missions.keys().copied().collect();
     sorted_mids.sort_unstable();
@@ -926,7 +927,7 @@ async fn agents_missions_push_over_90_regions() {
     ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
-            MissionFixture::new(char_id, mid0, any_ag.agent_id, any_ag.solar_system_id.unwrap(), "UnknownWeirdState")
+            MissionFixture::new(char_id, mid0, any_ag.agent_id, any_ag.solar_system_id.unwrap(), "Completed")
                 .current_room_id(1),
         );
         mission_fixture::insert(

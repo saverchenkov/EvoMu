@@ -252,20 +252,34 @@ fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
             last_extracted_unix: 1000,
         },
     );
-    snap.active_missions.insert(
-        (cid, 200),
-        ActiveMissionRecord {
-            mission_id: 200,
+    snap.missions
+        .try_insert(crate::MissionInstance {
+            instance_id: 200_000_200,
             character_id: cid,
             agent_id: 3_018_922,
+            template_id: 200,
+            state: crate::MissionState::Offered,
+            kind: crate::MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Offered".into(),
             current_room_id: 0,
-            npcs_remaining: 1,
-            spawned_npc_ball_ids: vec![],
             bookmark_id: None,
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
     snap.mission_tally.insert(cid, 2);
     snap.standing_transactions.insert(
         cid,
@@ -435,7 +449,7 @@ fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
     snap.contracts.clear();
     snap.industry_jobs.clear();
     snap.planetary_colonies.clear();
-    snap.active_missions.clear();
+    snap.missions.clear();
     snap.mission_tally.clear();
     snap.standing_transactions.clear();
     snap.npe_progress.clear();
@@ -473,7 +487,7 @@ fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
     assert!(loaded.contracts.is_empty());
     assert!(loaded.industry_jobs.is_empty());
     assert!(loaded.planetary_colonies.is_empty());
-    assert!(loaded.active_missions.is_empty());
+    assert!(loaded.missions.is_empty());
     assert!(loaded.mission_tally.is_empty());
     assert!(loaded.standing_transactions.is_empty());
     assert!(loaded.npe_progress.is_empty());

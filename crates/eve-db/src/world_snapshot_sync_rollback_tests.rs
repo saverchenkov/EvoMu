@@ -1,3 +1,6 @@
+use crate::missions::{
+    EncounterObjective, MissionInstance, MissionKind, MissionObjective, MissionState,
+};
 use crate::types::*;
 use crate::IskCents;
 use std::collections::{HashMap, HashSet};
@@ -200,20 +203,34 @@ pub(crate) fn populate_world_core_entities(snap: &mut WorldStateSnapshot) {
             last_extracted_unix: 1_700_000_100,
         },
     );
-    snap.active_missions.insert(
-        (2001, 101),
-        ActiveMissionRecord {
-            mission_id: 101,
+    snap.missions
+        .try_insert(MissionInstance {
+            instance_id: 200_000_101,
             character_id: 2001,
             agent_id: 3008416,
+            template_id: 101,
+            state: MissionState::Accepted,
+            kind: MissionKind::Encounter,
             solar_system_id: 30000142,
-            state: "Accepted".into(),
             current_room_id: 1,
-            npcs_remaining: 4,
-            spawned_npc_ball_ids: vec![70001],
             bookmark_id: Some(9401),
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: MissionObjective::Encounter(EncounterObjective {
+                npcs_remaining: 4,
+                spawned_npc_ball_ids: vec![70001],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
     snap.mission_tally.insert(2001, 5);
     snap.standing_transactions.insert(
         2001,
