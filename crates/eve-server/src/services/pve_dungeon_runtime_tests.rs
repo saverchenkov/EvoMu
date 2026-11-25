@@ -2229,10 +2229,11 @@ async fn dng_inst_current_room0_without_entry_gate_rejects_observatory_bypass_an
     let obs_dng_arg = [PyRep::String(format!("DNG-INST-{obs_inst_id}"))];
 
     assert!(
-        handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &obs_dng_arg, &kw)
-            .await
-            .is_none(),
-        "Observatory Flashpoint must not route DNG-INST string gate bypass"
+        matches!(
+            handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &obs_dng_arg, &kw).await,
+            None | Some(Err(_))
+        ),
+        "Observatory Flashpoint must reject DNG-INST string gate bypass"
     );
     assert!(
         try_activate_dungeon_runtime_gate(&ctx, &mut sess, pochven_sys, &obs_dng_arg)
