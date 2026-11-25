@@ -17,7 +17,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_dogma::ShipFittingEngine;
 use eve_machonet::SessionState;
 use eve_proto::dbrow::{DBRowDescriptor, DbColumnType};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use eve_sde::{InvType, SdeRegistry, TypeId};
 use std::collections::HashMap;
 
@@ -906,6 +906,10 @@ pub fn handle_structure_compression_mgr(
                     (raw_tid, total_raw, item.quantity)
                 };
 
+                let decomp_qty_i32 = ItemQty::try_from_i64(decomp_qty)
+                    .and_then(ItemQty::try_into_stack_i32)
+                    .map_err(|e| e.into_rpc_error("InvalidQuantity"))?;
+
                 let mut decomp_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                 decomp_opts.expected_owner_id = item_owner;
                 snap.consume_exact_item_quantity(item_id, orig_qty, decomp_opts)
@@ -925,7 +929,7 @@ pub fn handle_structure_compression_mgr(
                         owner_id: item_owner,
                         location_id: structure_id,
                         flag: item_flag,
-                        quantity: decomp_qty as i32,
+                        quantity: decomp_qty_i32,
                         singleton: false,
                         version: 1,
                         ..Default::default()
@@ -1446,7 +1450,9 @@ pub(crate) fn inspect_metenox_drill(
                 && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
         })
-        .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
+        .fold(0u32, |acc, it| {
+            acc.saturating_add(u32::try_from(it.quantity).unwrap_or(0))
+        });
     let total_struct_fuel = if item_fuel_blocks > 0 { item_fuel_blocks } else { st.fuel_blocks };
     let total_struct_gas: u32 = snap.items.values()
         .filter(|it| {
@@ -1457,7 +1463,9 @@ pub(crate) fn inspect_metenox_drill(
                 && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 && it.type_id == 81143
         })
-        .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
+        .fold(0u32, |acc, it| {
+            acc.saturating_add(u32::try_from(it.quantity).unwrap_or(0))
+        });
     let Some(moon_id) = super::resolve_structure_moon_id(sde, st_sys_id, st.position) else {
         return Err(BridgeRpcError { code: "NoMoonInSystem".into(), message: format!("No SDE moon celestial found in system {st_sys_id}"), client_error: None });
     };

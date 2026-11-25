@@ -19,6 +19,7 @@ use eve_db::{
     WorldRepository,
 };
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
+use eve_proto::ItemQty;
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
 use eve_db::lock_rank::AnyRwLock;
@@ -217,6 +218,12 @@ pub fn can_sentry_fire_and_record(
     })
 }
 
+fn clamp_space_loot_stack_qty(qty: i64) -> i32 {
+    ItemQty::try_from_i64(qty.max(1))
+        .and_then(ItemQty::try_into_stack_i32)
+        .unwrap_or(i32::MAX)
+}
+
 pub async fn drop_site_loot_into_space_core(
     db: &Arc<WorldRepository>,
     systems: &Arc<SystemRegistry>,
@@ -254,7 +261,7 @@ pub async fn drop_site_loot_into_space_core(
                 owner_id: char_id,
                 location_id: cid,
                 flag: InventoryFlag::Cargo,
-                quantity: quantity as i32,
+                quantity: clamp_space_loot_stack_qty(quantity),
                 singleton: false,
                 ..Default::default()
             },
@@ -908,4 +915,17 @@ mod wormhole_pve_seeding_tests;
 #[cfg(test)]
 #[path = "wormhole_pve_seeding_edges_tests.rs"]
 mod wormhole_pve_seeding_edges_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::clamp_space_loot_stack_qty;
+
+    #[test]
+    fn clamp_space_loot_stack_qty_bounds_without_wrap() {
+        assert_eq!(clamp_space_loot_stack_qty(0), 1);
+        assert_eq!(clamp_space_loot_stack_qty(-1), 1);
+        assert_eq!(clamp_space_loot_stack_qty(3), 3);
+        assert_eq!(clamp_space_loot_stack_qty(i64::from(i32::MAX) + 50), i32::MAX);
+    }
+}
 

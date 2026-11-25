@@ -15,7 +15,7 @@ use crate::services::industry_pi::{
 };
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -59,23 +59,27 @@ fn add_non_singleton_stacks_with_diffs(
             if let Some(existing) = snap.items.get_mut(&tid) {
                 let room = (i64::from(i32::MAX) - i64::from(existing.quantity)).max(0);
                 let add = qty.min(room);
-                if add > 0 {
+                if let Ok(add_i32) =
+                    ItemQty::try_from_i64(add).and_then(ItemQty::try_into_stack_i32)
+                {
                     if let Some(created_entry) = created.iter_mut().find(|c| c.item_id == tid) {
-                        existing.quantity += add as i32;
+                        existing.quantity += add_i32;
                         existing.version += 1;
                         *created_entry = existing.clone();
                     } else {
                         updated_pre.entry(tid).or_insert_with(|| existing.clone());
-                        existing.quantity += add as i32;
+                        existing.quantity += add_i32;
                         existing.version += 1;
                     }
-                    qty -= add;
+                    qty -= i64::from(add_i32);
                 }
             }
         }
     }
     while qty > 0 {
-        let chunk = qty.min(i64::from(i32::MAX)) as i32;
+        let chunk = ItemQty::try_from_i64(qty)
+            .and_then(ItemQty::try_into_stack_i32)
+            .unwrap_or(i32::MAX);
         snap.next_entity_id += 1;
         let new_id = snap.next_entity_id;
         let rec = InventoryItemRecord {
@@ -934,3 +938,26 @@ pub(crate) const RPCS: &[RpcEntry] = &[
         RpcDispatchHandler::SyncNoKwargs(handle_cancel_or_complete_industry_job),
     ),
 ];
+
+#[cfg(test)]
+mod qty_tests {
+    use super::add_non_singleton_stacks;
+    use eve_db::{InventoryFlag, WorldStateSnapshot};
+
+    #[test]
+    fn add_non_singleton_stacks_splits_above_stack_max_without_wrap() {
+        let mut snap = WorldStateSnapshot::default();
+        let created = add_non_singleton_stacks(
+            &mut snap,
+            90_001,
+            60_003_760,
+            InventoryFlag::Hangar,
+            34,
+            i64::from(i32::MAX) + 7,
+            true,
+        );
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[0].quantity, i32::MAX);
+        assert_eq!(created[1].quantity, 7);
+    }
+}

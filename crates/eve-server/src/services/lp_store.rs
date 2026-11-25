@@ -732,7 +732,7 @@ fn handle_take_offer(
         let final_owner_id = if is_corp_take { ch.corporation_id } else { char_id };
         let final_flag = if is_corp_take { eve_db::types::InventoryFlag::CorpDeliveries } else { delivery_flag };
         let (first_item_id, delivered_qty) = if is_blueprint {
-            let bpc_runs = offer.quantity.max(1) as u32;
+            let bpc_runs = offer.quantity.max(1);
             let mut first_id = 0_i64;
             for _ in 0..qty_i32 {
                 snap.next_entity_id += 1;
@@ -750,7 +750,7 @@ fn handle_take_offer(
                     singleton: true,
                     version: 1,
                     is_blueprint_copy: true,
-                    blueprint_runs_remaining: Some(bpc_runs as i32),
+                    blueprint_runs_remaining: Some(bpc_runs),
                     ..Default::default()
                 };
                 snap.items.insert(new_item_id, granted_item.clone());

@@ -164,7 +164,7 @@ fn encode_offer_get_response(
             .iter()
             .find(|p| p.id == pid)
             .filter(|p| !is_omega_license_product(p) && p.type_id > 0 && p.quantity > 1)
-            .map_or(1i32, |p| p.quantity as i32);
+            .map_or(1i32, |p| i32::try_from(p.quantity).unwrap_or(i32::MAX));
         msg = msg.add_with("attributes.products", |prod| {
             prod.set("product.sequential", pid)
                 .set("product.catalog", enum_name(catalog_name))

@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "description": "Per-file falling ratchet eliminating narrowing quantity/runs `as i32` / `as u32` casts across production crates/eve-server/src/services/ (#1186).",
+  "rules": {
+    "direct_quantity_casts": {
+      "zero_required": false,
+      "owning_issue": 1186,
+      "description": "Direct narrowing `as i32` / `as u32` casts on quantity/runs variables, field accesses, or compute_*_qty() calls. Zero everywhere except the 3 files actively held by parallel Wave F2 Track 13 (#1583).",
+      "files": {
+        "quasar_cosmetics_market.rs": 2,
+        "quasar_cosmetics_skinr.rs": 1,
+        "quasar_freelance_defs.rs": 1
+      }
+    },
+    "clamped_quantity_casts": {
+      "zero_required": false,
+      "owning_issue": 1186,
+      "description": "Shrink-only baseline for explicitly clamped/bounded quantity/runs casts (.max/.min/.clamp/.unwrap_or/.floor/.round/.ceil -> as i32 / as u32) in crates/eve-server/src/services/.",
+      "files": {
+        "character_clone_jump_rules.rs": 1,
+        "combat_fighters.rs": 1,
+        "combat_weapons.rs": 1,
+        "fast_checkout_and_activity.rs": 1,
+        "fitting_ewar_capital.rs": 1,
+        "fitting_module_cycles_helpers.rs": 1,
+        "gm_soak_commands.rs": 1,
+        "mobile_deployables_ext.rs": 1,
+        "operations_manager_helpers.rs": 2,
+        "pve_crab_beacons.rs": 1,
+        "quasar_economy_planetary_industry.rs": 2,
+        "quasar_inventory_asset.rs": 1,
+        "space_entity_mining.rs": 2,
+        "structure_control_ops.rs": 1
+      }
+    }
+  }
+}

@@ -36,7 +36,7 @@ use crate::services::sov_services::{
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedMercenaryDen, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use glam::DVec3;
 use std::sync::{Arc, RwLock};
 
@@ -701,7 +701,8 @@ pub async fn handle_mercden_component_call(
         let extracted_total = if max_owner_units >= full_owner_qty || tax_pct >= 100 {
             total
         } else {
-            ((u64::from(max_owner_units) * 100) / u64::from(100 - tax_pct)).min(u64::from(total)) as u32
+            let scaled = (u64::from(max_owner_units) * 100) / u64::from(100 - tax_pct);
+            u32::try_from(scaled.min(u64::from(total))).unwrap_or(total)
         };
         if extracted_total == 0 {
             return Err(eve_proto::BridgeRpcError::with_client_error(
@@ -719,7 +720,9 @@ pub async fn handle_mercden_component_call(
         let tax_qty = (extracted_total.saturating_mul(tax_pct)) / 100;
         let owner_qty = extracted_total.saturating_sub(tax_qty);
 
-        if owner_qty > 0 {
+        if let Ok(owner_qty_i32) = ItemQty::try_from_u32(owner_qty)
+            .map(|q| q.try_into_stack_i32().unwrap_or(i32::MAX))
+        {
             snap.next_entity_id += 1;
             let item_id = snap.next_entity_id;
             snap.items.insert(
@@ -730,12 +733,14 @@ pub async fn handle_mercden_component_call(
                     owner_id: char_id,
                     location_id: ship_id,
                     flag: InventoryFlag::Cargo,
-                    quantity: owner_qty as i32,
+                    quantity: owner_qty_i32,
                     ..Default::default()
                 },
             );
         }
-        if tax_qty > 0 {
+        if let Ok(tax_qty_i32) = ItemQty::try_from_u32(tax_qty)
+            .map(|q| q.try_into_stack_i32().unwrap_or(i32::MAX))
+        {
             let sov_corp = snap
                 .structures
                 .get(&skyhook_id)
@@ -751,7 +756,7 @@ pub async fn handle_mercden_component_call(
                     owner_id: sov_corp.max(char_id),
                     location_id: skyhook_id,
                     flag: InventoryFlag::Hangar,
-                    quantity: tax_qty as i32,
+                    quantity: tax_qty_i32,
                     ..Default::default()
                 },
             );
@@ -980,7 +985,9 @@ pub async fn apply_mercenary_den_weapon_damage(
             .collect();
         for iid in item_ids {
             if let Some(it) = snap.remove_system_cleanup_item(iid) {
-                stack_sizes.push(it.quantity as u32);
+                if let Ok(q) = u32::try_from(it.quantity) {
+                    stack_sizes.push(q);
+                }
             }
         }
         if let Some(den_rec) = &removed_den {
@@ -1013,8 +1020,10 @@ pub async fn apply_mercenary_den_weapon_damage(
         for (idx, qty) in stack_sizes.into_iter().enumerate() {
             let roll = splitmix64((den_id as u64) ^ ((idx as u64).wrapping_mul(0x9E37_79B9)) ^ u64::from(qty));
             if (roll & 1) == 0 {
+                let qty_i32 = ItemQty::try_from_u32(qty)
+                    .map_or(1, |q| q.try_into_stack_i32().unwrap_or(i32::MAX));
                 dropped_stacks += 1;
-                dropped_qty += qty;
+                dropped_qty = dropped_qty.saturating_add(u32::try_from(qty_i32).unwrap_or(0));
                 snap.next_entity_id += 1;
                 let lid = snap.next_entity_id;
                 snap.items.insert(
@@ -1025,7 +1034,7 @@ pub async fn apply_mercenary_den_weapon_damage(
                         owner_id: owner_cid.max(1),
                         location_id: wreck_id,
                         flag: InventoryFlag::Cargo,
-                        quantity: qty as i32,
+                        quantity: qty_i32,
                         ..Default::default()
                     },
                 );

@@ -608,7 +608,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                                     .set("corporation.sequential", corpid as u32)
                                     .set("installer.sequential", j.installer_id as u32)
                                     .set("facility.sequential", j.facility_id as u64)
-                                    .set("runs", j.runs as u32)
+                                    .set("runs", j.runs)
                                     .set("duration", j.duration_seconds as u32);
                                 let bp_item = j.blueprint_item_id.max(0) as u64;
                                 match j.activity_id {
@@ -678,7 +678,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             b.set("item_id.sequential", item.item_id as u64)
                                 .set("blueprint_type.sequential", item.type_id as u64)
                                 .set("location", loc)
-                                .set("quantity", item.quantity as u32)
+                                .set("quantity", u32::try_from(item.quantity).unwrap_or(0))
                         });
                     } else if item.is_blueprint_copy {
                         resp = resp.add_with("blueprint_copies", |b| {
@@ -1290,7 +1290,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             "attributes.price",
                             build_isk_currency((tx.unit_price * 100.0).round() as i64),
                         )
-                        .set("attributes.quantity", tx.quantity.max(0) as u32)
+                        .set(
+                            "attributes.quantity",
+                            u32::try_from(tx.quantity.max(0)).unwrap_or(u32::MAX),
+                        )
                         .set("attributes.station.sequential", tx.location_id as u64)
                         .set("attributes.customer_character.sequential", tx.client_id as u32)
                         .set(

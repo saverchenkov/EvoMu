@@ -1473,14 +1473,17 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
                         && i.quantity > 0
                         && rules::is_fuel_block_type(ctx, i.type_id)
                 })
-                .map(|i| i.quantity as u32)
+                .filter_map(|i| u32::try_from(i.quantity).ok())
                 .fold(0u32, u32::saturating_add);
             let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
             let avail = if bay_blocks > 0 { bay_blocks } else { st_blocks };
             let affordable = u64::from(avail / need);
             let paid_hours = elapsed_hours.min(affordable);
             let paid_ok = paid_hours == 0
-                || rules::consume_structure_fuel_blocks(ctx, snap, structure_id, need * (paid_hours as u32));
+                || u32::try_from(paid_hours)
+                    .ok()
+                    .and_then(|h| need.checked_mul(h))
+                    .is_some_and(|total| rules::consume_structure_fuel_blocks(ctx, snap, structure_id, total));
             if !paid_ok || affordable < elapsed_hours {
                 let fail_tick = start_tick + (paid_hours + 1).min(elapsed_hours) * SECS_PER_HOUR;
                 for m in &online {

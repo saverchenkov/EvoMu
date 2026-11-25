@@ -10,7 +10,7 @@ use crate::formulas::compute_broker_fee_rate;
 use crate::router::{RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, ItemQty, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -669,17 +669,30 @@ pub fn handle_orders_escrow(
                 if st_id != docked_station_id {
                     return Some(Err(BridgeRpcError { code: "StationMismatch".into(), message: format!("Cannot place sell order at station {st_id} while docked at {docked_station_id}"), client_error: None }));
                 }
-                if raw_tid <= 0 || !price_isk.is_finite() || price_isk <= 0.0 || qty <= 0 || qty > (i32::MAX as i64) || ![0, 1, 3, 7, 14, 30, 90].contains(&item_dur) {
+                let Some((tid, item_qty_i32)) = TypeId::try_from(raw_tid)
+                    .ok()
+                    .filter(|&t| {
+                        t > 0
+                            && price_isk.is_finite()
+                            && price_isk > 0.0
+                            && [0, 1, 3, 7, 14, 30, 90].contains(&item_dur)
+                    })
+                    .and_then(|t| {
+                        ItemQty::try_from_i64(qty)
+                            .and_then(ItemQty::try_into_stack_i32)
+                            .ok()
+                            .map(|q| (t, q))
+                    })
+                else {
                     return Some(Err(BridgeRpcError { code: "InvalidMultiSellOrder".into(), message: "PlaceMultiSellOrder entry requires valid positive typeID, price, quantity, and duration".into(), client_error: None }));
-                }
+                };
                 if !super::super::market_contracts::is_valid_4_sig_fig_price(price_isk) {
                     return Some(Err(BridgeRpcError { code: "InvalidPriceTickSize".into(), message: format!("Sell order price {price_isk} violates EVE 4-significant-figure tick size rule"), client_error: None }));
                 }
-                let tid = raw_tid as TypeId;
                 if ctx.sde.types.get(&tid).and_then(|t| t.market_group_id).is_none() {
                     return Some(Err(BridgeRpcError { code: "ItemNotMarketEligible".into(), message: format!("Type {tid} has no marketGroupID and cannot be sold on the market"), client_error: None }));
                 }
-                parsed_items.push((st_id, tid, item_id, IskCents::from_f64_isk(price_isk), qty as i32, item_dur));
+                parsed_items.push((st_id, tid, item_id, IskCents::from_f64_isk(price_isk), item_qty_i32, item_dur));
             }
 
             let now_unix = ctx.now_unix();
@@ -1757,7 +1770,8 @@ pub fn handle_orders_escrow(
                         if rem <= 0 { break; }
                         let avail = virtual_rem.get(&oid).copied().unwrap_or(0);
                         if avail <= 0 || ask_price.0 <= 0 { continue; }
-                        let max_affordable = (avail_isk.0 / ask_price.0).min(avail as i64) as i32;
+                        let max_affordable_i64 = (avail_isk.0 / ask_price.0).min(i64::from(avail));
+                        let max_affordable = i32::try_from(max_affordable_i64).unwrap_or(0);
                         if max_affordable <= 0 { stopped_by_isk = true; break; }
                         let desired = rem.min(avail);
                         let fill_qty = desired.min(max_affordable);

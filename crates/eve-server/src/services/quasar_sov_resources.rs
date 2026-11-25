@@ -90,8 +90,11 @@ pub(crate) fn build_reagent_simulation_entry(
 ) -> pb::ProtoBuilder {
     b.set("reagent.sequential", reag_type)
         .set("reagent_type.sequential", u64::from(reag_type))
-        .set("simulation.secured_stock", sec_qty as u32)
-        .set("simulation.unsecured_stock", unsec_qty as u32)
+        .set("simulation.secured_stock", u32::try_from(sec_qty).unwrap_or(u32::MAX))
+        .set(
+            "simulation.unsecured_stock",
+            u32::try_from(unsec_qty).unwrap_or(u32::MAX),
+        )
         .set(
             "simulation.last_cycle",
             GoogleTimestamp::from_unix(cycle_ts as i64, 0),
@@ -118,12 +121,12 @@ pub(crate) fn build_reagent_simulations_notice(
             })
             .add_with("simulations", |s| {
                 build_reagent_simulation_entry(s, reag_type, sec_qty, unsec_qty, cycle_ts)
-                    .set("maturation.stock", unsec_qty as u32)
+                    .set("maturation.stock", u32::try_from(unsec_qty).unwrap_or(u32::MAX))
                     .set(
                         "maturation.last_cycle",
                         GoogleTimestamp::from_unix(cycle_ts as i64, 0),
                     )
-                    .set("harvest.stock", sec_qty as u32)
+                    .set("harvest.stock", u32::try_from(sec_qty).unwrap_or(u32::MAX))
                     .set(
                         "harvest.last_cycle",
                         GoogleTimestamp::from_unix(cycle_ts as i64, 0),

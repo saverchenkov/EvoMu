@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 
 use crate::router::notify_registry::{
     push_typed_session_notification, OnItemChange, OnRedeemingQueueUpdated,
@@ -105,9 +105,13 @@ fn parse_reward_map(val: Option<&serde_json::Value>) -> BTreeMap<u32, SdeLoginRe
         let quantity = r
             .get("quantity")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(1)
-            .max(1);
+            .and_then(|v| {
+                ItemQty::try_from_u64(v)
+                    .and_then(ItemQty::try_into_stack_i32)
+                    .ok()
+            })
+            .and_then(|q| u32::try_from(q).ok())
+            .unwrap_or(1);
         let tier = r
             .get("tier")
             .and_then(|v| v.as_u64())
@@ -119,7 +123,10 @@ fn parse_reward_map(val: Option<&serde_json::Value>) -> BTreeMap<u32, SdeLoginRe
                 type_id,
                 quantity,
                 tier,
-                blueprint_runs: r.get("blueprintRuns").and_then(|v| v.as_u64()).map(|v| v as u32),
+                blueprint_runs: r
+                    .get("blueprintRuns")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
                 blueprint_material_level: r
                     .get("blueprintMaterialLevel")
                     .and_then(|v| v.as_u64())
@@ -319,6 +326,12 @@ pub(crate) fn deliver_login_reward(
             .or_default()
             .push(rw.type_id);
     }
+    let reward_qty = ItemQty::try_from_u32(rw.quantity.max(1))
+        .and_then(ItemQty::try_into_stack_i32)
+        .unwrap_or(i32::MAX);
+    let reward_runs = rw
+        .blueprint_runs
+        .map(|r| i32::try_from(r).unwrap_or(i32::MAX));
     if let Some(station_id) = docked_station_id {
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;
@@ -328,14 +341,14 @@ pub(crate) fn deliver_login_reward(
             owner_id: char_id,
             location_id: station_id,
             flag: eve_db::InventoryFlag::Hangar,
-            quantity: rw.quantity.max(1) as i32,
+            quantity: reward_qty,
             singleton: rw.blueprint_runs.is_some(),
             version: 1,
             dynamic_attributes: HashMap::new(),
             source_mutaplasmid_id: None,
             insured_payout_isk: 0.0,
             is_blueprint_copy: rw.blueprint_runs.is_some(),
-            blueprint_runs_remaining: rw.blueprint_runs.map(|r| r as i32),
+            blueprint_runs_remaining: reward_runs,
         };
         if let Some(exp_ft) = expire_date_time {
             snap.seasons_and_campaigns
@@ -353,7 +366,7 @@ pub(crate) fn deliver_login_reward(
             snap,
             uid,
             rw.type_id,
-            rw.quantity.max(1) as i32,
+            reward_qty,
             format!("Campaign {campaign_id} login reward"),
             None,
             expire_date_time,

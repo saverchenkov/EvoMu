@@ -16,6 +16,7 @@ use crate::services::combat_crimewatch::{
 };
 use crate::system_actor::SystemRegistry;
 use eve_db::WorldRepository;
+use eve_proto::ItemQty;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use eve_db::lock_rank::AnyRwLock;
@@ -849,7 +850,7 @@ fn append_default_npc_wreck_loot(
 ) {
     if let Some(mats) = ctx.sde.type_materials.get(&npc_type_id) {
         for m in mats {
-            let qty = m.quantity.clamp(1, 50) as i32;
+            let qty = i32::try_from(m.quantity.clamp(1, 50)).unwrap_or(50);
             if qty > 0 && !loot_to_insert.iter().any(|&(tid, _, _)| tid == m.material_type_id) {
                 loot_to_insert.push((m.material_type_id, qty, false));
             }
@@ -952,7 +953,10 @@ pub async fn populate_npc_wreck_on_turret_kill(
         loot_to_insert.push((tag_tid, 1, false));
     }
     if let Some((custom_tid, custom_qty)) = npc_opt.as_ref().and_then(|n| n.custom_cargo_loot) {
-        loot_to_insert.push((custom_tid, (custom_qty as i32).max(1), false));
+        let bounded_qty = ItemQty::try_from_i64(custom_qty.max(1))
+            .and_then(ItemQty::try_into_stack_i32)
+            .unwrap_or(i32::MAX);
+        loot_to_insert.push((custom_tid, bounded_qty, false));
     } else if let Some(ref conv) = convoy_opt {
         if conv.cargo_quantity > 0 {
             loot_to_insert.push((conv.cargo_type_id, conv.cargo_quantity, false));

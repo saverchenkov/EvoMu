@@ -7,7 +7,7 @@
 use crate::router::ServerContext;
 use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -1024,7 +1024,7 @@ pub fn consume_structure_fuel_blocks(
                 && i.quantity > 0
                 && is_fuel_block_type(ctx, i.type_id)
         })
-        .map(|i| i.quantity as u32)
+        .filter_map(|i| u32::try_from(i.quantity).ok())
         .fold(0u32, u32::saturating_add);
     let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
     let avail = if bay_blocks > 0 { bay_blocks } else { st_blocks };
@@ -1051,16 +1051,20 @@ pub fn consume_structure_fuel_blocks(
         if rem == 0 {
             break;
         }
-        let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity.max(0) as u32)) else {
+        let Some((it_owner, avail)) = snap
+            .items
+            .get(&iid)
+            .map(|it| (it.owner_id, u32::try_from(it.quantity).unwrap_or(0)))
+        else {
             continue;
         };
         let take = rem.min(avail);
-        if take == 0 {
+        let Ok(take_i32) = ItemQty::try_from_u32(take).and_then(ItemQty::try_into_stack_i32) else {
             continue;
-        }
+        };
         let mut fuel_opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
         fuel_opts.reject_singleton = true;
-        if snap.consume_exact_item_quantity(iid, take as i32, fuel_opts).is_ok() {
+        if snap.consume_exact_item_quantity(iid, take_i32, fuel_opts).is_ok() {
             rem -= take;
         }
     }
@@ -1075,7 +1079,7 @@ pub fn consume_structure_fuel_blocks(
                         && i.quantity > 0
                         && is_fuel_block_type(ctx, i.type_id)
                 })
-                .map(|i| i.quantity as u32)
+                .filter_map(|i| u32::try_from(i.quantity).ok())
                 .fold(0u32, u32::saturating_add);
             st.fuel_blocks = rem_bay;
         } else {
@@ -1099,7 +1103,7 @@ pub fn materialize_structure_fuel_for_disposal(
                 && i.quantity > 0
                 && is_fuel_block_type(ctx, i.type_id)
         })
-        .map(|i| i.quantity as u32)
+        .filter_map(|i| u32::try_from(i.quantity).ok())
         .fold(0u32, u32::saturating_add);
     let Some((total_blocks, owner_corp)) = snap.structures.get_mut(&structure_id).map(|st| {
         let fb = st.fuel_blocks;
@@ -1109,7 +1113,9 @@ pub fn materialize_structure_fuel_for_disposal(
         return;
     };
     if total_blocks > backed_blocks {
-        let unbacked = (total_blocks - backed_blocks).min(i32::MAX as u32) as i32;
+        let unbacked = ItemQty::try_from_u32(total_blocks - backed_blocks)
+            .and_then(ItemQty::try_into_stack_i32)
+            .unwrap_or(i32::MAX);
         snap.next_entity_id += 1;
         let new_id = snap.next_entity_id;
         snap.items.insert(
@@ -1259,7 +1265,7 @@ pub fn finalize_fuel_bay_move_in_snap(
         return (None, None);
     };
     let same_bay = from_fuel && to_fuel && old_loc == new_loc;
-    let qty_u32 = moving.quantity.max(0) as u32;
+    let qty_u32 = u32::try_from(moving.quantity).unwrap_or(0);
     let is_block = is_fuel_block_type(ctx, moving.type_id);
     if from_fuel && !same_bay {
         if is_block {

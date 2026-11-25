@@ -20,7 +20,7 @@ use crate::services::insurgency_services::{
 use crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_destiny::{Ball, MovementMode};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use glam::DVec3;
 
 pub const INSURGENCY_OPS_BLOB_KEY: &str = "insurgency_complex_ops";
@@ -310,7 +310,10 @@ pub fn append_insurgency_npc_wreck_loot(
 ) {
     if let Some((drop_tid, qty)) = named_insurgency_roamer_loot_drop(npc_type_id) {
         if !loot_to_insert.iter().any(|&(tid, _, _)| tid == drop_tid) {
-            loot_to_insert.push((drop_tid, qty as i32, false));
+            let bounded_qty = ItemQty::try_from_i64(qty.max(1))
+                .and_then(ItemQty::try_into_stack_i32)
+                .unwrap_or(i32::MAX);
+            loot_to_insert.push((drop_tid, bounded_qty, false));
         }
     }
     if (79_329..=79_334).contains(&npc_type_id)
