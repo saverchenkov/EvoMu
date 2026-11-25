@@ -225,12 +225,6 @@ impl ProjectedItemSwitchConfig {
         ignored
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_env_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
-        let _ = Self::retired_off_env_vars_lookup(&get);
-        Self::enabled()
-    }
-
     /// Returns startup switch configuration with all production item projection classes permanently
     /// enabled (`Self::enabled()`).
     ///

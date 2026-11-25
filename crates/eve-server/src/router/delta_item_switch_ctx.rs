@@ -144,23 +144,6 @@ impl ServerContext {
         )
     }
 
-    /// Returns `true` and consumes the matching commit-time projection token when `char_id`/`item`
-    /// was already projected as a character-owned first-set mutation (`OnItemChange`).
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn try_consume_projected_item_mutation(
-        &self,
-        char_id: i64,
-        item: &InventoryItemRecord,
-    ) -> bool {
-        self.try_consume_projected_item_mutation_with_changes(
-            char_id,
-            item,
-            &[],
-            "try_consume_projected_item_mutation",
-        )
-    }
-
     pub(crate) fn try_consume_projected_item_change_row_with_changes(
         &self,
         char_id: i64,
@@ -491,37 +474,6 @@ impl ServerContext {
             fp,
             false,
         )
-    }
-
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn should_skip_projected_item_change_for_target(
-        &self,
-        target: &NotificationTarget,
-        item: &InventoryItemRecord,
-        changes: &[(i32, PyRep)],
-        helper: &'static str,
-    ) -> bool {
-        self.filter_projected_item_change_target(target.clone(), item, changes, helper)
-            .is_empty()
-    }
-
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn should_skip_projected_item_deleted_for_target(
-        &self,
-        target: &NotificationTarget,
-        old_item: &InventoryItemRecord,
-        changes: &[(i32, PyRep)],
-        helper: &'static str,
-    ) -> bool {
-        self.filter_projected_item_deleted_targets(
-            &[(target.clone(), "")],
-            old_item,
-            changes,
-            helper,
-        )
-        .is_empty()
     }
 
     pub(crate) fn filter_projected_item_update_targets(
