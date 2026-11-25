@@ -86,6 +86,36 @@ async fn preset_combat_pilot_in_space_locks_and_activates_weapon() {
     assert!(after_hp < init_hp, "first weapon volley must damage locked target (init={init_hp}, after={after_hp})");
     let qty_after = ctx.db.with_snapshot(|snap| snap.items.get(&charge_id_before.0).map(|i| i.quantity));
     assert_eq!(qty_after, Some(39), "firing loaded weapon once must consume 1 round");
+
+    let sim_now = ctx
+        .peek_system_sim_filetime(actor.solar_system_id)
+        .expect("ScenarioBuilder space fixture must anchor sim clock");
+    let wall_now = ctx.now_machonet_wall_filetime();
+    assert_eq!(
+        sim_now.as_ticks() - wall_now.as_ticks(),
+        eve_testkit::scenario::DEFAULT_SPACE_SIM_CLOCK_OFFSET_MS * eve_db::clock::FILETIME_TICKS_PER_MS,
+        "ScenarioBuilder space fixture must carry non-zero (sim - wall) offset even at TiDi = 1.0"
+    );
+    let godma_notifs: Vec<_> = actor
+        .harness
+        .drain_notifications()
+        .into_iter()
+        .filter(|(ev, _)| ev == "OnGodmaShipEffect")
+        .collect();
+    let (_, godma_args) = godma_notifs
+        .last()
+        .expect("dogmaIM.Activate must deliver OnGodmaShipEffect to actor harness");
+    let effect_start_or_time = godma_args[2]
+        .as_i64()
+        .expect("OnGodmaShipEffect start_or_time SimFileTime");
+    let effect_start_time = godma_args[6]
+        .as_i64()
+        .expect("OnGodmaShipEffect start_time SimFileTime");
+    assert_eq!(effect_start_or_time, effect_start_time);
+    assert!(
+        (effect_start_time - sim_now.as_ticks()).abs() <= 10,
+        "OnGodmaShipEffect timestamp ({effect_start_time}) must align with SimFileTime ({sim_now:?}), not WallFileTime ({wall_now:?})"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -361,4 +391,87 @@ fn deterministic_seed_and_sde_pick_reproducibility() {
     let seq1: Vec<u64> = (0..8).map(|_| r1.next_u64()).collect();
     let seq2: Vec<u64> = (0..8).map(|_| r2.next_u64()).collect();
     assert_eq!(seq1, seq2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn space_fixture_clock_offset_separates_sim_and_wall_notifications_at_tidi_1() {
+    let ctx = TestContext::new();
+    crate::common::pin_clock(&ctx);
+    let mut backend = ServerScenarioBackend::new(&ctx);
+    let mut scenario = ScenarioBuilder::combat_pilot_in_space().build(&mut backend).await;
+    let actor = scenario.actor_mut(0);
+    let char_id = actor.character_id;
+    let sys_id = actor.solar_system_id;
+
+    // Confirm TiDi is 1.0x and the space fixture carries the default non-zero -300_000 ms offset.
+    assert!(
+        (eve_server::services::serverops_cluster::get_system_tidi_factor(&ctx, sys_id) - 1.0).abs()
+            < 1e-9,
+        "space fixture clock offset test must run at TiDi = 1.0"
+    );
+    let sim_now = ctx
+        .peek_system_sim_filetime(sys_id)
+        .expect("ScenarioBuilder space fixture must anchor sim clock");
+    let wall_now = ctx.now_machonet_wall_filetime();
+    let expected_offset_ticks =
+        eve_testkit::scenario::DEFAULT_SPACE_SIM_CLOCK_OFFSET_MS * eve_db::clock::FILETIME_TICKS_PER_MS;
+    assert_eq!(sim_now.as_ticks() - wall_now.as_ticks(), expected_offset_ticks);
+
+    let _ = actor.harness.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Trigger a SimFileTime-domain notification (OnNpcTimerUpdate: +300s sim expiry) and a
+    // WallFileTime-domain notification (OnClusterShutdownInitiated: +15m wall expiry) at TiDi = 1.0.
+    eve_server::services::crimewatch_timers::on_weapon_aggression_post_hook(
+        &ctx,
+        char_id,
+        None,
+        sys_id,
+        ctx.now_unix(),
+    );
+    eve_server::services::serverops_cluster::initiate_cluster_downtime_shutdown(&ctx);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let npc_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnNpcTimerUpdate")
+        .expect("on_weapon_aggression_post_hook must emit OnNpcTimerUpdate");
+    let npc_expiry_ft = eve_db::clock::SimFileTime::from_ticks(
+        npc_notif.args[1]
+            .as_i64()
+            .expect("OnNpcTimerUpdate expiry SimFileTime"),
+    );
+    assert_eq!(
+        npc_expiry_ft,
+        sim_now.saturating_add_secs(300),
+        "OnNpcTimerUpdate expiry must use SimFileTime (anchored -300_000 ms below WallFileTime at TiDi = 1.0)"
+    );
+
+    let shutdown_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnClusterShutdownInitiated")
+        .expect("initiate_cluster_downtime_shutdown must emit OnClusterShutdownInitiated");
+    let shutdown_when_ft = eve_db::clock::WallFileTime::from_ticks(
+        shutdown_notif.args[1]
+            .as_i64()
+            .expect("OnClusterShutdownInitiated when WallFileTime"),
+    );
+    let shutdown_dur_mins = shutdown_notif.args[2]
+        .as_i64()
+        .expect("OnClusterShutdownInitiated duration") as u64;
+    assert_eq!(
+        shutdown_when_ft,
+        wall_now.saturating_add_secs(shutdown_dur_mins * 60),
+        "OnClusterShutdownInitiated.when must use MachoNet WallFileTime (not shifted by space sim offset)"
+    );
+    assert_eq!(
+        (shutdown_when_ft.as_ticks() - wall_now.as_ticks())
+            - (npc_expiry_ft.as_ticks() - sim_now.as_ticks()),
+        ((shutdown_dur_mins * 60) as i64 - 300) * 10_000_000
+    );
+    assert_ne!(
+        npc_expiry_ft.as_ticks(),
+        wall_now.saturating_add_secs(300).as_ticks(),
+        "SimFileTime and WallFileTime notifications must diverge deterministically at TiDi = 1.0"
+    );
 }

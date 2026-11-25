@@ -101,9 +101,9 @@ fn emitters_format_all_fleet_combat_and_crimewatch_notifications() {
     emit_solar_system_lp_change(&ctx, sys_id, 100, 250);
 
     emit_victory_point_state_updated(&ctx, sys_id, 1500, 42.5, 3000);
-    emit_weapons_timer_update(&ctx, char_id, 1, PyRep::Integer(123_456));
-    emit_pvp_timer_update(&ctx, char_id, 2, PyRep::Integer(234_567));
-    emit_criminal_timer_update(&ctx, char_id, 3, PyRep::Integer(345_678));
+    emit_weapons_timer_update(&ctx, char_id, 1, Some(eve_db::clock::SimFileTime::from_ticks(123_456)));
+    emit_pvp_timer_update(&ctx, char_id, 2, Some(eve_db::clock::SimFileTime::from_ticks(234_567)));
+    emit_criminal_timer_update(&ctx, char_id, 3, Some(eve_db::clock::SimFileTime::from_ticks(345_678)));
 
     // All empty slices is a no-op
     emit_system_criminal_flag_updates(&ctx, sys_id, &[], &[], &[]);

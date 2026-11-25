@@ -691,7 +691,7 @@ fn emit_ess_fallback_cloak_deactivation(
     mtid: TypeId,
     is_covert: bool,
 ) {
-    let now = ctx.now_system_sim_filetime_ticks(Some(sys_id));
+    let now = ctx.now_system_sim_filetime(Some(sys_id));
     let observers = ctx.space_observer_chars_for_ship(ship_id, char_id);
     let eff_name = if is_covert {
         "cloakingWarpSafe"
@@ -716,11 +716,11 @@ fn emit_ess_fallback_cloak_deactivation(
         crate::router::notify_registry::OnGodmaShipEffect {
             item_id: mid,
             effect: PyRep::Integer(effect_id),
-            start_or_time: PyRep::Integer(now),
+            start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::SimTime(now),
             start: Some(PyRep::Integer(0)),
             active: Some(PyRep::Integer(0)),
             environment: Some(environment),
-            start_time: Some(PyRep::Integer(now)),
+            start_time: Some(now),
             duration: Some(PyRep::Real(0.0)),
             repeat: Some(PyRep::Integer(0)),
             error: Some(PyRep::None),

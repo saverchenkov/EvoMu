@@ -1141,11 +1141,13 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
         OnGodmaShipEffect {
             item_id: 700_001,
             effect: PyRep::Integer(16),
-            start_or_time: PyRep::Integer(0),
+            start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::SimTime(
+                eve_db::clock::SimFileTime::ZERO,
+            ),
             start: Some(PyRep::Integer(1)),
             active: Some(PyRep::Integer(1)),
             environment: Some(PyRep::Tuple(vec![])),
-            start_time: Some(PyRep::Integer(0)),
+            start_time: Some(eve_db::clock::SimFileTime::ZERO),
             duration: Some(PyRep::Real(1000.0)),
             repeat: Some(PyRep::Integer(0)),
             error: Some(PyRep::None),

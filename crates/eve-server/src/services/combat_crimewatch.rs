@@ -2091,7 +2091,7 @@ pub fn create_kill_right_in_snap(
 
 /// Creates a kill right from `owner_id` against `target_id` and emits `OnKillRightCreated`.
 pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_id: i64, fee_isk: f64) {
-    let expiry_ft = ctx.now_blueos_filetime_ticks() + (30 * 86_400 * 10_000_000);
+    let expiry_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(30 * 86_400);
     let expires_unix = ctx.now_unix().saturating_add(30 * 86_400);
     ctx.db.with_mut_snapshot(|snap| {
         create_kill_right_in_snap(snap, kr_id, owner_id, target_id, fee_isk, expires_unix);
@@ -2145,7 +2145,7 @@ pub(crate) fn validate_kill_right_live_preconditions(
 
 /// Emits limited engagement timeout start/stop and end notifications to `char_id`.
 pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, other_char_id: i64) {
-    let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+    let timeout_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(300);
     let t = NotificationTarget::Character(char_id);
     ctx.emit_typed(t.clone(), crate::router::notify_registry::OnCrimewatchEngagementStartTimeout { other_char_id, timeout: timeout_ft });
     ctx.emit_typed(t.clone(), crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id });

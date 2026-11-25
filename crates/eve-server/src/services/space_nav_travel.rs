@@ -741,9 +741,9 @@ pub(crate) fn apply_jump_fatigue(ctx: &ServerContext, char_id: i64, distance_ly:
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         OnJumpTimersUpdated {
-            jump_activation: unix_to_filetime(cd_until),
-            jump_fatigue: unix_to_filetime(fat_until),
-            last_updated: unix_to_filetime(now),
+            jump_activation: ctx.wall_unix_to_filetime(cd_until),
+            jump_fatigue: ctx.wall_unix_to_filetime(fat_until),
+            last_updated: ctx.wall_unix_to_filetime(now),
             do_alert: true,
         },
     );

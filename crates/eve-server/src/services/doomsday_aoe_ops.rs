@@ -43,7 +43,7 @@ fn emit_doomsday_godma_effect(
         crate::router::notify_registry::OnGodmaShipEffect {
             item_id: module_id,
             effect: PyRep::Integer(effect_id),
-            start_or_time: PyRep::Bool(true),
+            start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::Flag(true),
             start: None,
             active: None,
             environment: None,

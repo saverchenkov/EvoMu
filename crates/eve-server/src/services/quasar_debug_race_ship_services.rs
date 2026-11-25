@@ -86,10 +86,7 @@ fn publish_notice_now(
     scope: NoticeScope,
     builder: pb::ProtoBuilder,
 ) -> Result<usize, BridgeRpcError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = gateway.db.clock().now_unix_secs();
     gateway.publish_pb_notice_checked(scope, builder, now)
 }
 

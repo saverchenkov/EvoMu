@@ -2043,7 +2043,7 @@ impl ServerContext {
         } else {
             repeat_opt.unwrap_or(1000)
         };
-        let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+        let now = self.now_system_sim_filetime_for_ship(char_id, ship_id);
         let environment = PyRep::Tuple(vec![
             PyRep::Integer(module_id),
             PyRep::Integer(char_id),
@@ -2053,22 +2053,21 @@ impl ServerContext {
             PyRep::List(vec![]),
             PyRep::Integer(effect_id),
         ]);
-        let notifs = self.notify(
+        let notifs = self.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnGodmaShipEffect",
-            "charid",
-            vec![
-                PyRep::Integer(module_id),
-                PyRep::Integer(effect_id),
-                PyRep::Integer(now),
-                PyRep::Integer(1),
-                PyRep::Integer(1),
-                environment,
-                PyRep::Integer(now),
-                PyRep::Real(duration_ms),
-                PyRep::Integer(i64::from(repeat)),
-                PyRep::None,
-            ],
+            crate::router::notify_registry::OnGodmaShipEffect {
+                item_id: module_id,
+                effect: PyRep::Integer(effect_id),
+                start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::SimTime(now),
+                start: Some(PyRep::Integer(1)),
+                active: Some(PyRep::Integer(1)),
+                environment: Some(environment),
+                start_time: Some(now),
+                duration: Some(PyRep::Real(duration_ms)),
+                repeat: Some(PyRep::Integer(i64::from(repeat))),
+                error: Some(PyRep::None),
+                actual_stop_time: None,
+            },
         );
         if let Some(scene) = special_fx_scene {
             self.emit_module_special_fx_started(
@@ -2082,7 +2081,7 @@ impl ServerContext {
                 target_id,
                 repeat,
                 duration_ms,
-                now,
+                now.as_ticks(),
                 charge_type_id_override,
             );
         }

@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 
 /// Default directory holding `lifecycle.jsonl` and hourly archives.
 pub const DEFAULT_LIFECYCLE_LOG_DIR: &str = "logs";
@@ -288,10 +288,7 @@ impl LifecycleLogger {
         reason: impl Into<String>,
         detail: Option<String>,
     ) -> std::io::Result<LifecycleRecord> {
-        let now_unix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_unix = eve_db::WallUnixMs::system_now().as_secs();
         self.write_record_at(now_unix, reason, detail)
     }
 

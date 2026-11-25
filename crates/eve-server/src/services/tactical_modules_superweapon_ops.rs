@@ -1286,7 +1286,7 @@ async fn activate_superweapon_with_args_inner(
             crate::router::notify_registry::OnGodmaShipEffect {
                 item_id: module_id,
                 effect: PyRep::Integer(godma_effect_id),
-                start_or_time: PyRep::Bool(true),
+                start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::Flag(true),
                 start: None,
                 active: None,
                 environment: None,

@@ -1608,18 +1608,10 @@ const INTERFERENCE_DECAY_TICK_PERIOD_SECS: i64 = 3_600;
 const INTERFERENCE_DECAY_TICK_PERIOD_TICKS: i64 = INTERFERENCE_DECAY_TICK_PERIOD_SECS * 10_000_000;
 
 fn unix_secs_to_filetime(unix_secs: u64) -> i64 {
-    (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
+    eve_db::clock::WallFileTime::from_unix_secs_saturating(unix_secs).as_ticks()
 }
 
 /// Builds the V24 `newInterferenceState` keyval shared by `GetLocalInterferenceState` and `OnSolarsystemInterferenceChanged`.
-pub(crate) fn build_interference_state_keyval(sys_id: SolarSystemId, level: f64, band: u8) -> PyRep {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(1_775_000_000);
-    build_interference_state_keyval_at(sys_id, level, band, now_secs)
-}
-
 pub(crate) fn build_interference_state_keyval_at(
     sys_id: SolarSystemId,
     level: f64,

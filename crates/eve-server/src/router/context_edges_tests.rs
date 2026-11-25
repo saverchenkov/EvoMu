@@ -666,3 +666,75 @@ async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
     }
     assert!(!ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
 }
+
+#[tokio::test]
+async fn anchor_system_sim_clock_offset_diverges_wall_and_sim_domains_at_tidi_1() {
+    use crate::services::serverops_cluster::set_system_tidi_factor;
+    use eve_db::clock::{SimFileTime, WallFileTime, FILETIME_TICKS_PER_MS};
+
+    let base = 1_750_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(user_id, 9_102, Some(char_id), true, base)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+    });
+
+    // Anchor a non-zero (sim_time - wallclock) offset (-300_000 ms) while TiDi remains 1.0x.
+    let offset_ms = -300_000_i64;
+    let sim_clock = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, offset_ms, 1.0);
+    assert_eq!(sim_clock.sim_minus_wall_offset_ms(), Some(offset_ms));
+    assert!((sim_clock.tidi_factor() - 1.0).abs() < 1e-9);
+
+    let wall_0: WallFileTime = ctx.now_machonet_wall_filetime();
+    let sim_0: SimFileTime = ctx
+        .peek_system_sim_filetime(sys_id)
+        .expect("anchored system must expose peek_system_sim_filetime");
+    assert_eq!(
+        sim_0.as_ticks() - wall_0.as_ticks(),
+        offset_ms * FILETIME_TICKS_PER_MS,
+        "SimFileTime must trail WallFileTime by -300_000 ms even at TiDi = 1.0"
+    );
+
+    // Advance 10 real seconds at TiDi = 1.0: both clocks advance +10s preserving the -300_000 ms offset.
+    ctx.advance_secs(10);
+    let wall_1 = ctx.now_machonet_wall_filetime();
+    let sim_1 = ctx.now_system_sim_filetime_for_char(char_id);
+    assert_eq!(wall_1, wall_0.saturating_add_secs(10));
+    assert_eq!(sim_1, sim_0.saturating_add_secs(10));
+    assert_eq!(sim_1.as_ticks() - wall_1.as_ticks(), offset_ms * FILETIME_TICKS_PER_MS);
+
+    // Unrebased /advancetime keeps MachoNet wallclock steady while translating virtual expiry into
+    // client-aligned WallFileTime vs anchored SimFileTime domains without mixing them.
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    assert_eq!(ctx.now_machonet_wall_filetime(), wall_1);
+    let virtual_expiry = ctx.now_unix_secs() + 45;
+    let wall_exp = ctx.virtual_unix_to_machonet_wall_filetime(virtual_expiry);
+    let sim_exp = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, virtual_expiry);
+    assert_eq!(wall_exp, wall_1.saturating_add_secs(45));
+    assert_eq!(sim_exp, sim_1.saturating_add_secs(45));
+    assert_eq!(sim_exp.as_ticks() - wall_exp.as_ticks(), offset_ms * FILETIME_TICKS_PER_MS);
+
+    // Lowering TiDi to 0.50 advances SimFileTime by half wall time while preserving monotonicity.
+    let applied = set_system_tidi_factor(&ctx, sys_id, 0.50);
+    assert!((applied - 0.50).abs() < 1e-9);
+    ctx.advance_secs(20);
+    let wall_2 = ctx.now_machonet_wall_filetime();
+    let sim_2_peek = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock");
+    let sim_2 = ctx.now_system_sim_filetime_for_char(char_id);
+    assert_eq!(wall_2, wall_1.saturating_add_secs(20));
+    assert_eq!(sim_2_peek, sim_1.saturating_add_secs(10));
+    assert_eq!(sim_2, sim_2_peek);
+    assert_eq!(
+        sim_2.as_ticks() - wall_2.as_ticks(),
+        (offset_ms - 10_000) * FILETIME_TICKS_PER_MS
+    );
+}

@@ -178,4 +178,12 @@ impl<'c> ScenarioWorldBackend for ServerScenarioBackend<'c> {
     fn advance_secs(&self, secs: u64) {
         self.ctx.advance_secs(secs);
     }
+
+    fn configure_space_sim_clock_offset(&self, solar_system_id: u32, sim_minus_wall_ms: i64) {
+        let _ = self.ctx.anchor_system_sim_clock_with_offset_ms(
+            solar_system_id,
+            sim_minus_wall_ms,
+            1.0,
+        );
+    }
 }

@@ -69,6 +69,25 @@ impl WallUnixMs {
         }
     }
 
+    /// Converts whole Unix seconds into [`WallUnixMs`], saturating on overflow.
+    #[must_use]
+    pub const fn from_secs_saturating(secs: u64) -> Self {
+        Self(secs.saturating_mul(1_000))
+    }
+
+    /// Reads current host OS Unix time in milliseconds via [`host_wall_unix_secs_and_nanos`].
+    ///
+    /// Intended for host telemetry/logging and [`ServerClock`] host-clock implementations rather
+    /// than gameplay logic (which reads the injected [`ServerClock`]).
+    #[must_use]
+    pub fn system_now() -> Self {
+        let (secs, nanos) = host_wall_unix_secs_and_nanos();
+        Self(
+            secs.saturating_mul(1_000)
+                .saturating_add(u64::from(nanos / 1_000_000)),
+        )
+    }
+
     /// Returns whole Unix seconds rounded down.
     #[must_use]
     pub const fn as_secs(self) -> u64 {
@@ -120,6 +139,15 @@ impl WallUnixMs {
             None => None,
         }
     }
+
+    /// Converts Unix wall-clock milliseconds into [`WallFileTime`] ticks, saturating at `i64::MAX`.
+    #[must_use]
+    pub const fn to_wall_filetime_saturating(self) -> WallFileTime {
+        match self.to_wall_filetime() {
+            Some(ft) => ft,
+            None => WallFileTime(i64::MAX),
+        }
+    }
 }
 
 /// Windows FILETIME ticks (100-nanosecond intervals since `1601-01-01`) in the wall-clock domain.
@@ -132,10 +160,22 @@ impl WallUnixMs {
 pub struct WallFileTime(pub i64);
 
 impl WallFileTime {
+    /// Zero Windows FILETIME (`1601-01-01T00:00:00Z`).
+    pub const ZERO: Self = Self(0);
+
+    /// Unix epoch (`1970-01-01T00:00:00Z`) represented in [`WallFileTime`] ticks.
+    pub const UNIX_EPOCH: Self = Self(FILETIME_UNIX_EPOCH_OFFSET_TICKS);
+
     /// Constructs a [`WallFileTime`] from raw 100-nanosecond ticks.
     #[must_use]
     pub const fn from_ticks(ticks: i64) -> Self {
         Self(ticks)
+    }
+
+    /// Converts Unix epoch seconds (`>= 0`) into [`WallFileTime`] ticks, saturating on overflow.
+    #[must_use]
+    pub const fn from_unix_secs_saturating(unix_secs: u64) -> Self {
+        WallUnixMs::from_secs_saturating(unix_secs).to_wall_filetime_saturating()
     }
 
     /// Returns the raw 100-nanosecond FILETIME tick count.
@@ -157,6 +197,19 @@ impl WallFileTime {
         Some(WallUnixMs((unix_ticks / FILETIME_TICKS_PER_MS) as u64))
     }
 
+    /// Converts [`WallFileTime`] ticks back into whole Unix seconds rounded down, returning `None`
+    /// if the timestamp predates `1970-01-01T00:00:00Z` or underflows `i64`.
+    #[must_use]
+    pub const fn to_unix_secs_floor(self) -> Option<u64> {
+        let Some(unix_ticks) = self.0.checked_sub(FILETIME_UNIX_EPOCH_OFFSET_TICKS) else {
+            return None;
+        };
+        if unix_ticks < 0 {
+            return None;
+        }
+        Some((unix_ticks / FILETIME_TICKS_PER_SEC) as u64)
+    }
+
     /// Adds `delta_ticks` using checked arithmetic.
     #[must_use]
     pub const fn checked_add_ticks(self, delta_ticks: i64) -> Option<Self> {
@@ -173,6 +226,30 @@ impl WallFileTime {
             Some(ticks) => Some(Self(ticks)),
             None => None,
         }
+    }
+
+    /// Adds `delta_ticks` using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_add_ticks(self, delta_ticks: i64) -> Self {
+        Self(self.0.saturating_add(delta_ticks))
+    }
+
+    /// Subtracts `delta_ticks` using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_sub_ticks(self, delta_ticks: i64) -> Self {
+        Self(self.0.saturating_sub(delta_ticks))
+    }
+
+    /// Adds whole wall seconds (`secs`) using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_add_secs(self, secs: i64) -> Self {
+        Self(self.0.saturating_add(secs.saturating_mul(FILETIME_TICKS_PER_SEC)))
+    }
+
+    /// Subtracts whole wall seconds (`secs`) using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_sub_secs(self, secs: i64) -> Self {
+        Self(self.0.saturating_sub(secs.saturating_mul(FILETIME_TICKS_PER_SEC)))
     }
 
     /// Returns the signed tick difference `self - earlier`, or `None` on overflow.
@@ -255,6 +332,15 @@ impl SimDilatedMs {
         }
     }
 
+    /// Converts dilated simulation milliseconds into [`SimFileTime`] ticks, saturating at `i64::MAX`.
+    #[must_use]
+    pub const fn to_sim_filetime_saturating(self) -> SimFileTime {
+        match self.to_sim_filetime() {
+            Some(ft) => ft,
+            None => SimFileTime(i64::MAX),
+        }
+    }
+
     /// Converts dilated simulation milliseconds into an epoch-derived [`DestinyStamp`], returning
     /// `None` if whole seconds exceed `u32::MAX`.
     #[must_use]
@@ -303,6 +389,9 @@ impl SimDilatedMs {
 pub struct SimFileTime(pub i64);
 
 impl SimFileTime {
+    /// Zero Windows FILETIME (`1601-01-01T00:00:00Z`) in the simulation clock domain.
+    pub const ZERO: Self = Self(0);
+
     /// Constructs a [`SimFileTime`] from raw 100-nanosecond simulation ticks.
     #[must_use]
     pub const fn from_ticks(ticks: i64) -> Self {
@@ -344,6 +433,41 @@ impl SimFileTime {
             Some(ticks) => Some(Self(ticks)),
             None => None,
         }
+    }
+
+    /// Adds `delta_ticks` using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_add_ticks(self, delta_ticks: i64) -> Self {
+        Self(self.0.saturating_add(delta_ticks))
+    }
+
+    /// Subtracts `delta_ticks` using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_sub_ticks(self, delta_ticks: i64) -> Self {
+        Self(self.0.saturating_sub(delta_ticks))
+    }
+
+    /// Adds dilated simulation seconds using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_add_secs(self, secs: i64) -> Self {
+        Self(self.0.saturating_add(secs.saturating_mul(FILETIME_TICKS_PER_SEC)))
+    }
+
+    /// Subtracts dilated simulation seconds using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_sub_secs(self, secs: i64) -> Self {
+        Self(self.0.saturating_sub(secs.saturating_mul(FILETIME_TICKS_PER_SEC)))
+    }
+
+    /// Adds dilated simulation milliseconds using saturating arithmetic.
+    #[must_use]
+    pub const fn saturating_add_ms(self, ms: u64) -> Self {
+        let clamped_ms = if ms > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            ms as i64
+        };
+        Self(self.0.saturating_add(clamped_ms.saturating_mul(FILETIME_TICKS_PER_MS)))
     }
 
     /// Returns the signed tick difference `self - earlier`, or `None` on overflow.

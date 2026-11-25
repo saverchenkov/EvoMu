@@ -7,8 +7,9 @@ use crate::router::notify_registry::{
     OnCrimewatchEngagementCreated, OnCrimewatchEngagementUpdated,
     OnDisapprovalTimerUpdate, OnDuelChallenge, OnKillRightActivated, OnKillRightForYouSold,
     OnKillRightSold, OnKillRightUsed, OnNpcTimerUpdate, OnSafetyLevelChanged,
-    OnSecurityStatusUpdate,
+    OnSecurityStatusUpdate, ToNotifyArg,
 };
+use eve_db::clock::SimFileTime;
 
 /// Ensures both duel participants are online, undocked, and in the same non-zero solar system.
 fn validate_duel_participants_in_same_space_system(
@@ -209,7 +210,7 @@ pub fn evaluate_remote_assistance_legality(
 }
 
 struct ComputedCrimewatchTimerStates {
-    timers: [(i64, PyRep); 5],
+    timers: [(i64, Option<SimFileTime>); 5],
     sigs: (i64, i64, i64, i64, i64),
     next_trig: [u64; 5],
     prev_opt: Option<(i64, i64, i64, i64, i64)>,
@@ -218,13 +219,7 @@ struct ComputedCrimewatchTimerStates {
 impl Default for ComputedCrimewatchTimerStates {
     fn default() -> Self {
         Self {
-            timers: [
-                (0, PyRep::None),
-                (0, PyRep::None),
-                (0, PyRep::None),
-                (0, PyRep::None),
-                (0, PyRep::None),
-            ],
+            timers: [(0, None), (0, None), (0, None), (0, None), (0, None)],
             sigs: (0, 0, 0, 0, 0),
             next_trig: [0; 5],
             prev_opt: None,
@@ -247,7 +242,6 @@ fn compute_crimewatch_timer_states_with_state(
     st: &crate::combat::CharacterCrimeWatchState,
     now_unix: u64,
 ) -> ComputedCrimewatchTimerStates {
-    let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
     let (npc_exp, dis_exp, prev_opt, trig_at) = with_combat_runtime(ctx, |rt| (
         rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp),
         rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp),
@@ -256,7 +250,7 @@ fn compute_crimewatch_timer_states_with_state(
     ));
     let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
     let mut next_trig = trig_at;
-    let eval = |slot: usize, prev_sig: i64, exp: u64, active_c: i64, cd_c: i64, nt: &mut [u64; 5]| -> (i64, PyRep, i64) {
+    let eval = |slot: usize, prev_sig: i64, exp: u64, active_c: i64, cd_c: i64, nt: &mut [u64; 5]| -> (i64, Option<SimFileTime>, i64) {
         let same_exp = (prev_sig >> 40) != 0 && (prev_sig & 0xFF_FFFF_FFFF) as u64 == exp;
         let c = if same_exp {
             if now_unix > nt[slot] { cd_c } else { active_c }
@@ -264,25 +258,26 @@ fn compute_crimewatch_timer_states_with_state(
             nt[slot] = now_unix;
             active_c
         };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
+        let exp_sim = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, exp);
+        (c, Some(exp_sim), (c << 40) | (exp as i64))
     };
     let (wc, wv, ws) = if st.is_weapon_timer_active(now_unix) {
         eval(0, prev.0, st.weapon_timer_until_unix, 101, 102, &mut next_trig)
-    } else { next_trig[0] = 0; (100, PyRep::None, 100) };
+    } else { next_trig[0] = 0; (100, None, 100) };
     let (pc, pv, ps) = if st.is_pvp_active(now_unix) {
         eval(1, prev.1, st.pvp_timer_until_unix, 201, 202, &mut next_trig)
-    } else { next_trig[1] = 0; (200, PyRep::None, 200) };
+    } else { next_trig[1] = 0; (200, None, 200) };
     let (nc, nv, ns) = if let Some(exp) = npc_exp {
         eval(2, prev.2, exp, 401, 402, &mut next_trig)
-    } else { next_trig[2] = 0; (400, PyRep::None, 400) };
+    } else { next_trig[2] = 0; (400, None, 400) };
     let (cc, cv, cs) = if st.is_criminal(now_unix) {
         eval(3, prev.3, st.criminal_flag_until_unix, 301, 303, &mut next_trig)
     } else if st.is_suspect(now_unix) {
         eval(3, prev.3, st.suspect_flag_until_unix, 302, 304, &mut next_trig)
-    } else { next_trig[3] = 0; (300, PyRep::None, 300) };
+    } else { next_trig[3] = 0; (300, None, 300) };
     let (dc, dv, ds) = if let Some(exp) = dis_exp {
         eval(4, prev.4, exp, 501, 502, &mut next_trig)
-    } else { next_trig[4] = 0; (500, PyRep::None, 500) };
+    } else { next_trig[4] = 0; (500, None, 500) };
     ComputedCrimewatchTimerStates {
         timers: [(wc, wv), (pc, pv), (nc, nv), (cc, cv), (dc, dv)],
         sigs: (ws, ps, ns, cs, ds),
@@ -292,7 +287,7 @@ fn compute_crimewatch_timer_states_with_state(
 }
 
 /// Pushes `OnWeaponsTimerUpdate`, `OnPvpTimerUpdate`, `OnNpcTimerUpdate`, and `OnCriminalTimerUpdate`
-/// (`(state, expiryTime)` with Windows FILETIME expiry) to `char_id` on timer state changes (`feat:crimewatch.crimewatch-states`).
+/// (`(state, expiryTime)` with Windows `SimFileTime` expiry) to `char_id` on timer state changes (`feat:crimewatch.crimewatch-states`).
 pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, now_unix: u64) {
     let st = ctx.crimewatch.state_of(char_id).unwrap_or_default();
     emit_crimewatch_timer_notifications_with_state(ctx, char_id, &st, now_unix);
@@ -325,16 +320,16 @@ pub fn emit_crimewatch_timer_notifications_with_state(
             return;
         }
     }
-    let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
+    let mut updates: Vec<(&str, i64, Option<SimFileTime>)> = Vec::new();
     let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
     let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
     with_mut_combat_runtime(ctx, |rt| {
         if prev_opt.is_none() && is_all_idle { return; }
-        if prev.0 != weap_sig && !(prev.0 == 0 && weap_code == 100) { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
-        if prev.1 != pvp_sig && !(prev.1 == 0 && pvp_code == 200) { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
-        if prev.2 != npc_sig && !(prev.2 == 0 && npc_code == 400) { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
+        if prev.0 != weap_sig && !(prev.0 == 0 && weap_code == 100) { updates.push(("OnWeaponsTimerUpdate", weap_code, weap_val)); }
+        if prev.1 != pvp_sig && !(prev.1 == 0 && pvp_code == 200) { updates.push(("OnPvpTimerUpdate", pvp_code, pvp_val)); }
+        if prev.2 != npc_sig && !(prev.2 == 0 && npc_code == 400) { updates.push(("OnNpcTimerUpdate", npc_code, npc_val)); }
         if prev.3 != crim_sig && !(prev.3 == 0 && crim_code == 300) {
-            updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
+            updates.push(("OnCriminalTimerUpdate", crim_code, crim_val));
             let prev_c = prev.3 >> 40;
             if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
                 crim_transition = Some((vec![], vec![], vec![char_id]));
@@ -345,7 +340,7 @@ pub fn emit_crimewatch_timer_notifications_with_state(
             }
         }
         if prev.4 != dis_sig && !(prev.4 == 0 && dis_code == 500) {
-            updates.push(("OnDisapprovalTimerUpdate", vec![PyRep::Integer(dis_code), dis_val]));
+            updates.push(("OnDisapprovalTimerUpdate", dis_code, dis_val));
             let prev_d = prev.4 >> 40;
             if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {
                 dis_transition = Some((vec![], vec![char_id]));
@@ -361,30 +356,48 @@ pub fn emit_crimewatch_timer_notifications_with_state(
             rt.crimewatch_timer_triggered_at.insert(char_id, next_trig);
         }
     });
-    for (ev, mut a) in updates {
-        let code_fn = |a: &mut Vec<PyRep>, def: i64| (a.pop().unwrap_or(PyRep::None), a.pop().and_then(|v| v.as_i64()).unwrap_or(def));
+    for (ev, code, expiry_time) in updates {
         match ev {
-            "OnWeaponsTimerUpdate" => { let (exp, c) = code_fn(&mut a, 100); crate::services::notify_emitters_fleet_combat::emit_weapons_timer_update(ctx, char_id, c, exp); }
-            "OnPvpTimerUpdate" => { let (exp, c) = code_fn(&mut a, 200); crate::services::notify_emitters_fleet_combat::emit_pvp_timer_update(ctx, char_id, c, exp); }
-            "OnCriminalTimerUpdate" => { let (exp, c) = code_fn(&mut a, 300); crate::services::notify_emitters_fleet_combat::emit_criminal_timer_update(ctx, char_id, c, exp); }
+            "OnWeaponsTimerUpdate" => {
+                crate::services::notify_emitters_fleet_combat::emit_weapons_timer_update(
+                    ctx,
+                    char_id,
+                    code,
+                    expiry_time,
+                );
+            }
+            "OnPvpTimerUpdate" => {
+                crate::services::notify_emitters_fleet_combat::emit_pvp_timer_update(
+                    ctx,
+                    char_id,
+                    code,
+                    expiry_time,
+                );
+            }
+            "OnCriminalTimerUpdate" => {
+                crate::services::notify_emitters_fleet_combat::emit_criminal_timer_update(
+                    ctx,
+                    char_id,
+                    code,
+                    expiry_time,
+                );
+            }
             "OnNpcTimerUpdate" => {
-                let (exp, c) = code_fn(&mut a, 400);
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnNpcTimerUpdate {
-                        state: c,
-                        expiry_time: exp,
+                        state: code,
+                        expiry_time,
                         do_alert: None,
                     },
                 );
             }
             "OnDisapprovalTimerUpdate" => {
-                let (exp, c) = code_fn(&mut a, 500);
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnDisapprovalTimerUpdate {
-                        state: c,
-                        expiry_time: exp,
+                        state: code,
+                        expiry_time,
                         do_alert: None,
                     },
                 );
@@ -1013,7 +1026,7 @@ pub async fn handle_crimewatch(
                 PyRep::Tuple(
                     timers
                         .into_iter()
-                        .map(|(code, val)| PyRep::Tuple(vec![PyRep::Integer(code), val]))
+                        .map(|(code, val)| PyRep::Tuple(vec![PyRep::Integer(code), val.into_notify_arg()]))
                         .collect(),
                 ),
                 PyRep::Dict(le_entries),
@@ -1153,7 +1166,7 @@ pub async fn handle_crimewatch(
                     Err(e) => return Some(Err(e)),
                 };
             let now_unix = ctx.now_unix();
-            let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
+            let expiry_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(60);
             if let Err(err) = ctx.db.try_with_mut_snapshot(|snap| {
                 if snap
                     .combat_crimewatch_state
@@ -1359,7 +1372,7 @@ pub async fn handle_crimewatch(
                     }
                     RespondAcceptOutcome::Accepted => {}
                 }
-                let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+                let timeout_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(300);
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnCrimewatchEngagementCreated {
@@ -1591,7 +1604,7 @@ pub fn evaluate_and_record_pvp_aggression(
             now_unix,
         );
         if le_created {
-            let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+            let timeout_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(300);
             ctx.emit_typed(
                 NotificationTarget::Character(attacker_char_id),
                 OnCrimewatchEngagementCreated {
@@ -1744,7 +1757,7 @@ pub fn evaluate_and_record_remote_assistance(
                 add_mutual_limited_engagement_in_snap(snap, helper_char_id, pid, now_unix);
             }
         });
-        let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+        let timeout_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(300);
         for &pid in &ben_le_partners {
             ctx.emit_typed(
                 NotificationTarget::Character(helper_char_id),

@@ -821,14 +821,10 @@ pub(crate) fn emit_mining_godma_and_special_fx(
     active: bool,
     duration_ms: u64,
 ) {
-    let now_ft = ctx.now_system_sim_filetime_ticks(Some(solar_system_id));
+    let now_ft = ctx.now_system_sim_filetime(Some(solar_system_id));
     let flag = i64::from(active);
     let repeat = if active { 1000_i64 } else { 0_i64 };
-    let actual_stop_time = if active {
-        PyRep::None
-    } else {
-        PyRep::Integer(now_ft)
-    };
+    let actual_stop_time = if active { None } else { Some(now_ft) };
     let environment = PyRep::Tuple(vec![
         PyRep::Integer(module_id),
         PyRep::Integer(char_id),
@@ -845,11 +841,11 @@ pub(crate) fn emit_mining_godma_and_special_fx(
         crate::router::notify_registry::OnGodmaShipEffect {
             item_id: module_id,
             effect: PyRep::Integer(effect_id),
-            start_or_time: PyRep::Integer(now_ft),
+            start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::SimTime(now_ft),
             start: Some(PyRep::Integer(flag)),
             active: Some(PyRep::Integer(flag)),
             environment: Some(environment),
-            start_time: Some(PyRep::Integer(now_ft)),
+            start_time: Some(now_ft),
             duration: Some(PyRep::Integer(duration_ms as i64)),
             repeat: Some(PyRep::Integer(repeat)),
             error: Some(PyRep::None),
@@ -871,7 +867,7 @@ pub(crate) fn emit_mining_godma_and_special_fx(
             active: flag,
             duration: duration_ms as f64,
             repeat,
-            start_time: now_ft,
+            start_time: now_ft.as_ticks(),
             time_from_start: 0.0,
             graphic_info: None,
         };

@@ -277,7 +277,7 @@ fn build_combat_state_and_deposit_loot_cover_fallback_and_container_branches() {
 #[test]
 fn build_interference_state_keyval_and_gate_access_cover_all_bands() {
     for (band, expected_label) in [(1_u8, "Low"), (2_u8, "Medium"), (3_u8, "High")] {
-        let kv = build_interference_state_keyval(30_000_142, 0.5, band);
+        let kv = build_interference_state_keyval_at(30_000_142, 0.5, band, 1_775_000_000);
         assert_eq!(
             kv.dict_get("bandLabel").and_then(|v| v.as_str()),
             Some(expected_label)

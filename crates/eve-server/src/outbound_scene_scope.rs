@@ -849,7 +849,7 @@ impl ServerContext {
             }
             _ => None,
         };
-        let now_ticks = self.now_system_sim_filetime_ticks(sys_opt);
+        let now_sim = self.now_system_sim_filetime(sys_opt);
         let flag = if active { 1 } else { 0 };
         let env = PyRep::Tuple(vec![
             PyRep::Integer(item_id), PyRep::None, PyRep::Integer(item_id),
@@ -862,16 +862,24 @@ impl ServerContext {
         } else {
             None
         };
+        let notif = crate::router::notify_registry::OnGodmaShipEffect {
+            item_id,
+            effect: PyRep::Integer(effect_id as i64),
+            start_or_time: crate::router::notify_registry::GodmaEffectStartOrTime::SimTime(now_sim),
+            start: Some(PyRep::Integer(flag)),
+            active: Some(PyRep::Integer(flag)),
+            environment: Some(env),
+            start_time: Some(now_sim),
+            duration: Some(PyRep::Real((duration_ms.max(0)) as f64)),
+            repeat: Some(PyRep::Integer(repeat as i64)),
+            error: Some(PyRep::Integer(0)),
+            actual_stop_time: Some(None),
+        };
         self.notify_in_scene(
             target,
-            "OnGodmaShipEffect",
-            "charid",
-            vec![
-                PyRep::Integer(item_id), PyRep::Integer(effect_id as i64), PyRep::Integer(now_ticks),
-                PyRep::Integer(flag), PyRep::Integer(flag), env, PyRep::Integer(now_ticks),
-                PyRep::Real((duration_ms.max(0)) as f64), PyRep::Integer(repeat as i64),
-                PyRep::Integer(0), PyRep::None,
-            ],
+            <crate::router::notify_registry::OnGodmaShipEffect as crate::router::notify_registry::TypedNotification>::EVENT,
+            <crate::router::notify_registry::OnGodmaShipEffect as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
+            crate::router::notify_registry::TypedNotification::into_args(notif),
             scope,
         )
     }

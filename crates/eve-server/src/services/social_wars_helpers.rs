@@ -8,9 +8,10 @@ pub(crate) use crate::domain::wars::{
     entity_matches_war_owner, is_ally_neg_active_at, resolve_entity_alliance_id,
 };
 pub(super) use crate::domain::wars::{
-    already_at_war, corp_represents_war_side, same_alliance, unix_to_filetime,
-    WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
+    already_at_war, corp_represents_war_side, opt_unix_to_wall_filetime, same_alliance,
+    unix_to_wall_filetime, WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
 };
+use eve_db::clock::WallFileTime;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 #[cfg(test)]
 use eve_db::IskCents;
@@ -245,9 +246,14 @@ pub(super) fn emit_war_changed(
     }
 }
 
+#[inline]
+pub(super) fn wall_ft_py(ft: WallFileTime) -> PyRep {
+    PyRep::Integer(ft.as_ticks())
+}
+
 pub(super) fn opt_unix_to_filetime_py(unix_secs: Option<u64>) -> PyRep {
-    unix_secs
-        .map(|t| PyRep::Integer(unix_to_filetime(t)))
+    opt_unix_to_wall_filetime(unix_secs)
+        .map(wall_ft_py)
         .unwrap_or(PyRep::None)
 }
 
@@ -259,8 +265,8 @@ pub(super) fn war_row(w: &WarRecord, meta: &WarMeta, now: u64) -> Vec<PyRep> {
         PyRep::Integer(w.war_id),
         PyRep::Integer(w.aggressor_corp_id),
         PyRep::Integer(w.defender_corp_id),
-        PyRep::Integer(unix_to_filetime(w.started_unix)),
-        PyRep::Integer(unix_to_filetime(started)),
+        wall_ft_py(unix_to_wall_filetime(w.started_unix)),
+        wall_ft_py(unix_to_wall_filetime(started)),
         opt_unix_to_filetime_py(meta.finish_at_unix),
         PyRep::Bool(w.mutual),
         PyRep::Bool(meta.open_for_allies),

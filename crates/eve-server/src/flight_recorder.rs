@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const MAX_HISTORY_PER_SESSION: usize = 30;
 pub const MAX_OUTBOUND_LEDGER_PER_SESSION: usize = 500;
@@ -38,10 +38,7 @@ fn is_valid_rpc_latency_segment(segment: &str) -> bool {
 }
 
 fn now_unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    eve_db::WallUnixMs::system_now().as_millis()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

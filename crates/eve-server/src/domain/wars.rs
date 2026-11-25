@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use crate::domain::DomainError;
-use eve_db::clock::{FILETIME_TICKS_PER_SEC, FILETIME_UNIX_EPOCH_DIFF_SECS, WallUnixMs};
+use eve_db::clock::WallFileTime;
 use eve_db::snapshot_ext::WarAllyRecord;
 use eve_db::{
     IskCents, PersistedNegKind, PersistedPeaceTreaty, PersistedWarMeta, PersistedWarNegotiation,
@@ -71,26 +71,28 @@ impl AllyNegotiationAction {
     }
 }
 
+/// Converts Unix epoch seconds (`>= 0`) into a strongly-typed [`WallFileTime`].
+#[inline]
+pub const fn unix_to_wall_filetime(unix_secs: u64) -> WallFileTime {
+    WallFileTime::from_unix_secs_saturating(unix_secs)
+}
+
+/// Converts an optional Unix timestamp into an optional [`WallFileTime`].
+#[inline]
+pub fn opt_unix_to_wall_filetime(unix_secs: Option<u64>) -> Option<WallFileTime> {
+    unix_secs.map(unix_to_wall_filetime)
+}
+
 /// Converts Unix epoch seconds (`>= 0`) into Windows FILETIME ticks (`100ns` since `1601-01-01 UTC`).
 #[inline]
 pub fn unix_to_filetime(unix_secs: u64) -> i64 {
-    WallUnixMs::checked_from_secs(unix_secs)
-        .and_then(|ms| ms.to_wall_filetime())
-        .map_or_else(
-            || {
-                i64::try_from(unix_secs)
-                    .unwrap_or(i64::MAX)
-                    .saturating_add(FILETIME_UNIX_EPOCH_DIFF_SECS)
-                    .saturating_mul(FILETIME_TICKS_PER_SEC)
-            },
-            |ft| ft.as_ticks(),
-        )
+    unix_to_wall_filetime(unix_secs).as_ticks()
 }
 
 /// Converts an optional Unix timestamp into Windows FILETIME ticks.
 #[inline]
 pub fn opt_unix_to_filetime(unix_secs: Option<u64>) -> Option<i64> {
-    unix_secs.map(unix_to_filetime)
+    opt_unix_to_wall_filetime(unix_secs).map(WallFileTime::as_ticks)
 }
 
 /// Resolves the positive alliance ID for a corporation (`CorporationRecord::alliance_id`)
@@ -1501,11 +1503,13 @@ mod tests {
 
     #[test]
     fn unix_to_filetime_matches_windows_epoch_ticks() {
+        assert_eq!(unix_to_wall_filetime(0), WallFileTime::UNIX_EPOCH);
         assert_eq!(unix_to_filetime(0), 116_444_736_000_000_000);
         assert_eq!(
             unix_to_filetime(1_760_000_000),
             (1_760_000_000_i64 + 11_644_473_600) * 10_000_000
         );
+        assert_eq!(opt_unix_to_wall_filetime(None), None);
         assert_eq!(opt_unix_to_filetime(None), None);
         assert_eq!(
             opt_unix_to_filetime(Some(1_760_000_000)),

@@ -1048,16 +1048,15 @@ fn emit_cluster_shutdown_initiated(
 ) -> Vec<crate::router::cache_notifications::PendingMachoNotification> {
     // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments
     // and requires `when > blue.os.GetWallclockTime()` for `FormatTimeIntervalWritten`.
-    // Rebase virtual `now_unix` timestamps into client wallclock time (`now_unix - unrebased_clock_offset_secs`),
-    // matching `machoNet.GetTime` and `SafeLogoffTimer2` when `timeControl.AdvanceClock` has shifted sim time.
-    let effective_when_unix = shutdown_when_unix
-        .max(ctx.now_unix().saturating_add(60))
-        .saturating_sub(ctx.unrebased_clock_offset_secs());
+    // Rebase virtual `now_unix` timestamps into client wallclock `WallFileTime` (`now_unix - unrebased_clock_offset_secs`),
+    // matching `machoNet.GetTime` and `SafeLogoffTimer2` when `timeControl.AdvanceClock` has shifted sim time (#1586).
+    let effective_when_unix = shutdown_when_unix.max(ctx.now_unix().saturating_add(60));
+    let when = ctx.virtual_unix_to_machonet_wall_filetime(effective_when_unix);
     ctx.emit_typed(
         NotificationTarget::All,
         crate::router::notify_registry::OnClusterShutdownInitiated {
             explanation_label: "UI/Shared/ShutdownNotificationTitle".into(),
-            when: unix_to_filetime(effective_when_unix),
+            when,
             duration: duration_minutes,
         },
     )
