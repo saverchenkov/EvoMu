@@ -1,9 +1,10 @@
 //! `Ballpark` spatial grid management, ball lifecycle, warp bubbles, cloaking, MJD/MJFG, and target locking.
 
 use crate::{
-    Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, GridBubble, MovementMode,
-    SlimItemMeta, SpecialFxWireMeta, StargateActivationState, WarpBubble, WarpBubbleMgr,
-    WarpPhase, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
+    capital_ship_catalog_for_sde, Ball, BallId, Ballpark, CapitalShipCatalog, CombatState,
+    DamageVector, DestinyEvent, GridBubble, MovementMode, SlimItemMeta, SpecialFxWireMeta,
+    StargateActivationState, WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS,
+    BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
     GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
     STARGATE_ACTIVATION_STATE_ACTIVATING, STARGATE_ACTIVATION_STATE_CLOSED,
     STARGATE_ACTIVATION_STATE_OPEN,

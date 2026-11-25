@@ -518,7 +518,7 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     let PyRep::List(done_p2_list) = rpc(&ctx, &mut sess2, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
     let done_p2: HashSet<i64> = done_p2_list.iter().filter_map(|x| x.as_i64()).collect();
     if let Some((&rw_isk_op, &op_isk)) = defs.op_isk_rewards.iter().filter(|(&oid, &isk)| {
-        isk > 0 && !done_p2.contains(&oid) && is_supported_op(defs, oid)
+        isk > 0 && !done_p2.contains(&oid) && is_supported_op(&defs, oid)
             && defs.op_tasks.get(&oid).is_some_and(|ts| ts.iter().any(|t| defs.task_event_names.get(t).is_some_and(|e| !e.starts_with("client_"))))
     }).min_by_key(|(oid, _)| *oid) {
         let isk_cat = defs.op_default_category.get(&rw_isk_op).copied().unwrap_or(31);
@@ -529,8 +529,8 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
         assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_2).unwrap().balance.0) - bal_pre, (op_isk as i64) * 100);
         assert!(ctx.drain_notifications_for_char(PILOT_2).iter().any(|n| n.event == "OnAccountChange"));
     }
-    let rw_cat_id = defs.cat_isk_rewards.iter().filter(|(cid, isk)| **isk > 0 && defs.cat_operation_trees.get(cid).is_some_and(|t| !t.is_empty() && t.iter().all(|&o| is_supported_op(defs, o)))).map(|(c, _)| *c).min()
-        .or_else(|| defs.cat_operation_trees.iter().filter(|(&cid, t)| cid != 31 && t.len() >= 2 && t.iter().all(|&o| is_supported_op(defs, o))).min_by_key(|(_, t)| t.len()).map(|(&c, _)| c)).expect("multi-op SDE category");
+    let rw_cat_id = defs.cat_isk_rewards.iter().filter(|(cid, isk)| **isk > 0 && defs.cat_operation_trees.get(cid).is_some_and(|t| !t.is_empty() && t.iter().all(|&o| is_supported_op(&defs, o)))).map(|(c, _)| *c).min()
+        .or_else(|| defs.cat_operation_trees.iter().filter(|(&cid, t)| cid != 31 && t.len() >= 2 && t.iter().all(|&o| is_supported_op(&defs, o))).min_by_key(|(_, t)| t.len()).map(|(&c, _)| c)).expect("multi-op SDE category");
     let cat_isk = defs.cat_isk_rewards.get(&rw_cat_id).copied().unwrap_or(0);
     let bal_pre_cat = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(rw_cat_id)]).await.unwrap_err().code, "OperationCategoryIncomplete"); // rpc-lint: allow error code assertion

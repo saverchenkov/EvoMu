@@ -652,7 +652,7 @@ fn collect_live_market_adjusted_prices_with_lookup(
                     out.insert(tid, price);
                 }
             }
-        }
+        };
     }
     out
 }
@@ -673,7 +673,7 @@ fn compute_market_adjusted_price_with_lookup(
                     return Some(price);
                 }
             }
-        }
+        };
     }
     compute_adjusted_price_from_history(
         base_lookup(type_id),

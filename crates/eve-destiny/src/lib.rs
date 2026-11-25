@@ -2184,12 +2184,12 @@ impl CapitalShipCatalog {
 pub fn capital_ship_catalog_for_sde(
     sde: &eve_sde::SdeRegistry,
 ) -> std::sync::Arc<CapitalShipCatalog> {
-    #[derive(Clone)]
     struct CachedCapitalShipCatalog(std::sync::Arc<CapitalShipCatalog>);
     sde.get_or_init_derived(|| {
         CachedCapitalShipCatalog(std::sync::Arc::new(CapitalShipCatalog::from_sde(sde)))
     })
     .0
+    .clone()
 }
 #[cfg(test)] #[path = "destiny_lib_unit_tests.rs"] mod destiny_lib_unit_tests;
 

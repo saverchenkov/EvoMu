@@ -28,7 +28,7 @@ fn test_operations_manager_helpers_defs_rewards_and_server_events() {
         let rw = grant_operation_activation_rewards(
             snap,
             rec,
-            defs,
+            &defs,
             1,
             char_id,
             Some(60_003_760),
