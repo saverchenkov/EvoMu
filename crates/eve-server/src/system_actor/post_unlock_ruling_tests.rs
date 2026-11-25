@@ -154,7 +154,8 @@ async fn ruling_w5_nanite_repair_cancel_queued_behind_earlier_tick_applies_once_
     // Queue earlier NaniteRepairTick (`10 - 6 = 4` paste, `DAMAGE = 95.0`) ahead of cancel (`+4 = 8` paste, `DAMAGE = 40.0`).
     let mut earlier_ops = PostUnlockOps::default();
     earlier_ops.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp {
-        char_id, ship_id, module_id: mod_id, paste_delta: 6, rem_dmg: 95.0,
+        char_id, ship_id, module_id: mod_id, paste_delta: 6,
+        initial_damage_hp: 100.0, paste_total_needed: 10, rem_dmg: 95.0, done_now: false,
     }));
     sys.post_unlock_tx.send(PostUnlockMsg::Work(PostUnlockWorkItem {
         db_opt: Some(Arc::clone(&ctx.db)), sde_opt: Some(Arc::clone(&ctx.sde)),
@@ -438,23 +439,48 @@ async fn bf3_empty_ops_take_ball_flush_checkpoint_and_apply_step_output_wait_fif
     assert_eq!(ctx.db.with_snapshot(|s| s.item_positions.get(&ship_a).copied()), Some([p1.x, p1.y, p1.z]));
 }
 
-/// `BF-4`: Nanite repair defers under DB contention, prevents free repair on shortfall, and never mints paste.
+async fn pause_post_unlock_worker(
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    cyc_id: i64,
+) -> (std::sync::mpsc::Sender<()>, tokio::task::JoinHandle<Result<(), String>>) {
+    let (arr_tx, arr_rx) = tokio::sync::oneshot::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let arr_tx = std::sync::Mutex::new(Some(arr_tx));
+    let go_rx = std::sync::Mutex::new(go_rx);
+    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_, _, _| {
+        if let Some(tx) = arr_tx.lock().unwrap().take() { let _ = tx.send(()); }
+        let _ = go_rx.lock().unwrap().recv();
+    }));
+    sys.add_module_cycle(ActiveModuleCycle {
+        ship_id, owner_char_id: Some(char_id), module_id: cyc_id, module_type_id: 11578,
+        effect_name: "cloaking".into(), duration_s: 10.0, repeat: 1, ..ActiveModuleCycle::default()
+    }).await.unwrap();
+    let stop_fut = tokio::spawn({ let s = sys.clone(); async move { s.stop_non_warp_module_cycles(ship_id).await } });
+    arr_rx.await.unwrap();
+    (go_tx, stop_fut)
+}
+
+/// `BF-4` + `BF-1170-1A-01`: Nanite contention defer, `deducted == 0` -> partial/full Tick 2 recovery,
+/// `with_snapshot` shortfall visibility, `done_now` cleanup, and zero free repair or paste minting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bf4_nanite_repair_paste_conservation_defers_contention_and_prevents_free_repair_or_minting() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (char_id, ship_id, mod_a, mod_b, cyc_id, paste_id) =
-        (90_000_001_i64, 778_203_001_i64, 778_203_002_i64, 778_203_003_i64, 778_203_099_i64, 778_203_004_i64);
-
+    let (char_id, ship_id, mod_a, mod_b, mod_c, cyc_id, paste_id) = (
+        90_000_001_i64, 778_203_001_i64, 778_203_002_i64, 778_203_003_i64,
+        778_203_005_i64, 778_203_099_i64, 778_203_004_i64,
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(ship_id, make_item(ship_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1));
-        for (mid, dmg) in [(mod_a, 100.0), (mod_b, 90.0)] {
+        for (mid, dmg) in [(mod_a, 100.0), (mod_b, 90.0), (mod_c, 50.0)] {
             let mut m = make_item(mid, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1);
             m.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, dmg);
             snap.items.insert(mid, m);
         }
-        snap.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 10));
+        snap.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 4));
     });
     sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
     sys.actor_state.write().unwrap().active_nanite_repairs.push(ActiveNaniteRepair {
@@ -462,95 +488,94 @@ async fn bf4_nanite_repair_paste_conservation_defers_contention_and_prevents_fre
         elapsed_s: 0.0, paste_total_needed: 10, paste_consumed_so_far: 0,
     });
 
-    // Part A: published.write() held -> try_with_snapshot returns None -> Defer keeps elapsed_s=0 & paste_consumed=0.
+    // Part A: published.write() held -> Defer keeps elapsed_s=0 & paste_consumed=0.
     {
         let _pub = ctx.db.hold_published_write_for_test();
-        let mut virtual_used = HashMap::new();
-        let mut ops = PostUnlockOps::default();
+        let (mut virtual_used, mut ops) = (HashMap::new(), PostUnlockOps::default());
         let mut st = sys.actor_state.write().unwrap();
         let res = super::collect_nanite_repair_tick(
-            &ctx.db, &mut st.active_nanite_repairs[0], 5.0, 0.5, 5, &mut virtual_used, &mut ops,
+            &ctx.db, &mut st.active_nanite_repairs[0], 4.0, 0.4, 4, &mut virtual_used, &mut ops,
         );
-        assert!(matches!(res, super::NaniteTickCollect::Defer));
-        assert!(ops.is_empty());
+        assert!(matches!(res, super::NaniteTickCollect::Defer) && ops.is_empty());
         assert_eq!(st.active_nanite_repairs[0].paste_consumed_so_far, 0);
         assert!(st.active_nanite_repairs[0].elapsed_s.abs() < 1e-9);
     }
 
-    // Unlocked: consumes 5 paste and repairs mod_a to DAMAGE=50.0.
-    sys.step_manual_tick_only(5.0).await.unwrap();
-    let (qty_mid, dmg_mid) = ctx.db.with_snapshot(|s| (
-        s.items.get(&paste_id).map(|i| i.quantity).unwrap_or(0),
-        s.items[&mod_a].dynamic_attributes[&eve_sde::attr_ids::DAMAGE],
-    ));
-    assert_eq!(qty_mid, 5);
-    assert!((dmg_mid - 50.0).abs() < 1e-6, "dmg_mid={dmg_mid}");
-
-    // Part B: Race cargo paste from 5 -> 1 after actor tick collection -> proportional repair (10 HP) + shortfall=4.
-    let pause_worker = |sys: crate::system_actor::SystemHandle| async move {
-        let (arr_tx, arr_rx) = tokio::sync::oneshot::channel();
-        let (go_tx, go_rx) = std::sync::mpsc::channel();
-        let arr_tx = std::sync::Mutex::new(Some(arr_tx));
-        let go_rx = std::sync::Mutex::new(go_rx);
-        *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_, _, _| {
-            if let Some(tx) = arr_tx.lock().unwrap().take() { let _ = tx.send(()); }
-            let _ = go_rx.lock().unwrap().recv();
-        }));
-        sys.add_module_cycle(ActiveModuleCycle {
-            ship_id, owner_char_id: Some(char_id), module_id: cyc_id, module_type_id: 11578,
-            effect_name: "cloaking".into(), duration_s: 10.0, repeat: 1, ..ActiveModuleCycle::default()
-        }).await.unwrap();
-        let stop_fut = tokio::spawn({ let s = sys.clone(); async move { s.stop_non_warp_module_cycles(ship_id).await } });
-        arr_rx.await.unwrap();
-        (go_tx, stop_fut)
-    };
-
-    let (go_tx, stop_fut) = pause_worker(sys.clone()).await;
-    let step_fut = tokio::spawn({ let s = sys.clone(); async move { s.step_manual_tick_only(5.0).await } });
-    wait_until("mod_a tick never queued", || sys.actor_state.read().unwrap().active_nanite_repairs.is_empty()).await;
-    *sys.module_deactivation_hook.write().unwrap() = None;
-    ctx.db.with_mut_snapshot(|s| { s.items.get_mut(&paste_id).unwrap().quantity = 1; });
-    let _ = go_tx.send(());
-    stop_fut.await.unwrap().unwrap();
-    step_fut.await.unwrap().unwrap();
-
-    let (cargo_qty, dmg_after, sf_a) = ctx.db.with_snapshot(|s| {
-        let q: i32 = s.items.values().filter(|i| i.location_id == ship_id && i.type_id == 28668).map(|i| i.quantity).sum();
-        (q, s.items[&mod_a].dynamic_attributes[&eve_sde::attr_ids::DAMAGE], s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_a)).copied())
-    });
-    assert_eq!(cargo_qty, 0);
-    assert!((dmg_after - 40.0).abs() < 1e-6, "BF-4: must repair only 1/5 (10 HP) -> 40.0, got {dmg_after}");
-    assert_eq!(sf_a, Some(4));
-
-    // Part C: Shortfall on mod_b + cancel_ship_nanite_repairs_sync must neither mint paste nor lower DAMAGE.
-    ctx.db.with_mut_snapshot(|s| { s.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 1)); });
-    sys.actor_state.write().unwrap().active_nanite_repairs.push(ActiveNaniteRepair {
-        ship_id, char_id, module_id: mod_b, initial_damage_hp: 90.0, duration_s: 10.0,
-        elapsed_s: 0.0, paste_total_needed: 10, paste_consumed_so_far: 0,
-    });
-    let (go_tx, stop_fut) = pause_worker(sys.clone()).await;
-    let step_fut = tokio::spawn({ let s = sys.clone(); async move { s.step_manual_tick_only(1.0).await } });
-    wait_until("mod_b never consumed tick 1", || sys.actor_state.read().unwrap().active_nanite_repairs.first().is_some_and(|r| r.paste_consumed_so_far == 1)).await;
+    // Part B: Tick 1 `deducted == 0` -> DAMAGE stays 100.0, shortfall=4 visible via `with_snapshot`!
+    let (go_tx, stop_fut) = pause_post_unlock_worker(&sys, char_id, ship_id, cyc_id).await;
+    let step1 = tokio::spawn({ let s = sys.clone(); async move { s.step_manual_tick_only(4.0).await } });
+    wait_until("tick 1 mod_a", || sys.actor_state.read().unwrap().active_nanite_repairs.first().is_some_and(|r| r.paste_consumed_so_far == 4)).await;
     *sys.module_deactivation_hook.write().unwrap() = None;
     ctx.db.with_mut_snapshot(|s| { s.items.remove(&paste_id); });
     let _ = go_tx.send(());
     stop_fut.await.unwrap().unwrap();
-    step_fut.await.unwrap().unwrap();
+    step1.await.unwrap().unwrap();
+    let (dmg1, sf1) = ctx.db.with_snapshot(|s| (
+        s.items[&mod_a].dynamic_attributes[&eve_sde::attr_ids::DAMAGE],
+        s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_a)).copied(),
+    ));
+    assert!((dmg1 - 100.0).abs() < 1e-6 && sf1 == Some(4), "Tick 1 deducted=0: dmg1={dmg1}, sf1={sf1:?}");
 
-    // Also attach a remaining repair on mod_a (which has sf_a=4) with refund=2 -> net_refund clamped to 0.
-    sys.actor_state.write().unwrap().active_nanite_repairs.push(ActiveNaniteRepair {
-        ship_id, char_id, module_id: mod_a, initial_damage_hp: 10.0, duration_s: 10.0,
-        elapsed_s: 0.0, paste_total_needed: 4, paste_consumed_so_far: 2,
-    });
-    sys.cancel_ship_nanite_repairs_sync(ship_id, true);
-    let (minted, dmg_a, dmg_b) = ctx.db.with_snapshot(|s| (
+    // Part C: Tick 2 `paste_delta > 0` with PARTIAL paste (4 of 4+3=7 due) -> repairs 40 HP (to 60), sf=3.
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 4)); });
+    sys.step_manual_tick_only(3.0).await.unwrap();
+    let (qty2, dmg2, sf2) = ctx.db.with_snapshot(|s| (
         s.items.values().filter(|i| i.location_id == ship_id && i.type_id == 28668).map(|i| i.quantity).sum::<i32>(),
         s.items[&mod_a].dynamic_attributes[&eve_sde::attr_ids::DAMAGE],
-        s.items[&mod_b].dynamic_attributes[&eve_sde::attr_ids::DAMAGE],
+        s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_a)).copied(),
     ));
-    assert_eq!(minted, 0, "BF-4: cancel must not mint paste when shortfall occurred");
-    assert!((dmg_a - 40.0).abs() < 1e-6, "BF-4: shortfall must keep mod_a DAMAGE >= 40.0, got {dmg_a}");
-    assert!((dmg_b - 90.0).abs() < 1e-6, "BF-4: cancel must not grant free repair, got {dmg_b}");
+    assert!(qty2 == 0 && (dmg2 - 60.0).abs() < 1e-6 && sf2 == Some(3), "Partial Tick 2: qty={qty2}, dmg={dmg2}, sf={sf2:?}");
+
+    // Part D: Cancel while shortfall=3 remains -> zero paste minted and DAMAGE stays 60.0.
+    sys.cancel_ship_nanite_repairs_sync(ship_id, true);
+    let (minted, dmg_c, sf_c) = ctx.db.with_snapshot(|s| (
+        s.items.values().filter(|i| i.location_id == ship_id && i.type_id == 28668).map(|i| i.quantity).sum::<i32>(),
+        s.items[&mod_a].dynamic_attributes[&eve_sde::attr_ids::DAMAGE],
+        s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_a)).copied(),
+    ));
+    assert!(minted == 0 && (dmg_c - 60.0).abs() < 1e-6 && sf_c.is_none());
+
+    // Part E: Tick 1 `deducted == 0` on mod_b -> Tick 2 full paste restored (`done_now = true`) -> repairs to 0 & clears shortfall!
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 5)); });
+    sys.actor_state.write().unwrap().active_nanite_repairs.push(ActiveNaniteRepair {
+        ship_id, char_id, module_id: mod_b, initial_damage_hp: 90.0, duration_s: 10.0,
+        elapsed_s: 0.0, paste_total_needed: 10, paste_consumed_so_far: 0,
+    });
+    let (go_tx, stop_fut) = pause_post_unlock_worker(&sys, char_id, ship_id, cyc_id).await;
+    let step_b1 = tokio::spawn({ let s = sys.clone(); async move { s.step_manual_tick_only(5.0).await } });
+    wait_until("tick 1 mod_b", || sys.actor_state.read().unwrap().active_nanite_repairs.first().is_some_and(|r| r.paste_consumed_so_far == 5)).await;
+    *sys.module_deactivation_hook.write().unwrap() = None;
+    ctx.db.with_mut_snapshot(|s| { s.items.remove(&paste_id); });
+    let _ = go_tx.send(());
+    stop_fut.await.unwrap().unwrap();
+    step_b1.await.unwrap().unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_b)).copied()), Some(5));
+
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 10)); });
+    sys.step_manual_tick_only(5.0).await.unwrap();
+    let (qty_b, dmg_b, sf_b) = ctx.db.with_snapshot(|s| (
+        s.items.values().filter(|i| i.location_id == ship_id && i.type_id == 28668).map(|i| i.quantity).sum::<i32>(),
+        s.items[&mod_b].dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied(),
+        s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_b)).copied(),
+    ));
+    assert!(qty_b == 0 && dmg_b.is_none() && sf_b.is_none(), "Full Tick 2: qty={qty_b}, dmg={dmg_b:?}, sf={sf_b:?}");
+
+    // Completion with unpaid shortfall (`done_now = true`, due=2+3=5, cargo=3) repairs only 30 HP (to 20) & clears shortfall!
+    ctx.db.with_mut_snapshot(|s| {
+        s.sp6_lifecycle.nanite_paste_shortfall.insert((ship_id, mod_c), 2);
+        s.items.insert(paste_id, make_item(paste_id, 28668, char_id, ship_id, InventoryFlag::Cargo, 3));
+    });
+    let mut ops_c = PostUnlockOps::default();
+    ops_c.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp {
+        char_id, ship_id, module_id: mod_c, paste_delta: 3,
+        initial_damage_hp: 50.0, paste_total_needed: 5, rem_dmg: 0.0, done_now: true,
+    }));
+    let _ = super::execute_post_unlock_ops(Some(&ctx.db), None, ops_c, None, None);
+    let (dmg_c_end, sf_c_end) = ctx.db.with_snapshot(|s| (
+        s.items[&mod_c].dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied(),
+        s.sp6_lifecycle.nanite_paste_shortfall.get(&(ship_id, mod_c)).copied(),
+    ));
+    assert!(dmg_c_end.is_some_and(|d| (d - 20.0).abs() < 1e-6) && sf_c_end.is_none(), "done_now partial: {dmg_c_end:?}, {sf_c_end:?}");
 }
 
 /// `BF-5`: `TargetLockCompletedHook` runs post-commit with zero locks; `WouldBlock` cancel enqueues to actor.
@@ -622,4 +647,171 @@ async fn bf5_target_lock_hook_runs_post_commit_flush_guarded_and_would_block_can
     ));
     assert!((dmg - 30.0).abs() < 1e-6, "got {dmg}");
     assert_eq!(refunded, 2);
+}
+
+/// `BF-1170-1A-02`: Activation asteroid seeding stages `BeltAsteroidInsertIfAbsent` without DB writes under actor locks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_seed_asteroid_enqueues_post_unlock_without_db_write() {
+    use crate::system_actor::{
+        AsteroidState, SystemActorState, SystemContentProvider, SystemContentSeedContext, SystemWakeReason,
+    };
+    let ctx = test_ctx();
+    let (sys_id, ast_a, ast_b) = (30_000_144_u32, 778_205_001_i64, 778_205_002_i64);
+    let make_ast = |id| AsteroidState {
+        asteroid_id: id, belt_id: 40_000_001, type_id: 1230, initial_units: 250,
+        remaining_units: 250, unit_volume: 0.1, depleted: false, respawn_at_tick: None,
+    };
+
+    // 1. Direct `SystemContentSeedContext::spawn_asteroid` under held `RANK_BALLPARK` + `RANK_ACTOR_STATE`.
+    let bp_lock: eve_db::lock_rank::RankedRwLock<eve_destiny::Ballpark, { eve_db::lock_rank::RANK_BALLPARK }> =
+        eve_db::lock_rank::RankedRwLock::new(eve_destiny::Ballpark::new(sys_id));
+    let st_lock: eve_db::lock_rank::RankedRwLock<SystemActorState, { eve_db::lock_rank::RANK_ACTOR_STATE }> =
+        eve_db::lock_rank::RankedRwLock::new(SystemActorState::default());
+    let mut seed_ops = PostUnlockOps::default();
+    {
+        let mut bp = bp_lock.write().unwrap();
+        let mut st = st_lock.write().unwrap();
+        let mut seed_ctx = SystemContentSeedContext {
+            solar_system_id: sys_id, wake_reason: &SystemWakeReason::LegacyGetOrSpawn,
+            registry: &ctx.systems, ballpark: &mut bp, actor_state: &mut st,
+            sde: Some(&ctx.sde), db: Some(&ctx.db), db_read_safe: true,
+            belt_respawn_interval_secs: 3600, downtime_utc_secs_of_day: 39_600,
+            mechanic_rng: &ctx.mechanic_rng, staged_special_site_balls: Default::default(),
+            staged_wh_ore_anomalies: Default::default(), staged_post_unlock_ops: &mut seed_ops,
+        };
+        seed_ctx.spawn_asteroid(make_ast(ast_a), make_ball(ast_a, 1230, DVec3::ZERO));
+    }
+    assert!(matches!(seed_ops.intents.as_slice(), [PostUnlockIntent::BeltAsteroidInsertIfAbsent(r)] if r.asteroid_id == ast_a));
+    assert!(ctx.db.with_snapshot(|s| !s.asteroids.contains_key(&ast_a)));
+
+    // 2. End-to-end activation via `SystemContentProvider` commits only after DB writer releases.
+    struct AstProvider(i64, AsteroidState);
+    impl SystemContentProvider for AstProvider {
+        fn name(&self) -> &'static str { "test_ast_seed" }
+        fn seed(&self, sctx: &mut SystemContentSeedContext<'_>) -> Result<(), String> {
+            if sctx.solar_system_id == 30_000_144 {
+                sctx.spawn_asteroid(self.1.clone(), make_ball(self.0, 1230, DVec3::new(50.0, 0.0, 0.0)));
+            }
+            Ok(())
+        }
+    }
+    ctx.systems.register_content_provider(Arc::new(AstProvider(ast_b, make_ast(ast_b)))).unwrap();
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    assert!(ctx.db.with_snapshot(|s| !s.asteroids.contains_key(&ast_b)));
+    let _ = rel_w.send(());
+    writer.join().unwrap();
+    assert!(sys.wait_for_post_unlock_barrier().await);
+    assert!(ctx.db.with_snapshot(|s| s.asteroids.contains_key(&ast_b)));
+}
+
+/// `BF-1170-1A-03` + `BF-1170-1A-05`: Activation commands & empty-ops `try_remove_module_cycle` wait FIFO behind
+/// delayed `ModuleCycleCleanup` + `DeactivationHook`; `can_run_post_unlock_sync_now` rejects all ranked locks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_activation_and_try_remove_wait_fifo_behind_in_flight_cleanup() {
+    use crate::system_actor::{AtomicActivateCycleRequest, ProtectionBreakReason};
+    use eve_db::lock_rank::{RankedRwLock, RANK_CRIMEWATCH, RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY};
+    { let _g = RankedRwLock::<(), RANK_SYSTEM_REGISTRY>::new(()).read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
+    { let _g = RankedRwLock::<(), RANK_CRIMEWATCH>::new(()).read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
+    { let _g = RankedRwLock::<(), RANK_SERVICE_STATE>::new(()).read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
+
+    let ctx = test_ctx();
+    let (sys_id, char_id, ship_id, mod_a, mod_b) = (
+        30_000_142_u32, 90_000_001_i64, 778_206_001_i64, 778_206_002_i64, 778_206_003_i64,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_id, make_item(ship_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1));
+        snap.items.insert(mod_a, make_item(mod_a, 11578, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(mod_b, make_item(mod_b, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1));
+        snap.module_active_states.insert(mod_a);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_combat(make_ball(ship_id, 606, DVec3::ZERO), make_combat_state(500.0, 500.0, 500.0, 500.0)).await.unwrap();
+    sys.add_module_cycle(ActiveModuleCycle {
+        ship_id, owner_char_id: Some(char_id), module_id: mod_a, module_type_id: 11578,
+        effect_name: "cloaking".into(), duration_s: 1.0, elapsed_s: 0.9, repeat: 0, ..Default::default()
+    }).await.unwrap();
+
+    let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+    let db_h = Arc::clone(&ctx.db);
+    *sys.module_deactivation_hook.write().unwrap() = Some(Arc::new(move |_, _, cyc| {
+        let cleared = db_h.with_snapshot(|s| !s.module_active_states.contains(&cyc.module_id));
+        let _ = hook_tx.send((cyc.module_id, cleared));
+    }));
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let step_out = sys.ask_step_tick_only(0.2).await.unwrap();
+    wait_until("tick cleanup never queued", || sys.actor_state.read().unwrap().active_module_cycles.is_empty() && sys.has_in_flight_post_unlock()).await;
+    assert!(hook_rx.try_recv().is_err() && ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_a)));
+
+    let rec_fut = tokio::spawn({ let s = sys.clone(); async move { s.reconcile_module_cycle_before_activate(ship_id, mod_a, 1_000).await } });
+    let act_fut = tokio::spawn({
+        let s = sys.clone();
+        async move {
+            s.activate_module_cycle_atomic(AtomicActivateCycleRequest {
+                char_id,
+                cycle: ActiveModuleCycle {
+                    ship_id, owner_char_id: Some(char_id), module_id: mod_b, module_type_id: 2048,
+                    effect_name: "armorRepair".into(), duration_s: 5.0, repeat: 1, origin_scene_epoch: Some(1), ..Default::default()
+                },
+                allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false,
+                break_protection: false, break_reason: ProtectionBreakReason::ModuleActivation,
+                require_ball_in_space: true, real_now_unix: 1_000,
+            }).await
+        }
+    });
+    let rem_fut = tokio::spawn({ let s = sys.clone(); async move { s.remove_module_cycle(ship_id, mod_a).await } });
+    let upd_fut = tokio::spawn({ let s = sys.clone(); async move { s.update_module_overload(ship_id, mod_b, true).await } });
+    let fit_fut = tokio::spawn({ let s = sys.clone(); async move { s.apply_fit_projection(ship_id, Default::default()).await } });
+    let try_rem = std::thread::spawn({ let s = sys.clone(); move || s.try_remove_module_cycle(ship_id, mod_a) });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!rec_fut.is_finished() && !act_fut.is_finished() && !rem_fut.is_finished() && !upd_fut.is_finished() && !fit_fut.is_finished() && !try_rem.is_finished());
+
+    let _ = rel_w.send(());
+    writer.join().unwrap();
+    assert_eq!(rec_fut.await.unwrap(), (None, false));
+    assert!(act_fut.await.unwrap().is_ok());
+    assert!(rem_fut.await.unwrap().is_ok());
+    assert!(upd_fut.await.unwrap().is_ok());
+    assert!(fit_fut.await.unwrap());
+    try_rem.join().unwrap();
+    sys.apply_step_output(&step_out).await;
+    assert_eq!(hook_rx.recv_timeout(Duration::from_secs(2)).unwrap(), (mod_a, true));
+}
+
+/// `BF-1170-1A-04`: `set_combat_state_in_actor_collecting` enforces `expected_system: Some(solar_system_id)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_set_combat_state_checks_expected_system() {
+    let ctx = test_ctx();
+    let (sys_a_id, sys_b_id, char_id, ship_id) = (30_000_142_u32, 30_000_144_u32, 90_000_001_i64, 778_207_001_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_id, make_item(ship_id, 606, char_id, i64::from(sys_a_id), InventoryFlag::None, 1));
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_a_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let sys_a = ctx.systems.get_or_spawn(sys_a_id);
+    sys_a.spawn_ball_with_combat(make_ball(ship_id, 606, DVec3::ZERO), make_combat_state(500.0, 500.0, 500.0, 200.0)).await.unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(sys_b_id);
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_b_id;
+        snap.sp6_lifecycle.ship_combat_hp.insert(ship_id, crate::sp6_lifecycle::PersistedCombatHp {
+            shield_hp: 123.0, armor_hp: 234.0, hull_hp: 345.0,
+        });
+    });
+    let mut stale_cs = make_combat_state(500.0, 500.0, 500.0, 200.0);
+    stale_cs.shield_hp = 490.0;
+    sys_a.set_combat_state(ship_id, stale_cs).await.unwrap();
+    let hp = ctx.db.with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied()).unwrap();
+    assert!((hp.shield_hp - 123.0).abs() < 1e-6, "stale sys_a SetCombatState overwrote sys_b: {hp:?}");
 }

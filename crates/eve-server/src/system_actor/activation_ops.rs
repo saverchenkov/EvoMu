@@ -941,7 +941,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             }
             super::protection::snapshot_tackle_totals_in_actor(exec_ctx);
             super::protection::sync_positions_in_actor(exec_ctx);
-            defer_cmd_reply(exec_ctx, reply, res);
+            defer_barrier_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ActivateModuleCycleAtomic {
@@ -949,7 +949,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             reply,
         } => {
             let res = handle_activate_module_cycle_atomic(exec_ctx, request);
-            defer_cmd_reply(exec_ctx, reply, res);
+            defer_barrier_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::CommitLancerActivationAtomic {
@@ -957,7 +957,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             reply,
         } => {
             let res = handle_commit_lancer_activation_atomic(exec_ctx, request);
-            defer_cmd_reply(exec_ctx, reply, res);
+            defer_barrier_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::AddCapacitorClamped { ball_id, delta, reply } => {
@@ -992,7 +992,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
             }
             super::protection::sync_positions_and_active_ships(exec_ctx);
-            defer_cmd_reply(exec_ctx, reply, Ok(remaining_cooldown));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(remaining_cooldown));
             None
         }
         SystemCommand::RequestCycleDeactivation { ship_id, module_id, reply } => {
@@ -1029,7 +1029,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 super::protection::sync_active_ships_cache(exec_ctx);
                 sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
             }
-            defer_cmd_reply(exec_ctx, reply, res);
+            defer_barrier_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
@@ -1048,7 +1048,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 is_overloaded,
                 exec_ctx.post_unlock_ops,
             );
-            defer_cmd_reply(exec_ctx, reply, updated);
+            defer_barrier_cmd_reply(exec_ctx, reply, updated);
             None
         }
         SystemCommand::StopNonWarpModuleCycles { ship_id, reply } => {
@@ -1087,7 +1087,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
                 exec_ctx.post_unlock_ops,
             );
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
-            if let Some(tx) = reply { defer_cmd_reply(exec_ctx, tx, applied); }
+            if let Some(tx) = reply { defer_barrier_cmd_reply(exec_ctx, tx, applied); }
             None
         }
         SystemCommand::CurrentTick { reply } => {

@@ -394,7 +394,7 @@ pub(crate) fn set_combat_state_in_actor_collecting(
         post_unlock.push_ship_combat_hp(super::post_unlock::CombatHpDbUpdate {
             ball_id,
             combat_state: cs.clone(),
-            expected_system: None,
+            expected_system: Some(solar_system_id),
             require_persisted_entity: false,
         });
     }

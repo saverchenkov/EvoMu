@@ -609,19 +609,23 @@ impl SystemContentSeedContext<'_> {
             &sde_opt,
             &mut ast_ball,
         );
-        if let Some(db) = self.db.filter(|_| self.db_read_safe) {
-            if db.get_asteroid(ball_id).is_none() {
-                let _ = db.spawn_asteroid(eve_db::AsteroidRecord {
-                    asteroid_id: ball_id,
-                    belt_id: asteroid.belt_id,
-                    type_id: ast_ball.type_id,
-                    solar_system_id: self.solar_system_id,
-                    position: (ast_ball.position.x, ast_ball.position.y, ast_ball.position.z),
-                    quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
-                    initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
-                    radius: ast_ball.radius,
-                });
-            }
+        if self.db.filter(|_| self.db_read_safe).is_some_and(|db| {
+            db.try_with_snapshot(|s| !s.asteroids.contains_key(&ball_id)).unwrap_or(true)
+        }) {
+            self.staged_post_unlock_ops.push(
+                super::post_unlock::PostUnlockIntent::BeltAsteroidInsertIfAbsent(
+                    eve_db::AsteroidRecord {
+                        asteroid_id: ball_id,
+                        belt_id: asteroid.belt_id,
+                        type_id: ast_ball.type_id,
+                        solar_system_id: self.solar_system_id,
+                        position: (ast_ball.position.x, ast_ball.position.y, ast_ball.position.z),
+                        quantity: i64::try_from(asteroid.remaining_units).unwrap_or(i64::MAX),
+                        initial_quantity: i64::try_from(asteroid.initial_units).unwrap_or(i64::MAX),
+                        radius: ast_ball.radius,
+                    },
+                ),
+            );
         }
         self.actor_state
             .asteroid_templates

@@ -68,7 +68,10 @@ pub(crate) struct NaniteRepairTickDbOp {
     pub ship_id: BallId,
     pub module_id: ItemId,
     pub paste_delta: i32,
+    pub initial_damage_hp: f64,
+    pub paste_total_needed: i32,
     pub rem_dmg: f64,
+    pub done_now: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -280,36 +283,36 @@ fn apply_module_cycle_cleanup_in_snap(snap: &mut eve_db::WorldStateSnapshot, op:
 }
 
 fn apply_nanite_repair_tick_in_snap(snap: &mut eve_db::WorldStateSnapshot, tick: &NaniteRepairTickDbOp) {
-    let deducted = if tick.paste_delta > 0 {
+    let key = (tick.ship_id, tick.module_id);
+    let prior_shortfall = snap.sp6_lifecycle.nanite_paste_shortfall.get(&key).copied().unwrap_or(0).max(0);
+    let total_due = prior_shortfall.saturating_add(tick.paste_delta.max(0));
+    let deducted = if total_due > 0 {
         crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
-            snap, tick.char_id, tick.ship_id, tick.paste_delta,
+            snap, tick.char_id, tick.ship_id, total_due,
         )
     } else {
         0
     };
-    let shortfall = (tick.paste_delta - deducted).max(0);
-    if shortfall > 0 {
-        let prev = snap.sp6_lifecycle.nanite_paste_shortfall.get(&(tick.ship_id, tick.module_id)).copied().unwrap_or(0);
-        snap.sp6_lifecycle.nanite_paste_shortfall.insert((tick.ship_id, tick.module_id), prev.saturating_add(shortfall));
-    }
-    if tick.paste_delta > 0 {
-        if deducted == 0 {
-            return;
+    let rem_shortfall = (total_due - deducted).max(0);
+    if rem_shortfall == 0 {
+        snap.sp6_lifecycle.nanite_paste_shortfall.remove(&key);
+        set_module_damage_in_snap(snap, tick.module_id, tick.rem_dmg);
+    } else {
+        if tick.done_now {
+            snap.sp6_lifecycle.nanite_paste_shortfall.remove(&key);
+        } else {
+            snap.sp6_lifecycle.nanite_paste_shortfall.insert(key, rem_shortfall);
         }
-        if deducted < tick.paste_delta {
+        if deducted > 0 {
             if let Some(cur_dmg) = snap.items.get(&tick.module_id).and_then(|i| i.dynamic_attributes.get(&attr_ids::DAMAGE).copied()) {
                 if cur_dmg > tick.rem_dmg {
-                    let frac = (deducted as f64) / (tick.paste_delta as f64);
-                    let scaled_rem = (cur_dmg - (cur_dmg - tick.rem_dmg) * frac).max(tick.rem_dmg);
+                    let hp_per_paste = tick.initial_damage_hp.max(0.0) / (tick.paste_total_needed.max(1) as f64);
+                    let scaled_rem = (cur_dmg - (deducted as f64) * hp_per_paste).max(tick.rem_dmg);
                     set_module_damage_in_snap(snap, tick.module_id, scaled_rem);
                 }
             }
-            return;
         }
-    } else if snap.sp6_lifecycle.nanite_paste_shortfall.get(&(tick.ship_id, tick.module_id)).copied().unwrap_or(0) > 0 {
-        return;
     }
-    set_module_damage_in_snap(snap, tick.module_id, tick.rem_dmg);
 }
 
 fn apply_nanite_repair_cancel_in_snap(
@@ -531,7 +534,14 @@ pub(crate) fn collect_nanite_repair_tick(
     let done_now = !halted_for_paste && (next_elapsed + 1e-6 >= nr.duration_s);
     let rem_dmg = if done_now { 0.0 } else { nr.initial_damage_hp * (1.0 - effective_progress).clamp(0.0, 1.0) };
     post_unlock.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp {
-        char_id: nr.char_id, ship_id: nr.ship_id, module_id: nr.module_id, paste_delta: delta_taken, rem_dmg,
+        char_id: nr.char_id,
+        ship_id: nr.ship_id,
+        module_id: nr.module_id,
+        paste_delta: delta_taken,
+        initial_damage_hp: nr.initial_damage_hp,
+        paste_total_needed: total_needed,
+        rem_dmg,
+        done_now,
     }));
     NaniteTickCollect::Applied { halted_for_paste, effective_progress }
 }
@@ -1093,10 +1103,7 @@ pub(crate) fn execute_post_unlock_ops(
                     deferred_lock_hooks = tx_lock_hooks;
                 }
                 Err(err) => {
-                    tracing::error!(error = %err, "system_actor_post_unlock DB transaction failed");
-                    if let Some(intents) = intents_cell {
-                        collect_non_db_hooks(intents, &mut deferred_deact_hooks, &mut deferred_lock_hooks);
-                    }
+                    tracing::error!(error = %err, "system_actor_post_unlock DB transaction failed; skipping post-commit hooks");
                 }
             }
         } else {
@@ -1148,10 +1155,9 @@ pub(crate) fn execute_post_unlock_ops(
     emitted_actions
 }
 
-/// Returns `true` when the calling thread holds no actor lock (`RANK_BALLPARK` / `RANK_ACTOR_STATE`)
-/// and no lock at or above `RANK_WORLD_INNER` (`W3`, `#1170`).
+/// Returns `true` only when the calling thread holds zero ranked locks (`W3`, `#1170`).
 pub(crate) fn can_run_post_unlock_sync_now() -> bool {
-    !held_lock_ranks().iter().any(|&r| r == RANK_BALLPARK || r == RANK_ACTOR_STATE || r >= RANK_WORLD_INNER)
+    held_lock_ranks().is_empty()
 }
 
 /// Returns `true` when an external helper should block waiting for its own `post_unlock_worker`
@@ -1222,17 +1228,13 @@ pub(in crate::system_actor) enum PostUnlockWaitTicket {
     RunDirectAfterUnlock(Box<PostUnlockWorkItem>),
 }
 
-/// Enqueues `ops` onto `handle.post_unlock_tx` non-blockingly **while actor locks are held** (`W1`).
-pub(in crate::system_actor) fn enqueue_post_unlock_under_locks(
+fn enqueue_work_ticket(
     handle: &super::SystemHandle,
     db_opt: Option<&Arc<WorldRepository>>,
     sde_opt: Option<&Arc<SdeRegistry>>,
     ops: PostUnlockOps,
     caller_can_wait: bool,
 ) -> PostUnlockWaitTicket {
-    if ops.is_empty() {
-        return PostUnlockWaitTicket::None;
-    }
     let (done_tx, done_rx) = if caller_can_wait {
         let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
         (Some(tx), Some(rx))
@@ -1247,15 +1249,27 @@ pub(in crate::system_actor) fn enqueue_post_unlock_under_locks(
         db_opt: db_opt.cloned(), sde_opt: sde_opt.cloned(), ops, replies, in_flight_guard: None,
     };
     match send_post_unlock_item(&handle.post_unlock_tx, &handle.post_unlock_in_flight, item) {
-        Ok(()) => match done_rx {
-            Some(rx) => PostUnlockWaitTicket::WaitWorker(rx),
-            None => PostUnlockWaitTicket::None,
-        },
-        Err(unsent) => {
-            if unsent.ops.is_empty() { PostUnlockWaitTicket::None }
-            else { PostUnlockWaitTicket::RunDirectAfterUnlock(Box::new(unsent)) }
-        }
+        Ok(()) => done_rx.map_or(PostUnlockWaitTicket::None, PostUnlockWaitTicket::WaitWorker),
+        Err(unsent) if unsent.ops.is_empty() => PostUnlockWaitTicket::None,
+        Err(unsent) => PostUnlockWaitTicket::RunDirectAfterUnlock(Box::new(unsent)),
     }
+}
+
+/// Enqueues `ops` onto `handle.post_unlock_tx` non-blockingly **while actor locks are held** (`W1`).
+pub(in crate::system_actor) fn enqueue_post_unlock_under_locks(
+    handle: &super::SystemHandle,
+    db_opt: Option<&Arc<WorldRepository>>,
+    sde_opt: Option<&Arc<SdeRegistry>>,
+    ops: PostUnlockOps,
+    caller_can_wait: bool,
+) -> PostUnlockWaitTicket {
+    if ops.is_empty() { return PostUnlockWaitTicket::None; }
+    enqueue_work_ticket(handle, db_opt, sde_opt, ops, caller_can_wait)
+}
+
+/// Enqueues an empty-ops FIFO barrier onto `handle.post_unlock_tx` while actor locks are held (`W4`, `BF-3`).
+pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::SystemHandle) -> PostUnlockWaitTicket {
+    enqueue_work_ticket(handle, None, None, PostUnlockOps::default(), true)
 }
 
 /// Finishes waiting or fallback execution strictly **after** all actor locks are dropped (`W2`, `W3`).

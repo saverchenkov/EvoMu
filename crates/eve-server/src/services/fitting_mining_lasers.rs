@@ -732,6 +732,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }));
             }
 
+            let _ = sys.wait_for_post_unlock_barrier().await;
             let mod_check = ctx.db.with_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {
                     return Err(BridgeRpcError::module_not_found(
