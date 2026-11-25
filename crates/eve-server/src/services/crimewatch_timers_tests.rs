@@ -886,6 +886,10 @@ async fn crimewatch_timers_scale_sim_expiries_under_tidi_and_reemit_on_tidi_chan
     assert_eq!(p_notif_20.args[0].as_i64(), Some(202));
     assert_eq!(p_notif_20.args[1].as_i64(), Some(p_exp_sim_0));
 
+    // Drain any clock-advance rebase delivered to idle_char_id during advance_secs(20) before
+    // testing the 0.25 -> 0.50 TiDi transition isolatedly.
+    let _ = ctx.drain_notifications_for_char(idle_char_id);
+
     // Transition TiDi 0.25 -> 0.50: DoSimClockRebase fires and active timers re-emit scaled expiries;
     // idle pilots only receive DoSimClockRebase with zero CrimeWatch timer churn.
     let applied_050 = set_system_tidi_factor(&ctx, sys_id, 0.50);
