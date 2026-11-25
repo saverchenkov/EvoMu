@@ -16,7 +16,7 @@ use eve_sde::SolarSystemId;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Weak};
 
 type CharacterId = i64;
 
@@ -142,23 +142,38 @@ pub(crate) fn mutate_seasonal_exploration_reg_in_snap(
     Ok(())
 }
 
+const SEASONAL_SYSTEM_LOCKS_SLOT_KEY: &str = "pve_special_sites_seasonal_system_locks";
+
+struct SeasonalSystemLocksSlot {
+    locks: std::sync::Mutex<HashMap<SolarSystemId, Weak<tokio::sync::Mutex<()>>>>,
+}
+
+impl SeasonalSystemLocksSlot {
+    fn new() -> Self {
+        Self {
+            locks: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 pub(crate) fn seasonal_system_lock(
     db: &Arc<WorldRepository>,
     sys_id: SolarSystemId,
 ) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<
-        std::sync::Mutex<HashMap<(usize, SolarSystemId), Arc<tokio::sync::Mutex<()>>>>,
-    > = OnceLock::new();
-    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let key = (Arc::as_ptr(db) as usize, sys_id);
-    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.len() > 256 {
-        guard.retain(|_, lock| Arc::strong_count(lock) > 1);
+    let slot = db.get_or_init_transient_runtime_slot(
+        SEASONAL_SYSTEM_LOCKS_SLOT_KEY,
+        SeasonalSystemLocksSlot::new,
+    );
+    let mut guard = slot.locks.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(arc) = guard.get(&sys_id).and_then(Weak::upgrade) {
+        return arc;
     }
-    guard
-        .entry(key)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    if guard.len() > 256 {
+        guard.retain(|_, lock| lock.strong_count() > 0);
+    }
+    let arc = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(sys_id, Arc::downgrade(&arc));
+    arc
 }
 
 pub(crate) fn seasonal_site_valid_in_snap(

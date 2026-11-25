@@ -17,19 +17,31 @@ use crate::types::{
     DbError, PkceAuthCode, SsoRefreshTokenRecord, SsoTokenBundle, SsoTokenClaims,
 };
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::lock_rank::{RankedMutex, RANK_LEAF};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+
+const AUTH_RUNTIME_SLOT_KEY: &str = "eve_db_gateway_auth_runtime_slot";
 
 struct DedicatedAuthConn {
     conn: RankedMutex<rusqlite::Connection, RANK_LEAF>,
     force_fail: AtomicBool,
 }
 
-static AUTH_SQLITE_CONNS: LazyLock<RankedMutex<HashMap<u64, Arc<DedicatedAuthConn>>, RANK_LEAF>> =
-    LazyLock::new(|| RankedMutex::new(HashMap::new()));
+struct AuthRepoRuntimeSlot {
+    dedicated_conn: RankedMutex<Option<Arc<DedicatedAuthConn>>, RANK_LEAF>,
+    gateway_jwt_counter: AtomicU64,
+}
+
+impl AuthRepoRuntimeSlot {
+    fn new() -> Self {
+        Self {
+            dedicated_conn: RankedMutex::new(None),
+            gateway_jwt_counter: AtomicU64::new(1),
+        }
+    }
+}
 
 /// Normalizes IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to canonical `IpAddr::V4` so dual-stack
 /// sockets on `:26000` and `:26005` compare identically (`#472`).
@@ -39,8 +51,6 @@ pub fn normalize_peer_ip(ip: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
     }
 }
-
-static GATEWAY_JWT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const FORBIDDEN_PRIVILEGE_CLAIM_KEYS: &[&str] = &[
     "role",
@@ -154,10 +164,27 @@ impl WorldRepository {
         Ok(())
     }
 
+    fn auth_repo_runtime_slot(&self) -> Arc<AuthRepoRuntimeSlot> {
+        self.get_or_init_transient_runtime_slot(AUTH_RUNTIME_SLOT_KEY, AuthRepoRuntimeSlot::new)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_auth_runtime_slot_weak(
+        &self,
+    ) -> Option<std::sync::Weak<dyn std::any::Any + Send + Sync>> {
+        self.get_transient_runtime_slot::<AuthRepoRuntimeSlot>(AUTH_RUNTIME_SLOT_KEY)
+            .flatten()
+            .map(|slot| {
+                let any_arc: Arc<dyn std::any::Any + Send + Sync> = slot;
+                Arc::downgrade(&any_arc)
+            })
+    }
+
     fn get_or_init_auth_sqlite_conn(&self) -> Result<Arc<DedicatedAuthConn>, String> {
+        let slot = self.auth_repo_runtime_slot();
         {
-            let map = AUTH_SQLITE_CONNS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = map.get(&self.instance_id) {
+            let guard = slot.dedicated_conn.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = guard.as_ref() {
                 return Ok(Arc::clone(existing));
             }
         }
@@ -198,10 +225,9 @@ impl WorldRepository {
             conn: RankedMutex::new(conn),
             force_fail: AtomicBool::new(false),
         });
-        let mut map = AUTH_SQLITE_CONNS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = slot.dedicated_conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(Arc::clone(
-            map.entry(self.instance_id)
-                .or_insert_with(|| Arc::clone(&entry)),
+            guard.get_or_insert_with(|| Arc::clone(&entry)),
         ))
     }
 
@@ -266,8 +292,11 @@ impl WorldRepository {
             "alg": "HS256",
             "typ": "JWT",
         });
-        let seq = GATEWAY_JWT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let jti = format!("gwdev-{now_unix}-{user_id}-{seq}");
+        let seq = self
+            .auth_repo_runtime_slot()
+            .gateway_jwt_counter
+            .fetch_add(1, Ordering::Relaxed);
+        let jti = format!("gwdev-{now_unix}-{user_id}-{}-{seq}", self.instance_id);
         let mut payload = serde_json::Map::new();
         payload.insert("iss".to_string(), Value::String("https://login.eveonline.com".into()));
         payload.insert("sub".to_string(), Value::String(sub));

@@ -571,3 +571,101 @@ fn verify_quasar_bearer_jwt_malformed_segments_headers_temporal_and_sub_cross_cl
     );
     assert!(repo.verify_quasar_bearer_jwt(&post_kick_tok, now + 5).is_ok());
 }
+
+#[test]
+fn gateway_auth_conn_and_jwt_counter_isolated_per_repository_and_drop_freed() {
+    let repo_a = WorldRepository::with_demo_seed();
+    let repo_b = WorldRepository::with_demo_seed();
+    assert_ne!(repo_a.instance_id(), repo_b.instance_id());
+    assert!(repo_a.debug_auth_runtime_slot_weak().is_none());
+    assert!(repo_b.debug_auth_runtime_slot_weak().is_none());
+
+    let uid_a = repo_a.provision_player_account("iso_gw_a", "pw-a");
+    let uid_b = repo_b.provision_player_account("iso_gw_b", "pw-b");
+
+    repo_a
+        .ensure_auth_sqlite_connection()
+        .expect("repo_a auth sqlite connection");
+    repo_b
+        .ensure_auth_sqlite_connection()
+        .expect("repo_b auth sqlite connection");
+
+    repo_a.set_auth_sqlite_fault_for_test(true);
+    assert!(
+        repo_a.with_auth_sqlite_conn(|_| Ok(())).is_err(),
+        "fault injection on repo_a must fail repo_a auth SQLite writes"
+    );
+    let healthy_b = repo_b
+        .with_auth_sqlite_conn(|conn| {
+            conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        })
+        .expect("repo_a fault injection must not affect repo_b auth SQLite connection");
+    assert_eq!(healthy_b, 1);
+
+    repo_a.set_auth_sqlite_fault_for_test(false);
+    let recovered_a = repo_a
+        .with_auth_sqlite_conn(|conn| {
+            conn.query_row("SELECT 2", [], |row| row.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        })
+        .expect("clearing repo_a fault restores repo_a auth SQLite connection");
+    assert_eq!(recovered_a, 2);
+
+    let decode_jti = |tok: &str| -> String {
+        let parts: Vec<&str> = tok.split('.').collect();
+        assert_eq!(parts.len(), 3, "expected compact JWT");
+        let payload_bytes = crate::accounts::base64url_decode_no_pad(parts[1])
+            .expect("valid JWT payload base64url");
+        let payload: Value =
+            serde_json::from_slice(&payload_bytes).expect("valid JWT payload JSON");
+        payload["jti"]
+            .as_str()
+            .expect("jti string claim")
+            .to_string()
+    };
+
+    let now = 1_700_000_000u64;
+    let tok_a1 = repo_a
+        .issue_gateway_dev_token(uid_a, None, "tranquility", now + 300, now)
+        .expect("repo_a first token");
+    let tok_a2 = repo_a
+        .issue_gateway_dev_token(uid_a, None, "tranquility", now + 300, now)
+        .expect("repo_a second token");
+    let tok_b1 = repo_b
+        .issue_gateway_dev_token(uid_b, None, "tranquility", now + 300, now)
+        .expect("repo_b first token");
+
+    let jti_a1 = decode_jti(&tok_a1);
+    let jti_a2 = decode_jti(&tok_a2);
+    let jti_b1 = decode_jti(&tok_b1);
+    assert_eq!(jti_a1, format!("gwdev-{now}-{uid_a}-{}-1", repo_a.instance_id()));
+    assert_eq!(jti_a2, format!("gwdev-{now}-{uid_a}-{}-2", repo_a.instance_id()));
+    assert_eq!(jti_b1, format!("gwdev-{now}-{uid_b}-{}-1", repo_b.instance_id()));
+    assert_ne!(jti_a1, jti_b1);
+
+    let weak_a = repo_a
+        .debug_auth_runtime_slot_weak()
+        .expect("repo_a auth slot initialized");
+    let weak_b = repo_b
+        .debug_auth_runtime_slot_weak()
+        .expect("repo_b auth slot initialized");
+    assert!(weak_a.upgrade().is_some());
+    assert!(weak_b.upgrade().is_some());
+
+    drop(repo_a);
+    assert!(
+        weak_a.upgrade().is_none(),
+        "dropping repo_a must free its AuthRepoRuntimeSlot and DedicatedAuthConn"
+    );
+    assert!(
+        weak_b.upgrade().is_some(),
+        "dropping repo_a must keep repo_b auth runtime slot intact"
+    );
+
+    drop(repo_b);
+    assert!(
+        weak_b.upgrade().is_none(),
+        "dropping repo_b must free its AuthRepoRuntimeSlot and DedicatedAuthConn"
+    );
+}

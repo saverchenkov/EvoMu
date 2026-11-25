@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use eve_db::lock_rank::AnyRwLock;
 use glam::DVec3;
 use eve_db::{InventoryFlag, InventoryItemRecord, SolarSystemId, TypeId, WorldRepository};
@@ -15,7 +15,7 @@ use eve_sde::{InvType, SdeRegistry};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity};
 use crate::services::pve_exploration::{
-    ctx_pve_key, db_pve_key, drop_site_loot_into_space, drop_site_loot_into_space_core,
+    drop_site_loot_into_space, drop_site_loot_into_space_core,
     expire_and_prune_site_in_reg, finalize_expired_site_prune_core, find_site_by_canonical_id,
     find_site_by_canonical_id_mut, find_site_by_canonical_key_any_state_in_reg,
     is_site_expired_in_reg,
@@ -530,23 +530,38 @@ pub async fn drop_sleeper_wreck_core(
     wreck_id
 }
 
-type WaveSpawnKey = (usize, SolarSystemId, String);
+const INFLIGHT_WAVE_SPAWNS_SLOT_KEY: &str = "pve_exploration_inflight_wave_spawns";
 
-fn inflight_wave_spawns(
-) -> &'static Mutex<HashMap<WaveSpawnKey, Arc<tokio::sync::watch::Sender<bool>>>> {
-    static INFLIGHT: OnceLock<Mutex<HashMap<WaveSpawnKey, Arc<tokio::sync::watch::Sender<bool>>>>> =
-        OnceLock::new();
-    INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+type WaveSpawnKey = (SolarSystemId, String);
+
+struct InflightWaveSpawnsSlot {
+    map: Mutex<HashMap<WaveSpawnKey, Arc<tokio::sync::watch::Sender<bool>>>>,
+}
+
+impl InflightWaveSpawnsSlot {
+    fn new() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+fn inflight_wave_spawns_slot(db: &WorldRepository) -> Arc<InflightWaveSpawnsSlot> {
+    db.get_or_init_transient_runtime_slot(
+        INFLIGHT_WAVE_SPAWNS_SLOT_KEY,
+        InflightWaveSpawnsSlot::new,
+    )
 }
 
 struct WaveSpawnGuard {
+    slot: Arc<InflightWaveSpawnsSlot>,
     key: WaveSpawnKey,
     tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Drop for WaveSpawnGuard {
     fn drop(&mut self) {
-        if let Ok(mut map) = inflight_wave_spawns().lock() {
+        if let Ok(mut map) = self.slot.map.lock() {
             if map.get(&self.key).is_some_and(|cur| Arc::ptr_eq(cur, &self.tx)) {
                 map.remove(&self.key);
             }
@@ -555,18 +570,28 @@ impl Drop for WaveSpawnGuard {
     }
 }
 
-fn current_wave_spawn_rx(key: &WaveSpawnKey) -> Option<tokio::sync::watch::Receiver<bool>> {
-    let map = inflight_wave_spawns().lock().ok()?;
+fn current_wave_spawn_rx(
+    slot: &InflightWaveSpawnsSlot,
+    key: &WaveSpawnKey,
+) -> Option<tokio::sync::watch::Receiver<bool>> {
+    let map = slot.map.lock().ok()?;
     map.get(key).map(|tx| tx.subscribe())
 }
 
-fn register_wave_spawn_guard(key: WaveSpawnKey) -> WaveSpawnGuard {
+fn register_wave_spawn_guard(
+    slot: &Arc<InflightWaveSpawnsSlot>,
+    key: WaveSpawnKey,
+) -> WaveSpawnGuard {
     let (tx, _) = tokio::sync::watch::channel(false);
     let tx = Arc::new(tx);
-    if let Ok(mut map) = inflight_wave_spawns().lock() {
+    if let Ok(mut map) = slot.map.lock() {
         map.insert(key.clone(), Arc::clone(&tx));
     }
-    WaveSpawnGuard { key, tx }
+    WaveSpawnGuard {
+        slot: Arc::clone(slot),
+        key,
+        tx,
+    }
 }
 
 fn site_has_unhacked_cans(
@@ -725,7 +750,7 @@ async fn handle_pve_site_npc_destruction_core_inner(
             spawn_guard: Option<WaveSpawnGuard>,
         },
     }
-    let pve_key = db_pve_key(db);
+    let inflight_slot = inflight_wave_spawns_slot(db);
     let lookup = with_pve_exploration_reg_snap_db(db, now_unix, |reg, snap| {
         let now = now_sec(reg);
         let matched = reg.sites_by_system.get(&solar_system_id).and_then(|sites| {
@@ -763,11 +788,10 @@ async fn handle_pve_site_npc_destruction_core_inner(
         let mut spawn_guard = None;
         if wave_cleared && site.ded_rating.is_none() && site.current_wave < site.total_waves {
             if is_sleeper {
-                spawn_guard = Some(register_wave_spawn_guard((
-                    pve_key,
-                    solar_system_id,
-                    site.site_id.clone(),
-                )));
+                spawn_guard = Some(register_wave_spawn_guard(
+                    &inflight_slot,
+                    (solar_system_id, site.site_id.clone()),
+                ));
             } else {
                 site.current_wave += 1;
                 normal_wave_balls = build_wave_npc_balls_in_snap(
@@ -780,11 +804,10 @@ async fn handle_pve_site_npc_destruction_core_inner(
                 );
                 site.active_npc_ball_ids = normal_wave_balls.iter().map(|b| b.id).collect();
                 if !normal_wave_balls.is_empty() {
-                    spawn_guard = Some(register_wave_spawn_guard((
-                        pve_key,
-                        solar_system_id,
-                        site.site_id.clone(),
-                    )));
+                    spawn_guard = Some(register_wave_spawn_guard(
+                        &inflight_slot,
+                        (solar_system_id, site.site_id.clone()),
+                    ));
                 }
             }
         }
@@ -1317,7 +1340,7 @@ where
         NeedsExpiryPrune(String),
     }
 
-    let pve_key = ctx_pve_key(ctx);
+    let inflight_slot = inflight_wave_spawns_slot(&ctx.db);
     let (canonical_site_id, checked_wave, current_balls, is_sleeper_cache_stabilized) = loop {
         let precheck = read_pve_exploration_reg(ctx, |reg| -> Result<AdvancePrecheck, BridgeRpcError> {
             let now = now_sec(reg);
@@ -1337,7 +1360,9 @@ where
                     client_error: None,
                 });
             };
-            if let Some(rx) = current_wave_spawn_rx(&(pve_key, solar_system_id, site.site_id.clone())) {
+            if let Some(rx) =
+                current_wave_spawn_rx(&inflight_slot, &(solar_system_id, site.site_id.clone()))
+            {
                 return Ok(AdvancePrecheck::WaitingForSpawn(rx));
             }
             if site.cleared {
@@ -1538,11 +1563,10 @@ where
             site.active_npc_ball_ids.clone()
         };
         let spawn_guard = if !next_balls.is_empty() {
-            Some(register_wave_spawn_guard((
-                pve_key,
-                solar_system_id,
-                site.site_id.clone(),
-            )))
+            Some(register_wave_spawn_guard(
+                &inflight_slot,
+                (solar_system_id, site.site_id.clone()),
+            ))
         } else {
             None
         };

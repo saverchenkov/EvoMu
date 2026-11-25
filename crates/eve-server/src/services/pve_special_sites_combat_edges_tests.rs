@@ -874,3 +874,45 @@ async fn seasonal_site_npc_destroyed_and_ensure_seasonal_sites_edges() {
     });
     let _ = ensure_seasonal_event_sites_for_system(&ctx, 30_002_187).await;
 }
+
+#[test]
+fn seasonal_system_lock_isolated_per_repository_and_freed_on_drop() {
+    let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(build_combat_test_ctx);
+    let sys_id: SolarSystemId = 30_000_142;
+
+    let left_lock = seasonal_system_lock(&pair.left().db, sys_id);
+    let right_lock = seasonal_system_lock(&pair.right().db, sys_id);
+    assert!(!Arc::ptr_eq(&left_lock, &right_lock));
+
+    let left_guard = left_lock.try_lock().expect("left seasonal lock unlocked");
+    assert!(
+        left_lock.try_lock().is_err(),
+        "same repo + system seasonal lock must serialize callers"
+    );
+    assert!(Arc::ptr_eq(
+        &seasonal_system_lock(&pair.left().db, sys_id),
+        &left_lock
+    ));
+    let right_guard = right_lock
+        .try_lock()
+        .expect("left seasonal lock must not block independent repository");
+
+    drop(left_guard);
+    drop(right_guard);
+    drop(left_lock);
+    drop(right_lock);
+
+    let weak_slot = pair
+        .left()
+        .db
+        .get_transient_runtime_slot::<SeasonalSystemLocksSlot>(SEASONAL_SYSTEM_LOCKS_SLOT_KEY)
+        .flatten()
+        .map(|slot| Arc::downgrade(&slot))
+        .expect("SeasonalSystemLocksSlot initialized");
+    assert!(weak_slot.upgrade().is_some());
+    drop(pair);
+    assert!(
+        weak_slot.upgrade().is_none(),
+        "dropping WorldRepository must free SeasonalSystemLocksSlot"
+    );
+}
