@@ -1,14 +1,15 @@
 //! `Ballpark` spatial grid management, ball lifecycle, warp bubbles, cloaking, MJD/MJFG, and target locking.
 
 use crate::{
-    capital_ship_catalog_for_sde, Ball, BallId, Ballpark, CapitalShipCatalog, CombatState,
-    DamageVector, DestinyEvent, GridBubble, MovementMode, SlimItemMeta, SpecialFxWireMeta,
-    StargateActivationState, WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS,
-    BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
-    GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
+    Ball, BallId, Ballpark, CapitalShipCatalog, CombatState, DamageVector, DestinyEvent,
+    GridBubble, MovementMode, SlimItemMeta, SpecialFxWireMeta, StargateActivationState,
+    WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS,
+    DECLOAK_DISTANCE_METERS, GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
     STARGATE_ACTIVATION_STATE_ACTIVATING, STARGATE_ACTIVATION_STATE_CLOSED,
     STARGATE_ACTIVATION_STATE_OPEN,
 };
+#[cfg(test)]
+use crate::capital_ship_catalog_for_sde;
 use glam::DVec3;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,9 +23,18 @@ fn default_constellation_id() -> u32 {
 }
 
 fn capital_ship_catalog_fallback_or_default_db() -> std::sync::Arc<CapitalShipCatalog> {
-    eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path())
-        .map(|sde| capital_ship_catalog_for_sde(&sde))
-        .unwrap_or_else(|_| std::sync::Arc::new(CapitalShipCatalog::default_fallback()))
+    let mut catalog = CapitalShipCatalog::default_fallback();
+    if let Ok(rows) =
+        eve_sde::SdeRegistry::load_ship_category_type_rows(&eve_sde::SdeRegistry::default_db_path())
+    {
+        for (tid, gid, rig_size, is_cap_size) in rows {
+            catalog.type_to_group.insert(tid, gid);
+            if rig_size >= 4.0 || is_cap_size > 0.0 {
+                catalog.cap_groups.insert(gid);
+            }
+        }
+    }
+    std::sync::Arc::new(catalog)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

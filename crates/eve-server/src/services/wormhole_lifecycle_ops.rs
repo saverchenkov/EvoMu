@@ -311,11 +311,12 @@ pub fn system_wormhole_profile_sde(
 }
 
 pub fn system_wormhole_profile(sys_id: SolarSystemId) -> (u8, bool, bool, &'static str) {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+    if let Ok(sde) = crate::with_default_sde_db_path(|path| {
+        eve_sde::SdeRegistry::open_for_wormhole_system(path, sys_id)
+    }) {
         return system_wormhole_profile_sde(&sde, sys_id);
     }
-    let sde = eve_sde::SdeRegistry::with_canonical_seed();
-    compute_single_system_profile(&sde, sys_id)
+    compute_single_system_profile(&eve_sde::SdeRegistry::default(), sys_id)
 }
 
 pub fn is_drifter_system(sys_id: SolarSystemId) -> bool {

@@ -180,9 +180,11 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
     use eve_server::services::notify_emitters_tournaments_anomalies::collect_active_system_wide_effects_in_system;
     use std::collections::HashMap;
 
-    // Load the SDE directly via default_db_path() so concurrent env-var poisoning tests cannot race.
-    let base_sde =
-        SdeRegistry::open(&SdeRegistry::default_db_path()).expect("open evomu_sde.sqlite");
+    // Load the SDE directly via default_db_path() under test env read guard so concurrent env-var poisoning tests cannot race.
+    let base_sde = {
+        let _env_guard = eve_db::lock_test_env_read();
+        SdeRegistry::open(&SdeRegistry::default_db_path()).expect("open evomu_sde.sqlite")
+    };
     let pair = TwoServerContexts::with_sdes(Arc::new(base_sde.clone()), Arc::new(base_sde));
     let (left, right) = pair.both();
     crate::common::pin_clock(left);
@@ -482,8 +484,210 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
         let st = h.hacking_states.get(&container_id).expect("right hacking state preserved");
         assert!(!st.unlocked);
     });
-    assert_eq!(
-        right.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.flag)),
-        Some(InventoryFlag::Locked)
+    assert!(
+        right.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.flag))
+            == Some(InventoryFlag::Locked)
     );
+
+    // 4. Per-WorldRepository cyno portal beacons/bridges isolation (`#1583` Track 14).
+    use eve_server::services::inventory_fitting::fitting_cyno_portal::{
+        is_ship_cyno_active, on_cyno_ship_destroyed,
+    };
+    const CYNO_SHIP_ID: i64 = 9_900_301;
+    const CYNO_MOD_ID: i64 = 9_900_302;
+    const CYNO_FUEL_ID: i64 = 9_900_303;
+    const CYNO_FLEET_ID: i64 = 9_900_901;
+    const REDEEMER_TYPE_ID: u32 = 22_428;
+    const CYNO_GEN_TYPE_ID: u32 = 21_096;
+    const LIQUID_OZONE_TYPE_ID: u32 = 16_273;
+
+    run_disconnect_teardown_sync(right, char_id, Some(&sess_r));
+    let lowsec_sys = left
+        .sde
+        .lowest_matching_solar_system(|s| {
+            s.security_status < 0.45
+                && s.region_id != 10_000_070
+                && s.solar_system_id < 31_000_000
+                && s.solar_system_id != 30_100_000
+        })
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_813);
+
+    async fn setup_cyno_pilot_in_lowsec(
+        ctx: &ServerContext,
+        sess_id: u64,
+        lowsec_sys: u32,
+    ) -> SessionState {
+        let mut req_skills = vec![21_603_u32];
+        for tid in [REDEEMER_TYPE_ID, CYNO_GEN_TYPE_ID] {
+            if let Some(inv_t) = ctx.sde.types.get(&tid) {
+                for s_attr in [
+                    attr_ids::REQUIRED_SKILL_1,
+                    attr_ids::REQUIRED_SKILL_2,
+                    attr_ids::REQUIRED_SKILL_3,
+                ] {
+                    if let Some(&sid_f) = inv_t.default_attributes.get(&s_attr) {
+                        let sid = sid_f as u32;
+                        if sid > 0 && !req_skills.contains(&sid) {
+                            req_skills.push(sid);
+                        }
+                    }
+                }
+            }
+        }
+        ctx.db.with_mut_snapshot(|snap| {
+            let sk = snap.skills.entry(CHAR_ID).or_default();
+            for sid in req_skills {
+                sk.insert(
+                    sid,
+                    TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 },
+                );
+            }
+            snap.items.insert(
+                CYNO_SHIP_ID,
+                InventoryItemRecord {
+                    item_id: CYNO_SHIP_ID,
+                    type_id: REDEEMER_TYPE_ID,
+                    owner_id: CHAR_ID,
+                    location_id: i64::from(lowsec_sys),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                CYNO_MOD_ID,
+                InventoryItemRecord {
+                    item_id: CYNO_MOD_ID,
+                    type_id: CYNO_GEN_TYPE_ID,
+                    owner_id: CHAR_ID,
+                    location_id: CYNO_SHIP_ID,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                CYNO_FUEL_ID,
+                InventoryItemRecord {
+                    item_id: CYNO_FUEL_ID,
+                    type_id: LIQUID_OZONE_TYPE_ID,
+                    owner_id: CHAR_ID,
+                    location_id: CYNO_SHIP_ID,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 5_000,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(CYNO_MOD_ID, true);
+            if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = lowsec_sys;
+                ch.active_ship_id = CYNO_SHIP_ID;
+            }
+        });
+        crate::common::grant_legal_active_ship_skills(ctx, CHAR_ID);
+        ctx.invalidate_ship_fitting(CYNO_SHIP_ID);
+
+        let sys = ctx.systems.get_or_spawn(lowsec_sys);
+        let t = &ctx.sde.types[&REDEEMER_TYPE_ID];
+        let mut cs = ctx.build_type_combat_state(REDEEMER_TYPE_ID);
+        cs.capacitor = 10_000.0;
+        cs.max_capacitor = 10_000.0;
+        let meta = ctx.build_ship_slim_meta(CHAR_ID, REDEEMER_TYPE_ID);
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: CYNO_SHIP_ID,
+                type_id: REDEEMER_TYPE_ID,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.5,
+                mass: t.mass.max(10_000_000.0),
+                radius: t.radius.max(100.0),
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+            meta,
+        )
+        .await
+        .expect("spawn cyno ship");
+
+        let mut sess = SessionState::new(sess_id);
+        crate::common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
+        crate::common::borrow_wire_harness(ctx, &mut sess)
+            .call_ok(
+                "charUnboundMgr",
+                None,
+                "SelectCharacterID",
+                &[PyRep::Integer(CHAR_ID)],
+                &HashMap::new(),
+            )
+            .await;
+        // Seed fleet after `SelectCharacterID` so `on_character_select` does not purge offline fleet state.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.fleets.insert(
+                CYNO_FLEET_ID,
+                eve_db::FleetRecord {
+                    fleet_id: CYNO_FLEET_ID,
+                    boss_id: CHAR_ID,
+                    members: vec![CHAR_ID],
+                    ..Default::default()
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+                ch.fleet_id = Some(CYNO_FLEET_ID);
+            }
+        });
+        sess.role |= ROLE_GMH;
+        sess.station_id = None;
+        sess.structure_id = None;
+        sess.solar_system_id = Some(lowsec_sys);
+        sess.ship_id = Some(CYNO_SHIP_ID);
+        sess.fleet_id = Some(CYNO_FLEET_ID);
+        sess
+    }
+
+    let mut cyno_sess_l = setup_cyno_pilot_in_lowsec(left, 91_003, lowsec_sys).await;
+    let mut cyno_sess_r = setup_cyno_pilot_in_lowsec(right, 91_004, lowsec_sys).await;
+    assert!(!is_ship_cyno_active(left, CYNO_SHIP_ID));
+    assert!(!is_ship_cyno_active(right, CYNO_SHIP_ID));
+
+    let cyno_rep_l = crate::common::borrow_wire_harness(left, &mut cyno_sess_l)
+        .call_ok(
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(CYNO_MOD_ID), PyRep::String("cynosuralGeneration".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(cyno_rep_l.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(lowsec_sys)));
+    assert!(is_ship_cyno_active(left, CYNO_SHIP_ID));
+    assert!(!is_ship_cyno_active(right, CYNO_SHIP_ID));
+
+    let cyno_rep_r = crate::common::borrow_wire_harness(right, &mut cyno_sess_r)
+        .call_ok(
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(CYNO_MOD_ID), PyRep::String("cynosuralGeneration".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(cyno_rep_r.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(lowsec_sys)));
+    assert!(is_ship_cyno_active(left, CYNO_SHIP_ID));
+    assert!(is_ship_cyno_active(right, CYNO_SHIP_ID));
+
+    on_cyno_ship_destroyed(left, CYNO_SHIP_ID);
+    assert!(!is_ship_cyno_active(left, CYNO_SHIP_ID));
+    assert!(is_ship_cyno_active(right, CYNO_SHIP_ID));
 }

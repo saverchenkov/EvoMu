@@ -490,6 +490,7 @@ struct CachedAdjustedPriceOverrides(
     std::sync::RwLock<std::collections::HashMap<eve_sde::TypeId, f64>>,
 );
 
+#[cfg(test)]
 struct CachedSdeBasePrices(std::sync::Arc<std::collections::HashMap<eve_sde::TypeId, f64>>);
 
 /// Overrides or sets market adjusted prices cache on `sde` (`feat:industry.eiv-adjusted-prices`).
@@ -526,6 +527,7 @@ pub fn clear_sde_adjusted_prices(sde: &eve_sde::SdeRegistry) {
     slot.0.write().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
+#[cfg(test)]
 fn sde_base_prices(
     sde: &eve_sde::SdeRegistry,
 ) -> std::sync::Arc<std::collections::HashMap<eve_sde::TypeId, f64>> {
@@ -701,9 +703,10 @@ pub fn collect_live_market_adjusted_prices_with_sde(
 pub fn collect_live_market_adjusted_prices(
     snap: &eve_db::WorldStateSnapshot,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
-        let base_prices = sde_base_prices(&sde);
-        return collect_live_market_adjusted_prices_with_lookup(snap, Some(&sde), |tid| {
+    if let Ok(base_prices) =
+        crate::with_default_sde_db_path(|p| eve_sde::SdeRegistry::load_type_base_prices(p))
+    {
+        return collect_live_market_adjusted_prices_with_lookup(snap, None, |tid| {
             base_prices.get(&tid).copied()
         });
     }
@@ -727,9 +730,10 @@ pub fn compute_market_adjusted_price_from_snap(
     snap: &eve_db::WorldStateSnapshot,
     type_id: eve_sde::TypeId,
 ) -> Option<f64> {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
-        let base_prices = sde_base_prices(&sde);
-        return compute_market_adjusted_price_with_lookup(snap, Some(&sde), type_id, |tid| {
+    if let Ok(base_prices) =
+        crate::with_default_sde_db_path(|p| eve_sde::SdeRegistry::load_type_base_prices(p))
+    {
+        return compute_market_adjusted_price_with_lookup(snap, None, type_id, |tid| {
             base_prices.get(&tid).copied()
         });
     }

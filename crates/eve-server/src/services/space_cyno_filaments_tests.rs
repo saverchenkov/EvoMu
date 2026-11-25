@@ -1184,13 +1184,13 @@ async fn structure_beacon_and_fleet_beacon_jumps_retain_ballpark_protection_acro
         )
         .await;
 
-    let ctx_k = ctx.instance_id as usize;
-    crate::services::inventory_fitting::fitting_cyno_portal::cyno_state()
+    crate::services::inventory_fitting::fitting_cyno_portal::cyno_state(&ctx)
+        .state
         .write()
         .unwrap()
         .beacons
         .insert(
-            (ctx_k, cyno_ship),
+            cyno_ship,
             crate::services::inventory_fitting::fitting_cyno_portal::FleetModuleBeacon {
                 beacon_id: fleet_beacon_id,
                 char_id: cyno_pilot,

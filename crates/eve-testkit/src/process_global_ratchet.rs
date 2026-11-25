@@ -1593,7 +1593,7 @@ impl TwoRepositoryPair {
 
     /// Creates two demo-seeded in-memory [`WorldRepository`] instances backed by independent
     /// [`SdeRegistry::default`] stores without reading `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`,
-    /// `EVOMU_DISABLE_DEMO_SEED`, `EVOMU_SDE_PATH`, or `SDE_CACHE` (`#1583` BF-01).
+    /// `EVOMU_DISABLE_DEMO_SEED`, or `EVOMU_SDE_PATH` (`#1583` BF-01).
     pub fn with_demo_seed_isolated() -> Self {
         Self::with_demo_seed_with_sdes(
             Arc::new(SdeRegistry::default()),
@@ -1603,7 +1603,7 @@ impl TwoRepositoryPair {
 
     /// Creates two demo-seeded in-memory [`WorldRepository`] instances backed by the supplied
     /// [`SdeRegistry`] instances, seeding each side's repository from its own `SdeRegistry`
-    /// without reading env overrides or `SDE_CACHE` (`#1583` BF-01).
+    /// without reading env overrides (`#1583` BF-01).
     pub fn with_demo_seed_with_sdes(
         left_sde: Arc<SdeRegistry>,
         right_sde: Arc<SdeRegistry>,

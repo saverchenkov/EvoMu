@@ -293,11 +293,25 @@ impl WorldRepository {
         if crate::default_sde_suppressed_for_test() {
             return None;
         }
-        let path = {
-            let _env_guard = crate::lock_test_env_read();
-            SdeRegistry::default_db_path()
-        };
+        let _env_guard = crate::lock_test_env_read();
+        let path = SdeRegistry::default_db_path();
         SdeRegistry::open_shared(&path).ok()
+    }
+
+    /// Opens only `sde_races` and the transitive required-skill `sde_types` closure for
+    /// `root_type_ids`, honoring `EVOMU_SDE_PATH` without loading full 92 MB SDE tables (`#1583`).
+    pub(crate) fn open_skill_sde_subset_for_types(
+        root_type_ids: &[TypeId],
+    ) -> Option<std::sync::Arc<SdeRegistry>> {
+        #[cfg(test)]
+        if crate::default_sde_suppressed_for_test() {
+            return None;
+        }
+        let _env_guard = crate::lock_test_env_read();
+        let path = SdeRegistry::default_db_path();
+        SdeRegistry::open_races_and_skill_closure_for_types(&path, root_type_ids)
+            .ok()
+            .map(std::sync::Arc::new)
     }
 
     /// Builds a `TrainedSkillRecord` at `level` (clamped to `[1, 5]`) using skill rank attribute `275`.

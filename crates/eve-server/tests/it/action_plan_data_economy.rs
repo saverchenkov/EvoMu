@@ -194,7 +194,7 @@ password_token = "cadet_secret_token"
     assert_eq!(cfg.player_accounts[0].username, "new_cadet");
 
     // Part B (D-4): Accounts, Argon2id hashes, bans, online locks
-    let sde = SdeRegistry::with_canonical_seed();
+    let sde = eve_testkit::TestSde::with_canonical_seed();
     let pid = std::process::id();
     let temp_db = std::env::temp_dir().join(format!("evomu_action_plan_d3_d4_{pid}.sqlite"));
     let _ = std::fs::remove_file(&temp_db);
@@ -328,7 +328,7 @@ password_token = "cadet_secret_token"
 // parity: plan:DG-1
 #[tokio::test]
 async fn test_plan_dg1_dogma_modifier_engine_rifter_overdrives() {
-    let sde = SdeRegistry::with_canonical_seed();
+    let sde = eve_testkit::TestSde::with_canonical_seed();
 
     // 1. Validate modifier functions over V24 modifierInfo:
     // ItemModifier: modifies ship maxVelocity directly (+12.5% speedFactor)

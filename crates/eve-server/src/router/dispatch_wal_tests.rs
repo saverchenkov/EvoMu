@@ -313,7 +313,7 @@ async fn test_issue_874_staged_notifications_discarded_for_caller_and_bystander_
     ctx.db
         .set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
 
-    super::ensure_dispatch_tx_hooks_installed();
+    super::ensure_dispatch_tx_hooks_installed(&ctx.db);
     let fail_outcome: Result<(), eve_proto::BridgeRpcError> = super::maybe_with_dispatch_tx_error(
         true,
         super::maybe_with_staged_dispatch_notifications(

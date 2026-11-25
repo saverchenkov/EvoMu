@@ -429,7 +429,9 @@ pub fn default_seasonal_challenge_definitions_with_sde(
 
 /// Returns the starter active challenges from `res:/staticdata/challenges.fsdbinary`.
 pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+    if let Ok(sde) = crate::with_default_sde_db_path(|p| {
+        eve_sde::SdeRegistry::open_progression_resources_only(p)
+    }) {
         let defs = default_seasonal_challenge_definitions_with_sde(&sde);
         if !defs.is_empty() {
             return (*defs).clone();

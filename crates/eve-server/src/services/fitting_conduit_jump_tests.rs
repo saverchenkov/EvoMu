@@ -186,11 +186,11 @@ async fn hull_allowed_covert_capability_and_beacon_sweep() {
     assert!((arrival.distance(DVec3::new(1_000_000.0, 0.0, 0.0)) - 5_000.0).abs() < 1e-3);
 
     // Seed expired and live beacons in cyno_state and sweep expired ones
-    let ctx_k = ctx.instance_id as usize;
     {
-        let mut st = cyno_state().write().unwrap();
+        let slot = cyno_state(&ctx);
+        let mut st = slot.state.write().unwrap();
         st.beacons.insert(
-            (ctx_k, 8_880_001),
+            8_880_001,
             FleetModuleBeacon {
                 beacon_id: 8_880_101,
                 char_id: 98_000_001,
@@ -202,7 +202,7 @@ async fn hull_allowed_covert_capability_and_beacon_sweep() {
             },
         );
         st.beacons.insert(
-            (ctx_k, 8_880_002),
+            8_880_002,
             FleetModuleBeacon {
                 beacon_id: 8_880_102,
                 char_id: 98_000_002,
@@ -215,9 +215,10 @@ async fn hull_allowed_covert_capability_and_beacon_sweep() {
         );
     }
     sweep_expired_cyno_beacons(&ctx);
-    let st = cyno_state().read().unwrap();
-    assert!(!st.beacons.contains_key(&(ctx_k, 8_880_001)));
-    assert!(st.beacons.contains_key(&(ctx_k, 8_880_002)));
+    let slot = cyno_state(&ctx);
+    let st = slot.state.read().unwrap();
+    assert!(!st.beacons.contains_key(&8_880_001));
+    assert!(st.beacons.contains_key(&8_880_002));
 }
 
 #[tokio::test]
@@ -327,9 +328,8 @@ async fn jump_portal_bridge_jump_through_conduit_and_jammer_state_rpcs() {
     spawn_ship(&ctx, origin_sys, blops_ship_id, 999_701, blops_pilot, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
     spawn_ship(&ctx, origin_sys, bomber_ship_id, 999_703, bomber_pilot, DVec3::new(2_500.0, 0.0, 0.0), 5_000.0).await;
 
-    let ctx_k = ctx.instance_id as usize;
-    cyno_state().write().unwrap().beacons.insert(
-        (ctx_k, 1_000_800_009),
+    cyno_state(&ctx).state.write().unwrap().beacons.insert(
+        1_000_800_009,
         FleetModuleBeacon {
             beacon_id,
             char_id: cyno_pilot,
@@ -388,7 +388,7 @@ async fn jump_portal_bridge_jump_through_conduit_and_jammer_state_rpcs() {
     .expect_err("CmdBridgeToFleetModuleBeacon with missing fuel must reject pre-commit");
     assert_eq!(portal_no_fuel.code, "NotEnoughFuel");
     assert!(!origin_sys_handle.has_module_cycle(blops_ship_id, portal_mod_id).await);
-    assert!(!cyno_state().read().unwrap().bridges.contains_key(&(ctx_k, blops_ship_id)));
+    assert!(!cyno_state(&ctx).state.read().unwrap().bridges.contains_key(&blops_ship_id));
     let cs_no_fuel = origin_sys_handle.get_combat_state(blops_ship_id).await.unwrap().unwrap();
     assert!(cs_no_fuel.is_cloaked && cs_no_fuel.gate_cloak_remaining_ticks == 30);
     assert_eq!(cs_no_fuel.undock_invulnerable_remaining_ticks, 15);
@@ -464,7 +464,7 @@ async fn jump_portal_bridge_jump_through_conduit_and_jammer_state_rpcs() {
     });
     crate::router::session_transition::clear_session_change_timer(&ctx, blops_pilot);
     let _ = ctx.systems.get_or_spawn(origin_sys).remove_module_cycle(blops_ship_id, portal_mod_id).await;
-    cyno_state().write().unwrap().bridges.remove(&(ctx_k, blops_ship_id));
+    cyno_state(&ctx).state.write().unwrap().bridges.remove(&blops_ship_id);
 
     let conduit_res = handle_cyno_portal(
         &ctx,

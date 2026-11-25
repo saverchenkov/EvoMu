@@ -256,7 +256,7 @@ pub(super) async fn spawn_ship_ball(
 async fn bridge_rollback_arithmetic_and_conduit_distance_tether_boundaries() {
     use super::{bridge_to_resolved_beacon, group_jump_to_resolved_beacon};
     use crate::services::inventory_fitting::fitting_cyno_portal::{
-        ctx_key, cyno_state, handle_cyno_generator_activation, FleetModuleBeacon,
+        cyno_state, handle_cyno_generator_activation, FleetModuleBeacon,
     };
     use eve_db::{FleetMemberRecord, FleetRecord, FleetRole};
 
@@ -433,14 +433,14 @@ async fn bridge_rollback_arithmetic_and_conduit_distance_tether_boundaries() {
     //    - now_reserve=10 with 60s (`10 - 60` panics) and 25s (`10 + 25 - 60` panics) + now=1.8e9 with 1e18s (`now*dur`, `dur*60` overflow)
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(10)));
     assert!(bridge_to_resolved_beacon(&ctx, &titan_sess, beacon.clone(), None).await.is_err());
-    assert!(!cyno_state().read().unwrap().bridges.contains_key(&(ctx_key(&ctx), titan_ship)));
+    assert!(!cyno_state(&ctx).state.read().unwrap().bridges.contains_key(&titan_ship));
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&portal_mod).unwrap().type_id = 999_814;
     });
     ctx.invalidate_ship_fitting(titan_ship);
     assert!(bridge_to_resolved_beacon(&ctx, &titan_sess, beacon.clone(), None).await.is_err());
-    assert!(!cyno_state().read().unwrap().bridges.contains_key(&(ctx_key(&ctx), titan_ship)));
+    assert!(!cyno_state(&ctx).state.read().unwrap().bridges.contains_key(&titan_ship));
 
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx.db.with_mut_snapshot(|snap| {
@@ -448,7 +448,7 @@ async fn bridge_rollback_arithmetic_and_conduit_distance_tether_boundaries() {
     });
     ctx.invalidate_ship_fitting(titan_ship);
     assert!(bridge_to_resolved_beacon(&ctx, &titan_sess, beacon.clone(), None).await.is_err());
-    assert!(!cyno_state().read().unwrap().bridges.contains_key(&(ctx_key(&ctx), titan_ship)));
+    assert!(!cyno_state(&ctx).state.read().unwrap().bridges.contains_key(&titan_ship));
 
     // Restore 999_804 + seed Liquid Ozone & Nitrogen Isotopes -> happy bridge_to_fleet_beacon + jump_through_fleet non-default returns!
     ctx.db.with_mut_snapshot(|snap| {

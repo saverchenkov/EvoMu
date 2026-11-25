@@ -24,18 +24,28 @@ fn wh_class_of(ctx: &ServerContext, sys_id: u32) -> Option<u8> {
 }
 
 fn first_system_of_class(ctx: &ServerContext, class: u8) -> u32 {
-    ctx.sde
+    let min_id = ctx
+        .sde
         .solar_systems
         .keys()
         .copied()
         .filter(|&id| {
             id > 31_000_006
                 && wh_class_of(ctx, id) == Some(class)
-                && eve_server::services::pve_exploration::wormhole_class_for_system(id) == Some(class)
-                && !eve_server::services::wormhole_lifecycle_ops::system_wormhole_profile(id).2
+                && !eve_server::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(
+                    &ctx.sde,
+                    id,
+                )
+                .2
         })
         .min()
-        .unwrap_or_else(|| panic!("SDE C{class} wormhole system"))
+        .unwrap_or_else(|| panic!("SDE C{class} wormhole system"));
+    assert_eq!(
+        eve_server::services::pve_exploration::wormhole_class_for_system(min_id),
+        Some(class),
+        "selected C{class} system {min_id} must match wormhole_class_for_system"
+    );
+    min_id
 }
 
 /// Travels into `sys_id`, triggers live anomaly seeding, parks the ship 5 km from the first Sleeper,

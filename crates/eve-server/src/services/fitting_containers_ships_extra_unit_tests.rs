@@ -532,7 +532,7 @@ async fn alsc_lock_unlock_log_assemble_and_decode_item_branches() {
 #[tokio::test]
 async fn containers_ops_clear_charges_fit_fitting_alsc_retrieve_password_and_item_locking() {
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    let mut sde = eve_testkit::TestSde::with_canonical_seed();
     // Ensure a blueprint (category 9), charge (category 8), module (category 7), container (group 340),
     // plastic wrap (3468), and Mobile Siphon (1247) / Depot (1246) / Beacon exist cleanly.
     let base_tpl = sde.types.get(&587).unwrap().clone();
@@ -862,7 +862,7 @@ async fn pi_import_export_and_bay_move_boundary_mutants() {
     };
 
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    let mut sde = eve_testkit::TestSde::with_canonical_seed();
     let base_tpl = sde.types.get(&587).unwrap().clone();
     let ensure_t = |sde: &mut eve_sde::SdeRegistry, tid: u32, grp: u32, cat: u32, vol: f64, cap: f64| {
         if !sde.types.contains_key(&tid) {
@@ -1105,7 +1105,7 @@ async fn invbroker_misc_crystal_damage_fit_fitting_edge_cases_and_pi_errors() {
     };
 
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    let mut sde = eve_testkit::TestSde::with_canonical_seed();
     let base_tpl = sde.types.get(&587).unwrap().clone();
     let mut crystal_t = base_tpl.clone();
     crystal_t.type_id = 997_001;
@@ -1882,7 +1882,7 @@ async fn container_ship_per_entity_concurrent_ops_and_sqlite_reload_preserve_all
     let container_a = 950_100_001i64;
     let container_b = 950_100_002i64;
 
-    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let sde = eve_testkit::TestSde::canonical_shared();
     let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite repo1"));
     seed_demo_char_into_repo(&repo1, char_id, station_id, ship_a);
     let ctx1 = Arc::new(ServerContext::with_sde_and_repository(sde.clone(), repo1.clone()));
@@ -2033,7 +2033,7 @@ async fn alsc_30000_failed_password_attempts_stay_bounded_without_row_limit() {
     let ship_id = 100_000_001i64;
     let container_a = 950_200_001i64;
 
-    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let sde = eve_testkit::TestSde::canonical_shared();
     let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite repo1"));
     seed_demo_char_into_repo(&repo1, char_id, station_id, ship_id);
     let ctx1 = Arc::new(ServerContext::with_sde_and_repository(sde.clone(), repo1.clone()));
@@ -2183,7 +2183,7 @@ async fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_via_sqlite()
     let container_id = 950_300_001i64;
     let locked_item_id = 950_300_002i64;
 
-    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let sde = eve_testkit::TestSde::canonical_shared();
     let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite repo1"));
     seed_demo_char_into_repo(&repo1, char_id, station_id, ship_id);
     repo1.with_mut_snapshot(|snap| {
@@ -2579,7 +2579,7 @@ async fn bl02_invbroker_add_commits_alsc_take_custom_flag_and_ship_unlock_atomic
     let alsc_b = 950_500_002i64;
     let ore_id = 950_500_003i64;
 
-    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let sde = eve_testkit::TestSde::canonical_shared();
     let carrier_tid = sde
         .types
         .values()
@@ -2751,7 +2751,7 @@ async fn bl02_invbroker_add_commits_alsc_take_custom_flag_and_ship_unlock_atomic
 #[tokio::test]
 async fn clear_charges_rejects_alsc_locked_charge_without_tx_commit() {
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    let mut sde = eve_testkit::TestSde::with_canonical_seed();
     let base_tpl = sde.types.get(&587).unwrap().clone();
     let ensure_type = |sde: &mut eve_sde::SdeRegistry, tid: u32, grp: u32, cat: u32, vol: f64, effects: Vec<u16>| {
         if !sde.types.contains_key(&tid) {

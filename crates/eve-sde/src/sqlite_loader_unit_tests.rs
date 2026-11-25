@@ -185,12 +185,19 @@ fn load_uncached_populates_all_domain_tables_and_handles_edge_cases() {
     }
 
     let sde = SdeRegistry::open(&db_path).expect("open synthetic sde");
-    // Second open hits SDE_CACHE
-    let sde_cached = SdeRegistry::open(&db_path).expect("open cached synthetic sde");
+    // Explicit SdeCache shares Arc across open_shared calls; uncached SdeRegistry::open_shared allocates fresh Arcs.
+    let cache = SdeCache::new();
+    let sde_cached = cache.open(&db_path).expect("open cached synthetic sde");
     assert_eq!(sde_cached.types.len(), 3);
-    let shared_a = SdeRegistry::open_shared(&db_path).expect("open_shared synthetic sde");
-    let shared_b = SdeRegistry::open_shared(&db_path).expect("second open_shared hits SDE_CACHE");
+    let shared_a = cache.open_shared(&db_path).expect("open_shared synthetic sde");
+    let shared_b = cache.open_shared(&db_path).expect("second open_shared hits SdeCache");
     assert!(Arc::ptr_eq(&shared_a, &shared_b));
+    let other_cache = SdeCache::new();
+    let shared_other = other_cache.open_shared(&db_path).expect("independent SdeCache loads separately");
+    assert!(!Arc::ptr_eq(&shared_a, &shared_other));
+    let uncached_a = SdeRegistry::open_shared(&db_path).expect("uncached open_shared a");
+    let uncached_b = SdeRegistry::open_shared(&db_path).expect("uncached open_shared b");
+    assert!(!Arc::ptr_eq(&uncached_a, &uncached_b));
 
     assert_eq!(sde.types[&587].portion_size, 1);
     assert_eq!(sde.types[&587].default_attributes.get(&37), Some(&365.0));

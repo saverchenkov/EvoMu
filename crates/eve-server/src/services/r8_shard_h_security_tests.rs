@@ -498,8 +498,8 @@ async fn issue_500_jump_drive_capacitor_validation_deduction_and_pre_move_ewar()
     jita_handle.spawn_ball(ball).await.unwrap();
 
     // Register fleet cyno beacon and set low capacitor (10 GJ) -> reject BOTH beacon & fleet cyno jump before consuming fuel.
-    crate::services::inventory_fitting::fitting_cyno_portal::cyno_state().write().unwrap().beacons.insert(
-        (ctx.instance_id as usize, 982_201),
+    crate::services::inventory_fitting::fitting_cyno_portal::cyno_state(&ctx).state.write().unwrap().beacons.insert(
+        982_201,
         crate::services::inventory_fitting::fitting_cyno_portal::FleetModuleBeacon {
             beacon_id: 982_201,
             char_id: cyno_pilot,

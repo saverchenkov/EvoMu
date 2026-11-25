@@ -1235,13 +1235,6 @@ impl Clone for SdeDerivedCaches {
     }
 }
 
-/// Per-(path, size) slot. The outer map lock is held only to find/insert the slot; the slot's
-/// own lock is held for the whole load, so concurrent first `open` calls for the same database
-/// wait for a single load instead of each reading the SQLite file.
-pub(crate) type SdeCacheSlot = Arc<Mutex<Option<Arc<SdeRegistry>>>>;
-pub(crate) static SDE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u64), SdeCacheSlot>>> =
-    OnceLock::new();
-
 #[derive(Deserialize)]
 pub(crate) struct RawModifier {
     domain: Option<String>,
@@ -1899,11 +1892,13 @@ pub mod cfsd_nested_layouts_ops;
 pub mod cfsd_nested_tables;
 pub mod sqlite_loader;
 pub mod sqlite_loader_skins;
+pub mod sqlite_queries;
 pub mod belt_ores;
 pub mod static_domain_loaders;
 pub use cfsd_domain_loaders::*;
 pub use cfsd_flat_tables::*;
 pub use cfsd_nested_tables::*;
+pub use sqlite_queries::SdeCache;
 pub use static_domain_loaders::*;
 #[cfg(test)]
 mod tests {
@@ -2195,9 +2190,19 @@ mod tests {
         assert_eq!(parsed, vec![10, 20]);
         assert!(crate::sqlite_loader_skins::parse_json_col::<Vec<u32>>(2, "{bad").is_err());
         let _ = SdeRegistry::default_db_path();
-        let sde = SdeRegistry::with_canonical_seed();
+        let sde = SdeCache::new().canonical_shared();
         assert!(sde.load_cfsd_table("res:/missing_flat_table.fsdbinary").is_err());
         assert!(sde.load_cfsd_nested("res:/missing_nested_table.fsdbinary").is_err());
+        let lowest_ship = sde
+            .lowest_matching_type(|t| t.published && t.category_id == 6 && t.group_id == 25)
+            .expect("published frigate type");
+        let sorted_ships = sde.matching_types_sorted(|t| t.published && t.category_id == 6 && t.group_id == 25);
+        assert_eq!(lowest_ship.type_id, sorted_ships[0].type_id);
+        assert!(sorted_ships.windows(2).all(|w| w[0].type_id < w[1].type_id));
+        assert!(sde.lowest_matching_station(|st| st.solar_system_id == 30_000_142).is_some());
+        assert!(sde.lowest_matching_solar_system(|sys| !sys.stations.is_empty()).is_some());
+        assert!(sde.lowest_matching_blueprint(|bp| !bp.materials.is_empty()).is_some());
+        assert!(sde.lowest_matching_school(|sc| sc.race_id == 1).is_some());
     }
 
     #[test]
@@ -2242,19 +2247,6 @@ mod tests {
         }
 
         assert!(SdeRegistry::pick_lowest_entry(&forward, |_, &t| t == 99).is_none());
-
-        let sde = SdeRegistry::open(SdeRegistry::default_db_path())
-            .expect("data/evomu_sde.sqlite must open cleanly");
-        let lowest_ship = sde
-            .lowest_matching_type(|t| t.published && t.category_id == 6 && t.group_id == 25)
-            .expect("published frigate type");
-        let sorted_ships = sde.matching_types_sorted(|t| t.published && t.category_id == 6 && t.group_id == 25);
-        assert_eq!(lowest_ship.type_id, sorted_ships[0].type_id);
-        assert!(sorted_ships.windows(2).all(|w| w[0].type_id < w[1].type_id));
-        assert!(sde.lowest_matching_station(|st| st.solar_system_id == 30_000_142).is_some());
-        assert!(sde.lowest_matching_solar_system(|sys| !sys.stations.is_empty()).is_some());
-        assert!(sde.lowest_matching_blueprint(|bp| !bp.materials.is_empty()).is_some());
-        assert!(sde.lowest_matching_school(|sc| sc.race_id == 1).is_some());
     }
 
     #[test]

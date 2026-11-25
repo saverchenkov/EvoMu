@@ -5,16 +5,18 @@
 use super::*;
 use crate::sqlite_loader_skins::parse_json_col;
 
+pub(crate) struct LoadedTypesTables {
+    pub types: HashMap<TypeId, InvType>,
+    pub wrecks: HashMap<TypeId, TypeId>,
+    pub type_isis_groups: HashMap<TypeId, u32>,
+    pub variations_by_parent: HashMap<TypeId, Vec<TypeId>>,
+}
+
 impl SdeRegistry {
-    /// Opens an on-disk SQLite SDE database produced by `tools/sde-import` (`D-2`).
+    /// Opens an on-disk SQLite SDE database produced by `tools/sde-import` (`D-2`) without
+    /// consulting a process-wide cache. Callers loading repeatedly should own an [`SdeCache`].
     /// Fails clearly with [`SdeError::MissingDatabase`] if `path` does not exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SdeError> {
-        Self::open_shared(path).map(|sde| (*sde).clone())
-    }
-
-    /// Opens an on-disk SQLite SDE database and returns the cached shared handle
-    /// without cloning the full registry (`D-2`).
-    pub fn open_shared(path: impl AsRef<Path>) -> Result<Arc<Self>, SdeError> {
         let p = path.as_ref();
         let meta =
             std::fs::metadata(p).map_err(|_| SdeError::MissingDatabase(p.display().to_string()))?;
@@ -22,24 +24,21 @@ impl SdeRegistry {
             return Err(SdeError::MissingDatabase(p.display().to_string()));
         }
         let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let cache_key = (canon.clone(), meta.len());
-
-        let cache = SDE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        let slot: SdeCacheSlot = {
-            let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
-            Arc::clone(map.entry(cache_key).or_default())
-        };
-        let mut entry = slot.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = entry.as_ref() {
-            return Ok(Arc::clone(existing));
-        }
-        let registry = Arc::new(Self::load_uncached(canon)?);
-        *entry = Some(Arc::clone(&registry));
-        Ok(registry)
+        Self::load_uncached(canon)
     }
 
-    /// Loads the SDE from `canon` without consulting the process-wide cache (`D-2`).
-    fn load_uncached(canon: PathBuf) -> Result<Self, SdeError> {
+    /// Opens an on-disk SQLite SDE database and returns a shared handle (`D-2`).
+    pub fn open_shared(path: impl AsRef<Path>) -> Result<Arc<Self>, SdeError> {
+        Self::open(path).map(Arc::new)
+    }
+
+    pub(crate) fn open_validated_readonly_conn(path: &Path) -> Result<(PathBuf, Connection), SdeError> {
+        let meta = std::fs::metadata(path)
+            .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
+        if !meta.is_file() {
+            return Err(SdeError::MissingDatabase(path.display().to_string()));
+        }
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
         let path_str = canon.display().to_string();
         let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
@@ -66,28 +65,185 @@ impl SdeRegistry {
                 "unsupported SDE schema_version '{schema_ver}'"
             )));
         }
+        Ok((canon, conn))
+    }
 
+    pub(crate) fn load_resources_table(
+        conn: &Connection,
+    ) -> Result<HashMap<String, SdeResourceInfo>, SdeError> {
         let mut resources = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT res_path, cdn_relative_path, md5, byte_size, format, record_count, spot FROM sde_resources",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                Ok(SdeResourceInfo {
-                    res_path: r.get(0)?,
-                    cdn_relative_path: r.get(1)?,
-                    md5: r.get(2)?,
-                    byte_size: r.get::<_, i64>(3)? as u64,
-                    format: r.get(4)?,
-                    record_count: r.get::<_, i64>(5)? as usize,
-                    spot: r.get(6)?,
-                })
-            })?;
-            for r in rows {
-                let info = r?;
-                resources.insert(info.res_path.clone(), info);
-            }
+        let mut stmt = conn.prepare(
+            "SELECT res_path, cdn_relative_path, md5, byte_size, format, record_count, spot FROM sde_resources",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SdeResourceInfo {
+                res_path: r.get(0)?,
+                cdn_relative_path: r.get(1)?,
+                md5: r.get(2)?,
+                byte_size: r.get::<_, i64>(3)? as u64,
+                format: r.get(4)?,
+                record_count: r.get::<_, i64>(5)? as usize,
+                spot: r.get(6)?,
+            })
+        })?;
+        for r in rows {
+            let info = r?;
+            resources.insert(info.res_path.clone(), info);
         }
+        Ok(resources)
+    }
+
+    pub(crate) fn load_races_table(conn: &Connection) -> Result<HashMap<u32, RaceInfo>, SdeError> {
+        let mut races = HashMap::new();
+        let mut stmt =
+            conn.prepare("SELECT race_id, name, ship_type_id, skills_json, description FROM sde_races")?;
+        let rows = stmt.query_map([], |r| {
+            let skills_json: Option<String> = r.get(3).ok();
+            let starter_skills = skills_json
+                .and_then(|js| serde_json::from_str::<HashMap<String, u8>>(&js).ok())
+                .map(|m| {
+                    m.into_iter()
+                        .filter_map(|(k, v)| k.parse::<TypeId>().ok().map(|id| (id, v)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(RaceInfo {
+                race_id: r.get::<_, i64>(0)? as u32,
+                name: r.get(1)?,
+                corvette_type_id: r.get::<_, Option<i64>>(2)?.map(|tid| tid as TypeId),
+                starter_skills,
+                description: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            })
+        })?;
+        for r in rows {
+            let race = r?;
+            races.insert(race.race_id, race);
+        }
+        Ok(races)
+    }
+
+    pub(crate) fn query_inv_types_where(
+        conn: &Connection,
+        where_clause: Option<&str>,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<LoadedTypesTables, SdeError> {
+        let mut types = HashMap::new();
+        let mut type_isis_groups: HashMap<TypeId, u32> = HashMap::new();
+        let mut variations_by_parent: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
+        let mut wrecks = HashMap::new();
+        let has_isis_col = conn
+            .prepare("PRAGMA table_info(sde_types)")
+            .and_then(|mut s| {
+                let cols = s.query_map([], |r| r.get::<_, String>(1))?;
+                Ok(cols.flatten().any(|c| c == "isis_group_id"))
+            })
+            .unwrap_or(false);
+        let base_sql = if has_isis_col {
+            "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description, isis_group_id FROM sde_types"
+        } else {
+            "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description, NULL FROM sde_types"
+        };
+        let sql = match where_clause {
+            Some(w) => format!("{base_sql} WHERE {w}"),
+            None => base_sql.to_string(),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params, |r| {
+            let tid = r.get::<_, i64>(0)? as TypeId;
+            let wreck_tid: Option<i64> = r.get(14)?;
+            let attrs_str: String = r.get(16)?;
+            let effs_str: String = r.get(17)?;
+            let raw_attrs: HashMap<String, f64> = parse_json_col(16, &attrs_str)?;
+            let mut default_attributes = HashMap::with_capacity(raw_attrs.len());
+            for (k, v) in raw_attrs {
+                if let Ok(aid) = k.parse::<u16>() {
+                    default_attributes.insert(aid, v);
+                }
+            }
+            let raw_effs: Vec<u32> = parse_json_col(17, &effs_str)?;
+            let effect_ids: Vec<EffectId> = raw_effs
+                .into_iter()
+                .filter_map(|eid| u16::try_from(eid).ok())
+                .collect();
+            let desc_id: Option<u32> = r.get::<_, Option<i64>>(18)?.map(|v| v as u32);
+            let icon_id: Option<u32> = r.get::<_, Option<i64>>(19)?.map(|v| v as u32);
+            let graphic_id: Option<u32> = r.get::<_, Option<i64>>(20)?.map(|v| v as u32);
+            let sound_id: Option<u32> = r.get::<_, Option<i64>>(21)?.map(|v| v as u32);
+            let meta_group_id: Option<u32> = r.get::<_, Option<i64>>(22)?.map(|v| v as u32);
+            let meta_level: Option<i64> = r.get(23)?;
+            let tech_level: Option<u32> = r.get::<_, Option<i64>>(24)?.map(|v| v as u32);
+            let default_effect_id: Option<EffectId> = r
+                .get::<_, Option<i64>>(25)?
+                .and_then(|v| u16::try_from(v).ok());
+            let description: String = r.get::<_, Option<String>>(26)?.unwrap_or_default();
+            let isis_group_id: Option<u32> = r
+                .get::<_, Option<i64>>(27)?
+                .filter(|&v| v > 0)
+                .map(|v| v as u32);
+            Ok((
+                InvType {
+                    type_id: tid,
+                    group_id: r.get::<_, i64>(1)? as GroupId,
+                    category_id: r.get::<_, i64>(2)? as CategoryId,
+                    name: r.get(3)?,
+                    mass: r.get(4)?,
+                    volume: r.get(5)?,
+                    capacity: r.get(6)?,
+                    portion_size: (r.get::<_, i64>(7)?.max(1)) as u64,
+                    base_price: r.get(8)?,
+                    radius: r.get(9)?,
+                    market_group_id: r.get::<_, Option<i64>>(10)?.map(|v| v as u32),
+                    race_id: r.get::<_, Option<i64>>(11)?.map(|v| v as u32),
+                    faction_id: r.get::<_, Option<i64>>(12)?.map(|v| v as u32),
+                    variation_parent_type_id: r.get::<_, Option<i64>>(13)?.map(|v| v as TypeId),
+                    published: r.get::<_, i64>(15)? != 0,
+                    description_id: desc_id,
+                    icon_id,
+                    graphic_id,
+                    sound_id,
+                    meta_group_id,
+                    meta_level,
+                    tech_level,
+                    default_effect_id,
+                    description,
+                    effect_ids,
+                    default_attributes,
+                },
+                wreck_tid.map(|w| w as TypeId),
+                isis_group_id,
+            ))
+        })?;
+        for r in rows {
+            let (inv_type, wreck_tid, isis_group_id) = r?;
+            if let Some(w) = wreck_tid {
+                wrecks.insert(inv_type.type_id, w);
+            }
+            if let Some(ig) = isis_group_id {
+                type_isis_groups.insert(inv_type.type_id, ig);
+            }
+            if let Some(parent_tid) = inv_type.variation_parent_type_id {
+                variations_by_parent
+                    .entry(parent_tid)
+                    .or_default()
+                    .push(inv_type.type_id);
+            }
+            types.insert(inv_type.type_id, inv_type);
+        }
+        for list in variations_by_parent.values_mut() {
+            list.sort_unstable();
+        }
+        Ok(LoadedTypesTables {
+            types,
+            wrecks,
+            type_isis_groups,
+            variations_by_parent,
+        })
+    }
+
+    /// Loads the SDE from `canon` without consulting any cache (`D-2`).
+    pub(crate) fn load_uncached(canon: PathBuf) -> Result<Self, SdeError> {
+        let (canon, conn) = Self::open_validated_readonly_conn(&canon)?;
+        let resources = Self::load_resources_table(&conn)?;
 
         let mut categories = HashMap::new();
         {
@@ -129,109 +285,12 @@ impl SdeRegistry {
             }
         }
 
-        let mut types = HashMap::new();
-        let mut type_isis_groups: HashMap<TypeId, u32> = HashMap::new();
-        let mut variations_by_parent: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
-        let mut wrecks = HashMap::new();
-        {
-            let has_isis_col = conn
-                .prepare("PRAGMA table_info(sde_types)")
-                .and_then(|mut s| {
-                    let cols = s.query_map([], |r| r.get::<_, String>(1))?;
-                    Ok(cols.flatten().any(|c| c == "isis_group_id"))
-                })
-                .unwrap_or(false);
-            let sql = if has_isis_col {
-                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description, isis_group_id FROM sde_types"
-            } else {
-                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description, NULL FROM sde_types"
-            };
-            let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map([], |r| {
-                let tid = r.get::<_, i64>(0)? as TypeId;
-                let wreck_tid: Option<i64> = r.get(14)?;
-                let attrs_str: String = r.get(16)?;
-                let effs_str: String = r.get(17)?;
-                let raw_attrs: HashMap<String, f64> = parse_json_col(16, &attrs_str)?;
-                let mut default_attributes = HashMap::with_capacity(raw_attrs.len());
-                for (k, v) in raw_attrs {
-                    if let Ok(aid) = k.parse::<u16>() {
-                        default_attributes.insert(aid, v);
-                    }
-                }
-                let raw_effs: Vec<u32> = parse_json_col(17, &effs_str)?;
-                let effect_ids: Vec<EffectId> = raw_effs
-                    .into_iter()
-                    .filter_map(|eid| u16::try_from(eid).ok())
-                    .collect();
-                let desc_id: Option<u32> = r.get::<_, Option<i64>>(18)?.map(|v| v as u32);
-                let icon_id: Option<u32> = r.get::<_, Option<i64>>(19)?.map(|v| v as u32);
-                let graphic_id: Option<u32> = r.get::<_, Option<i64>>(20)?.map(|v| v as u32);
-                let sound_id: Option<u32> = r.get::<_, Option<i64>>(21)?.map(|v| v as u32);
-                let meta_group_id: Option<u32> = r.get::<_, Option<i64>>(22)?.map(|v| v as u32);
-                let meta_level: Option<i64> = r.get(23)?;
-                let tech_level: Option<u32> = r.get::<_, Option<i64>>(24)?.map(|v| v as u32);
-                let default_effect_id: Option<EffectId> = r
-                    .get::<_, Option<i64>>(25)?
-                    .and_then(|v| u16::try_from(v).ok());
-                let description: String = r.get::<_, Option<String>>(26)?.unwrap_or_default();
-                let isis_group_id: Option<u32> = r
-                    .get::<_, Option<i64>>(27)?
-                    .filter(|&v| v > 0)
-                    .map(|v| v as u32);
-                Ok((
-                    InvType {
-                        type_id: tid,
-                        group_id: r.get::<_, i64>(1)? as GroupId,
-                        category_id: r.get::<_, i64>(2)? as CategoryId,
-                        name: r.get(3)?,
-                        mass: r.get(4)?,
-                        volume: r.get(5)?,
-                        capacity: r.get(6)?,
-                        portion_size: (r.get::<_, i64>(7)?.max(1)) as u64,
-                        base_price: r.get(8)?,
-                        radius: r.get(9)?,
-                        market_group_id: r.get::<_, Option<i64>>(10)?.map(|v| v as u32),
-                        race_id: r.get::<_, Option<i64>>(11)?.map(|v| v as u32),
-                        faction_id: r.get::<_, Option<i64>>(12)?.map(|v| v as u32),
-                        variation_parent_type_id: r.get::<_, Option<i64>>(13)?.map(|v| v as TypeId),
-                        published: r.get::<_, i64>(15)? != 0,
-                        description_id: desc_id,
-                        icon_id,
-                        graphic_id,
-                        sound_id,
-                        meta_group_id,
-                        meta_level,
-                        tech_level,
-                        default_effect_id,
-                        description,
-                        effect_ids,
-                        default_attributes,
-                    },
-                    wreck_tid.map(|w| w as TypeId),
-                    isis_group_id,
-                ))
-            })?;
-            for r in rows {
-                let (inv_type, wreck_tid, isis_group_id) = r?;
-                if let Some(w) = wreck_tid {
-                    wrecks.insert(inv_type.type_id, w);
-                }
-                if let Some(ig) = isis_group_id {
-                    type_isis_groups.insert(inv_type.type_id, ig);
-                }
-                if let Some(parent_tid) = inv_type.variation_parent_type_id {
-                    variations_by_parent
-                        .entry(parent_tid)
-                        .or_default()
-                        .push(inv_type.type_id);
-                }
-                types.insert(inv_type.type_id, inv_type);
-            }
-            for list in variations_by_parent.values_mut() {
-                list.sort_unstable();
-            }
-        }
+        let LoadedTypesTables {
+            types,
+            wrecks,
+            type_isis_groups,
+            variations_by_parent,
+        } = Self::query_inv_types_where(&conn, None, &[])?;
 
         let mut attributes = HashMap::new();
         {
@@ -646,34 +705,7 @@ impl SdeRegistry {
             }
         }
 
-        let mut races = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT race_id, name, ship_type_id, skills_json, description FROM sde_races",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                let skills_json: Option<String> = r.get(3).ok();
-                let starter_skills = skills_json
-                    .and_then(|js| serde_json::from_str::<HashMap<String, u8>>(&js).ok())
-                    .map(|m| {
-                        m.into_iter()
-                            .filter_map(|(k, v)| k.parse::<TypeId>().ok().map(|id| (id, v)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Ok(RaceInfo {
-                    race_id: r.get::<_, i64>(0)? as u32,
-                    name: r.get(1)?,
-                    corvette_type_id: r.get::<_, Option<i64>>(2)?.map(|tid| tid as TypeId),
-                    starter_skills,
-                    description: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                })
-            })?;
-            for r in rows {
-                let race = r?;
-                races.insert(race.race_id, race);
-            }
-        }
+        let races = Self::load_races_table(&conn)?;
 
         let mut bloodlines = HashMap::new();
         {

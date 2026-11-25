@@ -461,39 +461,7 @@ pub fn tx_panics_total() -> u64 {
     PERSIST_TX_PANICS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-static TX_ERROR_HOOK: std::sync::RwLock<Option<fn(&TxError)>> = std::sync::RwLock::new(None);
-static TX_POISON_CHECK_HOOK: std::sync::RwLock<Option<fn() -> Option<String>>> =
-    std::sync::RwLock::new(None);
-
-/// Registers a callback invoked whenever `WorldRepository::tx` aborts due to an
-/// infrastructure/transaction error (`TxError::Persist`, `TxError::Panicked`,
-/// `TxError::NonFinite`, `TxError::RowLimit`). User closure business errors do not trigger it.
-pub fn set_tx_error_hook(hook: Option<fn(&TxError)>) {
-    *TX_ERROR_HOOK.write().unwrap_or_else(|e| e.into_inner()) = hook;
-}
-
-/// Registers a callback queried at the start of `WorldRepository::tx` to detect whether the
-/// active dispatch transaction scope is already poisoned by an earlier transaction failure.
-pub fn set_tx_poison_check_hook(hook: Option<fn() -> Option<String>>) {
-    *TX_POISON_CHECK_HOOK
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = hook;
-}
-
-#[inline]
-pub(crate) fn record_tx_error(err: &TxError) {
-    if let Some(hook) = *TX_ERROR_HOOK.read().unwrap_or_else(|e| e.into_inner()) {
-        hook(err);
-    }
-}
-
-#[inline]
-pub(crate) fn check_tx_poison() -> Option<String> {
-    let hook = *TX_POISON_CHECK_HOOK
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    hook.and_then(|f| f())
-}
+/// Transaction error/poison hook accessors are per-`WorldRepository` instance (`#1583`).
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
@@ -565,6 +533,10 @@ pub struct WorldRepository {
         HashMap<&'static str, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
         RANK_LEAF,
     >,
+    /// Per-repository callback invoked when `WorldRepository::tx` aborts on an infra/TxError.
+    pub(crate) tx_error_hook: std::sync::RwLock<Option<fn(&TxError)>>,
+    /// Per-repository callback queried on `WorldRepository::tx` entry for scope poisoning.
+    pub(crate) tx_poison_check_hook: std::sync::RwLock<Option<fn() -> Option<String>>>,
 }
 
 #[cfg(any(test, feature = "legacy-json-snapshot"))]
@@ -636,7 +608,79 @@ impl WorldRepository {
             next_system_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
             host_wiki_pve_catalog_autoload: std::sync::atomic::AtomicBool::new(false),
             transient_runtime_slots: RankedRwLock::new(HashMap::new()),
+            tx_error_hook: std::sync::RwLock::new(None),
+            tx_poison_check_hook: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Registers a per-repository callback invoked whenever `self.tx` aborts due to an
+    /// infrastructure/transaction error (`TxError::Persist`, `TxError::Panicked`,
+    /// `TxError::NonFinite`, `TxError::RowLimit`). User closure business errors do not trigger it.
+    pub fn set_tx_error_hook(&self, hook: Option<fn(&TxError)>) {
+        *self.tx_error_hook.write().unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// Returns whether a transaction error hook is currently installed on this repository.
+    pub fn has_tx_error_hook(&self) -> bool {
+        self.tx_error_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Registers a per-repository callback queried at the start of `self.tx` to detect whether
+    /// the active dispatch transaction scope is already poisoned by an earlier transaction failure.
+    pub fn set_tx_poison_check_hook(&self, hook: Option<fn() -> Option<String>>) {
+        *self
+            .tx_poison_check_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// Returns whether a transaction poison-check hook is currently installed on this repository.
+    pub fn has_tx_poison_check_hook(&self) -> bool {
+        self.tx_poison_check_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Atomically installs both transaction hooks only when their slots are empty, avoiding
+    /// read-then-write double-locking while preserving any pre-installed custom hook.
+    pub fn install_tx_hooks_if_unset(
+        &self,
+        error_hook: fn(&TxError),
+        poison_hook: fn() -> Option<String>,
+    ) {
+        let mut err_slot = self.tx_error_hook.write().unwrap_or_else(|e| e.into_inner());
+        if err_slot.is_none() {
+            *err_slot = Some(error_hook);
+        }
+        drop(err_slot);
+        let mut poison_slot = self
+            .tx_poison_check_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if poison_slot.is_none() {
+            *poison_slot = Some(poison_hook);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn record_tx_error(&self, err: &TxError) {
+        let hook = *self.tx_error_hook.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(hook) = hook {
+            hook(err);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn check_tx_poison(&self) -> Option<String> {
+        let hook = *self
+            .tx_poison_check_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        hook.and_then(|f| f())
     }
 
     pub(crate) fn next_instance_id() -> u64 {
@@ -1428,7 +1472,7 @@ impl WorldRepository {
     where
         E: crate::tx_engine::FromTxError,
     {
-        if let Some(prev_err) = check_tx_poison() {
+        if let Some(prev_err) = self.check_tx_poison() {
             return Err(E::from_tx_error(TxError::Persist(format!(
                 "dispatch transaction aborted due to earlier persistence failure: {prev_err}"
             ))));
@@ -1477,7 +1521,7 @@ impl WorldRepository {
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
                     let tx_err = TxError::Panicked { label, msg };
-                    record_tx_error(&tx_err);
+                    self.record_tx_error(&tx_err);
                     return Err(E::from_tx_error(tx_err));
                 }
                 Ok(Err(err)) => {
@@ -1506,7 +1550,7 @@ impl WorldRepository {
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
                     let tx_err = TxError::Persist(err);
-                    record_tx_error(&tx_err);
+                    self.record_tx_error(&tx_err);
                     return Err(E::from_tx_error(tx_err));
                 }
             }
@@ -1548,7 +1592,7 @@ impl WorldRepository {
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
-                    record_tx_error(&val_err);
+                    self.record_tx_error(&val_err);
                     return Err(E::from_tx_error(val_err));
                 }
 
@@ -1656,7 +1700,7 @@ impl WorldRepository {
                     writer.working.next_entity_id =
                         writer.working.next_entity_id.max(self.entity_ids.current());
                     drop(effects);
-                    record_tx_error(&persist_err);
+                    self.record_tx_error(&persist_err);
                     return Err(E::from_tx_error(persist_err));
                 }
             }

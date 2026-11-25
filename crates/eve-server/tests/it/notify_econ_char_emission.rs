@@ -334,9 +334,7 @@ const ERR_CHALLENGE_NOT_COMPLETED: &str = "ChallengeNotCompleted";
 const ERR_CHALLENGE_ALREADY_CLAIMED: &str = "ChallengeAlreadyClaimed";
 
 fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);
@@ -832,9 +830,7 @@ const PILOT_B: i64 = 90_000_002;
 const JITA_STATION: i64 = 60_003_760;
 
 fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);
@@ -1384,9 +1380,7 @@ const PILOT_A: i64 = 90_000_001;
 const SYS_JITA: u32 = 30_000_142;
 
 fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);
@@ -1680,9 +1674,7 @@ const SYS_JITA: u32 = 30_000_142;
 const JITA_STATION: i64 = 60_003_760;
 
 fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);
@@ -2345,9 +2337,7 @@ const PILOT_B: i64 = 90_000_002;
 const SYS_JITA: u32 = 30_000_142;
 
 fn new_ctx() -> ServerContext {
-    let sde = std::sync::Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
+    let sde = std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed());
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock_paused(true);

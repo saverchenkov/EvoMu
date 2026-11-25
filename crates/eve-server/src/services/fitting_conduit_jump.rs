@@ -92,12 +92,13 @@ pub(super) fn is_covert_ops_cloak_capable(ctx: &ServerContext, ship_type: &eve_s
 
 #[allow(dead_code)]
 pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
-    let (now, ctx_k) = (ctx.now_unix_secs(), ctx_key(ctx));
-    let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-    let (expired_beacons, expired_cycles) = drain_expired_beacons(&mut st, ctx_k, now);
+    let now = ctx.now_unix_secs();
+    let slot = cyno_state(ctx);
+    let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
+    let (expired_beacons, expired_cycles) = drain_expired_beacons(&mut st, now);
     let mut expired_bridges = Vec::new();
-    st.bridges.retain(|&(k, _), br| {
-        if k == ctx_k && br.expires_at_unix <= now {
+    st.bridges.retain(|_, br| {
+        if br.expires_at_unix <= now {
             expired_bridges.push((br.origin_system_id, br.bridger_ship_id, br.portal_module_id, br.portal_ball_id));
             false
         } else {
@@ -323,16 +324,17 @@ pub(crate) async fn bridge_to_resolved_beacon(
     }
     let now_reserve = ctx.now_unix_secs();
     {
-        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        super::fitting_cyno_portal::purge_expired_bridges(&mut st, ctx_key(ctx), now_reserve);
-        if st.bridges.contains_key(&(ctx_key(ctx), ship_id)) {
+        let slot = cyno_state(ctx);
+        let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
+        super::fitting_cyno_portal::purge_expired_bridges(&mut st, now_reserve);
+        if st.bridges.contains_key(&ship_id) {
             return Err(err(
                 "JumpBridgeAlreadyActive",
                 "A jump portal bridge is already active on this ship",
             ));
         }
         st.bridges.insert(
-            (ctx_key(ctx), ship_id),
+            ship_id,
             ActiveJumpBridge {
                 bridger_char_id: char_id,
                 bridger_ship_id: ship_id,
@@ -347,9 +349,10 @@ pub(crate) async fn bridge_to_resolved_beacon(
         );
     }
     let clear_bridge_claim = || {
-        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        if st.bridges.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.portal_ball_id == -ship_id) {
-            st.bridges.remove(&(ctx_key(ctx), ship_id));
+        let slot = cyno_state(ctx);
+        let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
+        if st.bridges.get(&ship_id).is_some_and(|b| b.portal_ball_id == -ship_id) {
+            st.bridges.remove(&ship_id);
         }
     };
     let mut cycle = self_immobilizing_cycle(
@@ -422,12 +425,13 @@ pub(crate) async fn bridge_to_resolved_beacon(
         })
         .await;
     let expires_at_unix = ctx.now_unix_secs() + duration_s.round() as u64;
-    cyno_state()
+    cyno_state(ctx)
+        .state
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .bridges
         .insert(
-            (ctx_key(ctx), ship_id),
+            ship_id,
             ActiveJumpBridge {
                 bridger_char_id: char_id,
                 bridger_ship_id: ship_id,
@@ -916,8 +920,13 @@ pub(super) async fn jump_through_fleet(
         )?;
     }
     require_same_fleet(ctx, char_id, other_char)?;
-    let key = (ctx_key(ctx), other_ship);
-    let bridge = cyno_state().read().unwrap_or_else(|e| e.into_inner()).bridges.get(&key).cloned();
+    let bridge = cyno_state(ctx)
+        .state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .bridges
+        .get(&other_ship)
+        .cloned();
     let bridge = bridge
         .filter(|b| {
             b.bridger_ship_id == other_ship
@@ -944,7 +953,12 @@ pub(super) async fn jump_through_fleet(
         ));
     }
     let Some(bridger_pos) = origin_handle.get_ball_position_sync(bridge.bridger_ship_id) else {
-        cyno_state().write().unwrap_or_else(|e| e.into_inner()).bridges.remove(&key);
+        cyno_state(ctx)
+            .state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .bridges
+            .remove(&other_ship);
         return Err(err("NoActiveBridge", "Bridging ship is no longer in space"));
     };
     let dist_m = ball.position.distance(bridger_pos);
@@ -975,11 +989,12 @@ pub(super) async fn jump_through_fleet(
             Ok(b) => b,
             Err(_) if bridge.beacon.ship_id == 0 => bridge.beacon.clone(),
             Err(e) => {
-                let destroyed_b = cyno_state()
+                let destroyed_b = cyno_state(ctx)
+                    .state
                     .read()
                     .unwrap_or_else(|p| p.into_inner())
                     .destroyed_beacons
-                    .get(&(ctx_key(ctx), bridge.beacon.ship_id))
+                    .get(&bridge.beacon.ship_id)
                     .cloned();
                 if let Some(db_b) = destroyed_b.filter(|b| {
                     b.beacon_id == bridge.beacon.beacon_id
