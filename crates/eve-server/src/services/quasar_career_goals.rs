@@ -16,7 +16,7 @@ use eve_db::{IskCents, WorldRepository};
 use eve_proto::pb;
 #[cfg(test)]
 use eve_proto::quasar::GoogleAny;
-use eve_proto::quasar::{DynamicValue, WireMessage};
+use eve_proto::quasar::{DynamicValue, QuasarDescriptorRegistry, WireMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -1194,14 +1194,8 @@ impl CareerGoalManager {
         );
     }
 
-    pub fn on_career_gameplay_event(
-        &self,
-        char_id: u32,
-        ev: CareerGameplayEvent<'_>,
-        delta: u64,
-        gateway: &PublicGatewayRouter,
-    ) {
-        self.on_career_gameplay_event_with_notifier(char_id, ev, delta, |scope, label, builder, ts| {
+    pub fn on_career_gameplay_event(&self, char_id: u32, ev: CareerGameplayEvent<'_>, delta: u64, gateway: &PublicGatewayRouter) {
+        self.on_career_gameplay_event_with_notifier(char_id, ev, delta, Some(&gateway.descriptors), |scope, label, builder, ts| {
             let _ = gateway.publish_pb_notice(scope, label, builder, ts);
         });
     }
@@ -1219,6 +1213,7 @@ impl CareerGoalManager {
             char_id,
             ev,
             delta,
+            None,
             |scope, label, builder, _ts| match builder.to_any() {
                 Ok(any) => {
                     pending_notices
@@ -1237,13 +1232,8 @@ impl CareerGoalManager {
         );
     }
 
-    fn on_career_gameplay_event_with_notifier<F>(
-        &self,
-        char_id: u32,
-        ev: CareerGameplayEvent<'_>,
-        delta: u64,
-        mut emit_notice: F,
-    ) where
+    fn on_career_gameplay_event_with_notifier<F>(&self, char_id: u32, ev: CareerGameplayEvent<'_>, delta: u64, descriptors: Option<&Arc<QuasarDescriptorRegistry>>, mut emit_notice: F)
+    where
         F: FnMut(crate::quasar_gateway::NoticeScope, &str, eve_proto::pb::ProtoBuilder, u64),
     {
         if matches!(ev.activity_kind, "hacking" | "advanced_hacking" | "combat_sites")
@@ -1326,11 +1316,15 @@ impl CareerGoalManager {
                 self.save_to_db();
             }
 
+            let build_msg = |ty: &str| match descriptors {
+                Some(d) => pb::message_with_registry(Arc::clone(d), ty),
+                None => pb::message(ty),
+            };
             for (uuid, new_progress, just_completed) in progressed {
                 emit_notice(
                     crate::quasar_gateway::NoticeScope::Character(char_id),
                     "quasar_career_goals.on_gameplay_event.progressed",
-                    pb::message("eve_public.career.goal.api.ProgressedNotice")
+                    build_msg("eve_public.career.goal.api.ProgressedNotice")
                         .set("goal.uuid", uuid.to_vec())
                         .set("amount", new_progress.min(u64::from(u32::MAX)) as u32),
                     now_unix,
@@ -1340,7 +1334,7 @@ impl CareerGoalManager {
                     emit_notice(
                         crate::quasar_gateway::NoticeScope::Character(char_id),
                         "quasar_career_goals.on_gameplay_event.completed",
-                        pb::message("eve_public.career.goal.api.CompletedNotice")
+                        build_msg("eve_public.career.goal.api.CompletedNotice")
                             .set("goal.uuid", uuid.to_vec()),
                         now_unix,
                     );

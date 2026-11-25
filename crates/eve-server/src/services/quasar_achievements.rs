@@ -12,7 +12,7 @@
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND};
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::pb;
-use eve_proto::quasar::{sha256_hex, DynamicValue};
+use eve_proto::quasar::{sha256_hex, DynamicValue, QuasarDescriptorRegistry};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -1095,6 +1095,7 @@ impl AchievementManager {
                             any_marked = true;
                             emit_achievement_notices(
                                 &gateway.queued_notices,
+                                &gateway.descriptors,
                                 char_id,
                                 o.achievement.def.id,
                                 o.achievement.def.category_id,
@@ -1149,6 +1150,7 @@ impl AchievementManager {
                 any_changed = true;
                 emit_achievement_notices(
                     &gateway.queued_notices,
+                    &gateway.descriptors,
                     character_id,
                     o.achievement.def.id,
                     o.achievement.def.category_id,
@@ -1519,6 +1521,7 @@ pub(crate) fn emit_achievement_notices(
             u64,
         )>,
     >,
+    descriptors: &Arc<QuasarDescriptorRegistry>,
     cid: u32,
     aid: u32,
     cat_id: u32,
@@ -1534,7 +1537,7 @@ pub(crate) fn emit_achievement_notices(
         queued_notices,
         crate::quasar_gateway::NoticeScope::Character(cid),
         "quasar_achievements.emit_achievement_notices.progressed",
-        pb::message("eve_public.achievement.api.ProgressedNotice")
+        pb::message_with_registry(Arc::clone(descriptors), "eve_public.achievement.api.ProgressedNotice")
             .set("achievement.uuid", u32_to_uuid(aid))
             .set("value", progress),
         now,
@@ -1544,7 +1547,7 @@ pub(crate) fn emit_achievement_notices(
             queued_notices,
             crate::quasar_gateway::NoticeScope::Character(cid),
             "quasar_achievements.emit_achievement_notices.completed",
-            pb::message("eve_public.achievement.api.CompletedNotice")
+            pb::message_with_registry(Arc::clone(descriptors), "eve_public.achievement.api.CompletedNotice")
                 .set("achievement.uuid", u32_to_uuid(aid)),
             now,
         );
@@ -1554,9 +1557,12 @@ pub(crate) fn emit_achievement_notices(
             queued_notices,
             crate::quasar_gateway::NoticeScope::Character(cid),
             "quasar_achievements.emit_achievement_notices.milestone_reached",
-            pb::message("eve_public.achievement.milestone.api.ReachedNotice")
-                .set("achievement.uuid", u32_to_uuid(aid))
-                .set("milestone.uuid", u32_to_uuid(*m_id)),
+            pb::message_with_registry(
+                Arc::clone(descriptors),
+                "eve_public.achievement.milestone.api.ReachedNotice",
+            )
+            .set("achievement.uuid", u32_to_uuid(aid))
+            .set("milestone.uuid", u32_to_uuid(*m_id)),
             now,
         );
     }
@@ -1567,9 +1573,12 @@ pub(crate) fn emit_achievement_notices(
                 queued_notices,
                 crate::quasar_gateway::NoticeScope::Character(cid),
                 "quasar_achievements.emit_achievement_notices.category_milestone_reached",
-                pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
-                    .set("category.uuid", u32_to_uuid(cat_id))
-                    .set("milestone.uuid", u32_to_uuid(*cm_id)),
+                pb::message_with_registry(
+                    Arc::clone(descriptors),
+                    "eve_public.achievement.category.milestone.api.ReachedNotice",
+                )
+                .set("category.uuid", u32_to_uuid(cat_id))
+                .set("milestone.uuid", u32_to_uuid(*cm_id)),
                 now,
             );
         }
@@ -1579,9 +1588,12 @@ pub(crate) fn emit_achievement_notices(
                 queued_notices,
                 crate::quasar_gateway::NoticeScope::Character(cid),
                 "quasar_achievements.emit_achievement_notices.category_progressed",
-                pb::message("eve_public.achievement.category.api.ProgressedNotice")
-                    .set("category.uuid", u32_to_uuid(cat_id))
-                    .set("score", cat_score),
+                pb::message_with_registry(
+                    Arc::clone(descriptors),
+                    "eve_public.achievement.category.api.ProgressedNotice",
+                )
+                .set("category.uuid", u32_to_uuid(cat_id))
+                .set("score", cat_score),
                 now,
             );
         }

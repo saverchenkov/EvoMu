@@ -2009,6 +2009,7 @@ mod blast_radius_tests {
         sess.character_id = Some(90_000_001);
         sess.corporation_id = Some(1_000_125);
         sess.solar_system_id = Some(30_000_142);
+        let mut rx = router.subscribe_session(&sess, Vec::new(), 1_700_000_000);
         router.on_session_changed(&sess, 1_700_000_000);
 
         router.progression.achievements.on_gameplay_event_by_name(
@@ -2018,6 +2019,20 @@ mod blast_radius_tests {
             1_700_000_000,
             &router,
         );
+        crate::services::quasar_achievements::emit_achievement_notices(
+            &router.queued_notices,
+            &router.descriptors,
+            90_000_001,
+            1,
+            1,
+            1,
+            1,
+            true,
+            true,
+            &[1],
+            &[1],
+            1_700_000_000,
+        );
         router
             .progression
             .daily_goals
@@ -2026,6 +2041,46 @@ mod blast_radius_tests {
             .progression
             .career_goals
             .on_gameplay_event(90_000_001, "combat", 1, &router);
+
+        assert!(
+            router
+                .progression
+                .daily_goals
+                .get_or_init_goals(90_000_001)
+                .iter()
+                .any(|g| g.current_progress >= 1),
+            "daily goal progress must execute even when notice descriptors are empty"
+        );
+        assert!(
+            router
+                .progression
+                .career_goals
+                .get_or_init_goals(90_000_001)
+                .iter()
+                .any(|g| g.progress >= 1),
+            "career goal progress must execute even when notice descriptors are empty"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "empty descriptor registry must publish zero Quasar notices to subscriber channel"
+        );
+        assert!(
+            router
+                .subscribers
+                .read()
+                .unwrap()
+                .get(&sess.session_id)
+                .is_some_and(|s| s.inbox.is_empty()),
+            "empty descriptor registry must enqueue zero subscriber inbox notices"
+        );
+        assert!(
+            router.routing_cache.read().unwrap().entries.is_empty(),
+            "empty descriptor registry must cache zero unrouted notices"
+        );
+        assert!(
+            router.drain_queued_notices().is_empty(),
+            "empty descriptor registry must queue zero achievement notices"
+        );
     }
 
     #[test]
