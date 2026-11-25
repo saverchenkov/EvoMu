@@ -83,8 +83,7 @@ pub use tx_engine::{
 };
 pub use sqlite_store::{
     clear_quarantine_unreadable_override, default_quarantine_unreadable, list_quarantined_rows,
-    parse_cli_quarantine_unreadable, set_quarantine_unreadable,
-    with_quarantine_unreadable_for_test, QuarantinedRow,
+    parse_cli_quarantine_unreadable, set_quarantine_unreadable, QuarantinedRow,
 };
 pub use corp_actor::{
     corp_role_breakdown, corp_role_breakdown_at, effective_corp_roles_at_db,

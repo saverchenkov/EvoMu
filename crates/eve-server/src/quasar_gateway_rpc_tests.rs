@@ -662,15 +662,21 @@ fn get_names_by_user_encodes_descriptor_checked_characters_empty_and_rejects_una
 
     // 4. Missing descriptor in active pb registry maps cleanly to 500 without panicking.
     let empty_reg = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let empty_router = new_router_with_descriptors(empty_reg);
+    let empty_handler = empty_router
+        .handlers
+        .read()
+        .unwrap()
+        .get("eve_public.character.GetNamesByUserRequest")
+        .cloned()
+        .expect("GetNamesByUserRequest handler registered on empty router");
     let auth_ctx =
         AuthoritativeContext::for_session(Some(42_420), None, None, 0, "tranquility", vec![1; 16]);
-    let missing_desc_err = eve_proto::pb::with_registry_override(empty_reg, || {
-        handler(
-            &auth_ctx,
-            &GoogleAny::default(),
-            &DynamicQuasarMessage::new("eve_public.character.GetNamesByUserRequest"),
-        )
-    })
+    let missing_desc_err = empty_handler(
+        &auth_ctx,
+        &GoogleAny::default(),
+        &DynamicQuasarMessage::new("eve_public.character.GetNamesByUserRequest"),
+    )
     .expect_err("missing descriptor must surface internal error tuple");
     assert_eq!(missing_desc_err.0, STATUS_INTERNAL_ERROR);
 }

@@ -4837,3 +4837,43 @@ async fn gh1195_t1_add_target_and_probe_invalid_target_emit_typed_user_errors_wi
         Some(eve_proto::UserErrorKey::CantShipNotPresent)
     );
 }
+
+#[test]
+fn dogma_session_check_store_is_isolated_per_server_context() {
+    let ctx_a = ServerContext::with_repository(Arc::new(WorldRepository::with_demo_seed()));
+    let ctx_b = ServerContext::with_repository(Arc::new(WorldRepository::with_demo_seed()));
+
+    let mut sess = SessionState::new(99_101);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(30_000_142);
+
+    let spec = PyRep::Dict(vec![(
+        PyRep::String("charid".into()),
+        PyRep::Integer(90_000_001),
+    )]);
+    let kw = HashMap::new();
+
+    let first_a = handle_dogma_set_session_check(&ctx_a, &sess, None, &[spec.clone()], &kw)
+        .expect("first SetSessionCheck on ctx_a");
+    assert_eq!(first_a.dict_get("checkCount"), Some(&PyRep::Integer(1)));
+
+    let second_a = handle_dogma_set_session_check(&ctx_a, &sess, None, &[spec.clone()], &kw)
+        .expect("second SetSessionCheck on ctx_a");
+    assert_eq!(second_a.dict_get("checkCount"), Some(&PyRep::Integer(2)));
+
+    // Identical session ID on a separate ServerContext starts with an isolated checkCount.
+    let first_b = handle_dogma_set_session_check(&ctx_b, &sess, None, &[spec], &kw)
+        .expect("first SetSessionCheck on ctx_b");
+    assert_eq!(first_b.dict_get("checkCount"), Some(&PyRep::Integer(1)));
+
+    // Clearing ctx_a leaves ctx_b's stored session-check count intact.
+    let cleared_a = handle_dogma_set_session_check(&ctx_a, &sess, None, &[PyRep::None], &kw)
+        .expect("clear ctx_a");
+    assert_eq!(cleared_a.dict_get("checkCount"), Some(&PyRep::Integer(0)));
+
+    let second_b = handle_dogma_set_session_check(&ctx_b, &sess, None, &[], &kw)
+        .expect("ctx_b still tracks session check");
+    assert_eq!(second_b.dict_get("checkCount"), Some(&PyRep::Integer(2)));
+}

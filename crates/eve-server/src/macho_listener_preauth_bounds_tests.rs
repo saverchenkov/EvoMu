@@ -1206,8 +1206,33 @@ async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regr
         guards[0].complete_auth();
         let extra = PreAuthConnectionGuard::try_acquire(&ctx, "198.51.100.77".into())
             .expect("slot freed after complete_auth");
+        // Another isolated ServerContext + standalone PreauthConnTracker have independent per-IP quotas.
+        let other_ctx = Arc::new(ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED));
+        let other_guard = PreAuthConnectionGuard::try_acquire(&other_ctx, "198.51.100.77".into())
+            .expect("exhausted IP quota on ctx must not affect isolated other_ctx");
+        let standalone_tracker = Arc::new(PreauthConnTracker::new());
+        let tracker_guard = PreAuthConnectionGuard::try_acquire_in_tracker(
+            &standalone_tracker,
+            other_ctx.instance_id,
+            "198.51.100.77".into(),
+        )
+        .expect("standalone tracker must be isolated from context tracker");
+        assert_eq!(
+            standalone_tracker.tracked_count(other_ctx.instance_id, "198.51.100.77"),
+            1
+        );
+        drop(tracker_guard);
+        assert_eq!(
+            standalone_tracker.tracked_count(other_ctx.instance_id, "198.51.100.77"),
+            0
+        );
+        drop(other_guard);
         drop(extra);
         drop(guards);
+        assert_eq!(
+            preauth_tracker_for_ctx(&ctx).tracked_count(ctx.instance_id, "198.51.100.77"),
+            0
+        );
     }
 
     // 2. #880: write_framed_pyrep_with_timeout errors promptly when peer stops reading.

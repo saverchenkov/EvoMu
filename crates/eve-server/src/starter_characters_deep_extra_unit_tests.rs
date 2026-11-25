@@ -6,6 +6,7 @@ use crate::config::{FeatureFlagsConfig, PlayerAccountConfig, ServerConfig, Start
 use crate::router::ServerContext;
 use crate::starter_characters::{
     grant_starter_plex_in_snapshot, provision_starter_characters, should_grant_default_starter_plex,
+    StarterCharOptions,
 };
 use eve_db::{IskCents, ServerClock, VirtualServerClock, WorldRepository};
 use eve_sde::SdeRegistry;
@@ -28,7 +29,12 @@ fn fast_test_context(base_unix: u64) -> Arc<ServerContext> {
 
 #[tokio::test]
 async fn starter_characters_task_local_and_plex_snapshot_grants_cover_all_branches() {
-    assert!(should_grant_default_starter_plex());
+    assert!(should_grant_default_starter_plex(
+        StarterCharOptions::default()
+    ));
+    assert!(!should_grant_default_starter_plex(StarterCharOptions {
+        grant_default_starter_plex: false,
+    }));
 
     let ctx = fast_test_context(1_800_000_000);
     ctx.db.with_mut_snapshot(|snap| {

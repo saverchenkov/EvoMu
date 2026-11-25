@@ -278,36 +278,34 @@ fn test_isolate_side_effect_and_thread_local_empty_registry_never_unwind() {
     );
 
     let ctx = make_context_with_empty_quasar_descriptors();
-    eve_proto::pb::with_registry_override(
-        Arc::new(QuasarDescriptorRegistry::empty_with_builtins()),
-        || {
-            assert!(ctx
-                .quasar_gateway
-                .publish_pb_notice(
-                    NoticeScope::Broadcast,
-                    "it.empty_notice",
-                    eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
-                    1_700_000_000,
-                )
-                .is_none());
-            ctx.quasar_gateway
-                .progression
-                .achievements
-                .on_gameplay_event_by_name(
-                    90_000_001,
-                    &["destroyHostileNPC"],
-                    1,
-                    1_700_000_000,
-                    &ctx.quasar_gateway,
-                );
-            ctx.quasar_gateway
-                .progression
-                .daily_goals
-                .on_gameplay_event(90_000_001, 1, 1, &ctx.quasar_gateway);
-            ctx.quasar_gateway
-                .progression
-                .career_goals
-                .on_gameplay_event(90_000_001, "combat", 1, &ctx.quasar_gateway);
-        },
-    );
+    assert!(ctx
+        .quasar_gateway
+        .publish_pb_notice(
+            NoticeScope::Broadcast,
+            "it.empty_notice",
+            eve_proto::pb::message_with_registry(
+                Arc::clone(&ctx.quasar_gateway.descriptors),
+                "eve_public.goal.api.ProgressedNotice",
+            ),
+            1_700_000_000,
+        )
+        .is_none());
+    ctx.quasar_gateway
+        .progression
+        .achievements
+        .on_gameplay_event_by_name(
+            90_000_001,
+            &["destroyHostileNPC"],
+            1,
+            1_700_000_000,
+            &ctx.quasar_gateway,
+        );
+    ctx.quasar_gateway
+        .progression
+        .daily_goals
+        .on_gameplay_event(90_000_001, 1, 1, &ctx.quasar_gateway);
+    ctx.quasar_gateway
+        .progression
+        .career_goals
+        .on_gameplay_event(90_000_001, "combat", 1, &ctx.quasar_gateway);
 }

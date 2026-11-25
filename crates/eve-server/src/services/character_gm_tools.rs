@@ -134,6 +134,185 @@ pub fn bloodline_name_pools(bloodline_id: u32) -> (&'static [&'static str], &'st
     }
 }
 
+pub(crate) fn create_character_with_doll_with_options(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    options: crate::starter_characters::StarterCharOptions,
+) -> Result<PyRep, BridgeRpcError> {
+    let user_id = ServerContext::require_auth(session)?;
+    let Some(name) = args.first().and_then(|a| a.as_str()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidCharacterName".into(),
+            message: "CreateCharacterWithDoll requires charactername string".into(),
+            client_error: None,
+        });
+    };
+    if !is_valid_character_name_syntax(name) || !crate::services::lookup_svc::is_word_allowed(name)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidCharacterName".into(),
+            message: format!("Character name '{name}' violates EVE naming rules"),
+            client_error: None,
+        });
+    }
+
+    // V24.01 ccSvc.CreateCharacterWithDoll passes 10 args:
+    // (charactername, raceID, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID, None, qa_starter_system_id)
+    // Also support legacy 7-arg callers without raceID at args[1].
+    if args.len() < 7 {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "CreateCharacterWithDoll requires (charactername, [raceID,] bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
+            client_error: None,
+        });
+    }
+    let has_race_arg = !is_valid_doll_or_portrait_payload(args.get(4).unwrap_or(&PyRep::None))
+        && is_valid_doll_or_portrait_payload(args.get(5).unwrap_or(&PyRep::None));
+    let offset = usize::from(has_race_arg);
+    let Some(bloodline_id) = args.get(1 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "CreateCharacterWithDoll requires integer bloodlineID".into(),
+            client_error: None,
+        });
+    };
+    let Some(gid) = args.get(2 + offset).and_then(|a| a.as_i64()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "CreateCharacterWithDoll requires integer genderID (0 or 1)".into(),
+            client_error: None,
+        });
+    };
+    if !(0..=1).contains(&gid) {
+        return Err(BridgeRpcError {
+            code: "InvalidGender".into(),
+            message: format!("Invalid genderID {gid}; expected 0 (female) or 1 (male)"),
+            client_error: None,
+        });
+    }
+    let gender_id = gid as u32;
+    let Some(ancestry_id) = args.get(3 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "CreateCharacterWithDoll requires integer ancestryID".into(),
+            client_error: None,
+        });
+    };
+    let Some(char_info_rep) = args.get(4 + offset) else {
+        return Err(BridgeRpcError {
+            code: "InvalidDollInfo".into(),
+            message: "Missing charInfo doll appearance argument".into(),
+            client_error: None,
+        });
+    };
+    let Some(portrait_info_rep) = args.get(5 + offset) else {
+        return Err(BridgeRpcError {
+            code: "InvalidDollInfo".into(),
+            message: "Missing portraitInfo argument".into(),
+            client_error: None,
+        });
+    };
+    if !is_valid_doll_or_portrait_payload(char_info_rep)
+        || !is_valid_doll_or_portrait_payload(portrait_info_rep)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidDollInfo".into(),
+            message: "charInfo and portraitInfo must be non-empty structured appearance descriptors (KeyVal or Dict)".into(),
+            client_error: None,
+        });
+    }
+    let Some(school_id) = args.get(6 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "CreateCharacterWithDoll requires integer schoolID".into(),
+            client_error: None,
+        });
+    };
+    let Some(race_id) = ctx.sde.bloodlines.get(&bloodline_id).map(|b| b.race_id) else {
+        return Err(BridgeRpcError {
+            code: "CharacterCreationFailed".into(),
+            message: format!("Unknown bloodline_id {bloodline_id}"),
+            client_error: None,
+        });
+    };
+    let doll_str = serialize_doll_pyrep(char_info_rep);
+    let portrait_str = serialize_portrait_pyrep(portrait_info_rep);
+    let is_qa_or_gm = ServerContext::has_gm_role_mask(
+        session.role,
+        ServerContext::ROLE_GM_QA_MASK,
+    );
+    let qa_starter_system_id = if is_qa_or_gm {
+        args.get(8 + offset)
+            .and_then(|a| a.as_i64())
+            .map(|v| v as u32)
+            .filter(|&sys_id| {
+                ctx.sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .is_some_and(|sys| !sys.stations.is_empty())
+            })
+    } else {
+        None
+    };
+
+    let res = ctx.db.create_character_with_system(
+        user_id,
+        name,
+        race_id,
+        bloodline_id,
+        ancestry_id,
+        school_id,
+        &ctx.sde,
+        qa_starter_system_id,
+    );
+    match res {
+        Ok(ch) => {
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let now_unix = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(c_mut) = snap.characters.get_mut(&ch.character_id) {
+                    c_mut.gender = gender_id;
+                    c_mut.create_date_unix = now_unix;
+                }
+                snap.character_doll_info
+                    .insert(ch.character_id, (doll_str, portrait_str));
+                crate::services::operations_manager::mark_new_character_tutorial_pending(
+                    snap,
+                    ch.character_id,
+                    now_unix,
+                );
+                if let Some(smap) = snap.skills.get(&ch.character_id).cloned() {
+                    let hist = snap.skill_history.entry(ch.character_id).or_default();
+                    let mut sorted: Vec<_> = smap.values().collect();
+                    sorted.sort_by_key(|s| s.type_id);
+                    for s in sorted {
+                        hist.push(SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            event_type_id: 33, // 33 = SkillEventCharCreation
+                            skill_type_id: s.type_id,
+                            skill_level: s.level,
+                            absolute_points: s.skill_points,
+                        });
+                    }
+                }
+                if crate::starter_characters::should_grant_default_starter_plex(options) {
+                    let starter_plex_balance = ctx.feature_flags_snapshot().starter_plex_balance;
+                    crate::starter_characters::grant_starter_plex_in_snapshot(
+                        snap, user_id, ch.character_id, starter_plex_balance, now_unix,
+                    );
+                }
+            });
+            Ok(PyRep::Integer(ch.character_id))
+        }
+        Err(e) => Err(BridgeRpcError {
+            code: "CharacterCreationFailed".into(),
+            message: e.to_string(),
+            client_error: None,
+        }),
+    }
+}
+
 /// Returns the maximum trainable/active skill level for an Alpha clone (`grade 1`) from `clonegrades.fsdbinary`.
 
 pub fn handle_char_unbound(
@@ -257,175 +436,12 @@ pub fn handle_char_unbound(
         }
 
         ("charUnboundMgr", "CreateCharacterWithDoll") => {
-            let user_id = match ServerContext::require_auth(session) {
-                Ok(u) => u,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(name) = args.first().and_then(|a| a.as_str()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidCharacterName".into(),
-                    message: "CreateCharacterWithDoll requires charactername string".into(),
-                    client_error: None,
-                }));
-            };
-            if !is_valid_character_name_syntax(name) || !crate::services::lookup_svc::is_word_allowed(name) {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidCharacterName".into(),
-                    message: format!("Character name '{name}' violates EVE naming rules"),
-                    client_error: None,
-                }));
-            }
-
-            // V24.01 ccSvc.CreateCharacterWithDoll passes 10 args:
-            // (charactername, raceID, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID, None, qa_starter_system_id)
-            // Also support legacy 7-arg callers without raceID at args[1].
-            if args.len() < 7 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CreateCharacterWithDoll requires (charactername, [raceID,] bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
-                    client_error: None,
-                }));
-            }
-            let has_race_arg = !is_valid_doll_or_portrait_payload(args.get(4).unwrap_or(&PyRep::None))
-                && is_valid_doll_or_portrait_payload(args.get(5).unwrap_or(&PyRep::None));
-            let offset = usize::from(has_race_arg);
-            let Some(bloodline_id) = args.get(1 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CreateCharacterWithDoll requires integer bloodlineID".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(gid) = args.get(2 + offset).and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CreateCharacterWithDoll requires integer genderID (0 or 1)".into(),
-                    client_error: None,
-                }));
-            };
-            if !(0..=1).contains(&gid) {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidGender".into(),
-                    message: format!("Invalid genderID {gid}; expected 0 (female) or 1 (male)"),
-                    client_error: None,
-                }));
-            }
-            let gender_id = gid as u32;
-            let Some(ancestry_id) = args.get(3 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CreateCharacterWithDoll requires integer ancestryID".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(char_info_rep) = args.get(4 + offset) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDollInfo".into(),
-                    message: "Missing charInfo doll appearance argument".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(portrait_info_rep) = args.get(5 + offset) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDollInfo".into(),
-                    message: "Missing portraitInfo argument".into(),
-                    client_error: None,
-                }));
-            };
-            if !is_valid_doll_or_portrait_payload(char_info_rep)
-                || !is_valid_doll_or_portrait_payload(portrait_info_rep)
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDollInfo".into(),
-                    message: "charInfo and portraitInfo must be non-empty structured appearance descriptors (KeyVal or Dict)".into(),
-                    client_error: None,
-                }));
-            }
-            let Some(school_id) = args.get(6 + offset).and_then(|a| a.as_i64()).map(|v| v as u32) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CreateCharacterWithDoll requires integer schoolID".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(race_id) = ctx.sde.bloodlines.get(&bloodline_id).map(|b| b.race_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterCreationFailed".into(),
-                    message: format!("Unknown bloodline_id {bloodline_id}"),
-                    client_error: None,
-                }));
-            };
-            let doll_str = serialize_doll_pyrep(char_info_rep);
-            let portrait_str = serialize_portrait_pyrep(portrait_info_rep);
-            let is_qa_or_gm = ServerContext::has_gm_role_mask(
-                session.role,
-                ServerContext::ROLE_GM_QA_MASK,
-            );
-            let qa_starter_system_id = if is_qa_or_gm {
-                args.get(8 + offset)
-                    .and_then(|a| a.as_i64())
-                    .map(|v| v as u32)
-                    .filter(|&sys_id| {
-                        ctx.sde
-                            .solar_systems
-                            .get(&sys_id)
-                            .is_some_and(|sys| !sys.stations.is_empty())
-                    })
-            } else {
-                None
-            };
-
-            let res = ctx.db.create_character_with_system(
-                user_id,
-                name,
-                race_id,
-                bloodline_id,
-                ancestry_id,
-                school_id,
-                &ctx.sde,
-                qa_starter_system_id,
-            );
-            match res {
-                Ok(ch) => {
-                    let now_ft = ctx.now_blueos_filetime_ticks();
-                    let now_unix = ctx.now_unix();
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(c_mut) = snap.characters.get_mut(&ch.character_id) {
-                            c_mut.gender = gender_id;
-                            c_mut.create_date_unix = now_unix;
-                        }
-                        snap.character_doll_info
-                            .insert(ch.character_id, (doll_str, portrait_str));
-                        crate::services::operations_manager::mark_new_character_tutorial_pending(
-                            snap,
-                            ch.character_id,
-                            now_unix,
-                        );
-                        if let Some(smap) = snap.skills.get(&ch.character_id).cloned() {
-                            let hist = snap.skill_history.entry(ch.character_id).or_default();
-                            let mut sorted: Vec<_> = smap.values().collect();
-                            sorted.sort_by_key(|s| s.type_id);
-                            for s in sorted {
-                                hist.push(SkillHistoryEntry {
-                                    log_date_ft: now_ft,
-                                    event_type_id: 33, // 33 = SkillEventCharCreation
-                                    skill_type_id: s.type_id,
-                                    skill_level: s.level,
-                                    absolute_points: s.skill_points,
-                                });
-                            }
-                        }
-                        if crate::starter_characters::should_grant_default_starter_plex() {
-                            let starter_plex_balance = ctx.feature_flags_snapshot().starter_plex_balance;
-                            crate::starter_characters::grant_starter_plex_in_snapshot(
-                                snap, user_id, ch.character_id, starter_plex_balance, now_unix,
-                            );
-                        }
-                    });
-                    Some(Ok(PyRep::Integer(ch.character_id)))
-                }
-                Err(e) => Some(Err(BridgeRpcError { code: "CharacterCreationFailed".into(), message: e.to_string(), client_error: None })),
-            }
+            Some(create_character_with_doll_with_options(
+                ctx,
+                session,
+                args,
+                crate::starter_characters::StarterCharOptions::default(),
+            ))
         }
 
         ("charUnboundMgr", "SelectCharacterID") => {

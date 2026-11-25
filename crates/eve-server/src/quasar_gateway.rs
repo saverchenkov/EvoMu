@@ -75,33 +75,28 @@ fn log_isolated_error<E: std::fmt::Debug>(label: &str, err: &E) {
     );
 }
 
-std::thread_local! {
-    static IN_ISOLATED_SIDE_EFFECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-struct IsolatedSideEffectGuard(bool);
-
-impl Drop for IsolatedSideEffectGuard {
-    fn drop(&mut self) {
-        IN_ISOLATED_SIDE_EFFECT.with(|flag| flag.set(self.0));
-    }
+#[inline(never)]
+fn catch_unwind_erased(f: &mut dyn FnMut()) -> std::thread::Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
 }
 
 /// Executes a secondary progression, notice, telemetry, or presence side-effect inside a
 /// `catch_unwind` boundary (`#1120`). Any panic is logged via `tracing::warn!` and converted to
 /// `None` so it can never unwind into `dispatch.rs` or abort a primary MachoNet gameplay RPC.
-/// Nested calls run directly under the active outer `catch_unwind` to avoid stacking debug unwind frames.
+/// Type-erases the closure through [`catch_unwind_erased`] so unwind frames remain minimal on debug stacks.
 pub fn isolate_side_effect<F, R>(label: &str, f: F) -> Option<R>
 where
     F: FnOnce() -> R,
 {
-    let already_isolated = IN_ISOLATED_SIDE_EFFECT.with(|flag| flag.get());
-    if already_isolated {
-        return Some(f());
-    }
-    let _guard = IN_ISOLATED_SIDE_EFFECT.with(|flag| IsolatedSideEffectGuard(flag.replace(true)));
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(val) => Some(val),
+    let mut f_opt = Some(f);
+    let mut out: Option<R> = None;
+    let mut call = || {
+        if let Some(func) = f_opt.take() {
+            out = Some(func());
+        }
+    };
+    match catch_unwind_erased(&mut call) {
+        Ok(()) => out,
         Err(payload) => {
             log_isolated_panic(label, payload);
             None
@@ -111,29 +106,27 @@ where
 
 /// Executes a fallible secondary side-effect inside a `catch_unwind` boundary (`#1120`), logging
 /// both `Err(e)` and panics via `tracing::warn!` and returning `None`.
-/// Nested calls reuse the active outer `catch_unwind` while still intercepting and logging `Err(e)`.
 pub fn isolate_side_effect_result<F, R, E>(label: &str, f: F) -> Option<R>
 where
     F: FnOnce() -> Result<R, E>,
     E: std::fmt::Debug,
 {
-    let already_isolated = IN_ISOLATED_SIDE_EFFECT.with(|flag| flag.get());
-    if already_isolated {
-        return match f() {
-            Ok(val) => Some(val),
-            Err(err) => {
+    let mut f_opt = Some(f);
+    let mut out: Option<Result<R, E>> = None;
+    let mut call = || {
+        if let Some(func) = f_opt.take() {
+            out = Some(func());
+        }
+    };
+    match catch_unwind_erased(&mut call) {
+        Ok(()) => match out {
+            Some(Ok(val)) => Some(val),
+            Some(Err(err)) => {
                 log_isolated_error(label, &err);
                 None
             }
-        };
-    }
-    let _guard = IN_ISOLATED_SIDE_EFFECT.with(|flag| IsolatedSideEffectGuard(flag.replace(true)));
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(Ok(val)) => Some(val),
-        Ok(Err(err)) => {
-            log_isolated_error(label, &err);
-            None
-        }
+            None => None,
+        },
         Err(payload) => {
             log_isolated_panic(label, payload);
             None
@@ -553,17 +546,12 @@ pub type QuasarTapHookFn = fn(
 );
 
 #[cfg(any(test, feature = "demo-seed"))]
-static QUASAR_TAP_HOOK: RwLock<Option<QuasarTapHookFn>> = RwLock::new(None);
-
-#[cfg(any(test, feature = "demo-seed"))]
-static TAPPED_QUASAR_ENDPOINTS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
-> = std::sync::OnceLock::new();
-
-#[cfg(any(test, feature = "demo-seed"))]
-static UNTAPPED_QUASAR_ENDPOINTS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
-> = std::sync::OnceLock::new();
+#[derive(Default)]
+struct QuasarTapState {
+    hook: Option<QuasarTapHookFn>,
+    tapped_endpoints: std::collections::BTreeMap<String, usize>,
+    untapped_endpoints: std::collections::BTreeMap<String, usize>,
+}
 
 /// Default HTTP port for `EsiServer` / `/cdn/...` endpoints when no override is active.
 pub const DEFAULT_CDN_HTTP_PORT: u16 = 26_004;
@@ -616,6 +604,8 @@ pub struct PublicGatewayRouter {
     // rollback_epoch removed by CoW tx_engine (#915)
     pub rehydrate_hooks: RankedRwLock<Vec<Arc<dyn Fn() + Send + Sync>>, RANK_LEAF>,
     pub sync_hooks: RankedRwLock<Vec<Arc<dyn Fn() + Send + Sync>>, RANK_LEAF>,
+    #[cfg(any(test, feature = "demo-seed"))]
+    tap_state: std::sync::Mutex<QuasarTapState>,
 }
 
 impl PublicGatewayRouter {
@@ -636,26 +626,26 @@ impl PublicGatewayRouter {
         resolve_cdn_base_url(self.esi_port())
     }
     #[cfg(any(test, feature = "demo-seed"))]
-    pub fn install_quasar_tap_hook(hook: QuasarTapHookFn) {
-        let mut guard = QUASAR_TAP_HOOK.write().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(hook);
+    pub fn install_quasar_tap_hook(&self, hook: QuasarTapHookFn) {
+        let mut guard = self.tap_state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.hook = Some(hook);
     }
 
     #[cfg(any(test, feature = "demo-seed"))]
-    pub fn tapped_quasar_endpoints() -> std::collections::BTreeMap<String, usize> {
-        TAPPED_QUASAR_ENDPOINTS
-            .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    pub fn tapped_quasar_endpoints(&self) -> std::collections::BTreeMap<String, usize> {
+        self.tap_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .tapped_endpoints
             .clone()
     }
 
     #[cfg(any(test, feature = "demo-seed"))]
-    pub fn untapped_quasar_endpoints() -> std::collections::BTreeMap<String, usize> {
-        UNTAPPED_QUASAR_ENDPOINTS
-            .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    pub fn untapped_quasar_endpoints(&self) -> std::collections::BTreeMap<String, usize> {
+        self.tap_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .untapped_endpoints
             .clone()
     }
 
@@ -667,15 +657,23 @@ impl PublicGatewayRouter {
         response_payload: Option<&GoogleAny>,
         emitted_notices: &[GoogleAny],
     ) {
-        let hook_opt = *QUASAR_TAP_HOOK.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(hook) = hook_opt {
-            {
-                let mut map = TAPPED_QUASAR_ENDPOINTS
-                    .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                *map.entry(request_type.to_string()).or_insert(0) += 1;
+        let hook_opt = {
+            let mut guard = self.tap_state.lock().unwrap_or_else(|e| e.into_inner());
+            let hook_opt = guard.hook;
+            if hook_opt.is_some() {
+                *guard
+                    .tapped_endpoints
+                    .entry(request_type.to_string())
+                    .or_insert(0) += 1;
+            } else {
+                *guard
+                    .untapped_endpoints
+                    .entry(request_type.to_string())
+                    .or_insert(0) += 1;
             }
+            hook_opt
+        };
+        if let Some(hook) = hook_opt {
             hook(
                 &self.descriptors,
                 request_type,
@@ -683,12 +681,6 @@ impl PublicGatewayRouter {
                 response_payload,
                 emitted_notices,
             );
-        } else {
-            let mut map = UNTAPPED_QUASAR_ENDPOINTS
-                .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *map.entry(request_type.to_string()).or_insert(0) += 1;
         }
     }
 
@@ -726,6 +718,8 @@ impl PublicGatewayRouter {
             // synced_rollback_epoch removed (#915)
             rehydrate_hooks: RankedRwLock::new(Vec::new()),
             sync_hooks: RankedRwLock::new(Vec::new()),
+            #[cfg(any(test, feature = "demo-seed"))]
+            tap_state: std::sync::Mutex::new(QuasarTapState::default()),
         };
         router.hydrate_meta_from_db();
         crate::router::startup_seeds::seed_gateway_startup_globals(&db, &sde);
@@ -890,6 +884,7 @@ impl PublicGatewayRouter {
 
         // 2. eve_public.character.GetNamesByUserRequest -> eve_public.character.GetNamesByUserResponse
         let db_chars = Arc::clone(&db);
+        let desc_chars = Arc::clone(&self.descriptors);
         self.register_handler(
             "eve_public.character.GetNamesByUserRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
@@ -897,8 +892,10 @@ impl PublicGatewayRouter {
                     return Err((STATUS_UNAUTHORIZED, "Authenticated user required".to_string()));
                 };
                 let chars = db_chars.get_characters_for_user(uid as u64);
-                let mut resp =
-                    eve_proto::pb::message("eve_public.character.GetNamesByUserResponse");
+                let mut resp = eve_proto::pb::message_with_registry(
+                    Arc::clone(&desc_chars),
+                    "eve_public.character.GetNamesByUserResponse",
+                );
                 for ch in chars {
                     resp = resp.add_with("characters", |entry| {
                         entry
@@ -1932,8 +1929,7 @@ mod blast_radius_tests {
         assert_eq!(res_panic, None);
 
         // Nested Err still short-circuits cleanly via isolate_side_effect_result without
-        // unwinding, and nested panic unwinds to the outer catch_unwind boundary while resetting
-        // the thread-local reentrancy guard on drop.
+        // unwinding, and nested panics isolate cleanly at each catch_unwind_erased boundary.
         let outer_after_nested_err = isolate_side_effect("test.outer_err", || {
             let nested_err: Option<u32> =
                 isolate_side_effect_result("test.nested_err", || Err::<u32, _>("nested err"));
@@ -1945,12 +1941,13 @@ mod blast_radius_tests {
         assert_eq!(outer_after_nested_err, Some(100));
 
         let outer_caught_nested_panic: Option<u32> = isolate_side_effect("test.outer_panic", || {
-            isolate_side_effect("test.inner_panic", || {
+            let inner = isolate_side_effect("test.inner_panic", || -> u32 {
                 panic!("simulated nested panic");
             });
+            assert_eq!(inner, None);
             123_u32
         });
-        assert_eq!(outer_caught_nested_panic, None);
+        assert_eq!(outer_caught_nested_panic, Some(123));
         assert_eq!(isolate_side_effect("test.guard_reset_ok", || 55_u32), Some(55));
         assert_eq!(
             isolate_side_effect::<_, u32>("test.guard_reset_panic", || panic!("post-reset")),
@@ -1965,60 +1962,124 @@ mod blast_radius_tests {
         let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
         let router = PublicGatewayRouter::new(Arc::clone(&empty), db, sde);
 
-        eve_proto::pb::with_registry_override(empty, || {
-            let _ = router.drain_queued_notices();
-            assert!(pb_to_any_or_log(
-                "test.empty_any",
-                eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
-            )
-            .is_none());
-            assert!(pb_encode_or_log(
-                "test.empty_encode",
-                eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
-            )
-            .is_none());
+        let _ = router.drain_queued_notices();
+        assert!(pb_to_any_or_log(
+            "test.empty_any",
+            eve_proto::pb::message_with_registry(
+                Arc::clone(&empty),
+                "eve_public.goal.api.ProgressedNotice",
+            ),
+        )
+        .is_none());
+        assert!(pb_encode_or_log(
+            "test.empty_encode",
+            eve_proto::pb::message_with_registry(
+                Arc::clone(&empty),
+                "eve_public.goal.api.ProgressedNotice",
+            ),
+        )
+        .is_none());
 
-            queue_pb_notice(
-                &router.queued_notices,
+        queue_pb_notice(
+            &router.queued_notices,
+            NoticeScope::Broadcast,
+            "test.empty_queue",
+            eve_proto::pb::message_with_registry(
+                Arc::clone(&empty),
+                "eve_public.goal.api.ProgressedNotice",
+            ),
+            1_700_000_000,
+        );
+        assert!(router.drain_queued_notices().is_empty());
+
+        assert!(router
+            .publish_pb_notice(
                 NoticeScope::Broadcast,
-                "test.empty_queue",
-                eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
+                "test.empty_publish",
+                eve_proto::pb::message_with_registry(
+                    Arc::clone(&empty),
+                    "eve_public.goal.api.ProgressedNotice",
+                ),
                 1_700_000_000,
-            );
-            assert!(router.drain_queued_notices().is_empty());
+            )
+            .is_none());
 
-            assert!(router
-                .publish_pb_notice(
-                    NoticeScope::Broadcast,
-                    "test.empty_publish",
-                    eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
-                    1_700_000_000,
-                )
-                .is_none());
+        let mut sess = SessionState::new(901);
+        sess.user_id = Some(1);
+        sess.character_id = Some(90_000_001);
+        sess.corporation_id = Some(1_000_125);
+        sess.solar_system_id = Some(30_000_142);
+        router.on_session_changed(&sess, 1_700_000_000);
 
-            let mut sess = SessionState::new(901);
-            sess.user_id = Some(1);
-            sess.character_id = Some(90_000_001);
-            sess.corporation_id = Some(1_000_125);
-            sess.solar_system_id = Some(30_000_142);
-            router.on_session_changed(&sess, 1_700_000_000);
+        router.progression.achievements.on_gameplay_event_by_name(
+            90_000_001,
+            &["destroyHostileNPC"],
+            1,
+            1_700_000_000,
+            &router,
+        );
+        router
+            .progression
+            .daily_goals
+            .on_gameplay_event(90_000_001, 1, 1, &router);
+        router
+            .progression
+            .career_goals
+            .on_gameplay_event(90_000_001, "combat", 1, &router);
+    }
 
-            router.progression.achievements.on_gameplay_event_by_name(
-                90_000_001,
-                &["destroyHostileNPC"],
-                1,
-                1_700_000_000,
-                &router,
-            );
-            router
-                .progression
-                .daily_goals
-                .on_gameplay_event(90_000_001, 1, 1, &router);
-            router
-                .progression
-                .career_goals
-                .on_gameplay_event(90_000_001, "combat", 1, &router);
-        });
+    #[test]
+    fn quasar_tap_hooks_and_endpoint_counters_are_isolated_per_router() {
+        fn noop_hook(
+            _descriptors: &QuasarDescriptorRegistry,
+            _request_type: &str,
+            _status_code: u32,
+            _response_payload: Option<&GoogleAny>,
+            _emitted_notices: &[GoogleAny],
+        ) {
+        }
+
+        let reg = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let router_a = PublicGatewayRouter::new(
+            Arc::clone(&reg),
+            Arc::new(WorldRepository::with_demo_seed()),
+            Arc::clone(&sde),
+        );
+        let router_b = PublicGatewayRouter::new(
+            reg,
+            Arc::new(WorldRepository::with_demo_seed()),
+            sde,
+        );
+
+        router_a.install_quasar_tap_hook(noop_hook);
+        let mut sess = SessionState::new(1);
+        sess.user_id = Some(1);
+        let req = EvePublicRequest {
+            payload: Some(GoogleAny {
+                type_url: format!(
+                    "{}google.protobuf.Empty",
+                    eve_proto::quasar::TYPE_GOOGLEAPIS_PREFIX
+                ),
+                value: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let rsp_a = router_a.handle_public_request(&sess, &req, None, false, 1_700_000_000);
+        let rsp_b = router_b.handle_public_request(&sess, &req, None, false, 1_700_000_000);
+        assert_eq!(rsp_a.status_code, STATUS_OK);
+        assert_eq!(rsp_b.status_code, STATUS_OK);
+
+        assert_eq!(
+            router_a.tapped_quasar_endpoints().get("google.protobuf.Empty").copied(),
+            Some(1)
+        );
+        assert!(router_a.untapped_quasar_endpoints().is_empty());
+        assert!(router_b.tapped_quasar_endpoints().is_empty());
+        assert_eq!(
+            router_b.untapped_quasar_endpoints().get("google.protobuf.Empty").copied(),
+            Some(1)
+        );
     }
 }
 

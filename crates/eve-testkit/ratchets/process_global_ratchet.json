@@ -8,13 +8,13 @@
   "groups": {
     "A_game_state": {
       "zero_required": false,
-      "max_count": 7,
+      "max_count": 6,
       "rationale_required": false,
       "description": "Game or simulation state belonging to a system actor, world repository, or session rather than the process (#1583 Group A)."
     },
     "B_registries": {
       "zero_required": false,
-      "max_count": 3,
+      "max_count": 2,
       "rationale_required": false,
       "description": "Process-global registries looking up live objects by context ID, database ID, or pointer address (#1583 Group B)."
     },
@@ -26,13 +26,13 @@
     },
     "D_ambient_scopes": {
       "zero_required": false,
-      "max_count": 6,
+      "max_count": 3,
       "rationale_required": false,
       "description": "Thread-local or task-local ambient scopes altering behaviour or carrying dispatch results (#1583 Group D)."
     },
     "E_test_seams": {
       "zero_required": false,
-      "max_count": 10,
+      "max_count": 5,
       "rationale_required": false,
       "description": "Non-#[cfg(test)] test seams, hooks, and overrides remaining in production source files (#1583 Group E)."
     },
@@ -228,14 +228,6 @@
       "rationale": "Process-wide CLI startup flag override for --quarantine-unreadable sqlite recovery policy."
     },
     {
-      "crate_name": "eve-db",
-      "rel_file": "sqlite_store/quarantine.rs",
-      "symbol": "TEST_QUARANTINE_OVERRIDE",
-      "kind": "thread_local",
-      "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
       "crate_name": "eve-machonet",
       "rel_file": "lib.rs",
       "symbol": "SESSION_CHANGE_DROPPED_KEYS_TOTAL",
@@ -252,14 +244,6 @@
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Immutable OnceLock default Quasar descriptor registry fallback for codec entrypoints."
-    },
-    {
-      "crate_name": "eve-proto",
-      "rel_file": "pb.rs",
-      "symbol": "PB_THREAD_REGISTRY_OVERRIDE",
-      "kind": "thread_local",
-      "group": "E_test_seams",
-      "max_count": 1
     },
     {
       "crate_name": "eve-proto",
@@ -361,14 +345,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "macho_listener.rs",
-      "symbol": "PREAUTH_CONN_COUNTS",
-      "kind": "static_sync",
-      "group": "B_registries",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "ops_telemetry.rs",
       "symbol": "GLOBAL_BOOTSTRAP_TIMINGS",
       "kind": "static_sync",
@@ -384,38 +360,6 @@
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Process-wide bounded tick summary ring buffer for operational diagnostics."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "quasar_gateway.rs",
-      "symbol": "IN_ISOLATED_SIDE_EFFECT",
-      "kind": "thread_local",
-      "group": "D_ambient_scopes",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "quasar_gateway.rs",
-      "symbol": "QUASAR_TAP_HOOK",
-      "kind": "static_sync",
-      "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "quasar_gateway.rs",
-      "symbol": "TAPPED_QUASAR_ENDPOINTS",
-      "kind": "static_sync",
-      "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "quasar_gateway.rs",
-      "symbol": "UNTAPPED_QUASAR_ENDPOINTS",
-      "kind": "static_sync",
-      "group": "E_test_seams",
-      "max_count": 1
     },
     {
       "crate_name": "eve-server",
@@ -521,14 +465,6 @@
     {
       "crate_name": "eve-server",
       "rel_file": "router/dispatch.rs",
-      "symbol": "SUPPRESS_QUASAR_SESSION_CHANGE",
-      "kind": "task_local",
-      "group": "D_ambient_scopes",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "router/dispatch.rs",
       "symbol": "TX_HOOK_ONCE",
       "kind": "static_sync",
       "group": "set_once_infra",
@@ -586,14 +522,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/fitting_dogma_im.rs",
-      "symbol": "STORE",
-      "kind": "static_sync",
-      "group": "A_game_state",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/space_probe_scanning.rs",
       "symbol": "NEXT_PROBE_RES_ID",
       "kind": "static_sync",
@@ -631,14 +559,6 @@
       "symbol": "PRE_TAKE_BALL_HOOKS",
       "kind": "static_sync",
       "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "starter_characters.rs",
-      "symbol": "SKIP_DEFAULT_STARTER_PLEX",
-      "kind": "task_local",
-      "group": "D_ambient_scopes",
       "max_count": 1
     },
     {

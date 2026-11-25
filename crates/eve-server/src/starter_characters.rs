@@ -11,17 +11,26 @@ use crate::config::ServerConfig;
 use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
-use std::collections::HashMap;
 use tracing::{info, warn};
 
-tokio::task_local! {
-    static SKIP_DEFAULT_STARTER_PLEX: ();
+/// Options controlling `CreateCharacterWithDoll` behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StarterCharOptions {
+    pub(crate) grant_default_starter_plex: bool,
+}
+
+impl Default for StarterCharOptions {
+    fn default() -> Self {
+        Self {
+            grant_default_starter_plex: true,
+        }
+    }
 }
 
 /// Returns `true` when `CreateCharacterWithDoll` should apply `feature_flags.starter_plex_balance`
 /// directly (disabled while `provision_starter_characters` runs so `initial_balance_plex` wins).
-pub(crate) fn should_grant_default_starter_plex() -> bool {
-    SKIP_DEFAULT_STARTER_PLEX.try_with(|_| ()).is_err()
+pub(crate) fn should_grant_default_starter_plex(options: StarterCharOptions) -> bool {
+    options.grant_default_starter_plex
 }
 
 /// Credits `plex_grant` PLEX (if positive, once per `user_id`) to `(user_id, char_id)` inside an
@@ -129,20 +138,14 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
             args.push(PyRep::None);
             args.push(PyRep::Integer(sys_id));
         }
-        let res = SKIP_DEFAULT_STARTER_PLEX
-            .scope(
-                (),
-                ctx.dispatch_rpc(
-                    &mut session,
-                    "charUnboundMgr",
-                    None,
-                    "CreateCharacterWithDoll",
-                    &args,
-                    &HashMap::new(),
-                    Some("startup"),
-                ),
-            )
-            .await;
+        let res = crate::services::character_skills::character_gm_tools::create_character_with_doll_with_options(
+            ctx,
+            &session,
+            &args,
+            StarterCharOptions {
+                grant_default_starter_plex: false,
+            },
+        );
         match res {
             Ok(rep) => {
                 let char_id = rep.as_i64().unwrap_or_default();

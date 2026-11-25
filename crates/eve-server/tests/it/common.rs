@@ -227,7 +227,7 @@ pub fn new_wire_harness<'c>(
     ctx: &'c ServerContext,
     session_id: u64,
 ) -> ClientHarness<ServerWireTransport<'c>> {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     ClientHarness::new(ServerWireTransport {
         inner: ClientWireSession::new(ctx, session_id),
     })
@@ -239,7 +239,7 @@ pub fn wrap_wire_harness<'c>(
     ctx: &'c ServerContext,
     session: SessionState,
 ) -> ClientHarness<ServerWireTransport<'c>> {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     ClientHarness::new(ServerWireTransport {
         inner: ClientWireSession::from_session(ctx, session),
     })
@@ -251,7 +251,7 @@ pub fn borrow_wire_harness<'s, 'c>(
     ctx: &'c ServerContext,
     session: &'s mut SessionState,
 ) -> ClientHarness<SessionBorrowWireTransport<'s, 'c>> {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     ClientHarness::new(SessionBorrowWireTransport {
         ctx,
         session,
@@ -286,7 +286,7 @@ pub const TEST_CLOCK_BASE_UNIX: u64 = 1_800_000_000;
 /// Time then only moves via `ctx.advance_secs` / explicit tick deltas.
 #[allow(dead_code)]
 pub fn pin_clock(ctx: &ServerContext) {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(
         TEST_CLOCK_BASE_UNIX,
     )));
@@ -655,7 +655,7 @@ pub struct TeardownInvariantGuard<'a> {
 impl<'a> TeardownInvariantGuard<'a> {
     #[allow(dead_code)]
     pub fn new(ctx: &'a ServerContext) -> Self {
-        ensure_quasar_tap_hook_installed();
+        ensure_quasar_tap_hook_installed(ctx);
         Self {
             ctx,
             opt_out: false,
@@ -694,7 +694,7 @@ pub fn teardown_guard(ctx: &ServerContext) -> TeardownInvariantGuard<'_> {
 /// checks (enabled by default unless `EVOMU_PRE_CHECK=0`, `G-07`).
 #[allow(dead_code)]
 pub fn assert_teardown_invariants(ctx: &ServerContext) {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     eve_testkit::pre_check::assert_world_and_pre_guards(&ctx.db, Some(&ctx.sde), false);
 }
 
@@ -702,19 +702,15 @@ pub fn assert_teardown_invariants(ctx: &ServerContext) {
 /// `SnapshotDirtyHints` fast-path equivalence checks (`#908`).
 #[allow(dead_code)]
 pub fn assert_pre_check_strict(ctx: &ServerContext) {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     eve_testkit::pre_check::assert_world_and_pre_guards(&ctx.db, Some(&ctx.sde), true);
 }
 
-/// Installs the live `quasar_tap` hook on `PublicGatewayRouter::handle_public_request` (`G-06`).
+/// Installs the live `quasar_tap` hook on `ctx.quasar_gateway.handle_public_request` (`G-06`, `#1583`).
 #[allow(dead_code)]
-pub fn ensure_quasar_tap_hook_installed() {
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(|| {
-        eve_server::quasar_gateway::PublicGatewayRouter::install_quasar_tap_hook(
-            run_strict_quasar_tap_hook,
-        );
-    });
+pub fn ensure_quasar_tap_hook_installed(ctx: &ServerContext) {
+    ctx.quasar_gateway
+        .install_quasar_tap_hook(run_strict_quasar_tap_hook);
 }
 
 fn run_strict_quasar_tap_hook(
@@ -757,7 +753,7 @@ pub fn tap_quasar_exchange(
     rsp: &eve_proto::quasar::EvePublicResponse,
     notices: &[eve_proto::quasar::GoogleAny],
 ) -> Vec<eve_testkit::quasar_tap::QuasarTapViolation> {
-    ensure_quasar_tap_hook_installed();
+    ensure_quasar_tap_hook_installed(ctx);
     eve_testkit::quasar_tap::tap_exchange(
         &ctx.quasar_gateway.descriptors,
         request_type,

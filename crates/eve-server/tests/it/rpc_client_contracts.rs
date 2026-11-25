@@ -42,7 +42,6 @@ fn cleanup_isolated_bug_queue_dir(ctx: &ServerContext) {
 }
 
 async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
-    common::ensure_quasar_tap_hook_installed();
     static BASE: tokio::sync::OnceCell<(Arc<eve_sde::SdeRegistry>, WorldStateSnapshot)> =
         tokio::sync::OnceCell::const_new();
     let (sde, snap) = BASE
@@ -50,6 +49,7 @@ async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
             let sde = shared_sde();
             let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
             let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+            common::ensure_quasar_tap_hook_installed(&ctx);
             isolate_bug_queue_dir(&ctx);
             let mut gm = SessionState::new(99_998);
             gm.user_id = Some(1);
@@ -70,6 +70,7 @@ async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap.clone());
     let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), db));
+    common::ensure_quasar_tap_hook_installed(&ctx);
     isolate_bug_queue_dir(&ctx);
     ctx
 }
@@ -2568,7 +2569,6 @@ async fn test_quasar_public_gateway_client_contracts() {
     use eve_proto::quasar::{
         EvePublicRequest, EvePublicResponse, GoogleAny, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
     };
-    use eve_server::quasar_gateway::PublicGatewayRouter;
 
     fn extract_created_uuid(rsp: &EvePublicResponse, label: &str) -> [u8; 16] {
         assert_eq!(
@@ -2600,8 +2600,8 @@ async fn test_quasar_public_gateway_client_contracts() {
             .unwrap_or_else(|_| panic!("`{label}` uuid must be 16 bytes, got {}", uuid_bytes.len()))
     }
 
-    common::ensure_quasar_tap_hook_installed();
     let ctx = shared_comprehensive_ctx().await;
+    common::ensure_quasar_tap_hook_installed(&ctx);
 
     let mut sess = SessionState::new(77_201);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -2965,8 +2965,8 @@ async fn test_quasar_public_gateway_client_contracts() {
         "All registered `eve_public.{{,character.}}skill.plan.*` endpoints must be tapped with 200: {untapped_skill_plans:#?}"
     );
 
-    let tapped_endpoints = PublicGatewayRouter::tapped_quasar_endpoints();
-    let untapped_endpoints = PublicGatewayRouter::untapped_quasar_endpoints();
+    let tapped_endpoints = ctx.quasar_gateway.tapped_quasar_endpoints();
+    let untapped_endpoints = ctx.quasar_gateway.untapped_quasar_endpoints();
     let uncovered_handlers: Vec<&String> = handler_names
         .iter()
         .filter(|h| !tapped_endpoints.contains_key(*h))
