@@ -160,13 +160,17 @@ pub async fn apply_damage_to_fighter_squadron(
     if wiped_out {
         with_mut_combat_runtime(ctx, |rt| {
             rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
-            rt.record_destroyed_item_id(fighter_ball_id);
-            rt.record_destroyed_item_id(item_id);
         });
     }
 
     if wiped_out || lost > 0 {
         ctx.db.with_mut_snapshot(|snap| {
+            if wiped_out {
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(fighter_ball_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(item_id);
+            }
             let mut remove_item = false;
             if let Some(it) = snap.items.get_mut(&item_id) {
                 if !(it.location_id == parent_ship_id && it.flag == InventoryFlag::FighterBay) {
@@ -1589,14 +1593,22 @@ async fn handle_recall_fighters_to_tubes(
         let refilled_units = match db_res {
             Ok(units) => units,
             Err(e) => {
-                let destroyed = with_mut_combat_runtime(ctx, |rt| {
-                    let dead = rt.is_recently_destroyed_item_id(f.ball_id)
-                        || rt.is_recently_destroyed_item_id(f.item_id);
-                    if !dead && accum_dmg > 0.0 {
-                        rt.fighter_unit_damage_accum.insert(bid, accum_dmg);
-                    }
-                    dead
-                });
+                let destroyed = with_mut_combat_runtime_tx_locks(
+                    &ctx.db,
+                    &*ctx.combat_ephemeral,
+                    |snap, rt| {
+                        let dead = snap
+                            .combat_crimewatch_state
+                            .is_recently_destroyed_item_id(f.ball_id)
+                            || snap
+                                .combat_crimewatch_state
+                                .is_recently_destroyed_item_id(f.item_id);
+                        if !dead && accum_dmg > 0.0 {
+                            rt.fighter_unit_damage_accum.insert(bid, accum_dmg);
+                        }
+                        dead
+                    },
+                );
                 if let Ok(mut fg) = ctx.fighters.write() {
                     fg.tube_loads.remove(&(ship_id, f.tube_index));
                     if !destroyed {
@@ -2058,9 +2070,12 @@ async fn handle_scoop_abandoned_fighter(
         fighters.remove(&resolved_key).unwrap()
     };
     let restore_squad = |sq: crate::router::context::ActiveFighterSquadron| {
-        let destroyed = with_combat_runtime(ctx, |rt| {
-            rt.is_recently_destroyed_item_id(sq.ball_id)
-                || rt.is_recently_destroyed_item_id(sq.item_id)
+        let destroyed = ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .is_recently_destroyed_item_id(sq.ball_id)
+                || snap
+                    .combat_crimewatch_state
+                    .is_recently_destroyed_item_id(sq.item_id)
         });
         if !destroyed {
             ctx.active_fighters.write().unwrap().entry(sq.ball_id).or_insert(sq);

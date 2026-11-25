@@ -398,11 +398,33 @@ fn empty_collections_negative_sorting_and_remaining_durable_domain_roundtrips() 
     combat.pending_bounty_ticks.insert((30_000_142, 90_001), 125_000.0);
     combat.bounty_tick_next_flush_unix.insert((30_000_142, 90_001), 1_700_001_200);
     combat.pending_bounty_tick_started_unix.insert((30_000_142, 90_001), 1_700_000_000);
+    combat.record_destroyed_item_id(1_897_080_352);
+    combat.record_destroyed_item_id(1_897_080_353);
     let combat_json = serde_json::to_string(&combat).unwrap();
     assert_eq!(
         serde_json::from_str::<PersistedCombatCrimewatchState>(&combat_json).unwrap(),
         combat
     );
+
+    // FIFO ring-buffer cap (1,024) + deduplication + <= 0 guard on PersistedCombatCrimewatchState
+    let mut ring = PersistedCombatCrimewatchState::default();
+    ring.record_destroyed_item_id(0);
+    ring.record_destroyed_item_id(-7);
+    assert!(ring.recently_destroyed_item_ids.is_empty());
+    for id in 1..=1_025_i64 {
+        ring.record_destroyed_item_id(id);
+    }
+    assert_eq!(
+        ring.recently_destroyed_item_ids.len(),
+        PersistedCombatCrimewatchState::MAX_RECENTLY_DESTROYED_ITEM_IDS
+    );
+    assert!(!ring.is_recently_destroyed_item_id(1));
+    assert!(ring.is_recently_destroyed_item_id(2));
+    assert!(ring.is_recently_destroyed_item_id(1_025));
+    ring.record_destroyed_item_id(2);
+    ring.record_destroyed_item_id(1_026);
+    assert!(ring.is_recently_destroyed_item_id(2));
+    assert!(!ring.is_recently_destroyed_item_id(3));
 
     let notif = SocialContactNotificationRecord::default();
     let notif_json = serde_json::to_string(&notif).unwrap();

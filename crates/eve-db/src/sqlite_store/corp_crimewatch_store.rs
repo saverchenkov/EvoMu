@@ -358,7 +358,7 @@ impl_decomposed_domain_struct!(
     ],
     sorted_set_maps: [],
     sets: [],
-    scalars: [extended_runtime_json],
+    scalars: [recently_destroyed_item_ids, extended_runtime_json],
     substructs: []
 );
 
@@ -906,10 +906,12 @@ struct CrimewatchDomainPayload {
     structure_docking_acl_denied: HashMap<i64, Vec<i64>>,
 }
 
-/// One-way legacy load fallback (`#1541` Track B2): promotes `modified_system_securities`,
-/// `ess_reserve_unlocked_until`, `ess_reserve_bank_thefts`, and `ess_main_bank_thefts` from
-/// `extended_runtime_json` into the typed fields on [`PersistedCombatCrimewatchState`] (without
-/// overwriting non-empty typed fields) and strips those keys from `extended_runtime_json`.
+/// One-way legacy load fallback (`#1541` Track B1 + B2): promotes `modified_system_securities`,
+/// `ess_reserve_unlocked_until`, `ess_reserve_bank_thefts`, `ess_main_bank_thefts`,
+/// `pending_bounty_ticks`, `bounty_tick_next_flush_unix`, `pending_bounty_tick_started_unix`, and
+/// `recently_destroyed_item_ids` from `extended_runtime_json` into the typed fields on
+/// [`PersistedCombatCrimewatchState`] (without overwriting non-empty typed fields) and strips those
+/// keys from `extended_runtime_json`.
 ///
 /// Returns `true` when any promoted key was extracted or stripped from `extended_runtime_json`.
 pub(crate) fn hydrate_legacy_combat_extended_fields(
@@ -936,10 +938,41 @@ pub(crate) fn hydrate_legacy_combat_extended_fields(
             }
         };
     }
+    macro_rules! hydrate_tuple_map_key {
+        ($key:literal, $field:ident, $val_ty:ty) => {
+            if let Some(raw_val) = obj.remove($key) {
+                changed = true;
+                if state.$field.is_empty() {
+                    if let Ok(entries) =
+                        serde_json::from_value::<Vec<((u32, i64), $val_ty)>>(raw_val)
+                    {
+                        state.$field = entries.into_iter().collect();
+                    }
+                }
+            }
+        };
+    }
     hydrate_map_key!("modified_system_securities", modified_system_securities);
     hydrate_map_key!("ess_reserve_unlocked_until", ess_reserve_unlocked_until);
     hydrate_map_key!("ess_reserve_bank_thefts", ess_reserve_bank_thefts);
     hydrate_map_key!("ess_main_bank_thefts", ess_main_bank_thefts);
+    hydrate_tuple_map_key!("pending_bounty_ticks", pending_bounty_ticks, f64);
+    hydrate_tuple_map_key!("bounty_tick_next_flush_unix", bounty_tick_next_flush_unix, u64);
+    hydrate_tuple_map_key!(
+        "pending_bounty_tick_started_unix",
+        pending_bounty_tick_started_unix,
+        u64
+    );
+    if let Some(raw_val) = obj.remove("recently_destroyed_item_ids") {
+        changed = true;
+        if state.recently_destroyed_item_ids.is_empty() {
+            if let Ok(ids) = serde_json::from_value::<Vec<i64>>(raw_val) {
+                for id in ids {
+                    state.record_destroyed_item_id(id);
+                }
+            }
+        }
+    }
 
     if changed {
         if obj.is_empty() {

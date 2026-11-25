@@ -145,9 +145,11 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
     .await;
 
     // Stage 4 suppression gives 100,000 * 1.20 = 120,000 pending bounty + sec status gain!
+    let pending = ctx
+        .db
+        .with_snapshot(|snap| snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)]);
+    assert!((pending - 120_000.0).abs() < 1e-3);
     let space_w2_trigger = with_combat_runtime(&ctx, |rt| {
-        let pending = rt.pending_bounty_ticks[&(sys_id, char_id)];
-        assert!((pending - 120_000.0).abs() < 1e-3);
         assert!(!rt.sec_status_transactions[&char_id].is_empty());
         rt.encounter_waves[&4].trigger_ball_id
     });
@@ -180,7 +182,9 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
         rt.npc_entities.insert(888_901, sl);
         rt.encounter_waves[&4].active_wave_ball_ids.clone()
     });
-    let bounty_before = with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks[&(sys_id, char_id)]);
+    let bounty_before = ctx
+        .db
+        .with_snapshot(|snap| snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)]);
     handle_npc_destroyed_in_space(
         &ctx.systems,
         &ctx.db,
@@ -203,8 +207,13 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
         )
         .await;
     }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)],
+            bounty_before
+        );
+    });
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.pending_bounty_ticks[&(sys_id, char_id)], bounty_before);
         assert!(rt.encounter_waves[&4].completed);
     });
 }
@@ -241,32 +250,51 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
     assert_eq!((empty_tick.pilot_isk, empty_tick.main_ess_isk, empty_tick.reserve_ess_isk), (0.0, 0.0, 0.0));
 
     // 2. Overdue boundary: 1,199s not flushed; 1,200s flushed at 0% tax (< 100k with default threshold)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((hs_sys, char_id), 99_999.0);
-        rt.pending_bounty_tick_started_unix.insert((hs_sys, char_id), now);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((hs_sys, char_id), 99_999.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_tick_started_unix
+            .insert((hs_sys, char_id), now);
     });
     tick_overdue_npc_bounty_payouts(&ctx, now + 1_199);
-    assert!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.contains_key(&(hs_sys, char_id))));
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .contains_key(&(hs_sys, char_id))
+    }));
     tick_overdue_npc_bounty_payouts(&ctx, now + 1_200);
-    assert!(with_combat_runtime(&ctx, |rt| !rt.pending_bounty_ticks.contains_key(&(hs_sys, char_id))));
+    assert!(ctx.db.with_snapshot(|snap| {
+        !snap
+            .combat_crimewatch_state
+            .pending_bounty_ticks
+            .contains_key(&(hs_sys, char_id))
+    }));
 
     // 3. Explicit non-0.11 tax rate (0.20) applies even below 100k gross;
     //    >= 100k in NPC corp applies 11% NPC corp tax!
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((hs_sys, char_id), 50_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((hs_sys, char_id), 50_000.0);
     });
     let small_taxed = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.20);
     assert!((small_taxed.pilot_isk - 40_000.0).abs() < 1e-2 && small_taxed.main_ess_isk == 0.0 && small_taxed.reserve_ess_isk == 0.0);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((hs_sys, char_id), 200_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((hs_sys, char_id), 200_000.0);
     });
     let p_npc_tax = flush_npc_bounty_tick(&ctx, hs_sys, char_id, 0.0).pilot_isk;
     assert!((p_npc_tax - 178_000.0).abs() < 1e-2);
 
     // 4. Wormhole system (>= 31_000_000, sec -1.0) is NOT K-space nullsec -> dbs_mult = 1.0, main_ess = 0.0!
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((wh_sys, char_id), 200_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((wh_sys, char_id), 200_000.0);
     });
     let wh_payout = flush_npc_bounty_tick(&ctx, wh_sys, char_id, 0.0);
     assert_eq!((wh_payout.main_ess_isk, wh_payout.reserve_ess_isk), (0.0, 0.0));
@@ -296,8 +324,10 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
             },
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((null_sys, char_id), 1_000_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((null_sys, char_id), 1_000_000.0);
     });
     let null_payout = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.0);
     assert!(null_payout.pilot_isk > 0.0 && null_payout.main_ess_isk > 0.0 && null_payout.reserve_ess_isk >= 0.0);
@@ -308,9 +338,9 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
         assert_eq!(c.wallet_divisions[0].balance, c.master_wallet_balance());
         assert!(snap.system_states[&null_sys].ess_main_bank.raw_cents() > 0);
         snap.system_states.get_mut(&null_sys).unwrap().dbs_multiplier = 1.25;
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((null_sys, char_id), 500_000.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((null_sys, char_id), 500_000.0);
     });
     let null_pilot2 = flush_npc_bounty_tick(&ctx, null_sys, char_id, 0.11).pilot_isk;
     assert!(null_pilot2 > 0.0);

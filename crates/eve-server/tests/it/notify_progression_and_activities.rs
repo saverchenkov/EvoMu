@@ -1778,8 +1778,12 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     }
     assert!(null_handle.get_ball_snapshot(npc_ball_id).await.unwrap().is_none(), "pirate NPC must be destroyed by weapon");
     assert!(
-        eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-            rt.pending_bounty_ticks.get(&(null_sys, PILOT_A)).copied().unwrap_or(0.0)
+        ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(null_sys, PILOT_A))
+                .copied()
+                .unwrap_or(0.0)
         }) > 0.0,
         "pending bounty must be queued after NPC kill (tid={pirate_npc_tid}, sys={null_sys})"
     );

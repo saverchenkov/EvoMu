@@ -1024,9 +1024,10 @@ pub async fn on_special_site_npc_destroyed_core(
             if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
                 list.retain(|a| a.anomaly_id != anom_key);
             }
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(npc_ball_id);
             crate::services::combat_crimewatch::with_mut_combat_runtime_in_snap(snap, |rt| {
                 rt.bounty_credited_balls.insert(npc_ball_id);
-                rt.record_destroyed_item_id(npc_ball_id);
                 for &bid in &balls_to_remove {
                     if bid != npc_ball_id {
                         rt.npc_entities.remove(&bid);
@@ -1073,9 +1074,10 @@ pub async fn on_special_site_npc_destroyed_core(
         if !(details.boss_defeated && all_escorts_defeated) {
             details_map.insert(site.instance_id, details);
             save_seasonal_site_details_map(snap, &details_map);
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(npc_ball_id);
             crate::services::combat_crimewatch::with_mut_combat_runtime_in_snap(snap, |rt| {
                 rt.bounty_credited_balls.insert(npc_ball_id);
-                rt.record_destroyed_item_id(npc_ball_id);
             });
             return Ok(Some(SeasonalKillOutcome::PartialProgress));
         }
@@ -1098,9 +1100,10 @@ pub async fn on_special_site_npc_destroyed_core(
         );
         save_seasonal_cooldown_store(snap, &cooldowns);
         save_seasonal_site_details_map(snap, &details_map);
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(npc_ball_id);
         crate::services::combat_crimewatch::with_mut_combat_runtime_in_snap(snap, |rt| {
             rt.bounty_credited_balls.insert(npc_ball_id);
-            rt.record_destroyed_item_id(npc_ball_id);
         });
 
         let mut completed_exp_ids = vec![format!("SHK-{did}-{iid}")];

@@ -315,6 +315,8 @@ fn populate_all_family4_fields(snap: &mut WorldStateSnapshot) {
     snap.combat_crimewatch_state
         .ess_main_bank_thefts
         .insert(30_000_142, vec![(90_000_002, 500_000.0, 1_700_008_500)]);
+    snap.combat_crimewatch_state
+        .record_destroyed_item_id(1_897_080_352);
     snap.wh_polarizations.insert((90_000_001, 31_000_001), 9999);
     snap.zarzakh_gate_locks
         .insert(90_000_001, (30_010_000, 12345));
@@ -851,7 +853,7 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
     use crate::durable_domain_types::*;
     use crate::persistence::WorldRepository;
     use crate::tx_engine::TxError;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
     let path = temp_corp_crimewatch_db_path("all_substruct_fields_roundtrip");
     let _ = std::fs::remove_file(&path);
@@ -943,6 +945,7 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
             30_000_142,
             vec![(90_000_002, 500_000.0, 1_700_008_500)],
         )]),
+        recently_destroyed_item_ids: VecDeque::from([1_897_080_352, 1_897_080_353]),
         extended_runtime_json: "{\"bounty_flush\":1}".to_string(),
     };
 
@@ -1374,6 +1377,216 @@ fn corp_crimewatch_legacy_extended_runtime_json_hydrates_sys_security_and_ess_le
     reopened.with_snapshot(|s| {
         assert_eq!(s.combat_crimewatch_state.modified_system_securities.get(&30_000_142), Some(&0.15));
         assert_eq!(s.combat_crimewatch_state.ess_reserve_unlocked_until.get(&30_000_142), Some(&1_700_010_000));
+        assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
+    });
+    drop(reopened);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn corp_crimewatch_legacy_extended_runtime_json_hydrates_bounty_ticks_and_recently_destroyed() {
+    use crate::persistence::WorldRepository;
+    use crate::sqlite_store::quarantine::LoadContext;
+    use std::collections::VecDeque;
+
+    let legacy_ext_json = serde_json::json!({
+        "pending_bounty_ticks": [[[30_000_142u32, 90_000_001i64], 125_000.0f64]],
+        "bounty_tick_next_flush_unix": [[[30_000_142u32, 90_000_001i64], 1_700_001_200u64]],
+        "pending_bounty_tick_started_unix": [[[30_000_142u32, 90_000_001i64], 1_700_000_000u64]],
+        "recently_destroyed_item_ids": [1_897_080_111i64, 1_897_080_222i64, 1_897_080_111i64],
+        "bounty_flush": 9
+    })
+    .to_string();
+
+    // 1. SQLite `domain_rows` one-way load fallback populates typed fields & strips promoted keys.
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    let encoded_scalar = serde_json::to_string(&legacy_ext_json).unwrap();
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'combat_crimewatch_state.extended_runtime_json', ?2)",
+        params![DOMAIN_CRIMEWATCH, encoded_scalar],
+    )
+    .unwrap();
+
+    let mut snap = WorldStateSnapshot::default();
+    assert!(
+        load_corp_crimewatch_domain_rows(&conn, &mut snap, &mut LoadContext::new(false)).unwrap(),
+        "loading legacy promoted extended_runtime_json keys should report had_legacy=true"
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(30_000_142, 90_000_001)),
+        Some(&125_000.0)
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state
+            .bounty_tick_next_flush_unix
+            .get(&(30_000_142, 90_000_001)),
+        Some(&1_700_001_200)
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state
+            .pending_bounty_tick_started_unix
+            .get(&(30_000_142, 90_000_001)),
+        Some(&1_700_000_000)
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.recently_destroyed_item_ids,
+        VecDeque::from([1_897_080_222, 1_897_080_111])
+    );
+    let rem_ext: serde_json::Value =
+        serde_json::from_str(&snap.combat_crimewatch_state.extended_runtime_json).unwrap();
+    assert_eq!(rem_ext.get("bounty_flush"), Some(&serde_json::json!(9)));
+    assert!(rem_ext.get("pending_bounty_ticks").is_none());
+    assert!(rem_ext.get("bounty_tick_next_flush_unix").is_none());
+    assert!(rem_ext.get("pending_bounty_tick_started_unix").is_none());
+    assert!(rem_ext.get("recently_destroyed_item_ids").is_none());
+
+    // Saving writes canonical `domain_rows` and drops promoted keys from `extended_runtime_json`.
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_corp_crimewatch_domain_rows(&tx, &snap).unwrap());
+        tx.commit().unwrap();
+    }
+    let stored_recent_raw: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.recently_destroyed_item_ids'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<VecDeque<i64>>(&stored_recent_raw).unwrap(),
+        VecDeque::from([1_897_080_222, 1_897_080_111])
+    );
+    let stored_bounty_raw: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.pending_bounty_ticks/30000142|90000001'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<f64>(&stored_bounty_raw).unwrap(), 125_000.0);
+    let stored_ext_raw: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.extended_runtime_json'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored_ext_str: String = serde_json::from_str(&stored_ext_raw).unwrap();
+    assert!(!stored_ext_str.contains("pending_bounty_ticks"));
+    assert!(!stored_ext_str.contains("bounty_tick_next_flush_unix"));
+    assert!(!stored_ext_str.contains("pending_bounty_tick_started_unix"));
+    assert!(!stored_ext_str.contains("recently_destroyed_item_ids"));
+
+    let mut clean_reload = WorldStateSnapshot::default();
+    assert!(
+        !load_corp_crimewatch_domain_rows(&conn, &mut clean_reload, &mut LoadContext::new(false))
+            .unwrap()
+    );
+    assert_eq!(clean_reload.combat_crimewatch_state, snap.combat_crimewatch_state);
+
+    // 2. Typed canonical fields take precedence over stale `extended_runtime_json` while stripping legacy keys.
+    let mut prec_state = PersistedCombatCrimewatchState::default();
+    prec_state
+        .pending_bounty_ticks
+        .insert((30_000_142, 90_000_001), 999_000.0);
+    prec_state.record_destroyed_item_id(7_777_001);
+    prec_state.extended_runtime_json = legacy_ext_json;
+    assert!(hydrate_legacy_combat_extended_fields(&mut prec_state));
+    assert_eq!(
+        prec_state.pending_bounty_ticks.get(&(30_000_142, 90_000_001)),
+        Some(&999_000.0)
+    );
+    assert_eq!(
+        prec_state.recently_destroyed_item_ids,
+        VecDeque::from([7_777_001])
+    );
+    assert!(prec_state
+        .bounty_tick_next_flush_unix
+        .contains_key(&(30_000_142, 90_000_001)));
+    assert!(!prec_state.extended_runtime_json.contains("pending_bounty_ticks"));
+    assert!(!prec_state.extended_runtime_json.contains("recently_destroyed_item_ids"));
+
+    // 3. Old JSON snapshot fallback (`migrate_legacy_service_state`) + FIFO cap (1,024) + empty clear.
+    let oversized_ids: Vec<i64> = (1..=1_030_i64).collect();
+    let only_promoted_json = serde_json::json!({
+        "pending_bounty_ticks": [[[30_000_142u32, 90_000_002i64], 42_000.0f64]],
+        "bounty_tick_next_flush_unix": [[[30_000_142u32, 90_000_002i64], 1_700_002_200u64]],
+        "pending_bounty_tick_started_unix": [[[30_000_142u32, 90_000_002i64], 1_700_001_000u64]],
+        "recently_destroyed_item_ids": oversized_ids
+    })
+    .to_string();
+    let mut json_snap = WorldStateSnapshot::default();
+    json_snap.combat_crimewatch_state.extended_runtime_json = only_promoted_json.clone();
+    json_snap.migrate_legacy_service_state();
+    assert_eq!(
+        json_snap
+            .combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(30_000_142, 90_000_002)),
+        Some(&42_000.0)
+    );
+    assert_eq!(
+        json_snap
+            .combat_crimewatch_state
+            .recently_destroyed_item_ids
+            .len(),
+        PersistedCombatCrimewatchState::MAX_RECENTLY_DESTROYED_ITEM_IDS
+    );
+    assert!(!json_snap
+        .combat_crimewatch_state
+        .is_recently_destroyed_item_id(6));
+    assert!(json_snap
+        .combat_crimewatch_state
+        .is_recently_destroyed_item_id(7));
+    assert!(json_snap
+        .combat_crimewatch_state
+        .is_recently_destroyed_item_id(1_030));
+    assert!(json_snap.combat_crimewatch_state.extended_runtime_json.is_empty());
+
+    // 4. End-to-end WorldRepository::open_sqlite migration flushes canonical domain_rows & cleans extended_runtime_json.
+    let db_path = temp_corp_crimewatch_db_path("legacy_b1_ext_runtime_migration_reopen");
+    let _ = std::fs::remove_file(&db_path);
+    {
+        let raw_conn = Connection::open(&db_path).unwrap();
+        apply_migrations(&raw_conn).unwrap();
+        let raw_scalar = serde_json::to_string(&only_promoted_json).unwrap();
+        raw_conn
+            .execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'combat_crimewatch_state.extended_runtime_json', ?2)",
+                params![DOMAIN_CRIMEWATCH, raw_scalar],
+            )
+            .unwrap();
+    }
+    {
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite migrate");
+        repo.with_snapshot(|s| {
+            assert_eq!(
+                s.combat_crimewatch_state
+                    .pending_bounty_ticks
+                    .get(&(30_000_142, 90_000_002)),
+                Some(&42_000.0)
+            );
+            assert!(s
+                .combat_crimewatch_state
+                .is_recently_destroyed_item_id(1_030));
+            assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
+        });
+    }
+    let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen clean");
+    reopened.with_snapshot(|s| {
+        assert_eq!(
+            s.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(30_000_142, 90_000_002)),
+            Some(&42_000.0)
+        );
+        assert!(s
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(1_030));
         assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
     });
     drop(reopened);

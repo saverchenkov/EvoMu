@@ -4,9 +4,7 @@
 
 use super::handle_cmd_return_bay;
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DroneMiningState, DroneSpaceState,
-};
+use crate::services::combat_crimewatch::{DroneMiningState, DroneSpaceState};
 use crate::services::drone_test_helpers;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
@@ -982,10 +980,12 @@ async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroye
     assert!(claimed_destroyed);
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&d_killed_claimed_item), "destroyed drone item must be deleted even if claimed from runtime map");
-    });
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.is_recently_destroyed_item_id(d_killed_claimed_ball));
-        assert!(rt.is_recently_destroyed_item_id(d_killed_claimed_item));
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(d_killed_claimed_ball));
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(d_killed_claimed_item));
     });
 
     // 3b. ScoopToDroneBay and try_atomic_scoop_drone both refuse recently destroyed drones even if a stale item row remains
@@ -1079,8 +1079,9 @@ async fn drone_return_and_scoop_use_surface_range_fail_closed_and_block_destroye
             },
         );
         super::super::record_drone_ball_meta_in_snap(snap, d_persisted_item, d_persisted_ball);
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(d_persisted_item);
     });
-    with_mut_combat_runtime(&ctx, |rt| rt.record_destroyed_item_id(d_persisted_item));
     let persisted_scoop_err = handle_npcs_drones(
         &ctx,
         &mut sess,

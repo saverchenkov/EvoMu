@@ -81,8 +81,17 @@ async fn test_handle_npc_destroyed_bounty_sec_status_drifter_and_wave_fallback()
     )
     .await;
 
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(sys_id, char_id))
+                .copied()
+                .unwrap_or(0.0)
+                >= 100_000.0
+        );
+    });
     let wave2_trigger = with_combat_runtime(&ctx, |rt| {
-        assert!(rt.pending_bounty_ticks.get(&(sys_id, char_id)).copied().unwrap_or(0.0) >= 100_000.0);
         assert!(!rt.sec_status_transactions.get(&char_id).unwrap().is_empty());
         rt.encounter_waves[&502].trigger_ball_id
     });
@@ -155,10 +164,9 @@ fn test_flush_npc_bounty_tick_nullsec_ess_dbs_and_player_corp_tax() {
                 ..Default::default()
             },
         );
-    });
-
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((null_sys_id, char_id), 1_000_000.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((null_sys_id, char_id), 1_000_000.0);
     });
 
     // Pass corp_tax_rate = 0.0 with gross >= 100k -> uses player corp's resolved_tax_rate (0.15)
@@ -368,13 +376,14 @@ async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() 
     // Reopen fresh ServerContext from SQLite and verify pending bounty state survived restart
     let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
     let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo2);
-    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx2, |rt| {
-        assert_eq!(rt.pending_bounty_ticks.get(&(null_sys_id, char_id)).copied(), Some(800_000.0));
-        assert_eq!(rt.pending_bounty_ticks.get(&(hs_sys_id, char_id)).copied(), Some(250_000.0));
-        assert!(rt.pending_bounty_tick_started_unix.contains_key(&(null_sys_id, char_id)));
-        assert!(rt.pending_bounty_tick_started_unix.contains_key(&(hs_sys_id, char_id)));
-        assert!(rt.bounty_tick_next_flush_unix.contains_key(&(null_sys_id, char_id)));
-        assert!(rt.bounty_tick_next_flush_unix.contains_key(&(hs_sys_id, char_id)));
+    ctx2.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.pending_bounty_ticks.get(&(null_sys_id, char_id)).copied(), Some(800_000.0));
+        assert_eq!(cw.pending_bounty_ticks.get(&(hs_sys_id, char_id)).copied(), Some(250_000.0));
+        assert!(cw.pending_bounty_tick_started_unix.contains_key(&(null_sys_id, char_id)));
+        assert!(cw.pending_bounty_tick_started_unix.contains_key(&(hs_sys_id, char_id)));
+        assert!(cw.bounty_tick_next_flush_unix.contains_key(&(null_sys_id, char_id)));
+        assert!(cw.bounty_tick_next_flush_unix.contains_key(&(hs_sys_id, char_id)));
     });
 
     // Run daily downtime cleanup -> must flush all pending bounty ticks with corp tax & null-sec ESS split
@@ -384,12 +393,11 @@ async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() 
     // Reopen once more to confirm flushed state & wallets persisted cleanly to SQLite
     let repo3 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite 3"));
     let ctx3 = ServerContext::with_sde_and_repository(sde, repo3);
-    with_combat_runtime(&ctx3, |rt| {
-        assert!(rt.pending_bounty_ticks.is_empty());
-        assert!(rt.pending_bounty_tick_started_unix.is_empty());
-        assert!(rt.bounty_tick_next_flush_unix.is_empty());
-    });
     ctx3.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert!(cw.pending_bounty_ticks.is_empty());
+        assert!(cw.pending_bounty_tick_started_unix.is_empty());
+        assert!(cw.bounty_tick_next_flush_unix.is_empty());
         assert!(snap.characters[&char_id].balance > initial_bal);
         let corp = snap.corporations.get(&player_corp_id).unwrap();
         assert!(corp.master_wallet_balance().raw_cents() > 0);

@@ -1544,9 +1544,13 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     )
     .await;
     assert!(wiped && lost_wipe == 4);
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(rt.is_recently_destroyed_item_id(dmg_ball));
-        assert!(rt.is_recently_destroyed_item_id(dmg_item));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(dmg_ball));
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(dmg_item));
     });
 
     // 2. Batch "MJD" pre-validates FighterLacksMjdAbility without jumping heavy_ok or setting cooldown

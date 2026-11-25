@@ -235,12 +235,8 @@ pub(crate) fn is_recently_destroyed_in_persisted(
     ball_id: i64,
     item_id: i64,
 ) -> bool {
-    if persisted.extended_runtime_json.is_empty() {
-        return false;
-    }
-    let mut rt = crate::services::combat_crimewatch::CombatRuntimeState::default();
-    rt.sync_from_persisted(persisted);
-    rt.is_recently_destroyed_item_id(ball_id) || rt.is_recently_destroyed_item_id(item_id)
+    persisted.is_recently_destroyed_item_id(ball_id)
+        || persisted.is_recently_destroyed_item_id(item_id)
 }
 
 /// Deletes the backing DB item and space metadata when a drone ball is destroyed,
@@ -250,7 +246,7 @@ pub(crate) fn cleanup_destroyed_drone_db_item(
     drone_ball_id: i64,
     claimed_item_id: Option<i64>,
 ) {
-    let resolved_item_id = ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let item_id = claimed_item_id
             .or_else(|| snap.items.contains_key(&drone_ball_id).then_some(drone_ball_id))
             .or_else(|| {
@@ -261,14 +257,12 @@ pub(crate) fn cleanup_destroyed_drone_db_item(
                     .map(|(&id, _)| id)
             });
         super::purge_destroyed_drone_from_snap(snap, item_id, drone_ball_id);
-        item_id
+        if let Some(iid) = item_id {
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(drone_ball_id);
+            snap.combat_crimewatch_state.record_destroyed_item_id(iid);
+        }
     });
-    if let Some(iid) = resolved_item_id {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.record_destroyed_item_id(drone_ball_id);
-            rt.record_destroyed_item_id(iid);
-        });
-    }
 }
 
 /// Removes any synthetic stasis-web cycle registered by `drone_ball_id`.
@@ -828,10 +822,11 @@ async fn reject_destroyed_drone_scoop(
     if purge_db {
         cleanup_destroyed_drone_db_item(ctx, drone_ball_id, item_id_opt);
     }
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.record_destroyed_item_id(drone_ball_id);
+    with_mut_combat_runtime_tx_locks(&ctx.db, &*ctx.combat_ephemeral, |snap, rt| {
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(drone_ball_id);
         if let Some(id) = item_id_opt {
-            rt.record_destroyed_item_id(id);
+            snap.combat_crimewatch_state.record_destroyed_item_id(id);
         }
         rt.active_drones_in_space.remove(&drone_ball_id);
     });
@@ -886,7 +881,10 @@ pub(crate) async fn handle_scoop_to_drone_bay(
         &ctx.db,
         &*ctx.combat_ephemeral,
         |snap, rt| -> ScoopTxResult {
-            if rt.is_recently_destroyed_item_id(drone_ball_id) {
+            if snap
+                .combat_crimewatch_state
+                .is_recently_destroyed_item_id(drone_ball_id)
+            {
                 let stale_item = rt
                     .active_drones_in_space
                     .remove(&drone_ball_id)
@@ -908,7 +906,10 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                         eve_proto::ClientError::CustomInfo(msg),
                     ));
                 }
-                if rt.is_recently_destroyed_item_id(drone_st.drone_item_id) {
+                if snap
+                    .combat_crimewatch_state
+                    .is_recently_destroyed_item_id(drone_st.drone_item_id)
+                {
                     let item_id = drone_st.drone_item_id;
                     rt.active_drones_in_space.remove(&drone_ball_id);
                     return ScoopTxResult::Destroyed {
@@ -972,11 +973,12 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 &snap.combat_crimewatch_state,
                 drone_ball_id,
                 drone_item_id,
-            ) || rt.is_recently_destroyed_item_id(drone_item_id)
-            {
+            ) {
                 super::purge_destroyed_drone_from_snap(snap, Some(drone_item_id), drone_ball_id);
-                rt.record_destroyed_item_id(drone_ball_id);
-                rt.record_destroyed_item_id(drone_item_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(drone_ball_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(drone_item_id);
                 rt.active_drones_in_space.remove(&drone_ball_id);
                 return ScoopTxResult::Destroyed {
                     item_id: Some(drone_item_id),

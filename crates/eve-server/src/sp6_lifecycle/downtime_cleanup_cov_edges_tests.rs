@@ -9,7 +9,6 @@ use super::super::{
 };
 use super::test_ctx;
 use crate::router::{ActiveScannerProbe, BoundObjectEntry};
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use crate::services::mission_fixture::{self, MissionFixture};
 use crate::sp6_lifecycle::{with_mut_sp6_state, with_sp6_state, SafeLogoffEntry};
 use eve_db::{InventoryFlag, InventoryItemRecord};
@@ -188,9 +187,13 @@ async fn downtime_recover_probes_bounties_safe_logoff_and_courier_mission() {
         }
     }
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, char_id), 25_000.0);
-        rt.pending_bounty_ticks.insert((sys_id, 90_000_002), 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, char_id), 25_000.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, 90_000_002), 0.0);
     });
     let flushed = flush_pending_bounty_ticks_on_downtime(&ctx);
     assert_eq!(flushed, 1);

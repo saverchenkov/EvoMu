@@ -418,13 +418,14 @@ async fn handle_npc_destroyed_in_space_inner(
                 let credited = rt.bounty_credited_balls.insert(killed_ball_id);
                 if credited {
                     let clock_now = db.clock().now_unix_secs();
-                    rt.pending_bounty_tick_started_unix
+                    let cw = &mut snap.combat_crimewatch_state;
+                    cw.pending_bounty_tick_started_unix
                         .entry((solar_system_id, killer))
                         .or_insert(clock_now);
-                    *rt.pending_bounty_ticks
+                    *cw.pending_bounty_ticks
                         .entry((solar_system_id, killer))
                         .or_insert(0.0) += eff_bounty;
-                    rt.bounty_tick_next_flush_unix
+                    cw.bounty_tick_next_flush_unix
                         .entry((solar_system_id, killer))
                         .or_insert_with(|| clock_now.saturating_add(1_200));
 
@@ -508,12 +509,13 @@ async fn handle_npc_destroyed_in_space_inner(
 
 /// Flushes all pending 20-minute (`1,200 s`) NPC bounty ticks that have matured by `now_unix`.
 pub fn tick_overdue_npc_bounty_payouts(ctx: &ServerContext, now_unix: u64) {
-    let due_keys: Vec<(u32, i64)> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.pending_bounty_ticks
+    let due_keys: Vec<(u32, i64)> = ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        cw.pending_bounty_ticks
             .keys()
             .copied()
             .filter(|k| {
-                let started = rt
+                let started = cw
                     .pending_bounty_tick_started_unix
                     .get(k)
                     .copied()
@@ -545,14 +547,24 @@ pub fn flush_npc_bounty_tick(
     use eve_db::{IskCents, WalletJournalEntry};
     use crate::formulas::compute_dbs_and_ess_bounty_split;
 
-    let raw_bounty = with_mut_combat_runtime(ctx, |rt| {
-        rt.bounty_tick_next_flush_unix
-            .remove(&(solar_system_id, char_id));
-        rt.pending_bounty_tick_started_unix
-            .remove(&(solar_system_id, char_id));
-        rt.pending_bounty_ticks
-            .remove(&(solar_system_id, char_id))
-            .unwrap_or(0.0)
+    let key = (solar_system_id, char_id);
+    let raw_bounty = ctx.db.with_mut_snapshot(|snap| {
+        let has_any = snap.combat_crimewatch_state.pending_bounty_ticks.contains_key(&key)
+            || snap
+                .combat_crimewatch_state
+                .bounty_tick_next_flush_unix
+                .contains_key(&key)
+            || snap
+                .combat_crimewatch_state
+                .pending_bounty_tick_started_unix
+                .contains_key(&key);
+        if !has_any {
+            return 0.0;
+        }
+        let cw = &mut snap.combat_crimewatch_state;
+        cw.bounty_tick_next_flush_unix.remove(&key);
+        cw.pending_bounty_tick_started_unix.remove(&key);
+        cw.pending_bounty_ticks.remove(&key).unwrap_or(0.0)
     });
     if raw_bounty <= 0.0 {
         return NpcBountyTickPayout::default();

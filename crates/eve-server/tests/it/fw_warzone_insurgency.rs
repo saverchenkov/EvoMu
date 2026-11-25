@@ -2144,7 +2144,7 @@ use eve_server::combat::npc_ai::npc_test_helpers::{
     any_npc_entity_in_system, find_npc_entity_in_system,
 };
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{step_sentry_gun_grid_aggression, with_combat_runtime};
+use eve_server::services::combat_crimewatch::step_sentry_gun_grid_aggression;
 use eve_server::services::combat_npc_police::{
     is_concord_suppressed_in_system, is_faction_police_suppressed, is_sentry_disabled_by_corruption,
 };
@@ -2757,7 +2757,13 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
     let _ = eve_server::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
         &ctx, &sys_h, emp_cid, emp_ship, 639, 0, npc_ball_id, &npc_ball, None, front_sys, 100.0, ctx.now_unix(),
     ).await;
-    let pending_bounty = with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(front_sys, emp_cid)).copied().unwrap_or(0.0));
+    let pending_bounty = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(front_sys, emp_cid))
+            .copied()
+            .unwrap_or(0.0)
+    });
     let new_sec = ctx.db.with_snapshot(|s| s.characters[&emp_cid].security_status);
     let expected_sec = eve_server::combat::npc_ai::compute_sec_status_gain(0.0, base_npc_bounty) * 1.25;
     assert!((pending_bounty - base_npc_bounty * 1.25).abs() < 1e-3, "Suppression Stage 5 scales NPC bounty by +25% (got {pending_bounty})");

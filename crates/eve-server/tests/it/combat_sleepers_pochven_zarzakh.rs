@@ -969,8 +969,9 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
         ctx.advance_secs(1);
 
         // Verify 0 ISK bounty for Hypnosian Sleepers and Interstellar Navigation Logs (56708) wreck drop (no blue loot 30744)
-        let pending_bounty = with_combat_runtime(&ctx, |rt| {
-            rt.pending_bounty_ticks
+        let pending_bounty = ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
                 .iter()
                 .filter(|((_, cid), _)| *cid == hunter.char_id)
                 .map(|(_, isk)| *isk)

@@ -728,10 +728,11 @@ async fn tick_background_cluster_cosmic_expiry_wormholes_metenox_and_bounty_tick
         }
     });
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, char_a), 1_000.0); // no next_flush yet -> scheduled for +1200
-        rt.pending_bounty_ticks.insert((sys_id, char_b), 2_000.0);
-        rt.bounty_tick_next_flush_unix.insert((sys_id, char_b), now_unix); // due immediately (`now >= next_flush`)
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = &mut snap.combat_crimewatch_state;
+        cw.pending_bounty_ticks.insert((sys_id, char_a), 1_000.0); // no next_flush yet -> scheduled for +1200
+        cw.pending_bounty_ticks.insert((sys_id, char_b), 2_000.0);
+        cw.bounty_tick_next_flush_unix.insert((sys_id, char_b), now_unix); // due immediately (`now >= next_flush`)
     });
 
     tick_background_cluster(&ctx).await;
@@ -754,15 +755,14 @@ async fn tick_background_cluster_cosmic_expiry_wormholes_metenox_and_bounty_tick
         if ctx.sde.types.values().any(|t| t.group_id == 4744) {
             assert_eq!(snap.mining_and_ess_state.metenox_last_tick_unix, now_unix);
         }
-    });
 
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let cw = &snap.combat_crimewatch_state;
         assert_eq!(
-            rt.bounty_tick_next_flush_unix.get(&(sys_id, char_a)).copied(),
+            cw.bounty_tick_next_flush_unix.get(&(sys_id, char_a)).copied(),
             Some(now_unix + 1_200)
         );
-        assert!(!rt.bounty_tick_next_flush_unix.contains_key(&(sys_id, char_b)));
-        assert!(!rt.pending_bounty_ticks.contains_key(&(sys_id, char_b)));
+        assert!(!cw.bounty_tick_next_flush_unix.contains_key(&(sys_id, char_b)));
+        assert!(!cw.pending_bounty_ticks.contains_key(&(sys_id, char_b)));
     });
 }
 

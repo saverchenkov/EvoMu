@@ -739,7 +739,6 @@ use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_server::services::pve_exploration::{ensure_system_pve_sites_seeded, with_pve_exploration_reg};
 use eve_server::services::pve_exploration_sites::{generate_exploration_container_loot, overseer_effects_for_rating};
 use eve_machonet::SessionState;
@@ -1111,7 +1110,13 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
         kill_ball(&ctx, c3, active[0]).await;
     }
     assert!(site_state(&ctx, c3, &wh_site).2, "All Sleeper waves destroyed -> site cleared");
-    let pending = with_mut_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(c3, CHAR_ID)).copied().unwrap_or(0.0));
+    let pending = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(c3, CHAR_ID))
+            .copied()
+            .unwrap_or(0.0)
+    });
     assert_eq!(pending, 0.0, "CONCORD pays no bounty for Sleeper kills");
 }
 
@@ -6234,8 +6239,14 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         for &ebid in &escort_bids {
             assert!(rt.bounty_credited_balls.contains(&ebid));
         }
+    });
+    ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            rt.pending_bounty_ticks.get(&(JITA, PILOT_A)).copied().unwrap_or(0.0),
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(JITA, PILOT_A))
+                .copied()
+                .unwrap_or(0.0),
             0.0,
             "Seasonal NPCs must not accrue per-kill SDE BeltRat bounty ticks"
         );
@@ -6246,8 +6257,14 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     .await;
     eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
         assert!(!rt.destroyed_npc_cache.contains_key(&boss_bid));
+    });
+    ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            rt.pending_bounty_ticks.get(&(JITA, PILOT_A)).copied().unwrap_or(0.0),
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(JITA, PILOT_A))
+                .copied()
+                .unwrap_or(0.0),
             0.0
         );
     });
@@ -6378,8 +6395,14 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     .await;
     eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
         assert!(!rt.destroyed_npc_cache.contains_key(&w_esc1));
+    });
+    ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            rt.pending_bounty_ticks.get(&(JITA, PILOT_A)).copied().unwrap_or(0.0),
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(JITA, PILOT_A))
+                .copied()
+                .unwrap_or(0.0),
             0.0,
             "Missile/AoE and cycle finalization on seasonal NPCs must not double-credit SDE bounties"
         );
