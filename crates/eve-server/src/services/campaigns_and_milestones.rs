@@ -330,33 +330,31 @@ pub(crate) fn deliver_login_reward(
     let reward_runs = rw
         .blueprint_runs
         .map(|r| i32::try_from(r).unwrap_or(i32::MAX));
-    if let Some(station_id) = docked_station_id {
-        snap.next_entity_id += 1;
-        let item_id = snap.next_entity_id;
-        let record = eve_db::InventoryItemRecord {
-            item_id,
-            type_id: rw.type_id,
-            owner_id: char_id,
-            location_id: station_id,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: reward_qty,
-            singleton: rw.blueprint_runs.is_some(),
-            version: 1,
-            dynamic_attributes: HashMap::new(),
-            source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0,
-            is_blueprint_copy: rw.blueprint_runs.is_some(),
-            blueprint_runs_remaining: reward_runs,
+    if let Some(station_id) = docked_station_id.filter(|&id| id > 0) {
+        let req = crate::domain::items::GrantItemRequest::explicit(
+            char_id,
+            station_id,
+            eve_db::InventoryFlag::Hangar,
+            rw.type_id,
+            reward_qty,
+        )
+        .with_singleton(rw.blueprint_runs.is_some());
+        let req = if rw.blueprint_runs.is_some() {
+            req.with_blueprint_copy(reward_runs)
+        } else {
+            req
         };
+        let granted = crate::domain::items::grant_item_in_snap(None, snap, None, req)
+            .expect("login reward grant with positive quantity and docked station");
+        let item_id = granted.item.item_id;
         if let Some(exp_ft) = expire_date_time {
             snap.seasons_and_campaigns
                 .login_reward_expiry
                 .insert(item_id, exp_ft);
         }
-        snap.items.insert(item_id, record.clone());
         DeliveredLoginReward {
             primary_id: item_id,
-            spawned_item: Some(record),
+            spawned_item: Some(granted.item),
             expire_date_time,
         }
     } else {

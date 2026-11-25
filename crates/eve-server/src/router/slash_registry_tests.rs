@@ -1393,3 +1393,178 @@ fn track2_wallet_and_skill_domain_parity_source_guard() {
         );
     }
 }
+
+#[test]
+fn typed_giveitem_argument_parser_enforces_contract() {
+    let caller_cid = 90_000_001_i64;
+    let other_cid = 90_000_002_i64;
+    let ctx = test_ctx();
+
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "34").expect("single typeID"),
+        GiveItemArgs::Explicit {
+            target_char_id: caller_cid,
+            type_id: 34,
+            quantity: 1,
+        }
+    );
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, " me 34 ").expect("me typeID"),
+        GiveItemArgs::Explicit {
+            target_char_id: caller_cid,
+            type_id: 34,
+            quantity: 1,
+        }
+    );
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "SELF 587").expect("self ship"),
+        GiveItemArgs::Explicit {
+            target_char_id: caller_cid,
+            type_id: 587,
+            quantity: 1,
+        }
+    );
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "90000002 34 50").expect("explicit target qty"),
+        GiveItemArgs::Explicit {
+            target_char_id: other_cid,
+            type_id: 34,
+            quantity: 50,
+        }
+    );
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "ME 484 2").expect("me typeID qty"),
+        GiveItemArgs::Explicit {
+            target_char_id: caller_cid,
+            type_id: 484,
+            quantity: 2,
+        }
+    );
+
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "34 50")
+            .unwrap()
+            .resolve(&ctx.sde, |id| id == other_cid)
+            .expect("typeID qty"),
+        ResolvedGiveItemArgs {
+            target_char_id: caller_cid,
+            type_id: 34,
+            quantity: 50,
+        }
+    );
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "90000002 34")
+            .unwrap()
+            .resolve(&ctx.sde, |id| id == other_cid)
+            .expect("charID typeID"),
+        ResolvedGiveItemArgs {
+            target_char_id: other_cid,
+            type_id: 34,
+            quantity: 1,
+        }
+    );
+    assert_eq!(
+        GiveItemArgs::parse(caller_cid, "999999999 1")
+            .unwrap()
+            .resolve(&ctx.sde, |id| id == other_cid)
+            .expect("unknown typeID with non-type qty"),
+        ResolvedGiveItemArgs {
+            target_char_id: caller_cid,
+            type_id: 999_999_999,
+            quantity: 1,
+        }
+    );
+    let missing_char = GiveItemArgs::parse(caller_cid, "999888777 34")
+        .unwrap()
+        .resolve(&ctx.sde, |id| id == other_cid)
+        .expect_err("unknown charID with valid SDE typeID must fail");
+    assert_eq!(missing_char.code, "CharacterNotFound");
+
+    for bad in [
+        "",
+        "   ",
+        "0",
+        "-5",
+        "notatype",
+        "badtarget 34",
+        "badtarget 34 5",
+        "0 34 5",
+        "-1 34 5",
+        "90000002 0 5",
+        "90000002 badtype 5",
+        "90000002 34 0",
+        "90000002 34 -3",
+        "34 0",
+        "34 -2",
+        "me 0",
+        "me badtype",
+        "1 2 3 4",
+    ] {
+        let err = GiveItemArgs::parse(caller_cid, bad)
+            .expect_err(&format!("expected GiveItemArgs::parse({bad:?}) to reject"));
+        assert_eq!(err.code, "InvalidSlashArgument", "for {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn track2_items_domain_parity_source_guard() {
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // 1. `auth_cache.rs` routes `/giveitem` and `/createitem` through `domain::items`
+    //    with zero raw `snap.items.insert` or `InventoryItemRecord` construction.
+    let auth_raw = fs::read_to_string(src_root.join("services/auth_cache.rs")).expect("auth_cache.rs");
+    let auth_prod = production_prefix(&auth_raw);
+    for forbidden in [
+        "handle_slash_give_item",
+        "snap.items.insert",
+        "InventoryItemRecord",
+    ] {
+        assert!(
+            !auth_prod.contains(forbidden),
+            "services/auth_cache.rs production code must not contain `{forbidden}`"
+        );
+    }
+    assert!(
+        auth_prod.contains("grant_character_item_tx("),
+        "dispatch_giveitem_slash must route through domain::items::grant_character_item_tx"
+    );
+
+    // 2. `domain/items.rs` delegates storage to `eve_db::WorldStateSnapshot::mint_inventory_item_with_id_in_snap`
+    //    and relies on commit ChangeSet delta projection without hand-written notifications.
+    let items_raw = fs::read_to_string(src_root.join("domain/items.rs")).expect("domain/items.rs");
+    let items_prod = production_prefix(&items_raw);
+    assert!(items_prod.contains("mint_inventory_item_with_id_in_snap("));
+    assert!(!items_prod.contains("items.insert("));
+    assert!(!items_prod.contains("emit_"));
+    assert!(!items_prod.contains("notify_"));
+
+    // 3. Real non-GM gameplay item creation flows share `domain::items::grant_item_in_snap`.
+    for rel in [
+        "services/account_services.rs",
+        "services/crate_loot_service.rs",
+        "services/project_discovery_rewards.rs",
+        "services/operations_manager_helpers.rs",
+        "services/campaigns_and_milestones.rs",
+        "services/season_manager.rs",
+        "services/lp_store.rs",
+        "services/notify_emitters_skills_trade_godma.rs",
+    ] {
+        let raw = fs::read_to_string(src_root.join(rel)).expect(rel);
+        let prod = production_prefix(&raw);
+        assert!(
+            prod.contains("grant_item_in_snap("),
+            "{rel} must call shared domain::items::grant_item_in_snap"
+        );
+        assert!(
+            !prod.contains("snap.items.insert"),
+            "{rel} production code must not insert raw rows into snap.items directly"
+        );
+    }
+}

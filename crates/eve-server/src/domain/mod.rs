@@ -8,6 +8,7 @@
 pub mod career_goals;
 pub mod corp_governance;
 pub mod fleets;
+pub mod items;
 pub mod mail;
 pub mod market_acl;
 pub mod skills;

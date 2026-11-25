@@ -223,14 +223,21 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &SessionState, args: &[
         .map_err(|e| err("ItemLocked", e.to_string()))?;
         let mut first_delivered = (0_i64, 0_u32, 0_i32);
         for &(item_type, qty) in &spec.items {
-            snap.next_entity_id += 1;
-            let new_item_id = snap.next_entity_id;
-            snap.items.insert(new_item_id, InventoryItemRecord {
-                item_id: new_item_id, type_id: item_type, owner_id: char_id, location_id: allowed_dest_id,
-                flag: InventoryFlag::Hangar, quantity: qty, singleton: false, ..Default::default()
-            });
+            let granted = crate::domain::items::grant_item_in_snap(
+                None,
+                snap,
+                None,
+                crate::domain::items::GrantItemRequest::explicit(
+                    char_id,
+                    allowed_dest_id,
+                    InventoryFlag::Hangar,
+                    item_type,
+                    qty,
+                ),
+            )
+            .map_err(crate::services::domain_err_to_rpc)?;
             if first_delivered.0 == 0 {
-                first_delivered = (new_item_id, item_type, qty);
+                first_delivered = (granted.item.item_id, item_type, qty);
             }
         }
         save_cosmetics_ui_state(snap, &ext);
@@ -304,12 +311,21 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args:
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
-        snap.next_entity_id += 1;
-        let ship_item_id = snap.next_entity_id;
-        snap.items.insert(ship_item_id, InventoryItemRecord {
-            item_id: ship_item_id, type_id: ship_type_id, owner_id: char_id, location_id: dest_id,
-            flag: InventoryFlag::Hangar, quantity: 1, singleton: false, ..Default::default()
-        });
+        let ship_item_id = crate::domain::items::grant_item_in_snap(
+            None,
+            snap,
+            None,
+            crate::domain::items::GrantItemRequest::explicit(
+                char_id,
+                dest_id,
+                InventoryFlag::Hangar,
+                ship_type_id,
+                1,
+            ),
+        )
+        .map_err(crate::services::domain_err_to_rpc)?
+        .item
+        .item_id;
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::keyval([("crateID", PyRep::Integer(crate_id)), ("fittingID", PyRep::Integer(fitting_id)), ("deliveredItemID", PyRep::Integer(ship_item_id)), ("claimed", PyRep::Bool(true))]))
     })
@@ -375,12 +391,19 @@ where
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
         for (item_type, spawn_qty) in calculate_crate_stack_spawns(&spec.items, actual_qty)? {
-            snap.next_entity_id += 1;
-            let new_item_id = snap.next_entity_id;
-            snap.items.insert(new_item_id, InventoryItemRecord {
-                item_id: new_item_id, type_id: item_type, owner_id: char_id, location_id: dest_id,
-                flag: InventoryFlag::Hangar, quantity: spawn_qty, singleton: false, ..Default::default()
-            });
+            crate::domain::items::grant_item_in_snap(
+                None,
+                snap,
+                None,
+                crate::domain::items::GrantItemRequest::explicit(
+                    char_id,
+                    dest_id,
+                    InventoryFlag::Hangar,
+                    item_type,
+                    spawn_qty,
+                ),
+            )
+            .map_err(crate::services::domain_err_to_rpc)?;
         }
         Ok(PyRep::Tuple(vec![PyRep::Integer(i64::from(actual_to_open)), PyRep::Integer(requested_qty.as_i64())]))
     })?;

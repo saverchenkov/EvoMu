@@ -371,27 +371,24 @@ fn deliver_op_item(
         return;
     }
     if let Some(loc_id) = docked_loc {
-        snap.next_entity_id += 1;
-        let item_id = snap.next_entity_id;
-        snap.items.insert(
-            item_id,
-            eve_db::InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id: char_id,
-                location_id: loc_id,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: amount as i32,
-                singleton: amount == 1,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        out.created_hangar_items.push((item_id, type_id, loc_id, amount));
+        if let Ok(qty_i32) = i32::try_from(amount) {
+            if let Ok(granted) = crate::domain::items::grant_item_in_snap(
+                None,
+                snap,
+                None,
+                crate::domain::items::GrantItemRequest::explicit(
+                    char_id,
+                    loc_id,
+                    eve_db::InventoryFlag::Hangar,
+                    type_id,
+                    qty_i32,
+                )
+                .with_singleton(amount == 1),
+            ) {
+                out.created_hangar_items
+                    .push((granted.item.item_id, type_id, loc_id, amount));
+            }
+        }
     } else {
         crate::services::account_services::enqueue_redeem_token_in_snapshot(
             snap,

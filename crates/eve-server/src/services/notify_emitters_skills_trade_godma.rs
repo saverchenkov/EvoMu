@@ -542,23 +542,20 @@ pub fn handle_rnd_buy_datacores(
         entry.initial_points = rem_rp;
         entry.started_unix = now_unix;
         super::agents_missions::save_rnd_research_entries(snap, char_id, &entries);
-        snap.next_entity_id += 1;
-        let item_id = snap.next_entity_id;
-        snap.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id: dc_type_id,
-                owner_id: char_id,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: qty,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        Ok((item_id, dc_type_id, rem_rp, bal_wire))
+        let granted = crate::domain::items::grant_item_in_snap(
+            None,
+            snap,
+            None,
+            crate::domain::items::GrantItemRequest::explicit(
+                char_id,
+                station_id,
+                InventoryFlag::Hangar,
+                dc_type_id,
+                qty,
+            ),
+        )
+        .map_err(crate::services::domain_err_to_rpc)?;
+        Ok((granted.item.item_id, dc_type_id, rem_rp, bal_wire))
     })?;
     emit_datacore_bought(ctx, char_id, agent_id, bal_after_isk);
     Ok(PyRep::keyval([

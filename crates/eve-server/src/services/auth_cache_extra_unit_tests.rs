@@ -1037,3 +1037,89 @@ async fn gm_bridge_giveitem_createitem_spawnnpc_target_player_and_fail_closed() 
     );
 }
 
+#[tokio::test]
+async fn gm_giveitem_typed_parser_rejects_invalid_args_and_never_wakes_cold_systems() {
+    use eve_db::InventoryFlag;
+
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let gm_cid = 90_000_001_i64;
+    let player_cid = 90_000_002_i64;
+    let cold_sys = 30_002_187_u32;
+    let player_station = 60_008_494_i64;
+
+    let player_ship = ctx.db.with_mut_snapshot(|snap| {
+        let p = snap.characters.get_mut(&player_cid).expect("player char");
+        p.solar_system_id = cold_sys;
+        p.station_id = Some(player_station);
+        p.structure_id = None;
+        p.active_ship_id
+    });
+    let mut gm_sess = auth_session(20, gm_cid, 98_000_001, 30_000_142);
+    gm_sess.station_id = Some(60_003_760);
+    gm_sess.role = service_roles::ROLE_GM_MASK;
+
+    let items_before = ctx.db.with_snapshot(|s| s.items.len());
+    for bad_cmd in [
+        "/giveitem badtarget 34",
+        "/giveitem 34 0",
+        "/createitem 34 -5",
+        "/giveitem 90000002 34 0",
+        "/giveitem 1 2 3 4",
+    ] {
+        let err = handle(
+            &ctx,
+            &mut gm_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(bad_cmd.into())],
+            &kw,
+        )
+        .await
+        .expect("slash handled")
+        .expect_err("invalid typed /giveitem args must reject");
+        assert_eq!(err.code, "InvalidSlashArgument", "{bad_cmd}");
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.len()), items_before);
+    assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+    // Targeted docked and undocked item grants do not wake cold solar systems (#1542).
+    let docked_rep = handle(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/giveitem {player_cid} 34 50"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("docked /giveitem ok");
+    let docked_id = docked_rep.dict_get("itemID").and_then(PyRep::as_i64).expect("itemID");
+    assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&player_cid).expect("player").station_id = None;
+    });
+    let undocked_rep = handle(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/createitem {player_cid} 484 1"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("undocked /createitem ok");
+    let undocked_id = undocked_rep.dict_get("itemID").and_then(PyRep::as_i64).expect("itemID");
+    assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+    ctx.db.with_snapshot(|snap| {
+        let hangar_item = snap.items.get(&docked_id).expect("hangar item");
+        assert_eq!((hangar_item.location_id, hangar_item.flag, hangar_item.quantity), (player_station, InventoryFlag::Hangar, 50));
+        let cargo_item = snap.items.get(&undocked_id).expect("cargo item");
+        assert_eq!((cargo_item.location_id, cargo_item.flag, cargo_item.quantity, cargo_item.singleton), (player_ship, InventoryFlag::Cargo, 1, true));
+    });
+}
+

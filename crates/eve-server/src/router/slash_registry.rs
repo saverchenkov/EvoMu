@@ -467,6 +467,8 @@ fn invalid_slash_arg_error(msg: impl Into<String>) -> BridgeRpcError {
 }
 
 const GIVEISK_USAGE: &str = "Usage: /giveisk [me|<character_id>] <positive_integer_amount>";
+const GIVEITEM_USAGE: &str =
+    "Usage: /giveitem [me|<characterID>] <type_id> [quantity] or /createitem [me|<characterID>] <type_id> [quantity]";
 const SETSKILL_USAGE: &str =
     "Usage: /setskill [me|<characterID>] <typeID> <0-5> or /giveskill [me|<characterID>] <typeID> <0-5>";
 
@@ -565,6 +567,155 @@ impl SetSkillArgs {
             skill_type_id,
             level,
         })
+    }
+}
+
+/// Syntax-level target/argument representation for `/giveitem` and `/createitem`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GiveItemArgs {
+    Explicit {
+        target_char_id: i64,
+        type_id: u32,
+        quantity: i32,
+    },
+    /// Two positive integers `[a, b]` could mean either `<charID> <typeID>` (qty = 1) or
+    /// `<typeID> <quantity>` targeting the caller; resolved against world characters + SDE.
+    AmbiguousNumericPair {
+        caller_char_id: i64,
+        first: i64,
+        second: i32,
+    },
+}
+
+/// Fully resolved arguments for `/giveitem` and `/createitem`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedGiveItemArgs {
+    pub target_char_id: i64,
+    pub type_id: u32,
+    pub quantity: i32,
+}
+
+impl GiveItemArgs {
+    /// Parses `/giveitem` or `/createitem` syntax without mutating world state, validating
+    /// target tokens, positive `typeID`, and positive `i32` quantity.
+    pub(crate) fn parse(caller_cid: i64, rest: &str) -> Result<Self, BridgeRpcError> {
+        let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+        let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        match token_strs.as_slice() {
+            [type_str] => {
+                let Some(type_id) = type_str.parse::<u32>().ok().filter(|&id| id > 0) else {
+                    return Err(invalid_slash_arg_error("Invalid type_id for /giveitem"));
+                };
+                Ok(Self::Explicit {
+                    target_char_id: caller_cid,
+                    type_id,
+                    quantity: 1,
+                })
+            }
+            [who, type_str, qty_str] => {
+                let Some(target_char_id) = parse_optional_target_char(caller_cid, who) else {
+                    return Err(invalid_slash_arg_error(GIVEITEM_USAGE));
+                };
+                let Some(type_id) = type_str.parse::<u32>().ok().filter(|&id| id > 0) else {
+                    return Err(invalid_slash_arg_error("Invalid type_id for /giveitem"));
+                };
+                let Ok(quantity) = qty_str.parse::<i32>() else {
+                    return Err(invalid_slash_arg_error("Quantity for /giveitem must be positive"));
+                };
+                if quantity <= 0 {
+                    return Err(invalid_slash_arg_error("Quantity for /giveitem must be positive"));
+                }
+                Ok(Self::Explicit {
+                    target_char_id,
+                    type_id,
+                    quantity,
+                })
+            }
+            [tok0, tok1] => {
+                if tok0.eq_ignore_ascii_case("me") || tok0.eq_ignore_ascii_case("self") {
+                    let Some(type_id) = tok1.parse::<u32>().ok().filter(|&id| id > 0) else {
+                        return Err(invalid_slash_arg_error("Invalid type_id for /giveitem"));
+                    };
+                    return Ok(Self::Explicit {
+                        target_char_id: caller_cid,
+                        type_id,
+                        quantity: 1,
+                    });
+                }
+                let Some(first) = tok0.parse::<i64>().ok().filter(|&id| id > 0) else {
+                    return Err(invalid_slash_arg_error(GIVEITEM_USAGE));
+                };
+                let Ok(second) = tok1.parse::<i32>() else {
+                    return Err(invalid_slash_arg_error("Quantity for /giveitem must be positive"));
+                };
+                if second <= 0 {
+                    return Err(invalid_slash_arg_error("Quantity for /giveitem must be positive"));
+                }
+                Ok(Self::AmbiguousNumericPair {
+                    caller_char_id: caller_cid,
+                    first,
+                    second,
+                })
+            }
+            _ => Err(invalid_slash_arg_error(GIVEITEM_USAGE)),
+        }
+    }
+
+    /// Resolves ambiguous two-integer invocations against known characters and SDE types.
+    pub(crate) fn resolve(
+        self,
+        sde: &eve_sde::SdeRegistry,
+        char_exists: impl FnOnce(i64) -> bool,
+    ) -> Result<ResolvedGiveItemArgs, crate::domain::DomainError> {
+        match self {
+            Self::Explicit {
+                target_char_id,
+                type_id,
+                quantity,
+            } => Ok(ResolvedGiveItemArgs {
+                target_char_id,
+                type_id,
+                quantity,
+            }),
+            Self::AmbiguousNumericPair {
+                caller_char_id,
+                first,
+                second,
+            } => {
+                if char_exists(first) {
+                    return Ok(ResolvedGiveItemArgs {
+                        target_char_id: first,
+                        type_id: second as u32,
+                        quantity: 1,
+                    });
+                }
+                let second_is_valid_type = sde
+                    .types
+                    .get(&(second as u32))
+                    .is_some_and(|rec| rec.category_id != 0);
+                let first_is_known_type = u32::try_from(first)
+                    .ok()
+                    .is_some_and(|t| sde.types.contains_key(&t));
+                if !first_is_known_type && second_is_valid_type {
+                    return Err(crate::domain::DomainError::not_found(
+                        "CharacterNotFound",
+                        format!("Character {first} not found"),
+                    ));
+                }
+                if let Ok(type_id) = u32::try_from(first) {
+                    Ok(ResolvedGiveItemArgs {
+                        target_char_id: caller_char_id,
+                        type_id,
+                        quantity: second,
+                    })
+                } else {
+                    Err(crate::domain::DomainError::not_found(
+                        "CharacterNotFound",
+                        format!("Character {first} not found"),
+                    ))
+                }
+            }
+        }
     }
 }
 

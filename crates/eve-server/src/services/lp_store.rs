@@ -18,7 +18,7 @@
 use crate::router::{RpcArgs, ServerContext};
 pub use crate::services::lp_store_catalog::*;
 pub use eve_db::LpRewardLogEntry;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_db::{InventoryFlag, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
@@ -732,43 +732,41 @@ fn handle_take_offer(
             let bpc_runs = offer.quantity.max(1);
             let mut first_id = 0_i64;
             for _ in 0..qty_i32 {
-                snap.next_entity_id += 1;
-                let new_item_id = snap.next_entity_id;
+                let granted = crate::domain::items::grant_item_in_snap(
+                    None,
+                    snap,
+                    None,
+                    crate::domain::items::GrantItemRequest::explicit(
+                        final_owner_id,
+                        delivery_loc_id,
+                        final_flag,
+                        offer.type_id,
+                        1,
+                    )
+                    .with_singleton(true)
+                    .with_blueprint_copy(Some(bpc_runs)),
+                )
+                .map_err(crate::services::domain_err_to_rpc)?;
                 if first_id == 0 {
-                    first_id = new_item_id;
+                    first_id = granted.item.item_id;
                 }
-                let granted_item = InventoryItemRecord {
-                    item_id: new_item_id,
-                    type_id: offer.type_id,
-                    owner_id: final_owner_id,
-                    location_id: delivery_loc_id,
-                    flag: final_flag,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    is_blueprint_copy: true,
-                    blueprint_runs_remaining: Some(bpc_runs),
-                    ..Default::default()
-                };
-                snap.items.insert(new_item_id, granted_item);
             }
             (first_id, qty_i32)
         } else {
-            snap.next_entity_id += 1;
-            let new_item_id = snap.next_entity_id;
-            let granted_item = InventoryItemRecord {
-                item_id: new_item_id,
-                type_id: offer.type_id,
-                owner_id: final_owner_id,
-                location_id: delivery_loc_id,
-                flag: final_flag,
-                quantity: total_items_qty,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            };
-            snap.items.insert(new_item_id, granted_item);
-            (new_item_id, total_items_qty)
+            let granted = crate::domain::items::grant_item_in_snap(
+                None,
+                snap,
+                None,
+                crate::domain::items::GrantItemRequest::explicit(
+                    final_owner_id,
+                    delivery_loc_id,
+                    final_flag,
+                    offer.type_id,
+                    total_items_qty,
+                ),
+            )
+            .map_err(crate::services::domain_err_to_rpc)?;
+            (granted.item.item_id, total_items_qty)
         };
 
         Ok((first_item_id, offer.type_id, delivered_qty, rem_lp, bal_after, lp_before, ch.corporation_id))
