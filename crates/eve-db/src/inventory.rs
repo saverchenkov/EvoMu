@@ -1569,7 +1569,7 @@ impl WorldStateSnapshot {
                 item.item_id, opts.policy
             )));
         }
-        if reject_courier_cargo && self.is_courier_mission_item(item.item_id) {
+        if reject_courier_cargo && self.is_courier_cargo_item(item.item_id) {
             return Err(DbError::ValidationError(format!(
                 "Cannot consume courier cargo item {}",
                 item.item_id

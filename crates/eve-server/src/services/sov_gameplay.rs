@@ -1664,20 +1664,32 @@ mod r3_charge_policy_tests {
         let den_id = 1_099_000_111_i64;
         let bpc_charge_id = 1_099_000_112_i64;
         ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                den_id,
+                UpwellStructureRecord {
+                    structure_id: den_id,
+                    type_id: TYPE_MERCENARY_DEN,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    name: "BPC Test Den".into(),
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    shield_hp: 5_000.0,
+                    armor_hp: 5_000.0,
+                    hull_hp: 5_000.0,
+                    ..Default::default()
+                },
+            );
             snap.sov_runtime.mercenary_dens.insert(
                 den_id,
                 PersistedMercenaryDen {
                     den_id,
                     owner_char_id: char_id,
-                    owner_corp_id: 98_000_001,
                     solar_system_id: 30_000_142,
                     skyhook_id: 1_099_000_110,
                     planet_id: 40_000_001,
                     type_id: TYPE_MERCENARY_DEN,
                     enabled: true,
-                    shield_hp: 5_000.0,
-                    armor_hp: 5_000.0,
-                    hull_hp: 5_000.0,
                     ..Default::default()
                 },
             );
@@ -1710,8 +1722,8 @@ mod r3_charge_policy_tests {
         .expect_err("BPC weapon charge must fail before dealing damage");
         assert!(!err.message.is_empty());
         ctx.db.with_snapshot(|snap| {
-            assert_eq!(snap.sov_runtime.mercenary_dens[&den_id].shield_hp, 5_000.0);
-            assert_eq!(snap.sov_runtime.mercenary_dens[&den_id].last_damage_tick, 0);
+            assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.structures[&den_id].last_damage_tick, 0);
             assert_eq!(snap.items[&bpc_charge_id].quantity, 2);
         });
     }

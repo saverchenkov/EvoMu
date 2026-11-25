@@ -1076,10 +1076,11 @@ fn check_module_fits_structure(mod_type: &eve_sde::InvType, st_type_id: u32, st_
 
 fn consume_service_online_fuel_or_err(
     ctx: &ServerContext,
-    snap: &mut WorldStateSnapshot,
+    snap: &mut eve_db::WorldStateSnapshot,
     structure_id: i64,
     online_fuel: u32,
 ) -> Result<(), BridgeRpcError> {
+    use crate::services::structure_acl_defense_rules as rules;
     if rules::consume_structure_fuel_blocks(ctx, snap, structure_id, online_fuel) {
         return Ok(());
     }

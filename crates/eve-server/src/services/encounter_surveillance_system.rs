@@ -151,6 +151,7 @@ pub(crate) fn select_valid_ess_reserve_key_in_cargo(
 
 /// Validates and selects an ESS Reserve Security Key (`57714..=57721`, group `4102`) in `ship_id`
 /// cargo matching `sys_id`'s SCC quadrant. Never accepts non-key cargo items even when `target_arg` is provided.
+#[cfg(test)]
 pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
     sde: &eve_sde::SdeRegistry,
     items: impl Iterator<Item = &'a eve_db::InventoryItemRecord>,
