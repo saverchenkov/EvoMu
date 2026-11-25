@@ -15,29 +15,10 @@ use super::delta_item_switch::{
 };
 use super::delta_projection::OnlineCharacterLookup;
 
-pub(crate) const RULE_OWNER: &str = "owner";
-pub(crate) const RULE_CORPORATION: &str = "corporation";
-pub(crate) const RULE_FORMER_MEMBER: &str = "former member";
-pub(crate) const RULE_OWNERLESS: &str = "ownerless";
-pub(crate) const RULE_HOLDER_ACTING_PILOT: &str = "holder acting pilot";
-pub(crate) const RULE_HOLDER_OWNER: &str = "holder owner";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ItemHolderKind {
     Ship,
     Space,
-    None,
-}
-
-impl ItemHolderKind {
-    #[inline]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ship => "ship",
-            Self::Space => "space",
-            Self::None => "none",
-        }
-    }
 }
 
 pub(crate) struct SwitchedItemRecipient<'a> {
@@ -45,7 +26,6 @@ pub(crate) struct SwitchedItemRecipient<'a> {
     pub op_kind: ProjectedItemOpKind,
     pub fp_rec: &'a InventoryItemRecord,
     pub id_type: &'static str,
-    pub rule: &'static str,
 }
 
 #[inline]
@@ -142,31 +122,6 @@ pub(crate) fn resolve_item_holder<'a>(
     None
 }
 
-/// Telemetry classifier for hand-written item events (`holder=ship|space|none`).
-pub(crate) fn classify_item_holder_kind_in_snap(
-    item_id: i64,
-    after_loc: i64,
-    before_loc: Option<i64>,
-    snap: &WorldStateSnapshot,
-    sde: &SdeRegistry,
-) -> ItemHolderKind {
-    let live_loc = snap.items.get(&item_id).map(|r| r.location_id).unwrap_or(after_loc);
-    if let Some((kind, _)) = resolve_item_holder(item_id, live_loc, snap, None, None, sde) {
-        return kind;
-    }
-    if after_loc > 0 && after_loc != live_loc && after_loc != 6 {
-        if let Some((kind, _)) = resolve_item_holder(item_id, after_loc, snap, None, None, sde) {
-            return kind;
-        }
-    }
-    if let Some(prev_loc) = before_loc {
-        if let Some((kind, _)) = resolve_item_holder(item_id, prev_loc, snap, None, None, sde) {
-            return kind;
-        }
-    }
-    ItemHolderKind::None
-}
-
 #[inline]
 fn is_existing_character_or_player_corp(owner_id: i64, snap_after: &WorldStateSnapshot) -> bool {
     snap_after.characters.contains_key(&owner_id) || snap_after.corporations.contains_key(&owner_id)
@@ -234,7 +189,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
                 op_kind: default_op_kind,
                 fp_rec: default_fp_rec,
                 id_type: "charid",
-                rule: RULE_HOLDER_OWNER,
             });
         }
     }
@@ -275,7 +229,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
                 op_kind: default_op_kind,
                 fp_rec: default_fp_rec,
                 id_type: "charid",
-                rule: RULE_FORMER_MEMBER,
             });
         }
     }
@@ -296,7 +249,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
                     op_kind: default_op_kind,
                     fp_rec: default_fp_rec,
                     id_type: "charid",
-                    rule: RULE_OWNERLESS,
                 });
             }
             // Gate RULE_HOLDER_ACTING_PILOT on a live holder or a surviving item relocated out of a
@@ -318,7 +270,6 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
                     op_kind: default_op_kind,
                     fp_rec: default_fp_rec,
                     id_type: "charid",
-                    rule: RULE_HOLDER_ACTING_PILOT,
                 });
             }
         }

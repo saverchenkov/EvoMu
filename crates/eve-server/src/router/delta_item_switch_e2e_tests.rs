@@ -3,10 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::ServerContext;
-use crate::router::delta_item_switch::{
-    projected_item_switch_summary, ItemWireFingerprint, ProjectedItemSwitchConfig,
-};
-use crate::router::NotificationTarget;
+use crate::router::delta_item_switch::{ItemWireFingerprint, ProjectedItemSwitchConfig};
 use eve_db::{
     FleetRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
 };
@@ -124,143 +121,6 @@ fn extract_multi_item_change_ids(n: &crate::router::PendingMachoNotification) ->
             other => ItemWireFingerprint::from_pyrep_row(other).map(|(id, _)| id),
         })
         .collect()
-}
-
-#[test]
-fn idle_default_server_context_has_no_activity_on_creation() {
-    let ctx = ServerContext::new();
-    let sw = projected_item_switch_summary(&ctx);
-    assert!(sw.config.is_any_enabled(), "default switches must be enabled");
-    assert!(
-        !sw.has_activity(),
-        "idle ServerContext must report has_activity() == false: {sw:?}"
-    );
-}
-
-#[test]
-fn offline_character_and_per_kind_switch_gating_do_not_miscount_non_first_set() {
-    let ctx = ServerContext::new();
-    let offline_char = 98_931_701_i64;
-    let online_a = 98_931_702_i64;
-    let online_b = 98_931_703_i64;
-    let station_id = 60_003_760_i64;
-    let sys_id = 30_000_142_u32;
-    let item_offline = 98_931_801_i64;
-    let item_online = 98_931_802_i64;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        for (cid, uid, sid_opt) in [
-            (offline_char, 98_701_u64, Some(station_id)),
-            (online_a, 98_702_u64, None),
-            (online_b, 98_703_u64, None),
-        ] {
-            if uid != 98_701 {
-                seed_account(snap, uid);
-            }
-            let mut ch = snap.characters.values().next().cloned().expect("seed char");
-            ch.character_id = cid;
-            ch.user_id = uid;
-            ch.station_id = sid_opt;
-            ch.solar_system_id = sys_id;
-            snap.characters.insert(cid, ch);
-        }
-        snap.items.insert(
-            item_offline,
-            InventoryItemRecord {
-                item_id: item_offline,
-                type_id: 34,
-                owner_id: offline_char,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            item_online,
-            InventoryItemRecord {
-                item_id: item_online,
-                type_id: 34,
-                owner_id: online_a,
-                location_id: station_id,
-                flag: InventoryFlag::Cargo,
-                quantity: 50,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    // Offline character helper emits produce 0 delivered notifications and 0 `non_first_set_emitted`.
-    let offline_item = ctx.db.with_snapshot(|s| s.items[&item_offline].clone());
-    assert!(
-        ctx.notify_item_record_change(offline_char, &offline_item, vec![(5, PyRep::Integer(80))])
-            .is_empty()
-    );
-    ctx.emit_item_change_routed(offline_char, &offline_item, vec![(5, PyRep::Integer(60))]);
-    ctx.emit_item_deleted_routed(offline_char, &offline_item);
-    ctx.notify_item_mutation(offline_char, Some(&offline_item), None);
-    let after_offline = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        after_offline.non_first_set_emitted, 0,
-        "offline recipients must not increment non_first_set_emitted: {after_offline:?}"
-    );
-    assert!(ctx.drain_notifications_for_char(offline_char).is_empty());
-
-    // Bring `online_a` and `online_b` online in `sys_id` and test per-kind switch gating on
-    // multi-recipient `NotificationTarget::SolarSystem(sys_id)`:
-    // `char_same_scene_item_deleted = false`, `char_same_scene_item_mutation = true`.
-    let now = ctx.now_unix();
-    ctx.db
-        .acquire_online_lock(98_702, 98_702, Some(online_a), false, now)
-        .unwrap();
-    ctx.db
-        .acquire_online_lock(98_703, 98_703, Some(online_b), false, now)
-        .unwrap();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-        char_same_scene_item_mutation: true,
-        char_same_scene_item_deleted: false,
-        char_same_scene_item_outside_rpc: false,
-        char_same_scene_item_fitted: false,
-        char_all_items: false,
-        corp_all_items: false,
-    });
-
-    let mut tomb_item = ctx.db.with_snapshot(|s| s.items[&item_online].clone());
-    tomb_item.location_id = 6;
-    tomb_item.flag = InventoryFlag::None;
-    // Deletion (`locationID = 6` post-state, prior location in changeDict) under disabled deleted
-    // switch must leave `non_first_set_emitted == 0`.
-    let del_notifs = ctx.notify_item_record_change_with_target(
-        NotificationTarget::SolarSystem(sys_id),
-        "solarsystemid2",
-        &tomb_item,
-        vec![(3, PyRep::Integer(station_id))],
-    );
-    assert_eq!(del_notifs.len(), 2);
-    let after_multi_del = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        after_multi_del.non_first_set_emitted, 0,
-        "multi-recipient OnItemChange tombstone must NOT count as non_first_set_emitted when deleted switch is OFF"
-    );
-
-    // Non-tombstone mutation (`locationID = station_id`) under enabled mutation switch MUST count once.
-    let online_item = ctx.db.with_snapshot(|s| s.items[&item_online].clone());
-    let mut_notifs = ctx.notify_item_record_change_with_target(
-        NotificationTarget::SolarSystem(sys_id),
-        "solarsystemid2",
-        &online_item,
-        vec![(3, PyRep::Integer(station_id))],
-    );
-    assert_eq!(mut_notifs.len(), 2);
-    let after_multi_mut = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        after_multi_mut.non_first_set_emitted, 1,
-        "multi-recipient OnItemChange mutation must increment non_first_set_emitted once when mutation switch is ON"
-    );
 }
 
 #[tokio::test]
@@ -1077,28 +937,6 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
         }),
         "cargo-only FitShips must drop its batch OnMultipleItemChange so only commit companions remain: {cargo_multi_notifs:?}"
     );
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        sw.replaced, 0,
-        "Step 3b-1 removed FitShips handwritten emitters so zero replacements occur: {sw:?}"
-    );
-    assert_eq!(
-        sw.new, 7,
-        "FitShips must emit all 7 commit-projected Cargo/Hangar + LoSlot0 rows directly: {sw:?}"
-    );
-    assert!(
-        sw.hand_sent_by_call_site.is_empty(),
-        "FitShips must emit zero hand-written events: {sw:?}"
-    );
-    assert_eq!(
-        sw.non_first_set_emitted, 0,
-        "FitShips under default-ON fitted must have zero unprojected OnMultipleItemChange rows: {sw:?}"
-    );
-    assert_eq!(
-        sw.helper_without_token, 0,
-        "FitShips must have zero helper_without_token misses: {sw:?}"
-    );
 }
 
 #[tokio::test]
@@ -1165,10 +1003,4 @@ async fn fit_ships_partial_dedupe_with_fitted_kill_switch_off() {
             }),
         "all OnMultipleItemChange notifications must be single-row commit companions: {multi_notifs:?}"
     );
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.replaced, 0, "expected zero handwritten replacements after Step 3b-1: {sw:?}");
-    assert_eq!(sw.new, 3, "expected 3 commit-projected Cargo/Hangar rows: {sw:?}");
-    assert_eq!(sw.non_first_set_emitted, 0, "expected zero legacy LoSlot0 emissions: {sw:?}");
-    assert_eq!(sw.helper_without_token, 0, "sw={sw:?}");
 }

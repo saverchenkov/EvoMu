@@ -52,7 +52,6 @@ fn test_skin_purchase_rollback_branches_account_sink_and_admin_expiration_errors
         Arc::clone(&db),
         Arc::clone(&sde),
         Arc::clone(&skinr),
-        Arc::clone(&router.macho_notify_sink),
     );
     register_with_state(&router, Arc::clone(&state));
 
@@ -283,7 +282,6 @@ fn admin_revoke_purges_ship_thirdparty_skin_notices_and_hub_listings_and_rejects
         Arc::clone(&db),
         Arc::clone(&sde),
         Arc::clone(&skinr),
-        Arc::clone(&router.macho_notify_sink),
     );
     register_skinr(&router, Arc::clone(&skinr));
     register_skinr_seq(&router, Arc::clone(&skinr));

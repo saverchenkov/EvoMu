@@ -1110,8 +1110,6 @@ fn register_payment_token_and_purchase_handlers(
 
     let db_purchase = Arc::clone(&db);
     let router_pending_purchase = Arc::clone(&router.pending_notices);
-    let macho_sink_purchase = Arc::clone(&router.macho_notify_sink);
-    let sde_purchase = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.payment.purchase.api.TokenRequest",
         Arc::new(move |ctx, any, dyn_msg| {
@@ -1185,15 +1183,7 @@ fn register_payment_token_and_purchase_handlers(
                 .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &input))
                 .map_err(store_purchase_error_to_quasar)?;
 
-            emit_store_purchase_notices(
-                &db_purchase,
-                &sde_purchase,
-                &macho_sink_purchase,
-                &router_pending_purchase,
-                &outcome,
-                false,
-                now_unix,
-            );
+            emit_store_purchase_notices(&router_pending_purchase, &outcome, false, now_unix);
 
             pb::message("eve_public.payment.purchase.api.TokenResponse")
                 .set(

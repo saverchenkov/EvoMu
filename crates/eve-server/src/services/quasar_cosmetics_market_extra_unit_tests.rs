@@ -196,7 +196,6 @@ fn test_skin_create_listing_error_and_broker_fee_rollback_branches() {
         Arc::clone(&db),
         Arc::clone(&sde),
         Arc::clone(&skinr),
-        Arc::clone(&router.macho_notify_sink),
     );
     register_with_state(&router, Arc::clone(&state));
 

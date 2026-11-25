@@ -27,7 +27,6 @@ use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use eve_testkit::client_harness::{ClientErrorResponse, ClientHarness};
 use eve_server::router::cache_notifications::PendingMachoNotification;
-use eve_server::router::delta_item_switch::projected_item_switch_summary;
 use eve_server::router::test_context::run_staged_dispatch_commit;
 use eve_server::router::ServerContext;
 use eve_server::services::fleet_social::execute_pending_auto_kicks_on_downtime;
@@ -1051,8 +1050,6 @@ async fn step3a_outside_rpc_and_same_commit_ownerless_container_emit_zero_to_pil
         pilot_notifs.is_empty(),
         "same-commit ownerless container + contents must send acting pilot nothing: {pilot_notifs:?}"
     );
-    let summary = projected_item_switch_summary(&ctx);
-    assert_eq!(summary.projected_by_rule.get("ownerless").copied(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

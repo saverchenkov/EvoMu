@@ -1244,9 +1244,6 @@ fn handle_buy_offer(
 
     let emit_balance = outcome.plex_credited > 0 || outcome.plex_spent > 0;
     crate::services::quasar_payment_store_types::emit_store_purchase_notices(
-        &ctx.db,
-        &ctx.sde,
-        &ctx.quasar_gateway.macho_notify_sink,
         &ctx.quasar_gateway.pending_notices,
         &outcome,
         emit_balance,

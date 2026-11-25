@@ -38,37 +38,19 @@ use eve_sde::SdeRegistry;
 
 use super::cache_notifications::register_dispatch_switch_handle;
 use super::delta_commit_listener::TxItemEffectKeys;
-use super::delta_item_switch_report::{CompareOriginScope, SwitchTelemetryState};
 use super::delta_item_corp::{
     collect_switched_item_recipients_for_change, is_corp_blueprint_owner_eligible,
     resolve_online_non_transitioned_corp_recipients,
-};
-use super::delta_item_outside_rpc::{
-    collect_touched_monitor_types, invalidate_covered_monitors_for_change,
-    invalidate_covered_monitors_for_types, merge_covered_industry_monitors,
-    outside_rpc_method_label, retain_monitors_excluding_chars, OutsideRpcLedgerState,
 };
 use super::delta_projection::{
     build_projected_item_change_args, compute_item_change_entries, is_blueprint_type,
     OnlineCharacterLookup,
 };
-use super::ServerContext;
 
 pub(crate) use super::delta_item_corp::{
     build_switched_item_commit_notifications, SwitchedCommitBatch,
     SwitchedProjectedBlueprintSpec, SwitchedProjectedItemSpec,
 };
-pub use super::delta_item_outside_rpc::SwitchScopeOutcomeCounts;
-pub(crate) use super::delta_item_outside_rpc::{
-    classify_hand_written_not_covered_reason_in_snap,
-    classify_hand_written_not_covered_reason_with_fitted_in_snap,
-    evaluate_hand_written_covered_class_in_snap, evaluate_hand_written_outside_first_set_in_snap,
-};
-pub use super::delta_item_switch_report::{
-    AccountSwitchCallSiteCounts, AccountSwitchSummary, ProjectedItemSwitchSummary,
-    SwitchCallSiteCounts, SwitchTelemetryCounts,
-};
-pub(crate) use super::delta_item_switch_report::NotCoveredReason;
 
 const MAX_CONTAINER_WALK_DEPTH: usize = 8;
 
@@ -398,120 +380,10 @@ impl ItemWireFingerprint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CanonicalDictKey {
-    ColIx(i64),
-    Other(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CanonicalDictVal {
-    Int(i64),
-    Bool(bool),
-    Str(String),
-    None,
-    Other(String),
-}
-
-/// Key-order-independent canonical representation of `OnItemChange`'s 2nd-arg change dictionary.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CanonicalChangeDict(pub(crate) BTreeMap<CanonicalDictKey, CanonicalDictVal>);
-
-impl CanonicalChangeDict {
-    fn key_from_pyrep(rep: &PyRep) -> CanonicalDictKey {
-        if let Some(ix) = rep.as_i64() {
-            CanonicalDictKey::ColIx(ix)
-        } else {
-            CanonicalDictKey::Other(format!("{rep:?}"))
-        }
-    }
-
-    fn val_from_pyrep(rep: &PyRep) -> CanonicalDictVal {
-        match rep {
-            PyRep::Bool(b) => CanonicalDictVal::Bool(*b),
-            PyRep::Integer(i) => CanonicalDictVal::Int(*i),
-            PyRep::String(s) | PyRep::Token(s) => CanonicalDictVal::Str(s.clone()),
-            PyRep::None => CanonicalDictVal::None,
-            other => match other.as_i64() {
-                Some(i) => CanonicalDictVal::Int(i),
-                None => CanonicalDictVal::Other(format!("{other:?}")),
-            },
-        }
-    }
-
-    pub(crate) fn from_pyrep(rep: &PyRep) -> Option<Self> {
-        let PyRep::Dict(entries) = rep else {
-            return None;
-        };
-        let mut map = BTreeMap::new();
-        for (k, v) in entries {
-            map.insert(Self::key_from_pyrep(k), Self::val_from_pyrep(v));
-        }
-        Some(Self(map))
-    }
-
-    pub(crate) fn from_entries(entries: &[(i32, PyRep)]) -> Self {
-        let mut map = BTreeMap::new();
-        for (k, v) in entries {
-            map.insert(CanonicalDictKey::ColIx(i64::from(*k)), Self::val_from_pyrep(v));
-        }
-        Self(map)
-    }
-
-    pub(crate) fn col_i64(&self, col_ix: i64) -> Option<i64> {
-        match self.0.get(&CanonicalDictKey::ColIx(col_ix))? {
-            CanonicalDictVal::Int(i) => Some(*i),
-            CanonicalDictVal::Bool(b) => Some(i64::from(*b)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn format_compact(&self) -> String {
-        let mut out = String::from("{");
-        for (idx, (k, v)) in self.0.iter().enumerate() {
-            if idx > 0 {
-                out.push(',');
-            }
-            match k {
-                CanonicalDictKey::ColIx(i) => out.push_str(&i.to_string()),
-                CanonicalDictKey::Other(s) => out.push_str(s),
-            }
-            out.push(':');
-            match v {
-                CanonicalDictVal::Int(i) => out.push_str(&i.to_string()),
-                CanonicalDictVal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-                CanonicalDictVal::Str(s) => {
-                    out.push('"');
-                    out.push_str(s);
-                    out.push('"');
-                }
-                CanonicalDictVal::None => out.push_str("None"),
-                CanonicalDictVal::Other(s) => out.push_str(s),
-            }
-        }
-        out.push('}');
-        out
-    }
-}
-
-#[inline]
-#[track_caller]
-fn caller_call_site() -> String {
-    let loc = std::panic::Location::caller();
-    format!("{}:{}", loc.file().replace('\\', "/"), loc.line())
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct ProjectedDedupeEntry {
     pub(super) kind: ProjectedItemOpKind,
     pub(super) fingerprint: ItemWireFingerprint,
-    pub(super) change_dict: Option<CanonicalChangeDict>,
-    pub(super) class_key: String,
-    pub(super) rpc_method: String,
-    /// `true` once at least one matching hand-written call has claimed this commit fact as
-    /// `replaced`, preventing `sw.new` from double-counting on expiry or overwrite while keeping
-    /// repeated `set + equal` calls suppressed.
-    pub(super) replaced_claimed: bool,
 }
 
 impl ProjectedDedupeEntry {
@@ -520,10 +392,6 @@ impl ProjectedDedupeEntry {
         Self {
             kind: tok.kind,
             fingerprint: tok.fingerprint,
-            change_dict: tok.change_dict,
-            class_key: tok.class_key,
-            rpc_method: tok.rpc_method,
-            replaced_claimed: false,
         }
     }
 }
@@ -534,7 +402,7 @@ pub(crate) enum DedupeLookupOutcome {
     Replaced,
     /// Fact is set for `(char_id, item_id)` with differing row -> suppress (`superseded`).
     Superseded,
-    /// Fact is not set for `(char_id, item_id)` -> send normally (`no projected event` if first-set).
+    /// Fact is not set for `(char_id, item_id)` -> send normally.
     NotSet,
 }
 
@@ -546,30 +414,44 @@ struct DispatchTokenBucket {
     /// `(char_id, owner_id)` blueprint-update dedupe facts announced inside this dispatch.
     blueprint_facts: HashSet<(i64, i64)>,
     transitioned_chars: HashSet<i64>,
-    /// Characters transitioned in the most recent item-mutating or transition commit inside this
-    /// dispatch (`#931` `P2-03`), distinguishing Commit 1 (`PilotMovedInThisCommit` for all items)
-    /// from subsequent commits (where only `ch.active_ship_id` and items actually touched in a
-    /// transition commit remain suppressed).
-    latest_commit_transitioned_chars: HashSet<i64>,
-    /// `(char_id, item_id)` items touched in a commit where `char_id` transitioned (`#931` R2 P2 #2),
-    /// kept across non-transition commits in the same dispatch until another commit touches `item_id`
-    /// so deferred Commit 1 emissions continue recording `PilotMovedInThisCommit`.
-    transition_suppressed_items: HashSet<(i64, i64)>,
     /// `monitor_id -> (char_id, owner_id, set of type_ids)` already covered by coalesced commit-time
     /// `OnIndustryMaterials` emissions in this dispatch scope (`#931` `BF-931-3C1-02` / `BF-01`).
     covered_industry_monitors: HashMap<i64, (i64, i64, HashSet<u32>)>,
-    /// `(char_id, item_id)` pairs skipped from commit projection due to explicit tx effects.
-    explicit_effect_items: HashSet<(i64, i64)>,
-    /// `item_id`s skipped from commit projection due to active fuel rollback reserves.
-    fuel_reserved_items: HashSet<i64>,
+}
+
+#[derive(Debug, Default)]
+struct OutsideScopeDedupeState {
+    facts: HashMap<(i64, i64, bool), ProjectedDedupeEntry>,
+    blueprint_facts: HashSet<(i64, i64)>,
+    covered_industry_monitors: HashMap<i64, (i64, i64, HashSet<u32>)>,
+}
+
+impl OutsideScopeDedupeState {
+    fn clear_all(&mut self) {
+        self.facts.clear();
+        self.blueprint_facts.clear();
+        self.covered_industry_monitors.clear();
+    }
+}
+
+fn purge_transitioned_chars_in_scope(
+    facts: &mut HashMap<(i64, i64, bool), ProjectedDedupeEntry>,
+    blueprint_facts: &mut HashSet<(i64, i64)>,
+    covered_industry_monitors: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    transitioned_chars: &[i64],
+) {
+    if transitioned_chars.is_empty() {
+        return;
+    }
+    facts.retain(|&(cid, _, _), _| !transitioned_chars.contains(&cid));
+    blueprint_facts.retain(|&(cid, _)| !transitioned_chars.contains(&cid));
+    retain_monitors_excluding_chars(covered_industry_monitors, transitioned_chars);
 }
 
 #[derive(Debug, Default)]
 struct ProjectedItemDedupeLedger {
     dispatch_buckets: HashMap<u64, DispatchTokenBucket>,
-    outside: OutsideRpcLedgerState,
-    telemetry: SwitchTelemetryState,
-    account_telemetry: AccountSwitchSummary,
+    outside: OutsideScopeDedupeState,
 }
 
 pub(crate) struct CommitProjectedToken {
@@ -578,10 +460,83 @@ pub(crate) struct CommitProjectedToken {
     pub is_corp_target: bool,
     pub kind: ProjectedItemOpKind,
     pub fingerprint: ItemWireFingerprint,
-    pub change_dict: Option<CanonicalChangeDict>,
-    pub class_key: String,
-    pub rpc_method: String,
-    pub recipient_rule: &'static str,
+}
+
+fn merge_covered_industry_monitors(
+    dst: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    covered: &HashMap<i64, (i64, i64, Vec<u32>)>,
+) {
+    for (&monitor_id, (char_id, owner_id, tids)) in covered {
+        let entry = dst
+            .entry(monitor_id)
+            .or_insert_with(|| (*char_id, *owner_id, HashSet::new()));
+        if entry.0 != *char_id || entry.1 != *owner_id {
+            entry.0 = *char_id;
+            entry.1 = *owner_id;
+            entry.2.clear();
+        }
+        entry.2.extend(tids.iter().copied());
+    }
+}
+
+fn invalidate_covered_monitors_for_change(
+    monitors: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    change: &RowChange<i64, InventoryItemRecord>,
+) {
+    if monitors.is_empty() {
+        return;
+    }
+    monitors.retain(|_, (_, oid, tids)| {
+        for rec in [change.before.as_deref(), change.after.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if *oid == rec.owner_id {
+                tids.remove(&rec.type_id);
+            }
+        }
+        !tids.is_empty()
+    });
+}
+
+fn collect_touched_monitor_types(changes: &ChangeSet) -> HashMap<i64, HashSet<u32>> {
+    let mut touched_types: HashMap<i64, HashSet<u32>> = HashMap::new();
+    for change in &changes.items {
+        for rec in [change.before.as_deref(), change.after.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            touched_types
+                .entry(rec.owner_id)
+                .or_default()
+                .insert(rec.type_id);
+        }
+    }
+    touched_types
+}
+
+fn invalidate_covered_monitors_for_types(
+    monitors: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    touched_types: &HashMap<i64, HashSet<u32>>,
+) {
+    if monitors.is_empty() || touched_types.is_empty() {
+        return;
+    }
+    monitors.retain(|_, (_, oid, tids)| {
+        if let Some(removed) = touched_types.get(oid) {
+            tids.retain(|tid| !removed.contains(tid));
+        }
+        !tids.is_empty()
+    });
+}
+
+fn retain_monitors_excluding_chars(
+    monitors: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    chars: &[i64],
+) {
+    if !chars.is_empty() && !monitors.is_empty() {
+        monitors.retain(|_, (cid, _, _)| !chars.contains(cid));
+    }
 }
 
 #[inline]
@@ -600,75 +555,32 @@ pub(super) fn entry_matches_wire_fp(
                 && entry.fingerprint.type_id == fp.type_id))
 }
 
-pub(super) fn remove_item_from_facts(
-    telemetry: Option<&mut SwitchTelemetryState>,
-    facts: &mut HashMap<(i64, i64, bool), ProjectedDedupeEntry>,
-    item_id: i64,
-) {
+fn remove_item_from_facts(facts: &mut HashMap<(i64, i64, bool), ProjectedDedupeEntry>, item_id: i64) {
     if facts.is_empty() {
         return;
     }
-    let stale_keys: Vec<(i64, i64, bool)> = facts
-        .keys()
-        .copied()
-        .filter(|&(_, eid, _)| eid == item_id)
-        .collect();
-    if let Some(telem) = telemetry {
-        for key in stale_keys {
-            if let Some(old_entry) = facts.remove(&key) {
-                if !old_entry.replaced_claimed {
-                    telem.record_new(key.1, &old_entry);
-                }
-            }
-        }
-    } else {
-        for key in stale_keys {
-            facts.remove(&key);
-        }
-    }
+    facts.retain(|&(_, eid, _), _| eid != item_id);
 }
 
-pub(super) fn remove_items_from_facts(
-    telemetry: Option<&mut SwitchTelemetryState>,
+fn remove_items_from_facts(
     facts: &mut HashMap<(i64, i64, bool), ProjectedDedupeEntry>,
     item_ids: &HashSet<i64>,
 ) {
     if facts.is_empty() || item_ids.is_empty() {
         return;
     }
-    let stale_keys: Vec<(i64, i64, bool)> = facts
-        .keys()
-        .copied()
-        .filter(|&(_, eid, _)| item_ids.contains(&eid))
-        .collect();
-    if let Some(telem) = telemetry {
-        for key in stale_keys {
-            if let Some(old_entry) = facts.remove(&key) {
-                if !old_entry.replaced_claimed {
-                    telem.record_new(key.1, &old_entry);
-                }
-            }
-        }
-    } else {
-        for key in stale_keys {
-            facts.remove(&key);
-        }
-    }
+    facts.retain(|&(_, eid, _), _| !item_ids.contains(&eid));
 }
 
 impl ProjectedItemDedupeLedger {
     fn invalidate_item_everywhere(&mut self, change: &RowChange<i64, InventoryItemRecord>) {
         let item_id = change.key;
         for bucket in self.dispatch_buckets.values_mut() {
-            remove_item_from_facts(Some(&mut self.telemetry), &mut bucket.facts, item_id);
-            if !bucket.transition_suppressed_items.is_empty() {
-                bucket
-                    .transition_suppressed_items
-                    .retain(|&(_, eid)| eid != item_id);
-            }
+            remove_item_from_facts(&mut bucket.facts, item_id);
             invalidate_covered_monitors_for_change(&mut bucket.covered_industry_monitors, change);
         }
-        self.outside.invalidate_item(change, &mut self.telemetry);
+        remove_item_from_facts(&mut self.outside.facts, item_id);
+        invalidate_covered_monitors_for_change(&mut self.outside.covered_industry_monitors, change);
     }
 
     fn invalidate_changes_everywhere(
@@ -684,33 +596,17 @@ impl ProjectedItemDedupeLedger {
             let has_any_dispatch_facts = self
                 .dispatch_buckets
                 .values()
-                .any(|b| !b.facts.is_empty() || !b.transition_suppressed_items.is_empty());
+                .any(|b| !b.facts.is_empty());
             let has_any_dispatch_monitors = self
                 .dispatch_buckets
                 .values()
                 .any(|b| !b.covered_industry_monitors.is_empty());
-            let has_any_outside_facts = !self.outside.live.facts.is_empty()
-                || !self.outside.shadow.facts.is_empty()
-                || !self.outside.live.explicit_effect_items.is_empty()
-                || !self.outside.shadow.explicit_effect_items.is_empty()
-                || !self.outside.live.fuel_reserved_items.is_empty()
-                || !self.outside.shadow.fuel_reserved_items.is_empty();
-            if has_any_dispatch_facts || has_any_outside_facts {
+            if has_any_dispatch_facts || !self.outside.facts.is_empty() {
                 let item_ids: HashSet<i64> = changes.items.iter().map(|c| c.key).collect();
                 for bucket in self.dispatch_buckets.values_mut() {
-                    remove_items_from_facts(
-                        Some(&mut self.telemetry),
-                        &mut bucket.facts,
-                        &item_ids,
-                    );
-                    if !bucket.transition_suppressed_items.is_empty() {
-                        bucket
-                            .transition_suppressed_items
-                            .retain(|&(_, eid)| !item_ids.contains(&eid));
-                    }
+                    remove_items_from_facts(&mut bucket.facts, &item_ids);
                 }
-                self.outside
-                    .invalidate_items_batch(&item_ids, &mut self.telemetry);
+                remove_items_from_facts(&mut self.outside.facts, &item_ids);
             }
             if has_any_dispatch_monitors || !self.outside.covered_industry_monitors.is_empty() {
                 let touched_types = collect_touched_monitor_types(changes);
@@ -736,23 +632,23 @@ impl ProjectedItemDedupeLedger {
                         .retain(|&(_cid, oid)| !invalidated_bp_owners.contains(&oid));
                 }
             }
-            self.outside.invalidate_blueprints(invalidated_bp_owners);
+            if !self.outside.blueprint_facts.is_empty() {
+                self.outside
+                    .blueprint_facts
+                    .retain(|&(_cid, oid)| !invalidated_bp_owners.contains(&oid));
+            }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_commit_updates(
         &mut self,
         scope_id: Option<u64>,
-        origin_scope: CompareOriginScope,
         outside_rpc_enabled: bool,
         changes: &ChangeSet,
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
         invalidated_bp_owners: &HashSet<i64>,
         blueprint_tokens: &[(i64, i64)],
-        explicit_effect_items: &[(i64, i64)],
-        fuel_reserved_items: &[i64],
     ) {
         self.invalidate_changes_everywhere(changes, invalidated_bp_owners);
         if let Some(sid) = scope_id {
@@ -760,44 +656,18 @@ impl ProjectedItemDedupeLedger {
                 && transitioned_chars.is_empty()
                 && tokens.is_empty()
                 && blueprint_tokens.is_empty()
-                && explicit_effect_items.is_empty()
-                && fuel_reserved_items.is_empty()
             {
                 return;
             }
             let bucket = self.dispatch_buckets.entry(sid).or_default();
-            if !changes.items.is_empty() {
-                bucket.latest_commit_transitioned_chars.clear();
-            }
             for &cid in transitioned_chars {
                 bucket.transitioned_chars.insert(cid);
-                bucket.latest_commit_transitioned_chars.insert(cid);
-                for ch in &changes.items {
-                    bucket.transition_suppressed_items.insert((cid, ch.key));
-                }
-            }
-            for &key in explicit_effect_items {
-                bucket.explicit_effect_items.insert(key);
-            }
-            for &item_id in fuel_reserved_items {
-                bucket.fuel_reserved_items.insert(item_id);
             }
             for tok in tokens {
                 let key = (tok.char_id, tok.item_id, tok.is_corp_target);
-                let recipient_rule = tok.recipient_rule;
-                let entry = ProjectedDedupeEntry::from_commit_token(tok);
-                self.telemetry.record_emitted(
-                    CompareOriginScope::Dispatch,
-                    true,
-                    &entry.class_key,
-                    &entry.rpc_method,
-                    recipient_rule,
-                );
-                if let Some(old) = bucket.facts.insert(key, entry) {
-                    if !old.replaced_claimed {
-                        self.telemetry.record_new(key.1, &old);
-                    }
-                }
+                bucket
+                    .facts
+                    .insert(key, ProjectedDedupeEntry::from_commit_token(tok));
             }
             retain_monitors_excluding_chars(&mut bucket.covered_industry_monitors, transitioned_chars);
             if !transitioned_chars.is_empty() && !bucket.blueprint_facts.is_empty() {
@@ -811,16 +681,34 @@ impl ProjectedItemDedupeLedger {
             return;
         }
 
-        self.outside.invalidate_transitioned_chars(transitioned_chars);
-        self.outside.apply_commit(
-            origin_scope,
-            outside_rpc_enabled,
-            tokens,
-            blueprint_tokens,
-            explicit_effect_items,
-            fuel_reserved_items,
-            &mut self.telemetry,
-        );
+        if !transitioned_chars.is_empty() {
+            for bucket in self.dispatch_buckets.values_mut() {
+                purge_transitioned_chars_in_scope(
+                    &mut bucket.facts,
+                    &mut bucket.blueprint_facts,
+                    &mut bucket.covered_industry_monitors,
+                    transitioned_chars,
+                );
+            }
+            purge_transitioned_chars_in_scope(
+                &mut self.outside.facts,
+                &mut self.outside.blueprint_facts,
+                &mut self.outside.covered_industry_monitors,
+                transitioned_chars,
+            );
+        }
+        if !outside_rpc_enabled {
+            return;
+        }
+        for tok in tokens {
+            let key = (tok.char_id, tok.item_id, tok.is_corp_target);
+            self.outside
+                .facts
+                .insert(key, ProjectedDedupeEntry::from_commit_token(tok));
+        }
+        for &bp_key in blueprint_tokens {
+            self.outside.blueprint_facts.insert(bp_key);
+        }
     }
 
     fn record_covered_industry_monitors(
@@ -836,7 +724,7 @@ impl ProjectedItemDedupeLedger {
             let bucket = self.dispatch_buckets.entry(sid).or_default();
             merge_covered_industry_monitors(&mut bucket.covered_industry_monitors, covered);
         } else if outside_rpc_enabled {
-            self.outside.record_covered_industry_monitors(covered);
+            merge_covered_industry_monitors(&mut self.outside.covered_industry_monitors, covered);
         }
     }
 
@@ -858,139 +746,59 @@ impl ProjectedItemDedupeLedger {
                     .is_some_and(|(_, _, covered)| tids.iter().all(|tid| covered.contains(tid)))
             });
         }
-        outside_rpc_enabled && self.outside.is_industry_monitor_covered(monitor_id, tids)
+        outside_rpc_enabled
+            && self
+                .outside
+                .covered_industry_monitors
+                .get(&monitor_id)
+                .is_some_and(|(_, _, covered)| tids.iter().all(|tid| covered.contains(tid)))
     }
 
     fn expire_dispatch_scope(&mut self, scope_id: u64) {
-        let Some(bucket) = self.dispatch_buckets.remove(&scope_id) else {
-            return;
-        };
-        for ((_, item_id, _), entry) in bucket.facts {
-            if !entry.replaced_claimed {
-                self.telemetry.record_new(item_id, &entry);
-            }
-        }
+        self.dispatch_buckets.remove(&scope_id);
     }
 
     fn clear_outside_dispatch_chars(&mut self, offline_chars: &[i64]) {
+        if offline_chars.is_empty() {
+            return;
+        }
         self.outside
-            .clear_offline_chars(offline_chars, &mut self.telemetry);
+            .facts
+            .retain(|&(cid, _, _), _| !offline_chars.contains(&cid));
+        self.outside
+            .blueprint_facts
+            .retain(|&(cid, _)| !offline_chars.contains(&cid));
+        retain_monitors_excluding_chars(&mut self.outside.covered_industry_monitors, offline_chars);
     }
 
     #[allow(clippy::too_many_arguments)]
     fn check_in_scope(
-        &mut self,
+        &self,
         scope_id: Option<u64>,
-        origin_scope: CompareOriginScope,
         char_id: i64,
         item_id: i64,
         is_corp_target: bool,
         kind: ProjectedItemOpKind,
         fp: ItemWireFingerprint,
         tombstone_wildcard_deleted: bool,
-        helper: &str,
-        call_site: &str,
-        actual_dict: Option<&CanonicalChangeDict>,
     ) -> DedupeLookupOutcome {
         let facts = match scope_id {
             Some(sid) => {
-                let Some(bucket) = self.dispatch_buckets.get_mut(&sid) else {
+                let Some(bucket) = self.dispatch_buckets.get(&sid) else {
                     return DedupeLookupOutcome::NotSet;
                 };
-                &mut bucket.facts
+                &bucket.facts
             }
-            None => &mut self.outside.live.facts,
+            None => &self.outside.facts,
         };
         let key = (char_id, item_id, is_corp_target);
-        let Some(entry) = facts.get_mut(&key) else {
+        let Some(entry) = facts.get(&key) else {
             return DedupeLookupOutcome::NotSet;
         };
         if entry_matches_wire_fp(entry, kind, fp, tombstone_wildcard_deleted) {
-            let count_live = !entry.replaced_claimed;
-            entry.replaced_claimed = true;
-            let class_key = entry.class_key.clone();
-            let rpc_method = entry.rpc_method.clone();
-            let expected_dict = entry.change_dict.clone();
-            self.telemetry.record_replaced(
-                origin_scope,
-                count_live,
-                &class_key,
-                &rpc_method,
-                helper,
-                call_site,
-                item_id,
-                expected_dict.as_ref(),
-                actual_dict,
-            );
             DedupeLookupOutcome::Replaced
         } else {
-            let class_key = entry.class_key.clone();
-            let rpc_method = entry.rpc_method.clone();
-            let expected_fp = entry.fingerprint;
-            self.telemetry.record_superseded(
-                origin_scope,
-                true,
-                &class_key,
-                &rpc_method,
-                helper,
-                call_site,
-                char_id,
-                item_id,
-                kind,
-                expected_fp,
-                fp,
-                actual_dict,
-            );
             DedupeLookupOutcome::Superseded
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn check_shadow_outside_fact(
-        &mut self,
-        origin_scope: CompareOriginScope,
-        char_id: i64,
-        item_id: i64,
-        is_corp_target: bool,
-        kind: ProjectedItemOpKind,
-        fp: ItemWireFingerprint,
-        tombstone_wildcard_deleted: bool,
-    ) -> DedupeLookupOutcome {
-        self.outside.check_shadow_outcome(
-            origin_scope,
-            char_id,
-            item_id,
-            is_corp_target,
-            kind,
-            fp,
-            tombstone_wildcard_deleted,
-            &mut self.telemetry,
-        )
-    }
-
-    fn has_fact_in_scope(
-        &self,
-        scope_id: Option<u64>,
-        outside_rpc_enabled: bool,
-        char_id: i64,
-        item_id: i64,
-        is_corp_target: bool,
-    ) -> bool {
-        match scope_id {
-            Some(sid) => self
-                .dispatch_buckets
-                .get(&sid)
-                .is_some_and(|b| b.facts.contains_key(&(char_id, item_id, is_corp_target))),
-            None if outside_rpc_enabled => self
-                .outside
-                .live
-                .facts
-                .contains_key(&(char_id, item_id, is_corp_target)),
-            None => self
-                .outside
-                .shadow
-                .facts
-                .contains_key(&(char_id, item_id, is_corp_target)),
         }
     }
 
@@ -1005,28 +813,8 @@ impl ProjectedItemDedupeLedger {
                 .dispatch_buckets
                 .get(&sid)
                 .is_some_and(|b| b.blueprint_facts.contains(&(char_id, owner_id))),
-            None => self
-                .outside
-                .live
-                .blueprint_facts
-                .contains(&(char_id, owner_id)),
+            None => self.outside.blueprint_facts.contains(&(char_id, owner_id)),
         }
-    }
-
-    fn is_item_transition_suppressed_in_scope(
-        &self,
-        scope_id: u64,
-        char_id: i64,
-        item_id: i64,
-        active_ship_id: i64,
-    ) -> bool {
-        self.dispatch_buckets.get(&scope_id).is_some_and(|b| {
-            b.latest_commit_transitioned_chars.contains(&char_id)
-                || b.transition_suppressed_items.contains(&(char_id, item_id))
-                || (active_ship_id > 0
-                    && item_id == active_ship_id
-                    && b.transitioned_chars.contains(&char_id))
-        })
     }
 
     fn transitioned_chars_in_scope(&self, scope_id: u64) -> HashSet<i64> {
@@ -1036,40 +824,13 @@ impl ProjectedItemDedupeLedger {
             .unwrap_or_default()
     }
 
-    fn is_explicit_effect_item(&self, scope_id: u64, char_id: i64, item_id: i64) -> bool {
-        self.dispatch_buckets
-            .get(&scope_id)
-            .is_some_and(|b| b.explicit_effect_items.contains(&(char_id, item_id)))
-    }
-
-    fn is_fuel_reserved_item(&self, scope_id: u64, item_id: i64) -> bool {
-        self.dispatch_buckets
-            .get(&scope_id)
-            .is_some_and(|b| b.fuel_reserved_items.contains(&item_id))
-    }
-
-    fn record_account_call_site(&mut self, call_site: &str, replaced: u64, passed_through: u64) {
-        if replaced == 0 && passed_through == 0 {
-            return;
-        }
-        self.account_telemetry.replaced += replaced;
-        self.account_telemetry.passed_through += passed_through;
-        let entry = self
-            .account_telemetry
-            .by_call_site
-            .entry(call_site.to_string())
-            .or_default();
-        entry.replaced += replaced;
-        entry.passed_through += passed_through;
-    }
-
     fn clear_active_buckets(&mut self) {
         self.dispatch_buckets.clear();
         self.outside.clear_all();
     }
 }
 
-/// Thread-safe, per-[`ServerContext`] switch state and per-scope fact/telemetry ledger.
+/// Thread-safe, per-[`ServerContext`] switch state and per-scope fact dedupe ledger.
 #[derive(Debug)]
 pub struct ProjectedItemSwitchHandle {
     char_same_scene_item_mutation: AtomicBool,
@@ -1124,7 +885,7 @@ impl ProjectedItemSwitchHandle {
         }
     }
 
-    /// Updates switch flags (clearing active dispatch/outside facts and resetting test telemetry).
+    /// Updates switch flags (clearing active dispatch/outside facts).
     pub fn set_config(&self, config: ProjectedItemSwitchConfig) {
         self.char_same_scene_item_mutation
             .store(config.char_same_scene_item_mutation, Ordering::Release);
@@ -1140,50 +901,29 @@ impl ProjectedItemSwitchHandle {
             .store(config.corp_all_items, Ordering::Release);
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear_active_buckets();
-        if !config.is_any_enabled() {
-            guard.telemetry = SwitchTelemetryState::default();
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_commit_dedupe_updates_with_mode(
         &self,
         scope_id: Option<u64>,
-        origin_scope: CompareOriginScope,
         outside_rpc_enabled: bool,
         changes: &ChangeSet,
         transitioned_chars: &[i64],
         tokens: Vec<CommitProjectedToken>,
         invalidated_bp_owners: &HashSet<i64>,
         blueprint_tokens: &[(i64, i64)],
-        explicit_effect_items: &[(i64, i64)],
-        fuel_reserved_items: &[i64],
     ) {
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.apply_commit_updates(
             scope_id,
-            origin_scope,
             outside_rpc_enabled,
             changes,
             transitioned_chars,
             tokens,
             invalidated_bp_owners,
             blueprint_tokens,
-            explicit_effect_items,
-            fuel_reserved_items,
         );
-    }
-
-    pub(crate) fn has_fact_in_scope(
-        &self,
-        scope_id: Option<u64>,
-        char_id: i64,
-        item_id: i64,
-        is_corp_target: bool,
-    ) -> bool {
-        let outside_rpc_enabled = self.config().char_same_scene_item_outside_rpc;
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.has_fact_in_scope(scope_id, outside_rpc_enabled, char_id, item_id, is_corp_target)
     }
 
     pub(crate) fn has_blueprint_fact_in_scope(
@@ -1253,68 +993,25 @@ impl ProjectedItemSwitchHandle {
         guard.clear_outside_dispatch_chars(char_ids);
     }
 
-    pub(crate) fn is_item_transition_suppressed_in_scope(
-        &self,
-        scope_id: u64,
-        char_id: i64,
-        item_id: i64,
-        active_ship_id: i64,
-    ) -> bool {
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.is_item_transition_suppressed_in_scope(scope_id, char_id, item_id, active_ship_id)
-    }
-
     pub(crate) fn transitioned_chars_in_scope(&self, scope_id: u64) -> HashSet<i64> {
         let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.transitioned_chars_in_scope(scope_id)
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[track_caller]
     pub(crate) fn try_check_in_scope(
         &self,
         scope_id: Option<u64>,
-        origin_scope: CompareOriginScope,
         char_id: i64,
         item_id: i64,
         is_corp_target: bool,
         kind: ProjectedItemOpKind,
         fp: ItemWireFingerprint,
         tombstone_wildcard_deleted: bool,
-        helper: &str,
-        actual_dict: Option<&CanonicalChangeDict>,
     ) -> DedupeLookupOutcome {
-        let call_site = caller_call_site();
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.check_in_scope(
             scope_id,
-            origin_scope,
-            char_id,
-            item_id,
-            is_corp_target,
-            kind,
-            fp,
-            tombstone_wildcard_deleted,
-            helper,
-            &call_site,
-            actual_dict,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn check_shadow_outside_outcome(
-        &self,
-        origin_scope: CompareOriginScope,
-        char_id: i64,
-        item_id: i64,
-        is_corp_target: bool,
-        kind: ProjectedItemOpKind,
-        fp: ItemWireFingerprint,
-        tombstone_wildcard_deleted: bool,
-    ) -> DedupeLookupOutcome {
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.check_shadow_outside_fact(
-            origin_scope,
             char_id,
             item_id,
             is_corp_target,
@@ -1322,149 +1019,6 @@ impl ProjectedItemSwitchHandle {
             fp,
             tombstone_wildcard_deleted,
         )
-    }
-
-    pub(crate) fn record_shadow_outside_no_projected_event(
-        &self,
-        origin_scope: CompareOriginScope,
-    ) {
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.telemetry.record_shadow_no_projected_event(origin_scope);
-    }
-
-    pub(crate) fn is_outside_explicit_or_fuel_skipped(
-        &self,
-        outside_rpc_enabled: bool,
-        char_id: i64,
-        item_id: i64,
-    ) -> (bool, bool) {
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .outside
-            .explicit_or_fuel_flags(outside_rpc_enabled, char_id, item_id)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[track_caller]
-    pub(crate) fn record_helper_without_token(
-        &self,
-        origin_scope: CompareOriginScope,
-        count_live: bool,
-        class_key: &str,
-        rpc_method: &str,
-        helper: &str,
-        char_id: i64,
-        item_id: i64,
-        kind: ProjectedItemOpKind,
-        actual_dict: Option<&CanonicalChangeDict>,
-    ) {
-        let call_site = caller_call_site();
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.telemetry.record_helper_without_token(
-            origin_scope,
-            count_live,
-            class_key,
-            rpc_method,
-            helper,
-            &call_site,
-            char_id,
-            item_id,
-            kind,
-            actual_dict,
-        );
-    }
-
-    pub(crate) fn is_explicit_effect_in_scope(&self, scope_id: u64, char_id: i64, item_id: i64) -> bool {
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.is_explicit_effect_item(scope_id, char_id, item_id)
-    }
-
-    pub(crate) fn is_fuel_reserved_in_scope(&self, scope_id: u64, item_id: i64) -> bool {
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.is_fuel_reserved_item(scope_id, item_id)
-    }
-
-    #[track_caller]
-    pub(crate) fn record_non_first_set_emitted(&self) {
-        let call_site = caller_call_site();
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.telemetry.record_non_first_set_emitted(&call_site);
-    }
-
-    #[track_caller]
-    pub(crate) fn record_not_covered(&self, reason: NotCoveredReason) {
-        let call_site = caller_call_site();
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.telemetry.record_not_covered(&call_site, reason);
-    }
-
-    #[track_caller]
-    pub(crate) fn record_hand_sent(
-        &self,
-        rpc_method: &str,
-        origin_scope: CompareOriginScope,
-        class_key: &str,
-        holder_kind: &str,
-        is_actor: bool,
-    ) {
-        let call_site = caller_call_site();
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.telemetry.record_hand_sent(
-            &call_site,
-            rpc_method,
-            origin_scope,
-            class_key,
-            holder_kind,
-            is_actor,
-        );
-    }
-
-    #[track_caller]
-    pub(crate) fn record_account_call_site(&self, replaced: u64, passed_through: u64) {
-        let call_site = caller_call_site();
-        let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.record_account_call_site(&call_site, replaced, passed_through);
-    }
-
-    /// Returns a snapshot of switched-run telemetry counters.
-    pub fn summary(&self) -> ProjectedItemSwitchSummary {
-        let cfg = self.config();
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        let mut summary = guard.telemetry.to_summary(cfg);
-        summary.account_switches = guard.account_telemetry.clone();
-        summary
-    }
-
-    /// Emits a structured `tracing::info!` summary when any switch is enabled or recorded activity.
-    pub fn log_summary(&self, msg: &str) {
-        let summary = self.summary();
-        if !summary.has_activity() {
-            return;
-        }
-        tracing::info!(
-            target: "delta_item_switch",
-            config = ?summary.config,
-            emitted = summary.emitted,
-            replaced = summary.replaced,
-            superseded = summary.superseded,
-            new = summary.new,
-            non_first_set_emitted = summary.non_first_set_emitted,
-            helper_without_token = summary.helper_without_token,
-            helper_without_token_with_projected_event = summary.helper_without_token_with_projected_event,
-            helper_without_token_no_projected_event = summary.helper_without_token_no_projected_event,
-            dictionary_same = summary.dictionary_same,
-            dictionary_differs = summary.dictionary_differs,
-            evictions = summary.evictions,
-            by_scope = ?summary.by_scope,
-            by_class = ?summary.by_class,
-            by_dispatch_method = ?summary.by_dispatch_method,
-            by_helper = ?summary.by_helper,
-            by_call_site = ?summary.by_call_site,
-            not_covered_by_reason = ?summary.not_covered_by_reason,
-            not_covered_by_call_site_reason = ?summary.not_covered_by_call_site_reason,
-            account_switches = ?summary.account_switches,
-            "{msg}"
-        );
     }
 }
 
@@ -1603,135 +1157,6 @@ pub(crate) type ItemBeforeAfter<'a> = (
     Option<&'a InventoryItemRecord>,
 );
 
-fn is_structure_location(
-    loc_id: i64,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
-    sde: &SdeRegistry,
-) -> bool {
-    if snap.structures.contains_key(&loc_id) || changes.structures.iter().any(|c| c.key == loc_id) {
-        return true;
-    }
-    let type_id = snap.items.get(&loc_id).map(|r| r.type_id).or_else(|| {
-        item_changes_by_id
-            .get(&loc_id)
-            .and_then(|(before, after)| after.or(*before).map(|r| r.type_id))
-    });
-    type_id.is_some_and(|tid| sde.types.get(&tid).is_some_and(|t| t.category_id == 65))
-}
-
-pub(crate) fn classify_location_kind(
-    loc_id: Option<i64>,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
-    sde: &SdeRegistry,
-) -> &'static str {
-    let Some(id) = loc_id else {
-        return "none";
-    };
-    if id == 0 {
-        return "none";
-    }
-    if id == 6 {
-        return "recycling_loc_6";
-    }
-    if is_structure_location(id, snap, changes, item_changes_by_id, sde) {
-        return "structure";
-    }
-    let known_item = snap.items.contains_key(&id)
-        || item_changes_by_id
-            .get(&id)
-            .is_some_and(|(before, after)| before.is_some() || after.is_some());
-    if known_item {
-        return "ship_or_container";
-    }
-    if sde.stations.contains_key(&id) || (60_000_000..=64_000_000).contains(&id) {
-        return "station";
-    }
-    if u32::try_from(id)
-        .ok()
-        .is_some_and(|sid| sde.solar_systems.contains_key(&sid))
-        || (30_000_000..=39_999_999).contains(&id)
-    {
-        return "solar_system";
-    }
-    "other"
-}
-
-pub(crate) fn classify_owner_kind(
-    owner_id: i64,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    sde: &SdeRegistry,
-) -> &'static str {
-    if owner_id <= 0
-        || sde.npc_corporations.contains_key(&owner_id)
-        || (1_000_000..=1_999_999).contains(&owner_id)
-    {
-        return "npc_corp_or_other";
-    }
-    if snap.characters.contains_key(&owner_id)
-        || changes
-            .characters
-            .iter()
-            .any(|c| c.key == owner_id && (c.before.is_some() || c.after.is_some()))
-        || (90_000_000..98_000_000).contains(&owner_id)
-    {
-        return "character";
-    }
-    if snap.corporations.contains_key(&owner_id) || (98_000_000..99_000_000).contains(&owner_id) {
-        return "player_corp";
-    }
-    "npc_corp_or_other"
-}
-
-/// Canonical class key for an `OnItemChange` event, including `before_flag` when recycled to `loc 6`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn classify_item_row_kind_key(
-    before_loc: Option<i64>,
-    before_flag: Option<i64>,
-    owner_id: i64,
-    after_loc: i64,
-    flag_id: i64,
-    wire_qty: i64,
-    snap: &WorldStateSnapshot,
-    changes: &ChangeSet,
-    item_changes_by_id: &HashMap<i64, ItemBeforeAfter<'_>>,
-    sde: &SdeRegistry,
-) -> String {
-    let loc_before = classify_location_kind(before_loc, snap, changes, item_changes_by_id, sde);
-    let loc_after = classify_location_kind(Some(after_loc), snap, changes, item_changes_by_id, sde);
-    let owner_kind = classify_owner_kind(owner_id, snap, changes, sde);
-    let singleton = wire_qty < 0;
-    if loc_after == "recycling_loc_6" {
-        match before_flag {
-            Some(bf) => format!(
-                "before={loc_before},after={loc_after},flag={flag_id},before_flag={bf},owner={owner_kind},singleton={singleton}"
-            ),
-            None => format!(
-                "before={loc_before},after={loc_after},flag={flag_id},before_flag=unknown,owner={owner_kind},singleton={singleton}"
-            ),
-        }
-    } else {
-        format!(
-            "before={loc_before},after={loc_after},flag={flag_id},owner={owner_kind},singleton={singleton}"
-        )
-    }
-}
-
-/// Returns `true` when `location_id` equals `ch`'s docked station/structure OR active ship ID.
-#[inline]
-pub(crate) fn is_first_set_direct_slot_location(location_id: i64, ch: &CharacterRecord) -> bool {
-    let docked_facility = ch
-        .station_id
-        .filter(|&id| id > 0)
-        .or_else(|| ch.structure_id.filter(|&id| id > 0));
-    docked_facility.is_some_and(|fac| location_id == fac)
-        || (ch.active_ship_id > 0 && location_id == ch.active_ship_id)
-}
-
 /// Returns `true` when `(location_id, flag_id)` sits directly in the docked station/structure
 /// hangar (`flag 4`) or the active ship cargo hold (`flag 5`) of `ch`.
 #[inline]
@@ -1810,13 +1235,27 @@ pub(crate) fn online_non_transitioned_owner<'a>(
     online.is_character_online(owner_id, ch.user_id).then_some(ch)
 }
 
+fn collect_invalidated_bp_owners(changes: &ChangeSet, sde: &SdeRegistry) -> HashSet<i64> {
+    let mut owners = HashSet::new();
+    for change in &changes.items {
+        let before_rec = change.before.as_deref();
+        let after_rec = change.after.as_deref();
+        if before_rec.is_some_and(|r| is_blueprint_type(sde, r.type_id))
+            || after_rec.is_some_and(|r| is_blueprint_type(sde, r.type_id))
+        {
+            if let Some(b) = before_rec {
+                owners.insert(b.owner_id);
+            }
+            if let Some(a) = after_rec {
+                owners.insert(a.owner_id);
+            }
+        }
+    }
+    owners
+}
+
 /// Evaluates `changes.items` under active [`ProjectedItemSwitchConfig`], updating dispatch/outside
-/// item & blueprint facts and per-scope telemetry and returning `OnItemChange` and
-/// `OnBlueprintsUpdated` specs.
-///
-/// When `char_same_scene_item_outside_rpc` is `false` and `dispatch_scope_info` is `None`,
-/// dry-run evaluates into `shadow_outside_facts` and `by_scope.{tick, neither}.would_announce`
-/// while returning no emission specs.
+/// item & blueprint facts and returning `OnItemChange` and `OnBlueprintsUpdated` specs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_switched_char_same_scene_item_specs(
     switches: &std::sync::Arc<ProjectedItemSwitchHandle>,
@@ -1827,8 +1266,7 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         i64,
         super::cache_notifications::PendingMachoNotification,
     )>,
-    dispatch_scope_info: Option<&(u64, Option<String>)>,
-    origin_scope: CompareOriginScope,
+    dispatch_scope_id: Option<u64>,
     explicit_acting_char_id: Option<i64>,
     online: &impl OnlineCharacterLookup,
     snap_after: &WorldStateSnapshot,
@@ -1849,47 +1287,48 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         .copied()
         .filter(|&cid| is_character_scene_or_ship_transition(cid, &changed_chars))
         .collect();
-    let in_dispatch = dispatch_scope_info.is_some();
-    let scope_id = dispatch_scope_info.map(|(sid, _)| *sid);
-    let effective_origin_scope = if in_dispatch {
-        CompareOriginScope::Dispatch
-    } else {
-        origin_scope
-    };
-    let shadow_outside_dry_run = !in_dispatch && !cfg.char_same_scene_item_outside_rpc;
-
-    if scope_id.is_some() {
-        let _ = register_dispatch_switch_handle(pend, notify_tx, switches);
-    }
-    let empty_bp = HashSet::new();
-    if changes.items.is_empty() {
-        if !transitioned_chars.is_empty() {
+    let in_dispatch = dispatch_scope_id.is_some();
+    if !in_dispatch && !cfg.char_same_scene_item_outside_rpc {
+        let invalidated_bp_owners = collect_invalidated_bp_owners(changes, sde);
+        if !changes.items.is_empty()
+            || !transitioned_chars.is_empty()
+            || !invalidated_bp_owners.is_empty()
+        {
             switches.apply_commit_dedupe_updates_with_mode(
-                scope_id,
-                effective_origin_scope,
-                cfg.char_same_scene_item_outside_rpc,
+                None,
+                false,
                 changes,
                 &transitioned_chars,
                 Vec::new(),
-                &empty_bp,
-                &[],
-                &[],
+                &invalidated_bp_owners,
                 &[],
             );
         }
         return SwitchedCommitBatch::default();
     }
 
-    let rpc_method = match dispatch_scope_info {
-        Some((_, rpc_opt)) => rpc_opt
-            .clone()
-            .unwrap_or_else(|| crate::flight_recorder::UNKNOWN_RPC_LABEL.to_string()),
-        None => outside_rpc_method_label(effective_origin_scope).to_string(),
-    };
+    if dispatch_scope_id.is_some() {
+        let _ = register_dispatch_switch_handle(pend, notify_tx, switches);
+    }
+    let empty_bp = HashSet::new();
+    if changes.items.is_empty() {
+        if !transitioned_chars.is_empty() {
+            switches.apply_commit_dedupe_updates_with_mode(
+                dispatch_scope_id,
+                cfg.char_same_scene_item_outside_rpc,
+                changes,
+                &transitioned_chars,
+                Vec::new(),
+                &empty_bp,
+                &[],
+            );
+        }
+        return SwitchedCommitBatch::default();
+    }
 
     // Snapshot characters already transitioned earlier in this dispatch so subsequent commits in
     // the same dispatch that omit `changes.characters` still stay excluded under Guardrail 2.
-    let prior_transitioned_chars = scope_id
+    let prior_transitioned_chars = dispatch_scope_id
         .map(|sid| switches.transitioned_chars_in_scope(sid))
         .unwrap_or_default();
 
@@ -1904,16 +1343,12 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
 
     let mut specs = Vec::new();
     let mut tokens = Vec::new();
-    let mut invalidated_bp_owners: HashSet<i64> = HashSet::new();
+    let invalidated_bp_owners = collect_invalidated_bp_owners(changes, sde);
     let mut blueprint_tokens_set: BTreeSet<(i64, i64)> = BTreeSet::new();
     let mut blueprint_specs_map: BTreeMap<(i64, i64), u64> = BTreeMap::new();
     let mut corp_recipients_cache: HashMap<i64, Vec<&CharacterRecord>> = HashMap::new();
-    let mut explicit_effect_items = Vec::new();
-    let mut fuel_reserved_items = Vec::new();
-    let char_all_bp_active = cfg.char_all_items
-        && (in_dispatch || shadow_outside_dry_run || cfg.char_same_scene_item_outside_rpc);
-    let corp_all_bp_active = cfg.corp_all_items
-        && (in_dispatch || shadow_outside_dry_run || cfg.char_same_scene_item_outside_rpc);
+    let char_all_bp_active = cfg.is_char_all_items_enabled_in_scope(in_dispatch);
+    let corp_all_bp_active = cfg.is_corp_all_items_enabled_in_scope(in_dispatch);
 
     for change in &changes.items {
         let before_rec = change.before.as_deref();
@@ -1921,19 +1356,10 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         let before_is_bp = before_rec.is_some_and(|r| is_blueprint_type(sde, r.type_id));
         let after_is_bp = after_rec.is_some_and(|r| is_blueprint_type(sde, r.type_id));
         let bp_involved = before_is_bp || after_is_bp;
-        if bp_involved {
-            if let Some(b) = before_rec {
-                invalidated_bp_owners.insert(b.owner_id);
-            }
-            if let Some(a) = after_rec {
-                invalidated_bp_owners.insert(a.owner_id);
-            }
-        }
 
         // Leave Cargo fuel items held under an active rollback reserve untouched here so silent
         // actor-validation rollbacks emit zero notifications and deferred diffs stay authoritative (#1486).
         if active_fuel_reserves.is_item_reserved(db_key, change.key) {
-            fuel_reserved_items.push(change.key);
             continue;
         }
 
@@ -1980,11 +1406,9 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                                 && !suppressed_effects.contains_blueprint(owner_id, owner_id)
                             {
                                 blueprint_tokens_set.insert((owner_id, owner_id));
-                                if !shadow_outside_dry_run {
-                                    blueprint_specs_map
-                                        .entry((owner_id, owner_id))
-                                        .or_insert(ch.user_id);
-                                }
+                                blueprint_specs_map
+                                    .entry((owner_id, owner_id))
+                                    .or_insert(ch.user_id);
                             }
                             continue;
                         }
@@ -2011,11 +1435,9 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                                 continue;
                             }
                             blueprint_tokens_set.insert((cid, owner_id));
-                            if !shadow_outside_dry_run {
-                                blueprint_specs_map
-                                    .entry((cid, owner_id))
-                                    .or_insert(ch.user_id);
-                            }
+                            blueprint_specs_map
+                                .entry((cid, owner_id))
+                                .or_insert(ch.user_id);
                         }
                     }
                 }
@@ -2029,7 +1451,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         });
         let classified_recipients = collect_switched_item_recipients_for_change(
             in_dispatch,
-            shadow_outside_dry_run,
             cfg,
             acting_char_id,
             change,
@@ -2051,7 +1472,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 continue;
             }
             if suppressed_effects.contains_item(recipient_char_id, change.key) {
-                explicit_effect_items.push((recipient_char_id, change.key));
                 continue;
             }
             eligible_recipients.push(recip);
@@ -2065,10 +1485,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         };
         let first_fp_rec = eligible_recipients[0].fp_rec;
         let fp = ItemWireFingerprint::from_record(first_fp_rec);
-        let change_dict = match item_payload.as_slice() {
-            [_, dict_rep, ..] => CanonicalChangeDict::from_pyrep(dict_rep),
-            _ => None,
-        };
         // Only non-singleton endpoints affect available material counts in OnIndustryMaterials
         // (matching collect_available_monitor_materials; locking a singleton BPO must not inject {tid: 0}).
         let mut industry_scopes = Vec::with_capacity(2);
@@ -2091,25 +1507,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 industry_scopes.push(new_scope);
             }
         }
-        let (after_loc, after_flag, after_qty) = match after_rec {
-            Some(after_r) => {
-                let after_fp = ItemWireFingerprint::from_record(after_r);
-                (after_fp.location_id, after_fp.flag_id, after_fp.wire_qty)
-            }
-            None => (6_i64, 0_i64, 0_i64),
-        };
-        let class_key = classify_item_row_kind_key(
-            before_rec.map(|r| r.location_id),
-            before_rec.map(|r| r.flag as i64),
-            fp.owner_id,
-            after_loc,
-            after_flag,
-            after_qty,
-            snap_after,
-            changes,
-            &item_changes_by_id,
-            sde,
-        );
 
         let eligible_count = eligible_recipients.len();
         for (idx, recip) in eligible_recipients.into_iter().enumerate() {
@@ -2121,30 +1518,24 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                 is_corp_target: recip.id_type == "corpid",
                 kind: recip.op_kind,
                 fingerprint: fp,
-                change_dict: change_dict.clone(),
-                class_key: class_key.clone(),
-                rpc_method: rpc_method.clone(),
-                recipient_rule: recip.rule,
             });
-            if !shadow_outside_dry_run {
-                if is_last {
-                    specs.push(SwitchedProjectedItemSpec {
-                        recipient_char_id,
-                        recipient_user_id: recip.character.user_id,
-                        id_type: recip.id_type,
-                        args: item_payload,
-                        industry_scopes,
-                    });
-                    break;
-                }
+            if is_last {
                 specs.push(SwitchedProjectedItemSpec {
                     recipient_char_id,
                     recipient_user_id: recip.character.user_id,
                     id_type: recip.id_type,
-                    args: item_payload.clone(),
-                    industry_scopes: industry_scopes.clone(),
+                    args: item_payload,
+                    industry_scopes,
                 });
+                break;
             }
+            specs.push(SwitchedProjectedItemSpec {
+                recipient_char_id,
+                recipient_user_id: recip.character.user_id,
+                id_type: recip.id_type,
+                args: item_payload.clone(),
+                industry_scopes: industry_scopes.clone(),
+            });
         }
     }
 
@@ -2159,16 +1550,13 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
         .collect();
 
     switches.apply_commit_dedupe_updates_with_mode(
-        scope_id,
-        effective_origin_scope,
+        dispatch_scope_id,
         cfg.char_same_scene_item_outside_rpc,
         changes,
         &transitioned_chars,
         tokens,
         &invalidated_bp_owners,
         &bp_tokens_vec,
-        &explicit_effect_items,
-        &fuel_reserved_items,
     );
     SwitchedCommitBatch {
         item_specs: specs,
@@ -2218,11 +1606,4 @@ pub(crate) fn build_item_change_dict(changes: Vec<(i32, PyRep)>) -> PyRep {
     )
 }
 
-/// Returns the switched item-projection telemetry snapshot for `ctx`.
-pub fn projected_item_switch_summary(ctx: &ServerContext) -> ProjectedItemSwitchSummary {
-    ctx.projected_item_switches.summary()
-}
-
-pub(crate) use super::delta_item_switch_ctx::{
-    build_fitted_item_trashed_args, has_active_switch_for_item_event,
-};
+pub(crate) use super::delta_item_switch_ctx::build_fitted_item_trashed_args;

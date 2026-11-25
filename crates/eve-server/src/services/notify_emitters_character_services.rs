@@ -478,11 +478,10 @@ pub fn emit_industry_materials_consumed(
         return;
     }
 
-    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_info(
+    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_id(
         Some(&*ctx.pending_notifications),
         Some(&ctx.notify_tx),
-    )
-    .map(|(sid, _)| sid);
+    );
     let corp_all_covered = ctx
         .projected_item_switches
         .config()
@@ -547,11 +546,10 @@ pub fn emit_industry_materials_for_scopes(
         return;
     }
 
-    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_info(
+    let dispatch_scope_id = crate::router::cache_notifications::current_dispatch_staging_scope_id(
         Some(&*ctx.pending_notifications),
         Some(&ctx.notify_tx),
-    )
-    .map(|(sid, _)| sid);
+    );
     let corp_all_covered = ctx
         .projected_item_switches
         .config()

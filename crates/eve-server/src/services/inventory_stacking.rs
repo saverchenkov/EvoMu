@@ -2307,7 +2307,7 @@ mod inventory_stacking_tests;
 
 #[cfg(test)]
 mod t3c2_tests {
-    use crate::router::{projected_item_switch_summary, ProjectedItemSwitchConfig, ServerContext};
+    use crate::router::{ProjectedItemSwitchConfig, ServerContext};
     use crate::services::inventory_fitting::handle;
     use eve_db::{InventoryFlag, InventoryItemRecord};
     use eve_machonet::SessionState;
@@ -2353,9 +2353,6 @@ mod t3c2_tests {
             &[PyRep::List(vec![PyRep::Integer(item_id)]), PyRep::Integer(station_id), PyRep::Integer(InventoryFlag::Hangar as i64)], &kw)
             .await.expect("handled").expect("noop MultiAdd");
         assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "noop MultiAdd must emit zero OnItemChange");
-
-        let sw = projected_item_switch_summary(&ctx);
-        assert_eq!(sw.helper_without_token_no_projected_event, 0);
     }
 
     #[tokio::test]

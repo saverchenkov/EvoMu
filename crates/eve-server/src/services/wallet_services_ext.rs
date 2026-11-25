@@ -484,9 +484,6 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             crate::services::quasar_payment_store_types::emit_store_purchase_notices(
-                &ctx.db,
-                &ctx.sde,
-                &ctx.quasar_gateway.macho_notify_sink,
                 &ctx.quasar_gateway.pending_notices,
                 &outcome,
                 true,

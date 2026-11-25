@@ -1,5 +1,5 @@
 //! Unit tests for Step 3a extended recipient rules (Rules 3–5), holder resolution,
-//! Section 4D cross-id-type ledger suppression, and Section 4E telemetry (`#931`).
+//! and Section 4D cross-id-type ledger suppression (`#931`).
 
 #![forbid(unsafe_code)]
 
@@ -13,14 +13,8 @@ use eve_db::{
 use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
 };
-use super::delta_item_switch_report::{push_dispatch_rpc_method_guard, with_compare_tick_scope};
-use super::delta_item_recipients::{
-    resolve_item_holder, ItemHolderKind, RULE_CORPORATION, RULE_FORMER_MEMBER,
-    RULE_HOLDER_ACTING_PILOT, RULE_HOLDER_OWNER, RULE_OWNER, RULE_OWNERLESS,
-};
-use super::delta_item_switch::{
-    projected_item_switch_summary, ItemBeforeAfter, ProjectedItemSwitchConfig,
-};
+use super::delta_item_recipients::{resolve_item_holder, ItemHolderKind};
+use super::delta_item_switch::{ItemBeforeAfter, ProjectedItemSwitchConfig};
 use super::delta_item_switch_tests::{setup_online_pilot_in_station, test_ctx};
 use super::dispatch_active_char::with_active_dispatch_char;
 use super::ServerContext;
@@ -45,340 +39,6 @@ fn make_corp_with_members(
         }
         snap.corporations.insert(corp_id, c);
     });
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn telemetry_hand_sent_and_projected_by_rule_record_expected_fields_and_bounds() {
-    let ctx = test_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
-    let actor_id = 90_000_001_i64;
-    let holder_owner_id = 90_000_002_i64;
-    let corp_id = 98_931_701_i64;
-    let station_id = 60_003_760_i64;
-    let sys_id = 30_000_142_u32;
-    let actor_ship = 995_931_001_i64;
-    let holder_ship = 995_931_002_i64;
-    let space_box = 995_931_003_i64;
-
-    setup_online_pilot_in_station(&ctx, actor_id, station_id, sys_id, actor_ship);
-    setup_online_pilot_in_station(&ctx, holder_owner_id, station_id, sys_id, holder_ship);
-    make_corp_with_members(&ctx, corp_id, holder_owner_id, &[holder_owner_id]);
-
-    // Pre-seed space container (created before the commit so Rule 5 applies) and ownerless item inside it.
-    let space_item_id = 995_931_010_i64;
-    let ship_held_id = 995_931_011_i64;
-    let corp_item_id = 995_931_012_i64;
-    let own_item_id = 995_931_013_i64;
-    let office_id = 995_931_014_i64;
-    let corp_closing_id = 98_931_702_i64;
-    let former_member_id = 96_931_703_i64;
-    let former_ship = 995_931_004_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters[&actor_id].clone();
-        ch.character_id = former_member_id;
-        ch.user_id = former_member_id as u64;
-        ch.name = format!("Former {former_member_id}");
-        snap.characters.insert(former_member_id, ch);
-        snap.accounts.insert(
-            format!("user_{former_member_id}"),
-            AccountRecord {
-                user_id: former_member_id as u64,
-                username: format!("user_{former_member_id}"),
-                password_token: String::new(),
-                role: 0,
-                banned_until_unix: None,
-                ban_reason: None,
-            },
-        );
-    });
-    setup_online_pilot_in_station(&ctx, former_member_id, station_id, sys_id, former_ship);
-    make_corp_with_members(&ctx, corp_closing_id, former_member_id, &[former_member_id]);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            space_box,
-            InventoryItemRecord {
-                item_id: space_box,
-                type_id: 23, // Cargo Container
-                owner_id: holder_owner_id,
-                location_id: i64::from(sys_id),
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            space_item_id,
-            InventoryItemRecord {
-                item_id: space_item_id,
-                type_id: 34,
-                owner_id: 0,
-                location_id: space_box,
-                flag: InventoryFlag::Cargo,
-                quantity: 100,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            ship_held_id,
-            InventoryItemRecord {
-                item_id: ship_held_id,
-                type_id: 34,
-                owner_id: holder_owner_id,
-                location_id: holder_ship,
-                flag: InventoryFlag::FleetHangar,
-                quantity: 50,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            office_id,
-            InventoryItemRecord {
-                item_id: office_id,
-                type_id: 27,
-                owner_id: corp_closing_id,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    // Enable projection switches only after seeding test fixtures so fixture writes emit no telemetry.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
-
-    // Trigger rules 1, 2, 4, 5 under acting pilot = actor_id, and rule 3 under acting pilot = former_member_id:
-    with_active_dispatch_char(Some(actor_id), async {
-        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "invbroker.MultiAdd".to_string(),
-            );
-            ctx.db
-                .tx("rules_dispatch_commit", |tx| -> Result<(), eve_db::TxError> {
-                    // 1. Owner
-                    tx.snap.items.insert(
-                        own_item_id,
-                        InventoryItemRecord {
-                            item_id: own_item_id,
-                            type_id: 34,
-                            owner_id: actor_id,
-                            location_id: station_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: 10,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    // 2. Corporation
-                    tx.snap.items.insert(
-                        corp_item_id,
-                        InventoryItemRecord {
-                            item_id: corp_item_id,
-                            type_id: 34,
-                            owner_id: corp_id,
-                            location_id: station_id,
-                            flag: InventoryFlag::CorpSAG1,
-                            quantity: 20,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    // 4. Ownerless (space_box -> actor gets ownerless, box owner gets holder owner)
-                    if let Some(it) = tx.snap.items.get_mut(&space_item_id) {
-                        it.quantity = 90;
-                        it.version += 1;
-                    }
-                    // 5. Ship holder item owned by holder_owner_id -> holder_owner gets owner, actor gets holder acting pilot.
-                    if let Some(it) = tx.snap.items.get_mut(&ship_held_id) {
-                        it.quantity = 45;
-                        it.version += 1;
-                    }
-                    Ok(())
-                })
-                .expect("rules commit");
-            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-        })
-        .await;
-    })
-    .await;
-
-    // 3. Former member (close corp_closing_id + delete office + move leaving pilot out under acting pilot = former_member_id).
-    with_active_dispatch_char(Some(former_member_id), async {
-        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "corpRegistry.KickOutMember".to_string(),
-            );
-            ctx.db
-                .tx("corp_close_commit", |tx| -> Result<(), eve_db::TxError> {
-                    tx.snap.items.remove(&office_id);
-                    tx.snap.corporations.remove(&corp_closing_id);
-                    if let Some(ch) = tx.snap.characters.get_mut(&former_member_id) {
-                        ch.corporation_id = 1_000_002;
-                    }
-                    Ok(())
-                })
-                .expect("corp close commit");
-            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-        })
-        .await;
-    })
-    .await;
-
-    // Trigger unmatched hand-written events across dispatch (actor=1 & actor=0, holder=ship & holder=none),
-    // tick (origin=tick, holder=space), and outside (origin=outside) + bounded sample check (>16).
-    let hw_ship_item = InventoryItemRecord {
-        item_id: 995_931_020,
-        type_id: 34,
-        owner_id: actor_id,
-        location_id: actor_ship,
-        flag: InventoryFlag::Cargo,
-        quantity: 7,
-        version: 1,
-        ..Default::default()
-    };
-    let hw_station_item = InventoryItemRecord {
-        item_id: 995_931_021,
-        type_id: 34,
-        owner_id: holder_owner_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 8,
-        version: 1,
-        ..Default::default()
-    };
-    let hw_space_ownerless = InventoryItemRecord {
-        item_id: space_item_id,
-        type_id: 34,
-        owner_id: 0,
-        location_id: space_box,
-        flag: InventoryFlag::Cargo,
-        quantity: 80,
-        version: 3,
-        ..Default::default()
-    };
-
-    with_active_dispatch_char(Some(actor_id), async {
-        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "invbroker.Add".to_string(),
-            );
-            ctx.notify_item_record_change(actor_id, &hw_ship_item, vec![(9, eve_proto::PyRep::Integer(5))]);
-            ctx.notify_item_record_change(
-                holder_owner_id,
-                &hw_station_item,
-                vec![(9, eve_proto::PyRep::Integer(4))],
-            );
-            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-        })
-        .await;
-    })
-    .await;
-
-    with_compare_tick_scope(async {
-        ctx.notify_item_record_change(
-            actor_id,
-            &hw_space_ownerless,
-            vec![(9, eve_proto::PyRep::Integer(90))],
-        );
-    })
-    .await;
-
-    for idx in 0..20_i64 {
-        let mut outside_item = hw_station_item.clone();
-        outside_item.item_id = 995_931_100 + idx;
-        ctx.notify_item_record_change(
-            holder_owner_id,
-            &outside_item,
-            vec![(9, eve_proto::PyRep::Integer(1))],
-        );
-    }
-
-    let summary = projected_item_switch_summary(&ctx);
-    assert!(
-        summary.projected_by_rule.get(RULE_OWNER).copied().unwrap_or(0) >= 2,
-        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
-        summary.projected_by_rule,
-        summary.projected_by_rule_rpc
-    );
-    assert_eq!(
-        summary.projected_by_rule.get(RULE_CORPORATION).copied(),
-        Some(1),
-        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
-        summary.projected_by_rule,
-        summary.projected_by_rule_rpc
-    );
-    assert_eq!(
-        summary.projected_by_rule.get(RULE_FORMER_MEMBER).copied(),
-        Some(1),
-        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
-        summary.projected_by_rule,
-        summary.projected_by_rule_rpc
-    );
-    assert_eq!(
-        summary.projected_by_rule.get(RULE_OWNERLESS).copied(),
-        Some(1),
-        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
-        summary.projected_by_rule,
-        summary.projected_by_rule_rpc
-    );
-    assert_eq!(
-        summary
-            .projected_by_rule
-            .get(RULE_HOLDER_ACTING_PILOT)
-            .copied(),
-        Some(1),
-        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
-        summary.projected_by_rule,
-        summary.projected_by_rule_rpc
-    );
-    assert_eq!(
-        summary.projected_by_rule.get(RULE_HOLDER_OWNER).copied(),
-        Some(1),
-        "projected_by_rule={:?}, projected_by_rule_rpc={:?}",
-        summary.projected_by_rule,
-        summary.projected_by_rule_rpc
-    );
-    assert_eq!(
-        summary
-            .projected_by_rule_rpc
-            .get(RULE_OWNERLESS)
-            .and_then(|m| m.get("invbroker.MultiAdd"))
-            .copied(),
-        Some(1),
-        "projected_by_rule_rpc={:?}",
-        summary.projected_by_rule_rpc
-    );
-
-    let total_hand_sent: u64 = summary.hand_sent_by_call_site.values().sum();
-    assert_eq!(total_hand_sent, 23, "hand_sent_by_call_site={:?}", summary.hand_sent_by_call_site);
-    assert_eq!(summary.sample_hand_sent.len(), 16, "sample_hand_sent must remain bounded at 16");
-    let s0 = &summary.sample_hand_sent[0];
-    assert!(s0.contains("site="), "missing site=: {s0}");
-    assert!(s0.contains("rpc=invbroker.Add"), "missing rpc=: {s0}");
-    assert!(s0.contains("origin=dispatch"), "missing origin=dispatch: {s0}");
-    assert!(s0.contains("class="), "missing class=: {s0}");
-    assert!(s0.contains("holder=ship"), "missing holder=ship: {s0}");
-    assert!(s0.contains("actor=1"), "missing actor=1: {s0}");
-
-    let s1 = &summary.sample_hand_sent[1];
-    assert!(s1.contains("origin=dispatch") && s1.contains("holder=none") && s1.contains("actor=0"), "{s1}");
-    let s2 = &summary.sample_hand_sent[2];
-    assert!(s2.contains("origin=tick") && s2.contains("holder=space") && s2.contains("actor=0"), "{s2}");
-    let s3 = &summary.sample_hand_sent[3];
-    assert!(s3.contains("origin=outside") && s3.contains("holder=none") && s3.contains("actor=0"), "{s3}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -430,11 +90,6 @@ async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_z
     let new_loot_id = 995_932_021_i64;
     with_active_dispatch_char(Some(pilot_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "dungeon.Trigger".to_string(),
-            );
             ctx.db
                 .tx("same_commit_ownerless_box", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.insert(
@@ -478,9 +133,6 @@ async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_z
         pilot_notifs.is_empty(),
         "same-commit ownerless container + contents must emit nothing to acting pilot: {pilot_notifs:?}"
     );
-    let summary = projected_item_switch_summary(&ctx);
-    assert_eq!(summary.projected_by_rule.get(RULE_OWNERLESS).copied(), None);
-    assert_eq!(summary.projected_by_rule.get(RULE_HOLDER_ACTING_PILOT).copied(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -527,11 +179,6 @@ async fn step3a_ledger_suppresses_either_id_type_without_stale_event_drop() {
     // AND legacy hand-written emit targets Character(outsider_q) (NO ledger fact for q).
     with_active_dispatch_char(Some(pilot_p), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "invbroker.Add".to_string(),
-            );
             ctx.db
                 .tx("core_step_1_2", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.insert(core_item_id, core_post.clone());
@@ -820,11 +467,6 @@ async fn step3b1_acting_pilot_skips_destroyed_ship_holder_and_keeps_live_ship_an
     //    moving `victim_cargo` into a new `wreck_id` -> killer must receive 0 `OnItemChange`.
     with_active_dispatch_char(Some(killer_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "dogmaIM.Activate".to_string(),
-            );
             ctx.db
                 .tx("destroy_victim_ship", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.remove(&victim_mod);
@@ -874,22 +516,10 @@ async fn step3b1_acting_pilot_skips_destroyed_ship_holder_and_keeps_live_ship_an
         !victim_kill_notifs.is_empty(),
         "victim must still receive OnItemChange for destroyed ship/cargo"
     );
-    let after_kill_summary = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        after_kill_summary.projected_by_rule.get(RULE_HOLDER_ACTING_PILOT).copied(),
-        None,
-        "destroyed ship holder must not trigger RULE_HOLDER_ACTING_PILOT: {:?}",
-        after_kill_summary.projected_by_rule
-    );
 
     // 2. Live non-owned ship bay + live space container mutations still emit RULE_HOLDER_ACTING_PILOT to actor.
     with_active_dispatch_char(Some(killer_id), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "invbroker.Add".to_string(),
-            );
             ctx.db
                 .tx("live_holder_ops", |tx| -> Result<(), eve_db::TxError> {
                     if let Some(it) = tx.snap.items.get_mut(&live_bay_item) {
@@ -919,13 +549,6 @@ async fn step3b1_acting_pilot_skips_destroyed_ship_holder_and_keeps_live_ship_an
         killer_live_ids,
         vec![live_bay_item, live_box_item],
         "live non-owned ship bay and space container must still emit RULE_HOLDER_ACTING_PILOT to acting pilot"
-    );
-    let after_live_summary = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        after_live_summary.projected_by_rule.get(RULE_HOLDER_ACTING_PILOT).copied(),
-        Some(2),
-        "projected_by_rule={:?}",
-        after_live_summary.projected_by_rule
     );
 }
 
@@ -979,11 +602,6 @@ async fn step3b1_destroyed_space_holder_drops_leak_when_deleted_and_notifies_whe
     //    (`ItemHolderKind::Space`, `after_opt.is_none()`) must emit zero `OnItemChange` to actor.
     with_active_dispatch_char(Some(acting_pilot), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "dogmaIM.Activate".to_string(),
-            );
             ctx.db
                 .tx("destroy_space_box", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.remove(&doomed_box_loot);
@@ -1026,11 +644,6 @@ async fn step3b1_destroyed_space_holder_drops_leak_when_deleted_and_notifies_whe
     //    (`ItemHolderKind::Space`, `after_opt.is_some()`) notifies the salvager via `RULE_HOLDER_ACTING_PILOT`.
     with_active_dispatch_char(Some(acting_pilot), async {
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                "entity.CmdSalvage".to_string(),
-            );
             ctx.db
                 .tx("salvage_relocate_loot", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.items.insert(
@@ -1076,12 +689,5 @@ async fn step3b1_destroyed_space_holder_drops_leak_when_deleted_and_notifies_whe
         actor_salvage_ids,
         vec![salvage_loot],
         "salvaging foreign wreck with loot must emit OnItemChange for moved loot to acting pilot"
-    );
-    let summary = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        summary.projected_by_rule.get(RULE_HOLDER_ACTING_PILOT).copied(),
-        Some(1),
-        "projected_by_rule={:?}",
-        summary.projected_by_rule
     );
 }
