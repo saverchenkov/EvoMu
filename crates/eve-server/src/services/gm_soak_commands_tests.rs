@@ -5,6 +5,18 @@ use eve_db::WorldRepository;
 use eve_sde::{InvType, RaceInfo, SdeRegistry, TypeMaterialEntry};
 use std::sync::Arc;
 
+async fn handle_gm_soak_slash_cmd(
+    ctx: &ServerContext,
+    session: &SessionState,
+    cid: i64,
+    cmd: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let inv = crate::router::slash_registry::parse_slash_invocation(cmd)?;
+    let mut sess = session.clone();
+    sess.character_id = Some(cid);
+    crate::router::slash_registry::dispatch_registered_for_test(ctx, &mut sess, &inv).await
+}
+
 fn make_test_inv_type(
     type_id: u32,
     group_id: u32,

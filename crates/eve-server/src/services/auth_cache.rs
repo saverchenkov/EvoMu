@@ -32,7 +32,7 @@ pub use crate::router::slash_registry::{
     format_remote_command_list_reason, remote_slash_commands_for_role, required_slash_role,
 };
 use crate::router::slash_registry::{
-    format_slash_help, unknown_slash_error, SlashBoxFuture, SlashDispatchOutcome, SlashInvocation,
+    format_slash_help, unknown_slash_error, SlashBoxFuture, SlashInvocation,
 };
 
 pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
@@ -584,26 +584,12 @@ pub async fn handle(
             Some(Ok(PyRep::Integer(client_clone_state)))
         }
 
-        ("slash", "SlashCmd") => {
-            match crate::router::slash_registry::dispatch_slash_command_async(
+        ("slash", "SlashCmd") => Some(
+            crate::router::slash_registry::dispatch_slash_command_async(
                 ctx, session, service, args,
             )
-            .await
-            {
-                SlashDispatchOutcome::Handled(res) => Some(res),
-                SlashDispatchOutcome::PendingLegacyChain => {
-                    let cmd = crate::router::rpc_args::RpcArgs::positional(args)
-                        .get_raw(0, "cmd")
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("")
-                        .trim();
-                    if let Some(cid) = session.character_id {
-                        record_gm_audit(ctx, cid, cmd, false);
-                    }
-                    Some(Err(unknown_slash_error(cmd)))
-                }
-            }
-        }
+            .await,
+        ),
 
         _ => super::config_service::handle(ctx, session, service, method, args, kwargs),
     }
