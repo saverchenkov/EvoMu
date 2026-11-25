@@ -504,9 +504,7 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
     run_disconnect_teardown_sync(right, char_id, Some(&sess_r));
     let lowsec_sys = left
         .sde
-        .solar_systems
-        .values()
-        .find(|s| {
+        .lowest_matching_solar_system(|s| {
             s.security_status < 0.45
                 && s.region_id != 10_000_070
                 && s.solar_system_id < 31_000_000

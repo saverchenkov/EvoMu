@@ -645,6 +645,27 @@ impl WorldRepository {
             .is_some()
     }
 
+    /// Atomically installs both transaction hooks only when their slots are empty, avoiding
+    /// read-then-write double-locking while preserving any pre-installed custom hook.
+    pub fn install_tx_hooks_if_unset(
+        &self,
+        error_hook: fn(&TxError),
+        poison_hook: fn() -> Option<String>,
+    ) {
+        let mut err_slot = self.tx_error_hook.write().unwrap_or_else(|e| e.into_inner());
+        if err_slot.is_none() {
+            *err_slot = Some(error_hook);
+        }
+        drop(err_slot);
+        let mut poison_slot = self
+            .tx_poison_check_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if poison_slot.is_none() {
+            *poison_slot = Some(poison_hook);
+        }
+    }
+
     #[inline]
     pub(crate) fn record_tx_error(&self, err: &TxError) {
         let hook = *self.tx_error_hook.read().unwrap_or_else(|e| e.into_inner());

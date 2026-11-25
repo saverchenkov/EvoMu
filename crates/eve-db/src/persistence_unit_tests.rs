@@ -958,6 +958,12 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     fn test_poison_hook() -> Option<String> {
         POISON_MSG.with(|m| m.borrow().clone())
     }
+    fn ignored_record_hook(_err: &TxError) {
+        RECORDED_TX_ERRORS.with(|v| v.borrow_mut().push("unexpected overwrite".into()));
+    }
+    fn ignored_poison_hook() -> Option<String> {
+        Some("unexpected poison overwrite".into())
+    }
 
     RECORDED_TX_ERRORS.with(|v| v.borrow_mut().clear());
     POISON_MSG.with(|m| *m.borrow_mut() = None);
@@ -969,8 +975,8 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     let repo_other = WorldRepository::new_empty();
     assert!(!repo.has_tx_error_hook());
     assert!(!repo.has_tx_poison_check_hook());
-    repo.set_tx_error_hook(Some(test_record_hook));
-    repo.set_tx_poison_check_hook(Some(test_poison_hook));
+    repo.install_tx_hooks_if_unset(test_record_hook, test_poison_hook);
+    repo.install_tx_hooks_if_unset(ignored_record_hook, ignored_poison_hook);
     assert!(repo.has_tx_error_hook());
     assert!(repo.has_tx_poison_check_hook());
     assert!(!repo_other.has_tx_error_hook());

@@ -26,7 +26,7 @@ impl TestSde {
 
     /// Clones a canonical runtime SDE registry using the shared test cache.
     pub fn with_canonical_seed() -> SdeRegistry {
-        shared_test_sde_cache().with_canonical_seed()
+        (*Self::canonical_shared()).clone()
     }
 
     /// Opens an explicit SQLite SDE path through the shared test cache.

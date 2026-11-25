@@ -212,12 +212,7 @@ fn dispatch_check_tx_poison() -> Option<String> {
 }
 
 pub(crate) fn ensure_dispatch_tx_hooks_installed(db: &eve_db::WorldRepository) {
-    if !db.has_tx_error_hook() {
-        db.set_tx_error_hook(Some(dispatch_record_tx_error));
-    }
-    if !db.has_tx_poison_check_hook() {
-        db.set_tx_poison_check_hook(Some(dispatch_check_tx_poison));
-    }
+    db.install_tx_hooks_if_unset(dispatch_record_tx_error, dispatch_check_tx_poison);
 }
 
 async fn maybe_with_dispatch_tx_error<F, R>(outer: bool, fut: F) -> R
@@ -331,7 +326,10 @@ impl ServerContext {
         caller_trace: Option<&str>,
         options: DispatchOptions,
     ) -> Result<PyRep, BridgeRpcError> {
-        ensure_dispatch_tx_hooks_installed(&self.db);
+        debug_assert!(
+            self.db.has_tx_error_hook() && self.db.has_tx_poison_check_hook(),
+            "ServerContext::with_sde_repository_and_descriptors must install dispatch tx hooks"
+        );
 
         let is_outer_tx_scope = DISPATCH_TX_ERROR.try_with(|_| ()).is_err();
         if is_outer_tx_scope {
