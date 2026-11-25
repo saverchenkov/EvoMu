@@ -320,11 +320,12 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
     {
         let bp = sys.ballpark.read().unwrap();
         let st = sys.actor_state.read().unwrap();
-        super::collect_landed_warps_for_post_unlock(
+        super::collect_landed_warps_for_post_unlock_with_in_flight(
             &bp,
             &[DestinyEvent::OnDeactivatingWarp { ball_id: ship2 }],
             &Some(Arc::clone(&ctx.db)),
             &st.ball_space_entry_epochs,
+            false,
             &mut ops,
         );
     }

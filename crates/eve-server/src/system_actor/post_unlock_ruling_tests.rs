@@ -864,3 +864,90 @@ async fn bf_1170_r6_03_nanite_halt_for_paste_clears_shortfall() {
     assert_eq!(paste_qty(&ctx.db, ship_id), 0);
     assert!(mod_dmg(&ctx.db, mod_id).unwrap() < 100.0);
 }
+
+/// `BF-1170-1A-R7-01`: `RepairTetherModuleHeal` behind in-flight `ModuleBurnout` and multi-step `FastForwardClock` `p0 -> p1 -> p0` for non-ego ball under held DB writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r7_01_tether_heal_behind_burnout_and_fast_forward_non_ego_p0_p1_p0() {
+    let (ctx, sys_id, char_id, ship_id, mod_id, ego_id, non_ego_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_217_001_i64, 778_217_101_i64, 778_217_002_i64, 778_217_003_i64);
+    let (p0, p1) = (DVec3::new(100.0, 0.0, 0.0), DVec3::new(300_000.0, 0.0, 0.0));
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[(mod_id, 2048, InventoryFlag::LoSlot0, 0.0)], None);
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(ego_id, make_item(ego_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1));
+        s.items.insert(non_ego_id, make_item(non_ego_id, 606, char_id, i64::from(sys_id), InventoryFlag::None, 1));
+        s.item_positions.insert(non_ego_id, [p0.x, p0.y, p0.z]);
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut cs_tether = make_combat_state(100.0, 100.0, 100.0, 100.0);
+    cs_tether.is_tethered = true;
+    sys.spawn_ball_with_combat(make_ball(ship_id, 606, DVec3::ZERO), cs_tether).await.unwrap();
+    let mut ego_ball = make_ball(ego_id, 606, DVec3::ZERO);
+    ego_ball.speed_fraction = 1.0;
+    sys.spawn_ball(ego_ball).await.unwrap();
+    sys.spawn_ball(make_ball(non_ego_id, 606, p0)).await.unwrap();
+    sys.set_movement_mode(ego_id, MovementMode::GotoDirection { direction: DVec3::X }).await.unwrap();
+    let warp_to = |src, dst| MovementMode::Warp {
+        origin: src, destination: dst, warp_speed_au_s: 3.0, total_distance: DVec3::distance(src, dst),
+        phase: eve_destiny::WarpPhase::Accelerating, elapsed_warp_time: 0.0,
+    };
+    sys.set_movement_mode(non_ego_id, warp_to(p0, p1)).await.unwrap();
+    let tick0 = sys.ballpark.read().unwrap().current_tick;
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let mut ops_burn = PostUnlockOps::default();
+    ops_burn.push(PostUnlockIntent::ModuleBurnout { ship_id, module_id: mod_id });
+    let _ = super::send_post_unlock_item(&sys.post_unlock_tx, &sys.post_unlock_in_flight, PostUnlockWorkItem {
+        db_opt: Some(Arc::clone(&ctx.db)), sde_opt: Some(Arc::clone(&ctx.sde)), ops: ops_burn, replies: Vec::new(), in_flight_guard: None,
+    });
+    let tick_h = std::thread::spawn({ let s = sys.clone(); move || s.try_step_full_tick(1.0) });
+    wait_until("tether step did not advance", || sys.ballpark.read().unwrap().current_tick > tick0).await;
+
+    let ff1 = tokio::spawn({ let s = sys.clone(); async move { s.fast_forward_clock(ego_id, 40).await } });
+    wait_until("non_ego never warped to p1", || sys.get_ball_position_sync(non_ego_id).is_some_and(|p| p.distance(p1) < 1e-2)).await;
+    let mv_fut = tokio::spawn({ let s = sys.clone(); let m = warp_to(p1, p0); async move { s.set_movement_mode(non_ego_id, m).await } });
+    wait_until("non_ego warp back never armed", || matches!(sys.ballpark.read().unwrap().balls.get(&non_ego_id).map(|b| &b.mode), Some(MovementMode::Warp { .. }))).await;
+    let ff2 = tokio::spawn({ let s = sys.clone(); async move { s.fast_forward_clock(ego_id, 40).await } });
+    wait_until("non_ego never warped back to p0", || sys.get_ball_position_sync(non_ego_id).is_some_and(|p| p.distance(p0) < 1e-2)).await;
+    assert!(!tick_h.is_finished() && !ff1.is_finished() && !ff2.is_finished(), "W3/W4 barrier bypassed under held writer");
+
+    let _ = rel_w.send(()); writer.join().unwrap();
+    tick_h.join().unwrap();
+    ff1.await.unwrap().unwrap(); mv_fut.await.unwrap().unwrap(); ff2.await.unwrap().unwrap();
+    assert_eq!(mod_dmg(&ctx.db, mod_id), Some(38.0), "RepairTetherModuleHeal must apply after queued ModuleBurnout (40.0 -> 38.0)");
+    let final_pos = ctx.db.with_snapshot(|s| s.item_positions.get(&non_ego_id).copied()).unwrap();
+    assert!((DVec3::from_array(final_pos) - p0).length() < 1e-2, "FastForwardClock dropped p0 return: {final_pos:?}");
+}
+
+/// `BF-1170-1A-R7-02`: Unlocked `cancel_ship_nanite_repairs_sync` waits behind completed `NaniteRepairTick` even with empty `active_nanite_repairs`,
+/// and `wait_for_post_unlock_barrier` returns `false` when the worker drops the barrier sender or shuts down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r7_02_empty_cancel_nanite_waits_and_dropped_barrier_returns_false() {
+    let (ctx, sys_id, char_id, ship_id, mod_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_218_001_i64, 778_218_101_i64);
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[(mod_id, 2048, InventoryFlag::LoSlot0, 20.0)], None);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let mut ops = PostUnlockOps::default();
+    ops.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp { char_id, ship_id, module_id: mod_id, paste_delta: 0, initial_damage_hp: 20.0, paste_total_needed: 2, rem_dmg: 0.0, done_now: true, halted_for_paste: false }));
+    let _ = super::send_post_unlock_item(&sys.post_unlock_tx, &sys.post_unlock_in_flight, PostUnlockWorkItem {
+        db_opt: Some(Arc::clone(&ctx.db)), sde_opt: None, ops, replies: Vec::new(), in_flight_guard: None,
+    });
+    wait_until("tick never entered in-flight", || sys.has_in_flight_post_unlock()).await;
+    let cancel_h = std::thread::spawn({ let s = sys.clone(); move || s.cancel_ship_nanite_repairs_sync(ship_id, true) });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!cancel_h.is_finished(), "empty cancel_ship_nanite_repairs_sync bypassed in-flight NaniteRepairTick");
+    let _ = rel_w.send(()); writer.join().unwrap();
+    cancel_h.join().unwrap();
+    assert!(mod_dmg(&ctx.db, mod_id).is_none());
+
+    let mut h_drop = sys.clone();
+    let (tx_d, mut rx_d) = tokio::sync::mpsc::unbounded_channel();
+    h_drop.post_unlock_tx = tx_d;
+    let bar_fut = tokio::spawn(async move { h_drop.wait_for_post_unlock_barrier().await });
+    drop(rx_d.recv().await.unwrap());
+    assert!(!bar_fut.await.unwrap(), "wait_for_post_unlock_barrier must return false when barrier sender drops");
+
+    let _ = sys.post_unlock_tx.send(PostUnlockMsg::Shutdown);
+    wait_until("post_unlock_tx never closed", || sys.post_unlock_tx.is_closed()).await;
+    assert!(!sys.wait_for_post_unlock_barrier().await, "wait_for_post_unlock_barrier must return false on closed worker");
+}

@@ -605,30 +605,14 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
         dt,
     );
 
-    // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`)
+    // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`);
+    // worker-side `should_open_db_tx` skips opening a DB tx when tethered ships have no damaged modules.
     let tethered_ships: Vec<BallId> = ballpark.combat_states.iter().filter_map(|(&bid, cs)| cs.is_tethered.then_some(bid)).collect();
-    if !tethered_ships.is_empty() {
-        let tether_repair_hp = 2.0 * dt.max(0.0);
-        if let Some(db_ref) = db_opt {
-            // Non-blocking read pre-check avoids taking the global DB write lock on every 1 Hz tick
-            // when tethered ships have no fitted module heat damage (`#1207`); if DB write lock is held
-            // elsewhere, enqueue best-effort and let `post_unlock_worker` skip no-ops inside `wtx`.
-            let maybe_has_heat_damage = db_ref
-                .try_with_snapshot(|snap| {
-                    snap.items.values().any(|it| {
-                        tethered_ships.contains(&it.location_id)
-                            && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
-                            && it.dynamic_attributes.contains_key(&eve_sde::attr_ids::DAMAGE)
-                    })
-                })
-                .unwrap_or(true);
-            if maybe_has_heat_damage {
-                post_unlock.push(super::post_unlock::PostUnlockIntent::RepairTetherModuleHeal {
-                    ship_ids: tethered_ships,
-                    heal_hp: tether_repair_hp,
-                });
-            }
-        }
+    if !tethered_ships.is_empty() && db_opt.is_some() {
+        post_unlock.push(super::post_unlock::PostUnlockIntent::RepairTetherModuleHeal {
+            ship_ids: tethered_ships,
+            heal_hp: 2.0 * dt.max(0.0),
+        });
     }
 
     // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`):

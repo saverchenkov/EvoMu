@@ -1055,6 +1055,11 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.ballpark.balls.get(&ship_id).map(|b| &b.mode),
                 Some(eve_destiny::MovementMode::Warp { .. })
             );
+            let ff_in_flight = exec_ctx
+                .post_unlock_in_flight_actor
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+                || !exec_ctx.post_unlock_ops.is_empty();
             super::fast_forward_clock_in_actor_collecting(
                 exec_ctx.solar_system_id,
                 exec_ctx.ballpark,
@@ -1068,6 +1073,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.event_tx_actor,
                 Some(exec_ctx.broadcast_seq_gate_actor),
                 &mut exec_ctx.actor_st.warp_state,
+                ff_in_flight,
                 exec_ctx.post_unlock_ops,
             );
             sync_all_protection_registry_in_actor(exec_ctx.ballpark, exec_ctx.actor_st);
@@ -1086,7 +1092,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(ship_id, tokio::time::Instant::now());
             }
-            defer_cmd_reply(exec_ctx, reply, ());
+            defer_barrier_cmd_reply(exec_ctx, reply, ());
             None
         }
         other => Some(other),

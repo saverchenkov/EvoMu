@@ -816,6 +816,8 @@ type CheckpointBatch = Vec<(SolarSystemId, Vec<ConditionCheckpointEntry>, usize,
 
 fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) -> (bool, CheckpointBatch) {
     let mut has_unconditional_write = false;
+    let mut check_asteroid_inserts = Vec::new();
+    let mut check_tether_heals = Vec::new();
     let mut check_positions = Vec::new();
     let mut check_combat_hps = Vec::new();
     let mut check_reloads = Vec::new();
@@ -824,6 +826,11 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
 
     for intent in intents {
         match intent {
+            PostUnlockIntent::BeltAsteroidInsertIfAbsent(r) => check_asteroid_inserts.push(r.asteroid_id),
+            PostUnlockIntent::RepairTetherModuleHeal { ship_ids, heal_hp } if *heal_hp > 0.0 => {
+                check_tether_heals.push(ship_ids.as_slice());
+            }
+            PostUnlockIntent::RepairTetherModuleHeal { .. } => {}
             PostUnlockIntent::ItemPosition { ball_id, pos, solar_system_id, space_entry_epoch } => {
                 check_positions.push((*ball_id, *pos, *solar_system_id, *space_entry_epoch));
             }
@@ -839,14 +846,23 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
     }
 
     if has_unconditional_write { return (true, Vec::new()); }
-    if check_positions.is_empty() && check_combat_hps.is_empty() && check_reloads.is_empty()
+    if check_asteroid_inserts.is_empty() && check_tether_heals.is_empty() && check_positions.is_empty()
+        && check_combat_hps.is_empty() && check_reloads.is_empty()
         && check_ship_clears.is_empty() && check_checkpoints.is_empty()
     {
         return (false, Vec::new());
     }
 
     let (any_change, skipped_checkpoints) = db.with_snapshot(|snap| {
-        let mut changed = check_positions.iter().any(|&(bid, pos, sys_id, ep)| {
+        let mut changed = check_asteroid_inserts.iter().any(|aid| !snap.asteroids.contains_key(aid))
+            || check_tether_heals.iter().any(|ship_ids| {
+                snap.items.values().any(|it| {
+                    ship_ids.contains(&it.location_id)
+                        && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
+                        && it.dynamic_attributes.contains_key(&attr_ids::DAMAGE)
+                })
+            })
+            || check_positions.iter().any(|&(bid, pos, sys_id, ep)| {
             snap.items.contains_key(&bid)
                 && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(snap, bid, Some(sys_id), ep)
                 && snap.item_positions.get(&bid).is_none_or(|&prev| (glam::DVec3::from_array(prev) - glam::DVec3::from_array(pos)).length_squared() > 1e-6)
@@ -1214,13 +1230,7 @@ fn enqueue_work_ticket(
     }
 }
 
-/// Enqueues `ops` onto `handle.post_unlock_tx` under actor locks, or an empty-ops FIFO barrier when requested (`W1`, `W4`).
-pub(in crate::system_actor) fn enqueue_post_unlock_under_locks(handle: &super::SystemHandle, db_opt: Option<&Arc<WorldRepository>>, sde_opt: Option<&Arc<SdeRegistry>>, ops: PostUnlockOps, caller_can_wait: bool) -> PostUnlockWaitTicket {
-    if ops.is_empty() { return PostUnlockWaitTicket::None; }
-    enqueue_work_ticket(handle, db_opt, sde_opt, ops, caller_can_wait)
-}
-
-/// Like [`enqueue_post_unlock_under_locks`], also enqueues a FIFO barrier when `ops` is empty and work is in flight (`W4`).
+/// Enqueues `ops` onto `handle.post_unlock_tx` under actor locks, or an empty-ops FIFO barrier when work is in flight (`W1`, `W4`).
 pub(in crate::system_actor) fn enqueue_post_unlock_or_barrier_under_locks(handle: &super::SystemHandle, db_opt: Option<&Arc<WorldRepository>>, sde_opt: Option<&Arc<SdeRegistry>>, ops: PostUnlockOps, caller_can_wait: bool) -> PostUnlockWaitTicket {
     if !ops.is_empty() { enqueue_work_ticket(handle, db_opt, sde_opt, ops, caller_can_wait) }
     else if caller_can_wait && handle.has_in_flight_post_unlock() { enqueue_barrier_under_locks(handle) }

@@ -575,7 +575,7 @@ impl SystemHandle {
                     }
                     st.db_opt.clone()
                 };
-                let ticket = super::post_unlock::enqueue_post_unlock_under_locks(
+                let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                     self,
                     db_opt.as_ref(),
                     None,
@@ -1231,7 +1231,7 @@ impl SystemHandle {
                         fallback_slim_owner,
                         deact_guard.is_some(),
                     );
-                    super::post_unlock::enqueue_post_unlock_under_locks(
+                    super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                         self,
                         db_opt_cloned.as_ref(),
                         sde_opt_cloned.as_ref(),
@@ -1343,7 +1343,7 @@ impl SystemHandle {
                 refund_paste,
                 &mut ops,
             );
-            super::post_unlock::enqueue_post_unlock_under_locks(
+            super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                 self,
                 st.db_opt.as_ref(),
                 st.sde_opt.as_ref(),
@@ -1824,7 +1824,7 @@ impl SystemHandle {
                 super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
                 self.publish_view_from(&bp, Some(&st));
             }
-            let ticket = super::post_unlock::enqueue_post_unlock_under_locks(
+            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                 self,
                 db_opt_cloned.as_ref(),
                 sde_opt_cloned.as_ref(),
@@ -1889,7 +1889,7 @@ impl SystemHandle {
             super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
             self.publish_view_from(&bp, Some(&st));
             let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
-            let ticket = super::post_unlock::enqueue_post_unlock_under_locks(
+            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                 self,
                 st.db_opt.as_ref(),
                 st.sde_opt.as_ref(),
@@ -3183,7 +3183,7 @@ pub(crate) use celestials_helpers::{
     update_system_hibernation_flag,
 };
 #[cfg(test)]
-pub(crate) use celestials_helpers::{collect_landed_warps_for_post_unlock, db_ballpark_entry_for_test};
+pub(crate) use celestials_helpers::db_ballpark_entry_for_test;
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
 

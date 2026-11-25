@@ -1641,10 +1641,7 @@ impl SystemRegistry {
                                     &sde_opt,
                                     &mut ast_ball,
                                 );
-                                if db_opt.as_ref().is_some_and(|db| {
-                                    db.try_with_snapshot(|s| !s.asteroids.contains_key(&ball_id))
-                                        .unwrap_or(true)
-                                }) {
+                                if db_opt.is_some() {
                                     post_unlock_ops.push(
                                         post_unlock::PostUnlockIntent::BeltAsteroidInsertIfAbsent(
                                             eve_db::AsteroidRecord {

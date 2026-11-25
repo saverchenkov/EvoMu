@@ -452,18 +452,6 @@ pub(crate) fn persist_ball_positions_in_db(
 
 /// Collects dynamic ship/item coordinates into `post_unlock`, on warp exit,
 /// explicit `SetBallPosition` / `Stop` events, and periodic / resting sub-warp movement flushes (`#741`, `#1170`).
-pub(crate) fn collect_landed_warps_for_post_unlock(
-    ballpark: &Ballpark,
-    events: &[eve_destiny::DestinyEvent],
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    ball_space_entry_epochs: &HashMap<BallId, u64>,
-    post_unlock: &mut post_unlock::PostUnlockOps,
-) {
-    collect_landed_warps_for_post_unlock_with_in_flight(
-        ballpark, events, db_opt, ball_space_entry_epochs, false, post_unlock,
-    );
-}
-
 pub(crate) fn collect_landed_warps_for_post_unlock_with_in_flight(
     ballpark: &Ballpark,
     events: &[eve_destiny::DestinyEvent],
@@ -599,11 +587,12 @@ pub(crate) fn persist_landed_warps_in_db(
     ball_space_entry_epochs: &HashMap<BallId, u64>,
 ) {
     let mut ops = post_unlock::PostUnlockOps::default();
-    collect_landed_warps_for_post_unlock(
+    collect_landed_warps_for_post_unlock_with_in_flight(
         ballpark,
         events,
         db_opt,
         ball_space_entry_epochs,
+        false,
         &mut ops,
     );
     if !ops.is_empty() {
@@ -1100,6 +1089,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
         event_tx_actor,
         broadcast_seq_gate,
         warp_state,
+        false,
         &mut ops,
     );
     if !ops.is_empty() {
@@ -1121,6 +1111,7 @@ pub(crate) fn fast_forward_clock_in_actor_collecting(
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
     broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
     warp_state: &mut crate::system_actor::types::ActorWarpState,
+    has_in_flight: bool,
     post_unlock: &mut post_unlock::PostUnlockOps,
 ) {
     let Some(ball0) = ballpark.balls.get(&ship_id) else {
@@ -1154,11 +1145,12 @@ pub(crate) fn fast_forward_clock_in_actor_collecting(
         *sim_elapsed_secs += 1.0;
         sim_steps += 1;
         let evs = ballpark.step(1.0);
-        collect_landed_warps_for_post_unlock(
+        collect_landed_warps_for_post_unlock_with_in_flight(
             ballpark,
             &evs,
             db_opt,
             ball_space_entry_epochs,
+            has_in_flight || !post_unlock.is_empty(),
             post_unlock,
         );
         clear_landed_warp_tracking_from_events(ballpark, &evs, warp_state);
@@ -1457,8 +1449,7 @@ impl SystemHandle {
         if self.post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(item)).is_err() {
             return false;
         }
-        let _ = rx.await;
-        true
+        rx.await.is_ok()
     }
 }
 

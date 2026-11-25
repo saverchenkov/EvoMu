@@ -236,19 +236,13 @@ impl super::SystemHandle {
             };
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));
-            let ticket = if db_opt_c.is_some() && !ops.is_empty() {
-                super::post_unlock::enqueue_post_unlock_under_locks(
-                    self,
-                    db_opt_c.as_ref(),
-                    sde_opt_c.as_ref(),
-                    ops,
-                    caller_can_wait,
-                )
-            } else if caller_can_wait && self.has_in_flight_post_unlock() {
-                super::post_unlock::enqueue_barrier_under_locks(self)
-            } else {
-                super::post_unlock::PostUnlockWaitTicket::None
-            };
+            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                self,
+                db_opt_c.as_ref(),
+                sde_opt_c.as_ref(),
+                ops,
+                caller_can_wait,
+            );
             (deact_guard, ticket)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);

@@ -609,9 +609,7 @@ impl SystemContentSeedContext<'_> {
             &sde_opt,
             &mut ast_ball,
         );
-        if self.db.filter(|_| self.db_read_safe).is_some_and(|db| {
-            db.try_with_snapshot(|s| !s.asteroids.contains_key(&ball_id)).unwrap_or(true)
-        }) {
+        if self.db.is_some() {
             self.staged_post_unlock_ops.push(
                 super::post_unlock::PostUnlockIntent::BeltAsteroidInsertIfAbsent(
                     eve_db::AsteroidRecord {
