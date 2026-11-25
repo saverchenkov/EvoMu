@@ -914,6 +914,11 @@ pub(crate) struct SystemActorState {
     pub(crate) pending_recall_or_scoop_claims: HashMap<i64, super::PendingClaimedSquadron>,
     pub(crate) fighters_removed_pre_hydration: HashSet<i64>,
     pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    /// In-flight `LaunchDrones` capacity/bandwidth reservations held between `ReserveDroneLaunches`
+    /// and DB commit/`FinalizeDroneLaunches`. Stored separately from `active_drones_in_space` and
+    /// never published into `SystemView` so negative reservation IDs cannot leak into command,
+    /// mining, fitting, fleet, or evacuation scans (`#1541`).
+    pub(crate) reserved_drone_launches: HashMap<BallId, super::DroneSpaceState>,
     /// Transient in-memory claim map preventing double-scoop races without mutating
     /// `active_drones_in_space` or dirtying SQLite checkpoints until a scoop commits.
     /// Stores an optional deferred abandon/disconnect action stamped if warp/logoff/abandon

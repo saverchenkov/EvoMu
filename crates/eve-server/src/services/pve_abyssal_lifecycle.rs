@@ -431,9 +431,10 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         let abyss_sys_val = *abyss_sys;
         for (_, h) in ctx.systems.active_system_handles() {
             let has_match = h.view().active_drones_in_space.values().any(|d| {
-                d.owner_char_id == char_id_val
-                    || d.original_owner_char_id == char_id_val
-                    || d.parent_ship_id == ship_id_val
+                d.ball_id > 0
+                    && (d.owner_char_id == char_id_val
+                        || d.original_owner_char_id == char_id_val
+                        || d.parent_ship_id == ship_id_val)
             });
             if !has_match {
                 continue;
@@ -443,9 +444,10 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 let mut local_cross = Vec::new();
                 let mut dirty = false;
                 drones.retain(|&did, d| {
-                    if d.owner_char_id == char_id_val
-                        || d.original_owner_char_id == char_id_val
-                        || d.parent_ship_id == ship_id_val
+                    if did > 0
+                        && (d.owner_char_id == char_id_val
+                            || d.original_owner_char_id == char_id_val
+                            || d.parent_ship_id == ship_id_val)
                     {
                         local_destroyed.push(did);
                         if d.drone_item_id != did {
@@ -454,9 +456,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                         if d.solar_system_id != abyss_sys_val {
                             local_cross.push((did, d.solar_system_id));
                         }
-                        if did > 0 {
-                            dirty = true;
-                        }
+                        dirty = true;
                         false
                     } else {
                         true
@@ -569,14 +569,12 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 let mut local_ids = Vec::new();
                 let mut dirty = false;
                 drones.retain(|&did, d| {
-                    if d.solar_system_id == abyss_sys {
+                    if did > 0 && d.solar_system_id == abyss_sys {
                         local_ids.push(did);
                         if d.drone_item_id != did {
                             local_ids.push(d.drone_item_id);
                         }
-                        if did > 0 {
-                            dirty = true;
-                        }
+                        dirty = true;
                         false
                     } else {
                         true

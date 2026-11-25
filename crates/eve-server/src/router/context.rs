@@ -897,13 +897,8 @@ impl ServerContext {
                 crate::services::ice_heist_ops::step_ice_heist_system(&ctx, sys_id).await;
                 crate::services::doomsday_aoe_ops::step_bosonic_doomsday_system(&ctx, sys_id).await;
                 crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
-                if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
-                    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones_in_system(
-                        &ctx,
-                        &sys_handle,
-                        ctx.now_unix(),
-                    )
-                    .await;
+                if let Some(sys_handle) = (dt > 0.0).then(|| ctx.systems.get_handle(sys_id)).flatten() {
+                    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones_in_system(&ctx, &sys_handle, ctx.now_unix()).await;
                 }
             })
         }));
@@ -3002,7 +2997,7 @@ impl ServerContext {
                     changed
                 });
             for (_, d) in self.systems.all_active_drones() {
-                if d.parent_ship_id == ship_id && !d.is_abandoned {
+                if d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned {
                     if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
                         existing.drones.push((d.drone_item_id, d.type_id));
                         drones_changed = true;
@@ -3227,7 +3222,7 @@ impl ServerContext {
             }
         }
         for (_, d) in self.systems.all_active_drones() {
-            if d.parent_ship_id == ship_id && !d.is_abandoned {
+            if d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned {
                 if !fit.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
                     fit.drones.push((d.drone_item_id, d.type_id));
                 }

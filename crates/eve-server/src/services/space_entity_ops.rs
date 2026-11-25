@@ -1269,7 +1269,7 @@ fn handle_get_extra_fleet_members(
             ctx.systems
                 .all_active_drones()
                 .into_iter()
-                .filter(|(_, d)| d.assist_char_id == Some(char_id) || d.guard_char_id == Some(char_id))
+                .filter(|(_, d)| d.ball_id > 0 && (d.assist_char_id == Some(char_id) || d.guard_char_id == Some(char_id)))
                 .map(|(_, d)| {
                     PyRep::keyval([
                         ("fleetID", PyRep::Integer(fid)),

@@ -1394,7 +1394,7 @@ pub async fn handle_cmd_reconnect_to_drones(
         let active: Vec<&DroneSpaceState> = view
             .active_drones_in_space
             .values()
-            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+            .filter(|d| d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned)
             .collect();
         (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
     };

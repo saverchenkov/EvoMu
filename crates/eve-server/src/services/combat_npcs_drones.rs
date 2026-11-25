@@ -957,6 +957,9 @@ fn validate_entity_drone_presence(
         )),
         EntityDroneFilter::Ids(ids) => {
             let matches_drone = |d: &DroneSpaceState| {
+                if d.ball_id <= 0 {
+                    return false;
+                }
                 let id_match = ids.contains(&d.ball_id) || ids.contains(&d.drone_item_id);
                 if !id_match {
                     return false;
@@ -993,7 +996,7 @@ fn validate_entity_drone_presence(
         EntityDroneFilter::All => {
             let found = ctx.systems.get_handle(sys_id).is_some_and(|h| {
                 h.view().active_drones_in_space.values().any(|d| {
-                    if d.solar_system_id != sys_id {
+                    if d.ball_id <= 0 || d.solar_system_id != sys_id {
                         return false;
                     }
                     match empty_mode {
@@ -1058,7 +1061,7 @@ async fn validate_return_bay_filter(
                     let view = h.view();
                     for &id in ids {
                         for d in view.active_drones_in_space.values() {
-                            if d.ball_id == id || d.drone_item_id == id {
+                            if d.ball_id > 0 && (d.ball_id == id || d.drone_item_id == id) {
                                 if drone_matches_owner_or_ship(d, char_id, ship_id, true) {
                                     own = true;
                                 } else {
@@ -1233,7 +1236,7 @@ pub async fn handle_npcs_drones(
                 let active: Vec<&DroneSpaceState> = view
                     .active_drones_in_space
                     .values()
-                    .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+                    .filter(|d| d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned)
                     .collect();
                 (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
             };
@@ -2222,7 +2225,8 @@ pub async fn handle_npcs_drones(
                     let mut count = 0i64;
                     let mut events = Vec::new();
                     for d in drones.values_mut() {
-                        if d.solar_system_id == sys_id
+                        if d.ball_id > 0
+                            && d.solar_system_id == sys_id
                             && !d.is_abandoned
                             && (d.parent_ship_id == ship_id || d.owner_char_id == char_id)
                             && drone_filter_for_mut

@@ -1468,7 +1468,7 @@ pub fn safe_logoff_blocking_space_conditions(
         h.view()
             .active_drones_in_space
             .values()
-            .any(|d| !d.is_abandoned && (d.owner_char_id == char_id || d.parent_ship_id == ship_id))
+            .any(|d| d.ball_id > 0 && !d.is_abandoned && (d.owner_char_id == char_id || d.parent_ship_id == ship_id))
     }) || ctx
         .systems
         .snapshot_fighters_for_system(sys_id)

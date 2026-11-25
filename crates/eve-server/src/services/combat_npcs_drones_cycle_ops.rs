@@ -391,7 +391,7 @@ pub(crate) fn disengage_drones_targeting(ctx: &ServerContext, solar_system_id: u
         .mutate_active_drones_sync(move |drones, _, _| {
             let mut ids = Vec::new();
             for d in drones.values_mut() {
-                if d.solar_system_id == solar_system_id && d.target_id == Some(target_id) {
+                if d.ball_id > 0 && d.solar_system_id == solar_system_id && d.target_id == Some(target_id) {
                     d.target_id = None;
                     d.activity_state = 0;
                     ids.push(d.ball_id);

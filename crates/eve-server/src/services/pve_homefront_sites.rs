@@ -2466,7 +2466,7 @@ fn validate_pilot_mining_capability(
         .systems
         .all_active_drones()
         .into_iter()
-        .any(|(_, d)| d.owner_char_id == char_id && d.group_id == 101);
+        .any(|(_, d)| d.ball_id > 0 && d.owner_char_id == char_id && d.group_id == 101);
     if has_mining_drone {
         return Ok(());
     }
@@ -2534,7 +2534,7 @@ fn validate_pilot_salvage_capability(
         ctx.systems
             .all_active_drones()
             .into_iter()
-            .any(|(_, d)| d.owner_char_id == char_id && d.type_id == 32_787)
+            .any(|(_, d)| d.ball_id > 0 && d.owner_char_id == char_id && d.type_id == 32_787)
             .then_some(3.0)
     } else {
         None

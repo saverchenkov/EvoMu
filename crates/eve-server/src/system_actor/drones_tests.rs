@@ -398,6 +398,23 @@ async fn reserve_finalize_mutate_and_hibernation_policy() {
     assert_eq!(res.reserved_ids, vec![-200_001]);
     assert_eq!(res.per_item_errors, vec![(2, "NoDroneManagementAbilitiesLeft")]);
     assert_eq!(res.rejected_error, None);
+    assert!(
+        sys.active_drones_snapshot().is_empty() && reg.all_active_drones().is_empty(),
+        "in-flight LaunchDrones reservations must never leak into active_drones_in_space or SystemView"
+    );
+    assert!(reg.find_active_drone_by_item(-200_001).is_none());
+    assert!(!sys.is_hibernated());
+    let second_res = sys
+        .reserve_drone_launches(ReserveDroneLaunchesReq {
+            ship_id: 900_001,
+            max_drones_allowed: 1,
+            max_bandwidth: 10.0,
+            partial_ok: false,
+            drones: vec![(3, make_space_drone(-200_009, 100_001, 900_001, sys_id, false))],
+        })
+        .await
+        .unwrap();
+    assert_eq!(second_res.rejected_error, Some("NoDroneManagementAbilitiesLeft"));
 
     // Rollback deletes pending reservation.
     sys.finalize_drone_launches(Vec::new(), res.reserved_ids)

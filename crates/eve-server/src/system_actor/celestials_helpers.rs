@@ -941,6 +941,7 @@ pub(crate) fn update_system_hibernation_flag(
         || !state.active_nanite_repairs.is_empty()
         || !state.active_drone_miners.is_empty()
         || state.fighters.active_fighters.values().any(|f| !f.is_abandoned)
+        || !state.reserved_drone_launches.is_empty()
         || state
             .active_drones_in_space
             .values()

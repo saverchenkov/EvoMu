@@ -1075,7 +1075,7 @@ pub(crate) async fn handle_dogma_ops(
                 .systems
                 .all_active_drones()
                 .into_iter()
-                .filter_map(|(_, d)| (d.owner_char_id == char_id).then_some(d))
+                .filter_map(|(_, d)| (d.ball_id > 0 && d.owner_char_id == char_id).then_some(d))
                 .collect();
             for d in active_drones {
                 let Some(scene) =

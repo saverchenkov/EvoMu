@@ -249,7 +249,7 @@ pub(crate) async fn handle_mine(
             .map(|did| {
                 view.active_drones_in_space
                     .values()
-                    .find(|d| d.drone_item_id == *did || d.ball_id == *did)
+                    .find(|d| d.ball_id > 0 && (d.drone_item_id == *did || d.ball_id == *did))
                     .map(|d| d.ball_id)
                     .unwrap_or(*did)
             })
@@ -277,8 +277,8 @@ pub(crate) async fn handle_mine(
             snap.items.get(&did).is_some_and(|i| i.owner_id == char_id)
         }) || {
             let view = handle.view();
-            view.active_drones_in_space.get(&did).is_some_and(|d| d.owner_char_id == char_id)
-                || view.active_drones_in_space.values().any(|d| d.drone_item_id == did && d.owner_char_id == char_id)
+            view.active_drones_in_space.get(&did).is_some_and(|d| d.ball_id > 0 && d.owner_char_id == char_id)
+                || view.active_drones_in_space.values().any(|d| d.ball_id > 0 && d.drone_item_id == did && d.owner_char_id == char_id)
         };
         if !is_owned {
             return Err(BridgeRpcError {
@@ -614,7 +614,7 @@ pub(crate) async fn handle_mine(
                 .view()
                 .active_drones_in_space
                 .values()
-                .find(|d| d.drone_item_id == d_item.item_id || d.ball_id == d_item.item_id)
+                .find(|d| d.ball_id > 0 && (d.drone_item_id == d_item.item_id || d.ball_id == d_item.item_id))
                 .map(|d| d.ball_id)
                 .unwrap_or(d_item.item_id);
 

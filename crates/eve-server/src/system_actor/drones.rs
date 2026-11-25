@@ -556,14 +556,15 @@ fn upsert_active_drones_in_actor(
     for d in drones {
         let d = d.in_solar_system(ctx.solar_system_id);
         let bid = d.ball_id;
+        if bid <= 0 {
+            continue;
+        }
         if only_if_absent && ctx.actor_st.active_drones_in_space.contains_key(&bid) {
             continue;
         }
         ctx.actor_st.active_drones_in_space.insert(bid, d);
         inserted += 1;
-        if bid > 0 {
-            any_persistent_change = true;
-        }
+        any_persistent_change = true;
     }
     if any_persistent_change {
         mark_active_drones_dirty_in_state(ctx.actor_st);
@@ -575,15 +576,14 @@ fn reserve_drone_launches_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     req: ReserveDroneLaunchesReq,
 ) -> Result<ReserveDroneLaunchesOutcome, String> {
-    let (cur_count, cur_bw) = {
-        let active: Vec<&DroneSpaceState> = ctx
-            .actor_st
-            .active_drones_in_space
-            .values()
-            .filter(|d| d.parent_ship_id == req.ship_id && !d.is_abandoned)
-            .collect();
-        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
-    };
+    let (cur_count, cur_bw) = ctx
+        .actor_st
+        .active_drones_in_space
+        .values()
+        .filter(|d| d.ball_id > 0)
+        .chain(ctx.actor_st.reserved_drone_launches.values())
+        .filter(|d| d.parent_ship_id == req.ship_id && !d.is_abandoned)
+        .fold((0usize, 0.0f64), |(c, bw), d| (c + 1, bw + d.bandwidth_used));
     let mut kept_indices = Vec::new();
     let mut reserved_ids = Vec::new();
     let mut per_item_errors = Vec::new();
@@ -632,7 +632,7 @@ fn reserve_drone_launches_in_actor(
             });
         }
         for st in staged {
-            ctx.actor_st.active_drones_in_space.insert(st.ball_id, st);
+            ctx.actor_st.reserved_drone_launches.insert(st.ball_id, st);
         }
     } else {
         if cur_count + req.drones.len() > req.max_drones_allowed {
@@ -656,7 +656,7 @@ fn reserve_drone_launches_in_actor(
             let st = st.in_solar_system(ctx.solar_system_id);
             kept_indices.push(idx);
             reserved_ids.push(st.ball_id);
-            ctx.actor_st.active_drones_in_space.insert(st.ball_id, st);
+            ctx.actor_st.reserved_drone_launches.insert(st.ball_id, st);
         }
     }
 
@@ -675,24 +675,22 @@ fn finalize_drone_launches_in_actor(
 ) -> Result<usize, String> {
     let mut updated = 0usize;
     for rid in rollback_res_ids {
-        if ctx.actor_st.active_drones_in_space.remove(&rid).is_some() {
+        if ctx.actor_st.reserved_drone_launches.remove(&rid).is_some() {
             updated += 1;
-            if rid > 0 {
-                mark_active_drones_dirty_in_state(ctx.actor_st);
-            }
         }
     }
     for (rid, bid, drone_item_id) in mappings {
-        if let Some(st) = ctx.actor_st.active_drones_in_space.remove(&rid) {
+        if let Some(st) = ctx.actor_st.reserved_drone_launches.remove(&rid) {
+            if bid <= 0 {
+                continue;
+            }
             let mut st = st.in_solar_system(ctx.solar_system_id);
             st.ball_id = bid;
             st.drone_item_id = drone_item_id;
             ctx.actor_st.drone_next_ready_unix.remove(&bid);
             ctx.actor_st.active_drones_in_space.insert(bid, st);
             updated += 1;
-            if bid > 0 {
-                mark_active_drones_dirty_in_state(ctx.actor_st);
-            }
+            mark_active_drones_dirty_in_state(ctx.actor_st);
         }
     }
     Ok(updated)
@@ -1307,12 +1305,14 @@ impl SystemHandle {
 
     /// Returns the published [`DroneSpaceState`] for `ball_id` in this system, if active.
     pub fn active_drone(&self, ball_id: BallId) -> Option<DroneSpaceState> {
-        self.view().active_drones_in_space.get(&ball_id).cloned()
+        (ball_id > 0)
+            .then(|| self.view().active_drones_in_space.get(&ball_id).cloned())
+            .flatten()
     }
 
     /// Returns `true` when `ball_id` is present in this system's published `active_drones_in_space`.
     pub fn has_active_drone(&self, ball_id: BallId) -> bool {
-        self.view().active_drones_in_space.contains_key(&ball_id)
+        ball_id > 0 && self.view().active_drones_in_space.contains_key(&ball_id)
     }
 
     /// Returns a snapshot of all published active drones in this solar system.
@@ -1604,6 +1604,9 @@ impl SystemRegistry {
 
     /// Finds an active drone by `ball_id` across loaded solar system actors without waking cold systems.
     pub fn find_active_drone(&self, ball_id: BallId) -> Option<(SystemHandle, DroneSpaceState)> {
+        if ball_id <= 0 {
+            return None;
+        }
         for (_, handle) in self.active_system_handles() {
             if let Some(d) = handle.active_drone(ball_id) {
                 return Some((handle, d));
@@ -1622,7 +1625,7 @@ impl SystemRegistry {
             if let Some(d) = view
                 .active_drones_in_space
                 .values()
-                .find(|d| d.drone_item_id == drone_item_id || d.ball_id == drone_item_id)
+                .find(|d| d.ball_id > 0 && (d.drone_item_id == drone_item_id || d.ball_id == drone_item_id))
             {
                 return Some((handle.clone(), d.clone()));
             }
@@ -1636,7 +1639,9 @@ impl SystemRegistry {
         for (_, handle) in self.active_system_handles() {
             let view = handle.view();
             for d in view.active_drones_in_space.values() {
-                out.push((handle.clone(), d.clone()));
+                if d.ball_id > 0 {
+                    out.push((handle.clone(), d.clone()));
+                }
             }
         }
         out
@@ -1646,7 +1651,13 @@ impl SystemRegistry {
     pub fn active_drones_count(&self) -> usize {
         self.active_system_handles()
             .into_iter()
-            .map(|(_, h)| h.view().active_drones_in_space.len())
+            .map(|(_, h)| {
+                h.view()
+                    .active_drones_in_space
+                    .values()
+                    .filter(|d| d.ball_id > 0)
+                    .count()
+            })
             .sum()
     }
 
