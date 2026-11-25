@@ -1017,7 +1017,6 @@ async fn login_move_system_and_account_logout_routes_execute_teardown_hooks() {
         "MoveCharacterToNewSystem",
         &[PyRep::Integer(char_mv), PyRep::Integer(i64::from(other_sys)), PyRep::String("slot-1190".into())],
         &kw,
-        None,
     )
     .await
     .unwrap()

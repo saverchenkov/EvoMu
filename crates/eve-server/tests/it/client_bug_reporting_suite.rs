@@ -258,7 +258,6 @@ async fn test_alert_send_client_stack_trace_alert_queues_bundle() {
         "SendClientStackTraceAlert",
         &args,
         &HashMap::new(),
-        None,
     )
     .await;
     assert!(res.is_some());
@@ -826,7 +825,6 @@ async fn test_alert_send_client_stack_trace_alert_suppresses_benign_and_preserve
             "SendClientStackTraceAlert",
             &args,
             &HashMap::new(),
-            None,
         )
         .await;
         assert!(res.is_some());

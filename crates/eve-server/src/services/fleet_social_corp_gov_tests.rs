@@ -207,10 +207,13 @@ async fn corp_gov_shares_dividends_titles_and_ceo_resign() {
     let titles = call_gov(&ctx, &mut ceo, "corpRegistry", "GetTitles", vec![])
         .await
         .unwrap();
-    assert_eq!(rs_rows(&titles).len(), 16);
-    assert_eq!(rs_rows(&titles)[0][0].as_i64(), Some(1));
-    assert_eq!(rs_rows(&titles)[0][1].as_str(), Some("Fleet Commander"));
-    assert_eq!(rs_rows(&titles)[15][0].as_i64(), Some(32_768));
+    let PyRep::Dict(title_entries) = &titles else {
+        panic!("expected Dict for GetTitles, got {titles:?}");
+    };
+    assert_eq!(title_entries.len(), 16);
+    assert_eq!(title_entries[0].0.as_i64(), Some(1));
+    assert_eq!(title_entries[0].1.dict_get("titleName").and_then(|v| v.as_str()), Some("Fleet Commander"));
+    assert_eq!(title_entries[15].0.as_i64(), Some(32_768));
 
     // UpdateTitles with a V24 Rowset containing power-of-two titleIDs 32 and 32768
     let rowset_update = PyRep::rowset(
@@ -259,18 +262,23 @@ async fn corp_gov_shares_dividends_titles_and_ceo_resign() {
     let titles_after_batch = call_gov(&ctx, &mut ceo, "corpRegistry", "GetTitles", vec![])
         .await
         .unwrap();
-    assert_eq!(rs_rows(&titles_after_batch).len(), 16);
-    let row_32 = rs_rows(&titles_after_batch)
+    let PyRep::Dict(batch_entries) = &titles_after_batch else {
+        panic!("expected Dict for GetTitles, got {titles_after_batch:?}");
+    };
+    assert_eq!(batch_entries.len(), 16);
+    let row_32 = batch_entries
         .iter()
-        .find(|r| r[0].as_i64() == Some(32))
+        .find(|(k, _)| k.as_i64() == Some(32))
+        .map(|(_, v)| v)
         .expect("titleID 32");
-    assert_eq!(row_32[1].as_str(), Some("Logistics Chief"));
-    assert_eq!(row_32[2].as_i64(), Some(corp_roles::ROLE_FACTORY_MANAGER as i64));
-    let row_32768 = rs_rows(&titles_after_batch)
+    assert_eq!(row_32.dict_get("titleName").and_then(|v| v.as_str()), Some("Logistics Chief"));
+    assert_eq!(row_32.dict_get("roles").and_then(|v| v.as_i64()), Some(corp_roles::ROLE_FACTORY_MANAGER as i64));
+    let row_32768 = batch_entries
         .iter()
-        .find(|r| r[0].as_i64() == Some(32_768))
+        .find(|(k, _)| k.as_i64() == Some(32_768))
+        .map(|(_, v)| v)
         .expect("titleID 32768");
-    assert_eq!(row_32768[1].as_str(), Some("Senior Admiral"));
+    assert_eq!(row_32768.dict_get("titleName").and_then(|v| v.as_str()), Some("Senior Admiral"));
 
     // Verify member with titleMask = 32 | 32768 inherits both roles via effective_corp_roles_at_db
     ctx.db.with_mut_snapshot(|snap| {

@@ -719,6 +719,17 @@ impl ServerContext {
                         .map(|bid| self.bound_object_rep(bid, caller_trace));
                 }
             }
+            if (effective_service == "skillMgr2" && method == "GetMySkillHandler")
+                || (effective_service == "trademgr" && method == "InitiateTrade")
+                || (effective_service == "invbroker"
+                    && matches!(method, "GetInventoryFromId" | "GetInventory"))
+            {
+                if let Ok(PyRep::Integer(bid)) = res {
+                    if bid >= 0 {
+                        res = Ok(self.bound_object_rep(bid as u64, caller_trace));
+                    }
+                }
+            }
             if effective_service == "skillMgr2"
                 && matches!(method, "GetSkills")
                 && matches!(&res, Ok(PyRep::Rowset { .. }))
@@ -1510,9 +1521,6 @@ impl ServerContext {
                 RpcDispatchHandler::Async(f) => {
                     f(self, session, effective_service, method, args, kwargs).await
                 }
-                RpcDispatchHandler::AsyncCallerTrace(f) => {
-                    f(self, session, effective_service, method, args, kwargs, caller_trace).await
-                }
                 RpcDispatchHandler::BoundAsync(f) => {
                     f(
                         self,
@@ -1525,14 +1533,13 @@ impl ServerContext {
                     )
                     .await
                 }
-                RpcDispatchHandler::BoundSyncCallerTrace(f) => f(
+                RpcDispatchHandler::BoundSync(f) => f(
                     self,
                     session,
                     bound_entry.as_ref(),
                     effective_service,
                     method,
                     args,
-                    caller_trace,
                 ),
             };
             let result = match registry_res {

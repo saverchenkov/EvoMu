@@ -87,18 +87,6 @@ pub enum RpcDispatchHandler {
             &'a HashMap<String, PyRep>,
         ) -> RpcBoxFuture<'a>,
     ),
-    /// Asynchronous handler receiving `caller_trace` metadata.
-    AsyncCallerTrace(
-        for<'a> fn(
-            &'a ServerContext,
-            &'a mut SessionState,
-            &'a str,
-            &'a str,
-            &'a [PyRep],
-            &'a HashMap<String, PyRep>,
-            Option<&'a str>,
-        ) -> RpcBoxFuture<'a>,
-    ),
     /// Asynchronous bound-object handler receiving `Option<&BoundObjectEntry>`.
     BoundAsync(
         for<'a> fn(
@@ -111,8 +99,8 @@ pub enum RpcDispatchHandler {
             &'a HashMap<String, PyRep>,
         ) -> RpcBoxFuture<'a>,
     ),
-    /// Synchronous bound-object handler reading `SessionState` and receiving `caller_trace`.
-    BoundSyncCallerTrace(
+    /// Synchronous bound-object handler reading `SessionState`.
+    BoundSync(
         fn(
             &ServerContext,
             &SessionState,
@@ -120,7 +108,6 @@ pub enum RpcDispatchHandler {
             &str,
             &str,
             &[PyRep],
-            Option<&str>,
         ) -> Option<Result<PyRep, BridgeRpcError>>,
     ),
 }
@@ -134,9 +121,8 @@ impl fmt::Debug for RpcDispatchHandler {
             Self::SyncNoService(_) => "SyncNoService",
             Self::SyncCallerTrace(_) => "SyncCallerTrace",
             Self::Async(_) => "Async",
-            Self::AsyncCallerTrace(_) => "AsyncCallerTrace",
             Self::BoundAsync(_) => "BoundAsync",
-            Self::BoundSyncCallerTrace(_) => "BoundSyncCallerTrace",
+            Self::BoundSync(_) => "BoundSync",
         };
         f.write_str(label)
     }

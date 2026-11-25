@@ -892,8 +892,11 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
         .await
         .unwrap()
         .unwrap();
-    let PyRep::KeyVal(sim_kv) = sim_res else { panic!("expected KeyVal"); };
-    assert!(sim_kv.iter().any(|(k, v)| k == "shipTypeID" && v == &PyRep::Integer(587)));
+    let PyRep::Tuple(sim_vals) = sim_res else { panic!("expected 4-tuple"); };
+    assert_eq!(sim_vals.len(), 4);
+    assert!(sim_vals[0].as_f64().is_some_and(|v| v >= 0.0));
+    assert!(sim_vals[1].as_f64().is_some_and(|v| v > 0.0));
+    assert!(sim_vals[3].as_f64().is_some_and(|v| v > 0.0));
 
     dk_corv.role = u64::MAX;
     assert_eq!(

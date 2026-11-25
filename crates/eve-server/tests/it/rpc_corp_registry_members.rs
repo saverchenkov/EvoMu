@@ -51,14 +51,7 @@ async fn rpc(
 }
 
 fn field(rep: &PyRep, key: &str) -> PyRep {
-    match rep {
-        PyRep::KeyVal(map) => map.get(key).cloned().unwrap_or(PyRep::None),
-        PyRep::Dict(entries) => entries
-            .iter()
-            .find_map(|(k, v)| (k.as_str() == Some(key)).then(|| v.clone()))
-            .unwrap_or(PyRep::None),
-        _ => PyRep::None,
-    }
+    rep.dict_get(key).cloned().unwrap_or(PyRep::None)
 }
 
 fn rowset_data(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {

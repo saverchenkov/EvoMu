@@ -1209,8 +1209,14 @@ async fn test_community_fittings_simulation_and_space_fitting_service() {
     .await
     .unwrap();
     assert_eq!(ctx.db.with_snapshot(|s| s.items.len()), items_before, "simulation must not mutate server state");
-    let cpu_base = sim_base.dict_get("cpuLoad").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let cpu_fit = sim_fit.dict_get("cpuLoad").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let cpu_base = match &sim_base {
+        PyRep::Tuple(vals) => vals.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+        _ => 0.0,
+    };
+    let cpu_fit = match &sim_fit {
+        PyRep::Tuple(vals) => vals.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+        _ => 0.0,
+    };
     assert!(cpu_fit > cpu_base, "simulated Damage Control II must increase ship cpuLoad (49)");
 
     // 2. In-space refitting near Mobile Depot (33474) / Orca (28606) vs out of range vs weapons timer.

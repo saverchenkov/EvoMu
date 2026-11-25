@@ -87,17 +87,18 @@ fn corp_public_info_update_divisions_members_and_medals() {
     let kw = HashMap::new();
 
     // GetPublicInfo / GetCorporation + NPC fallback (1_000_035 Caldari Navy)
-    let PyRep::KeyVal(info) = handle_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetCorporation", &[], &kw)
+    let info = handle_corps(&ctx, &mut ceo_sess, "corpRegistry", "GetCorporation", &[], &kw)
         .unwrap()
-        .unwrap()
-    else {
-        panic!()
-    };
-    assert_eq!(info.get("ticker").unwrap().as_str().unwrap(), "ALPH");
-    assert_eq!(info.get("creatorID").and_then(|v| v.as_i64()), Some(90_000_001));
-    assert_eq!(info.get("loyaltyPointTaxRate").and_then(|v| v.as_f64()), Some(0.1));
-    assert_eq!(info.get("iskTaxRate").and_then(|v| v.as_f64()), Some(0.1));
-    assert_eq!(info.get("friendlyFire").and_then(|v| v.as_bool()), Some(false));
+        .unwrap();
+    assert!(matches!(
+        &info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(info.dict_get("ticker").and_then(|v| v.as_str()), Some("ALPH"));
+    assert_eq!(info.dict_get("creatorID").and_then(|v| v.as_i64()), Some(90_000_001));
+    assert_eq!(info.dict_get("loyaltyPointTaxRate").and_then(|v| v.as_f64()), Some(0.1));
+    assert_eq!(info.dict_get("iskTaxRate").and_then(|v| v.as_f64()), Some(0.1));
+    assert_eq!(info.dict_get("friendlyFire").and_then(|v| v.as_bool()), Some(false));
     let npc_info = handle_corps(
         &ctx,
         &mut ceo_sess,
@@ -370,7 +371,7 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         corp.alliance_id = Some(0);
     });
 
-    let PyRep::KeyVal(info) = handle_corps(
+    let info = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpRegistry",
@@ -379,13 +380,14 @@ fn get_corporation_omits_zero_station_and_ceo_ids() {
         &kw,
     )
     .unwrap()
-    .unwrap()
-    else {
-        panic!("expected KeyVal for player corp");
-    };
-    assert_eq!(info.get("stationID"), Some(&PyRep::None), "missing HQ station must be None (#773)");
-    assert_eq!(info.get("allianceID"), Some(&PyRep::None), "zero allianceID must be None (#773)");
-    assert_eq!(info.get("ceoID"), Some(&PyRep::Integer(90_000_001)));
+    .unwrap();
+    assert!(matches!(
+        &info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(info.dict_get("stationID"), Some(&PyRep::None), "missing HQ station must be None (#773)");
+    assert_eq!(info.dict_get("allianceID"), Some(&PyRep::None), "zero allianceID must be None (#773)");
+    assert_eq!(info.dict_get("ceoID"), Some(&PyRep::Integer(90_000_001)));
 
     let npc_info = handle_corps(
         &ctx,

@@ -232,6 +232,7 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
     .expect("handled")
     .expect("GetShipFittingInfo ok");
     assert_ne!(sim_info, PyRep::None);
+    assert!(matches!(&sim_info, PyRep::Tuple(vals) if vals.len() == 4));
 
     let dirt_ts = handle_ships_mastery_and_fitting_ext(
         &ctx,

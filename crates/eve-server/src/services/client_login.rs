@@ -129,7 +129,6 @@ pub fn handle<'a>(
     method: &'a str,
     args: &'a [PyRep],
     _kwargs: &'a HashMap<String, PyRep>,
-    caller_trace: Option<&'a str>,
 ) -> crate::router::rpc_registry::RpcBoxFuture<'a> {
     Box::pin(async move {
     if let Some(res) = crate::services::pve_abyssal_hazards::check_abyssal_in_pocket_rpc_restrictions(
@@ -943,7 +942,7 @@ pub fn handle<'a>(
             };
             Some(
                 ctx.bind_object(session, "skillMgr2", char_id)
-                    .map(|bid| ctx.bound_object_rep(bid, caller_trace)),
+                    .map(|bid| PyRep::Integer(bid as i64)),
             )
         }
         ("skillMgr2", "GetAttributes") => {
@@ -1113,35 +1112,35 @@ use crate::router::rpc_registry::{
 };
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry_with_caller("alert", "BeanCount", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("alert", "SendClientStackTraceAlert", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("alert", "BeanDelivery", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("alert", "GetLogModeForError", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("alert", "LogModeChanged", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("alert", "SendProxyStackTraceAlert", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("alert", "GroupBeanDelivery", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("config", "GetBlackListedPlanets", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("air_npe", "is_air_npe_enabled", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("invbroker", "GetItemDescriptor", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("config", "GetAverageMarketPrices", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("charUnboundMgr", "GetCharacterSelectionData", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("charUnboundMgr", "GetCohortsForUser", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("charUnboundMgr", "GetCharOmegaDowngradeStatus", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("map", "GetSecurityModifiedSystems", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("config", "GetOldStationData", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("populationCap", "GetCharacterLoadSlot", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("populationCap", "MoveCharacterToNewSystem", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry_with_caller("charUnboundMgr", "GetCharacterLockType", RpcCallerClass::Account, RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry_with_caller("alert", "BeanCount", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("alert", "SendClientStackTraceAlert", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("alert", "BeanDelivery", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("alert", "GetLogModeForError", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("alert", "LogModeChanged", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("alert", "SendProxyStackTraceAlert", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("alert", "GroupBeanDelivery", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("config", "GetBlackListedPlanets", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("air_npe", "is_air_npe_enabled", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("invbroker", "GetItemDescriptor", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("config", "GetAverageMarketPrices", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCharacterSelectionData", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCohortsForUser", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCharOmegaDowngradeStatus", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("map", "GetSecurityModifiedSystems", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("config", "GetOldStationData", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("populationCap", "GetCharacterLoadSlot", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("populationCap", "MoveCharacterToNewSystem", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
+    rpc_entry_with_caller("charUnboundMgr", "GetCharacterLockType", RpcCallerClass::Account, RpcDispatchHandler::Async(handle)),
     // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
-    rpc_entry("photoUploadSvc", "Upload", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("charMgr", "GetCharacterSettings", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("charMgr", "GetPaperdollState", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("structureDirectory", "GetMyDockableStructures", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("map", "GetStationInfo", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("skillMgr2", "GetMySkillHandler", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("skillMgr2", "GetAttributes", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("skillMgr2", "GetFreeSkillPoints", RpcDispatchHandler::AsyncCallerTrace(handle)),
-    rpc_entry("operationsManager", "can_character_play_the_tutorial", RpcDispatchHandler::AsyncCallerTrace(handle)),
+    rpc_entry("photoUploadSvc", "Upload", RpcDispatchHandler::Async(handle)),
+    rpc_entry("charMgr", "GetCharacterSettings", RpcDispatchHandler::Async(handle)),
+    rpc_entry("charMgr", "GetPaperdollState", RpcDispatchHandler::Async(handle)),
+    rpc_entry("structureDirectory", "GetMyDockableStructures", RpcDispatchHandler::Async(handle)),
+    rpc_entry("map", "GetStationInfo", RpcDispatchHandler::Async(handle)),
+    rpc_entry("skillMgr2", "GetMySkillHandler", RpcDispatchHandler::Async(handle)),
+    rpc_entry("skillMgr2", "GetAttributes", RpcDispatchHandler::Async(handle)),
+    rpc_entry("skillMgr2", "GetFreeSkillPoints", RpcDispatchHandler::Async(handle)),
+    rpc_entry("operationsManager", "can_character_play_the_tutorial", RpcDispatchHandler::Async(handle)),
 ];
 
 #[cfg(test)] #[path = "client_login_tests.rs"] mod client_login_tests;

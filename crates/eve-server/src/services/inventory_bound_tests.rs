@@ -239,7 +239,7 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
 
     // Unbound call fails with InvalidBoundObject
     assert_eq!(
-        handle(&ctx, &sess, None, "invbroker", "GetSelfInvItem", &[], None)
+        handle(&ctx, &sess, None, "invbroker", "GetSelfInvItem", &[])
             .unwrap()
             .unwrap_err()
             .code,
@@ -248,19 +248,19 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
 
     // GetSelfInvItem on ship and on station
     let b_ship = bound_invbroker(char_id, ship_id);
-    assert!(handle(&ctx, &sess, Some(&b_ship), "invbroker", "GetSelfInvItem", &[], None)
+    assert!(handle(&ctx, &sess, Some(&b_ship), "invbroker", "GetSelfInvItem", &[])
         .unwrap()
         .is_ok());
 
     let b_station = bound_invbroker(char_id, hq_station);
     if ctx.sde.stations.contains_key(&hq_station) {
-        assert!(handle(&ctx, &sess, Some(&b_station), "invbroker", "GetSelfInvItem", &[], None)
+        assert!(handle(&ctx, &sess, Some(&b_station), "invbroker", "GetSelfInvItem", &[])
             .unwrap()
             .is_ok());
     }
 
     // GetAvailableTurretSlots on Rifter (587 has 3 turret slots, 0 fitted -> 3 available)
-    let free_turrets = handle(&ctx, &sess, Some(&b_ship), "invbroker", "GetAvailableTurretSlots", &[], None)
+    let free_turrets = handle(&ctx, &sess, Some(&b_ship), "invbroker", "GetAvailableTurretSlots", &[])
         .unwrap()
         .expect("GetAvailableTurretSlots");
     assert_eq!(free_turrets.as_i64(), Some(3));
@@ -273,7 +273,6 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(ship_id), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_ok());
@@ -285,7 +284,6 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(foreign_ship_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -302,7 +300,6 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
             "invbroker",
             "GetInventory",
             &[PyRep::Integer(container_id)],
-            None,
         )
         .unwrap()
         .is_ok());
@@ -316,7 +313,6 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
             "invbroker",
             "GetInventory",
             &[PyRep::Integer(10_004)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -483,7 +479,6 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(destroyed_ship_id), PyRep::Integer(0)],
-        None,
     )
     .unwrap();
     assert!(
@@ -499,7 +494,6 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .unwrap()
     .expect("GetSelfInvItem on destroyed dynamic ship");
@@ -542,7 +536,6 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
             "invbroker",
             "GetSelfInvItem",
             &[],
-            None,
         )
         .unwrap()
         .unwrap();
@@ -566,7 +559,6 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .unwrap()
     .unwrap_err();
@@ -584,7 +576,6 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .unwrap()
     .unwrap();
@@ -600,7 +591,6 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
         "invbroker",
         "GetAvailableTurretSlots",
         &[],
-        None,
     )
     .unwrap()
     .expect("GetAvailableTurretSlots on destroyed dynamic ship");
@@ -1477,7 +1467,6 @@ async fn issue_1021_1022_capsuleer_deliveries_get_inventory_list_and_rbacs() {
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(10_015), PyRep::Integer(corp_id)],
-        None,
     )
     .expect("GetInventory(10015) handled")
     .expect("GetInventory(10015) succeeds");
@@ -1512,7 +1501,6 @@ async fn issue_1021_1022_capsuleer_deliveries_get_inventory_list_and_rbacs() {
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(10_015), PyRep::Integer(other_corp_id)],
-        None,
     )
     .unwrap()
     .unwrap_err();
@@ -1525,7 +1513,6 @@ async fn issue_1021_1022_capsuleer_deliveries_get_inventory_list_and_rbacs() {
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(10_015), PyRep::Integer(corp_id)],
-        None,
     )
     .unwrap()
     .unwrap_err();
@@ -1542,7 +1529,6 @@ async fn issue_1021_1022_capsuleer_deliveries_get_inventory_list_and_rbacs() {
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(10_015)],
-        None,
     )
     .unwrap()
     .unwrap_err();
@@ -1932,7 +1918,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(struct_id), PyRep::Integer(1)],
-        None,
     )
     .expect("handled")
     .expect("GetInventoryFromId(struct_id) must succeed when docked there");
@@ -1947,7 +1932,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .expect("handled")
     .expect("GetSelfInvItem on structure inventory");
@@ -1961,7 +1945,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(hangar_ship_id), PyRep::Integer(0)],
-        None,
     )
     .expect("handled")
     .expect("GetInventoryFromId(hangar_ship_id) must succeed");
@@ -1975,7 +1958,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(CONTAINER_STRUCTURE), PyRep::None],
-        None,
     )
     .expect("handled")
     .expect("GetInventory(10014) must succeed while docked in structure");
@@ -2014,7 +1996,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(denied_id), PyRep::Integer(0)],
-            None,
         )
         .expect("handled")
         .unwrap_err();
@@ -2033,7 +2014,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(CONTAINER_STRUCTURE), PyRep::None],
-        None,
     )
     .expect("handled")
     .unwrap_err();
@@ -2047,7 +2027,6 @@ async fn invbroker_upwell_structure_bound_on_solar_system_supports_structure_con
         "invbroker",
         "GetInventory",
         &[PyRep::Integer(CONTAINER_STRUCTURE), PyRep::None],
-        None,
     )
     .expect("handled")
     .unwrap_err();
@@ -2168,7 +2147,6 @@ fn get_inventory_from_id_accepts_item_descriptors_and_rejects_malformed_args() {
             "invbroker",
             "GetInventoryFromId",
             &call_args,
-            None,
         )
         .unwrap()
         .unwrap_or_else(|e| panic!("{label} must succeed, got {e:?}"));
@@ -2188,7 +2166,6 @@ fn get_inventory_from_id_accepts_item_descriptors_and_rejects_malformed_args() {
             "invbroker",
             "GetInventoryFromId",
             &[missing_rep, PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -2204,7 +2181,6 @@ fn get_inventory_from_id_accepts_item_descriptors_and_rejects_malformed_args() {
             "invbroker",
             "GetInventoryFromId",
             &[foreign_rep, PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -2244,7 +2220,6 @@ fn get_inventory_from_id_accepts_item_descriptors_and_rejects_malformed_args() {
             "invbroker",
             "GetInventoryFromId",
             &bad_args,
-            None,
         )
         .unwrap()
         .unwrap_err();
@@ -2866,7 +2841,6 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(station_id), PyRep::Integer(0)],
-        None,
     )
     .expect("GetInventoryFromId handled")
     .expect("docked GetInventoryFromId(station_id, 0) succeeds");
@@ -2877,7 +2851,7 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
     assert_eq!(st_entry.service, "invbroker");
     assert_eq!(st_entry.object_id, station_id);
 
-    let st_self = handle(&ctx, &docked_sess, Some(&st_entry), "invbroker", "GetSelfInvItem", &[], None)
+    let st_self = handle(&ctx, &docked_sess, Some(&st_entry), "invbroker", "GetSelfInvItem", &[])
         .expect("GetSelfInvItem handled")
         .expect("station GetSelfInvItem succeeds");
     let st_info = &ctx.sde.stations[&station_id];
@@ -2928,7 +2902,6 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(venture_id), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .expect("GetInventoryFromId(venture_id, 0) succeeds");
@@ -2965,7 +2938,6 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(i64::from(system_id)), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -2995,14 +2967,13 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(i64::from(system_id)), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .expect("space GetInventoryFromId(current_solar_system_id, 0) succeeds");
     let sys_space_entry = ctx
         .verify_bound_object(&space_sess, sys_space_rep.as_i64().unwrap() as u64)
         .expect("space solar system sub-object verifies");
-    let sys_self = handle(&ctx, &space_sess, Some(&sys_space_entry), "invbroker", "GetSelfInvItem", &[], None)
+    let sys_self = handle(&ctx, &space_sess, Some(&sys_space_entry), "invbroker", "GetSelfInvItem", &[])
         .unwrap()
         .expect("solar system GetSelfInvItem succeeds");
     let sys_info = &ctx.sde.solar_systems[&system_id];
@@ -3030,7 +3001,6 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(target_id), PyRep::Integer(0)],
-            None,
         )
         .expect("handled")
         .expect_err("must reject invalid or unreachable inventory")
@@ -3193,7 +3163,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -3214,7 +3183,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetSelfInvItem",
             &[],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -3305,7 +3273,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-        None,
     )
     .expect("GetInventoryFromId handled")
     .expect("docked GetInventoryFromId(100_000_001, 0) must not fail with FakeItemNotFound");
@@ -3388,7 +3355,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .expect("GetSelfInvItem handled")
     .expect("docked GetSelfInvItem on removed starter ship stub");
@@ -3409,7 +3375,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         "invbroker",
         "GetAvailableTurretSlots",
         &[],
-        None,
     )
     .expect("GetAvailableTurretSlots handled")
     .expect("docked GetAvailableTurretSlots on removed starter ship stub");
@@ -3442,7 +3407,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -3460,7 +3424,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .is_ok()
@@ -3472,7 +3435,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .unwrap()
     .expect("in-space non-capsule GetSelfInvItem on removed starter ship stub");
@@ -3490,13 +3452,12 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .unwrap_err();
     assert_eq!(cap_inv_err.code, "FakeItemNotFound");
     assert_eq!(
-        handle(&ctx, &space_capsule_sess, Some(&b_stub), "invbroker", "GetSelfInvItem", &[], None)
+        handle(&ctx, &space_capsule_sess, Some(&b_stub), "invbroker", "GetSelfInvItem", &[])
             .unwrap()
             .unwrap_err()
             .code,
@@ -3516,14 +3477,13 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err();
         assert_eq!(err.code, "FakeItemNotFound");
         let foreign_stub = bound_invbroker(foreign_char, removed_starter_id);
         assert_eq!(
-            handle(&ctx, foreign_sess, Some(&foreign_stub), "invbroker", "GetSelfInvItem", &[], None)
+            handle(&ctx, foreign_sess, Some(&foreign_stub), "invbroker", "GetSelfInvItem", &[])
                 .unwrap()
                 .unwrap_err()
                 .code,
@@ -3540,7 +3500,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(bogus_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err();
@@ -3554,7 +3513,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -3595,7 +3553,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -3669,7 +3626,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
                 "invbroker",
                 "GetInventoryFromId",
                 &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
-                None,
             )
             .unwrap()
             .unwrap_err()
@@ -3777,7 +3733,6 @@ fn get_inventory_from_id_allows_corp_office_for_ceo_and_member_and_rejects_non_m
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(office_id), PyRep::Integer(0)],
-            None,
         )
         .expect("handled")
         .unwrap_or_else(|e| panic!("{label} GetInventoryFromId(office_id) must succeed: {e:?}"));
@@ -3814,7 +3769,6 @@ fn get_inventory_from_id_allows_corp_office_for_ceo_and_member_and_rejects_non_m
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(office_id), PyRep::Integer(0)],
-            None,
         )
         .expect("handled")
         .expect_err(&format!("{label} GetInventoryFromId(office_id) must fail"));

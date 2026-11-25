@@ -345,7 +345,7 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     assert_eq!(ut_kv.get("titleID"), Some(&PyRep::Integer(1)));
 
     let titles = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetTitles", &[], &kw, None).await.expect("GetTitles");
-    let PyRep::Rowset { rows: t_rows, .. } = titles else { panic!("expected Rowset") };
+    let PyRep::Dict(t_rows) = titles else { panic!("expected Dict") };
     assert!(!t_rows.is_empty());
 
     // 3. Potential CEOs

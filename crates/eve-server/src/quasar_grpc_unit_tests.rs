@@ -77,11 +77,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         add_tgt,
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
     );
-
-    assert!(matches!(
-        normalize_macho_rpc_reply("ship", "GetShipFittingInfo", Ok(PyRep::Dict(Vec::new()))).unwrap(),
-        PyRep::Tuple(_)
-    ));
 }
 
 #[tokio::test]

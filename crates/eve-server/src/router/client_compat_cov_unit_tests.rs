@@ -197,86 +197,10 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     let d_recov = d_entries[0].1.dict_get("recoverables").expect("decoded recoverables");
     assert!(d_recov.is_crowset());
     assert_eq!(d_recov.crowset_rows().unwrap()[0].dbrow_get("client").and_then(|v| v.as_i64()), Some(2288));
-
-    let fit = normalize_macho_rpc_reply(
-        "ship",
-        "GetShipFittingInfo",
-        Ok(PyRep::keyval([
-            ("cpuLoad", PyRep::Real(10.0)),
-            ("cpuOutput", PyRep::Real(100.0)),
-            ("powerLoad", PyRep::Real(20.0)),
-            ("powerOutput", PyRep::Real(200.0)),
-        ])),
-    )
-    .expect("ship fitting");
-    assert!(matches!(fit, PyRep::Tuple(t) if t.len() == 4));
 }
 
 #[test]
-fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
-    // #771: PagedResultSet wraps a dbutil.CRowset (not util.Rowset) with 24 member columns.
-    let cols = vec![
-        "characterID", "name", "role", "title", "corporationID", "locationID", "shipTypeID",
-        "logonDateTime", "roles", "grantableRoles", "rolesAtHQ", "grantableRolesAtHQ",
-        "rolesAtBase", "grantableRolesAtBase", "rolesAtOther", "grantableRolesAtOther",
-        "titleMask", "baseID", "startDateTime", "accountKey", "divisionID", "squadronID",
-        "blockRoles", "blocksRoles",
-    ];
-    let row = vec![
-        PyRep::Integer(90_000_001),
-        PyRep::String("Pilot One".into()),
-        PyRep::Integer(1),
-        PyRep::String(String::new()),
-        PyRep::Integer(98_000_001),
-        PyRep::Integer(60_003_760),
-        PyRep::Integer(587),
-        PyRep::Integer(133_000_000_000_000_000),
-        PyRep::Integer(1),
-        PyRep::Integer(1),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::None,
-        PyRep::Integer(133_000_000_000_000_000),
-        PyRep::Integer(1000),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-        PyRep::Integer(0),
-    ];
-    let paged = PyRep::ObjectEx {
-        is_type_2: false,
-        header: Box::new(PyRep::Tuple(vec![
-            PyRep::Token("eve.common.script.util.pagedCollection.PagedResultSet".into()),
-            PyRep::Tuple(vec![
-                PyRep::rowset(cols, vec![row]),
-                PyRep::Integer(1),
-                PyRep::Integer(0),
-                PyRep::Integer(50),
-            ]),
-        ])),
-        list: Vec::new(),
-        dict: Vec::new(),
-    };
-    let normalized = normalize_macho_rpc_reply("corpRegistry", "GetMembersPaged", Ok(paged))
-        .expect("normalize GetMembersPaged");
-    let wire = eve_proto::marshal::encode(&normalized);
-    let roundtrip = eve_proto::marshal::decode(&wire).expect("decode GetMembersPaged");
-    let PyRep::ObjectEx { is_type_2: false, header, .. } = roundtrip else {
-        panic!("expected PagedResultSet ObjectEx");
-    };
-    let PyRep::Tuple(h) = header.as_ref() else { panic!("expected Tuple header") };
-    let PyRep::Tuple(args) = &h[1] else { panic!("expected Tuple args") };
-    let PyRep::ObjectEx { is_type_2: true, list, .. } = &args[0] else {
-        panic!("expected dbutil.CRowset inside PagedResultSet, got {:?}", args[0]);
-    };
-    assert_eq!(list.len(), 1);
-    assert!(matches!(&list[0], PyRep::DBRow { columns, .. } if columns.len() == 24));
-
+fn issue_776_reprocess_list_and_fw_battlefield_compat() {
     // #776: 1-arg batch Reprocess list normalized on wire to (inputItemIDs, outputByTypeID)
     let batch_reply = PyRep::List(vec![
         PyRep::keyval([
@@ -861,44 +785,6 @@ fn wrapped_named_user_error_body_emits_unmacho_destination_for_moniker_retry() {
 }
 
 #[test]
-fn corp_info_keyval_normalizes_to_util_row_for_live_client() {
-    let kv = PyRep::KeyVal(
-        [
-            ("corporationID".to_string(), PyRep::Integer(98_100_001)),
-            (
-                "corporationName".to_string(),
-                PyRep::String("Demo Corp".into()),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    );
-    for svc in ["corpRegistry", "machoNet"] {
-        let res = normalize_macho_rpc_reply(svc, "GetCorporation", Ok(kv.clone())).unwrap();
-        let PyRep::Object { type_name, args } = res else {
-            panic!("expected util.Row PyRep::Object for {svc}");
-        };
-        assert_eq!(type_name, "util.Row");
-        let PyRep::Tuple(state) = *args else {
-            panic!("expected 2-tuple (header, line)");
-        };
-        let (PyRep::List(hdr), PyRep::List(row)) = (&state[0], &state[1]) else {
-            panic!("expected header and line lists");
-        };
-        let pairs: HashMap<&str, &PyRep> = hdr
-            .iter()
-            .zip(row.iter())
-            .map(|(k, v)| (k.as_str().unwrap(), v))
-            .collect();
-        assert_eq!(pairs.get("corporationID"), Some(&&PyRep::Integer(98_100_001)));
-        assert_eq!(
-            pairs.get("corporationName"),
-            Some(&&PyRep::String("Demo Corp".into()))
-        );
-    }
-}
-
-#[test]
 fn signature_instances_normalize_nested_dungeon_map_to_system_counts() {
     let input = PyRep::Dict(vec![
         (
@@ -1022,80 +908,6 @@ fn signature_instances_normalize_nested_dungeon_map_to_system_counts() {
             "did {did} must map to faction {expected_fac}"
         );
     }
-}
-
-#[test]
-fn get_titles_rowset_normalizes_to_dict_of_util_rows_and_empty_dict() {
-    let cols = vec![
-        "titleID",
-        "titleName",
-        "roles",
-        "grantableRoles",
-        "rolesAtHQ",
-        "grantableRolesAtHQ",
-        "rolesAtBase",
-        "grantableRolesAtBase",
-        "rolesAtOther",
-        "grantableRolesAtOther",
-    ];
-    let rowset = PyRep::rowset(
-        cols.clone(),
-        vec![
-            vec![
-                PyRep::Integer(1),
-                PyRep::String("Commander".into()),
-                PyRep::Integer(256),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-            ],
-            vec![
-                PyRep::Integer(2),
-                PyRep::String("Quartermaster".into()),
-                PyRep::Integer(8192),
-                PyRep::Integer(128),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-            ],
-        ],
-    );
-
-    for svc in ["corpRegistry", "machoNet"] {
-        let res = normalize_macho_rpc_reply(svc, "GetTitles", Ok(rowset.clone())).unwrap();
-        let PyRep::Dict(entries) = res else {
-            panic!("expected Dict for {svc}.GetTitles");
-        };
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].0, PyRep::Integer(1));
-        assert_eq!(entries[1].0, PyRep::Integer(2));
-
-        let PyRep::Object { type_name, args } = &entries[0].1 else {
-            panic!("expected util.Row object");
-        };
-        assert_eq!(type_name, "util.Row");
-        let PyRep::Tuple(parts) = args.as_ref() else {
-            panic!("expected (header, line) tuple");
-        };
-        let (PyRep::List(hdr), PyRep::List(line)) = (&parts[0], &parts[1]) else {
-            panic!("expected header & line lists");
-        };
-        assert_eq!(hdr.len(), 10);
-        assert_eq!(line.len(), 10);
-        assert_eq!(line[1], PyRep::String("Commander".into()));
-        assert_eq!(line[2], PyRep::Integer(256));
-    }
-
-    let empty_rs = PyRep::rowset(cols, vec![]);
-    let empty_res = normalize_macho_rpc_reply("corpRegistry", "GetTitles", Ok(empty_rs)).unwrap();
-    assert_eq!(empty_res, PyRep::Dict(vec![]));
 }
 
 #[test]
@@ -1282,4 +1094,214 @@ fn issue_766_agent_mgr_v24_dialogue_briefing_objective_and_location_normalizatio
     assert_eq!(briefing.dict_get("ContentID"), Some(&PyRep::Integer(501)));
     assert_eq!(briefing.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
     assert!(matches!(briefing.dict_get("Mission Keywords"), Some(PyRep::Dict(_))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_933_t5_direct_equals_wire_and_bound_dispatch() {
+    use eve_db::{VirtualServerClock, WorldRepository};
+    use eve_machonet::{service_roles, SessionState};
+    use std::sync::{Arc, OnceLock};
+
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    let shared_sde = || -> Arc<eve_sde::SdeRegistry> {
+        if let Some(sde) = SDE.get() {
+            Arc::clone(sde)
+        } else {
+            let ctx = crate::router::ServerContext::new();
+            let _ = SDE.set(Arc::clone(&ctx.sde));
+            ctx.sde
+        }
+    };
+
+    let now_unix = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+
+    let setup_world = || -> (crate::router::ServerContext, SessionState) {
+        let ctx = crate::router::ServerContext::with_sde_and_repository(
+            shared_sde(),
+            Arc::new(WorldRepository::with_demo_seed()),
+        )
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.corporation_id = corp_id;
+                ch.station_id = Some(station_id);
+                ch.structure_id = None;
+                ch.solar_system_id = sys_id;
+                ch.active_ship_id = ship_id;
+            }
+        });
+        ctx.db
+            .acquire_online_lock(1, 87_601, Some(char_id), true, now_unix)
+            .expect("online lock char 1");
+        ctx.db
+            .acquire_online_lock(2, 87_602, Some(90_000_002), true, now_unix)
+            .expect("online lock char 2");
+        let mut sess = SessionState::new(87_601);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.corporation_id = Some(corp_id);
+        sess.corp_role = u64::MAX;
+        sess.station_id = Some(station_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(ship_id);
+        sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+        (ctx, sess)
+    };
+
+    let (ctx_direct, mut sess_direct) = setup_world();
+    let (ctx_wire, mut sess_wire) = setup_world();
+    let kw = HashMap::new();
+
+    // 1. Migrated corpRegistry + ship RPCs emit identical native wire shapes for None and machoNet:26000.
+    let direct_corp = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "corpRegistry", None, "GetCorporation", &[PyRep::Integer(corp_id)], &kw, None)
+        .await
+        .expect("direct GetCorporation");
+    let wire_corp = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "corpRegistry", None, "GetCorporation", &[PyRep::Integer(corp_id)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire GetCorporation");
+    assert_eq!(direct_corp, wire_corp);
+    assert!(matches!(&direct_corp, PyRep::Object { type_name, .. } if type_name == "util.Row"));
+
+    let upd_direct = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "corpRegistry", None, "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Fleet Ops".into()), PyRep::Integer(256)], &kw, None)
+        .await
+        .expect("direct UpdateTitle");
+    let upd_wire = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "corpRegistry", None, "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Fleet Ops".into()), PyRep::Integer(256)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire UpdateTitle");
+    assert_eq!(upd_direct, upd_wire);
+    let direct_titles = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "corpRegistry", None, "GetTitles", &[], &kw, None)
+        .await
+        .expect("direct GetTitles");
+    let wire_titles = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "corpRegistry", None, "GetTitles", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire GetTitles");
+    assert_eq!(direct_titles, wire_titles);
+    assert!(matches!(&direct_titles, PyRep::Dict(entries) if entries.len() == 16));
+
+    let direct_members = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "corpRegistry", None, "GetMembersPaged", &[PyRep::Integer(corp_id)], &kw, None)
+        .await
+        .expect("direct GetMembersPaged");
+    let wire_members = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "corpRegistry", None, "GetMembersPaged", &[PyRep::Integer(corp_id)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire GetMembersPaged");
+    assert_eq!(direct_members, wire_members);
+
+    let fit_args = [
+        PyRep::Integer(587),
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(2048),
+            PyRep::Integer(11),
+            PyRep::Integer(1),
+        ])]),
+    ];
+    let direct_fit = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "ship", None, "GetShipFittingInfo", &fit_args, &kw, None)
+        .await
+        .expect("direct GetShipFittingInfo");
+    let wire_fit = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "ship", None, "GetShipFittingInfo", &fit_args, &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire GetShipFittingInfo");
+    assert_eq!(direct_fit, wire_fit);
+    assert!(matches!(&direct_fit, PyRep::Tuple(vals) if vals.len() == 4));
+
+    // 2. Services with zeroed caller_trace params wrap bound IDs centrally in dispatch.rs.
+    let extract_substruct_bound_id = |rep: &PyRep| -> Option<u64> {
+        let PyRep::SubStruct(inner) = rep else { return None };
+        let PyRep::SubStream(payload) = inner.as_ref() else { return None };
+        let PyRep::Tuple(parts) = payload.as_ref() else { return None };
+        let PyRep::Bytes(raw) = parts.first()? else { return None };
+        std::str::from_utf8(raw).ok()?.rsplit(':').next()?.parse::<u64>().ok()
+    };
+
+    let direct_skill = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "skillMgr2", None, "GetMySkillHandler", &[], &kw, None)
+        .await
+        .expect("direct skillMgr2.GetMySkillHandler");
+    let wire_skill = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "skillMgr2", None, "GetMySkillHandler", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire skillMgr2.GetMySkillHandler");
+    let PyRep::Integer(skill_bid) = direct_skill else {
+        panic!("expected Integer bound id for direct GetMySkillHandler: {direct_skill:?}");
+    };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, skill_bid as u64).is_ok());
+    let wire_skill_bid = extract_substruct_bound_id(&wire_skill)
+        .expect("wire GetMySkillHandler must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, wire_skill_bid).is_ok());
+    assert_eq!(wire_skill, ctx_wire.bound_object_rep(wire_skill_bid, Some("machoNet:26000")));
+
+    let direct_bind = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "invbroker", None, "MachoBindObject", &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None], &kw, None)
+        .await
+        .expect("direct invbroker bind");
+    let wire_bind = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "invbroker", None, "MachoBindObject", &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire invbroker bind");
+    let PyRep::Tuple(ref d_bind_parts) = direct_bind else { panic!("expected Tuple") };
+    let PyRep::Integer(d_mgr_bid) = d_bind_parts[0] else { panic!("expected Integer mgr bid") };
+    let PyRep::Tuple(ref w_bind_parts) = wire_bind else { panic!("expected wire Tuple") };
+    let w_mgr_bid = extract_substruct_bound_id(&w_bind_parts[0])
+        .expect("wire MachoBindObject must return SubStruct mgr bound ref");
+    assert_eq!(wire_bind, PyRep::Tuple(vec![ctx_wire.bound_object_rep(w_mgr_bid, Some("machoNet:26000")), PyRep::None]));
+
+    let direct_hangar = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "invbroker", Some(d_mgr_bid as u64), "GetInventory", &[PyRep::Integer(10_004), PyRep::None], &kw, None)
+        .await
+        .expect("direct invbroker.GetInventory");
+    let wire_hangar = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "invbroker", Some(w_mgr_bid), "GetInventory", &[PyRep::Integer(10_004), PyRep::None], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire invbroker.GetInventory");
+    let PyRep::Integer(d_hangar_bid) = direct_hangar else { panic!("expected Integer hangar bid") };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, d_hangar_bid as u64).is_ok());
+    let w_hangar_bid = extract_substruct_bound_id(&wire_hangar)
+        .expect("wire invbroker.GetInventory must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, w_hangar_bid).is_ok());
+    assert_eq!(wire_hangar, ctx_wire.bound_object_rep(w_hangar_bid, Some("machoNet:26000")));
+
+    let direct_ship_inv = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "invbroker", Some(d_mgr_bid as u64), "GetInventoryFromId", &[PyRep::Integer(ship_id), PyRep::Integer(0)], &kw, None)
+        .await
+        .expect("direct invbroker.GetInventoryFromId");
+    let wire_ship_inv = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "invbroker", Some(w_mgr_bid), "GetInventoryFromId", &[PyRep::Integer(ship_id), PyRep::Integer(0)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire invbroker.GetInventoryFromId");
+    let PyRep::Integer(d_ship_inv_bid) = direct_ship_inv else { panic!("expected Integer ship inv bid") };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, d_ship_inv_bid as u64).is_ok());
+    let w_ship_inv_bid = extract_substruct_bound_id(&wire_ship_inv)
+        .expect("wire invbroker.GetInventoryFromId must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, w_ship_inv_bid).is_ok());
+    assert_eq!(wire_ship_inv, ctx_wire.bound_object_rep(w_ship_inv_bid, Some("machoNet:26000")));
+
+    let direct_trade = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "trademgr", None, "InitiateTrade", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect("direct trademgr.InitiateTrade");
+    let wire_trade = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "trademgr", None, "InitiateTrade", &[PyRep::Integer(90_000_002)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire trademgr.InitiateTrade");
+    let PyRep::Integer(d_trade_bid) = direct_trade else { panic!("expected Integer trade bid") };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, d_trade_bid as u64).is_ok());
+    let w_trade_bid = extract_substruct_bound_id(&wire_trade)
+        .expect("wire trademgr.InitiateTrade must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, w_trade_bid).is_ok());
+    assert_eq!(wire_trade, ctx_wire.bound_object_rep(w_trade_bid, Some("machoNet:26000")));
 }

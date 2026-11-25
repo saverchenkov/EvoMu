@@ -20,7 +20,7 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
     assert!(matches!(blob, PyRep::Tuple(_)));
 
     // BeanCount before trace is registered returns (None, None)
-    let bc0 = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(12345)], &kw, None)
+    let bc0 = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(12345)], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -37,7 +37,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
             PyRep::String("Traceback (most recent call last):\n  File 'test.py'".into()),
         ],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -49,7 +48,7 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
     assert!(err_id >= 1);
 
     // BeanCount now returns (err_id, b"B")
-    let bc1 = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(12345)], &kw, None)
+    let bc1 = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(12345)], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -70,7 +69,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
                 PyRep::Tuple(vec![PyRep::Integer(-1), PyRep::Integer(0)]),
             )])],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -89,7 +87,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
             PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(100)]),
         )])],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -104,7 +101,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
         "GroupBeanDelivery",
         &[PyRep::Dict(vec![(PyRep::Integer(err_id), PyRep::Integer(3))])],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -119,7 +115,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
         "LogModeChanged",
         &[PyRep::Integer(err_id), PyRep::String("I".into())],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -133,7 +128,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
         "LogModeChanged",
         &[PyRep::Integer(err_id), PyRep::String("I".into())],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -146,7 +140,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
         "GetLogModeForError",
         &[PyRep::Integer(err_id)],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -164,7 +157,6 @@ async fn alert_telemetry_bean_delivery_and_log_modes() {
         "SendProxyStackTraceAlert",
         &[PyRep::Integer(54321), PyRep::String("Proxy trace".into())],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -183,27 +175,27 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
     let kw = HashMap::new();
 
     assert_eq!(
-        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
+        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
         PyRep::List(Vec::new())
     );
     assert!(matches!(
-        handle(&ctx, &mut sess, "air_npe", "is_air_npe_enabled", &[], &kw, None)
+        handle(&ctx, &mut sess, "air_npe", "is_air_npe_enabled", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
         PyRep::Bool(_)
     ));
     assert!(
-        handle(&ctx, &mut sess, "invbroker", "GetItemDescriptor", &[], &kw, None)
+        handle(&ctx, &mut sess, "invbroker", "GetItemDescriptor", &[], &kw)
             .await
             .unwrap()
             .is_ok()
     );
     assert_eq!(
-        handle(&ctx, &mut sess, "config", "GetOldStationData", &[], &kw, None)
+        handle(&ctx, &mut sess, "config", "GetOldStationData", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -230,14 +222,14 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             },
         );
     });
-    let avg_prices = handle(&ctx, &mut sess, "config", "GetAverageMarketPrices", &[], &kw, None)
+    let avg_prices = handle(&ctx, &mut sess, "config", "GetAverageMarketPrices", &[], &kw)
         .await
         .unwrap()
         .unwrap();
     assert!(avg_prices.as_dict().is_some_and(|d| !d.is_empty()));
 
     // GetCohortsForUser, GetCharOmegaDowngradeStatus, GetCharacterLockType
-    let cohorts = handle(&ctx, &mut sess, "charUnboundMgr", "GetCohortsForUser", &[], &kw, None)
+    let cohorts = handle(&ctx, &mut sess, "charUnboundMgr", "GetCohortsForUser", &[], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -251,7 +243,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             "GetCharOmegaDowngradeStatus",
             &[],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -267,7 +258,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             "GetCharacterLockType",
             &[PyRep::Integer(cid)],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -287,7 +277,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             "GetCharacterLockType",
             &[PyRep::Integer(cid)],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -303,7 +292,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
         "GetCharacterLoadSlot",
         &[PyRep::Integer(cid)],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -322,7 +310,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
                 PyRep::String("bad-slot-key".into()),
             ],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -341,7 +328,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             "Upload",
             &[PyRep::Integer(cid), PyRep::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -355,7 +341,7 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
 
     // charMgr, map.GetStationInfo, skillMgr2, operationsManager
     assert_eq!(
-        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -368,7 +354,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
         "GetStationInfo",
         &[PyRep::Integer(60_003_760)],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -385,7 +370,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             "GetStationInfo",
             &[PyRep::Integer(999_999_999)],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -394,13 +378,13 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
         "StationNotFound"
     );
 
-    let attrs = handle(&ctx, &mut sess, "skillMgr2", "GetAttributes", &[], &kw, None)
+    let attrs = handle(&ctx, &mut sess, "skillMgr2", "GetAttributes", &[], &kw)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(attrs.as_dict().map(|d| d.len()), Some(5));
     assert!(
-        handle(&ctx, &mut sess, "skillMgr2", "GetFreeSkillPoints", &[], &kw, None)
+        handle(&ctx, &mut sess, "skillMgr2", "GetFreeSkillPoints", &[], &kw)
             .await
             .unwrap()
             .is_ok()
@@ -413,7 +397,6 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
             "can_character_play_the_tutorial",
             &[],
             &kw,
-            None,
         )
         .await
         .unwrap()
@@ -440,7 +423,6 @@ async fn client_login_state_backed_hollow_arm_remediations() {
             PyRep::String("Traceback: test".into()),
         ],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -454,7 +436,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
             .alert_log_modes
             .insert(eid.to_string(), "db".into());
     });
-    let bc = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(555_111)], &kw, None)
+    let bc = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(555_111)], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -471,7 +453,6 @@ async fn client_login_state_backed_hollow_arm_remediations() {
             PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(1_700_000_000)]),
         )])],
         &kw,
-        None,
     )
     .await
     .unwrap()
@@ -485,7 +466,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
 
     // 2. config.GetBlackListedPlanets reads sorted, deduped blacklisted_planets
     assert_eq!(
-        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
+        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -495,7 +476,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         snap.cluster_and_runtime.blacklisted_planets = Some(vec![40_009_080, 40_009_077, 40_009_080]);
     });
     assert_eq!(
-        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
+        handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -514,7 +495,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
             None,
         );
     });
-    let tokens = handle(&ctx, &mut sess, "userSvc", "GetRedeemTokens", &[], &kw, None)
+    let tokens = handle(&ctx, &mut sess, "userSvc", "GetRedeemTokens", &[], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -526,7 +507,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
 
     // 4. charUnboundMgr.GetCharOmegaDowngradeStatus reflects lapsed vs active Omega subscription
     assert_eq!(
-        handle(&ctx, &mut sess, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[], &kw, None)
+        handle(&ctx, &mut sess, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -536,7 +517,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         store.subscription_expiry.insert(1, 1); // well in the past relative to ctx.now_unix()
     });
     assert_eq!(
-        handle(&ctx, &mut sess, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[], &kw, None)
+        handle(&ctx, &mut sess, "charUnboundMgr", "GetCharOmegaDowngradeStatus", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -547,7 +528,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(30_000_142).or_default().insurgency_corruption_stage = 5;
     });
-    let sec_mods = handle(&ctx, &mut sess, "map", "GetSecurityModifiedSystems", &[], &kw, None)
+    let sec_mods = handle(&ctx, &mut sess, "map", "GetSecurityModifiedSystems", &[], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -559,7 +540,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
 
     // 6. charMgr.GetPaperdollState reads resculpt_pending and paperdoll_state:{char_id}
     assert_eq!(
-        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -569,7 +550,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         store.resculpt_pending.insert(90_000_001);
     });
     assert_eq!(
-        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
@@ -581,7 +562,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
             .insert(90_000_001, "4".into());
     });
     assert_eq!(
-        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)
+        handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw)
             .await
             .unwrap()
             .unwrap(),
