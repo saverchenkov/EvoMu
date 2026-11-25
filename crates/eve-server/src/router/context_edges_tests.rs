@@ -881,6 +881,7 @@ async fn unanchored_and_anchored_invuln_notifications_track_virtual_server_clock
     let ship_b = 910_000_777_i64;
     let offset_ms = -300_000_i64;
     let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_anchored, offset_ms, 1.0);
+    ctx.advance_secs(1);
     ctx.db.with_mut_snapshot(|snap| {
         let mut acc = snap
             .accounts
