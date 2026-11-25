@@ -1083,6 +1083,7 @@ async fn anchor_tidi_on_occupied_system_preserves_pre_anchor_delta_pins_autoscal
     let _ = ctx.drain_notifications_for_char(char_a);
 
     ctx.advance_secs(5);
+    let _ = ctx.drain_notifications_for_char(char_a);
     let pre_sim_ft = ctx.now_machonet_wallclock_filetime_ticks();
 
     // Anchor occupied system with -300_000 ms offset + 0.25 TiDi:
