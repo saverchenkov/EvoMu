@@ -685,18 +685,6 @@ pub(crate) fn handle_place_bid(
     let caller_alliance = session.alliance_id;
     let now_unix = ctx.now_unix();
     let acct_div_idx = active_corp_acct_div(session);
-    if bid_for_corp {
-        if let Some(corp_id) = ctx
-            .db
-            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-            .or(session.corporation_id)
-            .filter(|&id| id > 0)
-        {
-            crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-                ctx, corp_id,
-            );
-        }
-    }
 
     if !lazy_resolve_expired_and_notify(ctx, Some(&[cid]), now_unix).is_empty() {
         return Err(rpc_err(
@@ -1176,14 +1164,6 @@ pub(crate) fn handle_reject_delete_fail(
     let cid = rpc.req_positive_i64(0, "contractID")?;
     let caller_corp = session.corporation_id.unwrap_or(0);
     let now_unix = ctx.now_unix();
-    if let Some(corp_id) = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-        .or(session.corporation_id)
-        .filter(|&id| id > 0)
-    {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-    }
 
     if method == "RejectContract" {
         let should_lazy_expire = ctx.db.with_snapshot(|snap| {

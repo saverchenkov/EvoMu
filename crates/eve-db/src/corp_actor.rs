@@ -245,6 +245,36 @@ pub fn effective_corp_roles_at_db(
     evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, location_id.is_some(), now_unix)
 }
 
+/// Computes `(roles_at_hq, roles_at_base, roles_at_other)` purely from `snap` at `now_unix`,
+/// folding matured `pending_scoped_role_grants` (`now_unix >= matured_at`) and suppressing
+/// unmatured pending scoped role bits (`now_unix < matured_at`).
+pub fn effective_scoped_corp_roles_db(
+    snap: &WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    now_unix: u64,
+) -> (u64, u64, u64) {
+    let ra = snap.corp_role_assignments.get(&(corp_id, char_id));
+    let (mut hq, mut base, mut other) =
+        ra.map_or((0, 0, 0), |r| (r.roles_at_hq, r.roles_at_base, r.roles_at_other));
+    if let Some(&(hq_p, base_p, other_p, matured_at)) = snap
+        .corp_governance
+        .get(&corp_id)
+        .and_then(|g| g.pending_scoped_role_grants.get(&char_id))
+    {
+        if now_unix >= matured_at {
+            hq |= hq_p;
+            base |= base_p;
+            other |= other_p;
+        } else {
+            hq &= !hq_p;
+            base &= !base_p;
+            other &= !other_p;
+        }
+    }
+    (hq, base, other)
+}
+
 impl CorpActor {
     /// Resolves `char_id`'s DB corporation membership, alliance, and global effective roles.
     pub fn resolve(

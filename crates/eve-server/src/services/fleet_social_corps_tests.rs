@@ -335,7 +335,7 @@ fn corp_public_info_update_divisions_members_and_medals() {
     assert_eq!(audit_rows.len(), 1);
     assert_eq!(audit_rows[0][4], PyRep::Integer(1_800_000_500));
 
-    // promote_due_pending_corp_grants + get_character_medals_and_decorations helpers
+    // fold_due_pending_corp_grants_in_snap + get_character_medals_and_decorations helpers
     with_corp_gov(&ctx, |g| {
         let st = g.entry(98_000_001).or_default();
         st.pending_role_grants
@@ -344,7 +344,11 @@ fn corp_public_info_update_divisions_members_and_medals() {
         st.medals.push((1, "Cross of Honor".into(), "Service".into(), 90_000_001, 1_800_010_000));
         st.medal_recipients.push((1, 90_000_002, 90_000_001, "Valor".into(), 2));
     });
-    promote_due_pending_corp_grants(&ctx, 98_000_001);
+    let now_u = ctx.now_unix();
+    let matured = ctx
+        .db
+        .with_mut_snapshot(|snap| fold_due_pending_corp_grants_in_snap(snap, 98_000_001, now_u));
+    emit_matured_corp_grants(&ctx, 98_000_001, matured);
     ctx.db.with_snapshot(|snap| {
         let role = snap.corporations.get(&98_000_001).unwrap().member_roles.get(&90_000_002).copied().unwrap_or(0);
         assert!(corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER));

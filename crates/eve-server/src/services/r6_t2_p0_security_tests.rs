@@ -313,8 +313,9 @@ fn r6_t2_03_issue_372_metenox_drill_security() {
     });
 
     // Inspection ignores CorpSAG1 and guest Hangar items, reporting only synced StructureFuel item blocks (5) without double-counting st.fuel_blocks (#567)
+    let now_u = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
-        let insp = inspect_metenox_drill(&ctx.sde, snap, cored_id, char_id, 1.0).unwrap();
+        let insp = inspect_metenox_drill(&ctx.sde, snap, cored_id, char_id, 1.0, now_u).unwrap();
         assert_eq!(insp.total_struct_fuel, 5);
         assert_eq!(insp.total_struct_gas, 300);
     });

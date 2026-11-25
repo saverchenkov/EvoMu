@@ -221,15 +221,6 @@ fn give_cash_from_corp(
     let amount = parse_transfer_isk_cents(amount_isk)?;
     let reason = reason.to_string();
     let now = ctx.now_unix();
-    let caller_corp_id = ctx
-        .db
-        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
-    if caller_corp_id > 0 {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-            ctx,
-            caller_corp_id,
-        );
-    }
     ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap
             .characters
@@ -486,21 +477,6 @@ fn deposit_plex_inner(
     }
     if ctx.db.with_snapshot(|snap| snap.is_item_in_alsc_lock(item_id)) {
         return Err(rpc_err("ItemLocked", "PLEX item is locked in an Audit Log Secure Container"));
-    }
-    if let Some(corp_id) = ctx.db.with_snapshot(|snap| {
-        let mut cur = snap.items.get(&item_id);
-        for _ in 0..8 {
-            let Some(it) = cur else { break };
-            if snap.corporations.contains_key(&it.owner_id) {
-                return Some(it.owner_id);
-            }
-            cur = snap.items.get(&it.location_id);
-        }
-        None
-    }) {
-        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-            ctx, corp_id,
-        );
     }
     ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(persisted_dock) = snap

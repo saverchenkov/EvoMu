@@ -1949,11 +1949,6 @@ pub async fn handle(
             let mut item_deltas: Vec<ReprocessItemDelta> = Vec::new();
 
             let now_unix = ctx.now_unix();
-            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
-                    ctx, cid,
-                );
-            }
             let char_skills = ctx.character_skill_levels(char_id);
             let is_batch_call = parsed.is_batch_call;
             let res = ctx.db.try_with_mut_snapshot(|snap| {

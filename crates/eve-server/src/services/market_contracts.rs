@@ -1619,9 +1619,6 @@ pub fn handle(
                         ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
                     })
                     .unwrap_or(0);
-                if corp_id > 0 {
-                    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
-                }
                 let account_key = args
                     .get(1)
                     .and_then(|v| v.as_i64())

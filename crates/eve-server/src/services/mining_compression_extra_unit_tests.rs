@@ -147,6 +147,7 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
     });
 
     let empty_fittings = HashMap::new();
+    let now_u = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         assert!(has_active_compressor_burst(&ctx.sde, snap, &empty_fittings, char_id, 30_000_142, 1230, 10.0).is_none());
         assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, struct_hs, 35835));
@@ -158,12 +159,12 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
 
         assert!(caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG2));
         assert!(!caller_can_take_corp_hangar_item(snap, char_id, corp_id, InventoryFlag::CorpSAG1));
-        assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id));
-        assert!(!caller_has_structure_extraction_role(snap, 90_000_077, corp_id));
+        assert!(!caller_has_structure_extraction_role(snap, char_id, corp_id, now_u));
+        assert!(!caller_has_structure_extraction_role(snap, 90_000_077, corp_id, now_u));
 
-        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, 999_999, char_id, 0.40).err().unwrap().code, "StructureNotFound");
-        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, struct_hs, char_id, 0.40).err().unwrap().code, "InvalidStructureType");
-        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, metenox_hs, char_id, 0.40).err().unwrap().code, "AccessDenied");
+        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, 999_999, char_id, 0.40, now_u).err().unwrap().code, "StructureNotFound");
+        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, struct_hs, char_id, 0.40, now_u).err().unwrap().code, "InvalidStructureType");
+        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, metenox_hs, char_id, 0.40, now_u).err().unwrap().code, "AccessDenied");
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -178,7 +179,7 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
         let (_, max_range) = has_active_compressor_burst(&ctx.sde, snap, &empty_fittings, char_id, 30_000_142, 1230, 10.0).expect("active burst");
         assert!((max_range - 66_000.0).abs() < 1.0);
         assert!(has_active_compressor_burst(&ctx.sde, snap, &empty_fittings, char_id, 30_000_142, 30370, 10.0).is_none());
-        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, metenox_hs, char_id, 0.40).err().unwrap().code, "InvalidSystemSecurity");
+        assert_eq!(inspect_metenox_drill(&ctx.sde, snap, metenox_hs, char_id, 0.40, now_u).err().unwrap().code, "InvalidSystemSecurity");
     });
 }
 

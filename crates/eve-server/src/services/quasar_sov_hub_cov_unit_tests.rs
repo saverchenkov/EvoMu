@@ -157,6 +157,12 @@ fn caller_ownership_item_access_mercden_siphon_and_process_configuration_boundar
         ch.alliance_id = Some(alliance_id);
         ch.solar_system_id = sys_id;
         ch.active_ship_id = 88_100;
+        let mut own_corp = CorporationRecord::default();
+        own_corp.corporation_id = corp_id;
+        own_corp.ceo_id = cid;
+        own_corp.alliance_id = Some(alliance_id);
+        own_corp.members.insert(cid);
+        snap.corporations.insert(corp_id, own_corp);
         let mut corp_rec = snap.corporations.values().next().unwrap().clone();
         corp_rec.corporation_id = alt_corp_id;
         corp_rec.alliance_id = Some(alliance_id);

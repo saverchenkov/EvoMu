@@ -28,101 +28,221 @@ pub fn read_corp_gov<R>(
     ctx.db.with_snapshot(|snap| f(&snap.corp_governance))
 }
 
-pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64) {
-    if corp_id <= 0 { return; }
-    let now_unix = ctx.now_unix();
-    let has_due = ctx.db.with_snapshot(|snap| {
-        snap.corp_governance.get(&corp_id).is_some_and(|g| {
-            g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
-                || g.pending_title_role_grants.values().any(|&(_, eff)| now_unix >= eff)
-                || g.pending_scoped_role_grants.values().any(|&(_, _, _, eff)| now_unix >= eff)
-                || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
-        })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaturedCorpGrant {
+    pub character_id: i64,
+    pub old_roles: u64,
+    pub new_roles: u64,
+    pub old_roles_at_hq: u64,
+    pub new_roles_at_hq: u64,
+    pub old_roles_at_base: u64,
+    pub new_roles_at_base: u64,
+    pub old_roles_at_other: u64,
+    pub new_roles_at_other: u64,
+}
+
+/// Folds matured 24-hour pending corporation role grants and friendly-fire toggles
+/// for `corp_id` into `snap` inside an existing write transaction (`#1194`).
+pub(crate) fn fold_due_pending_corp_grants_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    now_unix: u64,
+) -> Vec<MaturedCorpGrant> {
+    if corp_id <= 0 {
+        return Vec::new();
+    }
+    let has_due = snap.corp_governance.get(&corp_id).is_some_and(|g| {
+        g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+            || g.pending_title_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+            || g.pending_scoped_role_grants.values().any(|&(_, _, _, eff)| now_unix >= eff)
+            || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
     });
-    if !has_due { return; }
-    let dec = |m: u64| -> Vec<String> { crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect() };
-    let matured_changes: Vec<(i64, u64, u64, u64, u64, u64, u64, u64, u64)> = ctx.db.with_mut_snapshot(|snap| {
-        let (mut promoted, mut promoted_scoped) = (Vec::<(i64, u64)>::new(), Vec::<(i64, u64, u64, u64)>::new());
-        if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
-            g.pending_role_grants.retain(|&mid, &mut (p_mask, eff)| { if now_unix >= eff { promoted.push((mid, p_mask)); false } else { true } });
-            g.pending_title_role_grants.retain(|&mid, &mut (t_mask, eff)| { if now_unix >= eff { promoted.push((mid, t_mask)); false } else { true } });
-            g.pending_scoped_role_grants.retain(|&mid, &mut (hq, base, other, eff)| { if now_unix >= eff { promoted_scoped.push((mid, hq, base, other)); false } else { true } });
-            if let Some((ff_val, _)) = g.pending_friendly_fire.filter(|&(_, eff)| now_unix >= eff) {
-                g.friendly_fire_legal = ff_val;
-                g.pending_friendly_fire = None;
+    if !has_due {
+        return Vec::new();
+    }
+    let dec = |m: u64| -> Vec<String> {
+        crate::esi::corp_governance_routes::decode_corp_roles(m)
+            .into_iter()
+            .map(String::from)
+            .collect()
+    };
+    let (mut promoted, mut promoted_scoped) = (
+        Vec::<(i64, u64)>::new(),
+        Vec::<(i64, u64, u64, u64)>::new(),
+    );
+    if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
+        g.pending_role_grants.retain(|&mid, &mut (p_mask, eff)| {
+            if now_unix >= eff {
+                promoted.push((mid, p_mask));
+                false
+            } else {
+                true
             }
-        }
-        let mut touched: HashMap<i64, (u64, u64, u64, u64)> = HashMap::new();
-        for mid in promoted.iter().map(|&(m, _)| m).chain(promoted_scoped.iter().map(|&(m, _, _, _)| m)) {
-            touched.entry(mid).or_insert_with(|| {
-                let r0 = snap.corporations.get(&corp_id).map_or(0, |c| c.member_base_roles(mid));
-                let ra0 = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
-                (r0, ra0.roles_at_hq, ra0.roles_at_base, ra0.roles_at_other)
-            });
-        }
-        for (mid, p_mask) in promoted {
-            let new_eff = snap.corporations.get_mut(&corp_id).map_or(p_mask, |corp| {
-                let r = corp.member_roles.entry(mid).or_insert(0);
-                *r |= p_mask;
-                *r
-            });
-            let ra = snap.corp_role_assignments.entry((corp_id, mid)).or_insert_with(|| {
-                eve_db::snapshot_ext::CorpMemberRoleAssignment { character_id: mid, ..Default::default() }
-            });
-            ra.roles |= new_eff;
-            snap.char_scoped_roles.entry(mid).or_default().roles = dec(ra.roles);
-        }
-        for (mid, hq, base, other) in promoted_scoped {
-            let ra = snap.corp_role_assignments.entry((corp_id, mid)).or_insert_with(|| {
-                eve_db::snapshot_ext::CorpMemberRoleAssignment { character_id: mid, ..Default::default() }
-            });
-            ra.roles_at_hq |= hq;
-            ra.roles_at_base |= base;
-            ra.roles_at_other |= other;
-            let sc = snap.char_scoped_roles.entry(mid).or_default();
-            sc.roles_at_hq = dec(ra.roles_at_hq);
-            sc.roles_at_base = dec(ra.roles_at_base);
-            sc.roles_at_other = dec(ra.roles_at_other);
-        }
-        touched.into_iter().map(|(mid, (r0, hq0, base0, other0))| {
-            let r1 = snap.corporations.get(&corp_id).map_or(r0, |c| c.member_base_roles(mid));
-            let ra1 = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
-            (mid, r0, r1, hq0, ra1.roles_at_hq, base0, ra1.roles_at_base, other0, ra1.roles_at_other)
-        }).collect()
-    });
-    if !matured_changes.is_empty() {
-        let corp_ally = ctx.db.with_snapshot(|s| {
-            eve_db::corp_actor::resolve_corp_alliance_id(s, &ctx.sde, corp_id, None)
         });
-        for (mid, r0, r1, hq0, hq1, base0, base1, other0, other1) in matured_changes {
-            if r0 != r1 {
-                super::fleet_social_persistence::queue_forced_corp_sync(ctx, mid, corp_id, corp_ally, r1);
+        g.pending_title_role_grants.retain(|&mid, &mut (t_mask, eff)| {
+            if now_unix >= eff {
+                promoted.push((mid, t_mask));
+                false
+            } else {
+                true
             }
-            super::fleet_social_corp_tail::emit_corp_role_session_changed(ctx, corp_id, mid, r0, r1, hq0, hq1, base0, base1, other0, other1);
+        });
+        g.pending_scoped_role_grants
+            .retain(|&mid, &mut (hq, base, other, eff)| {
+                if now_unix >= eff {
+                    promoted_scoped.push((mid, hq, base, other));
+                    false
+                } else {
+                    true
+                }
+            });
+        if let Some((ff_val, _)) = g.pending_friendly_fire.filter(|&(_, eff)| now_unix >= eff) {
+            g.friendly_fire_legal = ff_val;
+            g.pending_friendly_fire = None;
         }
+    }
+    let mut touched: std::collections::BTreeMap<i64, (u64, u64, u64, u64)> =
+        std::collections::BTreeMap::new();
+    for mid in promoted
+        .iter()
+        .map(|&(m, _)| m)
+        .chain(promoted_scoped.iter().map(|&(m, _, _, _)| m))
+    {
+        touched.entry(mid).or_insert_with(|| {
+            let r0 = snap
+                .corporations
+                .get(&corp_id)
+                .map_or(0, |c| c.member_base_roles(mid));
+            let ra0 = snap
+                .corp_role_assignments
+                .get(&(corp_id, mid))
+                .cloned()
+                .unwrap_or_default();
+            (r0, ra0.roles_at_hq, ra0.roles_at_base, ra0.roles_at_other)
+        });
+    }
+    for (mid, p_mask) in promoted {
+        let new_eff = snap.corporations.get_mut(&corp_id).map_or(p_mask, |corp| {
+            let r = corp.member_roles.entry(mid).or_insert(0);
+            *r |= p_mask;
+            *r
+        });
+        let ra = snap
+            .corp_role_assignments
+            .entry((corp_id, mid))
+            .or_insert_with(|| eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                character_id: mid,
+                ..Default::default()
+            });
+        ra.roles |= new_eff;
+        snap.char_scoped_roles.entry(mid).or_default().roles = dec(ra.roles);
+    }
+    for (mid, hq, base, other) in promoted_scoped {
+        let ra = snap
+            .corp_role_assignments
+            .entry((corp_id, mid))
+            .or_insert_with(|| eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                character_id: mid,
+                ..Default::default()
+            });
+        ra.roles_at_hq |= hq;
+        ra.roles_at_base |= base;
+        ra.roles_at_other |= other;
+        let sc = snap.char_scoped_roles.entry(mid).or_default();
+        sc.roles_at_hq = dec(ra.roles_at_hq);
+        sc.roles_at_base = dec(ra.roles_at_base);
+        sc.roles_at_other = dec(ra.roles_at_other);
+    }
+    touched
+        .into_iter()
+        .map(|(mid, (r0, hq0, base0, other0))| {
+            let r1 = snap
+                .corporations
+                .get(&corp_id)
+                .map_or(r0, |c| c.member_base_roles(mid));
+            let ra1 = snap
+                .corp_role_assignments
+                .get(&(corp_id, mid))
+                .cloned()
+                .unwrap_or_default();
+            MaturedCorpGrant {
+                character_id: mid,
+                old_roles: r0,
+                new_roles: r1,
+                old_roles_at_hq: hq0,
+                new_roles_at_hq: ra1.roles_at_hq,
+                old_roles_at_base: base0,
+                new_roles_at_base: ra1.roles_at_base,
+                old_roles_at_other: other0,
+                new_roles_at_other: ra1.roles_at_other,
+            }
+        })
+        .collect()
+}
+
+/// Emits post-commit forced-session syncs and `OnSessionChanged` notifications for
+/// corporation role grants promoted by [`fold_due_pending_corp_grants_in_snap`].
+pub(crate) fn emit_matured_corp_grants(
+    ctx: &ServerContext,
+    corp_id: i64,
+    grants: Vec<MaturedCorpGrant>,
+) {
+    if grants.is_empty() {
+        return;
+    }
+    let corp_ally = ctx.db.with_snapshot(|s| {
+        eve_db::corp_actor::resolve_corp_alliance_id(s, &ctx.sde, corp_id, None)
+    });
+    for g in grants {
+        if g.old_roles != g.new_roles {
+            super::fleet_social_persistence::queue_forced_corp_sync(
+                ctx,
+                g.character_id,
+                corp_id,
+                corp_ally,
+                g.new_roles,
+            );
+        }
+        super::fleet_social_corp_tail::emit_corp_role_session_changed(
+            ctx,
+            corp_id,
+            g.character_id,
+            g.old_roles,
+            g.new_roles,
+            g.old_roles_at_hq,
+            g.new_roles_at_hq,
+            g.old_roles_at_base,
+            g.new_roles_at_base,
+            g.old_roles_at_other,
+            g.new_roles_at_other,
+        );
     }
 }
 
 /// Promotes all matured 24-hour pending corporation role grants and friendly-fire
-/// toggles across every corporation (`#736`).
+/// toggles across every corporation (`#736`, `#1194`).
 pub(crate) fn promote_all_due_corp_grants(ctx: &ServerContext) {
     let now_unix = ctx.now_unix();
     let due_corps: Vec<i64> = ctx.db.with_snapshot(|snap| {
         snap.corp_governance
             .iter()
-            .filter(|(_, g)| {
-                g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
-                    || g.pending_title_role_grants.values().any(|&(_, eff)| now_unix >= eff)
-                    || g.pending_scoped_role_grants
-                        .values()
-                        .any(|&(_, _, _, eff)| now_unix >= eff)
-                    || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
+            .filter(|(&cid, g)| {
+                cid > 0
+                    && (g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                        || g.pending_title_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                        || g.pending_scoped_role_grants
+                            .values()
+                            .any(|&(_, _, _, eff)| now_unix >= eff)
+                        || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff))
             })
             .map(|(&cid, _)| cid)
             .collect()
     });
     for corp_id in due_corps {
-        promote_due_pending_corp_grants(ctx, corp_id);
+        let grants = ctx
+            .db
+            .with_mut_snapshot(|snap| fold_due_pending_corp_grants_in_snap(snap, corp_id, now_unix));
+        emit_matured_corp_grants(ctx, corp_id, grants);
     }
 }
 
@@ -340,7 +460,6 @@ pub(crate) fn require_corp_caller(
             ));
         }
     }
-    promote_due_pending_corp_grants(ctx, caller_corp);
     let now_unix = ctx.now_unix();
     let (alliance_id, has_director) = ctx.db.with_snapshot(|s| {
         resolve_verified_corp_caller_in_snap(s, &ctx.sde, caller_corp, char_id, now_unix)
@@ -356,7 +475,6 @@ fn get_corp_member_snapshot(
     viewer_id: i64,
     has_director: bool,
 ) -> Vec<CorpMemberRowSnapshot> {
-    promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let gov_opt = snap.corp_governance.get(&corp_id);
@@ -369,6 +487,8 @@ fn get_corp_member_snapshot(
                     snap, &ctx.sde, corp_id, mid, None, now_unix,
                 )
                 .effective_roles;
+                let (roles_at_hq, roles_at_base, roles_at_other) =
+                    snap.effective_scoped_corp_roles_db(corp_id, mid, now_unix);
                 let ra = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
                 let tmask = gov_opt.and_then(|g| g.member_titles.get(&mid).copied()).unwrap_or(0);
                 let title = gov_opt
@@ -417,11 +537,11 @@ fn get_corp_member_snapshot(
                     ship_type_id: ship_id,
                     logon_date_time: logon_ts,
                     grantable_roles: ra.grantable_roles,
-                    roles_at_hq: ra.roles_at_hq,
+                    roles_at_hq,
                     grantable_roles_at_hq: ra.grantable_roles_at_hq,
-                    roles_at_base: ra.roles_at_base,
+                    roles_at_base,
                     grantable_roles_at_base: ra.grantable_roles_at_base,
-                    roles_at_other: ra.roles_at_other,
+                    roles_at_other,
                     grantable_roles_at_other: ra.grantable_roles_at_other,
                     title_mask: tmask,
                     base_id,
@@ -595,9 +715,9 @@ fn eval_member_query_clause(
         let ch = snap.characters.get(&char_id);
         match prop {
             "roles" | "corpRole" => effective_roles,
-            "rolesAtHQ" => ra.map_or(0, |r| r.roles_at_hq as i64),
-            "rolesAtBase" => ra.map_or(0, |r| r.roles_at_base as i64),
-            "rolesAtOther" => ra.map_or(0, |r| r.roles_at_other as i64),
+            "rolesAtHQ" => member.roles_at_hq as i64,
+            "rolesAtBase" => member.roles_at_base as i64,
+            "rolesAtOther" => member.roles_at_other as i64,
             "grantableRoles" => ra.map_or(0, |r| r.grantable_roles as i64),
             "grantableRolesAtHQ" => ra.map_or(0, |r| r.grantable_roles_at_hq as i64),
             "grantableRolesAtBase" => ra.map_or(0, |r| r.grantable_roles_at_base as i64),
@@ -729,8 +849,6 @@ fn handle_audit_member(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let caller_corp = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
-    promote_due_pending_corp_grants(ctx, caller_corp);
     let now_unix = ctx.now_unix();
     let actor = ctx.db.with_snapshot(|snap| {
         eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, now_unix)
@@ -1039,7 +1157,6 @@ pub(crate) fn handle_corps(
                     }))
                 }
             };
-            promote_due_pending_corp_grants(ctx, corp_id);
             let (desc, url, tax_rate_opt, allow_war_opt) = if args.first().and_then(|a| a.as_i64()).is_some() {
                 (args.get(1).and_then(|a| a.as_str()).unwrap_or(""), args.get(2).and_then(|a| a.as_str()).unwrap_or(""), args.get(3).and_then(|a| a.as_f64()), args.get(4).and_then(|a| a.as_bool()))
             } else {
@@ -1113,7 +1230,6 @@ pub(crate) fn handle_corps(
             let c1 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(5);
             let c2 = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
             let c3 = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0);
-            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
                 eve_db::CorpActor::resolve_for_corp(
@@ -1165,7 +1281,6 @@ pub(crate) fn handle_corps(
             if args.len() >= 14 || args.first().and_then(|a| a.as_str()).is_some() || dict_payload.is_some() {
                 let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
                 let dict_str = |k: &str| dict_payload.and_then(|entries| entries.iter().find(|(ek, _)| ek.as_str() == Some(k)).and_then(|(_, ev)| ev.as_str()));
-                promote_due_pending_corp_grants(ctx, corp_id);
                 let now_unix = ctx.now_unix();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let actor = eve_db::CorpActor::resolve_for_corp(
@@ -1232,7 +1347,6 @@ pub(crate) fn handle_corps(
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Division");
             let wallet_name = args.get(2).and_then(|a| a.as_str()).unwrap_or(new_name);
 
-            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let actor = eve_db::CorpActor::resolve_for_corp(
@@ -1430,11 +1544,6 @@ pub(crate) fn handle_corps(
                 .unwrap_or("Accepted");
             let now_unix = ctx.now_unix();
             let fallback_corp = resolve_db_corp_id(ctx, char_id);
-            if let Some(app_cid) = ctx.db.with_snapshot(|s| {
-                s.corporations.values().find(|c| c.applications.contains_key(&app_id)).map(|c| c.corporation_id).or(fallback_corp)
-            }).filter(|&id| id > 0) {
-                promote_due_pending_corp_grants(ctx, app_cid);
-            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Find the corporation owning app_id
@@ -1788,7 +1897,6 @@ pub(crate) fn handle_corps(
                     client_error: None,
                 }));
             }
-            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let actor = eve_db::CorpActor::resolve_for_corp(
@@ -1935,7 +2043,6 @@ pub(crate) fn handle_corps(
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let corp_id = resolve_db_corp_id(ctx, char_id).unwrap_or(0);
             let now_unix = ctx.now_unix();
-            promote_due_pending_corp_grants(ctx, corp_id);
             let can_kick = ctx.db.with_snapshot(|snap| {
                 let actor = eve_db::CorpActor::resolve_for_corp(
                     snap, &ctx.sde, corp_id, char_id, None, now_unix,
@@ -2022,7 +2129,6 @@ pub(crate) fn handle_corps(
             if let Err(e) = crate::services::wallet_ledger::extract_wallet_reason(&rpc, 3) {
                 return Some(Err(e));
             }
-            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let actor = eve_db::CorpActor::resolve_for_corp(

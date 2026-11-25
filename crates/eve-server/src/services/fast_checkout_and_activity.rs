@@ -504,6 +504,7 @@ fn handle_request_mining_cycle_output(
         });
     };
 
+    let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let efficiency = snap
             .auto_moon_miners
@@ -516,6 +517,7 @@ fn handle_request_mining_cycle_output(
             structure_id,
             char_id,
             efficiency,
+            now,
         )?;
         if let Some(ext) = snap.moon_extractions.get(&structure_id) {
             if !ext.moon_ores.is_empty() {

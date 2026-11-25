@@ -7,6 +7,10 @@
 //! `0`) so parallel tracks lowering debt never collide or trigger false failures, while
 //! `zero_required: true` rules remain strictly pinned at `0` across all files.
 
+#[cfg(test)]
+#[path = "arch_debt_ratchet_tests.rs"]
+mod arch_debt_ratchet_tests;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -394,6 +398,8 @@ enum PatternKind {
     DuplicateIsNpcCorpHelpers,
     DuplicateIsExcludedCorpMemberHelpers,
     LegacyEffectiveCorpRolesAtFallback,
+    HandlerCorpGrantPromotion,
+    CorpGrantFoldCallSites,
 }
 
 impl PatternKind {
@@ -426,6 +432,8 @@ impl PatternKind {
         Self::DuplicateIsNpcCorpHelpers,
         Self::DuplicateIsExcludedCorpMemberHelpers,
         Self::LegacyEffectiveCorpRolesAtFallback,
+        Self::HandlerCorpGrantPromotion,
+        Self::CorpGrantFoldCallSites,
     ];
 
     fn as_str(self) -> &'static str {
@@ -462,6 +470,8 @@ impl PatternKind {
             Self::LegacyEffectiveCorpRolesAtFallback => {
                 "legacy_effective_corp_roles_at_fallback"
             }
+            Self::HandlerCorpGrantPromotion => "handler_corp_grant_promotion",
+            Self::CorpGrantFoldCallSites => "corp_grant_fold_call_sites",
         }
     }
 
@@ -529,6 +539,12 @@ impl PatternKind {
             }
             Self::LegacyEffectiveCorpRolesAtFallback => {
                 Some(r"\beffective_corp_roles_at\s*\(")
+            }
+            Self::HandlerCorpGrantPromotion => {
+                Some(r"\bpromote_due_pending_corp_grants\s*\(")
+            }
+            Self::CorpGrantFoldCallSites => {
+                Some(r"\bfold_due_pending_corp_grants_in_snap\s*\(")
             }
         }
     }
@@ -610,6 +626,12 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::DuplicateIsExcludedCorpMemberHelpers => count_fn_is_excluded_corp_member(text),
         PatternKind::LegacyEffectiveCorpRolesAtFallback => {
             count_word_lparen(text, "effective_corp_roles_at")
+        }
+        PatternKind::HandlerCorpGrantPromotion => {
+            count_word_lparen(text, "promote_due_pending_corp_grants")
+        }
+        PatternKind::CorpGrantFoldCallSites => {
+            count_word_lparen(text, "fold_due_pending_corp_grants_in_snap")
         }
     }
 }
@@ -2374,120 +2396,5 @@ mod tests {
         assert_eq!(clean_report.patterns["legacy_effective_corp_roles_at_fallback"].occurrences, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn rust_and_python_ratchet_scanners_agree_on_live_repo() {
-        let canonical_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("canonicalize repo root");
-        let root_str = canonical_root.to_string_lossy();
-        let repo_root = PathBuf::from(root_str.trim_start_matches(r"\\?\"));
-        let script_path =
-            repo_root.join(".agents/skills/evomu-adversarial-review/scripts/tighten_ratchets.py");
-        assert!(
-            script_path.is_file(),
-            "missing tighten_ratchets.py at {}",
-            script_path.display()
-        );
-
-        let output = ["python3", "python"]
-            .into_iter()
-            .find_map(|interp| {
-                match std::process::Command::new(interp)
-                    .arg(&script_path)
-                    .arg("--root")
-                    .arg(&repo_root)
-                    .arg("--dump-counts-json")
-                    .output()
-                {
-                    Ok(out) => Some(Ok(out)),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(err) => Some(Err(format!("failed to execute {interp}: {err}"))),
-                }
-            })
-            .expect("neither python3 nor python interpreter found in PATH")
-            .expect("invoke tighten_ratchets.py --dump-counts-json");
-        assert!(
-            output.status.success(),
-            "tighten_ratchets.py --dump-counts-json failed ({:?}):\nstdout:\n{}\nstderr:\n{}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let py: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .expect("parse --dump-counts-json JSON output");
-
-        // 1. arch_debt per-rule per-file parity
-        let py_arch: BTreeMap<String, BTreeMap<String, usize>> =
-            serde_json::from_value(py["arch_debt"].clone()).expect("parse py arch_debt");
-        let arch_ratchet = ArchDebtRatchet::load_from_path(
-            &repo_root.join("crates/eve-testkit/ratchets/arch_debt_ratchet.json"),
-        )
-        .expect("load arch_debt_ratchet.json");
-        let rust_arch_report = arch_ratchet
-            .verify_dir(&repo_root.join("crates/eve-server/src"))
-            .expect("verify arch_debt on repo");
-        let rust_arch: BTreeMap<String, BTreeMap<String, usize>> = rust_arch_report
-            .patterns
-            .into_iter()
-            .map(|(k, v)| (k, v.per_file))
-            .collect();
-        assert_eq!(
-            rust_arch, py_arch,
-            "Rust vs Python arch_debt per-file scan mismatch"
-        );
-
-        // 2. client_compat per-counter per-file + allowlist set parity
-        let py_compat = &py["client_compat"];
-        let py_compat_counters: BTreeMap<String, BTreeMap<String, usize>> =
-            serde_json::from_value(py_compat["counters"].clone())
-                .expect("parse py client_compat.counters");
-        let py_known_rules: std::collections::BTreeSet<String> =
-            serde_json::from_value(py_compat["known_rules"].clone())
-                .expect("parse py client_compat.known_rules");
-        let py_svc_files: std::collections::BTreeSet<String> =
-            serde_json::from_value(py_compat["service_caller_trace_files"].clone())
-                .expect("parse py client_compat.service_caller_trace_files");
-        let py_it_files: std::collections::BTreeSet<String> =
-            serde_json::from_value(py_compat["it_dispatch_rpc_files"].clone())
-                .expect("parse py client_compat.it_dispatch_rpc_files");
-
-        let rust_compat = crate::client_compat_ratchet::scan_client_compat_in_dirs(
-            &repo_root.join("crates/eve-server"),
-            &repo_root.join("crates/eve-server/tests/it"),
-        )
-        .expect("scan client_compat in repo");
-        assert_eq!(
-            rust_compat.counters, py_compat_counters,
-            "Rust vs Python client_compat per-file counters mismatch"
-        );
-        assert_eq!(
-            rust_compat.known_rules, py_known_rules,
-            "Rust vs Python client_compat known_rules mismatch"
-        );
-        assert_eq!(
-            rust_compat.service_caller_trace_files, py_svc_files,
-            "Rust vs Python client_compat service_caller_trace_files mismatch"
-        );
-        assert_eq!(
-            rust_compat.it_dispatch_rpc_files, py_it_files,
-            "Rust vs Python client_compat it_dispatch_rpc_files mismatch"
-        );
-
-        // 3. untyped_user_error per-file parity
-        let py_untyped: BTreeMap<String, usize> =
-            serde_json::from_value(py["untyped_user_error"].clone())
-                .expect("parse py untyped_user_error");
-        let rust_untyped = crate::client_contract::scan_untyped_user_error_per_file(
-            &repo_root.join("crates/eve-server/src"),
-        )
-        .expect("scan untyped_user_error in repo");
-        assert_eq!(
-            rust_untyped, py_untyped,
-            "Rust vs Python untyped_user_error per-file counts mismatch"
-        );
     }
 }
