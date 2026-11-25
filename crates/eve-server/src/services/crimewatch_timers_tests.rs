@@ -775,7 +775,7 @@ async fn crimewatch_timers_scale_sim_expiries_under_tidi_and_reemit_on_tidi_chan
 
     let base = 1_800_000_000_u64;
     let (ctx, _old_sess, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
-    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base)));
+    ctx.set_clock(std::sync::Arc::new(VirtualServerClock::with_fixed_base(base)));
     let idle_char_id = 90_000_009_i64;
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters[&char_id].clone();
