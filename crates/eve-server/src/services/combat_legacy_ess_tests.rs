@@ -37,6 +37,9 @@ fn step_dynamic_bounty_multiplier_decay_boost_equilibrium_and_clamp() {
 #[tokio::test]
 async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let kwargs = HashMap::new();
 
     // Deleted legacy RPCs return UnimplementedRPC and legacy 1-arg Activate path is removed
