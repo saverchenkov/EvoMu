@@ -26,7 +26,7 @@
     },
     "D_ambient_scopes": {
       "zero_required": false,
-      "max_count": 7,
+      "max_count": 6,
       "rationale_required": false,
       "description": "Thread-local or task-local ambient scopes altering behaviour or carrying dispatch results (#1583 Group D)."
     },
@@ -590,14 +590,6 @@
       "symbol": "STORE",
       "kind": "static_sync",
       "group": "A_game_state",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/quasar_social_chat.rs",
-      "symbol": "LOCAL_NOTICES",
-      "kind": "thread_local",
-      "group": "D_ambient_scopes",
       "max_count": 1
     },
     {
