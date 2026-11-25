@@ -698,10 +698,35 @@ async fn anchor_system_sim_clock_offset_diverges_wall_and_sim_domains_at_tidi_1(
     let sim_0: SimFileTime = ctx
         .peek_system_sim_filetime(sys_id)
         .expect("anchored system must expose peek_system_sim_filetime");
+    assert_eq!(sim_clock.last_wall_filetime(), Some(wall_0));
+    assert_eq!(sim_clock.sim_filetime(), sim_0);
     assert_eq!(
         sim_0.as_ticks() - wall_0.as_ticks(),
         offset_ms * FILETIME_TICKS_PER_MS,
         "SimFileTime must trail WallFileTime by -300_000 ms even at TiDi = 1.0"
+    );
+
+    // Anchoring with a non-1.0 TiDi factor synchronizes manual_tidi_overrides and live SystemHandle.
+    let tidi_sys = 30_000_144_u32;
+    let tidi_clock = ctx.anchor_system_sim_clock_with_offset_ms(tidi_sys, offset_ms, 0.25);
+    assert_eq!(tidi_clock.last_wall_filetime(), Some(wall_0));
+    assert_eq!(
+        Some(tidi_clock.sim_filetime()),
+        ctx.peek_system_sim_filetime(tidi_sys)
+    );
+    assert!((tidi_clock.tidi_factor() - 0.25).abs() < 1e-9);
+    assert!(
+        (crate::services::serverops_cluster::get_system_tidi_factor(&ctx, tidi_sys) - 0.25).abs()
+            < 1e-9
+    );
+    assert!(
+        (ctx.systems
+            .get_handle(tidi_sys)
+            .expect("tidi-anchored system must spawn/sync SystemHandle")
+            .tidi_factor()
+            - 0.25)
+            .abs()
+            < 1e-9
     );
 
     // Advance 10 real seconds at TiDi = 1.0: both clocks advance +10s preserving the -300_000 ms offset.
@@ -736,5 +761,203 @@ async fn anchor_system_sim_clock_offset_diverges_wall_and_sim_domains_at_tidi_1(
     assert_eq!(
         sim_2.as_ticks() - wall_2.as_ticks(),
         (offset_ms - 10_000) * FILETIME_TICKS_PER_MS
+    );
+    // At 0.50x TiDi, remaining wall duration (+40s) maps to +20s in SimFileTime.
+    let sim_exp_tidi =
+        ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, ctx.now_unix_secs() + 40);
+    assert_eq!(sim_exp_tidi, sim_2.saturating_add_secs(20));
+}
+
+#[tokio::test]
+async fn unanchored_and_anchored_invuln_notifications_track_virtual_server_clock() {
+    use eve_db::clock::FILETIME_TICKS_PER_MS;
+    use eve_machonet::SessionState;
+
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    ctx.advance_secs(10);
+
+    // 1. Unanchored system: both OnInvulunOnUndockingUpdated and OnRestoringInvulnUpdated
+    // track VirtualServerClock (now_machonet_wall_filetime) instead of host SystemTime::now().
+    let sys_unanchored = 30_000_142_u32;
+    let station_a = 60_003_760_i64;
+    let char_a = 90_000_001_i64;
+    let ship_a = 910_000_101_i64;
+    let (user_a, corp_a) = ctx.db.with_snapshot(|s| {
+        let c = &s.characters[&char_a];
+        (c.user_id, c.corporation_id)
+    });
+    ctx.db
+        .acquire_online_lock(user_a, 9_201, Some(char_a), true, ctx.now_unix_secs())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.station_id = Some(station_a);
+            ch.structure_id = None;
+            ch.solar_system_id = sys_unanchored;
+            ch.active_ship_id = ship_a;
+        }
+        snap.items.insert(
+            ship_a,
+            make_item(ship_a, 587, char_a, station_a, InventoryFlag::Hangar),
+        );
+    });
+    let mut sess_a = SessionState::new(9_201);
+    sess_a.user_id = Some(user_a);
+    sess_a.character_id = Some(char_a);
+    sess_a.corporation_id = Some(corp_a);
+    sess_a.solar_system_id = Some(sys_unanchored);
+    sess_a.station_id = Some(station_a);
+    sess_a.ship_id = Some(ship_a);
+
+    crate::services::station_structure::handle(
+        &ctx,
+        &mut sess_a,
+        "stationSvc",
+        "Undock",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("unanchored undock ok");
+
+    let wall_a0 = ctx.now_machonet_wall_filetime();
+    let expected_undock_end_a = wall_a0.saturating_add_secs(30).as_ticks();
+    let notifs_a = ctx.drain_notifications_for_char(char_a);
+    let restoring_a0 = notifs_a
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("unanchored OnRestoringInvulnUpdated");
+    assert_eq!(restoring_a0.args[1].as_i64(), Some(expected_undock_end_a));
+    let undocking_a0 = notifs_a
+        .iter()
+        .find(|n| n.event == "OnInvulunOnUndockingUpdated")
+        .expect("unanchored OnInvulunOnUndockingUpdated");
+    assert_eq!(undocking_a0.args[1].as_i64(), Some(expected_undock_end_a));
+
+    ctx.advance_secs(25);
+    let wall_a1 = ctx.now_machonet_wall_filetime();
+    assert_eq!(wall_a1, wall_a0.saturating_add_secs(25));
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(
+        &ctx,
+        char_a,
+        ship_a,
+        150_000_000,
+    );
+    let notifs_a1 = ctx.drain_notifications_for_char(char_a);
+    let restoring_a1 = notifs_a1
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("unanchored OnRestoringInvulnUpdated after advance_secs");
+    assert_eq!(
+        restoring_a1.args[1].as_i64(),
+        Some(wall_a1.as_ticks() + 150_000_000)
+    );
+
+    ctx.advance_secs_without_sim_clock_rebase(300);
+    assert_eq!(ctx.now_machonet_wall_filetime(), wall_a1);
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(
+        &ctx,
+        char_a,
+        ship_a,
+        150_000_000,
+    );
+    let notifs_a2 = ctx.drain_notifications_for_char(char_a);
+    let restoring_a2 = notifs_a2
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("unanchored OnRestoringInvulnUpdated after unrebased advance");
+    assert_eq!(
+        restoring_a2.args[1].as_i64(),
+        Some(wall_a1.as_ticks() + 150_000_000)
+    );
+
+    // 2. Offset-anchored system (-300_000 ms): both notifications shift by the system's anchored
+    // SimFileTime offset and track subsequent VirtualServerClock progression.
+    let sys_anchored = 30_000_144_u32;
+    let station_b = 60_003_761_i64;
+    let char_b = 90_000_777_i64;
+    let ship_b = 910_000_777_i64;
+    let offset_ms = -300_000_i64;
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_anchored, offset_ms, 1.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&char_a].clone();
+        ch.character_id = char_b;
+        ch.user_id = char_b as u64;
+        ch.name = "Anchored Invuln Pilot".into();
+        ch.station_id = Some(station_b);
+        ch.structure_id = None;
+        ch.solar_system_id = sys_anchored;
+        ch.active_ship_id = ship_b;
+        snap.characters.insert(char_b, ch);
+        snap.items.insert(
+            ship_b,
+            make_item(ship_b, 587, char_b, station_b, InventoryFlag::Hangar),
+        );
+    });
+    ctx.db
+        .acquire_online_lock(char_b as u64, 9_202, Some(char_b), true, ctx.now_unix_secs())
+        .unwrap();
+    let mut sess_b = SessionState::new(9_202);
+    sess_b.user_id = Some(char_b as u64);
+    sess_b.character_id = Some(char_b);
+    sess_b.corporation_id = Some(corp_a);
+    sess_b.solar_system_id = Some(sys_anchored);
+    sess_b.station_id = Some(station_b);
+    sess_b.ship_id = Some(ship_b);
+
+    crate::services::station_structure::handle(
+        &ctx,
+        &mut sess_b,
+        "stationSvc",
+        "Undock",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("anchored undock ok");
+
+    let wall_b0 = ctx.now_machonet_wall_filetime();
+    let sim_b0 = ctx
+        .peek_system_sim_filetime(sys_anchored)
+        .expect("anchored sys sim time");
+    assert_eq!(
+        sim_b0.as_ticks() - wall_b0.as_ticks(),
+        offset_ms * FILETIME_TICKS_PER_MS
+    );
+    let expected_undock_end_b = sim_b0.saturating_add_secs(30).as_ticks();
+    let notifs_b = ctx.drain_notifications_for_char(char_b);
+    let restoring_b0 = notifs_b
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("anchored OnRestoringInvulnUpdated");
+    assert_eq!(restoring_b0.args[1].as_i64(), Some(expected_undock_end_b));
+    let undocking_b0 = notifs_b
+        .iter()
+        .find(|n| n.event == "OnInvulunOnUndockingUpdated")
+        .expect("anchored OnInvulunOnUndockingUpdated");
+    assert_eq!(undocking_b0.args[1].as_i64(), Some(expected_undock_end_b));
+
+    ctx.advance_secs(12);
+    let sim_b1 = ctx
+        .peek_system_sim_filetime(sys_anchored)
+        .expect("anchored sys sim time after advance");
+    assert_eq!(sim_b1, sim_b0.saturating_add_secs(12));
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(
+        &ctx,
+        char_b,
+        ship_b,
+        200_000_000,
+    );
+    let notifs_b1 = ctx.drain_notifications_for_char(char_b);
+    let restoring_b1 = notifs_b1
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("anchored OnRestoringInvulnUpdated after advance");
+    assert_eq!(
+        restoring_b1.args[1].as_i64(),
+        Some(sim_b1.as_ticks() + 200_000_000)
     );
 }

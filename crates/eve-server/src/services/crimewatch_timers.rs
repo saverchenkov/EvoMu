@@ -293,70 +293,12 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     emit_crimewatch_timer_notifications_with_state(ctx, char_id, &st, now_unix);
 }
 
-pub fn emit_crimewatch_timer_notifications_with_state(
+fn dispatch_crimewatch_timer_updates(
     ctx: &ServerContext,
     char_id: i64,
-    st: &crate::combat::CharacterCrimeWatchState,
-    now_unix: u64,
+    updates: &[(&str, i64, Option<SimFileTime>)],
 ) {
-    let ComputedCrimewatchTimerStates {
-        timers: [(weap_code, weap_val), (pvp_code, pvp_val), (npc_code, npc_val), (crim_code, crim_val), (dis_code, dis_val)],
-        sigs: (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig),
-        next_trig,
-        prev_opt,
-    } = compute_crimewatch_timer_states_with_state(ctx, char_id, st, now_unix);
-    let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
-
-    let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
-    if prev_opt.is_none() && is_all_idle {
-        return;
-    }
-    let new_sigs = (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig);
-    if !is_all_idle && prev_opt == Some(new_sigs) {
-        let same_trig = with_combat_runtime(ctx, |rt| {
-            rt.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]) == next_trig
-        });
-        if same_trig {
-            return;
-        }
-    }
-    let mut updates: Vec<(&str, i64, Option<SimFileTime>)> = Vec::new();
-    let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
-    let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
-    with_mut_combat_runtime(ctx, |rt| {
-        if prev_opt.is_none() && is_all_idle { return; }
-        if prev.0 != weap_sig && !(prev.0 == 0 && weap_code == 100) { updates.push(("OnWeaponsTimerUpdate", weap_code, weap_val)); }
-        if prev.1 != pvp_sig && !(prev.1 == 0 && pvp_code == 200) { updates.push(("OnPvpTimerUpdate", pvp_code, pvp_val)); }
-        if prev.2 != npc_sig && !(prev.2 == 0 && npc_code == 400) { updates.push(("OnNpcTimerUpdate", npc_code, npc_val)); }
-        if prev.3 != crim_sig && !(prev.3 == 0 && crim_code == 300) {
-            updates.push(("OnCriminalTimerUpdate", crim_code, crim_val));
-            let prev_c = prev.3 >> 40;
-            if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
-                crim_transition = Some((vec![], vec![], vec![char_id]));
-            } else if matches!(crim_code, 302 | 304) && !matches!(prev_c, 302 | 304) {
-                crim_transition = Some((vec![], vec![char_id], vec![]));
-            } else if crim_code == 300 && prev.3 != 0 && prev.3 != 300 {
-                crim_transition = Some((vec![char_id], vec![], vec![]));
-            }
-        }
-        if prev.4 != dis_sig && !(prev.4 == 0 && dis_code == 500) {
-            updates.push(("OnDisapprovalTimerUpdate", dis_code, dis_val));
-            let prev_d = prev.4 >> 40;
-            if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {
-                dis_transition = Some((vec![], vec![char_id]));
-            } else if dis_code == 500 && prev.4 != 0 && prev.4 != 500 {
-                dis_transition = Some((vec![char_id], vec![]));
-            }
-        }
-        if is_all_idle {
-            rt.crimewatch_timer_states.remove(&char_id);
-            rt.crimewatch_timer_triggered_at.remove(&char_id);
-        } else {
-            rt.crimewatch_timer_states.insert(char_id, (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig));
-            rt.crimewatch_timer_triggered_at.insert(char_id, next_trig);
-        }
-    });
-    for (ev, code, expiry_time) in updates {
+    for &(ev, code, expiry_time) in updates {
         match ev {
             "OnWeaponsTimerUpdate" => {
                 crate::services::notify_emitters_fleet_combat::emit_weapons_timer_update(
@@ -407,6 +349,81 @@ pub fn emit_crimewatch_timer_notifications_with_state(
             }
         }
     }
+}
+
+fn emit_crimewatch_timer_notifications_inner(
+    ctx: &ServerContext,
+    char_id: i64,
+    st: &crate::combat::CharacterCrimeWatchState,
+    now_unix: u64,
+    force_reemit_active: bool,
+) {
+    let ComputedCrimewatchTimerStates {
+        timers: [(weap_code, weap_val), (pvp_code, pvp_val), (npc_code, npc_val), (crim_code, crim_val), (dis_code, dis_val)],
+        sigs: (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig),
+        next_trig,
+        prev_opt,
+    } = compute_crimewatch_timer_states_with_state(ctx, char_id, st, now_unix);
+    let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
+
+    let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
+    if prev_opt.is_none() && is_all_idle {
+        return;
+    }
+    let new_sigs = (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig);
+    if !force_reemit_active && !is_all_idle && prev_opt == Some(new_sigs) {
+        let same_trig = with_combat_runtime(ctx, |rt| {
+            rt.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]) == next_trig
+        });
+        if same_trig {
+            return;
+        }
+    }
+    let mut updates: Vec<(&str, i64, Option<SimFileTime>)> = Vec::new();
+    let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
+    let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
+    with_mut_combat_runtime(ctx, |rt| {
+        if prev_opt.is_none() && is_all_idle { return; }
+        let slots = [
+            ("OnWeaponsTimerUpdate", prev.0, weap_sig, weap_code, weap_val),
+            ("OnPvpTimerUpdate", prev.1, pvp_sig, pvp_code, pvp_val),
+            ("OnNpcTimerUpdate", prev.2, npc_sig, npc_code, npc_val),
+            ("OnCriminalTimerUpdate", prev.3, crim_sig, crim_code, crim_val),
+            ("OnDisapprovalTimerUpdate", prev.4, dis_sig, dis_code, dis_val),
+        ];
+        for (ev, prev_sig, sig, code, val) in slots {
+            let slot_changed = prev_sig != sig && !(prev_sig == 0 && val.is_none());
+            if slot_changed || (force_reemit_active && val.is_some()) {
+                updates.push((ev, code, val));
+            }
+        }
+        if prev.3 != crim_sig && !(prev.3 == 0 && crim_code == 300) {
+            let prev_c = prev.3 >> 40;
+            if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
+                crim_transition = Some((vec![], vec![], vec![char_id]));
+            } else if matches!(crim_code, 302 | 304) && !matches!(prev_c, 302 | 304) {
+                crim_transition = Some((vec![], vec![char_id], vec![]));
+            } else if crim_code == 300 && prev.3 != 0 && prev.3 != 300 {
+                crim_transition = Some((vec![char_id], vec![], vec![]));
+            }
+        }
+        if prev.4 != dis_sig && !(prev.4 == 0 && dis_code == 500) {
+            let prev_d = prev.4 >> 40;
+            if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {
+                dis_transition = Some((vec![], vec![char_id]));
+            } else if dis_code == 500 && prev.4 != 0 && prev.4 != 500 {
+                dis_transition = Some((vec![char_id], vec![]));
+            }
+        }
+        if is_all_idle {
+            rt.crimewatch_timer_states.remove(&char_id);
+            rt.crimewatch_timer_triggered_at.remove(&char_id);
+        } else {
+            rt.crimewatch_timer_states.insert(char_id, new_sigs);
+            rt.crimewatch_timer_triggered_at.insert(char_id, next_trig);
+        }
+    });
+    dispatch_crimewatch_timer_updates(ctx, char_id, &updates);
     if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
         if let Some((new_idles, new_suspects, new_criminals)) = crim_transition {
             crate::services::notify_emitters_fleet_combat::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
@@ -414,6 +431,34 @@ pub fn emit_crimewatch_timer_notifications_with_state(
         if let Some((new_idles, new_naughty)) = dis_transition {
             crate::services::notify_emitters_combat_ess_progression::emit_system_disapproval_flag_updates(ctx, sys_id, &new_idles, &new_naughty);
         }
+    }
+}
+
+pub fn emit_crimewatch_timer_notifications_with_state(
+    ctx: &ServerContext,
+    char_id: i64,
+    st: &crate::combat::CharacterCrimeWatchState,
+    now_unix: u64,
+) {
+    emit_crimewatch_timer_notifications_inner(ctx, char_id, st, now_unix, false);
+}
+
+/// Re-emits active CrimeWatch timer notifications for online in-space characters whose solar system
+/// TiDi factor transitioned (`DoSimClockRebase`), recalculating [`SimFileTime`] expiries under the new
+/// dilation rate (`#1196`). Idle non-flagged pilots are skipped without notification churn.
+pub fn reemit_active_crimewatch_timers_on_tidi_change(
+    ctx: &ServerContext,
+    char_ids: &[i64],
+    now_unix: u64,
+) {
+    for &char_id in char_ids {
+        let Some(st) = ctx.crimewatch.state_of(char_id) else {
+            // Still check combat runtime NPC/disapproval timers when char has no crimewatch struct yet.
+            let st = crate::combat::CharacterCrimeWatchState::default();
+            emit_crimewatch_timer_notifications_inner(ctx, char_id, &st, now_unix, true);
+            continue;
+        };
+        emit_crimewatch_timer_notifications_inner(ctx, char_id, &st, now_unix, true);
     }
 }
 

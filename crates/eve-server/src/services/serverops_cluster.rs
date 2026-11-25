@@ -109,7 +109,7 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _o
     in_space_chars.sort_unstable();
     in_space_chars.dedup();
     // parity: notify:DoSimClockRebase
-    for char_id in in_space_chars {
+    for &char_id in &in_space_chars {
         ctx.emit_typed_with_id_type(
             NotificationTarget::Character(char_id),
             "solarsystemid2",
@@ -121,6 +121,11 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _o
             },
         );
     }
+    crate::services::combat_crimewatch::crimewatch_timers::reemit_active_crimewatch_timers_on_tidi_change(
+        ctx,
+        &in_space_chars,
+        ctx.now_unix(),
+    );
 }
 
 /// Emits `DoSimClockRebase((oldSimTime, newSimTime))` **once** directly to `char_id` on login

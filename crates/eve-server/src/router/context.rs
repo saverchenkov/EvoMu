@@ -2313,12 +2313,12 @@ impl ServerContext {
         self.clock().now_blueos_filetime_ticks()
     }
 
-    /// Returns a BlueOS 100ns FILETIME timestamp anchored to the client's `blue.os.GetSimTime()`
-    /// baseline (host wallclock), so `/advancetime` calls via
-    /// [`Self::advance_secs_without_sim_clock_rebase`] never push godma/FX/timer timestamps
-    /// >24h into the client's future and trigger `godma.py ActualStopEffect` sleep overflows.
+    /// Returns a BlueOS 100ns FILETIME timestamp aligned with the client's MachoNet clock
+    /// (`ctx.clock()` minus `unrebased_clock_offset_secs`), so `/advancetime` calls via
+    /// [`Self::advance_secs_without_sim_clock_rebase`] stay client-anchored while still
+    /// tracking [`VirtualServerClock`] instead of reading OS `SystemTime::now()` (`#1196`).
     pub fn now_client_sim_filetime_ticks(&self) -> i64 {
-        host_wall_blueos_filetime_ticks()
+        self.now_machonet_wallclock_filetime_ticks()
     }
 
     /// Returns a BlueOS 100ns FILETIME timestamp anchored to `solar_system_id`'s sim clock

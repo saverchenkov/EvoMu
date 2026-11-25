@@ -88,15 +88,18 @@ impl ServerContext {
 
     /// Anchors `solar_system_id`'s simulation clock with an explicit `(sim_time - wallclock)`
     /// millisecond offset and TiDi factor (`0.10..=1.00`) for deterministic multi-domain fixtures
-    /// and clock-offset testing (`#1196`).
+    /// and clock-offset testing (`#1196`), keeping `sim_clock_anchoring`, `manual_tidi_overrides`,
+    /// and live `SystemHandle` synchronized.
     pub fn anchor_system_sim_clock_with_offset_ms(
         &self,
         solar_system_id: u32,
         sim_minus_wall_ms: i64,
         tidi_factor: f64,
     ) -> eve_db::clock::SolarSystemSimClock {
-        let clamped_tidi = eve_db::clock::SolarSystemSimClock::clamp_tidi_factor(tidi_factor).unwrap_or(1.0);
-        let now_wall_ms = eve_db::clock::WallUnixMs::from_millis(self.now_machonet_wallclock_ms());
+        let clamped_tidi =
+            eve_db::clock::SolarSystemSimClock::clamp_tidi_factor(tidi_factor).unwrap_or(1.0);
+        let now_wall_ft = self.now_machonet_wall_filetime();
+        let now_wall_ms = now_wall_ft.to_wall_unix_ms().unwrap_or_default();
         let sim_clock = eve_db::clock::SolarSystemSimClock::new(
             now_wall_ms,
             sim_minus_wall_ms,
@@ -112,34 +115,71 @@ impl ServerContext {
             )
             .expect("zero-offset SolarSystemSimClock is valid")
         });
-        let now_wall_ft = self.now_machonet_wallclock_filetime_ticks();
-        let offset_ticks = sim_clock
-            .sim_minus_wall_offset_ms()
-            .unwrap_or(0)
-            .saturating_mul(eve_db::clock::FILETIME_TICKS_PER_MS);
-        let anchor_sim_ft = now_wall_ft.saturating_add(offset_ticks);
-        let mut cn = self
-            .systems
-            .cluster_nodes
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        cn.sim_clock_anchoring
-            .insert(solar_system_id, (now_wall_ft, anchor_sim_ft, sim_clock.tidi_factor()));
-        let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
-        *gen = (*gen).max(1);
-        let prev_act = cn
-            .last_sim_activation_ft_by_system
-            .get(&solar_system_id)
-            .copied()
-            .unwrap_or(0);
-        cn.last_sim_activation_ft_by_system
-            .insert(solar_system_id, anchor_sim_ft.max(prev_act));
+        let anchor_wall_ft = sim_clock
+            .last_wall_filetime()
+            .unwrap_or(now_wall_ft)
+            .as_ticks();
+        let anchor_sim_ft = sim_clock.sim_filetime().as_ticks();
+        let has_tidi_override = (clamped_tidi - 1.0).abs()
+            >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+        let had_existing_override = {
+            let mut cn = self
+                .systems
+                .cluster_nodes
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            cn.sim_clock_anchoring
+                .insert(solar_system_id, (anchor_wall_ft, anchor_sim_ft, clamped_tidi));
+            let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
+            *gen = (*gen).max(1);
+            let prev_act = cn
+                .last_sim_activation_ft_by_system
+                .get(&solar_system_id)
+                .copied()
+                .unwrap_or(0);
+            cn.last_sim_activation_ft_by_system
+                .insert(solar_system_id, anchor_sim_ft.max(prev_act));
+            if has_tidi_override {
+                false
+            } else {
+                cn.manual_tidi_overrides.contains_key(&solar_system_id)
+                    || self.systems.get_handle(solar_system_id).is_some_and(|h| {
+                        (h.tidi_factor() - 1.0).abs()
+                            >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
+                    })
+            }
+        };
+        if has_tidi_override {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let _ = crate::services::serverops_cluster::set_system_tidi_factor(
+                    self,
+                    solar_system_id,
+                    clamped_tidi,
+                );
+            } else {
+                let mut cn = self
+                    .systems
+                    .cluster_nodes
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                cn.manual_tidi_overrides.insert(solar_system_id, clamped_tidi);
+                if let Some(handle) = self.systems.get_handle(solar_system_id) {
+                    let _ = handle.set_tidi_factor_raw(clamped_tidi);
+                }
+            }
+        } else if had_existing_override {
+            let _ = crate::services::serverops_cluster::clear_manual_system_tidi_override(
+                self,
+                solar_system_id,
+            );
+        }
         sim_clock
     }
 
     /// Maps a virtual Unix timer expiry timestamp into `char_id`'s current [`eve_db::clock::SimFileTime`]
     /// domain (`blue.os.GetSimTime()`), preserving zero-skew equality when the character's system
-    /// has no simulation-clock offset anchored and shifting by `(sim - wall)` when anchored (`#1196`).
+    /// has no simulation-clock offset or TiDi active, shifting by `(sim - wall)` when anchored,
+    /// and scaling remaining wall ticks by the system's active TiDi factor (`0.10..=1.0`, `#1196`).
     pub fn virtual_unix_expiry_to_sim_filetime_for_char(
         &self,
         char_id: i64,
@@ -157,13 +197,49 @@ impl ServerContext {
             })
             .flatten();
         if let Some(sys_id) = space_sys_opt {
-            if let Some(cur_sim_ft) = self.peek_system_sim_filetime(sys_id) {
-                let now_wall_ft = self.now_machonet_wallclock_filetime_ticks();
-                let sim_minus_wall_ticks = cur_sim_ft.as_ticks().saturating_sub(now_wall_ft);
-                return eve_db::clock::SimFileTime::from_ticks(
-                    macho_exp_ft.as_ticks().saturating_add(sim_minus_wall_ticks),
-                );
-            }
+            let now_wall_ft = self.now_machonet_wallclock_filetime_ticks();
+            let anchor_opt = {
+                let cn = self
+                    .systems
+                    .cluster_nodes
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                cn.sim_clock_anchoring.get(&sys_id).copied()
+            };
+            let live_factor =
+                crate::services::serverops_cluster::get_system_tidi_factor(self, sys_id);
+            let (cur_sim_ft, effective_factor) =
+                if let Some((anchor_wall_ft, anchor_sim_ft, anchor_factor)) = anchor_opt {
+                    let clamped_anchor_factor = anchor_factor.clamp(0.10, 1.0);
+                    let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
+                    let dilated_ft =
+                        ((elapsed_wall_ft as f64) * clamped_anchor_factor).round() as i64;
+                    let sim_ft = anchor_sim_ft.saturating_add(dilated_ft);
+                    let eff = if (live_factor - clamped_anchor_factor).abs()
+                        >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
+                    {
+                        live_factor
+                    } else {
+                        clamped_anchor_factor
+                    };
+                    (sim_ft, eff)
+                } else {
+                    (now_wall_ft, live_factor)
+                };
+            let clamped_factor = if effective_factor.is_finite() {
+                effective_factor.clamp(0.10, 1.0)
+            } else {
+                1.0
+            };
+            let remaining_wall_ticks = macho_exp_ft.as_ticks().saturating_sub(now_wall_ft);
+            let scaled_remaining_ticks = if clamped_factor < 1.0 {
+                ((remaining_wall_ticks as f64) * clamped_factor).round() as i64
+            } else {
+                remaining_wall_ticks
+            };
+            return eve_db::clock::SimFileTime::from_ticks(
+                cur_sim_ft.saturating_add(scaled_remaining_ticks),
+            );
         }
         eve_db::clock::SimFileTime::from_ticks(macho_exp_ft.as_ticks())
     }
