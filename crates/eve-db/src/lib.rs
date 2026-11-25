@@ -237,6 +237,8 @@ pub struct Sp6PersistedState {
     pub session_change_timers: CowMap<i64, SessionChangeTimerRecord>,
     #[serde(skip)]
     pub nanite_paste_shortfall: CowMap<(i64, i64), i32>,
+    #[serde(skip)]
+    pub post_unlock_committed_seq: CowMap<SolarSystemId, u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_runtime_json: Option<String>,
 }

@@ -2092,8 +2092,9 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         Some(exec_ctx.pending_destroyed_actor),
         dt_sim,
     );
-    let (virtual_item_deltas, virtual_crystal_dmg_deltas) =
-        super::post_unlock::seed_pending_charge_reservations(
+    let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
+        super::post_unlock::begin_tick_charge_reservations(
+            exec_ctx.solar_system_id,
             exec_ctx.actor_st,
             exec_ctx.completed_post_unlock_seq_actor,
         );
@@ -2121,6 +2122,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         Some(&mut exec_ctx.actor_st.module_reload_sim_remaining),
         deact_guard.as_ref(),
         Some(exec_ctx.pending_destroyed_actor),
+        tick_snap_opt,
         virtual_item_deltas,
         virtual_crystal_dmg_deltas,
         exec_ctx.post_unlock_ops,

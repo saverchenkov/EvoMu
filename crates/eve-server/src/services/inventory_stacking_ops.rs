@@ -844,9 +844,7 @@ fn dispatch_rpc<'a>(
     kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
     Box::pin(async move {
-        if service == "invbroker" {
-            crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
-        }
+        crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
         handle_stack_ops(
             ctx,
             session,

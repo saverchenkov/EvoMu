@@ -579,7 +579,8 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
         base_core_strengths, sde_opt, db_opt, ball_space_entry_epochs, fit_projections,
         weapon_cycle_start_modules, pending_missile_launches, mechanic_rng_opt, tactical_state,
         pending_cycle_actions, sim_elapsed_secs, dt, tidi_factor, reload_sim_remaining,
-        deactivation_hook, pending_destroyed_outbox, HashMap::new(), HashMap::new(), post_unlock,
+        deactivation_hook, pending_destroyed_outbox, db_opt.as_deref().map(|db| db.published_snapshot_arc()),
+        HashMap::new(), HashMap::new(), post_unlock,
     )
 }
 
@@ -609,6 +610,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
     mut reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    tick_snap_opt: Option<Arc<eve_db::WorldStateSnapshot>>,
     mut virtual_item_qty: HashMap<i64, i32>,
     mut virtual_crystal_dmg: HashMap<i64, f64>,
     post_unlock: &mut super::post_unlock::PostUnlockOps,
@@ -860,7 +862,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                 }
             }
             let mut consumed_ok = true;
-            if let Some(db_ref) = db_opt {
+            if let Some(tick_snap) = tick_snap_opt.as_deref() {
                 let launchers: Vec<i64> = if cycle.linked_turrets.is_empty() {
                     vec![cycle.module_id]
                 } else {
@@ -868,7 +870,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                 };
                 let eff_char_id = cycle.owner_char_id.filter(|&c| c > 0);
                 consumed_ok = super::post_unlock::collect_launcher_consume(
-                    db_ref,
+                    tick_snap,
                     eff_char_id,
                     cycle.ship_id,
                     &launchers,
@@ -1216,9 +1218,10 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                         .filter(|&c| c > 0)
                 });
             let (crystal_shattered_empty, guided_reload_started, guided_reload_ms) =
-                if let Some(db_ref) = db_opt {
+                if let (Some(db_ref), Some(tick_snap)) = (db_opt, tick_snap_opt.as_deref()) {
                     super::post_unlock::collect_cycle_ammo_step(
-                        db_ref,
+                        tick_snap,
+                        db_ref.clock().now_unix_secs(),
                         cycle,
                         eff_char_id,
                         sde_opt,
@@ -1251,9 +1254,9 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                 if let Some(db_ref) = db_opt { cycle.started_at_unix = db_ref.clock().now_unix_secs(); }
                 // Handle ASB, AAR, and Cap Booster charge consumption for the next cycle (`DG-4`)
                 if cycle.is_asb {
-                    let consumed_charge = db_opt.as_deref().is_some_and(|db_ref| {
+                    let consumed_charge = tick_snap_opt.as_deref().is_some_and(|tick_snap| {
                         super::post_unlock::collect_ship_charge_consume(
-                            db_ref,
+                            tick_snap,
                             eff_char_id,
                             cycle.ship_id,
                             cycle.module_id,
@@ -1268,9 +1271,9 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                         cycle.cap_need_per_cycle = cycle.asb_fallback_cap_need;
                     }
                 } else if cycle.is_aar {
-                    let fueled = db_opt.as_deref().is_some_and(|db_ref| {
+                    let fueled = tick_snap_opt.as_deref().is_some_and(|tick_snap| {
                         super::post_unlock::collect_ship_charge_consume(
-                            db_ref,
+                            tick_snap,
                             eff_char_id,
                             cycle.ship_id,
                             cycle.module_id,
@@ -1292,9 +1295,9 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                         cycle.armor_repair_amount = rep_amt;
                     }
                 } else if cycle.cap_booster_inject_amount > 0.0 {
-                    let consumed_charge = db_opt.as_deref().is_some_and(|db_ref| {
+                    let consumed_charge = tick_snap_opt.as_deref().is_some_and(|tick_snap| {
                         super::post_unlock::collect_ship_charge_consume(
-                            db_ref,
+                            tick_snap,
                             eff_char_id,
                             cycle.ship_id,
                             cycle.module_id,
@@ -1950,8 +1953,10 @@ impl SystemHandle {
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let (virtual_item_deltas, virtual_crystal_dmg_deltas) =
-            super::post_unlock::seed_pending_charge_reservations(&mut st, &self.completed_post_unlock_seq);
+        let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
+            super::post_unlock::begin_tick_charge_reservations(
+                self.solar_system_id, &mut st, &self.completed_post_unlock_seq,
+            );
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
@@ -2100,7 +2105,7 @@ impl SystemHandle {
             pending_missile_launches,
             mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
             Some(module_reload_sim_remaining), deact_hook_guard.as_ref(), Some(&pending_destroyed),
-            virtual_item_deltas, virtual_crystal_dmg_deltas, &mut post_unlock_ops,
+            tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas, &mut post_unlock_ops,
         ));
         super::missiles::flush_pending_missile_launches(
             &mut bp,

@@ -1532,7 +1532,9 @@ impl WorldRepository {
                 || before.sessions != writer.working.sessions
                 || before.transient_items != writer.working.transient_items
                 || before.sp6_lifecycle.nanite_paste_shortfall
-                    != writer.working.sp6_lifecycle.nanite_paste_shortfall;
+                    != writer.working.sp6_lifecycle.nanite_paste_shortfall
+                || before.sp6_lifecycle.post_unlock_committed_seq
+                    != writer.working.sp6_lifecycle.post_unlock_committed_seq;
 
         if did_mutate || has_clock_offset {
             #[cfg(any(test, feature = "legacy-json-snapshot"))]
@@ -1706,6 +1708,11 @@ impl WorldRepository {
         }
 
         Ok(val)
+    }
+
+    #[track_caller]
+    pub fn published_snapshot_arc(&self) -> std::sync::Arc<WorldStateSnapshot> {
+        self.read_state()
     }
 
     #[track_caller]

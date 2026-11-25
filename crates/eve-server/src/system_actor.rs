@@ -1163,6 +1163,9 @@ impl SystemRegistry {
         let idle_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let dynamic_ball_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pending_destroyed_balls = PendingDestroyedOutbox::default();
+        let initial_post_unlock_seq = db_opt.as_ref().filter(|_| db_read_safe).map(|db| {
+            db.with_snapshot(|s| s.sp6_lifecycle.post_unlock_committed_seq.get(&solar_system_id).copied().unwrap_or(0))
+        }).unwrap_or(0);
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
@@ -1180,6 +1183,7 @@ impl SystemRegistry {
             dynamic_ball_count: Arc::clone(&dynamic_ball_count),
             pending_destroyed_balls: pending_destroyed_balls.clone(),
             warp_state: initial_warp_state,
+            next_post_unlock_seq: initial_post_unlock_seq,
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);

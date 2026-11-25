@@ -169,6 +169,7 @@ async fn try_start_or_resolve_cycle<'a>(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> std::ops::ControlFlow<Option<Result<PyRep, BridgeRpcError>>, ResolvedCycleStart<'a>> {
+    crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),

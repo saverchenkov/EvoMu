@@ -133,7 +133,7 @@ pub async fn handle(
         (
             "invbroker",
             "Add" | "MultiAdd" | "Jettison" | "TrashItems" | "SplitStack" | "StackAll" | "MultiMerge" | "DestroyFitting" | "ClearCharges"
-        ) | ("ship", "Jettison" | "Drop")
+        ) | ("ship", "Jettison" | "Drop") | ("contractProxy", "SplitStack")
     ) {
         wait_in_space_post_unlock_barrier(ctx, session).await;
     }

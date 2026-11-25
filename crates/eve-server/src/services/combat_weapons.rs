@@ -263,6 +263,7 @@ pub async fn handle_weapons(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
     handle_weapons_inner(
         ctx, char_id, session.ship_id, session.station_id, session.structure_id,
         session.solar_system_id, method, args, kwargs,
