@@ -12,6 +12,7 @@ use crate::router::context::BoundObjectEntry;
 use crate::router::{ActiveMoonSurveyProbe, NotificationTarget, ServerContext};
 use crate::starter_characters::{
     grant_starter_plex_in_snapshot, provision_starter_characters, should_grant_default_starter_plex,
+    StarterCharOptions,
 };
 use eve_db::{
     CosmicSignatureRecord, InventoryFlag, InventoryItemRecord, MoonExtractionRecord, ServerClock,
@@ -117,7 +118,12 @@ fn config_load_default_or_env_and_cwd_toml_paths() {
 
 #[tokio::test]
 async fn starter_characters_plex_grants_feature_flag_fallback_and_error_paths() {
-    assert!(should_grant_default_starter_plex());
+    assert!(should_grant_default_starter_plex(
+        StarterCharOptions::default()
+    ));
+    assert!(!should_grant_default_starter_plex(StarterCharOptions {
+        grant_default_starter_plex: false,
+    }));
     let (mut ctx, _) = fast_test_context(1_800_000_000);
 
     // Direct grant_starter_plex_in_snapshot coverage: non-positive is no-op; missing char uses account_plex_vault fallback

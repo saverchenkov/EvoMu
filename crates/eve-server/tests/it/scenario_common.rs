@@ -38,7 +38,7 @@ impl<'c> ServerScenarioBackend<'c> {
 }
 
 async fn login_gm_treasury<'c>(ctx: &'c ServerContext, gm_sid: u64) -> ClientWireSession<'c> {
-    common::ensure_quasar_tap_hook_installed();
+    common::ensure_quasar_tap_hook_installed(ctx);
     ctx.db.provision_gm_account("isd_treasury", "isd_treasury-secret", 90_000_099, "ISD Treasury");
     let mut gm = ClientWireSession::new(ctx, gm_sid);
     let empty = HashMap::new();
@@ -65,7 +65,7 @@ impl<'c> ScenarioWorldBackend for ServerScenarioBackend<'c> {
     }
 
     fn create_actor_transport(&mut self, session_id: u64) -> Self::Transport {
-        common::ensure_quasar_tap_hook_installed();
+        common::ensure_quasar_tap_hook_installed(self.ctx);
         ServerWireTransport { inner: ClientWireSession::new(self.ctx, session_id) }
     }
 

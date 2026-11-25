@@ -126,6 +126,7 @@ pub fn register_achievement_admin_handlers(
     // 1. eve_public.achievement.api.admin.AddProgressRequest -> AddProgressResponse
     let mgr_prog = Arc::clone(&manager);
     let q_prog = Arc::clone(&router.queued_notices);
+    let desc_prog = Arc::clone(&router.descriptors);
     let progress_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
         require_admin_role(ctx)?;
         let Some(cid) = ctx.effective_character_id() else {
@@ -151,6 +152,7 @@ pub fn register_achievement_admin_handlers(
 
         emit_achievement_notices(
             &q_prog,
+            &desc_prog,
             cid,
             aid,
             outcome.achievement.def.category_id,
@@ -178,6 +180,7 @@ pub fn register_achievement_admin_handlers(
     // 2. eve_public.achievement.api.admin.CompleteRequest -> CompleteResponse
     let mgr_comp = Arc::clone(&manager);
     let q_comp = Arc::clone(&router.queued_notices);
+    let desc_comp = Arc::clone(&router.descriptors);
     let complete_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
         require_admin_role(ctx)?;
         let Some(cid) = ctx.effective_character_id() else {
@@ -193,6 +196,7 @@ pub fn register_achievement_admin_handlers(
 
         emit_achievement_notices(
             &q_comp,
+            &desc_comp,
             cid,
             aid,
             outcome.achievement.def.category_id,

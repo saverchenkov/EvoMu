@@ -390,7 +390,20 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
 
     // 6. emit_achievement_notices exact payloads & extract_u32_ident exact length-4 boundary
     let queued = std::sync::RwLock::new(Vec::new());
-    emit_achievement_notices(&queued, cid, 50, 0, 12, 0, false, false, &[1], &[99], 7_000);
+    emit_achievement_notices(
+        &queued,
+        &ctx.quasar_gateway.descriptors,
+        cid,
+        50,
+        0,
+        12,
+        0,
+        false,
+        false,
+        &[1],
+        &[99],
+        7_000,
+    );
     let n_cat0 = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(n_cat0.len(), 2);
     assert_eq!(n_cat0[0].0, NoticeScope::Character(cid));
@@ -399,14 +412,40 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     let prog_wm = WireMessage::decode(&n_cat0[0].1.value).unwrap();
     assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(), Some(12));
 
-    emit_achievement_notices(&queued, cid, 50, 1, 12, 0, false, false, &[1], &[], 7_000);
+    emit_achievement_notices(
+        &queued,
+        &ctx.quasar_gateway.descriptors,
+        cid,
+        50,
+        1,
+        12,
+        0,
+        false,
+        false,
+        &[1],
+        &[],
+        7_000,
+    );
     let n_cat1_unchanged = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(n_cat1_unchanged.len(), 2);
     assert!(!n_cat1_unchanged
         .iter()
         .any(|(_, a, _)| a.type_url.ends_with("achievement.category.api.ProgressedNotice")));
 
-    emit_achievement_notices(&queued, cid, 50, 1, 30, 50, true, true, &[2, 3], &[101, 102], 7_001);
+    emit_achievement_notices(
+        &queued,
+        &ctx.quasar_gateway.descriptors,
+        cid,
+        50,
+        1,
+        30,
+        50,
+        true,
+        true,
+        &[2, 3],
+        &[101, 102],
+        7_001,
+    );
     let n_cat1 = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(n_cat1.len(), 7);
     let ach_ms_uuids: Vec<[u8; 16]> = n_cat1

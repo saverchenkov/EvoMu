@@ -372,36 +372,7 @@ pub struct ProtoBuilder {
 
 static PB_FALLBACK_REGISTRY: OnceLock<Arc<QuasarDescriptorRegistry>> = OnceLock::new();
 
-thread_local! {
-    static PB_THREAD_REGISTRY_OVERRIDE: std::cell::RefCell<Option<Arc<QuasarDescriptorRegistry>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Runs `f` with a thread-local [`QuasarDescriptorRegistry`] override for [`message`] calls on
-/// the current thread (used by regression tests simulating an empty or partial descriptor DB
-/// without affecting concurrent tests).
-pub fn with_registry_override<R>(
-    registry: Arc<QuasarDescriptorRegistry>,
-    f: impl FnOnce() -> R,
-) -> R {
-    struct ResetGuard(Option<Arc<QuasarDescriptorRegistry>>);
-    impl Drop for ResetGuard {
-        fn drop(&mut self) {
-            let prev = self.0.take();
-            PB_THREAD_REGISTRY_OVERRIDE.with(|cell| {
-                *cell.borrow_mut() = prev;
-            });
-        }
-    }
-    let prev = PB_THREAD_REGISTRY_OVERRIDE.with(|cell| cell.borrow_mut().replace(registry));
-    let _guard = ResetGuard(prev);
-    f()
-}
-
 fn default_registry() -> Result<Arc<QuasarDescriptorRegistry>, PbError> {
-    if let Some(reg) = PB_THREAD_REGISTRY_OVERRIDE.with(|cell| cell.borrow().clone()) {
-        return Ok(reg);
-    }
     if let Ok(reg) = QuasarDescriptorRegistry::open_default() {
         return Ok(reg);
     }

@@ -1,7 +1,6 @@
 //! Fail-closed row validation and `--quarantine-unreadable` quarantine table support (`#906`, `#856`).
 
 use rusqlite::{params, types::ValueRef, Connection, Row};
-use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// A corrupted or unreadable SQLite row moved into `quarantine_rows` when quarantine mode is active.
@@ -14,10 +13,6 @@ pub struct QuarantinedRow {
     pub quarantined_unix: u64,
 }
 
-thread_local! {
-    static TEST_QUARANTINE_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
-}
-
 static GLOBAL_QUARANTINE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// Sets a process-wide override for `--quarantine-unreadable` behavior.
@@ -28,23 +23,6 @@ pub fn set_quarantine_unreadable(enabled: bool) {
 /// Clears any process-wide override set via [`set_quarantine_unreadable`].
 pub fn clear_quarantine_unreadable_override() {
     GLOBAL_QUARANTINE_OVERRIDE.store(0, Ordering::Relaxed);
-}
-
-/// Runs `f` with a thread-local `--quarantine-unreadable` override (safe for parallel tests).
-pub fn with_quarantine_unreadable_for_test<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
-    struct Guard(Option<bool>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            TEST_QUARANTINE_OVERRIDE.with(|c| c.set(self.0));
-        }
-    }
-    let prev = TEST_QUARANTINE_OVERRIDE.with(|c| {
-        let old = c.get();
-        c.set(Some(enabled));
-        old
-    });
-    let _guard = Guard(prev);
-    f()
 }
 
 /// Parses whether `--quarantine-unreadable` (or `--quarantine-unreadable=true/1`) is present in CLI args.
@@ -76,9 +54,6 @@ where
 
 /// Determines whether unreadable SQLite rows should be quarantined instead of failing startup closed.
 pub fn default_quarantine_unreadable() -> bool {
-    if let Some(v) = TEST_QUARANTINE_OVERRIDE.with(|c| c.get()) {
-        return v;
-    }
     match GLOBAL_QUARANTINE_OVERRIDE.load(Ordering::Relaxed) {
         1 => return false,
         2 => return true,

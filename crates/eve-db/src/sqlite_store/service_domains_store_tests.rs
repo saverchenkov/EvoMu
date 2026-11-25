@@ -6,7 +6,8 @@ use crate::service_domains::{
 };
 use crate::sqlite_store::sync::sync_snapshot_diff_for_test;
 use crate::sqlite_store::{
-    apply_migrations, load_snapshot_from_sqlite, replace_sqlite_from_snapshot,
+    apply_migrations, load_snapshot_from_sqlite, load_snapshot_from_sqlite_with_options,
+    replace_sqlite_from_snapshot,
 };
 use crate::types::{OwnerNoteRecord, WorldStateSnapshot};
 use rusqlite::Connection;
@@ -845,15 +846,11 @@ fn entity_kv_legacy_blobs_and_945_owner_notes_migration_and_quarantine() {
     )
     .expect("insert corrupt json");
 
-    let fail_closed = crate::with_quarantine_unreadable_for_test(false, || {
-        load_snapshot_from_sqlite(&conn)
-    });
+    let fail_closed = load_snapshot_from_sqlite_with_options(&conn, false);
     assert!(fail_closed.is_err());
 
-    let quarantined_snap = crate::with_quarantine_unreadable_for_test(true, || {
-        load_snapshot_from_sqlite(&conn)
-    })
-    .expect("quarantine load succeeds");
+    let quarantined_snap = load_snapshot_from_sqlite_with_options(&conn, true)
+        .expect("quarantine load succeeds");
     assert_eq!(quarantined_snap.entity_kv, migrated.entity_kv);
     let q_rows = crate::list_quarantined_rows(&conn).expect("list quarantined");
     assert!(q_rows.iter().filter(|r| r.source_table == "entity_kv").count() >= 2);

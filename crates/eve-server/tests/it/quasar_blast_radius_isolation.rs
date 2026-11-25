@@ -264,7 +264,7 @@ async fn test_empty_quasar_registry_does_not_break_warp_and_stargate_jump() {
 }
 
 #[test]
-fn test_isolate_side_effect_and_thread_local_empty_registry_never_unwind() {
+fn test_isolate_side_effect_and_empty_registry_never_unwind() {
     assert_eq!(isolate_side_effect("it.ok", || 99_u32), Some(99));
     assert_eq!(
         isolate_side_effect("it.panic", || -> u32 {
@@ -278,36 +278,87 @@ fn test_isolate_side_effect_and_thread_local_empty_registry_never_unwind() {
     );
 
     let ctx = make_context_with_empty_quasar_descriptors();
-    eve_proto::pb::with_registry_override(
-        Arc::new(QuasarDescriptorRegistry::empty_with_builtins()),
-        || {
-            assert!(ctx
-                .quasar_gateway
-                .publish_pb_notice(
-                    NoticeScope::Broadcast,
-                    "it.empty_notice",
-                    eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
-                    1_700_000_000,
-                )
-                .is_none());
-            ctx.quasar_gateway
-                .progression
-                .achievements
-                .on_gameplay_event_by_name(
-                    90_000_001,
-                    &["destroyHostileNPC"],
-                    1,
-                    1_700_000_000,
-                    &ctx.quasar_gateway,
-                );
-            ctx.quasar_gateway
-                .progression
-                .daily_goals
-                .on_gameplay_event(90_000_001, 1, 1, &ctx.quasar_gateway);
-            ctx.quasar_gateway
-                .progression
-                .career_goals
-                .on_gameplay_event(90_000_001, "combat", 1, &ctx.quasar_gateway);
-        },
+    let _ = ctx.quasar_gateway.drain_queued_notices();
+    let mut sess = SessionState::new(88_999);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    let mut rx = ctx
+        .quasar_gateway
+        .subscribe_session(&sess, Vec::new(), 1_700_000_000);
+
+    assert!(ctx
+        .quasar_gateway
+        .publish_pb_notice(
+            NoticeScope::Broadcast,
+            "it.empty_notice",
+            eve_proto::pb::message_with_registry(
+                Arc::clone(&ctx.quasar_gateway.descriptors),
+                "eve_public.goal.api.ProgressedNotice",
+            ),
+            1_700_000_000,
+        )
+        .is_none());
+    ctx.quasar_gateway
+        .progression
+        .achievements
+        .on_gameplay_event_by_name(
+            90_000_001,
+            &["destroyHostileNPC"],
+            1,
+            1_700_000_000,
+            &ctx.quasar_gateway,
+        );
+    ctx.quasar_gateway
+        .progression
+        .daily_goals
+        .on_gameplay_event(90_000_001, 1, 1, &ctx.quasar_gateway);
+    ctx.quasar_gateway
+        .progression
+        .career_goals
+        .on_gameplay_event(90_000_001, "combat", 1, &ctx.quasar_gateway);
+
+    assert!(
+        ctx.quasar_gateway
+            .progression
+            .daily_goals
+            .get_or_init_goals(90_000_001)
+            .iter()
+            .any(|g| g.current_progress >= 1),
+        "daily goal progress must execute even when notice descriptors are empty"
+    );
+    assert!(
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(90_000_001)
+            .iter()
+            .any(|g| g.progress >= 1),
+        "career goal progress must execute even when notice descriptors are empty"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "empty descriptor registry must publish zero Quasar notices to subscriber channel"
+    );
+    assert!(
+        ctx.quasar_gateway
+            .subscribers
+            .read()
+            .unwrap()
+            .get(&sess.session_id)
+            .is_some_and(|s| s.inbox.is_empty()),
+        "empty descriptor registry must enqueue zero subscriber inbox notices"
+    );
+    assert!(
+        ctx.quasar_gateway
+            .routing_cache
+            .read()
+            .unwrap()
+            .entries
+            .is_empty(),
+        "empty descriptor registry must cache zero unrouted notices"
+    );
+    assert!(
+        ctx.quasar_gateway.drain_queued_notices().is_empty(),
+        "empty descriptor registry must queue zero notices"
     );
 }

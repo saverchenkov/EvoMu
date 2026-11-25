@@ -278,21 +278,60 @@ fn filtered_reward_claiming_and_notice_encoding_and_dynamic_extractors() {
 
     // Test emit_achievement_notices for cat_id == 0, unchanged cat score, vs cat_score_changed
     let queued = std::sync::RwLock::new(Vec::new());
-    emit_achievement_notices(&queued, cid, 303, 0, 5, 0, false, false, &[1], &[999], 4000);
+    emit_achievement_notices(
+        &queued,
+        &ctx.quasar_gateway.descriptors,
+        cid,
+        303,
+        0,
+        5,
+        0,
+        false,
+        false,
+        &[1],
+        &[999],
+        4000,
+    );
     let notices_cat0 = std::mem::take(&mut *queued.write().unwrap());
     // Should emit ProgressedNotice and milestone.api.ReachedNotice (2 notices, no category notices, no CompletedNotice)
     assert_eq!(notices_cat0.len(), 2);
     assert!(notices_cat0.iter().all(|(s, _, _)| *s == NoticeScope::Character(cid)));
     assert!(notices_cat0.iter().all(|(_, a, _)| !a.type_url.contains("achievement.category.")));
 
-    emit_achievement_notices(&queued, cid, 101, 1, 50, 0, false, false, &[], &[], 4000);
+    emit_achievement_notices(
+        &queued,
+        &ctx.quasar_gateway.descriptors,
+        cid,
+        101,
+        1,
+        50,
+        0,
+        false,
+        false,
+        &[],
+        &[],
+        4000,
+    );
     let notices_unchanged = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(notices_unchanged.len(), 1);
     assert!(!notices_unchanged
         .iter()
         .any(|(_, a, _)| a.type_url.ends_with("achievement.category.api.ProgressedNotice")));
 
-    emit_achievement_notices(&queued, cid, 101, 1, 100, 40, true, true, &[1, 2], &[501, 502], 4001);
+    emit_achievement_notices(
+        &queued,
+        &ctx.quasar_gateway.descriptors,
+        cid,
+        101,
+        1,
+        100,
+        40,
+        true,
+        true,
+        &[1, 2],
+        &[501, 502],
+        4001,
+    );
     let notices_cat1 = std::mem::take(&mut *queued.write().unwrap());
     // ProgressedNotice + CompletedNotice + 2 ach ReachedNotice + 2 cat ReachedNotice + category ProgressedNotice = 7
     assert_eq!(notices_cat1.len(), 7);

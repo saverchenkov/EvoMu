@@ -15,8 +15,15 @@ tokio::task_local! {
     static ACTIVE_RPC_CALL_ID: u64;
 }
 
-tokio::task_local! {
-    static SUPPRESS_QUASAR_SESSION_CHANGE: bool;
+/// Explicit per-call options controlling [`ServerContext::dispatch_rpc_with_options`] (`#1434`, `#1583`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DispatchOptions {
+    /// Suppresses `quasar_gateway.on_session_changed` inside `dispatch_rpc_inner_with_options`.
+    ///
+    /// Used by `SafeLogoffTeardownGrace` read-only RPC dispatch (`#1434`) so a temporary cloned
+    /// `SessionState` with `character_id = Some(grace_char_id)` never transiently re-attaches
+    /// character tenancy on the live charsel `GatewaySubscriber` or drains `NoticeRoutingCache`.
+    pub suppress_quasar_session_change: bool,
 }
 
 /// Runs `fut` with `call_id` bound for `rpc.slow` diagnostics.
@@ -27,30 +34,9 @@ where
     ACTIVE_RPC_CALL_ID.scope(call_id, Box::pin(fut)).await
 }
 
-/// Runs `fut` with `quasar_gateway.on_session_changed` suppressed inside `dispatch_rpc_inner`.
-///
-/// Used by `SafeLogoffTeardownGrace` read-only RPC dispatch (`#1434`) so a temporary cloned
-/// `SessionState` with `character_id = Some(grace_char_id)` never transiently re-attaches
-/// character tenancy on the live charsel `GatewaySubscriber` or drains `NoticeRoutingCache`.
-pub async fn with_quasar_session_change_suppressed<F, R>(fut: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    SUPPRESS_QUASAR_SESSION_CHANGE
-        .scope(true, Box::pin(fut))
-        .await
-}
-
 #[inline]
 fn current_rpc_call_id() -> u64 {
     ACTIVE_RPC_CALL_ID.try_with(|id| *id).unwrap_or(0)
-}
-
-#[inline]
-fn is_quasar_session_change_suppressed() -> bool {
-    SUPPRESS_QUASAR_SESSION_CHANGE
-        .try_with(|suppressed| *suppressed)
-        .unwrap_or(false)
 }
 
 #[inline(never)]
@@ -65,6 +51,7 @@ where
 }
 
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_rpc_boxed<'a>(
     ctx: &'a ServerContext,
     session: &'a mut SessionState,
@@ -74,11 +61,22 @@ fn dispatch_rpc_boxed<'a>(
     args: &'a [PyRep],
     kwargs: &'a HashMap<String, PyRep>,
     caller_trace: Option<&'a str>,
+    options: DispatchOptions,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PyRep, BridgeRpcError>> + Send + 'a>> {
-    Box::pin(ctx.dispatch_rpc(session, service, bound_id, method, args, kwargs, caller_trace))
+    Box::pin(ctx.dispatch_rpc_with_options(
+        session,
+        service,
+        bound_id,
+        method,
+        args,
+        kwargs,
+        caller_trace,
+        options,
+    ))
 }
 
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_rpc_inner_boxed<'a>(
     ctx: &'a ServerContext,
     session: &'a mut SessionState,
@@ -88,8 +86,18 @@ fn dispatch_rpc_inner_boxed<'a>(
     args: &'a [PyRep],
     kwargs: &'a HashMap<String, PyRep>,
     caller_trace: Option<&'a str>,
+    options: DispatchOptions,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PyRep, BridgeRpcError>> + Send + 'a>> {
-    Box::pin(ctx.dispatch_rpc_inner(session, service, bound_id, method, args, kwargs, caller_trace))
+    Box::pin(ctx.dispatch_rpc_inner_with_options(
+        session,
+        service,
+        bound_id,
+        method,
+        args,
+        kwargs,
+        caller_trace,
+        options,
+    ))
 }
 
 struct CatchUnwindFuture<F>(F);
@@ -296,6 +304,33 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        self.dispatch_rpc_with_options(
+            session,
+            service,
+            bound_id,
+            method,
+            args,
+            kwargs,
+            caller_trace,
+            DispatchOptions::default(),
+        )
+        .await
+    }
+
+    /// Dispatches an incoming RPC call `(service, bound_id, method, args, kwargs)` with explicit
+    /// per-call [`DispatchOptions`] (`#1434`, `#1583`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_rpc_with_options(
+        &self,
+        session: &mut SessionState,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+        args: &[PyRep],
+        kwargs: &HashMap<String, PyRep>,
+        caller_trace: Option<&str>,
+        options: DispatchOptions,
+    ) -> Result<PyRep, BridgeRpcError> {
         ensure_dispatch_tx_hooks_installed();
 
         let is_outer_tx_scope = DISPATCH_TX_ERROR.try_with(|_| ()).is_err();
@@ -386,6 +421,7 @@ impl ServerContext {
                             args,
                             kwargs,
                             caller_trace,
+                            options,
                         ))
                         .await
                         {
@@ -1079,6 +1115,31 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        self.dispatch_rpc_inner_with_options(
+            session,
+            service,
+            bound_id,
+            method,
+            args,
+            kwargs,
+            caller_trace,
+            DispatchOptions::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_rpc_inner_with_options(
+        &self,
+        session: &mut SessionState,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+        args: &[PyRep],
+        kwargs: &HashMap<String, PyRep>,
+        caller_trace: Option<&str>,
+        options: DispatchOptions,
+    ) -> Result<PyRep, BridgeRpcError> {
         info!(
             session_id = session.session_id,
             user_id = ?session.user_id,
@@ -1189,7 +1250,7 @@ impl ServerContext {
             }
         }
         let now_unix = self.now_unix();
-        if !is_quasar_session_change_suppressed() {
+        if !options.suppress_quasar_session_change {
             let _ = self.quasar_gateway.on_session_changed(session, now_unix);
         }
 
@@ -1480,6 +1541,7 @@ impl ServerContext {
                         &sub_args,
                         &sub_kwargs,
                         caller_trace,
+                        options,
                     )
                     .await
                 }

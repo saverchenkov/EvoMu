@@ -1376,9 +1376,12 @@ impl DailyGoalManager {
                 let _ = gateway.publish_pb_notice(
                     NoticeScope::Character(char_id),
                     "quasar_daily_goals.on_gameplay_event.progressed",
-                    pb::message("eve_public.dailygoal.api.ProgressedNotice")
-                        .set("goal.uuid", uuid)
-                        .set("current_progress", current_progress),
+                    pb::message_with_registry(
+                        Arc::clone(&gateway.descriptors),
+                        "eve_public.dailygoal.api.ProgressedNotice",
+                    )
+                    .set("goal.uuid", uuid)
+                    .set("current_progress", current_progress),
                     now_unix,
                 );
 
@@ -1386,8 +1389,11 @@ impl DailyGoalManager {
                     let _ = gateway.publish_pb_notice(
                         NoticeScope::Character(char_id),
                         "quasar_daily_goals.on_gameplay_event.completed",
-                        pb::message("eve_public.dailygoal.api.CompletedNotice")
-                            .set("goal.uuid", uuid),
+                        pb::message_with_registry(
+                            Arc::clone(&gateway.descriptors),
+                            "eve_public.dailygoal.api.CompletedNotice",
+                        )
+                        .set("goal.uuid", uuid),
                         now_unix,
                     );
                 }

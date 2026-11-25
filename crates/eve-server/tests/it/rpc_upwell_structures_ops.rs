@@ -832,8 +832,8 @@ async fn structure_control_wire_tcp_rejects_unauthorized_and_roundtrips_authoriz
         (harness, reader_task)
     }
 
-    common::ensure_quasar_tap_hook_installed();
     let ctx = Arc::new(ServerContext::new());
+    common::ensure_quasar_tap_hook_installed(&ctx);
     common::pin_clock(&ctx);
 
     let sys_id: u32 = 30_000_142;

@@ -813,8 +813,8 @@ async fn structure_control_take_and_release_wire_tcp_client_harness() {
         }
     }
 
-    crate::common::ensure_quasar_tap_hook_installed();
     let ctx = Arc::new(ServerContext::new());
+    crate::common::ensure_quasar_tap_hook_installed(&ctx);
     crate::common::pin_clock(&ctx);
 
     let char_id: i64 = 90_000_001;

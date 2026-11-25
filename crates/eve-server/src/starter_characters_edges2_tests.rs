@@ -24,14 +24,17 @@ fn fast_test_context(base_unix: u64) -> Arc<ServerContext> {
     ctx
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn should_grant_default_starter_plex_false_inside_task_local_scope() {
-    assert!(should_grant_default_starter_plex());
-    let inside = SKIP_DEFAULT_STARTER_PLEX
-        .scope((), async { should_grant_default_starter_plex() })
-        .await;
-    assert!(!inside);
-    assert!(should_grant_default_starter_plex());
+#[test]
+fn should_grant_default_starter_plex_respects_starter_char_options() {
+    assert!(should_grant_default_starter_plex(
+        StarterCharOptions::default()
+    ));
+    assert!(should_grant_default_starter_plex(StarterCharOptions {
+        grant_default_starter_plex: true,
+    }));
+    assert!(!should_grant_default_starter_plex(StarterCharOptions {
+        grant_default_starter_plex: false,
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

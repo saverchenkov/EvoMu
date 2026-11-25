@@ -293,41 +293,90 @@ pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_MACHO_SESSION_ID;
 /// Global monotonic session-ID counter shared across `machoNet`, Python Bridge, and Quasar gRPC (`ORD-9`).
 pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 
-static PREAUTH_CONN_COUNTS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(usize, String), usize>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+const PREAUTH_CONN_TRACKER_SLOT_KEY: &str = "macho_listener_preauth_conn_tracker";
 
-struct PreAuthConnectionGuard {
-    key: (usize, String),
-    active: bool,
+/// Per-repository/per-context tracker counting concurrent pre-authentication TCP connections
+/// per peer IP so per-IP handshake floods are bounded without process-global state (`#853`, `#1583`).
+#[derive(Default)]
+pub struct PreauthConnTracker {
+    counts: std::sync::Mutex<HashMap<(u64, String), usize>>,
 }
 
-impl PreAuthConnectionGuard {
-    fn try_acquire(ctx: &Arc<ServerContext>, peer_ip: String) -> Option<Self> {
-        let key = (Arc::as_ptr(ctx) as usize, peer_ip);
-        let mut counts = PREAUTH_CONN_COUNTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+impl PreauthConnTracker {
+    /// Creates a new isolated pre-authentication connection tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn acquire(
+        self: &Arc<Self>,
+        ctx_instance_id: u64,
+        peer_ip: String,
+    ) -> Option<PreAuthConnectionGuard> {
+        let key = (ctx_instance_id, peer_ip);
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
         let entry = counts.entry(key.clone()).or_insert(0);
         if *entry >= MAX_PREAUTH_CONNECTIONS_PER_IP {
             return None;
         }
         *entry += 1;
-        Some(Self { key, active: true })
+        Some(PreAuthConnectionGuard {
+            tracker: Arc::clone(self),
+            key,
+            active: true,
+        })
+    }
+
+    fn release(&self, key: &(u64, String)) {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cnt) = counts.get_mut(key) {
+            *cnt = cnt.saturating_sub(1);
+            if *cnt == 0 {
+                counts.remove(key);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked_count(&self, ctx_instance_id: u64, peer_ip: &str) -> usize {
+        self.counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(ctx_instance_id, peer_ip.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+fn preauth_tracker_for_ctx(ctx: &ServerContext) -> Arc<PreauthConnTracker> {
+    ctx.db
+        .get_or_init_transient_runtime_slot(PREAUTH_CONN_TRACKER_SLOT_KEY, PreauthConnTracker::new)
+}
+
+struct PreAuthConnectionGuard {
+    tracker: Arc<PreauthConnTracker>,
+    key: (u64, String),
+    active: bool,
+}
+
+impl PreAuthConnectionGuard {
+    #[cfg(test)]
+    fn try_acquire(ctx: &ServerContext, peer_ip: String) -> Option<Self> {
+        preauth_tracker_for_ctx(ctx).acquire(ctx.instance_id, peer_ip)
+    }
+
+    fn try_acquire_in_tracker(
+        tracker: &Arc<PreauthConnTracker>,
+        ctx_instance_id: u64,
+        peer_ip: String,
+    ) -> Option<Self> {
+        tracker.acquire(ctx_instance_id, peer_ip)
     }
 
     fn complete_auth(&mut self) {
         if self.active {
             self.active = false;
-            let mut counts = PREAUTH_CONN_COUNTS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(cnt) = counts.get_mut(&self.key) {
-                *cnt = cnt.saturating_sub(1);
-                if *cnt == 0 {
-                    counts.remove(&self.key);
-                }
-            }
+            self.tracker.release(&self.key);
         }
     }
 }
@@ -2698,7 +2747,7 @@ async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
     grace_session.character_id = Some(grace_char_id);
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
-        crate::router::dispatch::with_quasar_session_change_suppressed(ctx.dispatch_rpc(
+        ctx.dispatch_rpc_with_options(
             &mut grace_session,
             service,
             bound_id,
@@ -2706,7 +2755,10 @@ async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
             call_args,
             call_kwargs,
             Some("machoNet:26000"),
-        )),
+            crate::router::dispatch::DispatchOptions {
+                suppress_quasar_session_change: true,
+            },
+        ),
     )
     .await;
     if grace_session.user_id.is_none() && session.user_id.is_some() {
@@ -2926,7 +2978,18 @@ async fn handle_session_closer_event<W: AsyncWriteExt + Unpin>(
 
 /// Handles a single native `machoNet` TCP connection through the 4-step V24.01 `GPSTransport`
 /// handshake state machine and subsequent authenticated `MachoPacket` RPC dispatch (`P-6`).
-pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+pub async fn handle_macho_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+    let tracker = preauth_tracker_for_ctx(&ctx);
+    handle_macho_client_with_tracker(stream, ctx, tracker).await
+}
+
+/// Handles a single native `machoNet` TCP connection against an explicit caller-owned
+/// [`PreauthConnTracker`] (`#853`, `#1583`).
+pub async fn handle_macho_client_with_tracker(
+    mut stream: TcpStream,
+    ctx: Arc<ServerContext>,
+    preauth_tracker: Arc<PreauthConnTracker>,
+) -> Result<()> {
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let client_id = 1_000_000_000_000_u64.saturating_add(session_id);
     let peer_addr = stream
@@ -2939,7 +3002,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         .unwrap_or_else(|_| "127.0.0.1".to_string());
     let local_ip = stream.local_addr().ok().map(|a| a.ip().to_string());
 
-    let Some(mut preauth_guard) = PreAuthConnectionGuard::try_acquire(&ctx, peer_ip.clone()) else {
+    let Some(mut preauth_guard) =
+        PreAuthConnectionGuard::try_acquire_in_tracker(&preauth_tracker, ctx.instance_id, peer_ip.clone())
+    else {
         anyhow::bail!(
             "Rejected machoNet pre-auth connection from {peer_ip}: exceeded MAX_PREAUTH_CONNECTIONS_PER_IP ({MAX_PREAUTH_CONNECTIONS_PER_IP})"
         );

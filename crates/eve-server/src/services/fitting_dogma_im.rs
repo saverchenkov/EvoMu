@@ -1188,12 +1188,16 @@ struct DogmaSessionCheckState {
     updated_at: u64,
 }
 
-fn dogma_session_check_store(
-) -> &'static std::sync::RwLock<HashMap<(u64, u64), DogmaSessionCheckState>> {
-    static STORE: std::sync::OnceLock<
-        std::sync::RwLock<HashMap<(u64, u64), DogmaSessionCheckState>>,
-    > = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+const DOGMA_SESSION_CHECK_SLOT_KEY: &str = "fitting_dogma_im_session_checks";
+
+#[derive(Default)]
+struct DogmaSessionCheckSlot {
+    entries: std::sync::RwLock<HashMap<(u64, u64), DogmaSessionCheckState>>,
+}
+
+fn dogma_session_check_store(ctx: &ServerContext) -> std::sync::Arc<DogmaSessionCheckSlot> {
+    ctx.db
+        .get_or_init_transient_runtime_slot(DOGMA_SESSION_CHECK_SLOT_KEY, DogmaSessionCheckSlot::default)
 }
 
 fn lookup_session_check_i64(
@@ -1309,16 +1313,13 @@ fn handle_dogma_set_session_check(
     };
 
     let key = (ctx.instance_id, session.session_id);
+    let slot = dogma_session_check_store(ctx);
     let (check_count, session_check_rep) = if clear_requested {
-        let mut guard = dogma_session_check_store()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = slot.entries.write().unwrap_or_else(|e| e.into_inner());
         guard.remove(&key);
         (0u64, PyRep::None)
     } else {
-        let mut guard = dogma_session_check_store()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = slot.entries.write().unwrap_or_else(|e| e.into_inner());
         let entry = guard.entry(key).or_default();
         entry.character_id = char_id;
         entry.ship_id = session.ship_id;
