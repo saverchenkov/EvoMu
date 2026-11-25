@@ -4,7 +4,7 @@
 
 use crate::router::notify_registry::{OnNotificationReceived, OnSessionChanged};
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -657,59 +657,28 @@ pub(crate) fn dispatch_giveisk_slash(
     inv: &SlashInvocation<'_>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, cid) = ServerContext::require_character(session)?;
-    let tokens =
-        crate::services::character_skills::character_gm_tools::parse_slash_tokens(inv.rest);
-    let usage_err = || BridgeRpcError {
-        code: "InvalidSlashArgument".into(),
-        message: "Usage: /giveisk [me|<character_id>] <positive_integer_amount>".into(),
-        client_error: None,
-    };
-    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-    let (target_cid, amount_tok) = match token_strs.as_slice() {
-        [amt] => (cid, *amt),
-        [target, amt]
-            if target.eq_ignore_ascii_case("me") || target.eq_ignore_ascii_case("self") =>
-        {
-            (cid, *amt)
-        }
-        [target, amt] => {
-            let Some(target_id) = target.parse::<i64>().ok().filter(|&id| id > 0) else {
-                return Err(usage_err());
-            };
-            (target_id, *amt)
-        }
-        _ => return Err(usage_err()),
-    };
-    let Ok(amount) = amount_tok.parse::<i64>() else {
-        return Err(usage_err());
-    };
-    if amount <= 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidSlashArgument".into(),
-            message: "Amount for /giveisk must be positive".into(),
-            client_error: None,
-        });
-    }
-    let bal = ctx.db.try_with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&target_cid).ok_or_else(|| BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {target_cid} not found"),
-            client_error: None,
-        })?;
-        ch.balance = amount
-            .checked_mul(100)
-            .map(IskCents::from_raw_cents)
-            .and_then(|add| ch.balance.checked_add(add))
-            .ok_or_else(|| BridgeRpcError {
-                code: "BalanceOverflow".into(),
-                message: "Adding ISK would overflow balance".into(),
-                client_error: None,
-            })?;
-        Ok(ch.balance.to_wire_f64())
-    })?;
+    let parsed = crate::router::slash_registry::GiveIskArgs::parse(cid, inv.rest)?;
+    let (new_bal, _) = crate::domain::career_goals::credit_character_reward_tx(
+        &ctx.db,
+        "gm_giveisk",
+        parsed.target_char_id,
+        parsed.amount_cents,
+        0.0,
+        0,
+        Some((
+            "GMGiveIsk",
+            format!("GM /giveisk by {cid}"),
+            Some((
+                eve_db::ledger::ref_types::PLAYER_DONATION,
+                cid,
+                ctx.now_unix(),
+            )),
+        )),
+    )
+    .map_err(crate::services::domain_err_to_rpc)?;
     Ok(PyRep::keyval([
         ("command", PyRep::String(inv.raw.to_string())),
-        ("newBalanceISK", PyRep::Real(bal)),
+        ("newBalanceISK", PyRep::Real(new_bal.to_wire_f64())),
     ]))
 }
 
@@ -1154,7 +1123,24 @@ pub(crate) fn dispatch_setskill_slash(
     inv: &SlashInvocation<'_>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, cid) = ServerContext::require_character(session)?;
-    handle_slash_set_skill(ctx, cid, inv.raw, inv.rest)
+    let parsed = crate::router::slash_registry::SetSkillArgs::parse(cid, inv.rest)?;
+    let outcome = crate::domain::skills::set_character_skill_level(
+        ctx,
+        parsed.target_char_id,
+        parsed.skill_type_id,
+        parsed.level,
+    )
+    .map_err(crate::services::domain_err_to_rpc)?;
+
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(inv.raw.to_string())),
+        ("characterID", PyRep::Integer(outcome.target_char_id)),
+        ("skillID", PyRep::Integer(outcome.skill_type_id as i64)),
+        ("skillName", PyRep::String(outcome.skill_name)),
+        ("level", PyRep::Integer(outcome.level as i64)),
+        ("skillPoints", PyRep::Real(outcome.skill_points)),
+        ("characterTotalSP", PyRep::Real(outcome.character_total_sp)),
+    ]))
 }
 
 /// Registry dispatch target for `/spawnnpc` (`#1193`).
@@ -1244,127 +1230,6 @@ pub(crate) fn dispatch_createccpevent_slash(
         .map(|(t, d)| (t.trim(), d.trim()))
         .unwrap_or((rem, ""));
     super::fleet_social::create_ccp_calendar_event(ctx, cid, dt, dur, imp, title, desc)
-}
-
-/// Reconciles `snap.skill_queues` for `target_cid` after `/setskill` or `/giveskill` mutates
-/// `skill_id` to `(lvl, target_sp)`. Returns `true` when the persisted queue changed.
-#[allow(clippy::too_many_arguments)]
-fn reconcile_skill_queue_after_set_skill(
-    ctx: &ServerContext,
-    snap: &mut eve_db::WorldStateSnapshot,
-    target_cid: i64,
-    clone_grade: u32,
-    skill_id: u32,
-    lvl: u8,
-    target_sp: f64,
-    now_unix: u64,
-) -> bool {
-    if !snap
-        .skill_queues
-        .get(&target_cid)
-        .is_some_and(|q| !q.is_empty())
-    {
-        if snap.skill_queues.contains_key(&target_cid) {
-            snap.skill_queues.remove(&target_cid);
-        }
-        return false;
-    }
-    let train_mult = ctx.skill_training_multiplier();
-    let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
-        Some(crate::services::jump_clone_names::effective_character_attributes(
-            &ctx.sde,
-            snap,
-            target_cid,
-        ))
-    } else {
-        None
-    };
-    let mut valid_next_lvl: HashMap<u32, u8> = snap
-        .skills
-        .get(&target_cid)
-        .map(|m| m.iter().map(|(&k, v)| (k, v.level)).collect())
-        .unwrap_or_default();
-    let paused = snap.paused_skill_queues.contains(&target_cid);
-    let (changed, remove_empty_queue) = {
-        let Some(queue) = snap.skill_queues.get_mut(&target_cid) else {
-            return false;
-        };
-        let prev_queue = queue.clone();
-        let prev_head = prev_queue.first().map(|e| (e.type_id, e.target_level));
-        queue.retain_mut(|q| {
-            if q.type_id == skill_id && lvl == 0 {
-                return false;
-            }
-            if let Some(st) = ctx.sde.types.get(&q.type_id) {
-                for (req_attr, req_lvl_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-                    .into_iter()
-                    .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-                {
-                    if let Some(&req_tid_f) = st.default_attributes.get(&req_attr) {
-                        let req_tid = req_tid_f as u32;
-                        if req_tid > 0 {
-                            let req_lvl = st
-                                .default_attributes
-                                .get(&req_lvl_attr)
-                                .copied()
-                                .unwrap_or(1.0)
-                                .max(1.0) as u8;
-                            let have_lvl = valid_next_lvl.get(&req_tid).copied().unwrap_or(0);
-                            if have_lvl < req_lvl {
-                                return false;
-                            }
-                        }
-                    }
-                }
-            }
-            if q.type_id == skill_id {
-                let expected_prev = valid_next_lvl.get(&skill_id).copied().unwrap_or(0);
-                if q.target_level <= lvl || q.target_level != expected_prev + 1 {
-                    return false;
-                }
-                if q.target_level == lvl + 1 {
-                    let new_start_sp = target_sp.min(q.end_sp);
-                    if (q.start_sp - new_start_sp).abs() > 1e-6 {
-                        let old_needed = (q.end_sp - q.start_sp).max(1.0);
-                        q.start_sp = new_start_sp;
-                        q.duration_seconds = if let Some(attrs) = eff_attrs {
-                            crate::services::jump_clone_names::skill_queue_entry_duration_with_attrs(
-                                ctx,
-                                q.type_id,
-                                q.start_sp,
-                                q.end_sp,
-                                clone_grade,
-                                attrs,
-                                q.duration_seconds,
-                            )
-                        } else {
-                            q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
-                        };
-                        if q.started_at_unix.is_some() {
-                            q.started_at_unix = Some(now_unix);
-                        }
-                    }
-                }
-            }
-            valid_next_lvl.insert(q.type_id, q.target_level);
-            true
-        });
-        let new_head = queue.first().map(|e| (e.type_id, e.target_level));
-        if new_head != prev_head {
-            if let Some(head) = queue.first_mut() {
-                head.started_at_unix = if paused { None } else { Some(now_unix) };
-            }
-        } else if !paused {
-            if let Some(head) = queue.first_mut() {
-                head.started_at_unix.get_or_insert(now_unix);
-            }
-        }
-        (*queue != prev_queue, queue.is_empty())
-    };
-    if remove_empty_queue {
-        snap.skill_queues.remove(&target_cid);
-    }
-    changed
 }
 
 /// Parses an optional `[me|self|<characterID>]` prefix token, validating explicit numeric
@@ -1620,170 +1485,6 @@ async fn handle_slash_spawn_npc(
         ("npcID", PyRep::Integer(npc_id)),
         ("typeID", PyRep::Integer(type_id as i64)),
         ("solarSystemID", PyRep::Integer(sys_id as i64)),
-    ]))
-}
-
-/// Handles `/setskill` and `/giveskill` GM slash commands (`[me|<characterID>] <typeID> <0-5>`).
-fn handle_slash_set_skill(
-    ctx: &ServerContext,
-    cid: i64,
-    cmd: &str,
-    rest: &str,
-) -> Result<PyRep, BridgeRpcError> {
-    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
-    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-    let usage_err = || BridgeRpcError {
-        code: "InvalidSlashArgument".into(),
-        message: "Usage: /setskill [me|<characterID>] <typeID> <0-5> or /giveskill [me|<characterID>] <typeID> <0-5>"
-            .into(),
-        client_error: None,
-    };
-    let (target_cid, skill_id_str, lvl_str) = match token_strs.as_slice() {
-        [s, l] => (cid, *s, *l),
-        [target, s, l]
-            if target.eq_ignore_ascii_case("me") || target.eq_ignore_ascii_case("self") =>
-        {
-            (cid, *s, *l)
-        }
-        [target, s, l] => {
-            let Some(target_id) = target.parse::<i64>().ok().filter(|&id| id > 0) else {
-                return Err(usage_err());
-            };
-            (target_id, *s, *l)
-        }
-        _ => return Err(usage_err()),
-    };
-    let Ok(skill_id) = skill_id_str.parse::<u32>() else {
-        return Err(BridgeRpcError {
-            code: "InvalidSlashArgument".into(),
-            message: "Invalid skill_id for /setskill".into(),
-            client_error: None,
-        });
-    };
-    let Ok(lvl) = lvl_str.parse::<u8>() else {
-        return Err(BridgeRpcError {
-            code: "InvalidSlashArgument".into(),
-            message: "Invalid level for /setskill".into(),
-            client_error: None,
-        });
-    };
-    if lvl > 5 {
-        return Err(BridgeRpcError {
-            code: "InvalidSlashArgument".into(),
-            message: "Level for /setskill must be between 0 and 5".into(),
-            client_error: None,
-        });
-    }
-    let Some(skill_type) = ctx.sde.types.get(&skill_id) else {
-        return Err(BridgeRpcError {
-            code: "SkillNotFound".into(),
-            message: format!("Skill type ID {skill_id} not found in SDE"),
-            client_error: None,
-        });
-    };
-    if skill_type.category_id != 16 {
-        return Err(BridgeRpcError {
-            code: "InvalidSkillType".into(),
-            message: format!("Type {skill_id} is not a skill (category 16)"),
-            client_error: None,
-        });
-    }
-    let rank = skill_type
-        .default_attributes
-        .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
-        .copied()
-        .unwrap_or(1.0);
-    let skill_name = skill_type.name.clone();
-    let target_sp = crate::formulas::sp_for_skill_level(rank, lvl);
-    let now_unix = ctx.now_unix();
-
-    let (total_sp, active_ship, was_present, queue_changed) =
-        ctx.db.try_with_mut_snapshot(|snap| {
-            let (clone_grade, active_ship) = snap
-                .characters
-                .get(&target_cid)
-                .map(|ch| (ch.clone_grade, ch.active_ship_id))
-                .ok_or_else(|| BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {target_cid} not found"),
-                    client_error: None,
-                })?;
-            let (prev_sp, was_present) = {
-                let skills_map = snap.skills.entry(target_cid).or_default();
-                let prev_sp = skills_map.get(&skill_id).map(|s| s.skill_points).unwrap_or(0.0);
-                let was_present = if lvl == 0 {
-                    skills_map.remove(&skill_id).is_some()
-                } else {
-                    skills_map.insert(
-                        skill_id,
-                        eve_db::TrainedSkillRecord {
-                            type_id: skill_id,
-                            level: lvl,
-                            skill_points: target_sp,
-                        },
-                    );
-                    false
-                };
-                (prev_sp, was_present)
-            };
-            let sp_diff = target_sp - prev_sp;
-            let total_sp = {
-                let ch = snap.characters.get_mut(&target_cid).ok_or_else(|| BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {target_cid} not found"),
-                    client_error: None,
-                })?;
-                ch.skill_points = (ch.skill_points + sp_diff).max(0.0);
-                ch.skill_points
-            };
-            let queue_changed = reconcile_skill_queue_after_set_skill(
-                ctx,
-                snap,
-                target_cid,
-                clone_grade,
-                skill_id,
-                lvl,
-                target_sp,
-                now_unix,
-            );
-            Ok((total_sp, active_ship, was_present, queue_changed))
-        })?;
-
-    ctx.sync_ship_ballpark_stats(target_cid, active_ship);
-    if lvl == 0 {
-        if was_present {
-            // Pass post-removal level 0 so `emit_server_skills_removed` emits `-1.0` SP and
-            // V24 `SkillsSvc._UpdateMySkillsAndReturnLevelsTrained` deletes the cached skill.
-            crate::services::jump_clone_names::emit_server_skills_removed(
-                ctx,
-                target_cid,
-                &[(skill_id, 0)],
-            );
-        }
-    } else {
-        crate::services::jump_clone_names::emit_server_skills_changed(
-            ctx,
-            target_cid,
-            &[skill_id],
-            Some("GMGiveSkill"),
-        );
-    }
-    ctx.push_brain_update(target_cid);
-    if queue_changed {
-        let _ = ctx.notify_new_skill_queue_saved(
-            target_cid,
-            crate::services::jump_clone_names::skill_queue_rowset(ctx, target_cid),
-        );
-    }
-
-    Ok(PyRep::keyval([
-        ("command", PyRep::String(cmd.to_string())),
-        ("characterID", PyRep::Integer(target_cid)),
-        ("skillID", PyRep::Integer(skill_id as i64)),
-        ("skillName", PyRep::String(skill_name)),
-        ("level", PyRep::Integer(lvl as i64)),
-        ("skillPoints", PyRep::Real(target_sp)),
-        ("characterTotalSP", PyRep::Real(total_sp)),
     ]))
 }
 

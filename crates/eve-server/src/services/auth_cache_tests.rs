@@ -2532,3 +2532,125 @@ async fn gm_setskill_and_giveskill_emptying_queue_removes_key_and_passes_sqlite_
         .expect("/giveskill 3300 1 on stale empty queue");
     assert_removed_and_pre_clean(&ctx, "/giveskill cleaning pre-existing empty Vec");
 }
+
+#[tokio::test]
+async fn gm_giveisk_routes_through_tx_projects_on_account_change_and_records_journal() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let other_uid = 2_u64;
+    let other_cid = 90_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.get(&cid).cloned() {
+            ch.character_id = other_cid;
+            ch.user_id = other_uid;
+            ch.name = "GiveIskAlt".into();
+            snap.characters.insert(other_cid, ch);
+        }
+    });
+
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK;
+    let kw = HashMap::new();
+    ctx.db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(cid), true, ctx.now_unix())
+        .expect("online lock cid");
+    ctx.db
+        .acquire_online_lock(other_uid, 203, Some(other_cid), true, ctx.now_unix())
+        .expect("online lock other_cid");
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx.drain_notifications_for_char(other_cid);
+
+    let self_before = ctx.db.with_snapshot(|s| s.characters[&cid].balance);
+    let rep_self = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk me 2500".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveisk me 2500");
+    assert_eq!(
+        rep_self.dict_get("newBalanceISK"),
+        Some(&PyRep::Real(
+            self_before
+                .checked_add(eve_db::IskCents::from_isk(2_500))
+                .unwrap()
+                .to_wire_f64()
+        ))
+    );
+    let self_notifs = ctx.drain_notifications_for_char(cid);
+    assert!(
+        self_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "/giveisk me must emit OnAccountChange via tx commit listener: {self_notifs:?}"
+    );
+
+    let other_before = ctx.db.with_snapshot(|s| s.characters[&other_cid].balance);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/giveisk {other_cid} 500"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveisk <other_cid> 500");
+    let other_notifs = ctx.drain_notifications_for_char(other_cid);
+    assert!(
+        other_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "/giveisk <other_cid> must emit OnAccountChange to target character"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnAccountChange"),
+        "/giveisk <other_cid> must not emit OnAccountChange to GM caller"
+    );
+
+    let journal_before = ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.characters[&other_cid].balance,
+            other_before
+                .checked_add(eve_db::IskCents::from_isk(500))
+                .unwrap()
+        );
+        let j = s.wallet_journal.last().expect("GMGiveIsk journal entry");
+        assert_eq!(j.character_id, other_cid);
+        assert_eq!(j.entry_type, "GMGiveIsk");
+        assert_eq!(j.amount, eve_db::IskCents::from_isk(500));
+        let meta = &s.wallet_journal_meta[&j.entry_id];
+        assert_eq!(meta.ref_type_id, eve_db::ledger::ref_types::PLAYER_DONATION);
+        assert_eq!(meta.first_party_id, cid);
+        assert_eq!(meta.second_party_id, other_cid);
+        s.wallet_journal.len()
+    });
+
+    for (bad_cmd, expected_code) in [
+        ("/giveisk 922337203685477580", "BalanceOverflow"),
+        ("/giveisk 999888777 100", "CharacterNotFound"),
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(bad_cmd.into())],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, expected_code, "for {bad_cmd}");
+    }
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.wallet_journal.len(), journal_before);
+    });
+}

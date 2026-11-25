@@ -1439,26 +1439,23 @@ impl CareerGoalManager {
 
         if isk > 0 || sp > 0.0 {
             let now_unix = db.clock().now_unix_secs();
-            let credit_res = db.try_with_mut_snapshot(|snap| {
-                let isk_cents = IskCents::from_isk(isk);
-                let journal = (isk > 0).then(|| {
-                    (
-                        "CAREER_PROGRAM_REWARD",
-                        format!("AIR Career Program goal reward ({})", res_goal.def.name),
-                        Some((170, 1_000_125, now_unix)),
-                    )
-                });
-                crate::domain::career_goals::credit_character_reward_in_snap(
-                    snap,
-                    character_id as i64,
-                    isk_cents,
-                    sp,
-                    0,
-                    journal,
+            let isk_cents = IskCents::from_isk(isk);
+            let journal = (isk > 0).then(|| {
+                (
+                    "CAREER_PROGRAM_REWARD",
+                    format!("AIR Career Program goal reward ({})", res_goal.def.name),
+                    Some((170, 1_000_125, now_unix)),
                 )
-                .map(|_| ())
-                .map_err(|e| e.message)
             });
+            let credit_res = crate::domain::career_goals::credit_character_reward_tx(
+                db,
+                "career_program_reward",
+                character_id as i64,
+                isk_cents,
+                sp,
+                0,
+                journal,
+            );
             if credit_res.is_err() {
                 let mut map = self
                     .character_career_goals

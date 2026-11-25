@@ -456,6 +456,118 @@ pub(crate) fn unknown_slash_error(cmd: &str) -> BridgeRpcError {
     )
 }
 
+fn invalid_slash_arg_error(msg: impl Into<String>) -> BridgeRpcError {
+    let msg = msg.into();
+    let reason = format!("InvalidSlashArgument: {msg}");
+    BridgeRpcError::with_client_error(
+        "InvalidSlashArgument",
+        msg,
+        ClientError::user_with_args(UserErrorKey::SlashError, [("reason", UserErrorArg::Str(reason))]),
+    )
+}
+
+const GIVEISK_USAGE: &str = "Usage: /giveisk [me|<character_id>] <positive_integer_amount>";
+const SETSKILL_USAGE: &str =
+    "Usage: /setskill [me|<characterID>] <typeID> <0-5> or /giveskill [me|<characterID>] <typeID> <0-5>";
+
+fn parse_optional_target_char(caller_cid: i64, target: &str) -> Option<i64> {
+    if target.eq_ignore_ascii_case("me") || target.eq_ignore_ascii_case("self") {
+        Some(caller_cid)
+    } else {
+        target.parse::<i64>().ok().filter(|&id| id > 0)
+    }
+}
+
+/// Typed arguments parsed for `/giveisk [me|self|<character_id>] <positive_integer_amount>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GiveIskArgs {
+    pub target_char_id: i64,
+    pub amount_cents: eve_db::IskCents,
+}
+
+impl GiveIskArgs {
+    /// Parses `/giveisk` arguments without mutating world state, rejecting bad targets,
+    /// non-integer or non-positive amounts, and cent-overflow values.
+    pub(crate) fn parse(caller_cid: i64, rest: &str) -> Result<Self, BridgeRpcError> {
+        let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+        let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let (target_char_id, amount_tok) = match token_strs.as_slice() {
+            [amt] => (caller_cid, *amt),
+            [target, amt] => {
+                let Some(target_id) = parse_optional_target_char(caller_cid, target) else {
+                    return Err(invalid_slash_arg_error(GIVEISK_USAGE));
+                };
+                (target_id, *amt)
+            }
+            _ => return Err(invalid_slash_arg_error(GIVEISK_USAGE)),
+        };
+        let Ok(amount_isk) = amount_tok.parse::<i64>() else {
+            return Err(invalid_slash_arg_error(GIVEISK_USAGE));
+        };
+        if amount_isk <= 0 {
+            return Err(invalid_slash_arg_error("Amount for /giveisk must be positive"));
+        }
+        let Some(raw_cents) = amount_isk.checked_mul(100) else {
+            return Err(BridgeRpcError::with_client_error(
+                "BalanceOverflow",
+                "Adding ISK would overflow balance",
+                ClientError::user_with_args(
+                    UserErrorKey::SlashError,
+                    [(
+                        "reason",
+                        UserErrorArg::Str("BalanceOverflow: Adding ISK would overflow balance".to_string()),
+                    )],
+                ),
+            ));
+        };
+        Ok(Self {
+            target_char_id,
+            amount_cents: eve_db::IskCents::from_raw_cents(raw_cents),
+        })
+    }
+}
+
+/// Typed arguments parsed for `/setskill` and `/giveskill` (`[me|self|<characterID>] <typeID> <0-5>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SetSkillArgs {
+    pub target_char_id: i64,
+    pub skill_type_id: eve_sde::TypeId,
+    pub level: u8,
+}
+
+impl SetSkillArgs {
+    /// Parses `/setskill` or `/giveskill` arguments without mutating world state, validating
+    /// target character syntax, positive `typeID`, and bounded skill level `0..=5`.
+    pub(crate) fn parse(caller_cid: i64, rest: &str) -> Result<Self, BridgeRpcError> {
+        let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+        let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let (target_char_id, skill_id_str, lvl_str) = match token_strs.as_slice() {
+            [s, l] => (caller_cid, *s, *l),
+            [target, s, l] => {
+                let Some(target_id) = parse_optional_target_char(caller_cid, target) else {
+                    return Err(invalid_slash_arg_error(SETSKILL_USAGE));
+                };
+                (target_id, *s, *l)
+            }
+            _ => return Err(invalid_slash_arg_error(SETSKILL_USAGE)),
+        };
+        let Some(skill_type_id) = skill_id_str.parse::<u32>().ok().filter(|&id| id > 0) else {
+            return Err(invalid_slash_arg_error("Invalid skill_id for /setskill"));
+        };
+        let Ok(level) = lvl_str.parse::<u8>() else {
+            return Err(invalid_slash_arg_error("Invalid level for /setskill"));
+        };
+        if level > 5 {
+            return Err(invalid_slash_arg_error("Level for /setskill must be between 0 and 5"));
+        }
+        Ok(Self {
+            target_char_id,
+            skill_type_id,
+            level,
+        })
+    }
+}
+
 enum PreparedSlashDispatch<'a> {
     Immediate(Result<PyRep, BridgeRpcError>),
     Execute {

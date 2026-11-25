@@ -509,8 +509,8 @@ fn handle_apply_free_skill_points_to_skills(
     let now_ft = ctx.now_blueos_filetime_ticks();
     let now_unix = ctx.now_unix();
 
-    let (changed_skills, rem_free) = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(ch_snap) = snap.characters.get(&char_id).cloned() else {
+    let (changed_skills, rem_free) = ctx.db.tx("apply_free_skill_points_to_skills", |wtx| {
+        let Some(ch_snap) = wtx.snap.characters.get(&char_id).cloned() else {
             return Err(err("CharacterNotFound", format!("Character {char_id} not found")));
         };
         if ch_snap.free_skill_points <= 0.0 {
@@ -531,14 +531,14 @@ fn handle_apply_free_skill_points_to_skills(
             remaining_budget = remaining_budget.min(alpha_room);
         }
 
-        let mut total_applied = 0.0;
+        let mut rem_free = ch_snap.free_skill_points;
         let mut changed_tids = Vec::new();
         for (tid, target_lvl) in targets {
             if remaining_budget <= 0.0 {
                 break;
             }
             {
-                let skills_ro = snap.skills.entry(char_id).or_default();
+                let skills_ro = wtx.snap.skills.entry(char_id).or_default();
                 if !skills_ro.contains_key(&tid) {
                     return Err(err(
                         "CannotApplyFreePointsDoNotHaveSkill",
@@ -554,7 +554,7 @@ fn handle_apply_free_skill_points_to_skills(
             };
             let eff_target = target_lvl.min(max_lvl);
             let rank = skill_rank(ctx, tid);
-            let existing = snap.skills[&char_id][&tid].clone();
+            let existing = wtx.snap.skills[&char_id][&tid].clone();
             let target_sp = sp_for_skill_level(rank, eff_target);
             let needed = (target_sp - existing.skill_points).max(0.0);
             if needed <= 0.0 {
@@ -565,7 +565,6 @@ fn handle_apply_free_skill_points_to_skills(
                 continue;
             }
             remaining_budget -= applied;
-            total_applied += applied;
             let new_skill_sp = existing.skill_points + applied;
             let mut achieved_lvl = existing.level;
             for lvl in (existing.level + 1)..=max_lvl {
@@ -575,81 +574,28 @@ fn handle_apply_free_skill_points_to_skills(
                     break;
                 }
             }
-            snap.skills.entry(char_id).or_default().insert(
-                tid,
-                TrainedSkillRecord {
-                    type_id: tid,
-                    level: achieved_lvl,
-                    skill_points: new_skill_sp,
-                },
-            );
-            let train_mult = ctx.skill_training_multiplier();
-            let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
-                Some(effective_character_attributes(&ctx.sde, snap, char_id))
-            } else {
-                None
-            };
-            let mut remove_empty_queue = false;
-            if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
-                queue.retain_mut(|q| {
-                    if q.type_id != tid {
-                        return true;
-                    }
-                    if new_skill_sp + 0.5 >= q.end_sp {
-                        false
-                    } else {
-                        if new_skill_sp > q.start_sp {
-                            let old_needed = (q.end_sp - q.start_sp).max(1.0);
-                            q.start_sp = new_skill_sp;
-                            q.duration_seconds = if let Some(attrs) = eff_attrs {
-                                skill_queue_entry_duration_with_attrs(
-                                    ctx,
-                                    q.type_id,
-                                    q.start_sp,
-                                    q.end_sp,
-                                    ch_snap.clone_grade,
-                                    attrs,
-                                    q.duration_seconds,
-                                )
-                            } else {
-                                q.duration_seconds
-                                    * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
-                            };
-                        }
-                        true
-                    }
-                });
-                remove_empty_queue = queue.is_empty();
-            }
-            if remove_empty_queue {
-                snap.skill_queues.remove(&char_id);
-            }
-            snap.skill_history
-                .entry(char_id)
-                .or_default()
-                .push(SkillHistoryEntry {
-                    log_date_ft: now_ft,
-                    event_type_id: 307,
+            let outcome = crate::domain::skills::apply_character_skill_update_in_snap(
+                ctx,
+                wtx.snap,
+                char_id,
+                crate::domain::skills::CharacterSkillUpdate {
                     skill_type_id: tid,
-                    skill_level: achieved_lvl,
-                    absolute_points: new_skill_sp,
-                });
+                    new_level: achieved_lvl,
+                    new_skill_points: new_skill_sp,
+                    remove_when_zero: false,
+                    free_sp_delta: -applied,
+                    history_event_type_id: Some(307),
+                    now_ft,
+                    now_unix,
+                    allow_rewind_start_sp: false,
+                },
+            )
+            .map_err(crate::services::domain_err_to_rpc)?;
+            rem_free = outcome.remaining_free_skill_points;
             if !changed_tids.contains(&tid) {
                 changed_tids.push(tid);
             }
         }
-        if !snap.paused_skill_queues.contains(&char_id) {
-            if let Some(head) = snap.skill_queues.get_mut(&char_id).and_then(|q| q.first_mut()) {
-                head.started_at_unix.get_or_insert(now_unix);
-            }
-        }
-        let rem_free = if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.free_skill_points = (ch.free_skill_points - total_applied).max(0.0);
-            ch.skill_points += total_applied;
-            ch.free_skill_points
-        } else {
-            0.0
-        };
         Ok((changed_tids, rem_free))
     })?;
 

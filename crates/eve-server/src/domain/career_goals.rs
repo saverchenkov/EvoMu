@@ -7,6 +7,29 @@ use crate::services::quasar_career_goals::{CareerGoalManager, CareerMilestoneDef
 use eve_db::{IskCents, NpeProgressRecord, WorldStateSnapshot};
 use eve_sde::SdeRegistry;
 
+/// Credits ISK, free skill points, and optional EverMarks + wallet journal atomically via
+/// `WorldRepository::tx`, ensuring commit diffs project `OnAccountChange` automatically.
+pub fn credit_character_reward_tx(
+    db: &eve_db::WorldRepository,
+    tx_label: &'static str,
+    char_id: i64,
+    isk_cents: IskCents,
+    sp_reward: f64,
+    evermarks: i64,
+    journal_meta: Option<(&'static str, String, Option<(i32, i64, u64)>)>,
+) -> Result<(IskCents, f64), DomainError> {
+    db.tx(tx_label, |wtx| {
+        credit_character_reward_in_snap(
+            wtx.snap,
+            char_id,
+            isk_cents,
+            sp_reward,
+            evermarks,
+            journal_meta,
+        )
+    })
+}
+
 /// Credits ISK, free skill points, and optional EverMarks + wallet journal atomically within `snap`.
 pub fn credit_character_reward_in_snap(
     snap: &mut WorldStateSnapshot,
