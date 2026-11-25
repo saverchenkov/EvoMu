@@ -519,16 +519,17 @@ fn step_ext_deployables_in_ball_ops(
     mechanic_rng: &crate::rng::MechanicRng,
     now_unix: u64,
 ) -> Result<(), String> {
-    let deact_guard = ctx.read_deact_hook();
-    crate::services::mobile_deployables_ext::step_ext_deployables_in_actor(
+    crate::services::mobile_deployables_ext::step_ext_deployables_in_actor_collecting(
         ctx.ballpark,
         Some(&mut ctx.actor_st.active_module_cycles),
-        deact_guard.as_ref(),
         sde,
         db,
         Some(mechanic_rng),
         ctx.solar_system_id,
         now_unix,
+        Some(&mut ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at),
+        Some(&mut ctx.actor_st.post_unlock_shadows.observatory_pings_done),
+        ctx.post_unlock_ops,
     );
     protection::sync_all_protection_registry_in_actor(ctx.ballpark, ctx.actor_st);
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
@@ -1066,7 +1067,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = step_ext_deployables_in_ball_ops(&mut ctx, &sde, &db, &mechanic_rng, now_unix);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_barrier_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ReconnectLiveShipInSpace { request, reply } => {

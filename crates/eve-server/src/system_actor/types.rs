@@ -892,6 +892,16 @@ pub(crate) struct SystemActorState {
     pub next_post_unlock_seq: u64,
     pub pending_item_qty_deltas: std::collections::VecDeque<(u64, ItemId, i32)>,
     pub pending_crystal_dmg_deltas: std::collections::VecDeque<(u64, ItemId, f64)>,
+    pub(crate) post_unlock_shadows: PostUnlockActorShadows,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PostUnlockActorShadows {
+    pub mmju_spool_fired_at: HashMap<ItemId, u64>,
+    pub observatory_pings_done: HashMap<ItemId, u32>,
+    pub abyssal_boundary_ticks: HashMap<ItemId, u32>,
+    pub abyssal_active_clouds: HashMap<ItemId, TypeId>,
+    pub arena_hazard_ticks: HashMap<ItemId, u32>,
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`

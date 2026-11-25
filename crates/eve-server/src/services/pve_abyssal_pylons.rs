@@ -11,6 +11,10 @@ use crate::services::pve_abyssal_hazards::{
     MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
 };
 use crate::services::pve_special_sites::read_abyssal_state;
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, PostCommitBallparkOp, PostUnlockIntent, PostUnlockOps,
+};
+use eve_db::WorldStateSnapshot;
 use eve_sde::{attr_ids, SolarSystemId, TypeId};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
@@ -577,21 +581,369 @@ pub fn prune_out_of_bounds_abyssal_probes(ctx: &ServerContext, sys_id: SolarSyst
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum AbyssalPylonsDbOp {
+    ProbeDestroyed {
+        ball_id: i64,
+    },
+    PodBoundaryDestroyed {
+        solar_system_id: SolarSystemId,
+        ball_id: i64,
+        b_pos: [f64; 3],
+        owner_hint: i64,
+        now_unix: u64,
+    },
+    ShipBoundaryDestroyedNonDeferred {
+        solar_system_id: SolarSystemId,
+        ball_id: i64,
+        b_type: TypeId,
+        b_pos: [f64; 3],
+        owner_hint: i64,
+        t_count: u32,
+        now_unix: u64,
+    },
+    SyncBoundaryTicks {
+        upserts: Vec<(i64, u32)>,
+        removes: Vec<i64>,
+    },
+    SyncActiveClouds {
+        upserts: Vec<(i64, TypeId)>,
+        removes: Vec<i64>,
+    },
+}
+
+pub(crate) fn apply_abyssal_pylons_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    op: &AbyssalPylonsDbOp,
+) -> Vec<PostCommitBallparkOp> {
+    let mut effects = Vec::new();
+    match op {
+        AbyssalPylonsDbOp::ProbeDestroyed { ball_id } => {
+            snap.items.remove(ball_id);
+            snap.item_positions.remove(ball_id);
+        }
+        AbyssalPylonsDbOp::PodBoundaryDestroyed {
+            solar_system_id,
+            ball_id,
+            b_pos,
+            owner_hint,
+            now_unix,
+        } => {
+            let mut spawned_corpse: Option<(ItemId, CharacterId)> = None;
+            let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
+            let cid = snap
+                .items
+                .get(ball_id)
+                .map(|i| i.owner_id)
+                .filter(|&o| o > 0)
+                .or_else(|| {
+                    snap.characters
+                        .values()
+                        .find(|c| c.active_ship_id == *ball_id)
+                        .map(|c| c.character_id)
+                })
+                .unwrap_or(*owner_hint);
+            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, *ball_id);
+            snap.items.remove(ball_id);
+            snap.item_positions.remove(ball_id);
+            if cid > 0 {
+                snap.sp6_lifecycle.abyssal_sessions.remove(&cid);
+                let mut caches_to_purge: Vec<i64> = Vec::new();
+                let p_info = snap.abyssal_state.pockets.get_mut(&cid).map(|p| {
+                    p.collapsed_destroyed = true;
+                    p.completed = true;
+                    let npcs: Vec<i64> = p
+                        .rooms
+                        .iter()
+                        .flat_map(|r| r.npc_ball_ids.iter().copied())
+                        .collect();
+                    (p.pocket_id, p.origin_solar_system_id, p.trace_ball_id, npcs)
+                });
+                if let Some((pid, origin_sys, bound_tid, npcs)) = p_info {
+                    let any_other_alive = snap.abyssal_state.pockets.values().any(|other| {
+                        other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
+                    });
+                    if !any_other_alive {
+                        let mut trace_ids = Vec::new();
+                        if bound_tid > 0 {
+                            trace_ids.push(bound_tid);
+                        }
+                        snap.abyssal_state.traces.retain(|&tid, t| {
+                            if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
+                                if !trace_ids.contains(&tid) {
+                                    trace_ids.push(tid);
+                                }
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        let mut room_balls = npcs;
+                        for r in 1..=3_i64 {
+                            let mid = 1_895_000_000 + pid * 10 + r;
+                            let cid_b = 1_896_000_000 + pid * 10 + r;
+                            let sid_b = cid_b + 500_000;
+                            room_balls.extend([mid, cid_b, sid_b]);
+                            caches_to_purge.extend([cid_b, sid_b]);
+                            for c in 1..=3_i64 {
+                                room_balls.push(1_898_000_000 + pid * 100 + r * 10 + c);
+                            }
+                            for py in 1..=5_i64 {
+                                room_balls.push(1_899_000_000 + pid * 100 + r * 10 + py);
+                            }
+                        }
+                        final_cleanup = Some((origin_sys, trace_ids, room_balls));
+                    }
+                }
+                if !caches_to_purge.is_empty() {
+                    for &c_id in &caches_to_purge {
+                        snap.items.remove(&c_id);
+                        snap.item_positions.remove(&c_id);
+                    }
+                    snap.items
+                        .retain(|_, it| !caches_to_purge.contains(&it.location_id));
+                }
+                let (_, _, _, corpse_id, _) = destroy_pod_and_respawn_faction_corvette_in_snap(
+                    snap,
+                    sde_opt,
+                    cid,
+                    *solar_system_id,
+                    *b_pos,
+                    *now_unix,
+                );
+                spawned_corpse = Some((corpse_id, cid));
+            }
+            if let Some((origin_sys, trace_ids, room_balls)) = final_cleanup {
+                for rbid in room_balls {
+                    effects.push(PostCommitBallparkOp::RemoveBall { ball_id: rbid });
+                }
+                if origin_sys != *solar_system_id && !trace_ids.is_empty() {
+                    effects.push(PostCommitBallparkOp::RemoveCrossSystemTraceBalls {
+                        origin_sys,
+                        trace_ids,
+                    });
+                }
+            }
+            if let Some((corpse_id, cid)) = spawned_corpse {
+                let (c_grp, c_cat) = sde_opt
+                    .and_then(|sde| sde.types.get(&25))
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((14, 2));
+                effects.push(PostCommitBallparkOp::AddBallWithCombatAndMeta {
+                    ball: eve_destiny::Ball {
+                        id: corpse_id,
+                        type_id: 25,
+                        position: DVec3::from_array(*b_pos),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 80.0,
+                        radius: 2.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    combat_state: None,
+                    slim_meta: eve_destiny::SlimItemMeta {
+                        group_id: c_grp,
+                        category_id: c_cat,
+                        owner_id: cid,
+                        char_id: None,
+                        corp_id: -1,
+                        alliance_id: -1,
+                        security_status: 0.0,
+                        is_cloaked: false,
+                        ..Default::default()
+                    },
+                });
+            }
+        }
+        AbyssalPylonsDbOp::ShipBoundaryDestroyedNonDeferred {
+            solar_system_id,
+            ball_id,
+            b_type,
+            b_pos,
+            owner_hint,
+            t_count,
+            now_unix,
+        } => {
+            let cid = snap
+                .items
+                .get(ball_id)
+                .map(|i| i.owner_id)
+                .filter(|&o| o > 0)
+                .or_else(|| {
+                    snap.characters
+                        .values()
+                        .find(|c| c.active_ship_id == *ball_id)
+                        .map(|c| c.character_id)
+                })
+                .unwrap_or(*owner_hint);
+            let base_price = sde_opt
+                .and_then(|sde| sde.types.get(b_type))
+                .map(|t| t.base_price)
+                .unwrap_or(250_000.0);
+            snap.items.remove(ball_id);
+            snap.item_positions.remove(ball_id);
+            snap.module_online_states.remove(ball_id);
+            snap.sp6_lifecycle.ship_combat_hp.remove(ball_id);
+            snap.items.retain(|_, it| it.location_id != *ball_id);
+            snap.next_entity_id += 1;
+            let cap_id = snap.next_entity_id;
+            snap.items.insert(
+                cap_id,
+                eve_db::InventoryItemRecord {
+                    item_id: cap_id,
+                    type_id: 670,
+                    owner_id: cid,
+                    location_id: *solar_system_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(cap_id, *b_pos);
+            if cid > 0 {
+                if let Some(sde) = sde_opt {
+                    let _ = crate::router::apply_character_transition_in_snap(
+                        snap,
+                        sde,
+                        cid,
+                        crate::router::TransitionLocation::KeepCurrent,
+                        Some(cap_id),
+                        false,
+                        false,
+                    );
+                } else if let Some(ch) = snap.characters.get_mut(&cid) {
+                    ch.active_ship_id = cap_id;
+                    ch.version += 1;
+                    ch.system_epoch += 1;
+                }
+                let room_opt = snap
+                    .abyssal_state
+                    .pockets
+                    .get(&cid)
+                    .map(|p| (p.pocket_id, p.current_room));
+                if let Some(p) = snap.abyssal_state.pockets.get_mut(&cid) {
+                    p.ship_id = cap_id;
+                    if !p.fleet_ship_ids.contains(&cap_id) {
+                        p.fleet_ship_ids.push(cap_id);
+                    }
+                }
+                if let Some((pid, rnum)) = room_opt {
+                    for other in snap
+                        .abyssal_state
+                        .pockets
+                        .values_mut()
+                        .filter(|o| o.pocket_id == pid)
+                    {
+                        other.ship_room.remove(ball_id);
+                        other.ship_room.insert(cap_id, rnum);
+                    }
+                }
+                snap.next_entity_id += 1;
+                let kid = snap.next_entity_id;
+                snap.record_killmail(
+                    eve_db::KillmailRecord {
+                        kill_id: kid,
+                        victim_character_id: cid,
+                        attacker_character_id: 0,
+                        attacker_corp_id: 1_000_298,
+                        solar_system_id: *solar_system_id,
+                        ship_type_id: *b_type,
+                        total_value_isk: base_price,
+                        ..Default::default()
+                    },
+                    *now_unix,
+                );
+            }
+            snap.abyssal_state.boundary_ticks.insert(cap_id, *t_count);
+            effects.push(PostCommitBallparkOp::AddBallWithCombatAndMeta {
+                ball: eve_destiny::Ball {
+                    id: cap_id,
+                    type_id: 670,
+                    position: DVec3::from_array(*b_pos),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 0.2,
+                    mass: 1_000.0,
+                    radius: 15.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                combat_state: Some(eve_destiny::CombatState {
+                    shield_hp: 0.0,
+                    max_shield_hp: 0.0,
+                    armor_hp: 0.0,
+                    max_armor_hp: 0.0,
+                    structure_hp: 100.0,
+                    max_structure_hp: 100.0,
+                    ..Default::default()
+                }),
+                slim_meta: eve_destiny::SlimItemMeta {
+                    group_id: 29,
+                    category_id: 6,
+                    owner_id: cid,
+                    char_id: (cid > 0).then_some(cid),
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
+            });
+        }
+        AbyssalPylonsDbOp::SyncBoundaryTicks { upserts, removes } => {
+            for &bid in removes {
+                snap.abyssal_state.boundary_ticks.remove(&bid);
+            }
+            for &(bid, val) in upserts {
+                snap.abyssal_state.boundary_ticks.insert(bid, val);
+            }
+        }
+        AbyssalPylonsDbOp::SyncActiveClouds { upserts, removes } => {
+            for &bid in removes {
+                snap.abyssal_state.active_clouds.remove(&bid);
+            }
+            for &(bid, tid) in upserts {
+                snap.abyssal_state.active_clouds.insert(bid, tid);
+            }
+        }
+    }
+    effects
+}
+
 /// Real-time 1 Hz tick evaluation of Abyssal hazard clouds, automated pylons, force-decloak, and per-ship 75 km boundary damage.
 /// Returns any ball IDs destroyed by Deviant Automata Suppressors (or Abyssal boundaries when stepped) during this tick.
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
 pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     ballpark: &mut eve_destiny::Ballpark,
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
 ) -> Vec<i64> {
-    step_abyssal_hazards_and_pylons_in_ballpark_with_options(
+    let mut ops = PostUnlockOps::default();
+    let res = step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         ballpark,
         sde_opt,
         db_opt,
         solar_system_id,
         false,
-    )
+        None,
+        None,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.as_deref(),
+        db_opt.as_ref(),
+        sde_opt,
+        ops,
+        Some(ballpark),
+        None,
+    );
+    res
 }
 
 pub(crate) fn step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
@@ -600,21 +952,58 @@ pub(crate) fn step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
 ) -> Vec<i64> {
+    let mut ops = PostUnlockOps::default();
+    let res = step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
+        ballpark,
+        sde_opt,
+        db_opt,
+        solar_system_id,
+        None,
+        None,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.as_deref(),
+        db_opt.as_ref(),
+        sde_opt,
+        ops,
+        Some(ballpark),
+        None,
+    );
+    res
+}
+
+pub(crate) fn step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    boundary_ticks_shadow: Option<&mut HashMap<i64, u32>>,
+    active_clouds_shadow: Option<&mut HashMap<i64, TypeId>>,
+    post_unlock: &mut PostUnlockOps,
+) -> Vec<i64> {
     step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         ballpark,
         sde_opt,
         db_opt,
         solar_system_id,
         true,
+        boundary_ticks_shadow,
+        active_clouds_shadow,
+        post_unlock,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     ballpark: &mut eve_destiny::Ballpark,
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
     defer_ship_death_to_step_hook: bool,
+    mut boundary_ticks_shadow: Option<&mut HashMap<i64, u32>>,
+    mut active_clouds_shadow: Option<&mut HashMap<i64, TypeId>>,
+    post_unlock: &mut PostUnlockOps,
 ) -> Vec<i64> {
     let mut suppressor_destroyed = Vec::new();
     if !(32_000_001..=32_999_999).contains(&solar_system_id)
@@ -746,11 +1135,12 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             if let Some((_, true, _)) = ballpark.apply_damage_to_ball(target_id, dmg) {
                 suppressor_destroyed.push(target_id);
                 if let Some(db) = db_opt {
-                    crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+                    crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(
                         ballpark,
                         db,
                         solar_system_id,
                         target_id,
+                        post_unlock,
                     );
                 }
             }
@@ -852,15 +1242,28 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             });
         let Some(center) = center_opt else {
             boundary_ticks.remove(&bid);
+            if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
+                sh.remove(&bid);
+            }
             continue;
         };
         if b_pos.distance(center) <= ABYSSAL_ROOM_BOUNDARY_RADIUS_M {
             boundary_ticks.remove(&bid);
+            if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
+                sh.remove(&bid);
+            }
             continue;
         }
-        let ticks = boundary_ticks.entry(bid).or_insert(0);
-        *ticks += 1;
-        let t_count = *ticks;
+        let prev_val = boundary_ticks
+            .get(&bid)
+            .copied()
+            .unwrap_or(0)
+            .max(boundary_ticks_shadow.as_deref().and_then(|sh| sh.get(&bid).copied()).unwrap_or(0));
+        let t_count = prev_val + 1;
+        boundary_ticks.insert(bid, t_count);
+        if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
+            sh.insert(bid, t_count);
+        }
         let per_type = 250.0 * (1.0 + 0.5 * ((t_count as f64) - 1.0));
         if let Some(res_sum) = ballpark.combat_states.get(&bid).map(|cs| {
             cs.structure_resonance[0]
@@ -871,22 +1274,26 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             let raw_hull_dmg = per_type * res_sum;
             if let Some((_, true, _)) = ballpark.apply_direct_structure_damage_to_ball(bid, raw_hull_dmg) {
                 boundary_ticks.remove(&bid);
+                if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
+                    sh.remove(&bid);
+                }
                 boundary_destroyed.push((bid, b_type, b_pos, is_probe, is_pod, t_count, owner_hint));
             }
         } else if is_probe {
             let _ = ballpark.remove_ball(bid);
             boundary_ticks.remove(&bid);
+            if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
+                sh.remove(&bid);
+            }
             boundary_destroyed.push((bid, b_type, b_pos, true, false, t_count, owner_hint));
         }
     }
 
+    let mut deferred_boundary_destructions: Vec<AbyssalPylonsDbOp> = Vec::new();
     for (bid, b_type, b_pos, is_probe, is_pod, t_count, owner_hint) in boundary_destroyed {
         if is_probe {
-            if let Some(db) = db_opt {
-                db.with_mut_snapshot(|snap| {
-                    snap.items.remove(&bid);
-                    snap.item_positions.remove(&bid);
-                });
+            if db_opt.is_some() {
+                deferred_boundary_destructions.push(AbyssalPylonsDbOp::ProbeDestroyed { ball_id: bid });
             }
             continue;
         }
@@ -906,277 +1313,93 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             continue;
         }
         if is_pod {
-            let mut spawned_corpse: Option<(ItemId, CharacterId)> = None;
-            let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
             if let Some(db) = db_opt {
                 let now_u = db.clock().now_unix_secs();
-                db.with_mut_snapshot(|snap| {
-                    let cid = snap
-                        .items
-                        .get(&bid)
-                        .map(|i| i.owner_id)
-                        .filter(|&o| o > 0)
-                        .or_else(|| {
-                            snap.characters
-                                .values()
-                                .find(|c| c.active_ship_id == bid)
-                                .map(|c| c.character_id)
-                        })
-                        .unwrap_or(owner_hint);
-                    crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, bid);
-                    snap.items.remove(&bid);
-                    snap.item_positions.remove(&bid);
-                    if cid > 0 {
-                        snap.sp6_lifecycle.abyssal_sessions.remove(&cid);
-                        let mut caches_to_purge: Vec<i64> = Vec::new();
-                        let p_info = snap.abyssal_state.pockets.get_mut(&cid).map(|p| {
-                            p.collapsed_destroyed = true;
-                            p.completed = true;
-                            let npcs: Vec<i64> = p
-                                .rooms
-                                .iter()
-                                .flat_map(|r| r.npc_ball_ids.iter().copied())
-                                .collect();
-                            (p.pocket_id, p.origin_solar_system_id, p.trace_ball_id, npcs)
-                        });
-                        if let Some((pid, origin_sys, bound_tid, npcs)) = p_info {
-                            let any_other_alive = snap.abyssal_state.pockets.values().any(|other| {
-                                other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
-                            });
-                            if !any_other_alive {
-                                let mut trace_ids = Vec::new();
-                                if bound_tid > 0 {
-                                    trace_ids.push(bound_tid);
-                                }
-                                snap.abyssal_state.traces.retain(|&tid, t| {
-                                    if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
-                                        if !trace_ids.contains(&tid) {
-                                            trace_ids.push(tid);
-                                        }
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                });
-                                let mut room_balls = npcs;
-                                for r in 1..=3_i64 {
-                                    let mid = 1_895_000_000 + pid * 10 + r;
-                                    let cid_b = 1_896_000_000 + pid * 10 + r;
-                                    let sid_b = cid_b + 500_000;
-                                    room_balls.extend([mid, cid_b, sid_b]);
-                                    caches_to_purge.extend([cid_b, sid_b]);
-                                    for c in 1..=3_i64 {
-                                        room_balls.push(1_898_000_000 + pid * 100 + r * 10 + c);
-                                    }
-                                    for py in 1..=5_i64 {
-                                        room_balls.push(1_899_000_000 + pid * 100 + r * 10 + py);
-                                    }
-                                }
-                                final_cleanup = Some((origin_sys, trace_ids, room_balls));
-                            }
-                        }
-                        if !caches_to_purge.is_empty() {
-                            for &c_id in &caches_to_purge {
-                                snap.items.remove(&c_id);
-                                snap.item_positions.remove(&c_id);
-                            }
-                            snap.items.retain(|_, it| !caches_to_purge.contains(&it.location_id));
-                        }
-                        let (_, _, _, corpse_id, _) = destroy_pod_and_respawn_faction_corvette_in_snap(
-                            snap,
-                            sde_opt,
-                            cid,
-                            solar_system_id,
-                            [b_pos.x, b_pos.y, b_pos.z],
-                            now_u,
-                        );
-                        spawned_corpse = Some((corpse_id, cid));
-                    }
+                deferred_boundary_destructions.push(AbyssalPylonsDbOp::PodBoundaryDestroyed {
+                    solar_system_id,
+                    ball_id: bid,
+                    b_pos: [b_pos.x, b_pos.y, b_pos.z],
+                    owner_hint,
+                    now_unix: now_u,
                 });
-                if let Some((origin_sys, trace_ids, room_balls)) = final_cleanup {
-                    for rbid in room_balls {
-                        let _ = ballpark.remove_ball(rbid);
-                    }
-                    if origin_sys != solar_system_id {
-                        for tid in trace_ids {
-                            crate::system_actor::try_remove_ball_for_db(db, origin_sys, tid);
-                        }
-                    }
-                }
-            }
-            if let Some((corpse_id, cid)) = spawned_corpse {
-                let (c_grp, c_cat) = sde_opt
-                    .and_then(|sde| sde.types.get(&25))
-                    .map(|t| (t.group_id, t.category_id))
-                    .unwrap_or((14, 2));
-                ballpark.add_ball(eve_destiny::Ball {
-                    id: corpse_id,
-                    type_id: 25,
-                    position: b_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 80.0,
-                    radius: 2.0,
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                });
-                ballpark.set_ball_slim_meta(
-                    corpse_id,
-                    eve_destiny::SlimItemMeta {
-                        group_id: c_grp,
-                        category_id: c_cat,
-                        owner_id: cid,
-                        char_id: None,
-                        corp_id: -1,
-                        alliance_id: -1,
-                        security_status: 0.0,
-                        is_cloaked: false, ..Default::default()
-                    },
-                );
             }
             continue;
         }
-        let (cap_id, owner_cid) = if let Some(db) = db_opt {
+        if let Some(db) = db_opt {
             let now_u = db.clock().now_unix_secs();
-            db.with_mut_snapshot(|snap| {
-                let cid = snap
-                    .items
-                    .get(&bid)
-                    .map(|i| i.owner_id)
-                    .filter(|&o| o > 0)
-                    .or_else(|| {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == bid)
-                            .map(|c| c.character_id)
-                    })
-                    .unwrap_or(owner_hint);
-                let base_price = sde_opt
-                    .and_then(|sde| sde.types.get(&b_type))
-                    .map(|t| t.base_price)
-                    .unwrap_or(250_000.0);
-                snap.items.remove(&bid);
-                snap.item_positions.remove(&bid);
-                snap.module_online_states.remove(&bid);
-                snap.sp6_lifecycle.ship_combat_hp.remove(&bid);
-                snap.items.retain(|_, it| it.location_id != bid);
-                snap.next_entity_id += 1;
-                let cap_id = snap.next_entity_id;
-                snap.items.insert(
-                    cap_id,
-                    eve_db::InventoryItemRecord {
-                        item_id: cap_id,
-                        type_id: 670,
-                        owner_id: cid,
-                        location_id: solar_system_id as i64,
-                        flag: eve_db::InventoryFlag::None,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
-                snap.item_positions.insert(cap_id, [b_pos.x, b_pos.y, b_pos.z]);
-                if cid > 0 {
-                    if let Some(sde) = sde_opt {
-                        let _ = crate::router::apply_character_transition_in_snap(
-                            snap,
-                            sde,
-                            cid,
-                            crate::router::TransitionLocation::KeepCurrent,
-                            Some(cap_id),
-                            false,
-                            false,
-                        );
-                    } else if let Some(ch) = snap.characters.get_mut(&cid) {
-                        ch.active_ship_id = cap_id;
-                        ch.version += 1;
-                        ch.system_epoch += 1;
-                    }
-                    let room_opt = snap.abyssal_state.pockets.get(&cid).map(|p| (p.pocket_id, p.current_room));
-                    if let Some(p) = snap.abyssal_state.pockets.get_mut(&cid) {
-                        p.ship_id = cap_id;
-                        if !p.fleet_ship_ids.contains(&cap_id) {
-                            p.fleet_ship_ids.push(cap_id);
-                        }
-                    }
-                    if let Some((pid, rnum)) = room_opt {
-                        for other in snap.abyssal_state.pockets.values_mut().filter(|o| o.pocket_id == pid) {
-                            other.ship_room.remove(&bid);
-                            other.ship_room.insert(cap_id, rnum);
-                        }
-                    }
-                    snap.next_entity_id += 1;
-                    let kid = snap.next_entity_id;
-                    snap.record_killmail(
-                        eve_db::KillmailRecord {
-                            kill_id: kid,
-                            victim_character_id: cid,
-                            attacker_character_id: 0,
-                            attacker_corp_id: 1_000_298,
-                            solar_system_id,
-                            ship_type_id: b_type,
-                            total_value_isk: base_price,
-                            ..Default::default()
-                        },
-                        now_u,
-                    );
-                }
-                (cap_id, cid)
-            })
+            deferred_boundary_destructions.push(AbyssalPylonsDbOp::ShipBoundaryDestroyedNonDeferred {
+                solar_system_id,
+                ball_id: bid,
+                b_type,
+                b_pos: [b_pos.x, b_pos.y, b_pos.z],
+                owner_hint,
+                t_count,
+                now_unix: now_u,
+            });
         } else {
-            (bid.saturating_add(900_000_000), owner_hint)
-        };
-        if let Some(&center) = room_center_by_ship.get(&bid) {
-            room_center_by_ship.insert(cap_id, center);
+            let cap_id = bid.saturating_add(900_000_000);
+            if let Some(&center) = room_center_by_ship.get(&bid) {
+                room_center_by_ship.insert(cap_id, center);
+            }
+            boundary_ticks.insert(cap_id, t_count);
+            let cap_cs = eve_destiny::CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 0.0,
+                armor_hp: 0.0,
+                max_armor_hp: 0.0,
+                structure_hp: 100.0,
+                max_structure_hp: 100.0,
+                ..Default::default()
+            };
+            ballpark.add_ball(eve_destiny::Ball {
+                id: cap_id,
+                type_id: 670,
+                position: b_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 0.2,
+                mass: 1_000.0,
+                radius: 15.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            });
+            ballpark.combat_states.insert(cap_id, cap_cs);
+            ballpark.set_ball_slim_meta(
+                cap_id,
+                eve_destiny::SlimItemMeta {
+                    group_id: 29,
+                    category_id: 6,
+                    owner_id: owner_hint,
+                    char_id: (owner_hint > 0).then_some(owner_hint),
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
+            );
         }
-        boundary_ticks.insert(cap_id, t_count);
-        let cap_cs = eve_destiny::CombatState {
-            shield_hp: 0.0,
-            max_shield_hp: 0.0,
-            armor_hp: 0.0,
-            max_armor_hp: 0.0,
-            structure_hp: 100.0,
-            max_structure_hp: 100.0,
-            ..Default::default()
-        };
-        ballpark.add_ball(eve_destiny::Ball {
-            id: cap_id,
-            type_id: 670,
-            position: b_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 200.0,
-            inertia: 0.2,
-            mass: 1_000.0,
-            radius: 15.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        });
-        ballpark.combat_states.insert(cap_id, cap_cs);
-        ballpark.set_ball_slim_meta(
-            cap_id,
-            eve_destiny::SlimItemMeta {
-                group_id: 29,
-                category_id: 6,
-                owner_id: owner_cid,
-                char_id: (owner_cid > 0).then_some(owner_cid),
-                corp_id: -1,
-                alliance_id: -1,
-                security_status: 0.0,
-                is_cloaked: false, ..Default::default()
-            },
-        );
     }
 
     boundary_ticks.retain(|bid, _| *bid < 0 || ballpark.balls.contains_key(bid));
-    if boundary_ticks != prev_boundary_ticks {
-        if let Some(db) = db_opt {
-            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                snap.abyssal_state.boundary_ticks = boundary_ticks;
-                Ok(())
-            });
+    if boundary_ticks != prev_boundary_ticks && db_opt.is_some() {
+        let upserts: Vec<(i64, u32)> = boundary_ticks
+            .iter()
+            .filter_map(|(&k, &v)| (prev_boundary_ticks.get(&k) != Some(&v)).then_some((k, v)))
+            .collect();
+        let removes: Vec<i64> = prev_boundary_ticks
+            .keys()
+            .copied()
+            .filter(|k| !boundary_ticks.contains_key(k))
+            .collect();
+        if !upserts.is_empty() || !removes.is_empty() {
+            post_unlock.push(PostUnlockIntent::AbyssalPylons(
+                AbyssalPylonsDbOp::SyncBoundaryTicks { upserts, removes },
+            ));
         }
+    }
+    for op in deferred_boundary_destructions {
+        post_unlock.push(PostUnlockIntent::AbyssalPylons(op));
     }
 
     let mut clouds: Vec<(Option<i64>, TypeId, DVec3, f64)> = Vec::new();
@@ -1192,6 +1415,11 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         return suppressor_destroyed;
     }
 
+    if let Some(sh) = active_clouds_shadow.as_deref() {
+        for (&k, &v) in sh {
+            active_clouds.insert(k, v);
+        }
+    }
     active_clouds.retain(|bid, _| ballpark.balls.contains_key(bid));
 
     for sid in ship_ids {
@@ -1236,12 +1464,23 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         }
     }
 
-    if active_clouds != prev_active_clouds {
-        if let Some(db) = db_opt {
-            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                snap.abyssal_state.active_clouds = active_clouds;
-                Ok(())
-            });
+    if let Some(sh) = active_clouds_shadow.as_deref_mut() {
+        *sh = active_clouds.clone();
+    }
+    if active_clouds != prev_active_clouds && db_opt.is_some() {
+        let upserts: Vec<(i64, TypeId)> = active_clouds
+            .iter()
+            .filter_map(|(&k, &v)| (prev_active_clouds.get(&k) != Some(&v)).then_some((k, v)))
+            .collect();
+        let removes: Vec<i64> = prev_active_clouds
+            .keys()
+            .copied()
+            .filter(|k| !active_clouds.contains_key(k))
+            .collect();
+        if !upserts.is_empty() || !removes.is_empty() {
+            post_unlock.push(PostUnlockIntent::AbyssalPylons(
+                AbyssalPylonsDbOp::SyncActiveClouds { upserts, removes },
+            ));
         }
     }
     suppressor_destroyed

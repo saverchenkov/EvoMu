@@ -131,10 +131,7 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
     let _ = arena_handle.spawn_ball(fake_cloud_ball).await;
     let active_clouds = eve_server::services::pve_special_sites_abyssal::evaluate_abyssal_spatial_clouds_for_ship(&ctx, 32000001, ship_id).await;
     assert!(active_clouds.is_none(), "PvP arena ship must not be affected by Abyssal pocket clouds");
-    {
-        let mut bp = arena_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), 32000001);
-    }
+    let _ = arena_handle.step_manual(1.0).await;
     let vel_after_cloud = arena_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.max_velocity;
     assert!((vel_after_cloud - vel_before_cloud).abs() < 1e-6, "PvP arena ship must not be buffed by Tachyon cloud");
 

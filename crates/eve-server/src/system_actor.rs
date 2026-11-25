@@ -1374,7 +1374,7 @@ impl SystemRegistry {
             actor_state_actor.clone(),
             module_deactivation_hook_actor.clone(),
             target_lock_completed_hook_actor.clone(),
-            post_unlock_actions_actor.clone(),
+            post_unlock_actions_actor.clone(), cmd_tx.clone(),
         );
         if !initial_post_unlock_ops.is_empty() {
             let _ = post_unlock::send_post_unlock_item(
@@ -1991,11 +1991,8 @@ impl SystemRegistry {
                                                 tactical_state.as_ref(),
                                                 target_ball_id,
                                             );
-                                            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
-                                                ballpark,
-                                                db,
-                                                solar_system_id,
-                                                target_ball_id,
+                                            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(
+                                                ballpark, db, solar_system_id, target_ball_id, &mut post_unlock_ops,
                                             );
                                         }
                                     }

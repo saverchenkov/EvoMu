@@ -344,6 +344,7 @@ pub(crate) fn apply_resolved_weapon_damage(
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     if effective_damage.total() <= 0.0 {
         // Why: Turret/weapon shots that miss still emit combat-log miss messages (#1247).
@@ -365,7 +366,7 @@ pub(crate) fn apply_resolved_weapon_damage(
     }
     let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
     let sys_id = ballpark.solar_system_id;
-    let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(
+    let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor_collecting(
         db_opt,
         sde_opt,
         sys_id,
@@ -373,6 +374,7 @@ pub(crate) fn apply_resolved_weapon_damage(
         effective_damage,
         ballpark,
         now_unix,
+        post_unlock,
     )
     .or_else(|| ballpark.apply_damage_to_ball(target_id, effective_damage));
     let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
@@ -531,6 +533,7 @@ pub(crate) fn apply_weapon_cycle_damage_collecting(
         pending_cycle_actions,
         destroyed_balls,
         pending_destroyed_outbox,
+        post_unlock,
     );
     if effective_damage.total() > 0.0 && db_opt.is_some() {
         if let Some(cs) = ballpark.combat_states.get(&target_id) {
@@ -638,12 +641,13 @@ pub(crate) fn step_cycles_with_reservations_collecting(
 
     // Per-tick rack heat generation (`sum(heatAbsorbtionRateModifier)` * evaluated `heatGenerationMultiplier`)
     // and passive exponential dissipation (`feat:modules.overheat-rack-heat-generation`)
-    crate::services::tactical_module_mechanics::step_rack_heat_per_tick(
+    crate::services::tactical_module_mechanics::step_rack_heat_per_tick_collecting(
         ship_rack_heat,
         active_module_cycles,
         sde_opt,
         db_opt,
         dt,
+        post_unlock,
     );
 
     // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`);
@@ -757,6 +761,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
     }
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
+    let mut local_heat_dmg: HashMap<i64, (f64, bool)> = HashMap::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // If the source ship was destroyed / removed from space mid-cycle (or decloaked by proximity/physics), cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
         let cloak_decloaked = cycle.effect_name.starts_with("cloaking") && ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| !cs.is_cloaked && cs.cloak_velocity_multiplier.is_none());
@@ -1171,7 +1176,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                 }
             }
             if cycle.is_overloaded {
-                crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle(
+                crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle_collecting(
                     cycle,
                     ship_rack_heat,
                     sde_opt,
@@ -1179,6 +1184,8 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                     mechanic_rng_opt,
                     &mut burned_out,
                     &mut burned_ship_modules,
+                    Some(&mut local_heat_dmg),
+                    post_unlock,
                 );
                 if burned_out {
                     pending_cycle_actions.push(PendingCycleAction::InvalidateShipFitting {
@@ -1963,7 +1970,8 @@ impl SystemHandle {
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix, ..
+            warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
+            post_unlock_shadows, ..
         } = &mut *st;
         let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
         let tidi = self.tidi_factor();
@@ -2037,12 +2045,16 @@ impl SystemHandle {
                 }
             }
         }
-        let sup_dead = crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+        let sup_dead = crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
+            Some(&mut post_unlock_shadows.abyssal_boundary_ticks),
+            Some(&mut post_unlock_shadows.abyssal_active_clouds),
+            &mut post_unlock_ops,
         );
-        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
-            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>), notify_tx_opt.as_ref(),
+            pending_notifications_opt.as_ref(), notify_tx_opt.as_ref(),
+            Some(&mut post_unlock_shadows.arena_hazard_ticks), &mut post_unlock_ops,
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2066,9 +2078,11 @@ impl SystemHandle {
         }
         let fallback_rng = crate::rng::MechanicRng::default();
         let rng_ref = mechanic_rng_opt.as_deref().unwrap_or(&fallback_rng);
-        crate::services::mobile_deployables::step_mobile_deployables_in_actor(
-            &mut bp, active_module_cycles, rng_ref, deact_hook_guard.as_ref(),
-            sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
+        crate::services::mobile_deployables::step_mobile_deployables_in_actor_collecting(
+            &mut bp, active_module_cycles, rng_ref, sde_opt.as_deref(), db_opt.as_ref(),
+            mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
+            Some(&mut post_unlock_shadows.mmju_spool_fired_at),
+            Some(&mut post_unlock_shadows.observatory_pings_done), &mut post_unlock_ops,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         super::post_unlock::step_module_reloads_sim_clock_collecting(
@@ -2092,6 +2106,7 @@ impl SystemHandle {
             &mut destroyed,
             Some(&pending_destroyed),
             dt,
+            &mut post_unlock_ops,
         );
         destroyed.extend(step_cycles_with_reservations_collecting(
             self.solar_system_id,
@@ -2185,7 +2200,7 @@ impl SystemHandle {
                 target_ball_id,
             );
             if let Some(db) = db_opt.as_ref() {
-                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
+                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(&mut bp, db, self.solar_system_id, target_ball_id, &mut post_unlock_ops);
             }
         }
         let (drained_destroyed, destroyed_lease) = pending_destroyed.checkout_for_step();

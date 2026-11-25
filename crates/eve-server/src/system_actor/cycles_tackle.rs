@@ -1717,7 +1717,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
             let out = if is_invuln_stronghold {
                 exec_ctx.ballpark.balls.get(&ball_id).cloned().map(|b| (0.0, false, b))
             } else if let Some((applied, destroyed, ball_opt)) =
-                crate::services::mobile_deployables::handle_ball_damage_in_actor(
+                crate::services::mobile_deployables::handle_ball_damage_in_actor_collecting(
                     &exec_ctx.actor_st.db_opt,
                     &exec_ctx.actor_st.sde_opt,
                     exec_ctx.solar_system_id,
@@ -1725,15 +1725,17 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                     damage,
                     exec_ctx.ballpark,
                     now_unix,
+                    exec_ctx.post_unlock_ops,
                 )
                 .or_else(|| {
-                    crate::services::fw_gameplay::fw_gameplay_insurgency::handle_fob_ball_damage_in_actor(
+                    crate::services::fw_gameplay::fw_gameplay_insurgency::handle_fob_ball_damage_in_actor_collecting(
                         exec_ctx.actor_st.db_opt.as_deref(),
                         exec_ctx.solar_system_id,
                         ball_id,
                         damage,
                         exec_ctx.ballpark,
                         now_unix,
+                        exec_ctx.post_unlock_ops,
                     )
                 })
                 .or_else(|| exec_ctx.ballpark.apply_damage_to_ball(ball_id, damage))
@@ -2088,6 +2090,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         &mut missile_destroyed,
         Some(exec_ctx.pending_destroyed_actor),
         dt_sim,
+        exec_ctx.post_unlock_ops,
     );
     let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
         super::post_unlock::begin_tick_charge_reservations(
@@ -2185,35 +2188,37 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
                 exec_ctx.actor_st.tactical_state.as_ref(),
                 target_ball_id,
             );
-            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
+            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(
                 exec_ctx.ballpark,
                 db,
                 exec_ctx.solar_system_id,
                 target_ball_id,
+                exec_ctx.post_unlock_ops,
             );
         }
     }
     for _ in 0..completed_sim_steps {
-        for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+        for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
             exec_ctx.ballpark,
             exec_ctx.actor_st.sde_opt.as_deref(),
             exec_ctx.actor_st.db_opt.as_ref(),
             exec_ctx.solar_system_id,
+            Some(&mut exec_ctx.actor_st.post_unlock_shadows.abyssal_boundary_ticks),
+            Some(&mut exec_ctx.actor_st.post_unlock_shadows.abyssal_active_clouds),
+            exec_ctx.post_unlock_ops,
         ) {
             destroyed_balls.push((bid, None));
             exec_ctx.pending_destroyed_actor.record_one(bid, None);
         }
-        for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+        for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(
             exec_ctx.ballpark,
             exec_ctx.actor_st.sde_opt.as_deref(),
             exec_ctx.actor_st.db_opt.as_ref(),
             exec_ctx.solar_system_id,
-            exec_ctx
-                .actor_st
-                .pending_notifications_opt
-                .as_deref()
-                .map(|r| r as &dyn AnyRwLock<_>),
+            exec_ctx.actor_st.pending_notifications_opt.as_ref(),
             exec_ctx.actor_st.notify_tx_opt.as_ref(),
+            Some(&mut exec_ctx.actor_st.post_unlock_shadows.arena_hazard_ticks),
+            exec_ctx.post_unlock_ops,
         ) {
             destroyed_balls.push((bid, None));
             exec_ctx.pending_destroyed_actor.record_one(bid, None);
@@ -2241,20 +2246,23 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             .as_ref()
             .map(|db| db.clock().now_unix_secs())
             .unwrap_or(0);
-        crate::services::mobile_deployables::step_mobile_deployables_in_actor(
+        let _ = &deact_guard;
+        crate::services::mobile_deployables::step_mobile_deployables_in_actor_collecting(
             exec_ctx.ballpark,
             &mut exec_ctx.actor_st.active_module_cycles,
             exec_ctx.mechanic_rng,
-            deact_guard.as_ref(),
             exec_ctx.actor_st.sde_opt.as_deref(),
             exec_ctx.actor_st.db_opt.as_ref(),
             exec_ctx.actor_st.mechanic_rng_opt.as_deref(),
             exec_ctx.solar_system_id,
             dt_sim,
             step_now_unix,
+            Some(&mut exec_ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at),
+            Some(&mut exec_ctx.actor_st.post_unlock_shadows.observatory_pings_done),
+            exec_ctx.post_unlock_ops,
         );
         let pre_bosonic_len = destroyed_balls.len();
-        crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
+        crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark_collecting(
             exec_ctx.ballpark,
             &mut exec_ctx.actor_st.base_scramble_strengths,
             exec_ctx.actor_st.sde_opt.as_ref(),
@@ -2262,6 +2270,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             exec_ctx.solar_system_id,
             step_now_unix,
             &mut destroyed_balls,
+            exec_ctx.post_unlock_ops,
         );
         exec_ctx
             .pending_destroyed_actor

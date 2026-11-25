@@ -190,6 +190,7 @@ pub(crate) fn step_guided_missiles_in_actor(
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
     dt_sim: f64,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     if active_missiles.is_empty() {
         return;
@@ -272,6 +273,7 @@ pub(crate) fn step_guided_missiles_in_actor(
                 pending_cycle_actions,
                 destroyed_balls,
                 pending_destroyed_outbox,
+                post_unlock,
             );
         }
     }

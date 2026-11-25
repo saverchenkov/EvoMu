@@ -16,6 +16,10 @@ use crate::services::insurgency_services::{
     PIRATE_STRONGHOLD_ANGEL_TYPE, PIRATE_STRONGHOLD_GURISTAS_TYPE,
     PIRATE_STRONGHOLD_WRECK_TYPE,
 };
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, PostUnlockIntent, PostUnlockOps,
+};
+use eve_db::WorldStateSnapshot;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
@@ -477,6 +481,82 @@ pub async fn apply_pirate_fob_structure_damage(
 
 /// Handles ballpark/weapon damage against a unified Pirate FOB inside `SystemActor`, enforcing
 /// Stage-5 Suppression gating and `3h ± 1h` `ArmorReinforced` timers in sync with `UpwellStructureRecord`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FobBallDamageDbOp {
+    ShieldPhase {
+        camp_id: i64,
+        ball_id: i64,
+        new_s: f64,
+        new_a: f64,
+        hull: f64,
+        now_unix: u64,
+        became_reinf: bool,
+        until: u64,
+    },
+    ArmorPhase {
+        ball_id: i64,
+        destroyed: bool,
+        new_h: f64,
+        now_unix: u64,
+    },
+}
+
+pub(crate) fn apply_fob_ball_damage_in_snap(
+    snap: &mut WorldStateSnapshot,
+    op: &FobBallDamageDbOp,
+) {
+    match op {
+        FobBallDamageDbOp::ShieldPhase {
+            camp_id,
+            ball_id,
+            new_s,
+            new_a,
+            hull,
+            now_unix,
+            became_reinf,
+            until,
+        } => {
+            if *became_reinf {
+                snap.insurgency_runtime
+                    .fob_armor_reinforced_until
+                    .insert(*camp_id, *until);
+            }
+            if let Some(st) = snap.structures.get_mut(ball_id) {
+                st.shield_hp = *new_s;
+                st.armor_hp = if *became_reinf { 0.0 } else { *new_a };
+                st.hull_hp = *hull;
+                st.last_damage_unix = *now_unix;
+                if *became_reinf {
+                    st.state = "ArmorReinforced".into();
+                    st.reinforced_until_unix = *until;
+                } else if *new_s <= 1e-6 {
+                    st.state = "ArmorVulnerable".into();
+                }
+            }
+        }
+        FobBallDamageDbOp::ArmorPhase {
+            ball_id,
+            destroyed,
+            new_h,
+            now_unix,
+        } => {
+            if let Some(st) = snap.structures.get_mut(ball_id) {
+                st.shield_hp = 0.0;
+                st.armor_hp = 0.0;
+                st.last_damage_unix = *now_unix;
+                if *destroyed {
+                    st.hull_hp = 0.0;
+                    st.state = "Destroyed".into();
+                } else {
+                    st.hull_hp = *new_h;
+                    st.state = "HullVulnerable".into();
+                }
+            }
+        }
+    }
+}
+
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
 pub(crate) fn handle_fob_ball_damage_in_actor(
     db_opt: Option<&eve_db::WorldRepository>,
     solar_system_id: u32,
@@ -484,6 +564,29 @@ pub(crate) fn handle_fob_ball_damage_in_actor(
     damage: eve_destiny::DamageVector,
     ballpark: &mut eve_destiny::Ballpark,
     now_unix: u64,
+) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
+    let mut ops = PostUnlockOps::default();
+    let res = handle_fob_ball_damage_in_actor_collecting(
+        db_opt,
+        solar_system_id,
+        ball_id,
+        damage,
+        ballpark,
+        now_unix,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(db_opt, None, None, ops, Some(ballpark), None);
+    res
+}
+
+pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
+    db_opt: Option<&eve_db::WorldRepository>,
+    solar_system_id: u32,
+    ball_id: i64,
+    damage: eve_destiny::DamageVector,
+    ballpark: &mut eve_destiny::Ballpark,
+    now_unix: u64,
+    post_unlock: &mut PostUnlockOps,
 ) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
     let db = db_opt?;
     let camp_id = db.with_snapshot(|snap| {
@@ -552,30 +655,26 @@ pub(crate) fn handle_fob_ball_damage_in_actor(
                 let hr = (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0);
                 (dealt, cs.shield_hp, cs.armor_hp, sr, ar, hr)
             };
-            db.with_mut_snapshot(|snap| {
-                let became_reinf = new_a <= 1e-6;
-                let until = if became_reinf {
-                    let jitter = fob_reinforcement_jitter_secs(camp_id, now_unix);
-                    let secs = ((FOB_ARMOR_REINFORCEMENT_BASE_SECS as i64) + jitter).max(7_200) as u64;
-                    let u = now_unix + secs;
-                    snap.insurgency_runtime.fob_armor_reinforced_until.insert(camp_id, u);
-                    u
-                } else {
-                    0
-                };
-                if let Some(st) = snap.structures.get_mut(&ball_id) {
-                    st.shield_hp = new_s;
-                    st.armor_hp = if became_reinf { 0.0 } else { new_a };
-                    st.hull_hp = hull;
-                    st.last_damage_unix = now_unix;
-                    if became_reinf {
-                        st.state = "ArmorReinforced".into();
-                        st.reinforced_until_unix = until;
-                    } else if new_s <= 1e-6 {
-                        st.state = "ArmorVulnerable".into();
-                    }
-                }
-            });
+            let became_reinf = new_a <= 1e-6;
+            let until = if became_reinf {
+                let jitter = fob_reinforcement_jitter_secs(camp_id, now_unix);
+                let secs = ((FOB_ARMOR_REINFORCEMENT_BASE_SECS as i64) + jitter).max(7_200) as u64;
+                now_unix + secs
+            } else {
+                0
+            };
+            post_unlock.push(PostUnlockIntent::FobBallDamage(
+                FobBallDamageDbOp::ShieldPhase {
+                    camp_id,
+                    ball_id,
+                    new_s,
+                    new_a,
+                    hull,
+                    now_unix,
+                    became_reinf,
+                    until,
+                },
+            ));
             ballpark.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, false);
             Some((applied, false, ball_snap))
         }
@@ -592,20 +691,14 @@ pub(crate) fn handle_fob_ball_damage_in_actor(
                 let hr = (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0);
                 (applied, destroyed, cs.structure_hp, 0.0, 0.0, hr)
             };
-            db.with_mut_snapshot(|snap| {
-                if let Some(st) = snap.structures.get_mut(&ball_id) {
-                    st.shield_hp = 0.0;
-                    st.armor_hp = 0.0;
-                    st.last_damage_unix = now_unix;
-                    if destroyed {
-                        st.hull_hp = 0.0;
-                        st.state = "Destroyed".into();
-                    } else {
-                        st.hull_hp = new_h;
-                        st.state = "HullVulnerable".into();
-                    }
-                }
-            });
+            post_unlock.push(PostUnlockIntent::FobBallDamage(
+                FobBallDamageDbOp::ArmorPhase {
+                    ball_id,
+                    destroyed,
+                    new_h,
+                    now_unix,
+                },
+            ));
             ballpark.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
             Some((applied, destroyed, ball_snap))
         }

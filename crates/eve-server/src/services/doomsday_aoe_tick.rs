@@ -8,6 +8,10 @@
 use crate::rng::splitmix64_next;
 use crate::router::ServerContext;
 use crate::services::tactical_modules::is_combatant_ship_or_entity_ball;
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, PostUnlockIntent, PostUnlockOps,
+};
+use eve_db::WorldStateSnapshot;
 use eve_destiny::{BallId, DVec3, DamageVector};
 use std::collections::HashMap;
 
@@ -172,8 +176,143 @@ pub(crate) fn apply_doomsday_capsuleer_crimewatch(
     );
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BosonicDoomsdayRuntimeDbOp {
+    pub sys_id: u32,
+    pub now_unix: u64,
+}
+
+pub(crate) fn apply_bosonic_doomsday_runtime_in_snap(
+    snap: &mut WorldStateSnapshot,
+    op: &BosonicDoomsdayRuntimeDbOp,
+) {
+    let rt = &mut snap.superweapon_runtime;
+    for cycle in &mut rt.active_cycles {
+        if cycle.sys_id == op.sys_id
+            && op.now_unix >= cycle.immobilize_until_unix
+            && !cycle.mobility_restored
+        {
+            cycle.mobility_restored = true;
+        }
+    }
+    rt.active_cycles
+        .retain(|c| c.sys_id != op.sys_id || !c.mobility_restored || c.ticks_applied < c.total_ticks);
+    rt.warp_suppressions
+        .retain(|sup| sup.sys_id != op.sys_id || op.now_unix < sup.suppressed_until_unix);
+}
+
+/// Synchronously reconciles Titan superweapon self-immobility and GTFO 60s warp-drive
+/// suppression inside the `system_actor` ballpark tick, collecting runtime DB updates into `post_unlock` (`#1170`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
+    ballpark: &mut eve_destiny::Ballpark,
+    base_scramble_strengths: &mut HashMap<BallId, i32>,
+    _sde_opt: Option<&std::sync::Arc<eve_sde::SdeRegistry>>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    sys_id: u32,
+    now_unix: u64,
+    _destroyed_balls: &mut Vec<(i64, Option<i64>)>,
+    post_unlock: &mut PostUnlockOps,
+) {
+    let Some(db) = db_opt else {
+        return;
+    };
+    let (sys_cycles, sys_suppressions, needs_db_prune) = db.with_snapshot(|s| {
+        let rt = &s.superweapon_runtime;
+        if rt.active_cycles.is_empty() && rt.warp_suppressions.is_empty() {
+            return (Vec::new(), Vec::new(), false);
+        }
+        let cycles: Vec<PersistedSuperweaponCycle> = rt
+            .active_cycles
+            .iter()
+            .filter(|c| c.sys_id == sys_id)
+            .cloned()
+            .collect();
+        let sups: Vec<PersistedWarpSuppression> = rt
+            .warp_suppressions
+            .iter()
+            .filter(|sup| sup.sys_id == sys_id)
+            .cloned()
+            .collect();
+        let dirty = cycles.iter().any(|c| {
+            (now_unix >= c.immobilize_until_unix && !c.mobility_restored)
+                || (c.mobility_restored && c.ticks_applied >= c.total_ticks)
+                || (now_unix >= c.immobilize_until_unix && c.ticks_applied >= c.total_ticks)
+        }) || sups.iter().any(|sup| now_unix >= sup.suppressed_until_unix);
+        (cycles, sups, dirty)
+    });
+    if sys_cycles.is_empty() && sys_suppressions.is_empty() {
+        return;
+    }
+
+    for cycle in &sys_cycles {
+        if now_unix >= cycle.immobilize_until_unix && !cycle.mobility_restored {
+            base_scramble_strengths.insert(cycle.ship_id, cycle.orig_warp_scramble_strength);
+            if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                cs.warp_scramble_strength = cycle.orig_warp_scramble_strength;
+                cs.disallow_assistance = cycle.orig_disallow_assistance;
+                if cs.external_velocity_multiplier == Some(0.0) {
+                    cs.external_velocity_multiplier = None;
+                }
+                if cs.base_max_velocity.is_none() && cycle.orig_max_velocity > 0.0 {
+                    cs.base_max_velocity = Some(cycle.orig_max_velocity);
+                }
+            }
+            ballpark.recompute_ball_attributes(cycle.ship_id);
+            if ballpark
+                .combat_states
+                .get(&cycle.ship_id)
+                .is_none_or(|cs| cs.base_max_velocity.is_none())
+            {
+                if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                    titan_ball.max_velocity = cycle.orig_max_velocity;
+                }
+            }
+        } else if !cycle.mobility_restored {
+            base_scramble_strengths.insert(cycle.ship_id, 100);
+            if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
+                cs.disallow_assistance = true;
+                cs.is_tethered = false;
+                if cs.base_max_velocity.is_none() && cycle.orig_max_velocity > 0.0 {
+                    cs.base_max_velocity = Some(cycle.orig_max_velocity);
+                }
+                cs.external_velocity_multiplier = Some(0.0);
+            }
+            ballpark.recompute_ball_attributes(cycle.ship_id);
+            if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                titan_ball.max_velocity = 0.0;
+            }
+        }
+    }
+
+    for sup in &sys_suppressions {
+        if now_unix >= sup.suppressed_until_unix {
+            base_scramble_strengths.insert(sup.ship_id, sup.orig_warp_scramble_strength);
+            if let Some(cs) = ballpark.combat_states.get_mut(&sup.ship_id) {
+                cs.warp_scramble_strength = sup.orig_warp_scramble_strength;
+            }
+        } else {
+            let enforced = sup
+                .orig_warp_scramble_strength
+                .max(GTFO_WARP_SUPPRESSION_STRENGTH);
+            base_scramble_strengths.insert(sup.ship_id, enforced);
+            if let Some(cs) = ballpark.combat_states.get_mut(&sup.ship_id) {
+                cs.warp_scramble_strength = cs.warp_scramble_strength.max(enforced);
+            }
+        }
+    }
+
+    if needs_db_prune {
+        post_unlock.push(PostUnlockIntent::BosonicDoomsdayRuntime(
+            BosonicDoomsdayRuntimeDbOp { sys_id, now_unix },
+        ));
+    }
+}
+
 /// Synchronously reconciles Titan superweapon self-immobility and GTFO 60s warp-drive
 /// suppression inside the `system_actor` ballpark tick using persisted `WorldStateSnapshot` state.
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
 pub fn step_bosonic_doomsday_in_ballpark(
     ballpark: &mut eve_destiny::Ballpark,
     base_scramble_strengths: &mut HashMap<BallId, i32>,
@@ -183,86 +322,25 @@ pub fn step_bosonic_doomsday_in_ballpark(
     now_unix: u64,
     _destroyed_balls: &mut Vec<(i64, Option<i64>)>,
 ) {
-    let Some(db) = db_opt else {
-        return;
-    };
-    let has_runtime = db.with_snapshot(|s| {
-        !s.superweapon_runtime.active_cycles.is_empty()
-            || !s.superweapon_runtime.warp_suppressions.is_empty()
-    });
-    if !has_runtime {
-        return;
-    }
-    mutate_superweapon_runtime(db, |rt| {
-        for cycle in &mut rt.active_cycles {
-            if cycle.sys_id != sys_id {
-                continue;
-            }
-            if now_unix >= cycle.immobilize_until_unix && !cycle.mobility_restored {
-                base_scramble_strengths.insert(cycle.ship_id, cycle.orig_warp_scramble_strength);
-                if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                    cs.warp_scramble_strength = cycle.orig_warp_scramble_strength;
-                    cs.disallow_assistance = cycle.orig_disallow_assistance;
-                    if cs.external_velocity_multiplier == Some(0.0) {
-                        cs.external_velocity_multiplier = None;
-                    }
-                    if cs.base_max_velocity.is_none() && cycle.orig_max_velocity > 0.0 {
-                        cs.base_max_velocity = Some(cycle.orig_max_velocity);
-                    }
-                }
-                ballpark.recompute_ball_attributes(cycle.ship_id);
-                if ballpark
-                    .combat_states
-                    .get(&cycle.ship_id)
-                    .is_none_or(|cs| cs.base_max_velocity.is_none())
-                {
-                    if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-                        titan_ball.max_velocity = cycle.orig_max_velocity;
-                    }
-                }
-                cycle.mobility_restored = true;
-            } else if !cycle.mobility_restored {
-                base_scramble_strengths.insert(cycle.ship_id, 100);
-                if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                    cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
-                    cs.disallow_assistance = true;
-                    cs.is_tethered = false;
-                    if cs.base_max_velocity.is_none() && cycle.orig_max_velocity > 0.0 {
-                        cs.base_max_velocity = Some(cycle.orig_max_velocity);
-                    }
-                    cs.external_velocity_multiplier = Some(0.0);
-                }
-                ballpark.recompute_ball_attributes(cycle.ship_id);
-                if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-                    titan_ball.max_velocity = 0.0;
-                }
-            }
-        }
-        rt.active_cycles
-            .retain(|c| !c.mobility_restored || c.ticks_applied < c.total_ticks);
-
-        rt.warp_suppressions.retain(|sup| {
-            if sup.sys_id != sys_id {
-                return true;
-            }
-            if now_unix >= sup.suppressed_until_unix {
-                base_scramble_strengths.insert(sup.ship_id, sup.orig_warp_scramble_strength);
-                if let Some(cs) = ballpark.combat_states.get_mut(&sup.ship_id) {
-                    cs.warp_scramble_strength = sup.orig_warp_scramble_strength;
-                }
-                false
-            } else {
-                let enforced = sup
-                    .orig_warp_scramble_strength
-                    .max(GTFO_WARP_SUPPRESSION_STRENGTH);
-                base_scramble_strengths.insert(sup.ship_id, enforced);
-                if let Some(cs) = ballpark.combat_states.get_mut(&sup.ship_id) {
-                    cs.warp_scramble_strength = cs.warp_scramble_strength.max(enforced);
-                }
-                true
-            }
-        });
-    });
+    let mut ops = PostUnlockOps::default();
+    step_bosonic_doomsday_in_ballpark_collecting(
+        ballpark,
+        base_scramble_strengths,
+        _sde_opt,
+        db_opt,
+        sys_id,
+        now_unix,
+        _destroyed_balls,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.as_deref(),
+        db_opt.as_ref(),
+        None,
+        ops,
+        Some(ballpark),
+        None,
+    );
 }
 
 /// Advances all persisted AoE superweapon cycles (`Cone`, `SpatialGtfo`, `ReaperSweep`) on the
