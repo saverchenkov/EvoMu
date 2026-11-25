@@ -902,7 +902,7 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
     use eve_db::{PersistedInsurgencyCampaign, UpwellStructureRecord};
 
     let ctx = test_ctx();
-    let (abyss_sys, arena_sys, titan_sys, fob_sys) = (32_000_002_u32, 32_000_001_u32, SYS_ID, 30_002_505_u32);
+    let (abyss_sys, arena_sys, titan_sys, fob_sys) = (32_000_003_u32, 32_000_001_u32, SYS_ID, 30_002_505_u32);
     let (ab_ship, npc_id, cloud_id, gate_id) = (779_200_001_i64, 779_200_002, 1_898_000_111, 1_895_000_011);
     let (arena_char, arena_ship, titan_id, supp_ship, fob_camp, fob_id) = (
         90_000_002_i64, 779_200_101, 779_200_201, 779_200_202, 77_920_i64, 1_897_077_920_i64,
