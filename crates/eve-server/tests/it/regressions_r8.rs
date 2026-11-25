@@ -2555,7 +2555,8 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
             .await
             .expect("spawn ball in Jita");
     }
-    ctx.active_fighters.write().unwrap().insert(
+    eve_server::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         880_001,
         eve_server::router::context::ActiveFighterSquadron {
             ball_id: 880_001,
@@ -2570,7 +2571,8 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
             mwd_active: false,
         },
     );
-    ctx.active_fighters.write().unwrap().insert(
+    eve_server::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         880_002,
         eve_server::router::context::ActiveFighterSquadron {
             ball_id: 880_002,

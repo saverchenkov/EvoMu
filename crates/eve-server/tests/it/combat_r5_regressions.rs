@@ -135,11 +135,8 @@ async fn test_r5_199_200_205_fighter_point_targeted_charges_death_pipeline_and_r
             .call_ok("fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(159)])], &HashMap::new())
             .await;
     }
-    let f_ball_id = *ctx
-        .active_fighters
-        .read()
-        .expect("active_fighters read lock")
-        .keys()
+    let f_ball_id = eve_server::services::fighter_test_helpers::active_fighter_ids(&ctx)
+        .into_iter()
         .next()
         .expect("Launched fighter ball ID");
 

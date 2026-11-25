@@ -6819,15 +6819,15 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
     sync_tether(&ctx, OWNER, JITA, ship_id).await;
     assert!(jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
 
-    ctx.active_fighters.write().unwrap().insert(999_001, eve_server::router::context::ActiveFighterSquadron {
+    eve_server::services::fighter_test_helpers::insert_active_fighter(&ctx, 999_001, eve_server::router::context::ActiveFighterSquadron {
         ball_id: 999_001, item_id: 999_001, type_id: 23055, owner_char_id: OWNER, parent_ship_id: ship_id, tube_index: 0, squadron_size: 9, target_id: None, mwd_active: false, is_abandoned: false,
     });
     sync_tether(&ctx, OWNER, JITA, ship_id).await;
     assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
-    ctx.active_fighters.write().unwrap().get_mut(&999_001).unwrap().is_abandoned = true;
+    eve_server::services::fighter_test_helpers::update_active_fighter(&ctx, 999_001, |f| f.is_abandoned = true).unwrap();
     sync_tether(&ctx, OWNER, JITA, ship_id).await;
     assert!(jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
-    ctx.active_fighters.write().unwrap().clear();
+    eve_server::services::fighter_test_helpers::clear_all_fighter_squadrons(&ctx);
 
     for mod_tid in [4292u32, 21096] {
         let m = grant(&ctx, OWNER, ship_id, mod_tid, InventoryFlag::HiSlot2, 1);

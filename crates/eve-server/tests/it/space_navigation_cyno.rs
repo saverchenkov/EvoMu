@@ -8,6 +8,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_server::services::fighter_test_helpers;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -392,7 +393,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .await
         .expect("ExecuteMovementCommandOnFighters MWD");
     assert_eq!(mwd_cmd_res, PyRep::Bool(true));
-    assert!(ctx.active_fighters.read().unwrap()[&f2_ball_id].mwd_active);
+    assert!(fighter_test_helpers::active_fighter(&ctx, f2_ball_id).unwrap().mwd_active);
     let (_, f2_after_mwd) = sys_handle.get_ball_snapshot(f2_ball_id).await.unwrap().unwrap();
     assert!(
         f2_after_mwd.max_velocity > f2_base_vmax * 4.0,
@@ -612,7 +613,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .await
         .expect("CmdActivateAbilitySlots Slot 1 MWD");
     assert!(matches!(mwd_res, PyRep::KeyVal(_)));
-    assert!(ctx.active_fighters.read().unwrap()[&f1_ball_id].mwd_active);
+    assert!(fighter_test_helpers::active_fighter(&ctx, f1_ball_id).unwrap().mwd_active);
     let (_, f1_with_mwd_ab) = sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().unwrap();
     assert!(f1_with_mwd_ab.max_velocity > f1_base_vmax * 4.0);
 
@@ -632,7 +633,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         panic!("Expected KeyVal from CmdDeactivateAbilitySlots");
     };
     assert_eq!(deact_kv.get("deactivated"), Some(&PyRep::Bool(true)));
-    assert!(!ctx.active_fighters.read().unwrap()[&f1_ball_id].mwd_active);
+    assert!(!fighter_test_helpers::active_fighter(&ctx, f1_ball_id).unwrap().mwd_active);
     let (_, f1_after_deact_mwd) = sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().unwrap();
     assert!((f1_after_deact_mwd.max_velocity - f1_base_vmax).abs() < 1e-3);
 
@@ -687,7 +688,8 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             )
             .await
             .expect("spawn support fighter ball");
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             sup_ball_id,
             eve_server::router::ActiveFighterSquadron {
                 ball_id: sup_ball_id,
@@ -760,7 +762,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
                 "Dromi I Web ability (2) must reduce target speed_fraction"
             );
         }
-        ctx.active_fighters.write().unwrap().remove(&sup_ball_id);
+        fighter_test_helpers::remove_active_fighter(&ctx, sup_ball_id);
         let _ = sys_handle.remove_ball(sup_ball_id).await;
     }
 
@@ -984,7 +986,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         panic!("Expected List from CmdAbandonFighter");
     };
     assert!(!ab_list.is_empty());
-    assert!(ctx.active_fighters.read().unwrap()[&f1_ball_id].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, f1_ball_id).unwrap().is_abandoned);
 
     let err_load_abandoned = ctx
         .dispatch_rpc(
@@ -1044,8 +1046,8 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     };
     assert_eq!(rec_list.len(), 2);
     assert!(sys_handle.get_ball_snapshot(f2_ball_id).await.unwrap().is_none());
-    assert!(ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 1)));
-    assert!(ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 2)));
+    assert!(fighter_test_helpers::has_fighter_tube_load(&ctx, ship_id, 1));
+    assert!(fighter_test_helpers::has_fighter_tube_load(&ctx, ship_id, 2));
 }
 
 #[tokio::test]

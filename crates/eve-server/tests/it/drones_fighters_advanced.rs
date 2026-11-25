@@ -16,8 +16,9 @@ use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    apply_damage_to_fighter_squadron, dispatch_combat_rpc, with_combat_runtime,
+    apply_damage_to_fighter_squadron, dispatch_combat_rpc,
 };
+use eve_server::services::fighter_test_helpers;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -228,10 +229,7 @@ async fn test_support_fighter_squadrons_ewar_scaling_siren_dromi_cenobite_scarab
         (2, cenobite_item_id),
         (3, scarab_item_id),
     ] {
-        ctx.fighter_tube_loads
-            .write()
-            .unwrap()
-            .insert((carrier_ship_id, tube_idx), iid);
+        fighter_test_helpers::set_fighter_tube_load(&ctx, carrier_ship_id, tube_idx, iid);
     }
 
     // 2. Launch Siren and Dromi fighters from tubes
@@ -313,13 +311,9 @@ async fn test_support_fighter_squadrons_ewar_scaling_siren_dromi_cenobite_scarab
         kinetic: 0.0,
         explosive: 0.0,
     }).await;
-    let siren_size = with_combat_runtime(&ctx, |_rt| {
-        ctx.active_fighters
-            .read()
-            .ok()
-            .and_then(|f| f.get(&siren_ball_id).map(|s| s.squadron_size))
-            .unwrap_or(0)
-    });
+    let siren_size = fighter_test_helpers::active_fighter(&ctx, siren_ball_id)
+        .map(|s| s.squadron_size)
+        .unwrap_or(0);
     assert!(
         siren_size < 3,
         "Squadron losses must reduce surviving fighter squadron count"
@@ -362,10 +356,7 @@ async fn test_heavy_fighter_point_targeted_aoe_bomb_ability() {
         );
     });
 
-    ctx.fighter_tube_loads
-        .write()
-        .unwrap()
-        .insert((carrier_ship_id, 0), manta_item_id);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, carrier_ship_id, 0, manta_item_id);
 
     let launch_rep = dispatch_combat_rpc(
         &ctx,
@@ -458,10 +449,7 @@ async fn test_fighter_tube_refuel_rearm_repair_and_space_superiority() {
         );
     });
 
-    ctx.fighter_tube_loads
-        .write()
-        .unwrap()
-        .insert((carrier_ship_id, 0), equite_item_id);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, carrier_ship_id, 0, equite_item_id);
 
     let launch_rep = dispatch_combat_rpc(
         &ctx,
@@ -535,11 +523,8 @@ async fn test_fighter_tube_refuel_rearm_repair_and_space_superiority() {
     assert_eq!(recalled.len(), 1);
 
     // Verify tube rearm timer is active before relaunch
-    let is_rearming = with_combat_runtime(&ctx, |rt| {
-        rt.fighter_tube_rearm_until
-            .get(&(carrier_ship_id, 0))
-            .map(|&exp| exp > ctx.now_unix())
-            .unwrap_or(false)
-    });
+    let is_rearming = fighter_test_helpers::fighter_tube_rearm_unix(&ctx, carrier_ship_id, 0)
+        .map(|exp| exp > ctx.now_unix())
+        .unwrap_or(false);
     assert!(is_rearming, "Recalled fighters must undergo tube rearm timer before relaunch");
 }

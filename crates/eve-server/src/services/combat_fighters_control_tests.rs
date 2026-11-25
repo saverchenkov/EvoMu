@@ -899,7 +899,7 @@ async fn launch_preconditions_recall_by_tube_rearm_and_launched_unload_guards() 
     )
     .await;
     assert_eq!((l0, r0, w0), (0, 9, false));
-    assert!((with_combat_runtime(&ctx, |rt| rt.fighter_unit_damage_accum[&fighter_ball]) - 400.0).abs() < 1e-6);
+    assert!((fighter_test_helpers::fighter_damage_accum(&ctx, fighter_ball).unwrap() - 400.0).abs() < 1e-6);
 
     let (l1, r1, w1) = apply_damage_to_fighter_squadron(
         &ctx,
@@ -909,7 +909,7 @@ async fn launch_preconditions_recall_by_tube_rearm_and_launched_unload_guards() 
     )
     .await;
     assert_eq!((l1, r1, w1), (2, 7, false));
-    assert!((with_combat_runtime(&ctx, |rt| rt.fighter_unit_damage_accum[&fighter_ball]) - 900.0).abs() < 1e-6);
+    assert!((fighter_test_helpers::fighter_damage_accum(&ctx, fighter_ball).unwrap() - 900.0).abs() < 1e-6);
 
     // Recall by tube flag [159]: repairs, tops up from reserve stack (5 -> 3), sets REFUELING + rearm lock.
     session.drain_notifications();

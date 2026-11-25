@@ -1479,6 +1479,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
 use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use eve_server::services::combat_crimewatch::{spawn_specialized_npc_entity, with_combat_runtime};
+use eve_server::services::fighter_test_helpers;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -1920,7 +1921,7 @@ async fn test_carrier_supercarrier_launch_tubes_and_flight_control() {
     let ab = rpc(&ctx, &mut archon_sess, "fighterMgr", None, "CmdActivateAbilitySlots", &[PyRep::List(vec![PyRep::Integer(f_ball)]), PyRep::Integer(2), PyRep::Integer(npc_id)]).await.unwrap();
     let max_ch = ab.dict_get("chargeCount").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(ab.dict_get("remainingCharges").and_then(|v| v.as_i64()), Some(max_ch - 1));
-    assert!(!ctx.fighter_charge_state.read().unwrap().is_empty());
+    assert!(!fighter_test_helpers::fighter_charges_is_empty(&ctx));
 
     let (_, fb_snap) = sys_h.get_ball_snapshot(f_ball).await.unwrap().unwrap();
     let mut sb_sess = spawn_pilot(&ctx, 1104, 97_000_099, 1_000_010, 87_000_099, 24692, sys_id, fb_snap.position + DVec3::new(200.0, 0.0, 0.0)).await;
@@ -1930,12 +1931,12 @@ async fn test_carrier_supercarrier_launch_tubes_and_flight_control() {
         rpc(&ctx, &mut sb_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(87_000_499)]).await.unwrap();
         ctx.advance_virtual_clock(11);
     }
-    assert_eq!(ctx.active_fighters.read().unwrap()[&f_ball].squadron_size, 5, "Live Smartbomb damage must destroy 1 fighter unit (5 remaining)");
+    assert_eq!(fighter_test_helpers::active_fighter(&ctx, f_ball).unwrap().squadron_size, 5, "Live Smartbomb damage must destroy 1 fighter unit (5 remaining)");
 
     rpc(&ctx, &mut archon_sess, "fighterMgr", None, "RecallFightersToTubes", &[PyRep::List(vec![PyRep::Integer(f_ball)])]).await.unwrap();
-    assert_eq!(ctx.fighter_tube_loads.read().unwrap().get(&(archon_id, 0)).copied(), Some(87_000_301), "Squadron must land back in tube 0");
+    assert_eq!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, archon_id, 0), Some(87_000_301), "Squadron must land back in tube 0");
     assert_eq!(ctx.db.get_item(87_000_301).unwrap().quantity, 6, "Recalled squadron must refill lost unit from FighterBay reserve");
-    assert!(ctx.fighter_charge_state.read().unwrap().is_empty(), "Recalled squadron must restock ability charges");
+    assert!(fighter_test_helpers::fighter_charges_is_empty(&ctx), "Recalled squadron must restock ability charges");
     assert_eq!(rpc(&ctx, &mut archon_sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])]).await.unwrap_err().code, "TubeRearming");
 }
 

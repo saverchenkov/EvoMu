@@ -9,7 +9,6 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::combat_fighters::*;
-use crate::services::combat_crimewatch::with_combat_runtime;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_proto::PyRep;
@@ -103,14 +102,14 @@ async fn apply_damage_to_fighter_squadron_accumulates_fractional_damage_and_resp
     let (lost1, rem1, wiped1) =
         apply_damage_to_fighter_squadron(&ctx, sys_id, ball1, DamageVector::new(300.0, 0.0, 0.0, 0.0)).await;
     assert_eq!((lost1, rem1, wiped1), (0, 4, false));
-    let accum1 = with_combat_runtime(&ctx, |rt| rt.fighter_unit_damage_accum.get(&ball1).copied().unwrap_or(0.0));
+    let accum1 = fighter_test_helpers::fighter_damage_accum(&ctx, ball1).unwrap_or(0.0);
     assert!((accum1 - 300.0).abs() < 1e-6);
 
     // Hit 2: 250 dmg (total 550 >= 500) -> 1 killed, 50 remainder, size 4 -> 3
     let (lost2, rem2, wiped2) =
         apply_damage_to_fighter_squadron(&ctx, sys_id, ball1, DamageVector::new(250.0, 0.0, 0.0, 0.0)).await;
     assert_eq!((lost2, rem2, wiped2), (1, 3, false));
-    let accum2 = with_combat_runtime(&ctx, |rt| rt.fighter_unit_damage_accum.get(&ball1).copied().unwrap_or(0.0));
+    let accum2 = fighter_test_helpers::fighter_damage_accum(&ctx, ball1).unwrap_or(0.0);
     assert!((accum2 - 50.0).abs() < 1e-6);
     assert_eq!(ctx.db.get_item(item1).unwrap().quantity, 3);
     let notifs = ctx.drain_notifications_for_char(char_id);

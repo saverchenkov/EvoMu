@@ -609,6 +609,7 @@ use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_server::services::fighter_test_helpers;
 use glam::DVec3;
 use crate::common;
 
@@ -849,7 +850,7 @@ async fn test_fighters_tubes_and_multi_activation_audit() {
     });
 
     // Load squadron into tube 0
-    ctx.fighter_tube_loads.write().unwrap().insert((carrier_id, 0), squadron_id);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, carrier_id, 0, squadron_id);
 
     let mut sess = setup_pilot(&ctx, 1005, "fighter_tester", "sec123", char_id).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -896,12 +897,8 @@ async fn test_fighters_tubes_and_multi_activation_audit() {
     );
 
     // 2. CmdActivateAbilitySlots fighter ability activation
-    let fighter_ball_id = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .keys()
-        .copied()
+    let fighter_ball_id = fighter_test_helpers::active_fighter_ids(&ctx)
+        .into_iter()
         .next()
         .expect("active fighter ball");
 
