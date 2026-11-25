@@ -2178,9 +2178,6 @@ mod tests {
             crate::cfsd_nested_tables::CfsdType::U32,
             1,
         );
-    #[test]
-    fn test_sde_helpers_and_deterministic_lowest_id_picks() {
-        let _ = crate::cfsd_nested_tables::load_cfsd_nested_from_bytes(&[], "test");
         let o = crate::cfsd_nested_layouts::obj(8, None, &[]);
         let _ = crate::cfsd_nested_layouts::rec(
             "res:/staticdata/test.fsdbinary",

@@ -490,6 +490,7 @@ struct CachedAdjustedPriceOverrides(
     std::sync::RwLock<std::collections::HashMap<eve_sde::TypeId, f64>>,
 );
 
+#[cfg(test)]
 struct CachedSdeBasePrices(std::sync::Arc<std::collections::HashMap<eve_sde::TypeId, f64>>);
 
 /// Overrides or sets market adjusted prices cache on `sde` (`feat:industry.eiv-adjusted-prices`).
@@ -526,6 +527,7 @@ pub fn clear_sde_adjusted_prices(sde: &eve_sde::SdeRegistry) {
     slot.0.write().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
+#[cfg(test)]
 fn sde_base_prices(
     sde: &eve_sde::SdeRegistry,
 ) -> std::sync::Arc<std::collections::HashMap<eve_sde::TypeId, f64>> {
