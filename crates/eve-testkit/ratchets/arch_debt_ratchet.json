@@ -909,7 +909,7 @@
         "services/space_destiny.rs": 38,
         "services/space_docking_cloaking.rs": 14,
         "services/space_entity_mining.rs": 75,
-        "services/space_entity_ops.rs": 57,
+        "services/space_entity_ops.rs": 55,
         "services/space_nav_movement_guard.rs": 18,
         "services/space_nav_travel.rs": 35,
         "services/space_pochven_wormholes.rs": 1,
@@ -1270,6 +1270,26 @@
         "services/fleet_social_corp_tail.rs": 1,
         "services/fleet_social_corp_tail_dispatch.rs": 1,
         "services/fleet_social_corps.rs": 2
+      }
+    },
+    "effective_corp_member_roles_call_sites": {
+      "zero_required": false,
+      "owning_issue": 1194,
+      "regex": "\\beffective_corp_member_roles\\s*\\(",
+      "description": "Shrink-only ratchet on remaining effective_corp_member_roles(...) call sites taking session_roles before #1194 Track 3B-3 deletes the helper.",
+      "files": {
+        "domain/corp_governance.rs": 1
+      }
+    },
+    "request_corp_role_mask_reads": {
+      "zero_required": false,
+      "owning_issue": 1194,
+      "regex": "\\bcorp_role_mask\\b|\\.\\s*bitmask\\b",
+      "description": "Shrink-only ratchet on remaining handler reads of request AuthoritativeContext.corp_role_mask or CorpRoleBitmask.bitmask outside Quasar gateway metadata (#1194 Track 3B-2).",
+      "files": {
+        "services/quasar_cosmetics_live.rs": 3,
+        "services/quasar_entitlement_membership.rs": 1,
+        "services/quasar_space_services.rs": 3
       }
     }
   }

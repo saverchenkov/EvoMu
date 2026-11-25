@@ -946,9 +946,9 @@ pub fn register_progression_extra_handlers(
                 mgr.db.as_ref().and_then(|d| d.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32)))
             });
             let now_u = ctx.now_unix();
-            let (is_ceo, corp_role, wallet_div) = corpid.zip(mgr.db.as_ref()).map_or((false, ctx.corp_role_mask, 1u8), |(c_id, d)| {
+            let (is_ceo, corp_role, wallet_div) = corpid.zip(mgr.db.as_ref()).map_or((false, 0, 1u8), |(c_id, d)| {
                 d.with_snapshot(|s| {
-                    let (ceo, eff) = corp_projects::effective_corp_member_roles(s, c_id as i64, cid as i64, ctx.corp_role_mask, now_u);
+                    let (ceo, eff) = s.effective_corp_roles_at_db(c_id as i64, cid as i64, None, now_u);
                     let acct = s.corp_governance.get(&(c_id as i64)).and_then(|g| g.member_account_keys.get(&(cid as i64)).copied()).unwrap_or(1000);
                     let div = if (1000..=1006).contains(&acct) { (acct - 999) as u8 } else { 1 };
                     (ceo, eff, div)
@@ -1162,8 +1162,8 @@ pub fn register_progression_extra_handlers(
                         if caller_corp != Some(gc) {
                             return false;
                         }
-                        let (ceo, eff) = corp_projects::effective_corp_member_roles(
-                            s, gc as i64, caller_id as i64, ctx.corp_role_mask, ctx.now_unix(),
+                        let (ceo, eff) = s.effective_corp_roles_at_db(
+                            gc as i64, caller_id as i64, None, ctx.now_unix(),
                         );
                         ceo || (eff & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) != 0
                     })

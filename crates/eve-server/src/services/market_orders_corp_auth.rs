@@ -5,7 +5,6 @@
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_proto::BridgeRpcError;
 
-use crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles;
 use crate::services::station_structure::structure_upwell_ops::StructureExtendedState;
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -77,7 +76,7 @@ pub(crate) fn require_corp_market_order_role(
             format!("Corporation {corp_id} not found"),
         ));
     }
-    let (is_ceo, eff_roles) = effective_corp_member_roles(snap, corp_id, char_id, 0, now_unix);
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
     let div_idx = usize::from(account_key.clamp(1000, 1006).saturating_sub(1000)).min(6);
     let take_bit = corp_roles::ROLE_ACCOUNT_CAN_TAKE[div_idx];
     let allowed = is_ceo
@@ -108,7 +107,7 @@ pub(crate) fn require_corp_accountant_spend_role(
             format!("Corporation {corp_id} not found"),
         ));
     }
-    let (is_ceo, eff_roles) = effective_corp_member_roles(snap, corp_id, char_id, 0, now_unix);
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
     let div_idx = usize::from(account_key.clamp(1000, 1006).saturating_sub(1000)).min(6);
     let take_bit = corp_roles::ROLE_ACCOUNT_CAN_TAKE[div_idx];
     let allowed = is_ceo

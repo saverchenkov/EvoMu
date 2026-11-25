@@ -142,6 +142,7 @@ fn append_corp_journal(
         });
 }
 
+#[cfg(test)]
 pub(crate) use crate::domain::corp_governance::effective_corp_member_roles;
 
 fn extract_first_positive_id_in_msg(msg: &DynamicQuasarMessage) -> Option<i64> {
@@ -1257,7 +1258,6 @@ pub fn handle_edit_project(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = session.corporation_id.unwrap_or(0);
     let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let new_name_opt = args.get(1).and_then(|a| a.as_str()).map(String::from);
     let new_expires_opt = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0).map(|v| v as u64);
@@ -1270,7 +1270,10 @@ pub fn handle_edit_project(
                 client_error: None,
             });
         };
-        if proj.corporation_id != corp_id {
+        let proj_corp_id = proj.corporation_id;
+        let actor = eve_db::CorpActor::resolve(snap, &ctx.sde, char_id, ctx.now_unix());
+        let corp_id = actor.corp_id;
+        if proj_corp_id != corp_id {
             return Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot edit a project belonging to another corporation".into(),
@@ -1278,14 +1281,7 @@ pub fn handle_edit_project(
             });
         }
         let is_gm = session.has_gm_role();
-        let (is_ceo, caller_roles) =
-            effective_corp_member_roles(snap, corp_id, char_id, session.corp_role, ctx.now_unix());
-        if snap.corporations.contains_key(&corp_id)
-            && !is_ceo
-            && !is_gm
-            && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
-            && !corp_roles::has_role(caller_roles, corp_roles::ROLE_PROJECT_MANAGER)
-        {
+        if !is_gm && !actor.is_director_or(corp_roles::ROLE_PROJECT_MANAGER) {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Editing corporation projects requires Project Manager or Director role".into(),
@@ -1311,10 +1307,11 @@ pub fn handle_edit_project(
         Ok((
             snap.corp_projects.get(&pid).map(|p| p.name.clone()).unwrap_or_default(),
             det.creator_id,
+            corp_id,
         ))
     });
     match res {
-        Ok((updated_name, creator_id)) => {
+        Ok((updated_name, creator_id, corp_id)) => {
             if new_name_opt.is_some() {
                 let uuid = corp_goal_uuid(pid);
                 let _ = ctx.quasar_gateway.publish_notice(

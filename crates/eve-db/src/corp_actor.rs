@@ -111,7 +111,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
     char_id: i64,
     location_id: Option<i64>,
     fallback_to_char_location: bool,
-    now_unix: u64,
+    now_unix: Option<u64>,
 ) -> (bool, u64) {
     if corp.ceo_id == char_id {
         return (true, u64::MAX);
@@ -155,7 +155,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
     let mut unmatured_title_bits = 0u64;
     if let Some(gov) = gov_opt {
         if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
-            if now_unix >= matured_at {
+            if now_unix.is_some_and(|now| now >= matured_at) {
                 roles |= p_mask;
             } else {
                 // Only roles subject to 24h stasis (`CORP_DELAYED_DIVISION_ROLE_MASK`, Director,
@@ -181,7 +181,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
                 if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
                     scoped_p |= other_p;
                 }
-                if now_unix >= matured_at {
+                if now_unix.is_some_and(|now| now >= matured_at) {
                     roles |= scoped_p;
                 } else {
                     unmatured_role_bits |= scoped_p;
@@ -189,7 +189,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
             }
         }
         if let Some(&(t_mask, matured_at)) = gov.pending_title_role_grants.get(&char_id) {
-            if now_unix >= matured_at {
+            if now_unix.is_some_and(|now| now >= matured_at) {
                 roles |= t_mask;
             } else {
                 unmatured_title_bits |= t_mask;
@@ -242,7 +242,25 @@ pub fn effective_corp_roles_at_db(
     snap: &WorldStateSnapshot, corp_id: i64, char_id: i64, location_id: Option<i64>, now_unix: u64,
 ) -> (bool, u64) {
     let Some(corp) = snap.corporations.get(&corp_id) else { return (false, 0); };
-    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, location_id.is_some(), now_unix)
+    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, location_id.is_some(), Some(now_unix))
+}
+
+/// Evaluates `(is_ceo, effective_roles)` for `char_id` in `corp_id` as if no pending grant had
+/// matured: pending grants add nothing until promoted and still suppress delayed/title bits.
+///
+/// Inventory mutation primitives have no clock, so time-gated promotions cannot be evaluated here
+/// (on a live server, promotion runs on the 1 Hz tick). When `location_id` is `None`, location
+/// falls back to the character's current station or structure.
+pub fn effective_corp_roles_promoted_only(
+    snap: &WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+) -> (bool, u64) {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return (false, 0);
+    };
+    evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, true, None)
 }
 
 /// Computes `(roles_at_hq, roles_at_base, roles_at_other)` purely from `snap` at `now_unix`,
@@ -349,7 +367,7 @@ impl CorpActor {
             None
         };
         let (is_ceo, effective_roles) = if is_member {
-            evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, false, now_unix)
+            evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, false, Some(now_unix))
         } else {
             (false, 0)
         };

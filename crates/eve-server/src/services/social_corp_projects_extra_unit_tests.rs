@@ -364,7 +364,9 @@ fn project_validation_limits_auto_payout_freelance_batches_and_expiry_sweep() {
             .code,
         "ProjectNotFound"
     );
-    sess.corporation_id = Some(98_999_999);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = 98_999_999;
+    });
     assert_eq!(
         handle_edit_project(&ctx, &mut sess, &[PyRep::Integer(auto_pid)])
             .unwrap()
@@ -372,7 +374,9 @@ fn project_validation_limits_auto_payout_freelance_batches_and_expiry_sweep() {
             .code,
         "AccessDenied"
     );
-    sess.corporation_id = Some(corp_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
+    });
     sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {

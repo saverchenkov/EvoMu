@@ -11,7 +11,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_space_services::{effective_roles, get_identifier_or_int, get_int_field};
+use super::quasar_space_services::{get_identifier_or_int, get_int_field};
 use super::sov_services::{
     TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE,
 };
@@ -133,14 +133,7 @@ pub(crate) fn caller(ctx: &AuthoritativeContext, snap: &WorldStateSnapshot) -> R
         _ => ctx_corp.ok_or((STATUS_FORBIDDEN, format!("Character {cid} has no corporation")))?,
     };
     let alliance = ch.and_then(|c| c.alliance_id).or_else(|| corp_alliance(snap, corp));
-    let (is_ceo, eff) =
-        super::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-            snap,
-            corp,
-            cid,
-            0,
-            ctx.now_unix(),
-        );
+    let (is_ceo, eff) = snap.effective_corp_roles_at_db(corp, cid, None, ctx.now_unix());
     let roles = if is_ceo { u64::MAX } else { eff };
     Ok(Caller { cid, corp, alliance, roles })
 }
@@ -194,15 +187,6 @@ pub(crate) fn corp_owned_structure<'a>(
 /// Requires at least one of the corporation `roles` bits in the caller's live DB corporation state.
 pub(crate) fn require_caller_roles(c: &Caller, roles: u64, action: &str) -> Result<(), RpcError> {
     if c.roles & roles == 0 {
-        return Err((STATUS_FORBIDDEN, format!("Missing corporation role required to {action}")));
-    }
-    Ok(())
-}
-
-/// Requires at least one of the corporation `roles` bits in the caller's active identity.
-#[allow(dead_code)]
-pub(crate) fn require_roles(ctx: &AuthoritativeContext, roles: u64, action: &str) -> Result<(), RpcError> {
-    if effective_roles(ctx) & roles == 0 {
         return Err((STATUS_FORBIDDEN, format!("Missing corporation role required to {action}")));
     }
     Ok(())

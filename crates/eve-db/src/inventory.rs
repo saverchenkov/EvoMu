@@ -1124,71 +1124,6 @@ impl WorldStateSnapshot {
         true
     }
 
-    /// Computes effective matured corporation roles `(is_ceo, role_mask)` for `char_id` in `corp_id`
-    /// at `location_id`. Pending 24h grants in `corp_governance.pending_*` are intentionally excluded
-    /// until promoted (`Inv 6`).
-    pub fn effective_corp_roles_at_location(
-        &self,
-        corp_id: i64,
-        char_id: i64,
-        location_id: Option<i64>,
-    ) -> (bool, u64) {
-        let char_home = self
-            .characters
-            .get(&char_id)
-            .map(|c| c.home_station_id)
-            .unwrap_or(0);
-        let (is_ceo, hq_station_id, mut role_mask) = self
-            .corporations
-            .get(&corp_id)
-            .map(|c| {
-                (
-                    c.ceo_id == char_id,
-                    c.hq_station_id.unwrap_or(char_home),
-                    c.member_roles.get(&char_id).copied().unwrap_or(0),
-                )
-            })
-            .unwrap_or((false, char_home, 0));
-
-        let raw_loc = location_id
-            .or_else(|| {
-                self.characters
-                    .get(&char_id)
-                    .and_then(|ch| ch.station_id.or(ch.structure_id))
-            })
-            .unwrap_or(0);
-        let loc_station_id = self
-            .items
-            .get(&raw_loc)
-            .and_then(|it| {
-                (it.location_id >= 60_000_000 || self.structures.contains_key(&it.location_id))
-                    .then_some(it.location_id)
-            })
-            .unwrap_or(raw_loc);
-        let base_id = self
-            .corp_governance
-            .get(&corp_id)
-            .and_then(|g| g.member_bases.get(&char_id).copied())
-            .unwrap_or(0);
-
-        if let Some(ra) = self.corp_role_assignments.get(&(corp_id, char_id)) {
-            role_mask |= ra.roles;
-            if loc_station_id > 0 {
-                if loc_station_id == hq_station_id {
-                    role_mask |= ra.roles_at_hq;
-                }
-                if base_id > 0 && loc_station_id == base_id {
-                    role_mask |= ra.roles_at_base;
-                }
-                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
-                    role_mask |= ra.roles_at_other;
-                }
-            }
-        }
-
-        (is_ceo, role_mask)
-    }
-
     fn resolve_corp_root_location(&self, corp_id: i64, item_id: i64) -> (i64, InventoryFlag, bool) {
         let Some(item) = self.items.get(&item_id) else {
             return (0, InventoryFlag::None, false);
@@ -1229,7 +1164,7 @@ impl WorldStateSnapshot {
             )));
         }
         let (is_ceo, role_mask) =
-            self.effective_corp_roles_at_location(corp_id, char_id, Some(root_loc));
+            crate::corp_actor::effective_corp_roles_promoted_only(self, corp_id, char_id, Some(root_loc));
         if is_ceo || corp_roles::has_role(role_mask, corp_roles::ROLE_DIRECTOR) {
             return Ok(());
         }

@@ -702,6 +702,7 @@ fn market_orders_corp_auth_role_matrix_and_sellability_guards() {
     let dir_id = 910_002_i64;
     let acct_id = 910_003_i64;
     let base_trader_id = 910_004_i64;
+    let title_dir_id = 910_005_i64;
     let other_station = 60_003_759_i64;
     let base_station = 60_003_758_i64;
     let hq_station = JITA_STATION_ID;
@@ -722,7 +723,7 @@ fn market_orders_corp_auth_role_matrix_and_sellability_guards() {
 
     ctx.db.with_mut_snapshot(|s| {
         let base_char = s.characters.values().next().unwrap().clone();
-        for cid in [ceo_id, dir_id, acct_id, base_trader_id] {
+        for cid in [ceo_id, dir_id, acct_id, base_trader_id, title_dir_id] {
             let mut ch = base_char.clone();
             ch.character_id = cid;
             ch.name = format!("AuthChar-{cid}");
@@ -770,6 +771,16 @@ fn market_orders_corp_auth_role_matrix_and_sellability_guards() {
                 ROLE_HANGAR_CAN_TAKE[1],
             ),
         );
+        s.corp_titles.insert(
+            corp_id,
+            vec![eve_db::CorpTitleEntry {
+                title_id: 4,
+                name: "Market Director".into(),
+                roles: vec!["Director".into()],
+                ..Default::default()
+            }],
+        );
+        s.corp_member_titles.insert((corp_id, title_dir_id), vec![4]);
     });
 
     ctx.db.with_snapshot(|s| {
@@ -828,6 +839,14 @@ fn market_orders_corp_auth_role_matrix_and_sellability_guards() {
             .code,
             "CorpRoleRequired"
         );
+        assert!(market_orders_corp_auth::require_corp_market_order_role(
+            s,
+            corp_id,
+            title_dir_id,
+            1000,
+            now
+        )
+        .is_ok());
 
         // require_corp_accountant_spend_role branches: missing corp, CEO, Director, Accountant matching vs mismatching div, denied member
         assert_eq!(

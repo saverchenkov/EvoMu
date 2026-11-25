@@ -227,9 +227,9 @@ fn check_corp_admin_role(
     cid: u32,
     corpid: u32,
 ) -> Result<(bool, u64, u8), (u32, String)> {
-    let sess_role = ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(ctx.corp_role_mask);
     let now_u = ctx_now_unix(ctx);
-    let (member_ok, is_ceo, eff_roles, wallet_div) = db.map_or((true, false, sess_role, 1u8), |db| {
+    // Fail closed when DB is absent or the character row does not exist; never trust request masks.
+    let (member_ok, is_ceo, eff_roles, wallet_div) = db.map_or((false, false, 0, 1u8), |db| {
         db.with_snapshot(|snap| {
             let cid_i64 = cid as i64;
             let corp_i64 = corpid as i64;
@@ -239,13 +239,12 @@ fn check_corp_admin_role(
                     .corporations
                     .get(&corp_i64)
                     .is_some_and(|c| c.ceo_id == cid_i64 || c.members.contains(&cid_i64)),
-                Some(_) => false,
-                None => true,
+                Some(_) | None => false,
             };
             if !in_corp {
                 return (false, false, 0u64, 1u8);
             }
-            let (ceo, eff) = corp_projects::effective_corp_member_roles(snap, corp_i64, cid_i64, 0, now_u);
+            let (ceo, eff) = snap.effective_corp_roles_at_db(corp_i64, cid_i64, None, now_u);
             let acct = snap.corp_governance.get(&corp_i64).and_then(|g| g.member_account_keys.get(&cid_i64).copied()).unwrap_or(1000);
             let div = if (1000..=1006).contains(&acct) { (acct - 999) as u8 } else { 1 };
             (true, ceo, eff, div)

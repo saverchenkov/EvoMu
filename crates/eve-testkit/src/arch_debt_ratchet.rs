@@ -400,6 +400,8 @@ enum PatternKind {
     LegacyEffectiveCorpRolesAtFallback,
     HandlerCorpGrantPromotion,
     CorpGrantFoldCallSites,
+    EffectiveCorpMemberRolesCallSites,
+    RequestCorpRoleMaskReads,
 }
 
 impl PatternKind {
@@ -434,6 +436,8 @@ impl PatternKind {
         Self::LegacyEffectiveCorpRolesAtFallback,
         Self::HandlerCorpGrantPromotion,
         Self::CorpGrantFoldCallSites,
+        Self::EffectiveCorpMemberRolesCallSites,
+        Self::RequestCorpRoleMaskReads,
     ];
 
     fn as_str(self) -> &'static str {
@@ -472,6 +476,10 @@ impl PatternKind {
             }
             Self::HandlerCorpGrantPromotion => "handler_corp_grant_promotion",
             Self::CorpGrantFoldCallSites => "corp_grant_fold_call_sites",
+            Self::EffectiveCorpMemberRolesCallSites => {
+                "effective_corp_member_roles_call_sites"
+            }
+            Self::RequestCorpRoleMaskReads => "request_corp_role_mask_reads",
         }
     }
 
@@ -546,6 +554,12 @@ impl PatternKind {
             Self::CorpGrantFoldCallSites => {
                 Some(r"\bfold_due_pending_corp_grants_in_snap\s*\(")
             }
+            Self::EffectiveCorpMemberRolesCallSites => {
+                Some(r"\beffective_corp_member_roles\s*\(")
+            }
+            Self::RequestCorpRoleMaskReads => {
+                Some(r"\bcorp_role_mask\b|\.\s*bitmask\b")
+            }
         }
     }
 }
@@ -556,7 +570,9 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::DirectMemberRolesGet => {
             count_word_dot_method_lparen(text, "member_roles", &[b"get"])
         }
-        PatternKind::MemberBaseRolesCalls => count_member_base_roles_calls(text),
+        PatternKind::MemberBaseRolesCalls => {
+            crate::arch_debt_ratchet_corp_roles::count_member_base_roles_calls(text)
+        }
         PatternKind::HardcodedFallbackEntityIds => count_hardcoded_fallback_entity_ids(text),
         PatternKind::ServiceStateBlobsRefs => count_whole_word(text, "service_state_blobs"),
         PatternKind::DirectLocationOrShipAssign => count_direct_location_or_ship_assign(text),
@@ -622,10 +638,16 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
                 count_fn_require_undocked(text)
             }
         }
-        PatternKind::DuplicateIsNpcCorpHelpers => count_fn_is_npc_corp(text),
-        PatternKind::DuplicateIsExcludedCorpMemberHelpers => count_fn_is_excluded_corp_member(text),
+        PatternKind::DuplicateIsNpcCorpHelpers => {
+            crate::arch_debt_ratchet_corp_roles::count_fn_is_npc_corp(text)
+        }
+        PatternKind::DuplicateIsExcludedCorpMemberHelpers => {
+            crate::arch_debt_ratchet_corp_roles::count_fn_is_excluded_corp_member(text)
+        }
         PatternKind::LegacyEffectiveCorpRolesAtFallback => {
-            count_word_lparen(text, "effective_corp_roles_at")
+            crate::arch_debt_ratchet_corp_roles::count_legacy_effective_corp_roles_at_fallback(
+                text,
+            )
         }
         PatternKind::HandlerCorpGrantPromotion => {
             count_word_lparen(text, "promote_due_pending_corp_grants")
@@ -633,10 +655,18 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::CorpGrantFoldCallSites => {
             count_word_lparen(text, "fold_due_pending_corp_grants_in_snap")
         }
+        PatternKind::EffectiveCorpMemberRolesCallSites => {
+            crate::arch_debt_ratchet_corp_roles::count_effective_corp_member_roles_call_sites(
+                text,
+            )
+        }
+        PatternKind::RequestCorpRoleMaskReads => {
+            crate::arch_debt_ratchet_corp_roles::count_request_corp_role_mask_reads(text)
+        }
     }
 }
 
-fn count_fn_decl(text: &str, hint: &str, matches_after_ws: impl Fn(&[u8]) -> bool) -> usize {
+pub(crate) fn count_fn_decl(text: &str, hint: &str, matches_after_ws: impl Fn(&[u8]) -> bool) -> usize {
     if !text.contains(hint) {
         return 0;
     }
@@ -655,32 +685,9 @@ fn count_fn_decl(text: &str, hint: &str, matches_after_ws: impl Fn(&[u8]) -> boo
     count
 }
 
-fn has_lparen_after_prefix(rest: &[u8], prefix_len: usize) -> bool {
+pub(crate) fn has_lparen_after_prefix(rest: &[u8], prefix_len: usize) -> bool {
     let lp = skip_ws(rest, prefix_len);
     lp < rest.len() && rest[lp] == b'('
-}
-
-fn count_fn_is_npc_corp(text: &str) -> usize {
-    count_fn_decl(text, "is_npc_corp", |rest| {
-        if !rest.starts_with(b"is_npc_corp") {
-            return false;
-        }
-        let mut pos = "is_npc_corp".len();
-        if rest[pos..].starts_with(b"oration") {
-            pos += "oration".len();
-        }
-        if rest[pos..].starts_with(b"_id") {
-            pos += "_id".len();
-        }
-        has_lparen_after_prefix(rest, pos)
-    })
-}
-
-fn count_fn_is_excluded_corp_member(text: &str) -> usize {
-    count_fn_decl(text, "is_excluded_corp_member", |rest| {
-        rest.starts_with(b"is_excluded_corp_member")
-            && has_lparen_after_prefix(rest, "is_excluded_corp_member".len())
-    })
 }
 
 fn count_fn_require_undocked(text: &str) -> usize {
@@ -718,19 +725,19 @@ fn has_word_boundary_before(b: &[u8], idx: usize) -> bool {
 }
 
 #[inline]
-fn has_word_boundary_after(b: &[u8], end: usize) -> bool {
+pub(crate) fn has_word_boundary_after(b: &[u8], end: usize) -> bool {
     end >= b.len() || !is_ident_byte(b[end])
 }
 
 #[inline]
-fn skip_ws(b: &[u8], mut i: usize) -> usize {
+pub(crate) fn skip_ws(b: &[u8], mut i: usize) -> usize {
     while i < b.len() && b[i].is_ascii_whitespace() {
         i += 1;
     }
     i
 }
 
-fn count_whole_word(text: &str, word: &str) -> usize {
+pub(crate) fn count_whole_word(text: &str, word: &str) -> usize {
     if !text.contains(word) {
         return 0;
     }
@@ -741,7 +748,7 @@ fn count_whole_word(text: &str, word: &str) -> usize {
         .count()
 }
 
-fn count_word_lparen(text: &str, word: &str) -> usize {
+pub(crate) fn count_word_lparen(text: &str, word: &str) -> usize {
     if !text.contains(word) {
         return 0;
     }
@@ -783,33 +790,6 @@ fn count_word_dot_method_lparen(text: &str, obj: &str, methods: &[&[u8]]) -> usi
                     count += 1;
                 }
             }
-        }
-    }
-    count
-}
-
-fn count_member_base_roles_calls(text: &str) -> usize {
-    if !text.contains("member_base_roles") {
-        return 0;
-    }
-    const STEM: &str = "member_base_roles";
-    let b = text.as_bytes();
-    let mut count = 0usize;
-    for (i, _) in text.match_indices(STEM) {
-        let mut dot = i;
-        while dot > 0 && b[dot - 1].is_ascii_whitespace() {
-            dot -= 1;
-        }
-        if dot == 0 || b[dot - 1] != b'.' {
-            continue;
-        }
-        let mut end = i + STEM.len();
-        if end + 4 <= b.len() && &b[end..end + 4] == b"_opt" {
-            end += 4;
-        }
-        let lp = skip_ws(b, end);
-        if lp < b.len() && b[lp] == b'(' {
-            count += 1;
         }
     }
     count
@@ -2267,133 +2247,6 @@ mod tests {
         assert_eq!(entry.occurrences, 1);
         assert_eq!(entry.per_file.get("services/sample.rs"), Some(&1));
         assert!(!entry.per_file.contains_key("router/session.rs"));
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn arch_debt_ratchet_1194_duplicate_is_npc_corp_and_excluded_member_helpers() {
-        let tmp = make_temp_dir("1194_f3_corp_helpers");
-        let src = tmp.join("src");
-        std::fs::create_dir_all(src.join("services")).expect("create services dir");
-        std::fs::write(
-            src.join("services/bad.rs"),
-            r#"
-// fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool { false }
-// fn is_excluded_corp_member(corp: &CorporationRecord, char_id: i64) -> bool { false }
-const LIT: &str = "fn is_npc_corp(id: i64) {} fn is_excluded_corp_member(c: &C) {}";
-fn is_npc_corp(id: i64) -> bool { false }
-fn is_npc_corp_id(ctx: &ServerContext, id: i64) -> bool { false }
-pub(crate) fn is_npc_corporation(ctx: &ServerContext, id: i64) -> bool { false }
-fn is_npc_corporation_id (ctx: &ServerContext, id: i64) -> bool { false }
-fn is_excluded_corp_member(corp: &CorporationRecord, char_id: i64) -> bool { false }
-pub fn is_excluded_corp_member (corp: &CorporationRecord, char_id: i64) -> bool { false }
-// Non-matching names:
-fn is_npc_corp_helper(id: i64) -> bool { false }
-fn is_excluded_corp_member_v2(id: i64) -> bool { false }
-#[cfg(test)]
-mod tests {
-    fn is_npc_corp(id: i64) -> bool { false }
-    fn is_excluded_corp_member(id: i64) -> bool { false }
-}
-"#,
-        )
-        .expect("write services/bad.rs");
-
-        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
-        assert!(ratchet.patterns["duplicate_is_npc_corp_helpers"].zero_required);
-        assert!(ratchet.patterns["duplicate_is_excluded_corp_member_helpers"].zero_required);
-        assert!(ratchet.patterns["duplicate_is_npc_corp_helpers"].files.is_empty());
-        assert!(ratchet.patterns["duplicate_is_excluded_corp_member_helpers"].files.is_empty());
-
-        let report = scan_arch_debt_in_dir(&src).expect("scan 1194 f3 helpers");
-        let npc_entry = &report.patterns["duplicate_is_npc_corp_helpers"];
-        assert_eq!(npc_entry.occurrences, 4);
-        assert_eq!(npc_entry.per_file.get("services/bad.rs"), Some(&4));
-
-        let excl_entry = &report.patterns["duplicate_is_excluded_corp_member_helpers"];
-        assert_eq!(excl_entry.occurrences, 2);
-        assert_eq!(excl_entry.per_file.get("services/bad.rs"), Some(&2));
-
-        let err = ratchet
-            .assert_ratchet(&report)
-            .expect_err("zero_required F3 ratchets must reject duplicate helpers");
-        assert!(
-            err.contains("duplicate_is_npc_corp_helpers")
-                || err.contains("duplicate_is_excluded_corp_member_helpers"),
-            "unexpected error message: {err}"
-        );
-
-        let clean_src = tmp.join("clean_src");
-        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
-        std::fs::write(
-            clean_src.join("services/clean.rs"),
-            "pub fn check(sde: &SdeRegistry, corp: &CorporationRecord, cid: i64) -> bool {\n    eve_db::is_npc_corporation(sde, cid) || eve_db::is_excluded_corp_member(corp, cid)\n}\n",
-        )
-        .expect("write clean.rs");
-        let clean_report = ratchet
-            .verify_dir(&clean_src)
-            .expect("clean source using canonical eve_db helpers must pass at 0");
-        assert_eq!(clean_report.patterns["duplicate_is_npc_corp_helpers"].occurrences, 0);
-        assert_eq!(clean_report.patterns["duplicate_is_excluded_corp_member_helpers"].occurrences, 0);
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn arch_debt_ratchet_1194_legacy_effective_corp_roles_at_fallback() {
-        let tmp = make_temp_dir("1194_f1_effective_corp_roles_at");
-        let src = tmp.join("src");
-        std::fs::create_dir_all(src.join("services")).expect("create services dir");
-        std::fs::write(
-            src.join("services/bad.rs"),
-            r#"
-// snap.effective_corp_roles_at(cid, char_id, None, session.corp_role, now)
-const LIT: &str = "snap.effective_corp_roles_at(cid, char_id, None, 0, now)";
-pub fn f(snap: &S, cid: i64, char_id: i64) -> (bool, u64) {
-    let a = snap.effective_corp_roles_at(cid, char_id, None, 0, 0);
-    let b = effective_corp_roles_at (snap, cid, char_id, None, 0, 0);
-    let c = snap.effective_corp_roles_at_db(cid, char_id, None, 0);
-    (a.0 && b.0 && c.0, a.1 | b.1 | c.1)
-}
-#[cfg(test)]
-mod tests {
-    fn t(snap: &S) { let _ = snap.effective_corp_roles_at(1, 2, None, 0, 0); }
-}
-"#,
-        )
-        .expect("write services/bad.rs");
-
-        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
-        let rule = &ratchet.patterns["legacy_effective_corp_roles_at_fallback"];
-        assert!(rule.zero_required);
-        assert_eq!(rule.owning_issue, Some(1194));
-        assert!(rule.files.is_empty());
-
-        let report = scan_arch_debt_in_dir(&src).expect("scan 1194 f1 legacy fallback");
-        let entry = &report.patterns["legacy_effective_corp_roles_at_fallback"];
-        assert_eq!(entry.occurrences, 2);
-        assert_eq!(entry.per_file.get("services/bad.rs"), Some(&2));
-
-        let err = ratchet
-            .assert_ratchet(&report)
-            .expect_err("zero_required F1 ratchet must reject legacy effective_corp_roles_at");
-        assert!(
-            err.contains("legacy_effective_corp_roles_at_fallback"),
-            "unexpected error message: {err}"
-        );
-
-        let clean_src = tmp.join("clean_src");
-        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
-        std::fs::write(
-            clean_src.join("services/clean.rs"),
-            "pub fn check(snap: &S, cid: i64, char_id: i64, now: u64) -> (bool, u64) {\n    snap.effective_corp_roles_at_db(cid, char_id, None, now)\n}\n",
-        )
-        .expect("write clean.rs");
-        let clean_report = ratchet
-            .verify_dir(&clean_src)
-            .expect("clean source using effective_corp_roles_at_db must pass at 0");
-        assert_eq!(clean_report.patterns["legacy_effective_corp_roles_at_fallback"].occurrences, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
