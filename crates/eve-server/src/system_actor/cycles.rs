@@ -21,7 +21,6 @@ pub(crate) use super::post_unlock_test_shims::{
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{BallId, Ballpark, MovementMode};
-use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -2288,79 +2287,6 @@ impl SystemHandle {
             drop(destroyed_lease);
         }
         tick
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_disconnected_warp_sync(
-        &self, ship_id: BallId, _type_id: u32, _radius: f64, _mass: f64,
-        _inertia: f64, _max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
-    ) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if !bp.balls.contains_key(&ship_id) {
-            // Do not synthesize a phantom ball from stale disconnected-ship state if the ship
-            // already transitioned out of this solar system.
-            return;
-        }
-        let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
-            !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
-        });
-        let warp_started = if needs_warp_init {
-            let start_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(current_pos);
-            let ok = bp
-                .set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)))
-                .is_ok();
-            if ok {
-                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-                    cs.is_emergency_warping = true;
-                }
-            }
-            ok
-        } else {
-            false
-        };
-        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        if warp_started {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
-            st.warp_state.clear_ball(ship_id, true);
-            st.warp_state.provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
-        }
-        drop(bp);
-        if warp_started {
-            self.publish_view();
-        }
-    }
-
-    pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let arrived = bp.balls.get(&ship_id).is_none_or(|b| {
-            !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
-        });
-        if arrived {
-            if bp.balls.get(&ship_id).is_some_and(|b| {
-                matches!(b.mode, MovementMode::Warp { .. })
-                    || (!bp.is_ball_scrambled(ship_id) && (b.position - dest).length() <= 50_000.0)
-            }) {
-                let _ = bp.set_ball_position(ship_id, dest);
-            }
-            let _ = bp.set_mode(ship_id, MovementMode::Stop);
-            if let Some(b) = bp.balls.get_mut(&ship_id) {
-                b.velocity = DVec3::ZERO;
-                b.speed_fraction = 0.0;
-            }
-        }
-        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
-        {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            super::protection::finish_disconnected_warp_protection_sync(&mut bp, &mut st, ship_id);
-            if arrived {
-                st.warp_state.clear_ball(ship_id, false);
-            }
-            self.publish_view_from(&bp, Some(&st));
-        }
-        drop(bp);
-        (final_pos, arrived)
     }
 }
 
