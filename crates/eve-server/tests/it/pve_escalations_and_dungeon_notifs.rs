@@ -49,6 +49,7 @@ async fn login_pilot_harness<'c>(
     user: &str,
     pass: &str,
     char_id: i64,
+    expect_in_space: bool,
 ) -> ClientHarness<ServerWireTransport<'c>> {
     let kw = HashMap::new();
     let mut harness = new_wire_harness(ctx, sess_id);
@@ -80,6 +81,17 @@ async fn login_pilot_harness<'c>(
     );
     let backend = ServerScenarioBackend::new(ctx);
     let view = backend.actor_session_view(harness.transport());
+    let ship_in_ballpark = if expect_in_space {
+        match (view.ship_id, view.solar_system_id) {
+            (Some(sid), Some(sys_id)) => match ctx.systems.get_handle(sys_id) {
+                Some(h) => h.get_ball_snapshot(sid).await.ok().flatten().is_some(),
+                None => false,
+            },
+            _ => false,
+        }
+    } else {
+        false
+    };
     let snap = ctx.db.with_snapshot(|s| s.clone());
     assert_legal_fixture(
         "pve_escalations_and_dungeon_notifs_pilot",
@@ -87,7 +99,8 @@ async fn login_pilot_harness<'c>(
         &ctx.sde,
         &view,
         &LegalFixtureExpectation {
-            expect_in_space: Some(false),
+            expect_in_space: Some(expect_in_space),
+            ship_in_space_ballpark: expect_in_space.then_some(ship_in_ballpark),
             ..Default::default()
         },
     );
@@ -252,7 +265,7 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
             .expect_err("Unauthenticated GetMyEscalatingPathDetails must fail");
         assert_eq!(unauth_err.code, "Unauthorized");
 
-        let mut sess = login_pilot_harness(&ctx, 9301, "demo", "demo-secret", PILOT_1)
+        let mut sess = login_pilot_harness(&ctx, 9301, "demo", "demo-secret", PILOT_1, false)
             .await
             .into_transport()
             .inner
@@ -260,7 +273,7 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
         put_pilot_in_space(&ctx, &mut sess, PILOT_1, 760_001_001, JITA_SYS, DVec3::ZERO).await;
 
         // Create fleet via real RPCs so fleetmate PILOT_2 receives OnFleetEscalatingPathMessage on escalation
-        let mut sess_mate = login_pilot_harness(&ctx, 9302, "other", "other-secret", PILOT_2)
+        let mut sess_mate = login_pilot_harness(&ctx, 9302, "other", "other-secret", PILOT_2, false)
             .await
             .into_transport()
             .inner
@@ -462,7 +475,7 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
 
     // 5. Reopen SQLite database in a fresh ServerContext (simulated server restart)
     let ctx2 = open_sqlite_ctx_at(&db_path, base_ts + 600);
-    let mut sess2 = login_pilot_harness(&ctx2, 9303, "demo", "demo-secret", PILOT_1)
+    let mut sess2 = login_pilot_harness(&ctx2, 9303, "demo", "demo-secret", PILOT_1, true)
         .await
         .into_transport()
         .inner
@@ -517,7 +530,7 @@ async fn test_get_my_escalating_path_details_rpc_shape_and_sqlite_persistence() 
 
     // 7. Advancing clock past 24h expiry prunes expired escalation & emits OnEscalatingPathChange
     let ctx3 = open_sqlite_ctx_at(&db_path, base_ts + 90_000);
-    let mut sess3 = login_pilot_harness(&ctx3, 9304, "demo", "demo-secret", PILOT_1)
+    let mut sess3 = login_pilot_harness(&ctx3, 9304, "demo", "demo-secret", PILOT_1, true)
         .await
         .into_transport()
         .inner
@@ -563,7 +576,7 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let ship_id = 760_002_001i64;
-    let mut sess = login_pilot_harness(&ctx, 9310, "demo", "demo-secret", PILOT_1)
+    let mut sess = login_pilot_harness(&ctx, 9310, "demo", "demo-secret", PILOT_1, false)
         .await
         .into_transport()
         .inner

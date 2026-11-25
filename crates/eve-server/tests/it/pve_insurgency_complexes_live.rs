@@ -446,7 +446,13 @@ async fn hold_fw_complex_ticks(ctx: &ServerContext, p: &mut LivePilot, sys_id: u
     travel_to(ctx, p, sys_id).await;
     assert_fw_instances_dict(ctx, &mut p.sess).await;
     let pir_rep = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await.expect("GetPirateInsurgencyInstances");
-    assert!(matches!(pir_rep, PyRep::List(_)), "GetPirateInsurgencyInstances reply: {pir_rep:?}");
+    let PyRep::Dict(pir_by_sys) = pir_rep else {
+        panic!("GetPirateInsurgencyInstances must return Dict keyed by solarSystemID, got {pir_rep:?}");
+    };
+    assert!(
+        pir_by_sys.iter().all(|(k, v)| k.as_i64().is_some() && matches!(v, PyRep::List(_))),
+        "GetPirateInsurgencyInstances entries must map solarSystemID -> List: {pir_by_sys:?}"
+    );
     let sys = ctx.systems.get_or_spawn(sys_id);
     for _ in 0..ticks {
         let bpos = if let Some(pos) = ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).and_then(|st| st.fw_complex_position)) { DVec3::from_array(pos) } else {

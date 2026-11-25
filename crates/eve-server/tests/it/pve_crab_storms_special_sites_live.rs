@@ -718,7 +718,14 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
         .and_then(|v| v.as_i64())
         .expect("Miner I itemID");
     let board_rep = ok(&ctx, &mut hf1.sess, "ship", "Board", &[int(hf1_venture_id)]).await;
-    assert!(matches!(board_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_) | PyRep::None), "Board reply: {board_rep:?}");
+    let PyRep::Tuple(board_parts) = board_rep else {
+        panic!("ship.Board must return 4-tuple, got {board_rep:?}");
+    };
+    assert_eq!(board_parts.len(), 4, "ship.Board tuple length mismatch: {board_parts:?}");
+    assert!(
+        matches!(&board_parts[0], PyRep::Dict(entries) if entries.iter().any(|(k, _)| k.as_i64() == Some(hf1_venture_id))),
+        "ship.Board state dict must include Venture {hf1_venture_id}: {board_parts:?}"
+    );
     let add_rep = ok(&ctx, &mut hf1.sess, "invbroker", "Add", &[int(hf1_miner_id), int(hf1_venture_id), int(HIGH_SLOT_0)]).await;
     assert_eq!(add_rep.dict_get("itemID"), Some(&int(hf1_miner_id)), "invbroker.Add Miner I reply: {add_rep:?}");
     let online_rep = ok(&ctx, &mut hf1.sess, "dogmaIM", "ShipOnlineModules", &[int(hf1_venture_id)]).await;

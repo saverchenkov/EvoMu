@@ -120,10 +120,28 @@ async fn toggle_bound_module_checked(
         .await
         .unwrap_or_else(|e| panic!("dogmaIM.{method}({module_id}) failed: {e:?}"));
     assert_eq!(
-        kv_get(&rep, "active"),
-        Some(&PyRep::Bool(activate)),
-        "dogmaIM.{method}({module_id}) must return active={activate}: {rep:?}"
+        kv_get(&rep, "moduleID"),
+        Some(&PyRep::Integer(module_id)),
+        "dogmaIM.{method}({module_id}) must return matching moduleID: {rep:?}"
     );
+    if activate {
+        assert_eq!(
+            kv_get(&rep, "active"),
+            Some(&PyRep::Bool(true)),
+            "dogmaIM.Activate({module_id}) must return active=true: {rep:?}"
+        );
+    } else {
+        assert!(
+            kv_get(&rep, "active") == Some(&PyRep::Bool(false))
+                || kv_get(&rep, "overloaded") == Some(&PyRep::Bool(false)),
+            "dogmaIM.Deactivate({module_id}) must return active=false or overloaded=false: {rep:?}"
+        );
+        assert_ne!(
+            kv_get(&rep, "active"),
+            Some(&PyRep::Bool(true)),
+            "dogmaIM.Deactivate({module_id}) must not return active=true: {rep:?}"
+        );
+    }
 }
 
 fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {

@@ -298,7 +298,10 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
         rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(sid), PyRep::Integer(tgt_lvl)])])]).await;
         ctx.advance_secs(86_400 * 45);
         let skills_rep = rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "GetSkills", &[]).await;
-        assert!(!skills_rep.crowset_rows().unwrap_or(&[]).is_empty(), "cyno GetSkills must return trained skills");
+        assert!(
+            skills_rep.row_count().unwrap_or(0) > 0,
+            "cyno GetSkills must return trained skills: {skills_rep:?}"
+        );
     }
 
     let (dread_id, guns1) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 19_720, 37_296, 17_686, 3, 100).await;
@@ -669,7 +672,7 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
             &HashMap::new(), None,
         ).await {
             Ok(act_rep) => assert_eq!(kv_get(&act_rep, "active"), Some(&PyRep::Bool(true))),
-            Err(e) if matches!(e.code.as_str(), "TargetNotLocked" | "OutOfRange" | "TargetingFailed" | "NotEnoughCapacitor" | "ModuleAlreadyActive") => {}
+            Err(e) if matches!(e.code.as_str(), "TargetNotLocked" | "TargetOutOfRange" | "OutOfRange" | "TargetingFailed" | "NotEnoughCapacitor" | "ModuleAlreadyActive") => {}
             Err(e) => panic!("dogmaIM.Activate({g1}) failed: {e:?}"),
         }
     }
