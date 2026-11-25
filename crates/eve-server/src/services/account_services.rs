@@ -1061,6 +1061,15 @@ fn handle_inner(
                     let effective_ship = session
                         .ship_id
                         .or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
+                    let mct_opts = eve_db::ConsumeExactOptions {
+                        reject_blueprint_copy: true,
+                        active_ship_id: effective_ship,
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(
+                            Some(char_id),
+                            char_id,
+                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                        )
+                    };
                     let cert_id = snap
                         .items
                         .values()
@@ -1072,6 +1081,7 @@ fn handle_inner(
                                     effective_dock,
                                     effective_ship,
                                 )
+                                && snap.validate_item_for_consumption(it, &mct_opts).is_ok()
                         })
                         .map(|it| it.item_id)
                         .min()
@@ -1080,18 +1090,7 @@ fn handle_inner(
                             message: "NoMultiTrainingCertificateFound".into(),
                             client_error: None,
                         })?;
-                    snap.consume_exact_item_quantity(
-                        cert_id,
-                        1,
-                        eve_db::ConsumeExactOptions {
-                            active_ship_id: effective_ship,
-                            ..eve_db::ConsumeExactOptions::for_owner_exact(
-                                Some(char_id),
-                                char_id,
-                                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-                            )
-                        },
-                    )
+                    snap.consume_exact_item_quantity(cert_id, 1, mct_opts)
                     .map_err(|_| BridgeRpcError {
                         code: "UserError".into(),
                         message: "NoMultiTrainingCertificateFound".into(),
@@ -1147,6 +1146,15 @@ fn handle_inner(
                 let effective_ship = session
                     .ship_id
                     .or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
+                let resculpt_opts = eve_db::ConsumeExactOptions {
+                    reject_blueprint_copy: true,
+                    active_ship_id: effective_ship,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        char_id,
+                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                    )
+                };
                 let cert_id = snap
                     .items
                     .values()
@@ -1158,6 +1166,7 @@ fn handle_inner(
                                 effective_dock,
                                 effective_ship,
                             )
+                            && snap.validate_item_for_consumption(it, &resculpt_opts).is_ok()
                     })
                     .map(|it| it.item_id)
                     .min()
@@ -1166,18 +1175,7 @@ fn handle_inner(
                         message: "NoResculptCertificateFound".into(),
                         client_error: None,
                     })?;
-                snap.consume_exact_item_quantity(
-                    cert_id,
-                    1,
-                    eve_db::ConsumeExactOptions {
-                        active_ship_id: effective_ship,
-                        ..eve_db::ConsumeExactOptions::for_owner_exact(
-                            Some(char_id),
-                            char_id,
-                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-                        )
-                    },
-                )
+                snap.consume_exact_item_quantity(cert_id, 1, resculpt_opts)
                 .map_err(|_| BridgeRpcError {
                     code: "UserError".into(),
                     message: "NoResculptCertificateFound".into(),
@@ -1387,4 +1385,102 @@ pub(crate) const RPCS: &[RpcEntry] = &[
 ];
 
 #[cfg(test)] #[path = "account_services_tests.rs"] pub(crate) mod account_services_tests;
+
+#[cfg(test)]
+mod r3_cert_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cert_activation_skips_bpc_courier_and_rejects_bpc_only() {
+        let ctx = ServerContext::new();
+        let uid = ctx.db.provision_player_account("r3_cert_user", "pass");
+        let char_id = 90_000_001_i64;
+        let station_id = 60_003_760_i64;
+        let bpc_mct = 961_001_i64;
+        let courier_mct = 961_002_i64;
+        let valid_mct = 961_003_i64;
+        let bpc_resculpt = 961_004_i64;
+        let valid_resculpt = 961_005_i64;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.user_id = uid;
+                ch.station_id = Some(station_id);
+            }
+            for (iid, tid, bpc) in [
+                (bpc_mct, 33027_u32, true),
+                (courier_mct, 33027, false),
+                (valid_mct, 33027, false),
+                (bpc_resculpt, 28662, true),
+            ] {
+                snap.items.insert(
+                    iid,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid,
+                        type_id: tid,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: false,
+                        is_blueprint_copy: bpc,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+            snap.item_custom_names
+                .insert(courier_mct, format!("courier_cargo:{char_id}:55"));
+        });
+
+        let mut sess = SessionState::new(933);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(char_id);
+        sess.station_id = Some(station_id);
+        let kw = HashMap::new();
+
+        // Lower-ID BPC and courier MCTs must be skipped and valid sibling consumed.
+        handle(&ctx, &mut sess, "userSvc", "ActivateMultiTraining", &[], &kw)
+            .await
+            .expect("MCT RPC")
+            .expect("skips invalid certs and activates valid MCT");
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.items.contains_key(&bpc_mct));
+            assert!(snap.items.contains_key(&courier_mct));
+            assert!(!snap.items.contains_key(&valid_mct));
+        });
+
+        // Only BPC resculpt present -> rejected.
+        let err = handle(&ctx, &mut sess, "userSvc", "ActivateCharacterReSculpt", &[], &kw)
+            .await
+            .expect("Resculpt RPC")
+            .expect_err("BPC-only resculpt must fail");
+        assert_eq!(err.message, "NoResculptCertificateFound");
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                valid_resculpt,
+                eve_db::InventoryItemRecord {
+                    item_id: valid_resculpt,
+                    type_id: 28662,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        handle(&ctx, &mut sess, "userSvc", "ActivateCharacterReSculpt", &[], &kw)
+            .await
+            .expect("Resculpt RPC")
+            .expect("skips BPC resculpt and activates valid sibling");
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.items.contains_key(&bpc_resculpt));
+            assert!(!snap.items.contains_key(&valid_resculpt));
+        });
+    }
+}
 

@@ -147,28 +147,36 @@ fn consume_structure_charge(
     qty_needed: i32,
 ) -> bool {
     ctx.db.with_mut_snapshot(|snap| {
+        let is_eligible_charge = |i: &eve_db::InventoryItemRecord| {
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                st_corp_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
+            opts.reject_fitted = false;
+            i.item_id != module_id
+                && i.type_id == charge_tid
+                && i.quantity >= qty_needed
+                && snap.validate_item_for_consumption(i, &opts).is_ok()
+        };
         let candidate_id = snap
             .items
             .values()
-            .find(|i| {
+            .filter(|i| {
                 (i.location_id == structure_id || i.location_id == module_id)
-                    && i.owner_id == st_corp_id
-                    && i.item_id != module_id
                     && (i.location_id == module_id || i.flag == mod_flag)
-                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                    && i.type_id == charge_tid
-                    && i.quantity >= qty_needed
+                    && is_eligible_charge(i)
             })
+            .min_by_key(|i| i.item_id)
             .or_else(|| {
-                snap.items.values().find(|i| {
-                    i.location_id == structure_id
-                        && i.owner_id == st_corp_id
-                        && i.item_id != module_id
-                        && is_structure_ammo_bay(i, st_corp_id, mod_flag)
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                        && i.type_id == charge_tid
-                        && i.quantity >= qty_needed
-                })
+                snap.items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == structure_id
+                            && is_structure_ammo_bay(i, st_corp_id, mod_flag)
+                            && is_eligible_charge(i)
+                    })
+                    .min_by_key(|i| i.item_id)
             })
             .map(|i| i.item_id);
         let Some(cid) = candidate_id else {

@@ -638,11 +638,20 @@ pub fn handle_pi_colonies(
                                         .items
                                         .values()
                                         .filter(|it| {
-                                            it.owner_id == char_id
-                                                && it.type_id == pin_type_id
+                                            it.type_id == pin_type_id
                                                 && it.quantity >= 1
                                                 && it.location_id == ship_id
                                                 && matches!(it.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedCommandCenterHold)
+                                                && snap
+                                                    .validate_item_for_consumption(
+                                                        it,
+                                                        &eve_db::ConsumeExactOptions::for_owner_exact(
+                                                            Some(char_id),
+                                                            char_id,
+                                                            eve_db::ItemClassPolicy::ExactAssembledItem,
+                                                        ),
+                                                    )
+                                                    .is_ok()
                                         })
                                         .map(|it| it.item_id)
                                         .min();

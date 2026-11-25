@@ -1273,6 +1273,38 @@ pub async fn dispatch_special_structure_attack(
     tick: u64,
     charges: &[i64],
 ) -> Result<PyRep, BridgeRpcError> {
+    if st_type_id != TYPE_MERCENARY_DEN
+        && st_type_id != crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+        && !is_fw_ins
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidSpecialStructure".into(),
+            message: format!("Structure {structure_id} is not a special target"),
+            client_error: None,
+        });
+    }
+    if !charges.is_empty() {
+        ctx.db.try_with_mut_snapshot(|snap| {
+            for cid in charges {
+                let owner_id = snap
+                    .items
+                    .get(cid)
+                    .map(|ch| ch.owner_id)
+                    .ok_or_else(|| BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))?;
+                let opts = eve_db::ConsumeExactOptions {
+                    reject_fitted: false,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        owner_id,
+                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                    )
+                };
+                snap.consume_exact_item_quantity(*cid, 1, opts)
+                    .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
+            }
+            Ok(())
+        })?;
+    }
     let rep = if st_type_id == TYPE_MERCENARY_DEN {
         apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await?
     } else if st_type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
@@ -1286,29 +1318,10 @@ pub async fn dispatch_special_structure_attack(
             q,
             char_id,
         )?
-    } else if is_fw_ins {
-        crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await?
     } else {
-        return Err(BridgeRpcError {
-            code: "InvalidSpecialStructure".into(),
-            message: format!("Structure {structure_id} is not a special target"),
-            client_error: None,
-        });
+        crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await?
     };
     ctx.db.with_mut_snapshot(|snap| {
-        for cid in charges {
-            if let Some(owner_id) = snap.items.get(cid).map(|ch| ch.owner_id) {
-                let opts = eve_db::ConsumeExactOptions {
-                    reject_fitted: false,
-                    ..eve_db::ConsumeExactOptions::for_owner_exact(
-                        None,
-                        owner_id,
-                        eve_db::ItemClassPolicy::ExactAssembledItem,
-                    )
-                };
-                let _ = snap.consume_exact_item_quantity(*cid, 1, opts);
-            }
-        }
         if let Some(s) = snap.structures.get_mut(&structure_id) {
             s.last_damage_tick = tick;
         }
@@ -1639,5 +1652,69 @@ mod sov_gameplay_tests;
 #[cfg(test)]
 #[path = "sov_gameplay_edges2_tests.rs"]
 mod sov_gameplay_edges2_tests;
+
+#[cfg(test)]
+mod r3_charge_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_special_structure_attack_rejects_bpc_charge_without_damage() {
+        let ctx = ServerContext::new();
+        let char_id = 90_000_001_i64;
+        let den_id = 1_099_000_111_i64;
+        let bpc_charge_id = 1_099_000_112_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.mercenary_dens.insert(
+                den_id,
+                PersistedMercenaryDen {
+                    den_id,
+                    owner_char_id: char_id,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    skyhook_id: 1_099_000_110,
+                    planet_id: 40_000_001,
+                    type_id: TYPE_MERCENARY_DEN,
+                    enabled: true,
+                    shield_hp: 5_000.0,
+                    armor_hp: 5_000.0,
+                    hull_hp: 5_000.0,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_charge_id,
+                InventoryItemRecord {
+                    item_id: bpc_charge_id,
+                    type_id: 200,
+                    owner_id: char_id,
+                    location_id: 1_099_000_100,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 2,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let err = dispatch_special_structure_attack(
+            &ctx,
+            char_id,
+            den_id,
+            TYPE_MERCENARY_DEN,
+            false,
+            1_000.0,
+            77,
+            &[bpc_charge_id],
+        )
+        .await
+        .expect_err("BPC weapon charge must fail before dealing damage");
+        assert!(!err.message.is_empty());
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.sov_runtime.mercenary_dens[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.sov_runtime.mercenary_dens[&den_id].last_damage_tick, 0);
+            assert_eq!(snap.items[&bpc_charge_id].quantity, 2);
+        });
+    }
+}
 
 

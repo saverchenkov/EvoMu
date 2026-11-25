@@ -1214,6 +1214,12 @@ fn resolve_structure_weapon_tick(
                 .items
                 .values()
                 .filter(|c| {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        c.owner_id,
+                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                    );
+                    opts.reject_fitted = false;
                     c.location_id == structure_id
                         && c.flag == w.flag
                         && c.item_id != w.item_id
@@ -1223,6 +1229,7 @@ fn resolve_structure_weapon_tick(
                             .types
                             .get(&c.type_id)
                             .is_some_and(|ct| ct.group_id == charge_group)
+                        && snap.validate_item_for_consumption(c, &opts).is_ok()
                 })
                 .min_by_key(|c| c.item_id)
                 .map(|c| (c.item_id, c.type_id, c.quantity));
@@ -1255,14 +1262,20 @@ fn resolve_structure_weapon_tick(
                 }
                 continue;
             }
-            if let Some(c_owner) = snap.items.get(&charge_item_id).map(|c| c.owner_id) {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                    None,
-                    c_owner,
-                    eve_db::ItemClassPolicy::ExactAssembledItem,
-                );
-                opts.reject_fitted = false;
-                let _ = snap.consume_exact_item_quantity(charge_item_id, capped as i32, opts);
+            let Some(c_owner) = snap.items.get(&charge_item_id).map(|c| c.owner_id) else {
+                continue;
+            };
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                c_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
+            opts.reject_fitted = false;
+            if snap
+                .consume_exact_item_quantity(charge_item_id, capped as i32, opts)
+                .is_err()
+            {
+                continue;
             }
             ext.weapon_cooldowns.insert(w.item_id, new_rem);
             dirty_ext = true;

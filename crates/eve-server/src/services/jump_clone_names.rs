@@ -715,11 +715,15 @@ pub(crate) fn extract_skills(
         snap.consume_exact_item_quantity(
             extractor_item_id,
             1,
-            eve_db::ConsumeExactOptions::for_owner_exact(
-                Some(char_id),
-                char_id,
-                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-            ),
+            eve_db::ConsumeExactOptions {
+                reject_blueprint_copy: true,
+                active_ship_id: ship_id.filter(|&id| id > 0),
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
+            },
         )
         .map_err(|e| BridgeRpcError {
             code: "SkillExtractorConsumeFailed".into(),

@@ -732,17 +732,29 @@ pub(crate) async fn handle_void_space_player_jump(
         })
     };
     let ship_vec = DVec3::from_array(ship_pos);
+    let void_filament_opts = |sid: i64| eve_db::ConsumeExactOptions {
+        reject_blueprint_copy: true,
+        active_ship_id: Some(sid),
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+        )
+    };
     let cargo_filament = ctx.db.with_snapshot(|snap| {
+        let opts = void_filament_opts(ship_id);
         snap.items
             .values()
-            .find(|i| {
+            .filter(|i| {
                 i.owner_id == char_id
                     && i.location_id == ship_id
                     && i.flag == eve_db::InventoryFlag::Cargo
                     && (i.item_id == target_id || i.type_id as i64 == target_id)
                     && i.quantity >= 1
                     && is_void_space_filament_type(ctx, i.type_id)
+                    && snap.validate_item_for_consumption(i, &opts).is_ok()
             })
+            .min_by_key(|i| i.item_id)
             .map(|i| (i.item_id, i.type_id))
     });
     let cargo_filament_iid = cargo_filament.map(|(iid, _)| iid);
@@ -848,15 +860,7 @@ pub(crate) async fn handle_void_space_player_jump(
                     client_error: None,
                 });
             }
-            snap.consume_exact_item_quantity(
-                iid,
-                1,
-                eve_db::ConsumeExactOptions::for_owner_exact(
-                    Some(char_id),
-                    char_id,
-                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-                ),
-            )
+            snap.consume_exact_item_quantity(iid, 1, void_filament_opts(ship_id))
             .map_err(|e| BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: e.to_string(),

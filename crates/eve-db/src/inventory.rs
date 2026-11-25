@@ -73,6 +73,8 @@ pub struct ConsumeExactOptions {
     pub reject_blueprint_copy: bool,
     /// Reject items fitted to a ship or structure slot (`is_fitted_slot_flag`).
     pub reject_fitted: bool,
+    /// Allow consuming courier mission cargo items (`courier_cargo:` tag). Forced `false` for [`ItemClassPolicy::StackableCommodity`].
+    pub allow_courier_cargo: bool,
     /// Exclude an optional lock scope when verifying `is_item_locked_in_contract_or_job` (e.g., direct trade `-73` / raffle `-74`).
     pub exclude_trade_lock_id: Option<i64>,
     /// Character's currently boarded active ship ID (prevents consuming the active hull).
@@ -95,6 +97,7 @@ impl ConsumeExactOptions {
             reject_non_empty_container: true,
             reject_blueprint_copy: true,
             reject_fitted: true,
+            allow_courier_cargo: false,
             exclude_trade_lock_id: None,
             active_ship_id: None,
         }
@@ -128,6 +131,7 @@ impl ConsumeExactOptions {
             reject_non_empty_container: true,
             reject_blueprint_copy,
             reject_fitted: true,
+            allow_courier_cargo: false,
             exclude_trade_lock_id: None,
             active_ship_id: None,
         }
@@ -1539,9 +1543,9 @@ impl WorldStateSnapshot {
                 opts.policy,
                 ItemClassPolicy::StackableCommodity | ItemClassPolicy::ExactAssembledItem
             );
-        let reject_mutated = enforce_commodity
-            || (reject_singleton && !matches!(opts.policy, ItemClassPolicy::ExactAssembledItem));
+        let reject_mutated = !matches!(opts.policy, ItemClassPolicy::ExactAssembledItem);
         let reject_insured = !matches!(opts.policy, ItemClassPolicy::ExactAssembledItem);
+        let reject_courier_cargo = enforce_commodity || !opts.allow_courier_cargo;
 
         if reject_singleton && item.singleton {
             return Err(DbError::ValidationError(format!(
@@ -1565,12 +1569,7 @@ impl WorldStateSnapshot {
                 item.item_id, opts.policy
             )));
         }
-        if reject_singleton
-            && self
-                .item_custom_names
-                .get(&item.item_id)
-                .is_some_and(|tag| tag.starts_with("courier_cargo:"))
-        {
+        if reject_courier_cargo && self.is_courier_mission_item(item.item_id) {
             return Err(DbError::ValidationError(format!(
                 "Cannot consume courier cargo item {}",
                 item.item_id

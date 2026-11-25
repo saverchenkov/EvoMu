@@ -4170,11 +4170,12 @@ fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
         );
     }
 
-    // Even if a caller mutates reject flags to false on `StackableCommodity`, policy still enforces them.
+    // Even if a caller mutates reject/allow flags on `StackableCommodity`, policy still enforces them.
     let mut bypassed_flags = stack_opts;
     bypassed_flags.reject_singleton = false;
     bypassed_flags.reject_blueprint_copy = false;
-    for &bad_id in &[bpc_non_singleton_id, dynamic_attr_id, insured_id, singleton_id] {
+    bypassed_flags.allow_courier_cargo = true;
+    for &bad_id in &[bpc_non_singleton_id, dynamic_attr_id, insured_id, singleton_id, courier_id] {
         assert!(
             snap.validate_item_for_consumption(&snap.items[&bad_id], &bypassed_flags)
                 .is_err(),
@@ -4189,7 +4190,7 @@ fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
     assert_eq!(touched, vec![clean_stack_id]);
     assert_eq!(snap.items[&clean_stack_id].quantity, 2);
 
-    // 3. `ExactBlueprintOrSingleton` allows BPC/singleton per flags, but rejects insured items.
+    // 3. `ExactBlueprintOrSingleton` allows BPC/singleton per flags, rejects mutated, insured, and courier cargo by default.
     let bp_allow = ConsumeExactOptions::for_owner_exact(
         Some(owner_id),
         owner_id,
@@ -4202,8 +4203,23 @@ fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
         .validate_item_for_consumption(&snap.items[&singleton_id], &bp_allow)
         .is_ok());
     assert!(snap
+        .validate_item_for_consumption(&snap.items[&dynamic_attr_id], &bp_allow)
+        .is_err());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&mutaplasmid_id], &bp_allow)
+        .is_err());
+    assert!(snap
         .validate_item_for_consumption(&snap.items[&insured_id], &bp_allow)
         .is_err());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&courier_id], &bp_allow)
+        .is_err());
+
+    let mut bp_courier = bp_allow;
+    bp_courier.allow_courier_cargo = true;
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&courier_id], &bp_courier)
+        .is_ok());
 
     let mut bp_reject_bpc = bp_allow;
     bp_reject_bpc.reject_blueprint_copy = true;
@@ -4215,7 +4231,7 @@ fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
         .is_ok());
 
     // 4. `ExactAssembledItem` allows singleton, dynamic_attributes, and insured_payout_isk > 0.0,
-    //    while rejecting blueprint copies unconditionally.
+    //    while rejecting blueprint copies and courier cargo unconditionally by default.
     let assembled_opts = ConsumeExactOptions::for_owner_exact(
         Some(owner_id),
         owner_id,
@@ -4238,6 +4254,9 @@ fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
         .is_err());
     assert!(snap
         .validate_item_for_consumption(&snap.items[&run_bounded_bp_id], &assembled_opts)
+        .is_err());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&courier_id], &assembled_opts)
         .is_err());
 
     let mut assembled_bypass = assembled_opts;

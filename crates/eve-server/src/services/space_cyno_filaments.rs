@@ -574,15 +574,24 @@ async fn handle_random_jump_filament(
 
     const GROUP_JUMP_FILAMENTS: u32 = 4041;
     const GROUP_POCHVEN_FILAMENTS: u32 = 4087;
+    let cyno_fil_opts = eve_db::ConsumeExactOptions {
+        reject_blueprint_copy: true,
+        active_ship_id: Some(ship_id),
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+        )
+    };
     let fil_item_id = if let Some(id) = args.first().and_then(|a| a.as_i64()) {
         id
     } else {
         ctx.db.with_snapshot(|snap| {
-            snap.items.values().find(|i| {
+            snap.items.values().filter(|i| {
                 i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
-                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                    && snap.validate_item_for_consumption(i, &cyno_fil_opts).is_ok()
                     && matches!(ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0), GROUP_JUMP_FILAMENTS | GROUP_POCHVEN_FILAMENTS)
-            }).map(|i| i.item_id)
+            }).min_by_key(|i| i.item_id).map(|i| i.item_id)
         }).ok_or_else(|| BridgeRpcError {
             code: "InvalidArguments".into(),
             message: "ActivateRandomJumpFilament requires filament itemID argument".into(),
@@ -750,15 +759,7 @@ async fn handle_random_jump_filament(
         {
             return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound));
         }
-        snap.consume_exact_item_quantity(
-            fil_item_id,
-            1,
-            eve_db::ConsumeExactOptions::for_owner_exact(
-                Some(char_id),
-                char_id,
-                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-            ),
-        )
+        snap.consume_exact_item_quantity(fil_item_id, 1, cyno_fil_opts)
         .map_err(|e| BridgeRpcError {
             code: "FilamentLocked".into(),
             message: e.to_string(),

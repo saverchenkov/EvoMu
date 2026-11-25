@@ -1367,7 +1367,21 @@ fn installed_core_item(snap: &WorldStateSnapshot, st: &UpwellStructureRecord, co
     let mut ids: Vec<i64> = snap
         .items
         .values()
-        .filter(|i| i.location_id == st.structure_id && (i.flag == InventoryFlag::StructureDeedBay || i.flag as u16 == 172 || i.flag as u16 == 180) && i.type_id == core_type && (i.owner_id == corp || snap.characters.get(&i.owner_id).map(|c| c.corporation_id == corp).unwrap_or(false)))
+        .filter(|i| {
+            let opts = eve_db::ConsumeExactOptions {
+                reject_fitted: false,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    i.owner_id,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                )
+            };
+            i.location_id == st.structure_id
+                && (i.flag == InventoryFlag::StructureDeedBay || i.flag as u16 == 172 || i.flag as u16 == 180)
+                && i.type_id == core_type
+                && (i.owner_id == corp || snap.characters.get(&i.owner_id).map(|c| c.corporation_id == corp).unwrap_or(false))
+                && snap.validate_item_for_consumption(i, &opts).is_ok()
+        })
         .map(|i| i.item_id)
         .collect();
     ids.sort_unstable();
@@ -1406,18 +1420,7 @@ pub(crate) fn estimated_fuel_expires_unix(
     if need == 0 {
         return None;
     }
-    let bay_blocks: u64 = snap
-        .items
-        .values()
-        .filter(|i| {
-            i.location_id == st.structure_id
-                && rules::is_structure_fuel_flag(i.flag)
-                && i.quantity > 0
-                && rules::is_fuel_block_type(ctx, i.type_id)
-        })
-        .map(|i| i.quantity as u64)
-        .fold(0u64, u64::saturating_add);
-    let avail = if bay_blocks > 0 { bay_blocks } else { u64::from(st.fuel_blocks) };
+    let avail = u64::from(rules::available_structure_fuel_blocks(ctx, snap, st.structure_id));
     if avail == 0 {
         return None;
     }
@@ -1433,7 +1436,7 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
     for (iid, mod_tid, _, _, _) in online_service_modules(ctx, snap, structure_id) {
         if !life.online_modules.contains(&iid) {
             if first_init {
-                let avail = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
+                let avail = rules::available_structure_fuel_blocks(ctx, snap, structure_id);
                 if avail > 0 {
                     life.online_modules.push(iid);
                 } else {
@@ -1464,19 +1467,7 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
             need = need.saturating_add(mod_burn);
         }
         if need > 0 {
-            let bay_blocks: u32 = snap
-                .items
-                .values()
-                .filter(|i| {
-                    i.location_id == structure_id
-                        && rules::is_structure_fuel_flag(i.flag)
-                        && i.quantity > 0
-                        && rules::is_fuel_block_type(ctx, i.type_id)
-                })
-                .filter_map(|i| u32::try_from(i.quantity).ok())
-                .fold(0u32, u32::saturating_add);
-            let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
-            let avail = if bay_blocks > 0 { bay_blocks } else { st_blocks };
+            let avail = rules::available_structure_fuel_blocks(ctx, snap, structure_id);
             let affordable = u64::from(avail / need);
             let paid_hours = elapsed_hours.min(affordable);
             let paid_ok = paid_hours == 0

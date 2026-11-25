@@ -430,10 +430,24 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         let current_dock = session.station_id.or(session.structure_id);
         let current_ship = session.ship_id;
         let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let lic_opts = eve_db::ConsumeExactOptions {
+                reject_blueprint_copy: true,
+                active_ship_id: current_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
+            };
             let license_item_id = snap
                 .items
                 .values()
-                .filter(|i| i.type_id == requested_skin_id && i.quantity >= 1 && snap.is_item_consumable_by(i, char_id, current_dock, current_ship))
+                .filter(|i| {
+                    i.type_id == requested_skin_id
+                        && i.quantity >= 1
+                        && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                        && snap.validate_item_for_consumption(i, &lic_opts).is_ok()
+                })
                 .min_by_key(|i| i.item_id)
                 .map(|i| i.item_id);
             let Some(item_id) = license_item_id else {
@@ -442,18 +456,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                     format!("Character {char_id} does not own SKIN license item (typeID {requested_skin_id}) at current station/structure or active ship"),
                 ));
             };
-            snap.consume_exact_item_quantity(
-                item_id,
-                1,
-                eve_db::ConsumeExactOptions {
-                    active_ship_id: current_ship,
-                    ..eve_db::ConsumeExactOptions::for_owner_exact(
-                        Some(char_id),
-                        char_id,
-                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-                    )
-                },
-            )
+            snap.consume_exact_item_quantity(item_id, 1, lic_opts)
             .map_err(|e| err("ItemLocked", e.to_string()))?;
             let list = snap.licensed_skins.entry(char_id).or_default();
             if !list.contains(&requested_skin_id) {

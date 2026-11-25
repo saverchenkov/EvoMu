@@ -58,18 +58,21 @@ fn ess_key_quadrant_and_duration(type_id: u32) -> Option<(EssQuadrant, u64)> {
     }
 }
 
-/// Validates and selects an ESS Reserve Security Key (`57714..=57721`, group `4102`) in `ship_id`
-/// cargo matching `sys_id`'s SCC quadrant. Never accepts non-key cargo items even when `target_arg` is provided.
-pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
+fn select_ess_reserve_key_inner<'a, F>(
     sde: &eve_sde::SdeRegistry,
     items: impl Iterator<Item = &'a eve_db::InventoryItemRecord>,
     char_id: i64,
     ship_id: i64,
     sys_id: u32,
     target_arg: Option<i64>,
-) -> Result<(i64, u32, u64), BridgeRpcError> {
+    mut extra_filter: F,
+) -> Result<(i64, u32, u64), BridgeRpcError>
+where
+    F: FnMut(&eve_db::InventoryItemRecord) -> bool,
+{
     let sys_quad = system_ess_quadrant(sde, sys_id);
     let mut saw_wrong_quadrant_key = false;
+    let mut matching: Vec<(i64, u32, u64)> = Vec::new();
     for i in items {
         if i.owner_id != char_id
             || i.location_id != ship_id
@@ -91,11 +94,18 @@ pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
             let _ = is_sde_ess_key_group;
             continue;
         };
+        if !extra_filter(i) {
+            continue;
+        }
         if key_quad != sys_quad {
             saw_wrong_quadrant_key = true;
             continue;
         }
-        return Ok((i.item_id, i.type_id, dur_mins));
+        matching.push((i.item_id, i.type_id, dur_mins));
+    }
+    matching.sort_by_key(|&(iid, _, _)| iid);
+    if let Some(found) = matching.first().copied() {
+        return Ok(found);
     }
     if saw_wrong_quadrant_key {
         Err(BridgeRpcError {
@@ -112,6 +122,44 @@ pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
             client_error: None,
         })
     }
+}
+
+/// Selects and validates an ESS Reserve Security Key (`57714..=57721`) in `ship_id` cargo against
+/// `validate_item_for_consumption` (`ExactBlueprintOrSingleton`, `reject_blueprint_copy: true`) so
+/// BPCs, courier items, mutated items, insured items, and locked stacks never shadow valid keys.
+pub(crate) fn select_valid_ess_reserve_key_in_cargo(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    target_arg: Option<i64>,
+) -> Result<(i64, u32, u64), BridgeRpcError> {
+    select_ess_reserve_key_inner(sde, snap.items.values(), char_id, ship_id, sys_id, target_arg, |i| {
+        let key_opts = eve_db::ConsumeExactOptions {
+            reject_blueprint_copy: true,
+            active_ship_id: Some(ship_id),
+            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                i.owner_id,
+                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+            )
+        };
+        snap.validate_item_for_consumption(i, &key_opts).is_ok()
+    })
+}
+
+/// Validates and selects an ESS Reserve Security Key (`57714..=57721`, group `4102`) in `ship_id`
+/// cargo matching `sys_id`'s SCC quadrant. Never accepts non-key cargo items even when `target_arg` is provided.
+pub(crate) fn select_ess_reserve_key_in_cargo<'a>(
+    sde: &eve_sde::SdeRegistry,
+    items: impl Iterator<Item = &'a eve_db::InventoryItemRecord>,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    target_arg: Option<i64>,
+) -> Result<(i64, u32, u64), BridgeRpcError> {
+    select_ess_reserve_key_inner(sde, items, char_id, ship_id, sys_id, target_arg, |_| true)
 }
 
 /// Canonical cache priming structure for system ESS reserve and main banks.
@@ -424,9 +472,9 @@ pub async fn handle_ess_link(
                     });
                 }
             } else {
-                let (key_id, _key_type_id, dur_mins) = select_ess_reserve_key_in_cargo(
+                let (key_id, _key_type_id, dur_mins) = select_valid_ess_reserve_key_in_cargo(
                     &ctx.sde,
-                    snap.items.values(),
+                    snap,
                     char_id,
                     ship_id,
                     sys_id,
@@ -438,6 +486,7 @@ pub async fn handle_ess_link(
                         key_owner,
                         eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
                     );
+                    opts.reject_blueprint_copy = true;
                     opts.active_ship_id = Some(ship_id);
                     snap.consume_exact_item_quantity(key_id, 1, opts)
                         .map_err(|e| BridgeRpcError {
@@ -771,4 +820,79 @@ pub async fn tick_ess_main_bank_links(ctx: &ServerContext) -> usize {
 #[cfg(test)]
 #[path = "encounter_surveillance_system_tests.rs"]
 mod encounter_surveillance_system_tests;
+
+#[cfg(test)]
+mod r3_ess_key_policy_tests {
+    use super::*;
+
+    #[test]
+    fn select_valid_ess_reserve_key_skips_bpc_insured_and_courier_keys() {
+        let ctx = ServerContext::new();
+        let char_id = 90_000_001_i64;
+        let ship_id = 1_963_001_i64;
+        let nw_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .find(|s| system_ess_quadrant(&ctx.sde, s.solar_system_id) == EssQuadrant::Nw)
+            .map(|s| s.solar_system_id)
+            .expect("NW solar system");
+
+        let bpc_key = 963_010_i64;
+        let courier_key = 963_011_i64;
+        let insured_key = 963_012_i64;
+        let valid_key = 963_013_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                ship_id,
+                eve_db::InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: i64::from(nw_sys),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            for (iid, bpc, ins) in [
+                (bpc_key, true, 0.0),
+                (courier_key, false, 0.0),
+                (insured_key, false, 100_000.0),
+                (valid_key, false, 0.0),
+            ] {
+                snap.items.insert(
+                    iid,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid,
+                        type_id: 57714,
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: 1,
+                        singleton: false,
+                        is_blueprint_copy: bpc,
+                        insured_payout_isk: ins,
+                        ..Default::default()
+                    },
+                );
+            }
+            snap.item_custom_names
+                .insert(courier_key, format!("courier_cargo:{char_id}:88"));
+
+            let (chosen_id, chosen_tid, _) = select_valid_ess_reserve_key_in_cargo(
+                &ctx.sde,
+                snap,
+                char_id,
+                ship_id,
+                nw_sys,
+                None,
+            )
+            .expect("must skip invalid keys and pick valid sibling");
+            assert_eq!(chosen_id, valid_key);
+            assert_eq!(chosen_tid, 57714);
+        });
+    }
+}
 

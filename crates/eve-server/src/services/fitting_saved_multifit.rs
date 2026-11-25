@@ -439,14 +439,23 @@ pub(crate) async fn handle_ships_and_services(
                 }
 
                 // Locate and consume 1 unlocked, reachable mutaplasmid item owned by char_id
+                let mut muta_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                );
+                muta_opts.reject_blueprint_copy = true;
+                muta_opts.active_ship_id = current_ship;
                 let muta_item_id = snap
                     .items
                     .values()
-                    .find(|i| {
+                    .filter(|i| {
                         i.type_id == mutaplasmid_type_id
                             && i.quantity >= 1
                             && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                            && snap.validate_item_for_consumption(i, &muta_opts).is_ok()
                     })
+                    .min_by_key(|i| i.item_id)
                     .map(|i| i.item_id);
                 let Some(mid) = muta_item_id else {
                     return Err(BridgeRpcError {
@@ -458,12 +467,6 @@ pub(crate) async fn handle_ships_and_services(
                     });
                 };
 
-                let mut muta_opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                    Some(char_id),
-                    char_id,
-                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-                );
-                muta_opts.active_ship_id = current_ship;
                 snap.consume_exact_item_quantity(mid, 1, muta_opts).map_err(|e| BridgeRpcError {
                     code: "MutaplasmidItemNotFound".into(),
                     message: e.to_string(),

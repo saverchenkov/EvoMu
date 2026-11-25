@@ -1039,12 +1039,11 @@ fn is_eligible_fuel_block_stack(
             .is_ok()
 }
 
-pub fn consume_structure_fuel_blocks(
+fn collect_structure_fuel_block_state(
     ctx: &ServerContext,
-    snap: &mut WorldStateSnapshot,
+    snap: &WorldStateSnapshot,
     structure_id: i64,
-    amount: u32,
-) -> bool {
+) -> (bool, u32, Vec<i64>) {
     let mut has_any_bay_stack = false;
     let mut eligible_bay_blocks: u32 = 0;
     let mut item_ids: Vec<i64> = Vec::new();
@@ -1060,6 +1059,25 @@ pub fn consume_structure_fuel_blocks(
     }
     let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
     let avail = if has_any_bay_stack { eligible_bay_blocks } else { st_blocks };
+    (has_any_bay_stack, avail, item_ids)
+}
+
+pub fn available_structure_fuel_blocks(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+) -> u32 {
+    collect_structure_fuel_block_state(ctx, snap, structure_id).1
+}
+
+pub fn consume_structure_fuel_blocks(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    structure_id: i64,
+    amount: u32,
+) -> bool {
+    let (has_any_bay_stack, avail, mut item_ids) =
+        collect_structure_fuel_block_state(ctx, snap, structure_id);
     if avail < amount {
         return false;
     }

@@ -164,11 +164,14 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
             if take <= 0 {
                 continue;
             }
-            let opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                Some(char_id),
-                char_id,
-                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-            );
+            let opts = eve_db::ConsumeExactOptions {
+                allow_courier_cargo: true,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
+            };
             snap.consume_exact_item_quantity(iid, take, opts)
                 .map_err(|e| BridgeRpcError {
                     code: "InventoryError".into(),

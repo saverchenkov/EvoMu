@@ -1002,6 +1002,7 @@ fn handle_item_consume(
                 item_id as i64,
                 quantity as i32,
                 eve_db::ConsumeExactOptions {
+                    reject_blueprint_copy: true,
                     active_ship_id: current_ship,
                     ..eve_db::ConsumeExactOptions::for_owner_exact(
                         Some(cid as i64),

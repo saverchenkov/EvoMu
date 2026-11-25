@@ -1339,10 +1339,25 @@ pub fn activate_ship_emblem_license(
     let current_dock = session.station_id.or(session.structure_id);
     let current_ship = session.ship_id;
     ctx.db.try_with_mut_snapshot(|snap| {
+        let lic_opts = eve_db::ConsumeExactOptions {
+            reject_blueprint_copy: true,
+            active_ship_id: current_ship,
+            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                char_id,
+                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+            )
+        };
         let item_id = snap
             .items
             .values()
-            .find(|i| i.type_id == license_type_id && i.quantity >= 1 && snap.is_item_consumable_by(i, char_id, current_dock, current_ship))
+            .filter(|i| {
+                i.type_id == license_type_id
+                    && i.quantity >= 1
+                    && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                    && snap.validate_item_for_consumption(i, &lic_opts).is_ok()
+            })
+            .min_by_key(|i| i.item_id)
             .map(|i| i.item_id)
             .ok_or_else(|| {
                 mk_err(
@@ -1350,18 +1365,7 @@ pub fn activate_ship_emblem_license(
                     format!("Character {char_id} does not own emblem license item (typeID {license_type_id}) at current station/structure or active ship"),
                 )
             })?;
-        snap.consume_exact_item_quantity(
-            item_id,
-            1,
-            eve_db::ConsumeExactOptions {
-                active_ship_id: current_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(
-                    Some(char_id),
-                    char_id,
-                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
-                )
-            },
-        )
+        snap.consume_exact_item_quantity(item_id, 1, lic_opts)
         .map_err(|e| mk_err("ItemLocked", e.to_string()))?;
         Ok(())
     })?;
