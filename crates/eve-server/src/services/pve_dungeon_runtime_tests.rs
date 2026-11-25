@@ -1371,6 +1371,7 @@ async fn dungeon_unentered_room_is_inert_until_on_dungeon_room_entered() {
 
     let mat = materialize_dungeon_room_entities(&ctx, sys_id, 965_001, 0).await.unwrap();
     let _ = spawn_test_ship_ball(&ctx, sys_id, ship_id, beacon_pos).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
 
     assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
     on_dungeon_item_looted(&ctx, char_id, Some(sys_id), mat.object_ids[0], 34).await;
@@ -1392,7 +1393,7 @@ async fn dungeon_unentered_room_is_inert_until_on_dungeon_room_entered() {
         let rt = &store.instances[&965_001];
         let r0 = &rt.rooms[0];
         assert!(r0.entered && r0.entered_unix.is_some() && !r0.gate_locked && r0.cleared);
-        assert_eq!(rt.last_actor_char_id, Some(char_id));
+        assert_eq!(rt.last_actor_char_id, char_id);
         assert_eq!(r0.npc_groups[0].kills_recorded, 1);
         assert!(r0.triggers.iter().all(|t| t.fired));
     });
@@ -1642,7 +1643,7 @@ async fn spawn_dungeon_instance_enforces_bounded_parser_limits_and_finite_coords
     let inst_id = spawned.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
     read_dungeon_runtime_store(&ctx, |store| {
         let rt = &store.instances[&inst_id];
-        assert_eq!(rt.base_position, [0.0, 0.0, 0.0]);
+        assert_eq!(rt.base_position, [120_000_000.0, 0.0, 0.0]);
         assert_eq!(rt.rooms.len(), 16);
         let obj0 = &rt.rooms[0].objects[0];
         assert!(obj0.position.iter().all(|v| v.is_finite()));

@@ -1527,6 +1527,7 @@ pub async fn on_dungeon_item_looted(
             } else if inst.completed
                 && !inst.despawned
                 && !inst.failed
+                && inst.loot_grace_until_unix.is_some()
                 && inst.rooms.iter().any(|r| {
                     r.objects
                         .iter()
