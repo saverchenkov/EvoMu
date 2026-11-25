@@ -806,7 +806,7 @@ impl EsiRouter {
                         return (c_corp, true);
                     }
                     let allowed_mask = required_role_mask | eve_db::corp_roles::ROLE_DIRECTOR;
-                    let eff = effective_esi_corp_role_breakdown(
+                    let eff = eve_db::corp_role_breakdown(
                         snap,
                         path_corp_id,
                         claims.character_id,
@@ -1166,8 +1166,6 @@ fn hex_val(b: u8) -> Option<u8> {
         _ => None,
     }
 }
-
-pub(crate) use crate::domain::corp_governance::effective_corp_role_breakdown as effective_esi_corp_role_breakdown;
 
 fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
     use eve_db::corp_roles::*;

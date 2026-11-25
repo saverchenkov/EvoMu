@@ -481,6 +481,101 @@ async fn enrich_session_change_scoped_roles_handles_non_ceo_zero_val_and_malform
     enrich_session_change_scoped_roles(&ctx, &old_session, &session, &mut other_payload);
 }
 
+#[test]
+fn enrich_session_change_scoped_roles_honors_scoped_pending_grant_maturity() {
+    use eve_db::{corp_roles, CorpMemberRoleAssignment, VirtualServerClock};
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use std::collections::HashSet;
+
+    let now = 1_700_000_000_u64;
+    let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+    let char_id = 91_100_011_i64;
+    let ceo_id = 91_100_012_i64;
+    let corp_id = 98_100_011_i64;
+    let matured_at = now + 60;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "ScopedSess", "SCSS", ceo_id);
+        corp.members = HashSet::from([char_id, ceo_id]);
+        snap.corporations.insert(corp_id, corp);
+        snap.corp_role_assignments.insert(
+            (corp_id, char_id),
+            CorpMemberRoleAssignment {
+                character_id: char_id,
+                roles_at_hq: corp_roles::ROLE_HANGAR_CAN_TAKE[0],
+                ..Default::default()
+            },
+        );
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_scoped_role_grants
+            .insert(
+                char_id,
+                (
+                    corp_roles::ROLE_HANGAR_CAN_TAKE[0] | corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+                    corp_roles::ROLE_HANGAR_CAN_TAKE[2],
+                    corp_roles::ROLE_HANGAR_CAN_TAKE[3],
+                    matured_at,
+                ),
+            );
+    });
+
+    let old_session = SessionState::new(71_011);
+    let mut session = SessionState::new(71_012);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(corp_id);
+
+    let make_payload = || {
+        PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::Dict(vec![(
+                    PyRep::ascii_bytes("corpid"),
+                    PyRep::Tuple(vec![PyRep::Integer(1_000_009), PyRep::Integer(corp_id)]),
+                )]),
+            ]),
+        ])
+    };
+    let get_entry = |payload: &PyRep, key: &str| -> Option<i64> {
+        let PyRep::Tuple(outer) = payload else { return None };
+        let PyRep::Tuple(inner) = outer.get(1)? else { return None };
+        let PyRep::Dict(entries) = inner.get(1)? else { return None };
+        entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .and_then(|(_, v)| match v {
+                PyRep::Tuple(pair) => pair.get(1).and_then(PyRep::as_i64),
+                _ => None,
+            })
+    };
+
+    let mut pre_payload = make_payload();
+    enrich_session_change_scoped_roles(&ctx, &old_session, &session, &mut pre_payload);
+    assert_eq!(get_entry(&pre_payload, "rolesAtHQ"), None);
+    assert_eq!(get_entry(&pre_payload, "rolesAtBase"), None);
+    assert_eq!(get_entry(&pre_payload, "rolesAtOther"), None);
+
+    ctx.clock().advance_secs(60);
+    let mut post_payload = make_payload();
+    enrich_session_change_scoped_roles(&ctx, &old_session, &session, &mut post_payload);
+    assert_eq!(
+        get_entry(&post_payload, "rolesAtHQ"),
+        Some((corp_roles::ROLE_HANGAR_CAN_TAKE[0] | corp_roles::ROLE_HANGAR_CAN_TAKE[1]) as i64)
+    );
+    assert_eq!(
+        get_entry(&post_payload, "rolesAtBase"),
+        Some(corp_roles::ROLE_HANGAR_CAN_TAKE[2] as i64)
+    );
+    assert_eq!(
+        get_entry(&post_payload, "rolesAtOther"),
+        Some(corp_roles::ROLE_HANGAR_CAN_TAKE[3] as i64)
+    );
+}
+
 #[tokio::test]
 async fn post_auth_resolve_req_malformed_call_error_response_and_space_disconnect() {
     use eve_machonet::{

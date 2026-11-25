@@ -211,7 +211,7 @@ async fn parity_mail_cspa_and_corp_mail_role_enforcement() {
             .or_default()
             .restrict_corp_mails = true;
         // Grant officer Communication Officer via title only (not raw corp.member_roles), verifying both
-        // MachoNet `SendMail` and ESI `POST /mail` honor unified `effective_corp_role_breakdown`.
+        // MachoNet `SendMail` and ESI `POST /mail` honor unified `corp_role_breakdown`.
         let gov = snap.corp_governance.get_mut(&corp_id).unwrap();
         gov.titles
             .insert(1, ("Comms".into(), corp_roles::ROLE_CHAT_MANAGER));
@@ -530,12 +530,12 @@ async fn parity_career_goal_idempotency_and_corp_governance() {
     });
 
     ctx.db.with_snapshot(|snap| {
-        let (_, before_roles) =
-            corp_governance::effective_corp_member_roles(snap, corp_id, 90_000_002, 0, now);
-        assert_eq!(before_roles & corp_roles::ROLE_DIRECTOR, 0);
-        assert_ne!(before_roles & corp_roles::ROLE_ACCOUNTANT, 0);
+        let before_eff =
+            corp_governance::corp_role_breakdown(snap, corp_id, 90_000_002, now);
+        assert_eq!(before_eff.roles & corp_roles::ROLE_DIRECTOR, 0);
+        assert_ne!(before_eff.roles & corp_roles::ROLE_ACCOUNTANT, 0);
 
-        let after_eff = corp_governance::effective_corp_role_breakdown(
+        let after_eff = corp_governance::corp_role_breakdown(
             snap,
             corp_id,
             90_000_002,
@@ -914,22 +914,22 @@ fn domain_corp_governance_career_goals_mail_cspa_and_fleets_branches() {
     // 1. corp_governance: missing corp, pending title maturity, any_active_roles, can_send_corp_mail, member limits
     ctx.db.with_mut_snapshot(|snap| {
         assert_eq!(
-            corp_governance::effective_corp_role_breakdown(snap, missing_corp, member_id, 1_000),
-            corp_governance::EffectiveCorpRoles::default()
+            corp_governance::corp_role_breakdown(snap, missing_corp, member_id, 1_000),
+            corp_governance::CorpRoleBreakdown::default()
         );
         assert_eq!(
-            corp_governance::effective_corp_member_roles(snap, missing_corp, member_id, 0xAB, 1_000),
-            (false, 0xAB)
+            snap.effective_corp_roles_at_db(missing_corp, member_id, None, 1_000),
+            (false, 0)
         );
         let unmatured =
-            corp_governance::effective_corp_role_breakdown(snap, corp_id, member_id, 1_500);
+            corp_governance::corp_role_breakdown(snap, corp_id, member_id, 1_500);
         assert_eq!(unmatured.roles & corp_roles::ROLE_DIRECTOR, 0);
         assert_ne!(unmatured.unmatured_mask & corp_roles::ROLE_DIRECTOR, 0);
         assert_ne!(unmatured.any_active_roles() & corp_roles::ROLE_DIPLOMAT, 0);
         assert_ne!(unmatured.any_grantable_roles() & corp_roles::ROLE_ACCOUNTANT, 0);
 
         let matured =
-            corp_governance::effective_corp_role_breakdown(snap, corp_id, member_id, 2_000);
+            corp_governance::corp_role_breakdown(snap, corp_id, member_id, 2_000);
         assert_ne!(matured.roles & corp_roles::ROLE_DIRECTOR, 0);
         assert_eq!(matured.unmatured_mask, 0);
 
@@ -1552,8 +1552,8 @@ fn fleet_corp_governance_and_mail_cspa_helper_boundaries_kill_mutants() {
     let member_id = 90_000_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
         assert_eq!(
-            corp_governance::effective_corp_member_roles(snap, 999_999_999, member_id, 42, 1_000),
-            (false, 42)
+            snap.effective_corp_roles_at_db(999_999_999, member_id, None, 1_000),
+            (false, 0)
         );
         assert_eq!(corp_governance::resolve_corp_member_limit(Some(&ctx.sde), snap, 999_999_999), None);
 
@@ -1570,12 +1570,13 @@ fn fleet_corp_governance_and_mail_cspa_helper_boundaries_kill_mutants() {
         gov.restrict_corp_mails = true;
         snap.corp_governance.insert(corp_id, gov);
 
-        // Before maturity (t=1000): breakdown masks all pending roles; effective_corp_member_roles only masks delayed stasis roles (Director), keeping Accountant!
-        let bd_before = corp_governance::effective_corp_role_breakdown(snap, corp_id, member_id, 1_000);
-        assert_eq!(bd_before.roles, 0);
-        let (_, mem_roles_before) =
-            corp_governance::effective_corp_member_roles(snap, corp_id, member_id, 0, 1_000);
-        assert_eq!(mem_roles_before, corp_roles::ROLE_ACCOUNTANT);
+        // Before maturity (t=1000): unified breakdown & evaluator mask delayed stasis roles (Director), keeping immediate Accountant.
+        let bd_before = corp_governance::corp_role_breakdown(snap, corp_id, member_id, 1_000);
+        assert_eq!(bd_before.roles, corp_roles::ROLE_ACCOUNTANT);
+        assert_eq!(
+            snap.effective_corp_roles_at_db(corp_id, member_id, None, 1_000),
+            (false, corp_roles::ROLE_ACCOUNTANT)
+        );
         assert!(!corp_governance::can_send_corp_mail(snap, corp_id, member_id, 1_000));
         assert!(corp_governance::can_send_corp_mail(snap, corp_id, ceo_id, 1_000));
 

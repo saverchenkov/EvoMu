@@ -87,8 +87,8 @@ pub use sqlite_store::{
     with_quarantine_unreadable_for_test, QuarantinedRow,
 };
 pub use corp_actor::{
-    effective_corp_roles_at_db, is_excluded_corp_member, is_npc_corporation, CorpActor,
-    CorpActorDenied,
+    corp_role_breakdown, corp_role_breakdown_at, effective_corp_roles_at_db,
+    is_excluded_corp_member, is_npc_corporation, CorpActor, CorpActorDenied, CorpRoleBreakdown,
 };
 pub use snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, CorpVoteBallotRecord, CorpVoteCaseRecord,

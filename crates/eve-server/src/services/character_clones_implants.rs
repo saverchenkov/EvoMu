@@ -1658,79 +1658,6 @@ fn corp_item_visible_to_role(
     eve_db::corp_roles::has_role(loc_role, div_role)
 }
 
-fn has_scoped_corp_query_role(
-    snap: &eve_db::WorldStateSnapshot,
-    corp_id: i64,
-    char_id: i64,
-    any_asset_query_roles: u64,
-    now_unix: u64,
-) -> bool {
-    let mut hq_roles = 0u64;
-    let mut base_roles = 0u64;
-    let mut other_roles = 0u64;
-
-    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        hq_roles |= ra.roles_at_hq;
-        base_roles |= ra.roles_at_base;
-        other_roles |= ra.roles_at_other;
-    }
-
-    let gov_opt = snap.corp_governance.get(&corp_id);
-    let mut unmatured_role_bits = 0u64;
-    let mut unmatured_title_bits = 0u64;
-    if let Some(gov) = gov_opt {
-        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
-            if now_unix < matured_at {
-                const DELAYED_STASIS_MASK: u64 =
-                    eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
-                        | eve_db::corp_roles::ROLE_DIRECTOR
-                        | (0x7Fu64 << 42);
-                unmatured_role_bits |= p_mask & DELAYED_STASIS_MASK;
-            }
-        }
-        if let Some(&(hq_p, base_p, other_p, matured_at)) =
-            gov.pending_scoped_role_grants.get(&char_id)
-        {
-            if now_unix >= matured_at {
-                hq_roles |= hq_p;
-                base_roles |= base_p;
-                other_roles |= other_p;
-            } else {
-                hq_roles &= !hq_p;
-                base_roles &= !base_p;
-                other_roles &= !other_p;
-            }
-        }
-        if let Some(&(t_mask, matured_at)) = gov.pending_title_role_grants.get(&char_id) {
-            if now_unix < matured_at {
-                unmatured_title_bits |= t_mask;
-            }
-        }
-    }
-
-    let member_tmask = gov_opt
-        .and_then(|g| g.member_titles.get(&char_id).copied())
-        .unwrap_or(0);
-    let tids_opt = snap.corp_member_titles.get(&(corp_id, char_id));
-    if let Some(titles) = snap.corp_titles.get(&corp_id) {
-        for t in titles.iter().filter(|t| {
-            tids_opt.is_some_and(|tids| tids.contains(&t.title_id))
-                || (member_tmask & eve_db::snapshot_ext::title_id_to_bit(t.title_id)) != 0
-        }) {
-            hq_roles |= eve_db::corp_roles::encode_corp_role_names(&t.roles_at_hq)
-                & !unmatured_title_bits;
-            base_roles |= eve_db::corp_roles::encode_corp_role_names(&t.roles_at_base)
-                & !unmatured_title_bits;
-            other_roles |= eve_db::corp_roles::encode_corp_role_names(&t.roles_at_other)
-                & !unmatured_title_bits;
-        }
-    }
-
-    let scoped_roles =
-        (hq_roles | base_roles | other_roles) & !(unmatured_role_bits | unmatured_title_bits);
-    (scoped_roles & any_asset_query_roles) != 0
-}
-
 #[derive(Clone, Copy)]
 enum ListStationsErrorCode {
     CorporationNotFound,
@@ -1813,27 +1740,14 @@ pub(crate) fn handle_list_stations(
                     format!("Corporation {owner_id} not found"),
                 ));
             }
-            // Pass `None` so strictly global evaluation never inherits docked station-scoped roles.
-            let (is_ceo, global_role) =
-                snap.effective_corp_roles_at_db(owner_id, char_id, None, now_unix);
-            let has_scoped_query_role = has_scoped_corp_query_role(
-                snap,
-                owner_id,
-                char_id,
-                any_asset_query_roles,
-                now_unix,
-            );
-            if !is_ceo
-                && global_role != u64::MAX
-                && (global_role & any_asset_query_roles) == 0
-                && !has_scoped_query_role
-            {
+            let bd = eve_db::corp_role_breakdown(snap, owner_id, char_id, now_unix);
+            if !bd.is_ceo && (bd.any_active_roles() & any_asset_query_roles) == 0 {
                 return Err(list_stations_rpc_error(
                     ListStationsErrorCode::CorpRoleDenied,
                     "Viewing corporation asset stations requires Director, Accountant, Trader, Station Manager, or Hangar Query role",
                 ));
             }
-            is_ceo || global_role == u64::MAX || (global_role & full_corp_roles) != 0
+            bd.is_ceo || (bd.roles & full_corp_roles) != 0
         } else {
             false
         };

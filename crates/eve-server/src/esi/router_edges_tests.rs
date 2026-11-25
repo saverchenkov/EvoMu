@@ -369,14 +369,14 @@ fn handle_request_covers_auth_scopes_roles_alliance_cdn_portrait_lang_and_204() 
 }
 
 #[test]
-fn effective_esi_corp_role_breakdown_covers_governance_titles_and_assignments() {
+fn corp_role_breakdown_covers_governance_titles_and_assignments() {
     let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
     let now = 1_700_000_000_u64;
     let c_test = 90_000_050_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         // Unknown corp returns default
-        let empty = effective_esi_corp_role_breakdown(snap, 99_999_999, char_id, now);
+        let empty = eve_db::corp_role_breakdown(snap, 99_999_999, char_id, now);
         assert!(!empty.is_ceo);
         assert_eq!(empty.any_active_roles(), 0);
         assert_eq!(empty.any_grantable_roles(), 0);
@@ -420,7 +420,7 @@ fn effective_esi_corp_role_breakdown_covers_governance_titles_and_assignments() 
         );
         snap.corp_member_titles.insert((corp_id, c_test), vec![2]);
 
-        let eff = effective_esi_corp_role_breakdown(snap, corp_id, c_test, now);
+        let eff = eve_db::corp_role_breakdown(snap, corp_id, c_test, now);
         assert!(!eff.is_ceo);
         assert_ne!(eff.roles & ROLE_ACCOUNTANT, 0);
         assert_ne!(eff.roles & ROLE_JUNIOR_ACCOUNTANT, 0);
@@ -430,4 +430,75 @@ fn effective_esi_corp_role_breakdown_covers_governance_titles_and_assignments() 
         assert_ne!(eff.unmatured_mask & ROLE_TRADER, 0);
         assert_ne!(eff.any_grantable_roles(), 0);
     });
+}
+
+#[test]
+fn esi_corp_roles_route_honors_scoped_pending_grant_maturity() {
+    use eve_db::VirtualServerClock;
+
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let now = 1_700_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+    let c4 = 90_000_060_i64;
+    let matured_at = now + 60;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch4 = snap.characters[&char_id].clone();
+        ch4.character_id = c4;
+        ch4.corporation_id = corp_id;
+        snap.characters.insert(c4, ch4);
+        snap.corporations.get_mut(&corp_id).unwrap().members.insert(c4);
+        snap.corp_role_assignments.insert(
+            (corp_id, c4),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: c4,
+                roles_at_hq: ROLE_PERSONNEL_MANAGER,
+                ..Default::default()
+            },
+        );
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_scoped_role_grants
+            .insert(
+                c4,
+                (
+                    ROLE_PERSONNEL_MANAGER | ROLE_STATION_MANAGER,
+                    0,
+                    0,
+                    matured_at,
+                ),
+            );
+    });
+
+    let tok_c4 = issue_char_token(
+        &ctx,
+        c4,
+        &["esi-corporations.read_corporation_membership.v1"],
+        now,
+    );
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let route_path = format!("/corporations/{corp_id}/roles");
+
+    // Unmatured scoped pending grant removes ROLE_PERSONNEL_MANAGER at HQ -> 403.
+    let pre = router.handle_request(
+        &EsiHttpRequest::new("GET", &route_path).with_bearer_token(&tok_c4),
+    );
+    assert_eq!(pre.status_code, 403);
+
+    // Advance virtual clock to maturity without mutating DB -> 200 and matured HQ roles appear.
+    ctx.clock().advance_secs(60);
+    let post = router.handle_request(
+        &EsiHttpRequest::new("GET", &route_path).with_bearer_token(&tok_c4),
+    );
+    assert_eq!(post.status_code, 200);
+    let body_json = post.json().unwrap();
+    let entries = body_json.as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["character_id"].as_i64() == Some(c4))
+        .expect("character entry in /corporations/{corp_id}/roles");
+    let hq = entry["roles_at_hq"].as_array().unwrap();
+    assert!(hq.iter().any(|v| v == "Personnel_Manager"));
+    assert!(hq.iter().any(|v| v == "Station_Manager"));
 }

@@ -65,6 +65,14 @@ pub(crate) fn count_effective_corp_member_roles_call_sites(text: &str) -> usize 
     count_word_lparen(text, "effective_corp_member_roles")
 }
 
+pub(crate) fn count_corp_role_table_reads(text: &str) -> usize {
+    count_dot_field_access(text, "corp_role_assignments")
+        + count_dot_field_access(text, "pending_role_grants")
+        + count_dot_field_access(text, "pending_title_role_grants")
+        + count_dot_field_access(text, "pending_scoped_role_grants")
+        + count_dot_field_access(text, "member_titles")
+}
+
 pub(crate) fn count_request_corp_role_mask_reads(text: &str) -> usize {
     count_whole_word(text, "corp_role_mask") + count_dot_field_access(text, "bitmask")
 }
@@ -264,9 +272,9 @@ mod tests {
 
         let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
         let rule = &ratchet.patterns["effective_corp_member_roles_call_sites"];
-        assert!(!rule.zero_required);
+        assert!(rule.zero_required);
         assert_eq!(rule.owning_issue, Some(1194));
-        assert_eq!(rule.files.get("domain/corp_governance.rs"), Some(&1));
+        assert!(rule.files.is_empty());
 
         let report = scan_arch_debt_in_dir(&src).expect("scan effective_corp_member_roles");
         let entry = &report.patterns["effective_corp_member_roles_call_sites"];
@@ -353,6 +361,69 @@ mod tests {
             .verify_dir(&clean_src)
             .expect("clean source without request role mask reads must pass");
         assert_eq!(clean_report.patterns["request_corp_role_mask_reads"].occurrences, 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1194_corp_role_table_reads() {
+        let tmp = make_temp_dir("1194_t3b3_role_table_reads");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("domain")).expect("create domain dir");
+        std::fs::write(
+            src.join("domain/corp_governance.rs"),
+            r#"
+// snap.corp_role_assignments.get(&k); gov.member_titles.get(&k);
+const LIT: &str = "gov.pending_role_grants gov.pending_title_role_grants gov.pending_scoped_role_grants";
+pub fn f(snap: &S, gov: &G, k: i64) -> bool {
+    let member_titles = snap.corp_member_titles.get(&k);
+    let _ = member_titles;
+    snap.corp_role_assignments.contains_key(&k)
+        && gov.pending_role_grants.contains_key(&k)
+        && gov.pending_title_role_grants.contains_key(&k)
+        && gov.pending_scoped_role_grants.contains_key(&k)
+        && gov . member_titles.contains_key(&k)
+}
+#[cfg(test)]
+mod tests {
+    fn t(snap: &S, k: i64) { let _ = snap.corp_role_assignments.contains_key(&k); }
+}
+"#,
+        )
+        .expect("write domain/corp_governance.rs");
+
+        let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
+        let rule = &ratchet.patterns["corp_role_table_reads"];
+        assert!(!rule.zero_required);
+        assert_eq!(rule.owning_issue, Some(1194));
+        assert!(!rule.files.contains_key("domain/corp_governance.rs"));
+        assert!(!rule.files.contains_key("services/character_clones_implants.rs"));
+        assert!(!rule.files.contains_key("macho_listener.rs"));
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan corp_role_table_reads");
+        let entry = &report.patterns["corp_role_table_reads"];
+        assert_eq!(entry.occurrences, 5);
+        assert_eq!(entry.per_file.get("domain/corp_governance.rs"), Some(&5));
+
+        let err = ratchet
+            .assert_ratchet(&report)
+            .expect_err("ratchet must reject un-baselined corp role table reads");
+        assert!(
+            err.contains("corp_role_table_reads"),
+            "unexpected error message: {err}"
+        );
+
+        let clean_src = tmp.join("clean_src");
+        std::fs::create_dir_all(clean_src.join("domain")).expect("create clean domain dir");
+        std::fs::write(
+            clean_src.join("domain/corp_governance.rs"),
+            "pub fn check(snap: &S, cid: i64, char_id: i64, now: u64) -> CorpRoleBreakdown {\n    eve_db::corp_role_breakdown(snap, cid, char_id, now)\n}\n",
+        )
+        .expect("write clean corp_governance.rs");
+        let clean_report = ratchet
+            .verify_dir(&clean_src)
+            .expect("clean source delegating to corp_role_breakdown must pass");
+        assert_eq!(clean_report.patterns["corp_role_table_reads"].occurrences, 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -38,7 +38,7 @@ fn setup_projects_ctx() -> (ServerContext, SessionState, i64, i64) {
 }
 
 #[test]
-fn uuid_edge_cases_and_effective_corp_member_roles_maturation() {
+fn uuid_edge_cases_and_corp_role_breakdown_maturation() {
     // 1. Short/zero/negative UUIDs and freelance collision with CORP_GOAL_UUID_PREFIX
     assert_eq!(goal_uuid_to_project_id(&[0u8; 8]), None);
     assert_eq!(freelance_uuid_to_project_id(&[0u8; 8]), None);
@@ -51,7 +51,7 @@ fn uuid_edge_cases_and_effective_corp_member_roles_maturation() {
     assert_eq!(freelance_uuid_to_project_id(&fl_colliding), Some(777));
     assert_eq!(goal_uuid_to_project_id(&fl_colliding), None);
 
-    // 2. effective_corp_member_roles: missing corp, role_assignments, pending_role_grants, and pending_title_role_grants
+    // 2. corp_role_breakdown: missing corp, role_assignments, pending_role_grants, and pending_title_role_grants
     let (ctx, _, ceo_id, corp_id) = setup_projects_ctx();
     let member_id = 90_888_001i64;
     let div_take_bit = 1u64 << 13; // inside HANGAR_DIV_MASK
@@ -59,10 +59,11 @@ fn uuid_edge_cases_and_effective_corp_member_roles_maturation() {
 
     ctx.db.with_mut_snapshot(|snap| {
         assert_eq!(
-            effective_corp_member_roles(snap, 999_999_999, member_id, 42, 1_000),
-            (false, 42)
+            eve_db::corp_role_breakdown(snap, 999_999_999, member_id, 1_000),
+            eve_db::CorpRoleBreakdown::default()
         );
-        assert!(effective_corp_member_roles(snap, corp_id, ceo_id, 0, 1_000).0);
+        assert_eq!(snap.effective_corp_roles_at_db(999_999_999, member_id, None, 1_000), (false, 0));
+        assert!(eve_db::corp_role_breakdown(snap, corp_id, ceo_id, 1_000).is_ceo);
 
         let ra = snap
             .corp_role_assignments
@@ -81,16 +82,15 @@ fn uuid_edge_cases_and_effective_corp_member_roles_maturation() {
             .insert(1, ("Quartermaster".into(), div_take_bit | (1u64 << 6)));
 
         // Before maturation (t = 1_500): pending_role_grants not applied, unmatured title bit masked out
-        let (is_ceo_before, roles_before) =
-            effective_corp_member_roles(snap, corp_id, member_id, 0, 1_500);
-        assert!(!is_ceo_before);
-        assert_ne!(roles_before & (1u64 << 5), 0);
-        assert_ne!(roles_before & (1u64 << 6), 0);
-        assert_eq!(roles_before & director_bit, 0);
-        assert_eq!(roles_before & div_take_bit, 0);
+        let bd_before = eve_db::corp_role_breakdown(snap, corp_id, member_id, 1_500);
+        assert!(!bd_before.is_ceo);
+        assert_ne!(bd_before.roles & (1u64 << 5), 0);
+        assert_ne!(bd_before.roles & (1u64 << 6), 0);
+        assert_eq!(bd_before.roles & director_bit, 0);
+        assert_eq!(bd_before.roles & div_take_bit, 0);
 
         // At/after maturation (t = 2_000): both pending grants and title bits are active
-        let (_, roles_after) = effective_corp_member_roles(snap, corp_id, member_id, 0, 2_000);
+        let roles_after = eve_db::corp_role_breakdown(snap, corp_id, member_id, 2_000).roles;
         assert_ne!(roles_after & director_bit, 0);
         assert_ne!(roles_after & div_take_bit, 0);
     });

@@ -142,9 +142,6 @@ fn append_corp_journal(
         });
 }
 
-#[cfg(test)]
-pub(crate) use crate::domain::corp_governance::effective_corp_member_roles;
-
 fn extract_first_positive_id_in_msg(msg: &DynamicQuasarMessage) -> Option<i64> {
     let mut keys: Vec<u32> = msg.fields.keys().copied().collect();
     keys.sort_unstable();

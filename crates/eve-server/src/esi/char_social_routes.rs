@@ -575,7 +575,7 @@ pub fn dispatch_char_social_route_with_claims(
                         3600,
                     );
                 }
-                let eff = super::router::effective_esi_corp_role_breakdown(
+                let eff = eve_db::corp_role_breakdown(
                     snap,
                     ch.corporation_id,
                     char_id,

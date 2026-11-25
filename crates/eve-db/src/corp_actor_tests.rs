@@ -98,4 +98,32 @@ fn resolve_enforces_npc_exclusion_ceo_pending_stasis_and_location_scoping() {
     assert_eq!(resolve_corp_alliance_id(&snap, &sde, dissolved_corp, snap.characters.get(&91_505)), None);
     let dissolved = CorpActor::resolve(&snap, &sde, 91_505, now);
     assert!(!dissolved.corp_exists && !dissolved.is_member && dissolved.alliance_id.is_none() && dissolved.require_member() == Err(CorpActorDenied::CorporationNotFound));
+
+    // 7. CorpRoleBreakdown + promoted-only (`now_unix = None`) + effective_scoped_corp_roles_db parity
+    let bd_pre = corp_role_breakdown(&snap, corp_id, member_id, now + 100);
+    assert!(!bd_pre.is_ceo);
+    assert_eq!(bd_pre.roles, ROLE_TRADER | ROLE_ACCOUNTANT);
+    assert_eq!(bd_pre.roles_at_hq, 0);
+    assert_eq!(bd_pre.roles_at_base, ROLE_HANGAR_CAN_TAKE[1]);
+    assert_eq!(bd_pre.roles_at_other, ROLE_HANGAR_CAN_TAKE[2]);
+    assert_eq!(
+        effective_scoped_corp_roles_db(&snap, corp_id, member_id, now + 100),
+        (bd_pre.roles_at_hq, bd_pre.roles_at_base, bd_pre.roles_at_other)
+    );
+    let bd_promoted_only = corp_role_breakdown_at(&snap, corp_id, member_id, None);
+    assert_eq!(bd_promoted_only, bd_pre);
+    assert_eq!(
+        effective_corp_roles_promoted_only(&snap, corp_id, member_id, Some(base_id)),
+        (false, ROLE_TRADER | ROLE_ACCOUNTANT | ROLE_HANGAR_CAN_TAKE[1])
+    );
+    let bd_matured_promoted_only = {
+        snap.corp_governance
+            .get_mut(&corp_id)
+            .unwrap()
+            .pending_role_grants
+            .insert(member_id, (ROLE_DIRECTOR | ROLE_HANGAR_CAN_TAKE[0], 0));
+        corp_role_breakdown_at(&snap, corp_id, member_id, None)
+    };
+    assert_eq!(bd_matured_promoted_only.roles & ROLE_DIRECTOR, 0);
+    assert_eq!(corp_role_breakdown(&snap, 98_999_999, member_id, now), CorpRoleBreakdown::default());
 }

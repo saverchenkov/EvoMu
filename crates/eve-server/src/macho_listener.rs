@@ -4397,34 +4397,20 @@ pub(crate) fn enrich_session_change_scoped_roles(
         return;
     };
     let now_unix = ctx.now_unix();
-    let (is_ceo, roles_all, roles_hq, roles_base, roles_other) = ctx.db.with_snapshot(|snap| {
-        if !snap.corporations.contains_key(&corp_id) {
-            return (false, 0u64, 0u64, 0u64, 0u64);
-        }
-        let (is_ceo, eff_roles) =
-            snap.effective_corp_roles_at_db(corp_id, char_id, None, now_unix);
-        if is_ceo {
-            return (true, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
-        }
-        let ra = snap
-            .corp_role_assignments
-            .get(&(corp_id, char_id))
-            .cloned()
-            .unwrap_or_default();
-        let (pend_hq, pend_base, pend_other) = snap
-            .corp_governance
-            .get(&corp_id)
-            .and_then(|g| g.pending_scoped_role_grants.get(&char_id))
-            .filter(|&&(_, _, _, eff)| now_unix >= eff)
-            .map_or((0, 0, 0), |&(hq, base, other, _)| (hq, base, other));
+    let bd = ctx
+        .db
+        .with_snapshot(|snap| eve_db::corp_role_breakdown(snap, corp_id, char_id, now_unix));
+    let (is_ceo, roles_all, roles_hq, roles_base, roles_other) = if bd.is_ceo {
+        (true, u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+    } else {
         (
             false,
-            eff_roles,
-            ra.roles_at_hq | pend_hq,
-            ra.roles_at_base | pend_base,
-            ra.roles_at_other | pend_other,
+            bd.roles,
+            bd.roles_at_hq,
+            bd.roles_at_base,
+            bd.roles_at_other,
         )
-    });
+    };
     if !is_ceo && roles_all == 0 && roles_hq == 0 && roles_base == 0 && roles_other == 0 {
         return;
     }

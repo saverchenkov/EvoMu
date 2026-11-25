@@ -22,7 +22,6 @@
       "regex": "\\.\\s*member_base_roles(?:_opt)?\\s*\\(",
       "description": "Direct .member_base_roles(...) / .member_base_roles_opt(...) wrapper calls outside effective_corp_role_breakdown (#1197).",
       "files": {
-        "domain/corp_governance.rs": 1,
         "services/corp_registry_ops.rs": 1,
         "services/fleet_social_corp_gov.rs": 1,
         "services/fleet_social_corp_tail.rs": 4,
@@ -1272,12 +1271,25 @@
       }
     },
     "effective_corp_member_roles_call_sites": {
-      "zero_required": false,
+      "zero_required": true,
       "owning_issue": 1194,
       "regex": "\\beffective_corp_member_roles\\s*\\(",
-      "description": "Shrink-only ratchet on remaining effective_corp_member_roles(...) call sites taking session_roles before #1194 Track 3B-3 deletes the helper.",
+      "description": "Zero-required ratchet blocking effective_corp_member_roles(...) calls after #1194 Track 3B-3 unified role evaluation in eve-db.",
+      "files": {}
+    },
+    "corp_role_table_reads": {
+      "zero_required": false,
+      "owning_issue": 1194,
+      "regex": "\\.\\s*(?:corp_role_assignments|pending_role_grants|pending_title_role_grants|pending_scoped_role_grants|member_titles)\\b",
+      "description": "Shrink-only ratchet on direct accesses to the five corporation role tables outside canonical eve_db::corp_actor::corp_role_breakdown (#1194 Track 3B-3).",
       "files": {
-        "domain/corp_governance.rs": 1
+        "services/character_lifecycle.rs": 1,
+        "services/corp_registry_ops.rs": 27,
+        "services/fitting_dogma_im.rs": 1,
+        "services/fleet_social_corp_gov.rs": 6,
+        "services/fleet_social_corp_tail.rs": 25,
+        "services/fleet_social_corps.rs": 22,
+        "services/quasar_corp_domain.rs": 1
       }
     },
     "request_corp_role_mask_reads": {

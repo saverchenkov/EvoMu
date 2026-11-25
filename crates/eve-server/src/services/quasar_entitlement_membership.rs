@@ -581,7 +581,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 
             let (corp_id, title) = db_corp_mem.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&cid) {
-                    let eff = crate::domain::corp_governance::effective_corp_role_breakdown(
+                    let eff = eve_db::corp_role_breakdown(
                         snap,
                         ch.corporation_id,
                         cid,

@@ -8,7 +8,7 @@ use crate::services::campaigns_and_milestones::{
 };
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 use crate::services::social_corp_fleet::social_corp_projects::{
-    CanonicalProjectSpec, create_canonical_project, effective_corp_member_roles, freelance_uuid,
+    CanonicalProjectSpec, create_canonical_project, freelance_uuid,
 };
 use eve_db::{
     CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, corp_roles,
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 const DAILY_REWARD_COOLDOWN_ERR: &str = "DailyRewardAlreadyClaimedToday";
 
 /// `#464`: Masks all unmatured 24h title role bits (`ROLE_DIRECTOR`, `ROLE_PROJECT_MANAGER`,
-/// `ROLE_ACCOUNT_CAN_TAKE`) in `effective_corp_member_roles` and rejects assembled singleton ships/containers
+/// `ROLE_ACCOUNT_CAN_TAKE`) in `corp_role_breakdown` and rejects assembled singleton ships/containers
 /// or items containing nested child items during project item delivery.
 #[test]
 fn r7_464_title_role_maturation_and_singleton_ship_container_delivery_blocked() {
@@ -62,16 +62,17 @@ fn r7_464_title_role_maturation_and_singleton_ship_container_delivery_blocked() 
     });
 
     // Before 24h maturation completes, none of the unmatured title bits may be active.
-    let (_, pre_mature_roles) =
-        ctx.db.with_snapshot(|s| effective_corp_member_roles(s, corp_id, member_id, 0, now));
+    let pre_mature_roles = ctx
+        .db
+        .with_snapshot(|s| eve_db::corp_role_breakdown(s, corp_id, member_id, now).roles);
     assert_eq!(pre_mature_roles & corp_roles::ROLE_DIRECTOR, 0);
     assert_eq!(pre_mature_roles & corp_roles::ROLE_PROJECT_MANAGER, 0);
     assert_eq!(pre_mature_roles & corp_roles::ROLE_ACCOUNT_CAN_TAKE[0], 0);
 
     // Once 24h maturation elapses, all granted title bits become active.
-    let (_, matured_roles) = ctx
+    let matured_roles = ctx
         .db
-        .with_snapshot(|s| effective_corp_member_roles(s, corp_id, member_id, 0, now + 86_400));
+        .with_snapshot(|s| eve_db::corp_role_breakdown(s, corp_id, member_id, now + 86_400).roles);
     assert_ne!(matured_roles & corp_roles::ROLE_DIRECTOR, 0);
     assert_ne!(matured_roles & corp_roles::ROLE_PROJECT_MANAGER, 0);
     assert_ne!(matured_roles & corp_roles::ROLE_ACCOUNT_CAN_TAKE[0], 0);

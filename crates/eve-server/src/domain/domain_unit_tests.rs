@@ -433,9 +433,9 @@ mod domain_error_and_career_goals_tests {
 mod corp_governance_tests {
     use super::*;
     use crate::domain::corp_governance::{
-        ALLOWED_CORP_MAIL_ROLES, CORP_ROLE_DEFINITIONS, EffectiveCorpRoles, can_send_corp_mail,
-        corp_member_limit_from_skills, decode_corp_roles, effective_corp_member_roles,
-        effective_corp_role_breakdown, encode_esi_corp_roles, resolve_corp_member_limit,
+        ALLOWED_CORP_MAIL_ROLES, CORP_ROLE_DEFINITIONS, CorpRoleBreakdown, can_send_corp_mail,
+        corp_member_limit_from_skills, corp_role_breakdown, decode_corp_roles,
+        encode_esi_corp_roles, resolve_corp_member_limit,
     };
     use eve_db::corp_roles;
     use eve_db::durable_domain_types::CorpGovState;
@@ -485,7 +485,7 @@ mod corp_governance_tests {
     }
 
     #[test]
-    fn effective_corp_role_breakdown_combines_assignments_pending_grants_and_titles_with_stasis() {
+    fn corp_role_breakdown_combines_assignments_pending_grants_and_titles_with_stasis() {
         let now = 1_700_000_500u64;
         let corp_id = 98_100_001i64;
         let ceo_id = 92_000_001i64;
@@ -493,15 +493,9 @@ mod corp_governance_tests {
         let outsider_id = 92_000_999i64;
 
         let mut snap = WorldStateSnapshot::default();
-        // Missing corporation fallback.
-        assert_eq!(
-            effective_corp_member_roles(&snap, corp_id, member_id, 0xABCD, now),
-            (false, 0xABCD)
-        );
-        assert_eq!(
-            effective_corp_role_breakdown(&snap, corp_id, member_id, now),
-            EffectiveCorpRoles::default()
-        );
+        // Missing corporation fails closed.
+        assert_eq!(snap.effective_corp_roles_at_db(corp_id, member_id, None, now), (false, 0));
+        assert_eq!(corp_role_breakdown(&snap, corp_id, member_id, now), CorpRoleBreakdown::default());
 
         let mut corp = make_corp(corp_id, ceo_id, None, &[ceo_id, member_id]);
         // Give CEO no explicit assignment to prove CEO still gets full director/all breakdown.
@@ -509,19 +503,13 @@ mod corp_governance_tests {
         snap.corporations.insert(corp_id, corp);
 
         // CEO flag is populated, while stored roles remain explicit unless assigned.
-        let ceo_breakdown = effective_corp_role_breakdown(&snap, corp_id, ceo_id, now);
+        let ceo_breakdown = corp_role_breakdown(&snap, corp_id, ceo_id, now);
         assert!(ceo_breakdown.is_ceo);
         assert_eq!(ceo_breakdown.roles, 0);
-        let (is_ceo_flag, ceo_session_roles) =
-            effective_corp_member_roles(&snap, corp_id, ceo_id, 0xBEEF, now);
-        assert!(is_ceo_flag);
-        assert_eq!(ceo_session_roles, 0);
+        assert_eq!(snap.effective_corp_roles_at_db(corp_id, ceo_id, None, now), (true, u64::MAX));
 
         // Outsider has no roles.
-        assert_eq!(
-            effective_corp_role_breakdown(&snap, corp_id, outsider_id, now),
-            EffectiveCorpRoles::default()
-        );
+        assert_eq!(corp_role_breakdown(&snap, corp_id, outsider_id, now), CorpRoleBreakdown::default());
 
         // Member role assignments across HQ/Base/Other + grantables.
         snap.corp_role_assignments.insert(
@@ -576,7 +564,7 @@ mod corp_governance_tests {
         gov.titles
             .insert(65, ("Out Of Range 65".to_string(), corp_roles::ROLE_DIRECTOR));
         gov.member_titles
-            .insert(member_id, (1u64 << 1) | (1u64 << 63));
+            .insert(member_id, (1u64 << 1) | eve_db::snapshot_ext::title_id_to_bit(64));
         gov.pending_role_grants
             .insert(member_id, (corp_roles::ROLE_DIRECTOR, now + 100));
         gov.pending_title_role_grants
@@ -586,7 +574,7 @@ mod corp_governance_tests {
         // Before maturity: stasis hides pending role (ROLE_DIRECTOR) and pending title bit (ROLE_BRAND_MANAGER),
         // while existing corp_member_titles + non-pending gov.titles (title 2 Personnel, title 64 Diplomat) apply,
         // and out-of-range gov.titles (0, 65) never leak ROLE_DIRECTOR.
-        let before = effective_corp_role_breakdown(&snap, corp_id, member_id, now);
+        let before = corp_role_breakdown(&snap, corp_id, member_id, now);
         assert!(!before.is_ceo);
         assert_eq!(before.roles & corp_roles::ROLE_DIRECTOR, 0);
         assert_eq!(before.roles & corp_roles::ROLE_BRAND_MANAGER, 0);
@@ -609,9 +597,7 @@ mod corp_governance_tests {
         assert_ne!(any_grant & corp_roles::ROLE_HANGAR_CAN_QUERY[1], 0);
         assert_ne!(any_grant & corp_roles::ROLE_HANGAR_CAN_QUERY[2], 0);
 
-        // Distinguish `effective_corp_member_roles` (only delays DELAYED_STASIS_MASK) vs full breakdown.
-        // Place a non-stasis immediate role (ROLE_ACCOUNTANT) into corp_role_assignments.roles while keeping it
-        // in pending_role_grants: full breakdown hides it before maturity, effective_corp_member_roles preserves it.
+        // Unified breakdown and evaluator delay only DELAYED_STASIS_MASK while preserving immediate ROLE_ACCOUNTANT.
         snap.corp_role_assignments
             .get_mut(&(corp_id, member_id))
             .unwrap()
@@ -624,22 +610,20 @@ mod corp_governance_tests {
                 member_id,
                 (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT, now + 100),
             );
-        let before_with_acct = effective_corp_role_breakdown(&snap, corp_id, member_id, now);
-        assert_eq!(before_with_acct.roles & corp_roles::ROLE_ACCOUNTANT, 0);
+        let before_with_acct = corp_role_breakdown(&snap, corp_id, member_id, now);
+        assert_ne!(before_with_acct.roles & corp_roles::ROLE_ACCOUNTANT, 0);
+        assert_eq!(before_with_acct.roles & corp_roles::ROLE_DIRECTOR, 0);
         let (_, mem_roles_before) =
-            effective_corp_member_roles(&snap, corp_id, member_id, 0, now);
-        assert_ne!(mem_roles_before & corp_roles::ROLE_ACCOUNTANT, 0);
-        assert_eq!(mem_roles_before & corp_roles::ROLE_DIRECTOR, 0);
+            snap.effective_corp_roles_at_db(corp_id, member_id, None, now);
+        assert_eq!(mem_roles_before, before_with_acct.roles);
 
         // After maturity: pending general and title grants all apply.
-        let after = effective_corp_role_breakdown(&snap, corp_id, member_id, now + 100);
+        let after = corp_role_breakdown(&snap, corp_id, member_id, now + 100);
         assert_ne!(after.roles & corp_roles::ROLE_DIRECTOR, 0);
         assert_ne!(after.roles & corp_roles::ROLE_BRAND_MANAGER, 0);
-
         let (m_ceo, m_roles_after) =
-            effective_corp_member_roles(&snap, corp_id, member_id, 0, now + 100);
-        assert!(!m_ceo);
-        assert_ne!(m_roles_after & corp_roles::ROLE_DIRECTOR, 0);
+            snap.effective_corp_roles_at_db(corp_id, member_id, None, now + 100);
+        assert!(!m_ceo && (m_roles_after & corp_roles::ROLE_DIRECTOR) != 0);
     }
 
     #[test]
@@ -832,11 +816,11 @@ mod corp_governance_tests {
             .member_roles
             .insert(member_id, delayed_mask | corp_roles::ROLE_ACCOUNTANT);
 
-        // At matured_at - 1: unmatured_mask suppresses CommunicationsOfficer (roles_at_hq), Trader, Director, etc.
-        let bd_before = effective_corp_role_breakdown(&snap, corp_id, member_id, matured_at - 1);
-        assert_eq!(bd_before.unmatured_mask, pending_roles | pending_title_mask);
+        // At matured_at - 1: unmatured_mask suppresses pending title roles + delayed stasis bits while keeping immediate Accountant.
+        let bd_before = corp_role_breakdown(&snap, corp_id, member_id, matured_at - 1);
+        assert_eq!(bd_before.unmatured_mask, delayed_mask | pending_title_mask);
         assert_eq!(bd_before.roles & corp_roles::ROLE_TRADER, 0);
-        assert_eq!(bd_before.roles & corp_roles::ROLE_ACCOUNTANT, 0);
+        assert_ne!(bd_before.roles & corp_roles::ROLE_ACCOUNTANT, 0);
         assert_eq!(bd_before.roles_at_hq & corp_roles::ROLE_CHAT_MANAGER, 0);
         assert_ne!(bd_before.roles & corp_roles::ROLE_CONTRACT_MANAGER, 0);
         assert_ne!(bd_before.roles_at_base & corp_roles::ROLE_HANGAR_CAN_TAKE[1], 0);
@@ -857,23 +841,19 @@ mod corp_governance_tests {
         // Corp mail denied while ROLE_CHAT_MANAGER (hq) & ROLE_DIRECTOR are masked.
         assert!(!can_send_corp_mail(&snap, corp_id, member_id, matured_at - 1));
 
-        // effective_corp_member_roles at matured_at - 1 hides Director + Hangar/Account/Container stasis bits, keeps Accountant & ContractManager!
+        // DB evaluator at matured_at - 1 matches breakdown global roles (stasis bits hidden, Accountant & ContractManager kept).
         let (_, mem_before) =
-            effective_corp_member_roles(&snap, corp_id, member_id, 0, matured_at - 1);
-        assert_eq!(mem_before & corp_roles::ROLE_DIRECTOR, 0);
-        assert_eq!(mem_before & corp_roles::ROLE_HANGAR_CAN_TAKE[0], 0);
-        assert_eq!(mem_before & corp_roles::ROLE_ACCOUNT_CAN_TAKE[0], 0);
-        assert_eq!(mem_before & corp_roles::ROLE_CONTAINER_CAN_TAKE[6], 0);
-        assert_ne!(mem_before & corp_roles::ROLE_ACCOUNTANT, 0);
-        assert_ne!(mem_before & corp_roles::ROLE_CONTRACT_MANAGER, 0);
+            snap.effective_corp_roles_at_db(corp_id, member_id, None, matured_at - 1);
+        assert_eq!(mem_before, bd_before.roles);
+        assert_eq!(mem_before & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_HANGAR_CAN_TAKE[0] | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0] | corp_roles::ROLE_CONTAINER_CAN_TAKE[6]), 0);
 
         // At exact matured_at (>= boundary): all pending role & title grants mature (`unmatured_mask == 0`).
-        let bd_at = effective_corp_role_breakdown(&snap, corp_id, member_id, matured_at);
+        let bd_at = corp_role_breakdown(&snap, corp_id, member_id, matured_at);
         assert_eq!(bd_at.unmatured_mask, 0);
         assert_ne!(bd_at.roles & corp_roles::ROLE_DIRECTOR, 0);
         assert_ne!(bd_at.roles & corp_roles::ROLE_TRADER, 0);
         assert_ne!(bd_at.roles_at_hq & corp_roles::ROLE_CHAT_MANAGER, 0);
-        let (_, mem_at) = effective_corp_member_roles(&snap, corp_id, member_id, 0, matured_at);
+        let (_, mem_at) = snap.effective_corp_roles_at_db(corp_id, member_id, None, matured_at);
         assert_ne!(mem_at & corp_roles::ROLE_CONTAINER_CAN_TAKE[6], 0);
 
         // can_send_corp_mail uses `any_active_roles()` -> succeeds when ROLE_CHAT_MANAGER is ONLY in roles_at_hq!

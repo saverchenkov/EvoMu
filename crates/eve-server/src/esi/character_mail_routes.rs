@@ -94,7 +94,7 @@ fn check_corp_wallet_access_in_snap(
     now_unix: u64,
 ) -> Result<(), RouteExecutionResult> {
     if let Some(c) = claims {
-        let eff = super::router::effective_esi_corp_role_breakdown(
+        let eff = eve_db::corp_role_breakdown(
             snap,
             corp.corporation_id,
             c.character_id,
