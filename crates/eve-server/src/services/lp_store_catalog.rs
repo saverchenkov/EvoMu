@@ -15,7 +15,7 @@ use eve_proto::PyRep;
 use eve_sde::TypeId;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 pub const CONCORD_CORP_ID: i64 = 1_000_125;
 pub const PARAGON_CORP_ID: i64 = 1_000_419;
@@ -31,12 +31,13 @@ struct RawEsiLpCatalog {
     corp_offers: HashMap<String, Vec<i64>>,
 }
 
-/// Parses `data/esi_lp_store_offers.json` once into an immutable `corp_id -> Vec<LPOffer>` table.
-fn esi_lp_catalog() -> &'static HashMap<i64, Vec<LPOffer>> {
-    static CATALOG: OnceLock<HashMap<i64, Vec<LPOffer>>> = OnceLock::new();
-    CATALOG.get_or_init(|| {
+struct CachedEsiLpCatalog(Arc<HashMap<i64, Vec<LPOffer>>>);
+
+/// Parses `data/esi_lp_store_offers.json` into a per-`SdeRegistry` `corp_id -> Vec<LPOffer>` table.
+fn esi_lp_catalog(sde: &eve_sde::SdeRegistry) -> Arc<HashMap<i64, Vec<LPOffer>>> {
+    sde.get_or_init_derived::<CachedEsiLpCatalog>(|| {
         let Ok(raw) = serde_json::from_str::<RawEsiLpCatalog>(RAW_ESI_LP_OFFERS_JSON) else {
-            return HashMap::new();
+            return CachedEsiLpCatalog(Arc::new(HashMap::new()));
         };
         let mut parsed_offers: HashMap<i64, (u32, i32, i64, i64, i64, Vec<(u32, i32)>)> =
             HashMap::with_capacity(raw.offers.len());
@@ -75,13 +76,16 @@ fn esi_lp_catalog() -> &'static HashMap<i64, Vec<LPOffer>> {
                 by_corp.insert(corp_id, list);
             }
         }
-        by_corp
+        CachedEsiLpCatalog(Arc::new(by_corp))
     })
+    .0
+    .clone()
 }
 
 /// Returns authoritative Tranquility ESI LP store offers for `corp_id`, filtered against V24 `sde.types`.
 pub fn esi_sde_lp_offers(sde: &eve_sde::SdeRegistry, corp_id: i64) -> Vec<LPOffer> {
-    let Some(offers) = esi_lp_catalog().get(&corp_id) else {
+    let catalog = esi_lp_catalog(sde);
+    let Some(offers) = catalog.get(&corp_id) else {
         return Vec::new();
     };
     if sde.types.is_empty() {
@@ -99,7 +103,7 @@ pub fn esi_sde_lp_offers(sde: &eve_sde::SdeRegistry, corp_id: i64) -> Vec<LPOffe
 
 /// Returns all imported Tranquility ESI LP offers across corporations when resolving 2-arg `TakeOffer*` calls.
 pub fn esi_all_lp_offers(sde: &eve_sde::SdeRegistry) -> Vec<LPOffer> {
-    let mut corp_ids: Vec<i64> = esi_lp_catalog().keys().copied().collect();
+    let mut corp_ids: Vec<i64> = esi_lp_catalog(sde).keys().copied().collect();
     corp_ids.sort_unstable();
     let mut out = Vec::new();
     for cid in corp_ids {

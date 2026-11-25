@@ -4,12 +4,13 @@
 
 use crate::services::industry_pi::industry_rigs::{
     StructureIndustryBonuses, StructureRigBonuses, clear_sde_adjusted_prices,
-    collect_live_market_adjusted_prices, compute_activity_ptv_multiplier,
-    compute_market_adjusted_price_from_snap, compute_ship_insurance_reference_value_with_prices,
-    is_industry_loc_at_facility, resolve_corp_office_at_facility,
-    resolve_facility_modifiers_and_system, resolve_industry_delivery_target,
-    resolve_material_adjusted_price, resolve_structure_rig_bonuses_full, set_sde_adjusted_price,
-    structure_sde_industry_bonuses, validate_capital_construction_restrictions,
+    collect_live_market_adjusted_prices_with_sde, compute_activity_ptv_multiplier,
+    compute_market_adjusted_price_from_snap_with_sde,
+    compute_ship_insurance_reference_value_with_prices, is_industry_loc_at_facility,
+    resolve_corp_office_at_facility, resolve_facility_modifiers_and_system,
+    resolve_industry_delivery_target, resolve_material_adjusted_price,
+    resolve_structure_rig_bonuses_full, set_sde_adjusted_price, structure_sde_industry_bonuses,
+    validate_capital_construction_restrictions,
 };
 use crate::router::ServerContext;
 use crate::services::industry_pi::IndustryJobCostMeta;
@@ -214,10 +215,6 @@ fn facility_modifiers_and_sde_bonuses_cover_tatara_2721_item_fallbacks_and_npc_s
 
 #[test]
 fn rolling_28_day_ema_window_and_insurance_activity_fallback_and_hull_adj_fallback() {
-    let _adj_lock = super::SDE_ADJ_PRICE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    clear_sde_adjusted_prices();
     let mut ctx = make_ctx();
     let sde_mut = Arc::make_mut(&mut ctx.sde);
 
@@ -294,9 +291,9 @@ fn rolling_28_day_ema_window_and_insurance_activity_fallback_and_hull_adj_fallba
         }
         snap.market_history.insert((10_000_002, 880_001), days);
 
-        let adj = compute_market_adjusted_price_from_snap(snap, 880_001).unwrap();
+        let adj = compute_market_adjusted_price_from_snap_with_sde(&ctx.sde, snap, 880_001).unwrap();
         assert!((adj - 50.0).abs() < 1e-9);
-        let map = collect_live_market_adjusted_prices(snap);
+        let map = collect_live_market_adjusted_prices_with_sde(&ctx.sde, snap);
         assert!((map[&880_001] - 50.0).abs() < 1e-9);
     });
 
@@ -336,8 +333,8 @@ fn rolling_28_day_ema_window_and_insurance_activity_fallback_and_hull_adj_fallba
     let v_priced_hull = compute_ship_insurance_reference_value_with_prices(&sde_priced, &live_hull_priced, 880_102);
     assert!((v_priced_hull - 12_000.0).abs() < 1e-9);
 
-    set_sde_adjusted_price(880_001, 0.0); // non-positive price ignored by cache lookup
-    clear_sde_adjusted_prices();
+    set_sde_adjusted_price(&ctx.sde, 880_001, 0.0); // non-positive price ignored by cache lookup
+    clear_sde_adjusted_prices(&ctx.sde);
 }
 
 #[test]

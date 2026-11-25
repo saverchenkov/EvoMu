@@ -192,3 +192,95 @@ fn test_season_fsd_catalog_overrides_conditions_and_def_fallbacks() {
     let crates = fsd_crate_loot_tables(&ctx.sde);
     assert!(crates.values().all(|v| !v.is_empty()));
 }
+
+#[test]
+fn two_sde_registries_isolate_season_fsd_caches() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let build_conditions_cfsd = |key: &str, value: u64| -> Vec<u8> {
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        let rec_pos = buf.len();
+        buf[56..64].copy_from_slice(&((rec_pos - 32) as u64).to_le_bytes());
+        buf.extend_from_slice(&[0u8; 16]);
+        buf.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        let str_abs = buf.len();
+        buf.extend_from_slice(key.as_bytes());
+        buf[rec_pos..rec_pos + 8].copy_from_slice(&((str_abs - 32) as u64).to_le_bytes());
+        buf[rec_pos + 8..rec_pos + 16].copy_from_slice(&value.to_le_bytes());
+        buf
+    };
+
+    let dir = TempDir(std::env::temp_dir().join(format!(
+        "evomu_season_fsd_iso_{}",
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    std::fs::create_dir_all(&dir.0).expect("create temp dir");
+
+    let make_cond_sde = |tag: &str, key: &str, value: u64| {
+        let path = dir.0.join(format!("cond_{tag}.bin"));
+        let bytes = build_conditions_cfsd(key, value);
+        std::fs::write(&path, &bytes).expect("write challengeconditions.bin");
+        let mut sde = eve_sde::SdeRegistry::default();
+        sde.resources.insert(
+            "res:/staticdata/challengeconditions.fsdbinary".to_string(),
+            eve_sde::SdeResourceInfo {
+                res_path: "res:/staticdata/challengeconditions.fsdbinary".to_string(),
+                cdn_relative_path: path.display().to_string(),
+                md5: String::new(),
+                byte_size: bytes.len() as u64,
+                format: "cfsd".to_string(),
+                record_count: 1,
+                spot: String::new(),
+            },
+        );
+        sde
+    };
+
+    let sde_a = make_cond_sde("a", "ship_group", 101);
+    let sde_b = make_cond_sde("b", "region_id", 202);
+    let cond_a1 = fsd_challenge_conditions(&sde_a);
+    let cond_a2 = fsd_challenge_conditions(&sde_a);
+    let cond_b1 = fsd_challenge_conditions(&sde_b);
+    let cond_b2 = fsd_challenge_conditions(&sde_b);
+    assert!(std::sync::Arc::ptr_eq(&cond_a1, &cond_a2));
+    assert!(std::sync::Arc::ptr_eq(&cond_b1, &cond_b2));
+    assert!(!std::sync::Arc::ptr_eq(&cond_a1, &cond_b1));
+    assert_eq!(cond_a1.get("ship_group"), Some(&101));
+    assert!(!cond_a1.contains_key("region_id"));
+    assert_eq!(cond_b1.get("region_id"), Some(&202));
+    assert!(!cond_b1.contains_key("ship_group"));
+
+    // Empty SdeRegistry read must not poison real SdeRegistry or inherit from it.
+    let empty_sde = eve_sde::SdeRegistry::default();
+    assert!(fsd_challenge_definitions(&empty_sde).is_empty());
+    assert!(default_seasonal_challenge_definitions_with_sde(&empty_sde).is_empty());
+    assert!(fsd_crate_loot_tables(&empty_sde).is_empty());
+
+    let ctx = test_ctx();
+    let real_defs = fsd_challenge_definitions(&ctx.sde);
+    let real_starters = default_seasonal_challenge_definitions_with_sde(&ctx.sde);
+    let real_crates = fsd_crate_loot_tables(&ctx.sde);
+    assert!(!real_defs.is_empty());
+    assert!(!real_starters.is_empty());
+    assert!(!real_crates.is_empty());
+    assert!(fsd_challenge_definitions(&empty_sde).is_empty());
+
+    // Cloning resets derived caches so clearing types/resources affects only the clone.
+    let mut cloned_sde = (*ctx.sde).clone();
+    cloned_sde.types.clear();
+    cloned_sde.resources.clear();
+    let cloned_defs = fsd_challenge_definitions(&cloned_sde);
+    assert!(!std::sync::Arc::ptr_eq(&real_defs, &cloned_defs));
+    assert!(cloned_defs.is_empty());
+    assert!(default_seasonal_challenge_definitions_with_sde(&cloned_sde).is_empty());
+    assert!(fsd_crate_loot_tables(&cloned_sde).is_empty());
+}

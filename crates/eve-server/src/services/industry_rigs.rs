@@ -485,39 +485,62 @@ pub fn resolve_facility_modifiers_and_system(
     resolve_facility_modifiers_and_system_for_job(ctx, snap, facility_id, None, None)
 }
 
-static SDE_ADJUSTED_PRICES: std::sync::RwLock<Option<std::collections::HashMap<eve_sde::TypeId, f64>>> =
-    std::sync::RwLock::new(None);
+#[derive(Default)]
+struct CachedAdjustedPriceOverrides(
+    std::sync::RwLock<std::collections::HashMap<eve_sde::TypeId, f64>>,
+);
 
-/// Overrides or sets market adjusted prices cache (`feat:industry.eiv-adjusted-prices`).
-pub fn set_sde_adjusted_prices(prices: std::collections::HashMap<eve_sde::TypeId, f64>) {
-    *SDE_ADJUSTED_PRICES.write().unwrap() = Some(prices);
+struct CachedSdeBasePrices(std::sync::Arc<std::collections::HashMap<eve_sde::TypeId, f64>>);
+
+/// Overrides or sets market adjusted prices cache on `sde` (`feat:industry.eiv-adjusted-prices`).
+pub fn set_sde_adjusted_prices(
+    sde: &eve_sde::SdeRegistry,
+    prices: std::collections::HashMap<eve_sde::TypeId, f64>,
+) {
+    let slot = sde.get_or_init_derived::<CachedAdjustedPriceOverrides>(
+        CachedAdjustedPriceOverrides::default,
+    );
+    *slot.0.write().unwrap_or_else(|e| e.into_inner()) = prices;
 }
 
-/// Sets an individual type's adjusted price in the cache (`feat:industry.eiv-adjusted-prices`).
-pub fn set_sde_adjusted_price(type_id: eve_sde::TypeId, price: f64) {
-    let mut guard = SDE_ADJUSTED_PRICES.write().unwrap();
-    let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    map.insert(type_id, price);
+/// Sets an individual type's adjusted price in `sde`'s adjusted price cache (`feat:industry.eiv-adjusted-prices`).
+pub fn set_sde_adjusted_price(
+    sde: &eve_sde::SdeRegistry,
+    type_id: eve_sde::TypeId,
+    price: f64,
+) {
+    let slot = sde.get_or_init_derived::<CachedAdjustedPriceOverrides>(
+        CachedAdjustedPriceOverrides::default,
+    );
+    slot.0
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(type_id, price);
 }
 
-/// Clears cached market adjusted prices (`feat:industry.eiv-adjusted-prices`).
-pub fn clear_sde_adjusted_prices() {
-    *SDE_ADJUSTED_PRICES.write().unwrap() = None;
+/// Clears cached market adjusted price overrides on `sde` (`feat:industry.eiv-adjusted-prices`).
+pub fn clear_sde_adjusted_prices(sde: &eve_sde::SdeRegistry) {
+    let slot = sde.get_or_init_derived::<CachedAdjustedPriceOverrides>(
+        CachedAdjustedPriceOverrides::default,
+    );
+    slot.0.write().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
-fn canonical_sde_base_prices() -> &'static std::collections::HashMap<eve_sde::TypeId, f64> {
-    static CANONICAL_BASE_PRICES: std::sync::OnceLock<
-        std::collections::HashMap<eve_sde::TypeId, f64>,
-    > = std::sync::OnceLock::new();
-    CANONICAL_BASE_PRICES.get_or_init(|| {
-        let sde = eve_sde::SdeRegistry::with_canonical_seed();
-        sde.types
+fn sde_base_prices(
+    sde: &eve_sde::SdeRegistry,
+) -> std::sync::Arc<std::collections::HashMap<eve_sde::TypeId, f64>> {
+    sde.get_or_init_derived::<CachedSdeBasePrices>(|| {
+        let map = sde
+            .types
             .iter()
             .filter_map(|(&tid, t)| {
                 (t.base_price.is_finite() && t.base_price > 0.0).then_some((tid, t.base_price))
             })
-            .collect()
+            .collect();
+        CachedSdeBasePrices(std::sync::Arc::new(map))
     })
+    .0
+    .clone()
 }
 
 #[inline]
@@ -598,6 +621,7 @@ fn compute_adjusted_price_from_history<'a>(
 
 fn collect_live_market_adjusted_prices_with_lookup(
     snap: &eve_db::WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     base_lookup: impl Fn(eve_sde::TypeId) -> Option<f64>,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
     let mut hist_by_type: std::collections::HashMap<
@@ -618,31 +642,38 @@ fn collect_live_market_adjusted_prices_with_lookup(
             out.insert(tid, adj);
         }
     }
-    if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
-        if let Some(map) = guard.as_ref() {
-            for (&tid, &price) in map {
+    if let Some(sde) = sde_opt {
+        let slot = sde.get_or_init_derived::<CachedAdjustedPriceOverrides>(
+            CachedAdjustedPriceOverrides::default,
+        );
+        if let Ok(map) = slot.0.read() {
+            for (&tid, &price) in map.iter() {
                 if price.is_finite() && price > 0.0 {
                     out.insert(tid, price);
                 }
             }
-        }
+        };
     }
     out
 }
 
 fn compute_market_adjusted_price_with_lookup(
     snap: &eve_db::WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     type_id: eve_sde::TypeId,
     base_lookup: impl Fn(eve_sde::TypeId) -> Option<f64>,
 ) -> Option<f64> {
-    if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
-        if let Some(map) = guard.as_ref() {
+    if let Some(sde) = sde_opt {
+        let slot = sde.get_or_init_derived::<CachedAdjustedPriceOverrides>(
+            CachedAdjustedPriceOverrides::default,
+        );
+        if let Ok(map) = slot.0.read() {
             if let Some(&price) = map.get(&type_id) {
                 if price.is_finite() && price > 0.0 {
                     return Some(price);
                 }
             }
-        }
+        };
     }
     compute_adjusted_price_from_history(
         base_lookup(type_id),
@@ -659,17 +690,24 @@ pub fn collect_live_market_adjusted_prices_with_sde(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
-    collect_live_market_adjusted_prices_with_lookup(snap, |tid| sde_base_price_for_type(sde, tid))
+    collect_live_market_adjusted_prices_with_lookup(snap, Some(sde), |tid| {
+        sde_base_price_for_type(sde, tid)
+    })
 }
 
 /// Computes all active rolling market adjusted prices (`feat:industry.eiv-adjusted-prices`, `feat:esi.market.prices`)
-/// from the explicit adjusted-price cache and 28-day clamped rolling EMA over executed `snap.market_history`,
-/// anchored to canonical SDE `base_price` and aggregated cluster-wide per UTC day.
+/// from 28-day clamped rolling EMA over executed `snap.market_history`, anchored to canonical SDE
+/// `base_price` and aggregated cluster-wide per UTC day.
 pub fn collect_live_market_adjusted_prices(
     snap: &eve_db::WorldStateSnapshot,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
-    let base_prices = canonical_sde_base_prices();
-    collect_live_market_adjusted_prices_with_lookup(snap, |tid| base_prices.get(&tid).copied())
+    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+        let base_prices = sde_base_prices(&sde);
+        return collect_live_market_adjusted_prices_with_lookup(snap, Some(&sde), |tid| {
+            base_prices.get(&tid).copied()
+        });
+    }
+    collect_live_market_adjusted_prices_with_lookup(snap, None, |_| None)
 }
 
 /// Resolves a type's live rolling market adjusted price using an explicit [`eve_sde::SdeRegistry`]
@@ -679,7 +717,7 @@ pub fn compute_market_adjusted_price_from_snap_with_sde(
     snap: &eve_db::WorldStateSnapshot,
     type_id: eve_sde::TypeId,
 ) -> Option<f64> {
-    compute_market_adjusted_price_with_lookup(snap, type_id, |tid| {
+    compute_market_adjusted_price_with_lookup(snap, Some(sde), type_id, |tid| {
         sde_base_price_for_type(sde, tid)
     })
 }
@@ -689,8 +727,13 @@ pub fn compute_market_adjusted_price_from_snap(
     snap: &eve_db::WorldStateSnapshot,
     type_id: eve_sde::TypeId,
 ) -> Option<f64> {
-    let base_prices = canonical_sde_base_prices();
-    compute_market_adjusted_price_with_lookup(snap, type_id, |tid| base_prices.get(&tid).copied())
+    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+        let base_prices = sde_base_prices(&sde);
+        return compute_market_adjusted_price_with_lookup(snap, Some(&sde), type_id, |tid| {
+            base_prices.get(&tid).copied()
+        });
+    }
+    compute_market_adjusted_price_with_lookup(snap, None, type_id, |_| None)
 }
 
 /// Resolves a material's adjusted price for EIV calculation (`feat:industry.eiv-adjusted-prices`):

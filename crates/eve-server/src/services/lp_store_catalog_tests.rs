@@ -76,3 +76,63 @@ fn test_lp_store_catalog_helpers_and_persistence() {
     let all_offers = esi_all_lp_offers(&empty_sde);
     assert!(!all_offers.is_empty());
 }
+
+#[test]
+fn two_sde_registries_isolate_esi_lp_catalog_and_filtered_offers() {
+    let (ctx, _session, _char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let cat_ctx1 = esi_lp_catalog(&ctx.sde);
+    let cat_ctx2 = esi_lp_catalog(&ctx.sde);
+    assert!(std::sync::Arc::ptr_eq(&cat_ctx1, &cat_ctx2));
+
+    let (corp_id, offer_a, offer_b) = cat_ctx1
+        .iter()
+        .find_map(|(&cid, offers)| {
+            let valid: Vec<&LPOffer> = offers
+                .iter()
+                .filter(|o| {
+                    ctx.sde.types.contains_key(&o.type_id)
+                        && o.req_items.iter().all(|(rt, _)| ctx.sde.types.contains_key(rt))
+                })
+                .collect();
+            for (i, a) in valid.iter().enumerate() {
+                for b in &valid[i + 1..] {
+                    if a.type_id != b.type_id
+                        && !a.req_items.iter().any(|(t, _)| *t == b.type_id)
+                        && !b.req_items.iter().any(|(t, _)| *t == a.type_id)
+                    {
+                        return Some((cid, (*a).clone(), (*b).clone()));
+                    }
+                }
+            }
+            None
+        })
+        .expect("expected at least two independent SDE LP offers");
+
+    let mut sde_a = eve_sde::SdeRegistry::default();
+    sde_a.types.insert(offer_a.type_id, ctx.sde.types[&offer_a.type_id].clone());
+    for &(rt, _) in &offer_a.req_items {
+        sde_a.types.insert(rt, ctx.sde.types[&rt].clone());
+    }
+
+    let mut sde_b = eve_sde::SdeRegistry::default();
+    sde_b.types.insert(offer_b.type_id, ctx.sde.types[&offer_b.type_id].clone());
+    for &(rt, _) in &offer_b.req_items {
+        sde_b.types.insert(rt, ctx.sde.types[&rt].clone());
+    }
+
+    let cat_a = esi_lp_catalog(&sde_a);
+    let cat_b = esi_lp_catalog(&sde_b);
+    assert!(std::sync::Arc::ptr_eq(&cat_a, &esi_lp_catalog(&sde_a)));
+    assert!(!std::sync::Arc::ptr_eq(&cat_a, &cat_b));
+    assert!(!std::sync::Arc::ptr_eq(&cat_ctx1, &cat_a));
+
+    let offers_a = esi_sde_lp_offers(&sde_a, corp_id);
+    let offers_b = esi_sde_lp_offers(&sde_b, corp_id);
+    assert!(offers_a.iter().any(|o| o.offer_id == offer_a.offer_id));
+    assert!(!offers_a.iter().any(|o| o.offer_id == offer_b.offer_id));
+    assert!(offers_b.iter().any(|o| o.offer_id == offer_b.offer_id));
+    assert!(!offers_b.iter().any(|o| o.offer_id == offer_a.offer_id));
+
+    let sde_c = sde_a.clone();
+    assert!(!std::sync::Arc::ptr_eq(&cat_a, &esi_lp_catalog(&sde_c)));
+}

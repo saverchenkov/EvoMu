@@ -1183,7 +1183,7 @@ pub fn handle_season_manager(
                             client_error: None,
                         });
                     }
-                    if def_opt.is_some_and(|d| !matches_challenge_conditions(d, extra_data, cond_catalog)) {
+                    if def_opt.is_some_and(|d| !matches_challenge_conditions(d, extra_data, &cond_catalog)) {
                         return Ok((expired, st.season_points, updates, activity.active_for_char, activity.has_any_season_entries));
                     }
                     if ch.claimed || ch.completed {
@@ -1210,7 +1210,7 @@ pub fn handle_season_manager(
                                     d.event_type == ev_name
                                         || d.event_type.strip_prefix("client_") == Some(ev_name)
                                 }) || ch.title == ev_name)
-                                && def_opt.is_none_or(|d| matches_challenge_conditions(d, extra_data, cond_catalog))
+                                && def_opt.is_none_or(|d| matches_challenge_conditions(d, extra_data, &cond_catalog))
                         })
                         .map(|ch| ch.challenge_id)
                         .collect();

@@ -707,8 +707,10 @@ async fn mutant_kill_wormhole_jump_phenomena_multipliers_and_fallback_branches()
     }
 
     // Part 2: Clear wormhole_class_id on cloned SDE for 4 distinct system IDs so
-    // resolve_system_wormhole_phenomenon returns None while system_wormhole_profile_sde
-    // still returns Pulsar / Wolf-Rayet / Black Hole / Cataclysmic Variable -> fallback match arms
+    // resolve_system_wormhole_phenomenon and system_wormhole_profile_sde stay isolated
+    // from ctx.sde's CachedWormholeProfiles (returning None / "None" instead of reading a
+    // stale cross-registry global cache), then exercise the fallback `env_effect` match arms
+    // in `build_arriving_wormhole_ship_bundle` directly.
     let mut fb_ctx = test_ctx();
     clone_type_with(&mut fb_ctx.sde, 587, frig_tid, 25, 6, 1_500_000.0);
     {
@@ -738,7 +740,8 @@ async fn mutant_kill_wormhole_jump_phenomena_multipliers_and_fallback_branches()
         (cv_sys, "FB-CV", "Cataclysmic Variable"),
     ] {
         assert!(eve_dogma::resolve_system_wormhole_phenomenon(&fb_ctx.sde, dest_sys, None).is_none());
-        assert_eq!(system_wormhole_profile_sde(&fb_ctx.sde, dest_sys).3, label);
+        assert_eq!(system_wormhole_profile_sde(&fb_ctx.sde, dest_sys), (0, false, false, "None"));
+        assert_eq!(system_wormhole_profile_sde(&ctx.sde, dest_sys).3, label);
 
         fb_ctx.db.with_mut_snapshot(|snap| {
             let mut ch = snap.characters.values().next().cloned().expect("demo char");
@@ -782,13 +785,39 @@ async fn mutant_kill_wormhole_jump_phenomena_multipliers_and_fallback_branches()
         let ball = make_ship_ball(ship_id, frig_tid, 1_500_000.0, DVec3::new(11_000.0, 0.0, 0.0));
         let _ = host_h.spawn_ball_with_meta(ball.clone(), CombatState::default(), SlimItemMeta::default()).await;
         let mut sess = make_session(char_id, 98_000_001, Some(host_sys), Some(ship_id));
-        execute_cosmic_wormhole_jump(&fb_ctx, &mut sess, char_id, host_sys, ship_id, ball, None, Some(sig_id))
-            .await
-            .unwrap()
-            .unwrap();
-        let dest_h = fb_ctx.systems.get_or_spawn(dest_sys);
-        let bp = dest_h.ballpark.read().unwrap();
-        let cs = bp.combat_states.get(&ship_id).expect("fallback env combat state");
+        let jump_res = execute_cosmic_wormhole_jump(
+            &fb_ctx,
+            &mut sess,
+            char_id,
+            host_sys,
+            ship_id,
+            ball.clone(),
+            None,
+            Some(sig_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(jump_res.dict_get("environmentalEffect"), Some(&PyRep::String("None".into())));
+
+        let taken = crate::system_actor::TakenBall {
+            tick: 0,
+            ball,
+            combat_state: Some(CombatState::default()),
+            slim_meta: Some(SlimItemMeta::default()),
+            cycles_cleared: 0,
+            removed_own_cycles: Vec::new(),
+            pre_cleanup_combat_flags: None,
+        };
+        let (_, cs, _) = super::super::build_arriving_wormhole_ship_bundle(
+            &fb_ctx,
+            char_id,
+            ship_id,
+            dest_sys,
+            taken,
+            DVec3::new(10_000.0, 0.0, 0.0),
+            label,
+        );
         match label {
             "Pulsar" => {
                 assert_eq!(cs.env_max_shield_multiplier, Some(1.30));

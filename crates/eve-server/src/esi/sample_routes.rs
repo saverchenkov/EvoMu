@@ -877,7 +877,8 @@ pub fn dispatch_operation(
                 .collect();
             ship_types.sort_by_key(|t| t.type_id);
             let live_prices = ctx.db.with_snapshot(|snap| {
-                crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(
+                crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices_with_sde(
+                    &ctx.sde,
                     snap,
                 )
             });

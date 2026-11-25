@@ -69,6 +69,7 @@ pub fn populate_system_celestials(
     solar_system_id: SolarSystemId,
     sde: &SdeRegistry,
 ) {
+    ballpark.bind_sde(sde);
     if let Some(sys) = sde.solar_systems.get(&solar_system_id) {
         ballpark.constellation_id = sys.constellation_id;
     }

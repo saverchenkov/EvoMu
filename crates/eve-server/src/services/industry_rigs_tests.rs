@@ -212,12 +212,9 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
         assert!(resolve_facility_modifiers_and_system(&ctx, snap, 999_999_999).is_none());
     });
 
-    let _adj_lock = SDE_ADJ_PRICE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    clear_sde_adjusted_prices();
-    set_sde_adjusted_prices(HashMap::from([(34, 5.5)]));
-    set_sde_adjusted_price(35, 12.0);
+    clear_sde_adjusted_prices(&ctx.sde);
+    set_sde_adjusted_prices(&ctx.sde, HashMap::from([(34, 5.5)]));
+    set_sde_adjusted_price(&ctx.sde, 35, 12.0);
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_history.insert(
             (10000002, 36),
@@ -244,15 +241,16 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
                 },
             ],
         );
-        let prices = collect_live_market_adjusted_prices(snap);
         let prices_with_sde = collect_live_market_adjusted_prices_with_sde(&ctx.sde, snap);
-        assert!((prices[&34] - 5.5).abs() < 1e-9);
-        assert!((prices[&35] - 12.0).abs() < 1e-9);
+        let prices_default = collect_live_market_adjusted_prices(snap);
+        assert!((prices_with_sde[&34] - 5.5).abs() < 1e-9);
+        assert!((prices_with_sde[&35] - 12.0).abs() < 1e-9);
+        assert!(!prices_default.contains_key(&34));
         let alpha = crate::formulas::ADJUSTED_PRICE_EMA_ALPHA;
         let band = crate::formulas::ADJUSTED_PRICE_DAILY_BAND;
         let d1 = (32.0 + alpha * (100.0 - 32.0)).clamp(32.0 * (1.0 - band), 32.0 * (1.0 + band));
         let expected_36 = (d1 + alpha * (300.0 - d1)).clamp(d1 * (1.0 - band), d1 * (1.0 + band));
-        assert!((prices[&36] - expected_36).abs() < 1e-9);
+        assert!((prices_default[&36] - expected_36).abs() < 1e-9);
         assert!((prices_with_sde[&36] - expected_36).abs() < 1e-9);
         assert!(
             (compute_market_adjusted_price_from_snap(snap, 36).unwrap() - expected_36).abs() < 1e-9
@@ -269,10 +267,8 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
     assert!((resolve_material_adjusted_price(&ctx, None, 35) - 12.0).abs() < 1e-9);
     let ins_val = compute_ship_insurance_reference_value_for_ctx(&ctx, 587);
     assert!(ins_val >= 0.0);
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
 }
-
-pub(super) static SDE_ADJ_PRICE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn industry_loc_office_and_delivery_target_helpers_work() {
@@ -858,10 +854,7 @@ fn w3_mutant_killers_rig_security_boundaries_activity_products_and_hull_bonuses(
 #[test]
 fn adjusted_price_single_day_one_unit_outlier_stays_anchored_to_sde_base_price() {
     let ctx = make_test_context();
-    let _adj_lock = SDE_ADJ_PRICE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_history.clear();
@@ -918,16 +911,13 @@ fn adjusted_price_single_day_one_unit_outlier_stays_anchored_to_sde_base_price()
         );
     });
 
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
 }
 
 #[test]
 fn adjusted_price_twenty_eight_regions_same_utc_day_collapse_to_single_step() {
     let ctx = make_test_context();
-    let _adj_lock = SDE_ADJ_PRICE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_history.clear();
@@ -1024,7 +1014,55 @@ fn adjusted_price_twenty_eight_regions_same_utc_day_collapse_to_single_step() {
         );
     });
 
-    clear_sde_adjusted_prices();
+    clear_sde_adjusted_prices(&ctx.sde);
+}
+
+#[test]
+fn two_sde_registries_isolate_adjusted_price_overrides_and_base_prices() {
+    let db = WorldRepository::with_demo_seed();
+
+    let mut inv_a = make_inv_type(990_001, 25, "RigTestA", HashMap::new());
+    inv_a.base_price = 123_456.0;
+    let mut inv_b = make_inv_type(990_001, 25, "RigTestB", HashMap::new());
+    inv_b.base_price = 654_321.0;
+
+    let mut sde_a = SdeRegistry::default();
+    sde_a.types.insert(990_001, inv_a);
+    let mut sde_b = SdeRegistry::default();
+    sde_b.types.insert(990_001, inv_b);
+    assert_eq!(sde_a.types.len(), sde_b.types.len());
+
+    set_sde_adjusted_price(&sde_a, 34, 111.25);
+    set_sde_adjusted_price(&sde_b, 34, 222.75);
+
+    db.with_snapshot(|snap| {
+        let p_a = collect_live_market_adjusted_prices_with_sde(&sde_a, snap);
+        let p_b = collect_live_market_adjusted_prices_with_sde(&sde_b, snap);
+        assert_eq!(p_a.get(&34).copied(), Some(111.25));
+        assert_eq!(p_b.get(&34).copied(), Some(222.75));
+    });
+
+    let base_a1 = sde_base_prices(&sde_a);
+    let base_a2 = sde_base_prices(&sde_a);
+    let base_b = sde_base_prices(&sde_b);
+    assert!(Arc::ptr_eq(&base_a1, &base_a2));
+    assert!(!Arc::ptr_eq(&base_a1, &base_b));
+    assert_eq!(base_a1.get(&990_001).copied(), Some(123_456.0));
+    assert_eq!(base_b.get(&990_001).copied(), Some(654_321.0));
+
+    let sde_c = sde_a.clone();
+    let base_c = sde_base_prices(&sde_c);
+    assert!(!Arc::ptr_eq(&base_a1, &base_c));
+    db.with_snapshot(|snap| {
+        let p_c = collect_live_market_adjusted_prices_with_sde(&sde_c, snap);
+        assert_ne!(p_c.get(&34).copied(), Some(111.25));
+    });
+
+    clear_sde_adjusted_prices(&sde_a);
+    db.with_snapshot(|snap| {
+        let p_b = collect_live_market_adjusted_prices_with_sde(&sde_b, snap);
+        assert_eq!(p_b.get(&34).copied(), Some(222.75));
+    });
 }
 
 #[cfg(test)]

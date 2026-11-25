@@ -135,18 +135,19 @@ pub fn clone_soldier_type_for_security_and_faction(
         _ => 556,
     };
     if sde.types.len() > 1_000 {
-        static CLONE_SOLDIER_CATALOG_BY_LEN: std::sync::OnceLock<
+        struct CachedCloneSoldierCatalog(
             std::sync::Mutex<std::collections::HashMap<(usize, usize), Vec<(u32, u32, String)>>>,
-        > = std::sync::OnceLock::new();
+        );
         let key = (
             sde.types.len(),
             (33_130u32..=33_250)
                 .filter(|id| sde.types.contains_key(id))
                 .count(),
         );
-        let map = CLONE_SOLDIER_CATALOG_BY_LEN
-            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = sde.get_or_init_derived::<CachedCloneSoldierCatalog>(|| {
+            CachedCloneSoldierCatalog(std::sync::Mutex::new(std::collections::HashMap::new()))
+        });
+        let mut guard = cache.0.lock().unwrap_or_else(|e| e.into_inner());
         let catalog = guard.entry(key).or_insert_with(|| {
             let mut rows: Vec<(u32, u32, String)> = sde
                 .types

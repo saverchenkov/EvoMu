@@ -32,19 +32,19 @@
     },
     "E_test_seams": {
       "zero_required": false,
-      "max_count": 11,
+      "max_count": 10,
       "rationale_required": false,
       "description": "Non-#[cfg(test)] test seams, hooks, and overrides remaining in production source files (#1583 Group E)."
     },
     "F_mutable_static_data_caches": {
       "zero_required": false,
-      "max_count": 2,
+      "max_count": 1,
       "rationale_required": false,
       "description": "Mutable global caches derived from SdeRegistry data; move onto SdeRegistry (#1583 Group F mutable)."
     },
     "F_set_once_caches": {
-      "zero_required": false,
-      "max_count": 10,
+      "zero_required": true,
+      "max_count": 0,
       "rationale_required": false,
       "description": "Set-once caches derived from static/SDE data that pin the first registry caller; move onto SdeRegistry (#1583 Group F set-once)."
     },
@@ -252,14 +252,6 @@
       "max_count": 1
     },
     {
-      "crate_name": "eve-destiny",
-      "rel_file": "ballpark.rs",
-      "symbol": "CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
       "crate_name": "eve-machonet",
       "rel_file": "lib.rs",
       "symbol": "SESSION_CHANGE_DROPPED_KEYS_TOTAL",
@@ -307,14 +299,6 @@
       "crate_name": "eve-sde",
       "rel_file": "lib.rs",
       "symbol": "SDE_CACHE",
-      "kind": "static_sync",
-      "group": "F_mutable_static_data_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "combat/npc_ai.rs",
-      "symbol": "CLONE_SOLDIER_CATALOG_BY_LEN",
       "kind": "static_sync",
       "group": "F_mutable_static_data_caches",
       "max_count": 1
@@ -602,22 +586,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/campaigns_and_milestones.rs",
-      "symbol": "SDE_COMMUNITY_TRACKS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/campaigns_and_milestones.rs",
-      "symbol": "SDE_LOGIN_CAMPAIGNS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/combat_fighters.rs",
       "symbol": "NEXT_FIGHTER_RES_ID",
       "kind": "static_sync",
@@ -658,38 +626,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/industry_rigs.rs",
-      "symbol": "CANONICAL_BASE_PRICES",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/industry_rigs.rs",
-      "symbol": "SDE_ADJUSTED_PRICES",
-      "kind": "static_sync",
-      "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/lp_store_catalog.rs",
-      "symbol": "CATALOG",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/operations_manager_helpers.rs",
-      "symbol": "OPERATION_DEFS_CACHE",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/pve_exploration_seeding.rs",
       "symbol": "LOCKS",
       "kind": "static_sync",
@@ -718,38 +654,6 @@
       "symbol": "LOCAL_NOTICES",
       "kind": "thread_local",
       "group": "D_ambient_scopes",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/season_fsd.rs",
-      "symbol": "CACHED",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/season_fsd.rs",
-      "symbol": "FSD_CHALLENGES",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/season_fsd.rs",
-      "symbol": "FSD_CONDITIONS",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/season_fsd.rs",
-      "symbol": "LOOT_TABLES",
-      "kind": "static_sync",
-      "group": "F_set_once_caches",
       "max_count": 1
     },
     {

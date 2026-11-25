@@ -323,7 +323,7 @@ pub(crate) async fn handle_ships_and_services(
             // expecting `{typeID: referencePrice}` matching `GetInsurancePrice(typeID)`.
             let mut seen_types = std::collections::HashSet::new();
             ship_type_ids.retain(|tid| seen_types.insert(*tid));
-            let live_prices = ctx.db.with_snapshot(|snap| crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(snap));
+            let live_prices = ctx.db.with_snapshot(|snap| crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices_with_sde(&ctx.sde, snap));
             let entries: Vec<(PyRep, PyRep)> = ship_type_ids
                 .into_iter()
                 .filter_map(|type_id| {

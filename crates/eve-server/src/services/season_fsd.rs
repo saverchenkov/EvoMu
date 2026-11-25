@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use super::season_manager::CharacterChallenge;
 pub use eve_db::{SeasonConfig, SeasonalChallengeDef};
@@ -229,10 +229,11 @@ fn json_bool_flag(v: Option<&serde_json::Value>) -> bool {
         .unwrap_or(false)
 }
 
+struct CachedFsdChallengeConditions(Arc<BTreeMap<String, u64>>);
+
 /// Decodes all 33 V24 challenge condition keys and IDs from `res:/staticdata/challengeconditions.fsdbinary`.
-pub fn fsd_challenge_conditions(sde: &eve_sde::SdeRegistry) -> &'static BTreeMap<String, u64> {
-    static FSD_CONDITIONS: OnceLock<BTreeMap<String, u64>> = OnceLock::new();
-    FSD_CONDITIONS.get_or_init(|| {
+pub fn fsd_challenge_conditions(sde: &eve_sde::SdeRegistry) -> Arc<BTreeMap<String, u64>> {
+    sde.get_or_init_derived::<CachedFsdChallengeConditions>(|| {
         let mut map = BTreeMap::new();
         if let Ok(raw) = sde.challenge_conditions() {
             for (k, v) in raw {
@@ -245,8 +246,10 @@ pub fn fsd_challenge_conditions(sde: &eve_sde::SdeRegistry) -> &'static BTreeMap
                 map.insert(k, id);
             }
         }
-        map
+        CachedFsdChallengeConditions(Arc::new(map))
     })
+    .0
+    .clone()
 }
 
 /// Evaluates `extra_data` from `seasonManager.process_client_event` against imported `challengeconditions`
@@ -301,13 +304,14 @@ pub fn matches_challenge_conditions(
     true
 }
 
+struct CachedFsdChallenges(Arc<Vec<SeasonalChallengeDef>>);
+
 /// Decodes all 1,210 V24 seasonal challenges from `res:/staticdata/challenges.fsdbinary`.
-pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [SeasonalChallengeDef] {
-    static FSD_CHALLENGES: OnceLock<Vec<SeasonalChallengeDef>> = OnceLock::new();
-    FSD_CHALLENGES.get_or_init(|| {
+pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> Arc<Vec<SeasonalChallengeDef>> {
+    sde.get_or_init_derived::<CachedFsdChallenges>(|| {
         let cond_catalog = fsd_challenge_conditions(sde);
         let Ok(raw) = sde.challenges() else {
-            return Vec::new();
+            return CachedFsdChallenges(Arc::new(Vec::new()));
         };
         let mut parsed: Vec<(i64, serde_json::Value)> = raw
             .into_iter()
@@ -318,7 +322,7 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
             .iter()
             .filter_map(|(_, v)| v.get("next_challenge").and_then(|n| n.as_i64()).filter(|&n| n > 0))
             .collect();
-        parsed
+        let defs = parsed
             .into_iter()
             .map(|(cid, v)| {
                 let event_type = v
@@ -397,38 +401,50 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
                     event_conditions,
                 }
             })
-            .collect()
+            .collect();
+        CachedFsdChallenges(Arc::new(defs))
     })
+    .0
+    .clone()
+}
+
+struct CachedStarterSeasonalChallenges(Arc<Vec<SeasonalChallengeDef>>);
+
+/// Returns the starter active challenges from `res:/staticdata/challenges.fsdbinary` for `sde`.
+pub fn default_seasonal_challenge_definitions_with_sde(
+    sde: &eve_sde::SdeRegistry,
+) -> Arc<Vec<SeasonalChallengeDef>> {
+    sde.get_or_init_derived::<CachedStarterSeasonalChallenges>(|| {
+        let defs: Vec<SeasonalChallengeDef> = fsd_challenge_definitions(sde)
+            .iter()
+            .filter(|d| !d.is_dormant)
+            .take(4)
+            .cloned()
+            .collect();
+        CachedStarterSeasonalChallenges(Arc::new(defs))
+    })
+    .0
+    .clone()
 }
 
 /// Returns the starter active challenges from `res:/staticdata/challenges.fsdbinary`.
 pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
-    static CACHED: OnceLock<Vec<SeasonalChallengeDef>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            if let Ok(sde) = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-                let defs: Vec<SeasonalChallengeDef> = fsd_challenge_definitions(&sde)
-                    .iter()
-                    .filter(|d| !d.is_dormant)
-                    .take(4)
-                    .cloned()
-                    .collect();
-                if !defs.is_empty() {
-                    return defs;
-                }
-            }
-            Vec::new()
-        })
-        .clone()
+    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+        let defs = default_seasonal_challenge_definitions_with_sde(&sde);
+        if !defs.is_empty() {
+            return (*defs).clone();
+        }
+    }
+    Vec::new()
 }
+
+struct CachedFsdCrateLootTables(Arc<BTreeMap<u32, Vec<(u32, i64, f64)>>>);
 
 /// Decodes authentic reward crate loot tables from `res:/staticdata/crates.fsdbinary`.
 pub fn fsd_crate_loot_tables(
     sde: &eve_sde::SdeRegistry,
-) -> &'static BTreeMap<u32, Vec<(u32, i64, f64)>> {
-    static LOOT_TABLES: OnceLock<BTreeMap<u32, Vec<(u32, i64, f64)>>> =
-        OnceLock::new();
-    LOOT_TABLES.get_or_init(|| {
+) -> Arc<BTreeMap<u32, Vec<(u32, i64, f64)>>> {
+    sde.get_or_init_derived::<CachedFsdCrateLootTables>(|| {
         let mut map: BTreeMap<u32, Vec<(u32, i64, f64)>> = BTreeMap::new();
         if let Ok(cfsd) = sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
             for (_k, v) in cfsd {
@@ -467,8 +483,10 @@ pub fn fsd_crate_loot_tables(
                 }
             }
         }
-        map
+        CachedFsdCrateLootTables(Arc::new(map))
     })
+    .0
+    .clone()
 }
 
 pub fn load_challenge_definitions_with_sde(

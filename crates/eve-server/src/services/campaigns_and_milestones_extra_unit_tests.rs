@@ -424,7 +424,8 @@ async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches()
         "CommunityTrackInstanceNotFound"
     );
 
-    let (&first_tid, first_tmpl) = get_sde_community_tracks(&ctx.sde)
+    let tracks = get_sde_community_tracks(&ctx.sde);
+    let (&first_tid, first_tmpl) = tracks
         .iter()
         .next()
         .expect("SDE community track template");

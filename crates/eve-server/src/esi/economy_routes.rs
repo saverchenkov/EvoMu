@@ -271,7 +271,8 @@ pub fn dispatch_economy_route(
 
         ("GET", "/markets/prices") => Some(ctx.db.with_snapshot(|snap| {
             let live_adjusted =
-                crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(
+                crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices_with_sde(
+                    &ctx.sde,
                     snap,
                 );
             let mut hist_by_type: HashMap<u32, Vec<&eve_db::snapshot_ext::MarketHistoryDayRecord>> =

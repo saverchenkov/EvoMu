@@ -1000,3 +1000,67 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     );
     assert!(live_wire.wire_state.scene_drop_count() > 0);
 }
+
+#[test]
+fn two_sde_registries_with_equal_type_counts_isolate_clone_soldier_catalog() {
+    let ctx = test_ctx();
+    let template = ctx.sde.types[&587].clone();
+    let make_large_sde = |clone_tid: u32| {
+        let mut sde = SdeRegistry::default();
+        for id in 1..=1_010u32 {
+            let mut dummy = template.clone();
+            dummy.type_id = id;
+            dummy.group_id = 1;
+            dummy.name = format!("DummyType-{id}");
+            sde.types.insert(id, dummy);
+        }
+        let mut clone_ty = template.clone();
+        clone_ty.type_id = clone_tid;
+        clone_ty.group_id = 556;
+        clone_ty.name = "Guristas Clone Soldier Trainer".to_string();
+        sde.types.insert(clone_tid, clone_ty);
+        sde
+    };
+    let clone_range_count = |sde: &SdeRegistry| -> usize {
+        (33_130u32..=33_250)
+            .filter(|id| sde.types.contains_key(id))
+            .count()
+    };
+
+    let sde_a = make_large_sde(33_132);
+    let sde_b = make_large_sde(33_133);
+
+    assert!(sde_a.types.len() > 1_000);
+    assert_eq!(sde_a.types.len(), sde_b.types.len());
+    assert_eq!(clone_range_count(&sde_a), 1);
+    assert_eq!(clone_range_count(&sde_a), clone_range_count(&sde_b));
+
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_a, 0.38, 500_010),
+        Some(33_132)
+    );
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_b, 0.38, 500_010),
+        Some(33_133)
+    );
+
+    // Cloning resets CachedCloneSoldierCatalog even when the replacement preserves the exact
+    // (sde.types.len(), (33_130..=33_250).count()) cache key.
+    let mut sde_c = sde_a.clone();
+    sde_c.types.remove(&33_132);
+    let mut ty_c = template;
+    ty_c.type_id = 33_134;
+    ty_c.group_id = 556;
+    ty_c.name = "Guristas Clone Soldier Trainer".to_string();
+    sde_c.types.insert(33_134, ty_c);
+    assert_eq!(sde_c.types.len(), sde_a.types.len());
+    assert_eq!(clone_range_count(&sde_c), clone_range_count(&sde_a));
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_c, 0.38, 500_010),
+        Some(33_134)
+    );
+    assert_eq!(
+        clone_soldier_type_for_security_and_faction(&sde_a, 0.38, 500_010),
+        Some(33_132)
+    );
+}

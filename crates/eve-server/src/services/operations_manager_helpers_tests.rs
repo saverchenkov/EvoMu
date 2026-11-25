@@ -28,7 +28,7 @@ fn test_operations_manager_helpers_defs_rewards_and_server_events() {
         let rw = grant_operation_activation_rewards(
             snap,
             rec,
-            defs,
+            &defs,
             1,
             char_id,
             Some(60_003_760),
@@ -343,4 +343,81 @@ fn test_operations_manager_helpers_private_parsers_conditions_and_edge_branches(
         u64::MAX,
         ctx.now_unix(),
     );
+}
+
+#[test]
+fn two_sde_registries_isolate_operation_defs_cache() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let build_op_categories_cfsd = |cat_id: u64, name: &str, isk_reward: u32| -> Vec<u8> {
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        let rec_pos = buf.len();
+        buf[56..64].copy_from_slice(&((rec_pos - 32) as u64).to_le_bytes());
+        buf.extend_from_slice(&[0u8; 56]);
+        buf[rec_pos..rec_pos + 8].copy_from_slice(&cat_id.to_le_bytes());
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        let str_abs = buf.len();
+        buf.extend_from_slice(name.as_bytes());
+        buf[rec_pos + 16..rec_pos + 24].copy_from_slice(&((str_abs - 32) as u64).to_le_bytes());
+        buf[rec_pos + 36..rec_pos + 40].copy_from_slice(&isk_reward.to_le_bytes());
+        buf
+    };
+
+    let dir = TempDir(std::env::temp_dir().join(format!(
+        "evomu_ops_sde_iso_{}",
+        std::process::id()
+    )));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    std::fs::create_dir_all(&dir.0).expect("create temp dir");
+
+    let make_op_sde = |tag: &str, cat_id: u64, name: &str, isk_reward: u32| {
+        let path = dir.0.join(format!("opcats_{tag}.bin"));
+        let bytes = build_op_categories_cfsd(cat_id, name, isk_reward);
+        std::fs::write(&path, &bytes).expect("write operationcategories.bin");
+        let mut sde = eve_sde::SdeRegistry::default();
+        sde.resources.insert(
+            "res:/staticdata/operationcategories.fsdbinary".to_string(),
+            eve_sde::SdeResourceInfo {
+                res_path: "res:/staticdata/operationcategories.fsdbinary".to_string(),
+                cdn_relative_path: path.display().to_string(),
+                md5: String::new(),
+                byte_size: bytes.len() as u64,
+                format: "cfsd".to_string(),
+                record_count: 1,
+                spot: String::new(),
+            },
+        );
+        sde
+    };
+
+    let empty_sde = eve_sde::SdeRegistry::default();
+    assert!(get_operation_defs(&empty_sde).sde_categories.is_empty());
+
+    let sde_a = make_op_sde("a", 501, "AlphaOps", 10_000);
+    let sde_b = make_op_sde("b", 502, "BetaOps", 25_000);
+    let defs_a1 = get_operation_defs(&sde_a);
+    let defs_a2 = get_operation_defs(&sde_a);
+    let defs_b1 = get_operation_defs(&sde_b);
+    assert!(std::sync::Arc::ptr_eq(&defs_a1, &defs_a2));
+    assert!(!std::sync::Arc::ptr_eq(&defs_a1, &defs_b1));
+    assert!(defs_a1.sde_categories.contains(&501));
+    assert!(!defs_a1.sde_categories.contains(&502));
+    assert_eq!(defs_a1.cat_isk_rewards.get(&501), Some(&10_000));
+    assert!(defs_b1.sde_categories.contains(&502));
+    assert!(!defs_b1.sde_categories.contains(&501));
+    assert_eq!(defs_b1.cat_isk_rewards.get(&502), Some(&25_000));
+
+    let mut sde_c = sde_a.clone();
+    sde_c.resources.clear();
+    let defs_c = get_operation_defs(&sde_c);
+    assert!(!std::sync::Arc::ptr_eq(&defs_a1, &defs_c));
+    assert!(defs_c.sde_categories.is_empty());
 }

@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -87,8 +87,8 @@ pub struct SdeCommunityTrackTemplate {
     pub tale_templates: Vec<u32>,
 }
 
-static SDE_LOGIN_CAMPAIGNS: OnceLock<BTreeMap<i64, SdeLoginCampaign>> = OnceLock::new();
-static SDE_COMMUNITY_TRACKS: OnceLock<BTreeMap<i64, SdeCommunityTrackTemplate>> = OnceLock::new();
+struct CachedSdeLoginCampaigns(Arc<BTreeMap<i64, SdeLoginCampaign>>);
+struct CachedSdeCommunityTracks(Arc<BTreeMap<i64, SdeCommunityTrackTemplate>>);
 
 fn parse_reward_map(val: Option<&serde_json::Value>) -> BTreeMap<u32, SdeLoginRewardEntry> {
     let mut out = BTreeMap::new();
@@ -147,8 +147,8 @@ fn parse_reward_map(val: Option<&serde_json::Value>) -> BTreeMap<u32, SdeLoginRe
     out
 }
 
-pub fn get_sde_login_campaigns(sde: &eve_sde::SdeRegistry) -> &'static BTreeMap<i64, SdeLoginCampaign> {
-    SDE_LOGIN_CAMPAIGNS.get_or_init(|| {
+pub fn get_sde_login_campaigns(sde: &eve_sde::SdeRegistry) -> Arc<BTreeMap<i64, SdeLoginCampaign>> {
+    sde.get_or_init_derived::<CachedSdeLoginCampaigns>(|| {
         let mut map = BTreeMap::new();
         if let Ok(raw) = sde.load_cfsd_nested("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary") {
             for (cid_str, val) in raw {
@@ -182,14 +182,16 @@ pub fn get_sde_login_campaigns(sde: &eve_sde::SdeRegistry) -> &'static BTreeMap<
                 );
             }
         }
-        map
+        CachedSdeLoginCampaigns(Arc::new(map))
     })
+    .0
+    .clone()
 }
 
 pub fn get_sde_community_tracks(
     sde: &eve_sde::SdeRegistry,
-) -> &'static BTreeMap<i64, SdeCommunityTrackTemplate> {
-    SDE_COMMUNITY_TRACKS.get_or_init(|| {
+) -> Arc<BTreeMap<i64, SdeCommunityTrackTemplate>> {
+    sde.get_or_init_derived::<CachedSdeCommunityTracks>(|| {
         let mut map = BTreeMap::new();
         if let Ok(raw) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
             for (tid_str, val) in raw {
@@ -226,8 +228,10 @@ pub fn get_sde_community_tracks(
                 );
             }
         }
-        map
+        CachedSdeCommunityTracks(Arc::new(map))
     })
+    .0
+    .clone()
 }
 
 /// Default daily reward turnover time in seconds past 00:00:00 UTC (11:00:00 EVE downtime).
@@ -469,7 +473,7 @@ fn handle_login_campaign_get_state(
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
         let (campaign_id, is_rookie, campaign) =
-            playtime::resolve_daily_campaign(snap, char_id, now, campaigns)?;
+            playtime::resolve_daily_campaign(snap, char_id, now, &campaigns)?;
         let track_length = campaign.track_length();
 
         let claimed_days = ext
@@ -572,7 +576,7 @@ fn handle_login_campaign_claim_reward(
     let (res, spawned_items) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let (campaign_id, _is_rookie, campaign) =
-            playtime::resolve_daily_campaign(snap, char_id, now, campaigns)?;
+            playtime::resolve_daily_campaign(snap, char_id, now, &campaigns)?;
         let track_length = campaign.track_length();
 
         let (docked_station_id, clone_grade) = snap

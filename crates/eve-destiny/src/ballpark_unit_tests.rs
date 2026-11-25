@@ -1655,3 +1655,74 @@ fn duplicate_stop_clears_emergency_warp_without_emitting_redundant_stop() {
     );
 }
 
+#[test]
+fn two_sde_registries_and_ballparks_isolate_capital_ship_catalog() {
+    let make_ship_type = |type_id: u32, group_id: u32, rig_size: Option<f64>| {
+        let mut default_attributes = std::collections::HashMap::new();
+        if let Some(sz) = rig_size {
+            default_attributes.insert(1547, sz);
+        }
+        eve_sde::InvType {
+            type_id,
+            group_id,
+            category_id: 6,
+            name: format!("CustomHull-{type_id}"),
+            mass: 1_000_000.0,
+            volume: 10_000.0,
+            capacity: 0.0,
+            radius: 100.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes,
+        }
+    };
+
+    let mut sde_cap = eve_sde::SdeRegistry::default();
+    sde_cap.types.insert(990_001, make_ship_type(990_001, 9_001, Some(4.0)));
+    let mut sde_sub = eve_sde::SdeRegistry::default();
+    sde_sub.types.insert(990_001, make_ship_type(990_001, 9_002, None));
+
+    let cat_cap1 = capital_ship_catalog_for_sde(&sde_cap);
+    let cat_cap2 = capital_ship_catalog_for_sde(&sde_cap);
+    let cat_sub = capital_ship_catalog_for_sde(&sde_sub);
+    assert!(std::sync::Arc::ptr_eq(&cat_cap1, &cat_cap2));
+    assert!(!std::sync::Arc::ptr_eq(&cat_cap1, &cat_sub));
+    assert!(cat_cap1.is_capital_ship(990_001, 0));
+    assert!(!cat_sub.is_capital_ship(990_001, 0));
+
+    let mut bp_cap = Ballpark::new(30_000_142).with_sde(&sde_cap);
+    let mut ship_cap = make_ship(1, DVec3::ZERO);
+    ship_cap.type_id = 990_001;
+    assert!(bp_cap.add_ball(ship_cap));
+    assert!(bp_cap.micro_jump(1, 100_000.0).is_ok());
+    assert!((bp_cap.balls[&1].position.x - 250_000.0).abs() < 1e-6);
+
+    let mut bp_sub = Ballpark::new(30_000_142).with_sde(&sde_sub);
+    let mut ship_sub = make_ship(1, DVec3::ZERO);
+    ship_sub.type_id = 990_001;
+    assert!(bp_sub.add_ball(ship_sub));
+    assert!(bp_sub.micro_jump(1, 100_000.0).is_ok());
+    assert!((bp_sub.balls[&1].position.x - 100_000.0).abs() < 1e-6);
+
+    let sde_clone = sde_cap.clone();
+    assert!(!std::sync::Arc::ptr_eq(
+        &cat_cap1,
+        &capital_ship_catalog_for_sde(&sde_clone)
+    ));
+}
+

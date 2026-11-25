@@ -133,6 +133,7 @@ async fn test_pve_seasons_events_and_project_discovery() {
     let def274 = fsd_challenge_definitions(&ctx.sde)
         .iter()
         .find(|d| d.challenge_id == 274)
+        .cloned()
         .expect("challenge 274");
     let ed274: Vec<(PyRep, PyRep)> = def274
         .event_conditions
