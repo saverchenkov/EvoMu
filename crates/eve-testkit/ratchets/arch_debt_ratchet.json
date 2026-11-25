@@ -1037,18 +1037,11 @@
         "services/pve_exploration_seeding.rs": 1,
         "services/pve_exploration_sites.rs": 1,
         "services/pve_special_sites_combat.rs": 1,
-        "services/quasar_cosmetics_live.rs": 3,
-        "services/quasar_cosmetics_market.rs": 1,
-        "services/quasar_cosmetics_skinr.rs": 2,
-        "services/quasar_entitlement_ledger.rs": 1,
-        "services/quasar_payment_store.rs": 1,
-        "services/quasar_payment_store_types.rs": 1,
         "services/quasar_social_chat.rs": 1,
         "services/r6_t1_p1_security_tests_combat.rs": 1,
         "services/season_fsd.rs": 4,
         "services/space_probe_scanning.rs": 1,
         "services/space_warp_jump.rs": 4,
-        "sso.rs": 2,
         "system_actor/celestials_helpers.rs": 5,
         "warn_limiter.rs": 1
       }
