@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::router::ServerContext;
 use crate::services::agents_missions::agents_missions_helpers::{
-    is_storyline_agent_type, is_storyline_template,
+    is_storyline_agent_type, is_storyline_template, mission_offer_selection_seed,
+    select_weighted_mission_template,
 };
 use crate::services::agents_missions::agents_standings_arcs::{
     compute_effective_agent_standing, compute_effective_standing_breakdown,
@@ -116,8 +117,7 @@ pub fn has_completed_mission_with_agent(
 ) -> bool {
     if snap
         .missions
-        .iter_by_character(char_id)
-        .any(|m| m.agent_id == agent_id && m.state == MissionState::Completed)
+        .has_history_for_agent_state(char_id, agent_id, MissionState::Completed)
     {
         return true;
     }
@@ -552,7 +552,8 @@ pub fn record_mission_completion_and_resolve_storyline(
         .map(|(a, _, _)| (a.agent_id, level))
 }
 
-/// Selects a Storyline `MissionTemplate` matching `level` (`1..=5`) via SDE dungeon difficulty.
+/// Selects a repeatable Storyline `MissionTemplate` matching `level` (`1..=5`) via SDE dungeon
+/// difficulty and seeded recency weighting across archived storyline history.
 pub fn select_storyline_mission_for_level<'a>(
     sde: &'a SdeRegistry,
     missions: &MissionInstanceStore,
@@ -560,7 +561,25 @@ pub fn select_storyline_mission_for_level<'a>(
     level: u8,
 ) -> Option<&'a MissionTemplate> {
     let target_diff = u32::from(level.clamp(1, 5));
-    let matches_level = sde
+    let mut storyline_hist: Vec<&eve_db::MissionHistoryEntry> = missions
+        .iter_history_by_character(char_id)
+        .filter(|e| {
+            sde.missions
+                .get(&e.template_id)
+                .is_some_and(is_storyline_template)
+        })
+        .collect();
+    storyline_hist.sort_by(|a, b| {
+        (b.ended_at_unix, b.instance_id).cmp(&(a.ended_at_unix, a.instance_id))
+    });
+    let recent_templates: Vec<u32> = storyline_hist.iter().take(3).map(|e| e.template_id).collect();
+    let seed = mission_offer_selection_seed(
+        char_id,
+        i64::from(target_diff),
+        storyline_hist.len() as u64,
+    );
+
+    let level_candidates: Vec<&'a MissionTemplate> = sde
         .missions
         .values()
         .filter(|sm| {
@@ -572,15 +591,17 @@ pub fn select_storyline_mission_for_level<'a>(
                     .and_then(|d| d.difficulty)
                     == Some(target_diff)
         })
-        .min_by_key(|sm| sm.mission_id);
-    matches_level.or_else(|| {
-        sde.missions
+        .collect();
+    select_weighted_mission_template(&level_candidates, &recent_templates, seed).or_else(|| {
+        let all_candidates: Vec<&'a MissionTemplate> = sde
+            .missions
             .values()
             .filter(|sm| {
                 is_storyline_template(sm)
                     && !missions.contains_character_template(char_id, sm.mission_id)
             })
-            .min_by_key(|sm| sm.mission_id)
+            .collect();
+        select_weighted_mission_template(&all_candidates, &recent_templates, seed)
     })
 }
 

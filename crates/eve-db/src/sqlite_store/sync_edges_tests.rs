@@ -500,6 +500,18 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
             objective: crate::MissionObjective::Encounter(crate::EncounterObjective::default()),
         })
         .expect("insert mission");
+    snap.missions
+        .record_history(crate::MissionHistoryEntry {
+            instance_id: 200_000_002,
+            character_id: cid,
+            agent_id: 3_018_922,
+            template_id: 2,
+            kind: crate::MissionKind::Courier,
+            final_state: crate::MissionState::Completed,
+            offered_at_unix: 10,
+            ended_at_unix: 20,
+        })
+        .expect("insert mission history");
     snap.mission_tally.insert(cid, 1);
     snap.standing_transactions.insert(
         cid,
@@ -653,6 +665,7 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
         "industry_jobs",
         "planetary_colonies",
         "mission_instances",
+        "mission_history",
         "mission_tally",
         "standings",
         "npe_progress",

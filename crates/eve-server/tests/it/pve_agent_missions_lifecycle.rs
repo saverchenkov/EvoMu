@@ -658,7 +658,8 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     let PyRep::Tuple(je_tup) = j_exp else { panic!() };
     let PyRep::List(je_list) = &je_tup[0] else { panic!() };
     assert!(!je_list.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mid_4 as i64))));
-    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mid_4).unwrap().state), "Expired");
+    assert!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mid_4).is_none()));
+    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::latest_history(snap, char_id, mid_4)).as_deref(), Some("Expired"));
 
     // 3b. Accepted mission deadline expiration
     let offer_5 = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Offer 5");
@@ -675,7 +676,8 @@ async fn test_pve_mission_decline_quit_and_expiration() {
 
     let comp_expired = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.expect_err("Completing expired mission must fail");
     assert_eq!(comp_expired.code, "MissionExpired");
-    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mid_5).unwrap().state), "Failed");
+    assert!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mid_5).is_none()));
+    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::latest_history(snap, char_id, mid_5)).as_deref(), Some("Failed"));
 }
 
 async fn dock_pilot_at_station(

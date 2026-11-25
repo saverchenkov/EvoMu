@@ -1875,6 +1875,7 @@ impl WorldStateSnapshot {
             || self.wallet_journal.contains_id(candidate)
             || self.char_lp_logs.contains_log_id(candidate)
             || self.missions.contains_instance_id(candidate)
+            || self.missions.contains_history_id(candidate)
             || self.missions.contains_spawned_npc_id(candidate)
             || crate::service_domains::entity_kv::Ns::ALL.iter().any(|&ns| {
                 self.entity_kv
@@ -1926,6 +1927,7 @@ impl WorldStateSnapshot {
             .chain(self.entity_kv.keys().map(|k| k.entity_id))
             .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
             .chain(self.missions.keys())
+            .chain(self.missions.history_keys())
             .chain(self.missions.spawned_npc_ball_ids())
             .chain(self.owner_notes.values().filter_map(decode_owner_note_entity_id))
     }

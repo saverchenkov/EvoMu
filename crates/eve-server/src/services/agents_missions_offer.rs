@@ -6,10 +6,11 @@ use super::{
     build_mission_briefing_text, compute_character_mission_rewards, compute_effective_agent_standing,
     is_fw_agent, is_rnd_agent, is_storyline_agent_type, is_unsupported_direct_agent_type,
     load_epic_arc_states, load_rnd_research_entries, mission_bonus_window_secs,
-    mission_matches_agent_pool_with_sde, resolve_courier_mission_details,
-    resolve_epic_arc_id_for_agent, resolve_fw_warzone_system, resolve_mining_mission_details,
+    mission_matches_agent_pool_with_sde, mission_offer_selection_seed,
+    resolve_courier_mission_details, resolve_epic_arc_id_for_agent, resolve_fw_warzone_system,
+    resolve_heraldry_mission_details, resolve_mining_mission_details,
     resolve_security_mission_encounter, resolve_trade_mission_details, rnd_tritanium_required_qty,
-    CharacterMissionRewards,
+    select_weighted_mission_template, CharacterMissionRewards,
 };
 use crate::router::notify_registry::{OnAgentMissionChange, OnIncomingTransmission};
 use crate::router::{NotificationTarget, ServerContext};
@@ -180,8 +181,7 @@ pub(super) async fn handle_mission_offer_action(
     if matches!(agent_info.agent_type_id, 5 | 8 | 12) {
         let already_done = ctx.db.with_snapshot(|snap| {
             snap.missions
-                .iter_by_character(char_id)
-                .any(|m| m.agent_id == agent_id && m.state == MissionState::Completed)
+                .has_history_for_agent_state(char_id, agent_id, MissionState::Completed)
         });
         if already_done {
             return Some(Err(BridgeRpcError { code: "OneTimeAgentMissionCompleted".into(), message: format!("One-time COSMOS / Data Center / Career agent {agent_id} mission has already been completed"), client_error: None }));
@@ -191,8 +191,7 @@ pub(super) async fn handle_mission_offer_action(
     if matches!(agent_info.agent_type_id, 5 | 8 | 12) {
         let cosmos_expired = ctx.db.with_snapshot(|snap| {
             snap.missions
-                .iter_by_character(char_id)
-                .any(|m| m.agent_id == agent_id && m.state == MissionState::Expired)
+                .has_history_for_agent_state(char_id, agent_id, MissionState::Expired)
         });
         if cosmos_expired {
             return Some(Err(BridgeRpcError {
@@ -319,25 +318,58 @@ pub(super) async fn handle_mission_offer_action(
             return Ok((mid, title, briefing, objectives, dest_sid));
         }
         let is_heraldry_agent = agent_info.agent_type_id == 13 || agent_info.division_id == 37;
-        let next_tmpl = if is_heraldry_agent && explicit_agent {
-            ctx.sde.missions
-                .values().filter(|m| {
-                     m.content_template.as_deref().unwrap_or_default().contains("Heraldry")
-                        && !snap.missions.contains_character_template(char_id, m.mission_id)
-                }).min_by_key(|m| m.mission_id)
+        let arc_completed: Vec<u32> = if agent_info.agent_type_id == 10 {
+            let (arc_id, _) = resolve_epic_arc_id_for_agent(ctx, agent_id);
+            load_epic_arc_states(snap, char_id)
+                .into_iter()
+                .find(|a| a.epic_arc_id == arc_id && a.completed_at_unix.is_none())
+                .map(|a| a.completed_missions)
+                .unwrap_or_default()
         } else {
-            ctx.sde.missions
-                .values().filter(|m| {
+            Vec::new()
+        };
+        let recent_templates = snap.missions.recent_templates_for_agent(char_id, agent_id, 3);
+        let history_count = snap.missions.count_history_for_agent(char_id, agent_id) as u64;
+        let seed = mission_offer_selection_seed(char_id, agent_id, history_count);
+        let next_tmpl = if is_heraldry_agent && explicit_agent {
+            let candidates: Vec<&eve_sde::MissionTemplate> = ctx
+                .sde
+                .missions
+                .values()
+                .filter(|m| {
+                    m.content_template
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("Heraldry")
+                        && !snap.missions.contains_character_template(char_id, m.mission_id)
+                })
+                .collect();
+            select_weighted_mission_template(&candidates, &recent_templates, seed)
+        } else {
+            let preferred: Vec<&eve_sde::MissionTemplate> = ctx
+                .sde
+                .missions
+                .values()
+                .filter(|m| {
                     mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
                         && m.has_standing_rewards
                         && !snap.missions.contains_character_template(char_id, m.mission_id)
-                }).min_by_key(|m| m.mission_id).or_else(|| {
-                    ctx.sde.missions
-                        .values().filter(|m| {
-                            mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
-                                && !snap.missions.contains_character_template(char_id, m.mission_id)
-                        }).min_by_key(|m| m.mission_id)
+                        && !arc_completed.contains(&m.mission_id)
                 })
+                .collect();
+            select_weighted_mission_template(&preferred, &recent_templates, seed).or_else(|| {
+                let fallback: Vec<&eve_sde::MissionTemplate> = ctx
+                    .sde
+                    .missions
+                    .values()
+                    .filter(|m| {
+                        mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
+                            && !snap.missions.contains_character_template(char_id, m.mission_id)
+                            && !arc_completed.contains(&m.mission_id)
+                    })
+                    .collect();
+                select_weighted_mission_template(&fallback, &recent_templates, seed)
+            })
         };
         let Some(tmpl) = next_tmpl else {
             return Err(BridgeRpcError { code: "NoMissionsAvailable".into(), message: format!("No unoffered missions remaining in SDE pool for agent {agent_id} and character {char_id}"), client_error: None });
@@ -415,12 +447,27 @@ pub(super) async fn handle_mission_offer_action(
                     md.objective_text,
                 )
             }
-            MissionKind::Heraldry => (
-                MissionObjective::None,
-                agent_info.station_id,
-                None,
-                "Complete heraldry assignment and report back.".to_string(),
-            ),
+            MissionKind::Heraldry => {
+                let hd = resolve_heraldry_mission_details(ctx, tmpl);
+                let ship_name = ctx
+                    .sde
+                    .types
+                    .get(&hd.ship_type_id)
+                    .map(|t| t.name.as_str())
+                    .unwrap_or("ship hull");
+                (
+                    MissionObjective::Delivery(DeliveryObjective {
+                        item_type_id: Some(hd.ship_type_id),
+                        quantity: hd.quantity,
+                    }),
+                    agent_info.station_id,
+                    None,
+                    format!(
+                        "Deliver {}x {} (packaged) to the Paragon station hangar.",
+                        hd.quantity, ship_name
+                    ),
+                )
+            }
             MissionKind::Encounter => {
                 let enc = resolve_security_mission_encounter(ctx, tmpl, agent_info, target_sys);
                 (

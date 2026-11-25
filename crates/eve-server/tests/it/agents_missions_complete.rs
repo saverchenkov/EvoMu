@@ -213,31 +213,172 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     });
     assert_eq!(ball_ids.len(), enc.wave_npc_count as usize);
 
-    // Independently derive expected NPC spawn group from SDE (R-MSN-TEST-02)
+    // Independently derive expected NPC spawn-group criteria from SDE (R-MSN-TEST-02)
+    // without reading production `enc.spawn_group_id`, `enc.faction_id`, or `enc.npc_type_ids`.
+    let is_non_combat_prop_group = |group_id: u32| -> bool {
+        matches!(
+            group_id,
+            306 | 319 | 323 | 335 | 494 | 496 | 784 | 922 | 925 | 952 | 1207 | 1872 | 1927 | 1928 | 4073 | 4494 | 4576 | 4771
+        )
+    };
+    let is_invuln_authority_group = |group_id: u32| -> bool {
+        matches!(group_id, 99 | 180 | 182 | 300 | 301 | 446 | 4572)
+    };
+    let is_sleeper_or_drifter_group = |group_id: u32| -> bool {
+        matches!(
+            group_id,
+            959..=961 | 982..=1005 | 1307 | 1310 | 1529 | 1530 | 1768 | 1788 | 1804..=1807 | 1956 | 4035 | 4036
+        )
+    };
+
+    let agent_level = burner_agent.level.clamp(1, 5) as u32;
     let agent_faction = ctx
         .sde
         .npc_corporations
         .get(&burner_agent.corporation_id)
         .and_then(|c| c.faction_id)
         .unwrap_or(0);
-    let target_ship_class = match burner_agent.level {
-        1 => 1,
-        2 | 3 => 2,
-        _ => 3,
+    let sys_info = ctx.sde.solar_systems.get(&agent_sys_id);
+    let region_id = sys_info.map(|s| s.region_id);
+    let region_name = region_id
+        .and_then(|rid| ctx.sde.regions.get(&rid))
+        .map(|r| r.name.to_lowercase());
+    let region_faction = region_id
+        .and_then(|rid| ctx.sde.regions.get(&rid))
+        .and_then(|r| r.faction_id);
+    let sys_name = sys_info.map(|s| s.name.to_lowercase());
+    let title_clean = burner_tmpl
+        .title
+        .to_lowercase()
+        .replace(['(', ')', '-', ':', '\''], " ");
+    let title_words: Vec<&str> = title_clean
+        .split_whitespace()
+        .filter(|w| w.len() > 3 && !matches!(*w, "the" | "part" | "level" | "mission"))
+        .collect();
+    let matched_dungeon = ctx
+        .sde
+        .dungeons
+        .values()
+        .filter(|d| {
+            let d_name_low = d.name.to_lowercase();
+            burner_tmpl.title.to_lowercase().contains(&d_name_low)
+                || d_name_low.contains(&burner_tmpl.title.to_lowercase())
+                || title_words.iter().filter(|&&w| d_name_low.contains(w)).count() >= 2
+        })
+        .min_by_key(|d| (d.difficulty.unwrap_or(agent_level).abs_diff(agent_level), d.dungeon_id))
+        .or_else(|| {
+            ctx.sde
+                .dungeons
+                .values()
+                .filter(|d| {
+                    let d_name_low = d.name.to_lowercase();
+                    let sys_match = sys_name.as_ref().is_some_and(|sn| d_name_low.contains(sn));
+                    let reg_match = region_name.as_ref().is_some_and(|rn| d_name_low.contains(rn));
+                    let fac_match = region_faction.is_some_and(|rf| d.faction_id == Some(rf));
+                    (sys_match || reg_match || fac_match) && d.difficulty.unwrap_or(agent_level) == agent_level
+                })
+                .min_by_key(|d| (d.dungeon_id as usize + burner_tmpl.mission_id as usize) % 1000)
+        })
+        .or_else(|| {
+            (agent_faction > 0)
+                .then(|| {
+                    ctx.sde
+                        .dungeons
+                        .values()
+                        .filter(|d| d.faction_id == Some(agent_faction) && d.difficulty == Some(agent_level))
+                        .min_by_key(|d| (d.dungeon_id as usize + burner_tmpl.mission_id as usize) % 1000)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            ctx.sde
+                .dungeons
+                .values()
+                .filter(|d| d.archetype_id == Some(20) && d.difficulty == Some(agent_level))
+                .min_by_key(|d| (d.dungeon_id as usize + burner_tmpl.mission_id as usize) % 1000)
+        });
+
+    let (dungeon_name, raw_dungeon_faction, expected_difficulty) = match matched_dungeon {
+        Some(d) => (d.name.to_lowercase(), d.faction_id.unwrap_or(agent_faction), d.difficulty.unwrap_or(agent_level)),
+        None => (String::new(), agent_faction, agent_level),
     };
-    let independent_spawn_group = ctx
+    let explicit_sleeper_or_drifter = title_clean.contains("sleeper")
+        || title_clean.contains("drifter")
+        || dungeon_name.contains("sleeper")
+        || dungeon_name.contains("drifter");
+    let effective_dungeon_faction = if raw_dungeon_faction == 500_021 && !explicit_sleeper_or_drifter {
+        0
+    } else {
+        raw_dungeon_faction
+    };
+    let expected_faction_id = if effective_dungeon_faction > 0 {
+        effective_dungeon_faction
+    } else if title_clean.contains("guristas") {
+        500_010
+    } else if title_clean.contains("angel") {
+        500_011
+    } else if title_clean.contains("blood") {
+        500_012
+    } else if title_clean.contains("sansha") {
+        500_019
+    } else if title_clean.contains("serpentis") {
+        500_020
+    } else {
+        agent_faction
+    };
+    let expected_faction_name = match expected_faction_id {
+        500_010 => "Guristas".to_string(),
+        500_011 => "Angel Cartel".to_string(),
+        500_012 => "Blood Raiders".to_string(),
+        500_019 => "Sansha's Nation".to_string(),
+        500_020 => "Serpentis".to_string(),
+        _ => ctx
+            .sde
+            .factions
+            .get(&expected_faction_id)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "Hostile".to_string()),
+    };
+    let expected_ship_class = match expected_difficulty {
+        1 => 1_u32,
+        2 | 3 => 2_u32,
+        _ => 3_u32,
+    };
+    assert!(
+        matches!(expected_ship_class, 2 | 3),
+        "L4 security encounter expected_ship_class must be cruiser/BC (2) or battleship/heavy (3), got {expected_ship_class}"
+    );
+
+    let faction_combat_groups: Vec<&eve_sde::NpcSpawnGroupInfo> = ctx
         .sde
         .npc_spawn_groups
         .values()
         .filter(|sg| {
-            (sg.faction_id == agent_faction || sg.group_name.contains("Deadspace"))
-                && !sg.npc_type_ids.is_empty()
+            !sg.npc_type_ids.is_empty()
+                && !is_non_combat_prop_group(sg.group_id)
+                && !is_invuln_authority_group(sg.group_id)
+                && (explicit_sleeper_or_drifter || expected_faction_id == 500_024 || !is_sleeper_or_drifter_group(sg.group_id))
+                && (sg.faction_id == expected_faction_id
+                    || sg.group_name.to_lowercase().contains(&expected_faction_name.to_lowercase()))
         })
-        .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
-        .expect("Matching NPC spawn group in SDE");
-    assert!(!independent_spawn_group.npc_type_ids.is_empty(), "SDE spawn group must have NPC types");
+        .collect();
+    assert!(
+        !faction_combat_groups.is_empty(),
+        "SDE must provide at least one eligible combatant spawn group for faction {} ({})",
+        expected_faction_name,
+        expected_faction_id
+    );
+    let min_ship_class_diff = faction_combat_groups
+        .iter()
+        .map(|sg| sg.ship_class.abs_diff(expected_ship_class))
+        .min()
+        .expect("non-empty faction combat groups");
+    let independent_spawn_groups: Vec<&eve_sde::NpcSpawnGroupInfo> = faction_combat_groups
+        .into_iter()
+        .filter(|sg| sg.ship_class.abs_diff(expected_ship_class) == min_ship_class_diff)
+        .collect();
 
-    // Verify spawned NPC types match expected SDE spawn group NPC type IDs derived independently (R-MSN-TEST-02)
+    // Verify spawned NPC types match independently derived combatant SDE spawn groups (R-MSN-TEST-02)
     let sys_handle = ctx.systems.get_or_spawn(agent_sys_id);
     for bid in &ball_ids {
         let (_, ball) = sys_handle
@@ -246,15 +387,25 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
             .ok()
             .flatten()
             .expect("spawned NPC ball in system");
-        assert!(
-            independent_spawn_group.npc_type_ids.contains(&ball.type_id),
-            "Spawned NPC type {} must match independently derived SDE spawn group (id={}, name={:?})",
-            ball.type_id,
-            independent_spawn_group.spawn_group_id,
-            independent_spawn_group.group_name,
-        );
         let sde_type = ctx.sde.types.get(&ball.type_id).expect("NPC type exists in SDE");
-        assert!(sde_type.group_id > 0, "NPC type must have valid group");
+        assert_eq!(sde_type.category_id, 11, "Spawned NPC type {} must be Entity category 11", ball.type_id);
+        assert!(
+            sde_type.group_id > 0
+                && !is_non_combat_prop_group(sde_type.group_id)
+                && !is_invuln_authority_group(sde_type.group_id),
+            "Spawned NPC type {} group {} must be combatant and non-authority",
+            ball.type_id,
+            sde_type.group_id,
+        );
+        assert!(
+            independent_spawn_groups.iter().any(|sg| sg.npc_type_ids.contains(&ball.type_id)),
+            "Spawned NPC type {} must belong to an independently derived combatant SDE spawn group for faction {} ({}) with ship_class diff {} (expected_ship_class={})",
+            ball.type_id,
+            expected_faction_name,
+            expected_faction_id,
+            min_ship_class_diff,
+            expected_ship_class,
+        );
     }
 
     // Completing before killing NPCs must fail
@@ -451,7 +602,11 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         .await.expect_err("Accepting expired offer must fail");
     assert_eq!(exp_err.code, "MissionOfferExpired");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, char_id, mid2).map(|m| m.state), Some("Expired".to_string()));
+        assert!(mission_fixture::get(snap, char_id, mid2).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid2).as_deref(),
+            Some("Expired")
+        );
         let courier_tag2 = format!("courier_cargo:{char_id}:{mid2}");
         assert!(!snap.items.values().any(|it| snap.item_custom_names.get(&it.item_id) == Some(&courier_tag2)));
     });
@@ -2307,11 +2462,12 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
         .expect_err("Expired mission must fail on completion");
     assert_eq!(exp_err.code, "MissionExpired");
 
-    // Verify active mission transitioned to Failed state
+    // Verify active mission left live table and archived in Failed state
     let is_failed = ctx.db.with_snapshot(|snap| {
-        mission_fixture::get(snap, char_id, mid2).is_some_and(|m| m.state == "Failed")
+        mission_fixture::get(snap, char_id, mid2).is_none()
+            && mission_fixture::latest_history(snap, char_id, mid2).as_deref() == Some("Failed")
     });
-    assert!(is_failed, "Expired mission must be transitioned to Failed state");
+    assert!(is_failed, "Expired mission must be archived in Failed state");
 }
 
 /// feat:pve.mission-trade

@@ -802,7 +802,11 @@ async fn test_pve_mission_bonus_timer_payout_and_expiry() {
 
     let reloaded = reload_db(&ctx);
     reloaded.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, pilot_id, mid).unwrap().state, "Completed");
+        assert!(mission_fixture::get(snap, pilot_id, mid).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, pilot_id, mid).as_deref(),
+            Some("Completed")
+        );
     });
 
     let agent_l1 = ctx
@@ -873,7 +877,11 @@ async fn test_pve_mission_offer_expiry_no_penalty_and_cosmos_lockout() {
 
     let reloaded = reload_db(&ctx);
     reloaded.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, pilot_id, mid).unwrap().state, "Expired");
+        assert!(mission_fixture::get(snap, pilot_id, mid).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, pilot_id, mid).as_deref(),
+            Some("Expired")
+        );
         let standing_after = snap.characters.get(&pilot_id).and_then(|c| c.standings.get(&agent.corporation_id).copied()).unwrap_or(0.0);
         assert_eq!(standing_before, standing_after);
     });

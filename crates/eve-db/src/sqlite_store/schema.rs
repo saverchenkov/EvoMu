@@ -16,6 +16,18 @@ CREATE TABLE IF NOT EXISTS mission_instances (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mission_instances_character_id ON mission_instances(character_id);
+
+CREATE TABLE IF NOT EXISTS mission_history (
+    instance_id INTEGER PRIMARY KEY,
+    character_id INTEGER NOT NULL,
+    agent_id INTEGER NOT NULL,
+    mission_id INTEGER NOT NULL,
+    final_state TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mission_history_character_id ON mission_history(character_id);
 "#;
 
 pub(super) fn apply_mission_instances_ddl(conn: &Connection) -> Result<(), String> {

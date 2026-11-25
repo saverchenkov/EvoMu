@@ -7,10 +7,10 @@ use super::{
     epic_arc_required_missions, finalize_mission_state_cleanup, is_agent_colocated, is_fw_agent,
     is_rnd_agent, is_storyline_template, load_epic_arc_states, load_rnd_research_entries,
     notify_standing_changes, resolve_agent_and_corp_for_system, resolve_courier_mission_details,
-    resolve_epic_arc_id_for_agent, resolve_mining_mission_details,
-    resolve_security_mission_encounter, resolve_target_mission_id, resolve_trade_mission_details,
-    rnd_tritanium_required_qty, save_epic_arc_states, save_rnd_research_entries,
-    CharacterMissionRewards, EpicArcStateEntry,
+    resolve_epic_arc_id_for_agent, resolve_heraldry_mission_details,
+    resolve_mining_mission_details, resolve_security_mission_encounter,
+    resolve_target_mission_id, resolve_trade_mission_details, rnd_tritanium_required_qty,
+    save_epic_arc_states, save_rnd_research_entries, CharacterMissionRewards, EpicArcStateEntry,
 };
 use crate::router::notify_registry::{
     OnAgentMissionChange, OnAgentMissionObjectivesCompleted, OnAgentMissionObjectivesFailed,
@@ -103,7 +103,7 @@ pub(super) async fn handle_mission_complete_action(
     });
     if is_expired {
         ctx.db.with_mut_snapshot(|snap| {
-            finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Failed, true);
+            finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Failed, true, now);
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 let cur_ag = ch.standings.get(&active_agent_id).copied().unwrap_or(0.0);
                 ch.standings.insert(active_agent_id, (cur_ag - 0.10).max(-10.0));
@@ -181,7 +181,11 @@ pub(super) async fn handle_mission_complete_action(
                 Some((34, rnd_tritanium_required_qty(agent_opt.map_or(1, |a| a.level))))
             }
             MissionKind::DataCenterTurnIn => Some((17202, 1)),
-            MissionKind::Courier | MissionKind::Heraldry | MissionKind::Encounter => None,
+            MissionKind::Heraldry => {
+                let hd = resolve_heraldry_mission_details(ctx, &tmpl);
+                Some((hd.ship_type_id, hd.quantity))
+            }
+            MissionKind::Courier | MissionKind::Encounter => None,
         });
         if action_id == 7 && req_delivery.is_some() {
             return Err(BridgeRpcError {
@@ -219,10 +223,11 @@ pub(super) async fn handle_mission_complete_action(
                 active_ship_id,
                 m_dest_station_id,
                 m_granted_cid,
+                m_kind == MissionKind::Heraldry,
             )?;
         }
 
-        finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Completed, false);
+        finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Completed, false, now);
 
         let bonus_granted = m_bonus_expiry.is_none_or(|bexp| now <= bexp);
         let bonus_paid = if bonus_granted { bonus_reward } else { 0 };
@@ -446,7 +451,14 @@ pub(super) async fn handle_mission_complete_action(
                             sl_agent.and_then(|a| a.station_id),
                         ),
                         MissionKind::Heraldry => {
-                            (MissionObjective::None, sl_agent.and_then(|a| a.station_id))
+                            let hd = resolve_heraldry_mission_details(ctx, storyline_tmpl);
+                            (
+                                MissionObjective::Delivery(DeliveryObjective {
+                                    item_type_id: Some(hd.ship_type_id),
+                                    quantity: hd.quantity,
+                                }),
+                                sl_agent.and_then(|a| a.station_id),
+                            )
                         }
                         MissionKind::Encounter => {
                             if let Some(sa) = sl_agent {

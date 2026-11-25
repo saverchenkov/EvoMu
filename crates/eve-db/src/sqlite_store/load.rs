@@ -2,8 +2,8 @@
 
 use crate::missions::{
     decide_mission_kind, lookup_sde_mission_and_agent, open_sde_sqlite_ro, CourierObjective,
-    DeliveryObjective, EncounterObjective, MissionInstance, MissionKind, MissionObjective,
-    MissionState,
+    DeliveryObjective, EncounterObjective, MissionHistoryEntry, MissionInstance, MissionKind,
+    MissionObjective, MissionState,
 };
 use crate::snapshot_ext::{decode_owner_note_entity_id, LpRewardLogEntry};
 use crate::sqlite_store::domain_rows::{
@@ -38,6 +38,7 @@ const ENTITY_ID_SQLITE_TABLES: &[(&str, &str)] = &[
     ("contracts", "contract_id"),
     ("industry_jobs", "job_id"),
     ("mission_instances", "instance_id"),
+    ("mission_history", "instance_id"),
     ("bookmarks", "bookmark_id"),
     ("mail", "message_id"),
     ("mail_timestamps", "mail_id"),
@@ -728,6 +729,7 @@ pub fn load_snapshot_from_sqlite_with_options(
         }
     }
 
+    let mut upgraded_mission_rows = false;
     if table_exists(conn, "mission_instances")? || !table_exists(conn, "missions")? {
         let mut stmt = conn
             .prepare(
@@ -746,7 +748,8 @@ pub fn load_snapshot_from_sqlite_with_options(
                 let parsed_col_state = MissionState::parse(&col_state)
                     .ok_or_else(|| format!("unknown mission state '{col_state}'"))?;
                 let js = r.get::<_, String>(4).map_err(|e| e.to_string())?;
-                let inst: MissionInstance = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                let mut inst: MissionInstance =
+                    serde_json::from_str(&js).map_err(|e| e.to_string())?;
                 if inst.instance_id != instance_id
                     || inst.character_id != col_char_id
                     || inst.state != parsed_col_state
@@ -755,10 +758,30 @@ pub fn load_snapshot_from_sqlite_with_options(
                         "mission_instances row column/json mismatch for instance_id {instance_id}"
                     ));
                 }
+                if inst.kind == MissionKind::Heraldry
+                    && matches!(inst.objective, MissionObjective::None)
+                {
+                    inst.objective = MissionObjective::Delivery(DeliveryObjective::default());
+                    upgraded_mission_rows = true;
+                }
                 Ok(inst)
             })() {
                 Ok(inst) => {
-                    if let Err(err) = snap.missions.try_insert(inst) {
+                    if !inst.state.is_active() {
+                        let ended_at = inst.accepted_at_unix.unwrap_or(inst.offered_at_unix);
+                        let entry = inst.to_history_entry(inst.state, ended_at);
+                        upgraded_mission_rows = true;
+                        if let Err(err) = snap.missions.record_history(entry) {
+                            ctx.record_bad_row(
+                                "mission_instances",
+                                "mission_instances",
+                                key,
+                                payload,
+                                err,
+                                rowid,
+                            )?;
+                        }
+                    } else if let Err(err) = snap.missions.try_insert(inst) {
                         ctx.record_bad_row(
                             "mission_instances",
                             "mission_instances",
@@ -773,6 +796,63 @@ pub fn load_snapshot_from_sqlite_with_options(
                     ctx.record_bad_row(
                         "mission_instances",
                         "mission_instances",
+                        key,
+                        payload,
+                        err,
+                        rowid,
+                    )?;
+                }
+            }
+        }
+    }
+
+    let has_mission_history_table = table_exists(conn, "mission_history")?;
+    if has_mission_history_table {
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, instance_id, character_id, final_state, record_json FROM mission_history ORDER BY instance_id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let key = row_col_string(r, 1);
+            let payload = row_col_string(r, 4);
+            match (|| -> Result<MissionHistoryEntry, String> {
+                let instance_id = r.get::<_, i64>(1).map_err(|e| e.to_string())?;
+                let col_char_id = r.get::<_, i64>(2).map_err(|e| e.to_string())?;
+                let col_state = r.get::<_, String>(3).map_err(|e| e.to_string())?;
+                let parsed_col_state = MissionState::parse(&col_state)
+                    .ok_or_else(|| format!("unknown mission history state '{col_state}'"))?;
+                let js = r.get::<_, String>(4).map_err(|e| e.to_string())?;
+                let entry: MissionHistoryEntry =
+                    serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                if entry.instance_id != instance_id
+                    || entry.character_id != col_char_id
+                    || entry.final_state != parsed_col_state
+                {
+                    return Err(format!(
+                        "mission_history row column/json mismatch for instance_id {instance_id}"
+                    ));
+                }
+                Ok(entry)
+            })() {
+                Ok(entry) => {
+                    if let Err(err) = snap.missions.record_history(entry) {
+                        ctx.record_bad_row(
+                            "mission_history",
+                            "mission_history",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
+                }
+                Err(err) => {
+                    ctx.record_bad_row(
+                        "mission_history",
+                        "mission_history",
                         key,
                         payload,
                         err,
@@ -1687,7 +1767,9 @@ pub fn load_snapshot_from_sqlite_with_options(
     if had_legacy_missions_table {
         migrate_legacy_missions_table(conn, &mut snap, &legacy_sp6_waves, &mut ctx)?;
     }
-    if had_legacy_missions_table && can_sync_migrations {
+    if (had_legacy_missions_table || !has_mission_history_table || upgraded_mission_rows)
+        && can_sync_migrations
+    {
         super::schema::apply_mission_instances_ddl(conn)?;
     }
     ctx.flush_quarantined_rows(conn)?;
@@ -1706,7 +1788,7 @@ pub fn load_snapshot_from_sqlite_with_options(
         }
         let changes = crate::tx_engine::ChangeSet::diff(snap.wal_seq, &pre_mig, &snap);
         let did_change_snap = !changes.is_empty();
-        if did_change_snap || had_any_legacy {
+        if did_change_snap || had_any_legacy || upgraded_mission_rows {
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             if did_change_snap {
                 let mut exec =
@@ -1720,6 +1802,9 @@ pub fn load_snapshot_from_sqlite_with_options(
                     false,
                 )
                 .map_err(|e| e.to_string())?;
+            }
+            if upgraded_mission_rows {
+                super::sync::rewrite_mission_tables(&tx, &snap)?;
             }
             if had_legacy_ledger {
                 super::domain_rows::sync_ledger_domain_rows(&tx, &snap)?;
@@ -1805,6 +1890,7 @@ struct LegacyMissionMetaJson {
     destination_station_id: Option<i64>,
     origin_station_id: Option<i64>,
     offered_level: Option<u8>,
+    completed_at_unix: Option<u64>,
 }
 
 fn legacy_mission_meta_note_id(char_id: i64, mission_id: u32) -> i64 {
@@ -1981,9 +2067,10 @@ fn migrate_legacy_missions_table(
             .and_then(|note| serde_json::from_str::<LegacyMissionMetaJson>(&note.note).ok())
             .unwrap_or_default();
 
-        if snap
-            .missions
-            .contains_character_template(rec.character_id, rec.mission_id)
+        if state.is_active()
+            && snap
+                .missions
+                .contains_character_template(rec.character_id, rec.mission_id)
         {
             continue;
         }
@@ -2054,7 +2141,7 @@ fn migrate_legacy_missions_table(
             } else {
                 let base = decide_mission_kind(tmpl.as_ref(), ag.as_ref());
                 match base {
-                    MissionKind::Heraldry | MissionKind::Encounter
+                    MissionKind::Encounter
                         if has_delivery_clue && !has_encounter_clue =>
                     {
                         if meta.required_delivery_type_id == Some(17202) {
@@ -2093,39 +2180,57 @@ fn migrate_legacy_missions_table(
             }),
             MissionKind::Trade
             | MissionKind::Mining
+            | MissionKind::Heraldry
             | MissionKind::DataCenterTurnIn
             | MissionKind::ResearchTurnIn => MissionObjective::Delivery(DeliveryObjective {
                 item_type_id: meta.required_delivery_type_id,
                 quantity: meta.required_delivery_qty,
             }),
-            MissionKind::Heraldry => MissionObjective::None,
         };
 
         let mut instance_id = snap.alloc_entity_id();
         while pending_ball_ids.contains(&instance_id) {
             instance_id = snap.alloc_entity_id();
         }
-        let instance = MissionInstance {
-            instance_id,
-            character_id: rec.character_id,
-            agent_id: rec.agent_id,
-            template_id: rec.mission_id,
-            state,
-            kind,
-            solar_system_id: rec.solar_system_id,
-            current_room_id: rec.current_room_id,
-            bookmark_id: rec.bookmark_id,
-            origin_station_id: meta.origin_station_id,
-            offered_level: meta.offered_level,
-            is_anomic_burner: meta.is_anomic_burner,
-            offered_at_unix: meta.offered_at_unix,
-            offer_expiry_unix: meta.offer_expiry_unix,
-            accepted_at_unix: meta.accepted_at_unix,
-            accept_expiry_unix: meta.accept_expiry_unix,
-            bonus_expiry_unix: meta.bonus_expiry_unix,
-            objective,
+        let res = if !state.is_active() {
+            let ended_at_unix = meta
+                .completed_at_unix
+                .or(meta.accepted_at_unix)
+                .unwrap_or(meta.offered_at_unix);
+            snap.missions.record_history(MissionHistoryEntry {
+                instance_id,
+                character_id: rec.character_id,
+                agent_id: rec.agent_id,
+                template_id: rec.mission_id,
+                kind,
+                final_state: state,
+                offered_at_unix: meta.offered_at_unix,
+                ended_at_unix,
+            })
+        } else {
+            let instance = MissionInstance {
+                instance_id,
+                character_id: rec.character_id,
+                agent_id: rec.agent_id,
+                template_id: rec.mission_id,
+                state,
+                kind,
+                solar_system_id: rec.solar_system_id,
+                current_room_id: rec.current_room_id,
+                bookmark_id: rec.bookmark_id,
+                origin_station_id: meta.origin_station_id,
+                offered_level: meta.offered_level,
+                is_anomic_burner: meta.is_anomic_burner,
+                offered_at_unix: meta.offered_at_unix,
+                offer_expiry_unix: meta.offer_expiry_unix,
+                accepted_at_unix: meta.accepted_at_unix,
+                accept_expiry_unix: meta.accept_expiry_unix,
+                bonus_expiry_unix: meta.bonus_expiry_unix,
+                objective,
+            };
+            snap.missions.try_insert(instance)
         };
-        if let Err(err) = snap.missions.try_insert(instance) {
+        if let Err(err) = res {
             ctx.record_bad_row("missions", "missions", key, payload, err, rowid)?;
         }
     }

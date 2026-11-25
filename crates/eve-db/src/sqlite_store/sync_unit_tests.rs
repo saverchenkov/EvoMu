@@ -280,6 +280,18 @@ fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
             }),
         })
         .expect("insert mission");
+    snap.missions
+        .record_history(crate::MissionHistoryEntry {
+            instance_id: 200_000_201,
+            character_id: cid,
+            agent_id: 3_018_922,
+            template_id: 201,
+            kind: crate::MissionKind::Courier,
+            final_state: crate::MissionState::Completed,
+            offered_at_unix: 100,
+            ended_at_unix: 200,
+        })
+        .expect("insert mission history");
     snap.mission_tally.insert(cid, 2);
     snap.standing_transactions.insert(
         cid,
@@ -488,6 +500,7 @@ fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
     assert!(loaded.industry_jobs.is_empty());
     assert!(loaded.planetary_colonies.is_empty());
     assert!(loaded.missions.is_empty());
+    assert_eq!(loaded.missions.history_len(), 0);
     assert!(loaded.mission_tally.is_empty());
     assert!(loaded.standing_transactions.is_empty());
     assert!(loaded.npe_progress.is_empty());

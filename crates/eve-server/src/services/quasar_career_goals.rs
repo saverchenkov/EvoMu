@@ -2200,13 +2200,11 @@ pub(crate) fn record_mission_completion_career_goals(
                     }
                 } else {
                     let done = ctx.db.with_snapshot(|snap| {
-                        snap.missions
-                            .iter_by_character(char_id)
-                            .filter(|m| {
-                                m.agent_id == agent_id
-                                    && m.state == eve_db::MissionState::Completed
-                            })
-                            .count() as u32
+                        snap.missions.count_history_for_agent_state(
+                            char_id,
+                            agent_id,
+                            eve_db::MissionState::Completed,
+                        ) as u32
                     });
                     let base = done.clamp(1, 10);
                     if matches!(div, "entrepreneur" | "producer") && base <= 5 {

@@ -369,7 +369,7 @@ fn r6_t3_06_mission_delivery_rejects_contract_locked_and_borrowed_courier_items(
     snap.item_custom_names.insert(77_500_002, format!("courier_cargo:{ch}:999"));
 
     let err = super::agents_mission_delivery::verify_and_consume_mission_delivery_items(
-        &mut snap, ch, mid, 34, 500, false, false, Some(st), Some(st), None, None, None,
+        &mut snap, ch, mid, 34, 500, false, false, Some(st), Some(st), None, None, None, false,
     ).unwrap_err();
     assert_eq!(err.code, "MissionIncomplete");
     assert_eq!(snap.items[&77_500_001].quantity, 1000);
@@ -379,7 +379,7 @@ fn r6_t3_06_mission_delivery_rejects_contract_locked_and_borrowed_courier_items(
         item_id: 77_500_003, type_id: 34, owner_id: ch, location_id: st, flag: InventoryFlag::Hangar, quantity: 500, singleton: false, ..Default::default()
     });
     super::agents_mission_delivery::verify_and_consume_mission_delivery_items(
-        &mut snap, ch, mid, 34, 500, false, false, Some(st), Some(st), None, None, None,
+        &mut snap, ch, mid, 34, 500, false, false, Some(st), Some(st), None, None, None, false,
     ).unwrap();
     assert!(!snap.items.contains_key(&77_500_003));
     assert_eq!(snap.items[&77_500_001].quantity, 1000);

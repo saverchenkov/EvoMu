@@ -588,10 +588,11 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
     assert!(!pen1 && !acc1);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&66_001].quantity, 15);
-        assert!(mission_fixture::get(snap, char_id, 301)
-            .unwrap()
-            .granted_courier_item_id
-            .is_none());
+        assert!(mission_fixture::get(snap, char_id, 301).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, 301).as_deref(),
+            Some("Declined")
+        );
     });
 
     // Second regular mission decline within 4 hours (302) -> standing penalty (-0.05) applied!
@@ -961,7 +962,7 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
         );
         mission_fixture::insert(
             snap,
-            MissionFixture::new(char_id, 702, 4_200_001, 30_300_001, "Completed"),
+            MissionFixture::new(char_id, 702, 4_200_001, 30_300_001, "Accepted"),
         );
     });
 
@@ -1059,7 +1060,7 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
             .code,
         "MissionNotActive"
     );
-    // Fallback to agent match with different state (702 Completed on 4_200_001 when querying Offered)
+    // Fallback to agent match with different active state (702 Accepted on 4_200_001 when querying Offered)
     assert_eq!(
         resolve_target_mission_id(
             &ctx,

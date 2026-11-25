@@ -112,10 +112,12 @@ impl MissionKind {
     /// Journal bookmark `locationType` label expected by the V24 client.
     pub const fn journal_location_type(self) -> &'static str {
         match self {
-            Self::Courier | Self::Trade | Self::DataCenterTurnIn | Self::ResearchTurnIn => {
-                "objective.destination"
-            }
-            Self::Encounter | Self::Mining | Self::Heraldry => "dungeon",
+            Self::Courier
+            | Self::Trade
+            | Self::DataCenterTurnIn
+            | Self::ResearchTurnIn
+            | Self::Heraldry => "objective.destination",
+            Self::Encounter | Self::Mining => "dungeon",
         }
     }
 }
@@ -406,11 +408,24 @@ impl MissionObjective {
             MissionKind::Courier => Self::Courier(CourierObjective::default()),
             MissionKind::Trade
             | MissionKind::Mining
+            | MissionKind::Heraldry
             | MissionKind::DataCenterTurnIn
             | MissionKind::ResearchTurnIn => Self::Delivery(DeliveryObjective::default()),
-            MissionKind::Heraldry => Self::None,
         }
     }
+}
+
+/// Persistent terminal mission archive record (`#1496` Track 4).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MissionHistoryEntry {
+    pub instance_id: MissionInstanceId,
+    pub character_id: i64,
+    pub agent_id: i64,
+    pub template_id: u32,
+    pub kind: MissionKind,
+    pub final_state: MissionState,
+    pub offered_at_unix: u64,
+    pub ended_at_unix: u64,
 }
 
 /// Persisted per-instance mission record unifying active row, timing/cargo metadata,
@@ -457,12 +472,60 @@ impl MissionInstance {
                 | (
                     MissionKind::Trade
                         | MissionKind::Mining
+                        | MissionKind::Heraldry
                         | MissionKind::DataCenterTurnIn
                         | MissionKind::ResearchTurnIn,
                     MissionObjective::Delivery(_),
                 )
-                | (MissionKind::Heraldry, MissionObjective::None)
         )
+    }
+
+    /// Converts this mission instance into an immutable [`MissionHistoryEntry`] at `ended_at_unix`.
+    pub fn to_history_entry(
+        &self,
+        final_state: MissionState,
+        ended_at_unix: u64,
+    ) -> MissionHistoryEntry {
+        MissionHistoryEntry {
+            instance_id: self.instance_id,
+            character_id: self.character_id,
+            agent_id: self.agent_id,
+            template_id: self.template_id,
+            kind: self.kind,
+            final_state,
+            offered_at_unix: self.offered_at_unix,
+            ended_at_unix,
+        }
+    }
+
+    /// Reconstructs a read-only mission view from an archived [`MissionHistoryEntry`].
+    pub fn from_history_entry(
+        entry: &MissionHistoryEntry,
+        solar_system_id: SolarSystemId,
+        origin_station_id: Option<i64>,
+    ) -> Self {
+        Self {
+            instance_id: entry.instance_id,
+            character_id: entry.character_id,
+            agent_id: entry.agent_id,
+            template_id: entry.template_id,
+            state: entry.final_state,
+            kind: entry.kind,
+            solar_system_id,
+            current_room_id: 1,
+            bookmark_id: None,
+            origin_station_id,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: entry.offered_at_unix,
+            offer_expiry_unix: entry.ended_at_unix,
+            accepted_at_unix: (entry.final_state != MissionState::Expired
+                && entry.final_state != MissionState::Declined)
+                .then_some(entry.offered_at_unix),
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: MissionObjective::default_for_kind(entry.kind),
+        }
     }
 
     pub fn encounter(&self) -> Option<&EncounterObjective> {
@@ -634,6 +697,12 @@ pub fn lookup_sde_mission_and_agent(
 }
 
 fn validate_instance(instance: &mut MissionInstance) -> Result<(), String> {
+    if !instance.state.is_active() {
+        return Err(format!(
+            "active mission instance {} cannot have terminal state {:?}; archive to history instead",
+            instance.instance_id, instance.state
+        ));
+    }
     if !instance.is_objective_consistent() {
         return Err(format!(
             "mission instance {} has incompatible kind {:?} and objective variant",
@@ -646,24 +715,29 @@ fn validate_instance(instance: &mut MissionInstance) -> Result<(), String> {
     Ok(())
 }
 
-/// CoW indexed storage of all [`MissionInstance`] records in [`crate::WorldStateSnapshot`].
+/// CoW indexed storage of active [`MissionInstance`] records and archived
+/// [`MissionHistoryEntry`] records in [`crate::WorldStateSnapshot`] (`#1496` Tracks 3 & 4).
 ///
 /// Invariants:
-/// - Primary key is `instance_id` (`MissionInstanceId`), iterated deterministically in ascending order.
-/// - Track 3 enforces unique `(character_id, template_id)` across all stored instances.
-/// - Secondary indexes (`by_character`, `by_char_template`, `by_npc_ball`) stay synchronized
-///   across every checked mutation with zero dirty flags or reconciliation passes.
+/// - Active primary key is `instance_id` (`MissionInstanceId`), iterated deterministically in ascending order.
+/// - Track 3 enforces unique `(character_id, template_id)` across all active instances.
+/// - Track 4 restricts `by_id` to active states (`Offered` / `Accepted`) and keeps terminal
+///   transitions in `history` + `history_by_character` with disjoint `MissionInstanceId`s.
+/// - Secondary indexes stay synchronized across every checked mutation.
 #[derive(Debug, Clone, Default)]
 pub struct MissionInstanceStore {
     by_id: OrdMap<MissionInstanceId, MissionInstance>,
     by_character: OrdMap<(i64, MissionInstanceId), ()>,
     by_char_template: OrdMap<(i64, u32), MissionInstanceId>,
     by_npc_ball: OrdMap<i64, MissionInstanceId>,
+    history: OrdMap<MissionInstanceId, MissionHistoryEntry>,
+    history_by_character: OrdMap<(i64, MissionInstanceId), ()>,
 }
 
 impl PartialEq for MissionInstanceStore {
     fn eq(&self, other: &Self) -> bool {
-        self.by_id.ptr_eq(&other.by_id) || self.by_id == other.by_id
+        (self.by_id.ptr_eq(&other.by_id) || self.by_id == other.by_id)
+            && (self.history.ptr_eq(&other.history) || self.history == other.history)
     }
 }
 
@@ -675,7 +749,7 @@ impl MissionInstanceStore {
         Self::default()
     }
 
-    /// Rebuilds a validated store from an iterator of mission instances.
+    /// Rebuilds a validated store from an iterator of active mission instances.
     pub fn from_instances<I>(iter: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = MissionInstance>,
@@ -687,9 +761,46 @@ impl MissionInstanceStore {
         Ok(store)
     }
 
-    /// Returns `true` when two stores share the exact same underlying primary B-tree root.
+    /// Rebuilds a store from pre-Track-4 legacy JSON snapshots, upgrading legacy
+    /// `(Heraldry, None)` rows and archiving terminal rows into history.
+    fn from_legacy_instances<I>(iter: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = MissionInstance>,
+    {
+        let mut store = Self::new();
+        for mut inst in iter {
+            if inst.kind == MissionKind::Heraldry
+                && matches!(inst.objective, MissionObjective::None)
+            {
+                inst.objective = MissionObjective::Delivery(DeliveryObjective::default());
+            }
+            if !inst.state.is_active() {
+                let ended_at = inst.accepted_at_unix.unwrap_or(inst.offered_at_unix);
+                let entry = inst.to_history_entry(inst.state, ended_at);
+                store.record_history(entry)?;
+            } else {
+                store.try_insert(inst)?;
+            }
+        }
+        Ok(store)
+    }
+
+    /// Rebuilds a validated store from active mission instances and archived history entries.
+    pub fn from_parts<I, H>(instances: I, history: H) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = MissionInstance>,
+        H: IntoIterator<Item = MissionHistoryEntry>,
+    {
+        let mut store = Self::from_instances(instances)?;
+        for entry in history {
+            store.record_history(entry)?;
+        }
+        Ok(store)
+    }
+
+    /// Returns `true` when two stores share the exact same primary active and history B-tree roots.
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.by_id.ptr_eq(&other.by_id)
+        self.by_id.ptr_eq(&other.by_id) && self.history.ptr_eq(&other.history)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -755,6 +866,108 @@ impl MissionInstanceStore {
         self.by_npc_ball.keys().copied()
     }
 
+    /// Deterministic ascending iteration over all archived mission history entries.
+    pub fn iter_history(&self) -> impl Iterator<Item = &MissionHistoryEntry> + '_ {
+        self.history.values()
+    }
+
+    /// Indexed `O(log N + k)` iteration over one character's archived mission history.
+    pub fn iter_history_by_character(
+        &self,
+        char_id: i64,
+    ) -> impl Iterator<Item = &MissionHistoryEntry> + '_ {
+        self.history_by_character
+            .range((char_id, i64::MIN)..=(char_id, i64::MAX))
+            .filter_map(|(&(_, instance_id), _)| self.history.get(&instance_id))
+    }
+
+    /// Total number of archived terminal mission history entries.
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Looks up one archived history entry by `MissionInstanceId`.
+    pub fn get_history(&self, instance_id: MissionInstanceId) -> Option<&MissionHistoryEntry> {
+        self.history.get(&instance_id)
+    }
+
+    /// Returns `true` if `instance_id` exists in archived mission history.
+    pub fn contains_history_id(&self, instance_id: MissionInstanceId) -> bool {
+        self.history.contains_key(&instance_id)
+    }
+
+    /// Deterministic ascending archived `MissionInstanceId` keys.
+    pub fn history_keys(&self) -> impl Iterator<Item = MissionInstanceId> + '_ {
+        self.history.keys().copied()
+    }
+
+    /// Returns `true` when `char_id` has an archived history row for `agent_id` in `state`.
+    pub fn has_history_for_agent_state(
+        &self,
+        char_id: i64,
+        agent_id: i64,
+        state: MissionState,
+    ) -> bool {
+        self.iter_history_by_character(char_id)
+            .any(|e| e.agent_id == agent_id && e.final_state == state)
+    }
+
+    /// Counts archived history rows for `(char_id, agent_id)` matching `state`.
+    pub fn count_history_for_agent_state(
+        &self,
+        char_id: i64,
+        agent_id: i64,
+        state: MissionState,
+    ) -> usize {
+        self.iter_history_by_character(char_id)
+            .filter(|e| e.agent_id == agent_id && e.final_state == state)
+            .count()
+    }
+
+    /// Counts all archived history rows for `(char_id, agent_id)` regardless of terminal state.
+    pub fn count_history_for_agent(&self, char_id: i64, agent_id: i64) -> usize {
+        self.iter_history_by_character(char_id)
+            .filter(|e| e.agent_id == agent_id)
+            .count()
+    }
+
+    /// Counts all archived history rows for `char_id`.
+    pub fn count_history_by_character(&self, char_id: i64) -> usize {
+        self.iter_history_by_character(char_id).count()
+    }
+
+    /// Returns the most recent archived history row for `(char_id, template_id)` by `(ended_at_unix, instance_id)`.
+    pub fn latest_history_for_character_template(
+        &self,
+        char_id: i64,
+        template_id: u32,
+    ) -> Option<&MissionHistoryEntry> {
+        self.iter_history_by_character(char_id)
+            .filter(|e| e.template_id == template_id)
+            .max_by_key(|e| (e.ended_at_unix, e.instance_id))
+    }
+
+    /// Returns up to `limit` archived template IDs for `(char_id, agent_id)` ordered most-recent first.
+    pub fn recent_templates_for_agent(
+        &self,
+        char_id: i64,
+        agent_id: i64,
+        limit: usize,
+    ) -> Vec<u32> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut entries: Vec<&MissionHistoryEntry> = self
+            .iter_history_by_character(char_id)
+            .filter(|e| e.agent_id == agent_id)
+            .collect();
+        entries.sort_by(|a, b| {
+            (b.ended_at_unix, b.instance_id).cmp(&(a.ended_at_unix, a.instance_id))
+        });
+        entries.truncate(limit);
+        entries.into_iter().map(|e| e.template_id).collect()
+    }
+
     fn insert_validated_unchecked(&mut self, instance: MissionInstance) {
         let id = instance.instance_id;
         let char_id = instance.character_id;
@@ -778,13 +991,19 @@ impl MissionInstanceStore {
         }
     }
 
-    /// Inserts a new [`MissionInstance`], failing on duplicate `instance_id`, duplicate
-    /// `(character_id, template_id)`, or NPC ball ID collision with another instance.
+    /// Inserts a new active [`MissionInstance`], failing on terminal state, duplicate `instance_id`
+    /// (live or archived), duplicate `(character_id, template_id)`, or NPC ball ID collision.
     pub fn try_insert(&mut self, mut instance: MissionInstance) -> Result<(), String> {
         validate_instance(&mut instance)?;
         if self.by_id.contains_key(&instance.instance_id) {
             return Err(format!(
                 "duplicate mission instance_id {}",
+                instance.instance_id
+            ));
+        }
+        if self.history.contains_key(&instance.instance_id) {
+            return Err(format!(
+                "mission instance_id {} already exists in mission history",
                 instance.instance_id
             ));
         }
@@ -808,12 +1027,18 @@ impl MissionInstanceStore {
         Ok(())
     }
 
-    /// Inserts or replaces the row matching `(instance.character_id, instance.template_id)`.
+    /// Inserts or replaces the active row matching `(instance.character_id, instance.template_id)`.
     pub fn upsert_by_character_template(
         &mut self,
         mut instance: MissionInstance,
     ) -> Result<Option<MissionInstance>, String> {
         validate_instance(&mut instance)?;
+        if self.history.contains_key(&instance.instance_id) {
+            return Err(format!(
+                "mission instance_id {} already exists in mission history",
+                instance.instance_id
+            ));
+        }
         let replaced_id = self
             .by_char_template
             .get(&(instance.character_id, instance.template_id))
@@ -862,12 +1087,125 @@ impl MissionInstanceStore {
         self.remove(id)
     }
 
-    /// Removes all mission instances without touching allocation if already empty.
+    /// Records a validated terminal [`MissionHistoryEntry`], rejecting active states or ID collisions.
+    pub fn record_history(&mut self, entry: MissionHistoryEntry) -> Result<(), String> {
+        if entry.final_state.is_active() {
+            return Err(format!(
+                "mission history entry {} cannot have active state {:?}",
+                entry.instance_id, entry.final_state
+            ));
+        }
+        if self.history.contains_key(&entry.instance_id) {
+            return Err(format!(
+                "duplicate mission history instance_id {}",
+                entry.instance_id
+            ));
+        }
+        if self.by_id.contains_key(&entry.instance_id) {
+            return Err(format!(
+                "mission instance_id {} already exists in active mission instances",
+                entry.instance_id
+            ));
+        }
+        self.history_by_character
+            .insert((entry.character_id, entry.instance_id), ());
+        self.history.insert(entry.instance_id, entry);
+        Ok(())
+    }
+
+    /// Moves an active mission identified by `instance_id` out of live storage and into persistent history.
+    pub fn archive_terminal(
+        &mut self,
+        instance_id: MissionInstanceId,
+        final_state: MissionState,
+        ended_at_unix: u64,
+    ) -> Result<Option<MissionHistoryEntry>, String> {
+        if final_state.is_active() {
+            return Err(format!(
+                "cannot archive mission {instance_id} with non-terminal state {final_state:?}"
+            ));
+        }
+        if self.history.contains_key(&instance_id) {
+            return Err(format!(
+                "duplicate mission history instance_id {instance_id}"
+            ));
+        }
+        let Some(removed) = self.remove(instance_id) else {
+            return Ok(None);
+        };
+        let entry = removed.to_history_entry(final_state, ended_at_unix);
+        self.history_by_character
+            .insert((entry.character_id, entry.instance_id), ());
+        self.history.insert(entry.instance_id, entry.clone());
+        Ok(Some(entry))
+    }
+
+    /// Moves an active mission identified by `(char_id, template_id)` out of live storage and into persistent history.
+    pub fn archive_by_character_template(
+        &mut self,
+        char_id: i64,
+        template_id: u32,
+        final_state: MissionState,
+        ended_at_unix: u64,
+    ) -> Result<Option<MissionHistoryEntry>, String> {
+        if final_state.is_active() {
+            return Err(format!(
+                "cannot archive mission ({char_id}, {template_id}) with non-terminal state {final_state:?}"
+            ));
+        }
+        let Some(&id) = self.by_char_template.get(&(char_id, template_id)) else {
+            return Ok(None);
+        };
+        self.archive_terminal(id, final_state, ended_at_unix)
+    }
+
+    /// Removes a specific archived history entry by `instance_id`.
+    pub fn remove_history(&mut self, instance_id: MissionInstanceId) -> Option<MissionHistoryEntry> {
+        let old = self.history.remove(&instance_id)?;
+        self.history_by_character
+            .remove(&(old.character_id, old.instance_id));
+        Some(old)
+    }
+
+    /// Removes all archived history entries for `(char_id, template_id)`, returning how many were removed.
+    pub fn remove_history_for_character_template(
+        &mut self,
+        char_id: i64,
+        template_id: u32,
+    ) -> usize {
+        let ids: Vec<MissionInstanceId> = self
+            .iter_history_by_character(char_id)
+            .filter(|e| e.template_id == template_id)
+            .map(|e| e.instance_id)
+            .collect();
+        let count = ids.len();
+        for id in ids {
+            self.remove_history(id);
+        }
+        count
+    }
+
+    /// Removes all archived history entries for `char_id`, returning how many were removed.
+    pub fn remove_history_by_character(&mut self, char_id: i64) -> usize {
+        let ids: Vec<MissionInstanceId> = self
+            .iter_history_by_character(char_id)
+            .map(|e| e.instance_id)
+            .collect();
+        let count = ids.len();
+        for id in ids {
+            self.remove_history(id);
+        }
+        count
+    }
+
+    /// Removes all active mission instances and archived history without touching allocation if already empty.
     pub fn clear(&mut self) {
         if self.by_id.is_empty()
             && self.by_character.is_empty()
             && self.by_char_template.is_empty()
             && self.by_npc_ball.is_empty()
+            && self.history.is_empty()
+            && self.history_by_character.is_empty()
         {
             return;
         }
@@ -875,6 +1213,8 @@ impl MissionInstanceStore {
         self.by_character.clear();
         self.by_char_template.clear();
         self.by_npc_ball.clear();
+        self.history.clear();
+        self.history_by_character.clear();
     }
 
     /// Checked mutation of one mission by `instance_id`; preserves primary sharing if unchanged.
@@ -977,7 +1317,7 @@ impl MissionInstanceStore {
         true
     }
 
-    /// Asserts exact 1-to-1 bijection across primary storage and all secondary indexes.
+    /// Asserts exact 1-to-1 bijection across primary storage, secondary indexes, active-only rule, and history.
     pub fn assert_invariants(&self) -> Result<(), String> {
         if self.by_character.len() != self.by_id.len() {
             return Err(format!(
@@ -993,10 +1333,23 @@ impl MissionInstanceStore {
                 self.by_id.len()
             ));
         }
+        if self.history_by_character.len() != self.history.len() {
+            return Err(format!(
+                "history_by_character len {} != history len {}",
+                self.history_by_character.len(),
+                self.history.len()
+            ));
+        }
         let mut expected_balls = 0usize;
         for (&id, inst) in &self.by_id {
             if inst.instance_id != id {
                 return Err(format!("key {id} != instance_id {}", inst.instance_id));
+            }
+            if !inst.state.is_active() {
+                return Err(format!(
+                    "live mission instance {id} has terminal state {:?}",
+                    inst.state
+                ));
             }
             if !inst.is_objective_consistent() {
                 return Err(format!("inconsistent kind/objective on instance {id}"));
@@ -1030,21 +1383,73 @@ impl MissionInstanceStore {
                 self.by_npc_ball.len()
             ));
         }
+        for (&id, entry) in &self.history {
+            if entry.instance_id != id {
+                return Err(format!("history key {id} != instance_id {}", entry.instance_id));
+            }
+            if entry.final_state.is_active() {
+                return Err(format!(
+                    "history entry {id} has active state {:?}",
+                    entry.final_state
+                ));
+            }
+            if self.by_id.contains_key(&id) {
+                return Err(format!(
+                    "instance_id {id} present in both active missions and history"
+                ));
+            }
+            if !self
+                .history_by_character
+                .contains_key(&(entry.character_id, id))
+            {
+                return Err(format!(
+                    "missing history_by_character entry ({}, {id})",
+                    entry.character_id
+                ));
+            }
+        }
         Ok(())
     }
 }
 
+#[derive(Serialize)]
+struct SerMissionInstanceStore<'a> {
+    instances: Vec<&'a MissionInstance>,
+    history: Vec<&'a MissionHistoryEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DeMissionInstanceStore {
+    Legacy(Vec<MissionInstance>),
+    Full {
+        #[serde(default)]
+        instances: Vec<MissionInstance>,
+        #[serde(default)]
+        history: Vec<MissionHistoryEntry>,
+    },
+}
+
 impl Serialize for MissionInstanceStore {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let items: Vec<&MissionInstance> = self.iter().collect();
-        items.serialize(serializer)
+        SerMissionInstanceStore {
+            instances: self.iter().collect(),
+            history: self.iter_history().collect(),
+        }
+        .serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for MissionInstanceStore {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let items = Vec::<MissionInstance>::deserialize(deserializer)?;
-        Self::from_instances(items).map_err(DeError::custom)
+        match DeMissionInstanceStore::deserialize(deserializer)? {
+            DeMissionInstanceStore::Legacy(items) => {
+                Self::from_legacy_instances(items).map_err(DeError::custom)
+            }
+            DeMissionInstanceStore::Full { instances, history } => {
+                Self::from_parts(instances, history).map_err(DeError::custom)
+            }
+        }
     }
 }
 
@@ -1087,7 +1492,10 @@ mod tests {
                 }),
                 quantity: 25,
             }),
-            MissionKind::Heraldry => MissionObjective::None,
+            MissionKind::Heraldry => MissionObjective::Delivery(DeliveryObjective {
+                item_type_id: Some(587),
+                quantity: 1,
+            }),
         };
         MissionInstance {
             instance_id,
@@ -1142,10 +1550,47 @@ mod tests {
         assert_eq!(MissionState::parse("offered"), None);
 
         let mut store = MissionInstanceStore::new();
-        for (idx, (&state, &kind)) in all_states.iter().zip(all_kinds.iter()).enumerate() {
+        for (idx, &kind) in all_kinds.iter().enumerate() {
+            let state = if idx % 2 == 0 {
+                MissionState::Offered
+            } else {
+                MissionState::Accepted
+            };
             let iid = 200_000_100 - (idx as i64) * 3;
-            let inst = sample_instance(iid, 90_000_001 + (idx as i64 % 2), 10_000 + idx as u32, state, kind);
-            store.try_insert(inst).expect("insert sample");
+            let inst = sample_instance(
+                iid,
+                90_000_001 + (idx as i64 % 2),
+                10_000 + idx as u32,
+                state,
+                kind,
+            );
+            store.try_insert(inst).expect("insert active sample");
+        }
+        let terminal_states = all_states
+            .iter()
+            .copied()
+            .filter(|s| !s.is_active())
+            .collect::<Vec<_>>();
+        for (idx, &term_state) in terminal_states.iter().enumerate() {
+            let tid = 10_200 + idx as u32;
+            let iid = 200_000_200 + idx as i64;
+            let mut active = sample_instance(
+                iid,
+                90_000_001 + (idx as i64 % 2),
+                tid,
+                MissionState::Accepted,
+                all_kinds[idx % all_kinds.len()],
+            );
+            store.try_insert(active.clone()).expect("insert pre-archive");
+            store
+                .archive_terminal(iid, term_state, 1_700_001_000 + idx as u64)
+                .expect("archive terminal state")
+                .expect("archived entry");
+            active.state = term_state;
+            assert!(
+                store.try_insert(active).is_err(),
+                "terminal state insert into active store must fail"
+            );
         }
         store.assert_invariants().expect("valid store");
 
@@ -1153,6 +1598,7 @@ mod tests {
         let decoded: MissionInstanceStore = serde_json::from_str(&json).expect("deserialize store");
         assert_eq!(decoded, store);
         decoded.assert_invariants().expect("decoded store invariants");
+        assert_eq!(decoded.history_len(), terminal_states.len());
 
         // Ascending deterministic iteration order regardless of insertion order
         let ids: Vec<i64> = decoded.iter().map(|m| m.instance_id).collect();
@@ -1160,17 +1606,25 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(ids, sorted);
 
+        let hist_ids: Vec<i64> = decoded.iter_history().map(|e| e.instance_id).collect();
+        let mut sorted_hist = hist_ids.clone();
+        sorted_hist.sort_unstable();
+        assert_eq!(hist_ids, sorted_hist);
+
         // Secondary indexes lookup cleanly
         let enc = decoded
             .get_by_character_template(90_000_001, 10_000)
             .expect("char/template lookup");
         assert_eq!(enc.kind, MissionKind::Encounter);
         assert_eq!(
-            decoded.get_by_npc_ball(enc.spawned_npc_ball_ids()[0]).map(|m| m.instance_id),
+            decoded
+                .get_by_npc_ball(enc.spawned_npc_ball_ids()[0])
+                .map(|m| m.instance_id),
             Some(enc.instance_id)
         );
         assert_eq!(decoded.iter_by_character(90_000_001).count(), 4);
         assert_eq!(decoded.iter_by_character(90_000_002).count(), 3);
+        assert!(decoded.has_history_for_agent_state(90_000_001, 3_018_418, MissionState::Completed));
     }
 
     struct SplitMix64(u64);
@@ -1192,19 +1646,22 @@ mod tests {
         let mut rng = SplitMix64(0x1496_5EED_CAFE_BABEu64);
         let mut store = MissionInstanceStore::new();
         let mut oracle: BTreeMap<MissionInstanceId, MissionInstance> = BTreeMap::new();
+        let mut history_oracle: BTreeMap<MissionInstanceId, MissionHistoryEntry> = BTreeMap::new();
         let mut next_id = 200_000_001_i64;
         let mut next_ball = 910_000_001_i64;
-        let states = [
-            MissionState::Offered,
-            MissionState::Accepted,
+        let active_states = [MissionState::Offered, MissionState::Accepted];
+        let terminal_states = [
             MissionState::Completed,
+            MissionState::Expired,
+            MissionState::Failed,
             MissionState::Quit,
+            MissionState::Declined,
         ];
 
         for step in 0..800 {
-            match rng.next_range(6) {
+            match rng.next_range(8) {
                 0 | 1 => {
-                    // Upsert / insert random encounter mission
+                    // Upsert / insert random active encounter mission
                     let cid = 90_000_001 + rng.next_range(6) as i64;
                     let tid = 500 + rng.next_range(10) as u32;
                     let iid = next_id;
@@ -1212,7 +1669,7 @@ mod tests {
                     let b1 = next_ball;
                     let b2 = next_ball + 1;
                     next_ball += 2;
-                    let state = states[rng.next_range(states.len())];
+                    let state = active_states[rng.next_range(active_states.len())];
                     let mut inst = sample_instance(iid, cid, tid, state, MissionKind::Encounter);
                     if let Some(enc) = inst.encounter_mut() {
                         enc.spawned_npc_ball_ids = vec![b1, b2];
@@ -1231,10 +1688,10 @@ mod tests {
                         .expect("upsert must succeed");
                 }
                 2 => {
-                    // Update an existing instance (changing state, room, or ball list)
+                    // Update an existing active instance (changing state, room, or ball list)
                     let ids: Vec<i64> = oracle.keys().copied().collect();
                     if let Some(&iid) = ids.get(rng.next_range(ids.len().max(1))) {
-                        let new_state = states[rng.next_range(states.len())];
+                        let new_state = active_states[rng.next_range(active_states.len())];
                         let new_room = (step % 5) as u32;
                         let new_ball = next_ball;
                         next_ball += 1;
@@ -1296,7 +1753,7 @@ mod tests {
                         assert_eq!(store.remove(iid), oracle.remove(&iid));
                     }
                 }
-                _ => {
+                5 => {
                     // Remove by (character_id, template_id)
                     let cid = 90_000_001 + rng.next_range(6) as i64;
                     let tid = 500 + rng.next_range(10) as u32;
@@ -1307,18 +1764,263 @@ mod tests {
                     let expected = found_id.and_then(|id| oracle.remove(&id));
                     assert_eq!(store.remove_by_character_template(cid, tid), expected);
                 }
+                6 => {
+                    // Archive by instance id
+                    let ids: Vec<i64> = oracle.keys().copied().collect();
+                    if let Some(&iid) = ids.get(rng.next_range(ids.len().max(1))) {
+                        let term = terminal_states[rng.next_range(terminal_states.len())];
+                        let ended_at = 1_700_001_000 + step as u64;
+                        let entry = oracle
+                            .remove(&iid)
+                            .unwrap()
+                            .to_history_entry(term, ended_at);
+                        history_oracle.insert(iid, entry.clone());
+                        assert_eq!(
+                            store.archive_terminal(iid, term, ended_at).unwrap(),
+                            Some(entry)
+                        );
+                    }
+                }
+                _ => {
+                    // Archive by (character_id, template_id)
+                    let cid = 90_000_001 + rng.next_range(6) as i64;
+                    let tid = 500 + rng.next_range(10) as u32;
+                    let term = terminal_states[rng.next_range(terminal_states.len())];
+                    let ended_at = 1_700_002_000 + step as u64;
+                    let found_id = oracle
+                        .values()
+                        .find(|m| m.character_id == cid && m.template_id == tid)
+                        .map(|m| m.instance_id);
+                    let expected = found_id.map(|id| {
+                        let entry = oracle.remove(&id).unwrap().to_history_entry(term, ended_at);
+                        history_oracle.insert(id, entry.clone());
+                        entry
+                    });
+                    assert_eq!(
+                        store
+                            .archive_by_character_template(cid, tid, term, ended_at)
+                            .unwrap(),
+                        expected
+                    );
+                }
             }
 
             store.assert_invariants().expect("invariants must hold every step");
             let store_vec: Vec<&MissionInstance> = store.iter().collect();
             let oracle_vec: Vec<&MissionInstance> = oracle.values().collect();
             assert_eq!(store_vec, oracle_vec);
+            let store_hist_vec: Vec<&MissionHistoryEntry> = store.iter_history().collect();
+            let oracle_hist_vec: Vec<&MissionHistoryEntry> = history_oracle.values().collect();
+            assert_eq!(store_hist_vec, oracle_hist_vec);
             for cid in 90_000_001..=90_000_006 {
                 let by_char_store: Vec<&MissionInstance> = store.iter_by_character(cid).collect();
                 let by_char_oracle: Vec<&MissionInstance> =
                     oracle.values().filter(|m| m.character_id == cid).collect();
                 assert_eq!(by_char_store, by_char_oracle);
+                let hist_char_store: Vec<&MissionHistoryEntry> =
+                    store.iter_history_by_character(cid).collect();
+                let hist_char_oracle: Vec<&MissionHistoryEntry> = history_oracle
+                    .values()
+                    .filter(|e| e.character_id == cid)
+                    .collect();
+                assert_eq!(hist_char_store, hist_char_oracle);
             }
         }
+    }
+
+    #[test]
+    fn active_store_rejects_terminal_states_and_archive_moves_to_history() {
+        let mut store = MissionInstanceStore::new();
+        for term in [
+            MissionState::Completed,
+            MissionState::Expired,
+            MissionState::Failed,
+            MissionState::Quit,
+            MissionState::Declined,
+        ] {
+            let bad = sample_instance(200_000_001, 90_000_001, 10, term, MissionKind::Courier);
+            assert!(store.try_insert(bad.clone()).is_err());
+            assert!(store.upsert_by_character_template(bad).is_err());
+        }
+
+        let active = sample_instance(
+            200_000_010,
+            90_000_001,
+            42,
+            MissionState::Accepted,
+            MissionKind::Heraldry,
+        );
+        store.try_insert(active).expect("active heraldry insert");
+        assert!(store
+            .update(200_000_010, |m| m.state = MissionState::Completed)
+            .is_err());
+
+        let cloned_before_archive = store.clone();
+        assert!(store.ptr_eq(&cloned_before_archive));
+        assert!(store
+            .archive_by_character_template(90_000_001, 42, MissionState::Accepted, 1_700_001_000)
+            .is_err());
+        let archived = store
+            .archive_by_character_template(90_000_001, 42, MissionState::Completed, 1_700_001_000)
+            .expect("archive ok")
+            .expect("entry present");
+        assert_ne!(store, cloned_before_archive);
+        assert!(!store.ptr_eq(&cloned_before_archive));
+        assert!(store.is_empty());
+        assert!(!store.contains_character_template(90_000_001, 42));
+        assert_eq!(store.history_len(), 1);
+        assert_eq!(archived.final_state, MissionState::Completed);
+
+        // Fresh instance of same template can now be offered cleanly.
+        let reoffered = sample_instance(
+            200_000_011,
+            90_000_001,
+            42,
+            MissionState::Offered,
+            MissionKind::Heraldry,
+        );
+        store.try_insert(reoffered).expect("re-offer same template");
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.history_len(), 1);
+        store.assert_invariants().expect("invariants hold");
+    }
+
+    #[test]
+    fn history_queries_deterministic_ordering_and_recency() {
+        let mut store = MissionInstanceStore::new();
+        let make_entry = |iid, cid, aid, tid, state, ended| MissionHistoryEntry {
+            instance_id: iid,
+            character_id: cid,
+            agent_id: aid,
+            template_id: tid,
+            kind: MissionKind::Encounter,
+            final_state: state,
+            offered_at_unix: 1_700_000_000,
+            ended_at_unix: ended,
+        };
+        store
+            .record_history(make_entry(101, 90_000_001, 3_018_418, 10, MissionState::Completed, 100))
+            .unwrap();
+        store
+            .record_history(make_entry(102, 90_000_001, 3_018_418, 20, MissionState::Declined, 200))
+            .unwrap();
+        // Same timestamp tie broken by higher instance_id
+        store
+            .record_history(make_entry(103, 90_000_001, 3_018_418, 10, MissionState::Quit, 200))
+            .unwrap();
+        store
+            .record_history(make_entry(104, 90_000_001, 3_018_418, 30, MissionState::Completed, 300))
+            .unwrap();
+        store
+            .record_history(make_entry(105, 90_000_001, 3_018_419, 99, MissionState::Expired, 400))
+            .unwrap();
+
+        assert_eq!(
+            store.recent_templates_for_agent(90_000_001, 3_018_418, 3),
+            vec![30, 10, 20]
+        );
+        assert_eq!(
+            store
+                .latest_history_for_character_template(90_000_001, 10)
+                .map(|e| (e.instance_id, e.final_state)),
+            Some((103, MissionState::Quit))
+        );
+        assert_eq!(
+            store.count_history_for_agent_state(90_000_001, 3_018_418, MissionState::Completed),
+            2
+        );
+        assert!(store.has_history_for_agent_state(90_000_001, 3_018_419, MissionState::Expired));
+        assert!(!store.has_history_for_agent_state(90_000_001, 3_018_419, MissionState::Completed));
+    }
+
+    #[test]
+    fn legacy_json_array_upgrades_terminal_and_heraldry_rows() {
+        let legacy_json = serde_json::json!([
+            {
+                "instance_id": 200_000_201_i64,
+                "character_id": 90_000_001_i64,
+                "agent_id": 3_018_418_i64,
+                "template_id": 101_u32,
+                "state": "Offered",
+                "kind": "Encounter",
+                "solar_system_id": 30_000_142_u32,
+                "current_room_id": 1_u32,
+                "offered_at_unix": 1_700_000_000_u64,
+                "offer_expiry_unix": 1_700_086_400_u64,
+                "objective": {
+                    "Encounter": {
+                        "npcs_remaining": 3,
+                        "spawned_npc_ball_ids": [],
+                        "initial_wave_count": 3,
+                        "initial_wave_types": [587],
+                        "awaiting_downtime_respawn": false
+                    }
+                }
+            },
+            {
+                "instance_id": 200_000_202_i64,
+                "character_id": 90_000_001_i64,
+                "agent_id": 3_018_418_i64,
+                "template_id": 102_u32,
+                "state": "Completed",
+                "kind": "Encounter",
+                "solar_system_id": 30_000_142_u32,
+                "current_room_id": 1_u32,
+                "offered_at_unix": 1_700_000_100_u64,
+                "offer_expiry_unix": 1_700_086_500_u64,
+                "accepted_at_unix": 1_700_000_250_u64,
+                "objective": {
+                    "Encounter": {
+                        "npcs_remaining": 0,
+                        "spawned_npc_ball_ids": [],
+                        "initial_wave_count": 2,
+                        "initial_wave_types": [587],
+                        "awaiting_downtime_respawn": false
+                    }
+                }
+            },
+            {
+                "instance_id": 200_000_203_i64,
+                "character_id": 90_000_001_i64,
+                "agent_id": 3_020_034_i64,
+                "template_id": 17_013_u32,
+                "state": "Accepted",
+                "kind": "Heraldry",
+                "solar_system_id": 30_000_142_u32,
+                "current_room_id": 1_u32,
+                "offered_at_unix": 1_700_000_300_u64,
+                "offer_expiry_unix": 1_700_086_700_u64,
+                "accepted_at_unix": 1_700_000_350_u64,
+                "objective": "None"
+            }
+        ])
+        .to_string();
+
+        let decoded: MissionInstanceStore =
+            serde_json::from_str(&legacy_json).expect("decode legacy MissionInstance array");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded.history_len(), 1);
+        assert!(decoded.contains_character_template(90_000_001, 101));
+        assert!(!decoded.contains_character_template(90_000_001, 102));
+
+        let hist = decoded
+            .latest_history_for_character_template(90_000_001, 102)
+            .expect("terminal legacy row archived to history");
+        assert_eq!(hist.instance_id, 200_000_202);
+        assert_eq!(hist.final_state, MissionState::Completed);
+        assert_eq!(hist.ended_at_unix, 1_700_000_250);
+
+        let heraldry = decoded
+            .get_by_character_template(90_000_001, 17_013)
+            .expect("active Heraldry mission preserved");
+        assert_eq!(heraldry.kind, MissionKind::Heraldry);
+        assert!(matches!(heraldry.objective, MissionObjective::Delivery(_)));
+        assert!(heraldry.is_objective_consistent());
+        decoded.assert_invariants().expect("decoded store invariants hold");
+
+        let reencoded = serde_json::to_string(&decoded).expect("re-encode MissionInstanceStore");
+        let roundtrip: MissionInstanceStore =
+            serde_json::from_str(&reencoded).expect("decode full MissionInstanceStore");
+        assert_eq!(roundtrip, decoded);
     }
 }

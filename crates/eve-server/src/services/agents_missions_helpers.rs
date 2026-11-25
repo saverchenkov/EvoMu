@@ -1052,9 +1052,13 @@ pub fn resolve_target_mission_id(
     if let Some(second_arg) = args.get(1).and_then(|a| a.as_i64()) {
         if let Ok(mid) = u32::try_from(second_arg) {
             if ctx.sde.missions.contains_key(&mid)
-                || ctx
-                    .db
-                    .with_snapshot(|snap| snap.missions.contains_character_template(char_id, mid))
+                || ctx.db.with_snapshot(|snap| {
+                    snap.missions.contains_character_template(char_id, mid)
+                        || snap
+                            .missions
+                            .latest_history_for_character_template(char_id, mid)
+                            .is_some()
+                })
             {
                 return Ok(mid);
             }
@@ -1066,6 +1070,10 @@ pub fn resolve_target_mission_id(
                 if ctx.sde.missions.contains_key(&mid)
                     || ctx.db.with_snapshot(|snap| {
                         snap.missions.contains_character_template(char_id, mid)
+                            || snap
+                                .missions
+                                .latest_history_for_character_template(char_id, mid)
+                                .is_some()
                     })
                 {
                     return Ok(mid);
@@ -1193,26 +1201,17 @@ pub async fn abandon_or_decline_mission(
             let m_sys_id = existing.solar_system_id;
             let m_agent_id = existing.agent_id;
             let m_bmid = existing.bookmark_id;
+            let ball_ids = existing.spawned_npc_ball_ids().to_vec();
             let next_state = if was_accepted {
                 MissionState::Quit
             } else {
                 MissionState::Declined
             };
             let new_state = next_state.as_str().to_string();
-            let mut ball_ids = Vec::new();
-            snap.missions
-                .update_by_character_template(char_id, mission_id, |m| {
-                    m.state = next_state;
-                    if let Some(enc) = m.encounter_mut() {
-                        enc.npcs_remaining = 0;
-                        ball_ids = std::mem::take(&mut enc.spawned_npc_ball_ids);
-                    }
-                })
-                .map_err(mission_store_rpc_err)?;
             let now = ctx.now_unix();
             let mut standing_penalty_applied = false;
 
-            // Reclaim granted courier cargo on quit/decline to prevent commodity minting
+            // Reclaim granted courier cargo while active record is still present
             reclaim_courier_cargo(snap, char_id, mission_id);
             let corp_id = ctx
                 .sde
@@ -1311,6 +1310,9 @@ pub async fn abandon_or_decline_mission(
                 }
                 snap.last_mission_decline_times.insert(char_id, now);
             }
+            snap.missions
+                .archive_by_character_template(char_id, mission_id, next_state, now)
+                .map_err(mission_store_rpc_err)?;
             Ok((
                 m_sys_id,
                 ball_ids,
@@ -1529,6 +1531,116 @@ pub fn resolve_trade_mission_details(
     TradeMissionDetails {
         trade_type_id,
         trade_quantity,
+    }
+}
+
+/// Computes a deterministic SplitMix64 seed from character, agent, and archived offer count.
+pub fn mission_offer_selection_seed(char_id: i64, agent_id: i64, history_count: u64) -> u64 {
+    let mut s = (char_id as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    s ^= (agent_id as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+    s.rotate_left(17) ^ history_count.wrapping_mul(0xE703_7ED1_A0B4_28DB)
+}
+
+/// Deterministically selects a repeatable mission template using SplitMix64 recency weighting.
+///
+/// Sorts candidates by `mission_id`, excludes `recent_templates.first()` when `candidates.len() >= 2`
+/// to avoid immediate back-to-back repeats, and assigns weight `4` to non-recent templates vs `1`
+/// to recent templates.
+pub fn select_weighted_mission_template<'a>(
+    candidates: &[&'a eve_sde::MissionTemplate],
+    recent_templates: &[u32],
+    seed: u64,
+) -> Option<&'a eve_sde::MissionTemplate> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&'a eve_sde::MissionTemplate> = candidates.to_vec();
+    sorted.sort_by_key(|m| m.mission_id);
+
+    let pool: Vec<&'a eve_sde::MissionTemplate> = if sorted.len() >= 2 {
+        if let Some(&immediate_prev) = recent_templates.first() {
+            let filtered: Vec<&'a eve_sde::MissionTemplate> = sorted
+                .iter()
+                .copied()
+                .filter(|m| m.mission_id != immediate_prev)
+                .collect();
+            if filtered.is_empty() {
+                sorted
+            } else {
+                filtered
+            }
+        } else {
+            sorted
+        }
+    } else {
+        sorted
+    };
+
+    let total_weight: u64 = pool
+        .iter()
+        .map(|m| if recent_templates.contains(&m.mission_id) { 1 } else { 4 })
+        .sum();
+    if total_weight == 0 {
+        return pool.first().copied();
+    }
+
+    let mut x = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let mixed = x ^ (x >> 31);
+    let mut roll = mixed % total_weight;
+    for m in &pool {
+        let w = if recent_templates.contains(&m.mission_id) {
+            1
+        } else {
+            4
+        };
+        if roll < w {
+            return Some(*m);
+        }
+        roll -= w;
+    }
+    pool.first().copied()
+}
+
+/// DERIVED: Resolved ship hull requirement for a Paragon Heraldry turn-in mission (`PVE-018`).
+///
+/// FSD/SDE does not ship Paragon mission-to-ship-hull mappings; see [`resolve_heraldry_mission_details`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeraldryMissionDetails {
+    pub ship_type_id: eve_db::TypeId,
+    pub quantity: i32,
+}
+
+/// DERIVED: Resolves a packaged T1 ship hull for a Paragon Heraldry turn-in mission from a
+/// server-calibrated `lp_omega` tier table (`mission_id % tier.len()`), because FSD/SDE does not
+/// ship target ship-hull columns for Paragon Heraldry missions. `ctx.sde.types` is consulted only
+/// to verify that the selected hull type ID exists in SDE.
+pub fn resolve_heraldry_mission_details(
+    ctx: &ServerContext,
+    tmpl: &eve_sde::MissionTemplate,
+) -> HeraldryMissionDetails {
+    let tier: &[eve_db::TypeId] = if tmpl.lp_omega <= 2_500 {
+        &[583, 585, 587, 589, 594, 597, 603, 608]
+    } else if tmpl.lp_omega <= 3_000 {
+        &[16236, 16238, 16240, 16242, 32880]
+    } else if tmpl.lp_omega <= 3_600 {
+        &[648, 650, 652, 1944]
+    } else {
+        &[621, 624, 627, 629]
+    };
+    let picked = tier[(tmpl.mission_id as usize) % tier.len()];
+    let ship_type_id = if ctx.sde.types.contains_key(&picked) {
+        picked
+    } else {
+        tier.iter()
+            .copied()
+            .find(|tid| ctx.sde.types.contains_key(tid))
+            .unwrap_or(587)
+    };
+    HeraldryMissionDetails {
+        ship_type_id,
+        quantity: 1,
     }
 }
 
