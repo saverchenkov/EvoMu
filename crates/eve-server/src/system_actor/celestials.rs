@@ -3127,7 +3127,8 @@ pub(crate) use celestials_helpers::{
     fast_forward_clock_in_actor_collecting,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
     register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,
-    remove_ball_checkpoint_tracking, sync_ball_positions, clear_db_system_ballpark_if_matching,
+    remove_ball_checkpoint_tracking, send_tick_broadcast_sequenced,
+    send_tick_broadcast_sequenced_owned, sync_ball_positions, clear_db_system_ballpark_if_matching,
     update_system_hibernation_flag,
 };
 #[cfg(test)]

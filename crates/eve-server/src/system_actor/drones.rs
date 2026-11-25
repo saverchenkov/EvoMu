@@ -4,14 +4,46 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    call_actor_result_with_deadline, defer_reply, dispatch_actor_sync_with_deadline,
-    ActorExecCtx, BallOpsCtx, SystemActorState, SystemCommand, SystemHandle, SystemRegistry,
-    ACTOR_CMD_TIMEOUT,
+    call_actor_result_with_deadline, defer_cmd_reply, dispatch_actor_sync_with_deadline,
+    ActorExecCtx, BallOpsCtx, RankedMutex, SystemActorState, SystemCommand, SystemHandle,
+    SystemRegistry, ACTOR_CMD_TIMEOUT, RANK_LEAF,
 };
 use eve_destiny::{BallId, DamageVector};
 use eve_sde::SolarSystemId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+#[derive(Default)]
+pub(crate) struct RegistryDroneRuntimeState {
+    pub(crate) migrated_legacy_drone_systems: RankedMutex<HashSet<SolarSystemId>, RANK_LEAF>,
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) headless_test_rt: std::sync::OnceLock<tokio::runtime::Runtime>,
+}
+
+#[cfg(any(test, feature = "testkit"))]
+impl Drop for RegistryDroneRuntimeState {
+    fn drop(&mut self) {
+        if let Some(rt) = self.headless_test_rt.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                rt.shutdown_background();
+            } else {
+                drop(rt);
+            }
+        }
+    }
+}
+
+pub(crate) fn init_actor_active_drones(
+    actor_st: &mut SystemActorState,
+    registry: &SystemRegistry,
+    solar_system_id: SolarSystemId,
+    db_read_safe: bool,
+) {
+    let (drones, dirty) = load_initial_active_drones_for_system(registry, solar_system_id, db_read_safe);
+    actor_st.active_drones_in_space = drones;
+    actor_st.active_drones_checkpoint_dirty = dirty;
+    actor_st.active_drones_checkpoint_seq = u64::from(dirty);
+}
 
 /// Runtime state for a launched or abandoned drone in solar-system space (`#1541` Track D2b).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -497,6 +529,7 @@ pub(crate) fn migrate_legacy_active_drones_at_startup(ctx: &crate::router::Serve
         if !by_sys.is_empty() {
             let mut guard = ctx
                 .systems
+                .drone_rt_state
                 .migrated_legacy_drone_systems
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -537,6 +570,7 @@ pub(crate) fn load_initial_active_drones_for_system(
     }
     if drones.is_empty() {
         let already_migrated = registry
+            .drone_rt_state
             .migrated_legacy_drone_systems
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -557,6 +591,7 @@ pub(crate) fn load_initial_active_drones_for_system(
                 }
             }
             registry
+                .drone_rt_state
                 .migrated_legacy_drone_systems
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1000,7 +1035,7 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         SystemCommand::UpsertDroneMiner { state, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = upsert_drone_miner_in_actor(&mut ctx, state);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::RescheduleDroneMiner {
@@ -1010,7 +1045,7 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = reschedule_drone_miner_in_actor(&mut ctx, drone_id, now_unix);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::SetDroneNextReadyUnix {
@@ -1026,7 +1061,7 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
                 next_ready_unix,
                 require_ball_in_space,
             );
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ClearDroneRuntime {
@@ -1044,7 +1079,7 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
                     clear_timers,
                 },
             );
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::UpsertActiveDrones {
@@ -1054,13 +1089,13 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = upsert_active_drones_in_actor(&mut ctx, drones, only_if_absent);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ReserveDroneLaunches { req, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = reserve_drone_launches_in_actor(&mut ctx, req);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::FinalizeDroneLaunches {
@@ -1070,25 +1105,25 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = finalize_drone_launches_in_actor(&mut ctx, mappings, rollback_res_ids);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ReconnectDrones { req, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = reconnect_drones_in_actor(&mut ctx, req);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::MutateActiveDrones { op, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = mutate_active_drones_in_actor(&mut ctx, op);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::MutateActiveDronesWithClaims { op, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = mutate_active_drones_with_claims_in_actor(&mut ctx, op);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         SystemCommand::ScoopDroneClaimOp {
@@ -1098,7 +1133,7 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = execute_drone_scoop_claim_op_in_actor(&mut ctx, ball_id, action);
-            defer_reply(exec_ctx.deferred_replies, reply, res);
+            defer_cmd_reply(exec_ctx, reply, res);
             None
         }
         other => Some(other),
@@ -1817,7 +1852,7 @@ impl SystemRegistry {
         );
         #[cfg(any(test, feature = "testkit"))]
         if tokio::runtime::Handle::try_current().is_err() {
-            let rt = self.headless_test_rt.get_or_init(|| {
+            let rt = self.drone_rt_state.headless_test_rt.get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(1)
                     .enable_time()

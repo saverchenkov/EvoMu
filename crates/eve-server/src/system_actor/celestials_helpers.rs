@@ -13,6 +13,36 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Atomically assigns the next monotonic `TickBroadcast.broadcast_seq` and sends `broadcast`
+/// onto `event_tx` while holding `broadcast_seq_gate`, preserving strict FIFO seq ordering (`GH #1172`).
+pub(crate) fn send_tick_broadcast_sequenced_owned(
+    event_tx: &super::broadcast::Sender<super::TickBroadcast>,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+    mut broadcast: super::TickBroadcast,
+) {
+    let mut seq = broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *seq = seq.saturating_add(1);
+    broadcast.broadcast_seq = *seq;
+    let _ = event_tx.send(broadcast);
+}
+
+/// Assigns `broadcast.broadcast_seq` in-place under `broadcast_seq_gate` and sends a clone onto
+/// `event_tx` (`GH #1172`).
+pub(crate) fn send_tick_broadcast_sequenced(
+    event_tx: &super::broadcast::Sender<super::TickBroadcast>,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+    broadcast: &mut super::TickBroadcast,
+) {
+    let mut seq = broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *seq = seq.saturating_add(1);
+    broadcast.broadcast_seq = *seq;
+    let _ = event_tx.send(broadcast.clone());
+}
+
 #[derive(Clone)]
 struct DbBallparkEntry {
     ballpark: std::sync::Weak<BallparkHandle>,
