@@ -1255,7 +1255,7 @@ fn enqueue_work_ticket(
         Err(unsent) => {
             tracing::warn!(
                 solar_system_id = handle.solar_system_id,
-                intents = unsent.ops.len(),
+                intents = unsent.ops.intents.len(),
                 "post_unlock_tx closed while caller holds ranked locks or is on worker thread; skipping direct fallback"
             );
             for send_reply in unsent.replies {
@@ -1314,7 +1314,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(
             } else {
                 tracing::warn!(
                     solar_system_id = handle.solar_system_id,
-                    intents = unsent.ops.len(),
+                    intents = unsent.ops.intents.len(),
                     "skipping RunDirectAfterUnlock after worker shutdown under held ranked locks or worker reentrancy"
                 );
             }
