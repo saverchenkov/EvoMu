@@ -3174,7 +3174,7 @@ pub(crate) use celestials_helpers::{
     collect_all_condition_checkpoint_entries, collect_ball_positions_for_post_unlock,
     collect_dirty_condition_checkpoint_entries,
     collect_immediate_armor_hull_checkpoint_entries,
-    collect_landed_warp_positions, collect_landed_warps_for_post_unlock,
+    collect_landed_warp_positions,
     collect_landed_warps_for_post_unlock_with_in_flight,
     fast_forward_clock_in_actor_collecting,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
@@ -3183,7 +3183,7 @@ pub(crate) use celestials_helpers::{
     update_system_hibernation_flag,
 };
 #[cfg(test)]
-pub(crate) use celestials_helpers::db_ballpark_entry_for_test;
+pub(crate) use celestials_helpers::{collect_landed_warps_for_post_unlock, db_ballpark_entry_for_test};
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
 

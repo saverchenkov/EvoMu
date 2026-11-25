@@ -2163,6 +2163,7 @@ impl SystemHandle {
             }
         }
         let (drained_destroyed, destroyed_lease) = pending_destroyed.checkout_for_step();
+        let has_destroyed = !drained_destroyed.is_empty();
         let mut death_futs = Vec::new();
         for &(target_ball_id, owner_char_id) in &drained_destroyed {
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
@@ -2197,7 +2198,6 @@ impl SystemHandle {
         let db_opt_cloned = db_opt.clone();
         let sde_opt_cloned = sde_opt.clone();
         let ops_was_empty = post_unlock_ops.is_empty();
-        let has_destroyed = !drained_destroyed.is_empty();
         let wait_ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
             self,
             db_opt_cloned.as_ref(),
