@@ -415,8 +415,9 @@ pub(crate) fn sync_anchored_system_tidi(
     };
 
     if has_tidi_override {
-        let handle = existing_handle.or_else(|| ctx.systems.get_or_spawn_if_runtime(solar_system_id));
-        let old_handle_factor = handle
+        // Update an already-live SystemHandle if spawned; otherwise `manual_tidi_overrides` and the
+        // persisted owner note initialize `initial_tidi` on lazy system activation (`#1542`).
+        let old_handle_factor = existing_handle
             .map(|h| h.set_tidi_factor_raw(clamped_tidi))
             .unwrap_or(prev_effective_factor);
         persist_system_tidi_note(ctx, solar_system_id, clamped_tidi);

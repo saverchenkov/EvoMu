@@ -720,13 +720,13 @@ async fn anchor_system_sim_clock_offset_diverges_wall_and_sim_domains_at_tidi_1(
             < 1e-9
     );
     assert!(
-        (ctx.systems
-            .get_handle(tidi_sys)
-            .expect("tidi-anchored system must spawn/sync SystemHandle")
-            .tidi_factor()
-            - 0.25)
-            .abs()
-            < 1e-9
+        (ctx.systems.get_or_spawn(tidi_sys).tidi_factor() - 0.25).abs() < 1e-9,
+        "lazy-spawned SystemHandle must inherit 0.25 TiDi from anchored manual_tidi_overrides"
+    );
+    // Re-anchoring an already-spawned system updates its live SystemHandle TiDi factor cleanly.
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(tidi_sys, offset_ms, 0.50);
+    assert!(
+        (ctx.systems.get_handle(tidi_sys).unwrap().tidi_factor() - 0.50).abs() < 1e-9
     );
 
     // Advance 10 real seconds at TiDi = 1.0: both clocks advance +10s preserving the -300_000 ms offset.
