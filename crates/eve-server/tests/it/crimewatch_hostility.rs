@@ -536,6 +536,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{check_crimewatch_action_restriction, dispatch_combat_rpc, is_legal_war_or_suspect_target};
+use eve_server::services::fighter_test_helpers;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -569,7 +570,7 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     let beyonce_bound = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
     let celestial_id = far_celestial_id(&ctx, sys_id);
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(celestial_id), PyRep::Real(0.0)], &kw, None).await.expect("Carrier warps within system");
-    let f_after_warp = ctx.active_fighters.read().unwrap()[&f_ball_id].clone();
+    let f_after_warp = fighter_test_helpers::active_fighter(&ctx, f_ball_id).unwrap();
     assert!(!f_after_warp.is_abandoned && f_after_warp.parent_ship_id == carrier_id);
 
     // 2. Carrier docking at station abandons the fighter squadron in space, frees tube 0, and keeps the fighter ball in space.
@@ -585,15 +586,15 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
 
     let f_item_docked = ctx.db.get_item(fighter_id).unwrap();
     assert_eq!((f_item_docked.location_id, f_item_docked.flag), (sys_id as i64, InventoryFlag::None));
-    let f_state = ctx.active_fighters.read().unwrap()[&f_ball_id].clone();
+    let f_state = fighter_test_helpers::active_fighter(&ctx, f_ball_id).unwrap();
     assert_eq!((f_state.is_abandoned, f_state.parent_ship_id, f_state.target_id), (true, 0, None));
-    assert!(ctx.fighter_tube_loads.read().unwrap().get(&(carrier_id, 0)).is_none(), "Carrier fighter tube must be cleared when squadron is abandoned");
+    assert!(fighter_test_helpers::loaded_fighter_in_tube(&ctx, carrier_id, 0).is_none(), "Carrier fighter tube must be cleared when squadron is abandoned");
     assert!(sys_handle.get_ball_snapshot(f_ball_id).await.unwrap().is_some());
 
     // 3. Server restart: `get_or_spawn` populates the persisted fighter ball into the ballpark, and another carrier scoops, loads, and re-launches it.
     let reloaded_ctx = ServerContext::with_sde_and_repository(ctx.sde.clone(), ctx.db.clone());
     eve_server::sp6_lifecycle::seed_persisted_abandoned_drones(&reloaded_ctx);
-    assert!(reloaded_ctx.active_fighters.read().unwrap().contains_key(&f_ball_id));
+    assert!(fighter_test_helpers::has_active_fighter(&reloaded_ctx, f_ball_id));
     let reloaded_sys = reloaded_ctx.systems.get_or_spawn(sys_id);
     let (_, reloaded_f_ball) = reloaded_sys.get_ball_snapshot(f_ball_id).await.unwrap().expect("Fighter ball must be populated in ballpark on restart");
     let _ = reloaded_sys.spawn_ball(Ball {
@@ -636,7 +637,7 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_jita), "CmdJumpToFleetDeployableBeacon", &[PyRep::Integer(char_id), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)], &kw, None)
         .await.expect("Carrier jumps to deployable cyno beacon");
     assert_eq!(sess.solar_system_id, Some(dest_sys));
-    assert!(ctx.active_fighters.read().unwrap()[&f_jump_ball].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, f_jump_ball).unwrap().is_abandoned);
     assert_eq!(ctx.db.get_item(fighter_jump_id).unwrap().location_id, sys_id as i64);
     let sys_dest = ctx.systems.get_or_spawn(dest_sys);
     let _ = sys_dest
@@ -656,14 +657,14 @@ async fn test_fighters_left_in_space_abandon_persist_and_scoop() {
     let PyRep::List(logoff_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };
     let f_logoff_ball = logoff_balls[0].as_i64().unwrap();
     eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id).await;
-    assert!(ctx.active_fighters.read().unwrap()[&f_logoff_ball].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, f_logoff_ball).unwrap().is_abandoned);
     let _ = sys_dest.set_movement_mode(carrier_id, eve_destiny::MovementMode::Stop).await;
 
     ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_death_id)], &kw, None).await.unwrap();
     let PyRep::List(death_balls) = ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap() else { panic!() };
     let f_death_ball = death_balls[0].as_i64().unwrap();
     eve_server::combat::death_pipeline::execute_death_pipeline_sync(&ctx, dest_sys, char_id, carrier_id, 0, DVec3::ZERO, 1).expect("execute_death_pipeline_sync on carrier");
-    assert!(ctx.active_fighters.read().unwrap()[&f_death_ball].is_abandoned);
+    assert!(fighter_test_helpers::active_fighter(&ctx, f_death_ball).unwrap().is_abandoned);
     let f_death_item = ctx.db.get_item(fighter_death_id).expect("Abandoned fighter in space must not be destroyed by loot fairy on carrier death");
     assert_eq!((f_death_item.location_id, f_death_item.flag), (dest_sys as i64, InventoryFlag::None));
 }

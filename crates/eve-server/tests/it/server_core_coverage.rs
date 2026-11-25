@@ -1632,10 +1632,7 @@ async fn lock_rank_enforcement_across_fixed_subsystems_and_inversion_panic() {
     assert!(matches!(metrics, eve_proto::PyRep::List(_)));
 
     // 4. Consolidated FighterRuntimeState + lenses, CrimeWatchLock + tick_concord_responses, target-tag cleanup.
-    ctx.fighter_tube_loads
-        .write()
-        .unwrap()
-        .insert((ship_id, 0), 980_001_002);
+    eve_server::services::fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, 980_001_002);
     assert_eq!(
         ctx.fighters.read().unwrap().tube_loads.get(&(ship_id, 0)).copied(),
         Some(980_001_002)

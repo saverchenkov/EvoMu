@@ -1007,7 +1007,7 @@ async fn carrier_fighter_tubes_launch_movement_abilities_losses_and_abandon() {
     assert_eq!(recalled_list.len(), 1);
     let sq_qty_after_recall = ctx.db.with_snapshot(|snap| snap.items.get(&squadron_item_id).unwrap().quantity);
     assert_eq!(sq_qty_after_recall, 6, "Recalled squadron must refill lost units from FighterBay reserve back to max squadron size");
-    assert!(ctx.fighter_charge_state.read().unwrap().is_empty(), "Recalled squadron must rearm ability charges");
+    assert!(eve_server::services::fighter_test_helpers::fighter_charges_is_empty(&ctx), "Recalled squadron must rearm ability charges");
 
     // 7. Re-launch and abandon in space (`feat:drones.fighter-abandon`)
     let relaunch_early = ctx.dispatch_rpc(&mut s1, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await;
@@ -1029,7 +1029,7 @@ async fn carrier_fighter_tubes_launch_movement_abilities_losses_and_abandon() {
         panic!("Expected list from CmdAbandonFighter");
     };
     assert_eq!(abandoned_list, vec![PyRep::Integer(relaunched_ball_id)]);
-    assert!(ctx.active_fighters.read().unwrap().get(&relaunched_ball_id).unwrap().is_abandoned);
+    assert!(eve_server::services::fighter_test_helpers::active_fighter(&ctx, relaunched_ball_id).unwrap().is_abandoned);
 }
 
 }
@@ -2024,8 +2024,9 @@ use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    apply_damage_to_fighter_squadron, dispatch_combat_rpc, with_combat_runtime,
+    apply_damage_to_fighter_squadron, dispatch_combat_rpc,
 };
+use eve_server::services::fighter_test_helpers;
 use std::collections::HashMap;
 
 const ARCHON_CARRIER: u32 = 23757;
@@ -2213,12 +2214,9 @@ async fn test_fighter_refuel_rearm_repair() {
     .await
     .expect("RecallFightersToTubes");
 
-    let is_rearming = with_combat_runtime(&ctx, |rt| {
-        rt.fighter_tube_rearm_until
-            .get(&(carrier_id, 0))
-            .map(|&exp| exp > ctx.now_unix())
-            .unwrap_or(false)
-    });
+    let is_rearming = fighter_test_helpers::fighter_tube_rearm_unix(&ctx, carrier_id, 0)
+        .map(|exp| exp > ctx.now_unix())
+        .unwrap_or(false);
     assert!(is_rearming, "Recalled squadron must enter tube rearm/repair timer");
     assert!(
         dispatch_combat_rpc(&ctx, &mut sess, "fighterMgr", "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw)
@@ -2423,7 +2421,7 @@ use eve_machonet::{service_roles, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::context::ActiveFighterSquadron;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
+use eve_server::services::fighter_test_helpers;
 use eve_server::services::industry_pi::*;
 use std::collections::{HashMap, HashSet};
 
@@ -2541,10 +2539,8 @@ async fn test_parity_fighters_heavy_bomb_and_tube_rearm_repair() {
         .await.expect_err("4th bomb activation with 0 charges must fail");
     assert_eq!(ooc_err.code, "OutOfCharges");
 
-    ctx.active_fighters.write().unwrap().get_mut(&heavy_ball_id).unwrap().squadron_size = 5;
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.fighter_unit_damage_accum.insert(heavy_ball_id, 450.0);
-    });
+    fighter_test_helpers::update_active_fighter(&ctx, heavy_ball_id, |f| f.squadron_size = 5).unwrap();
+    fighter_test_helpers::set_fighter_damage_accum(&ctx, heavy_ball_id, 450.0);
 
     let recall_rep = rpc(&ctx, &mut sess, "fighterMgr", "RecallFightersToTubes", &[PyRep::List(vec![PyRep::Integer(heavy_ball_id)])]).await.expect("RecallFightersToTubes");
     assert_eq!(recall_rep, PyRep::List(vec![PyRep::Integer(heavy_ball_id)]));
@@ -2557,13 +2553,13 @@ async fn test_parity_fighters_heavy_bomb_and_tube_rearm_repair() {
         assert_eq!(snap.items.get(&heavy_item_id).unwrap().quantity, 6, "Destroyed fighter refilled from reserve in FighterBay");
         assert_eq!(snap.items.get(&reserve_item_id).unwrap().quantity, 4, "Reserve stack in FighterBay decremented by 1");
     });
-    assert!(with_combat_runtime(&ctx, |rt| !rt.fighter_unit_damage_accum.contains_key(&heavy_ball_id)), "Unit damage accumulator cleared on recall");
+    assert!(!fighter_test_helpers::has_fighter_damage_accum(&ctx, heavy_ball_id), "Unit damage accumulator cleared on recall");
 
     ctx.advance_secs(20);
     let relaunch_rep = rpc(&ctx, &mut sess, "fighterMgr", "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])]).await.expect("Relaunch after rearm");
     let PyRep::List(relaunched) = relaunch_rep else { panic!("Expected list") };
     let new_ball_id = relaunched[0].as_i64().unwrap();
-    assert_eq!(ctx.active_fighters.read().unwrap().get(&new_ball_id).unwrap().squadron_size, 6, "Relaunched squadron has full size");
+    assert_eq!(fighter_test_helpers::active_fighter(&ctx, new_ball_id).unwrap().squadron_size, 6, "Relaunched squadron has full size");
 }
 
 #[tokio::test]
@@ -2603,7 +2599,7 @@ async fn test_parity_fighters_support_and_space_superiority() {
     assert_eq!(sys.get_combat_state(target_ship_id).await.unwrap().unwrap().warp_scramble_strength, 3, "Siren full squad (3) applies 3 scram points");
 
     ctx.advance_secs(12);
-    ctx.active_fighters.write().unwrap().get_mut(&siren_ball).unwrap().squadron_size = 1;
+    fighter_test_helpers::update_active_fighter(&ctx, siren_ball, |f| f.squadron_size = 1).unwrap();
     rpc(&ctx, &mut sess, "fighterMgr", "CmdActivateAbilitySlots", &[PyRep::Integer(siren_ball), PyRep::Integer(0), PyRep::Integer(target_ship_id)]).await.unwrap();
     assert_eq!(sys.get_combat_state(target_ship_id).await.unwrap().unwrap().warp_scramble_strength, 1, "Siren scaled down to 1 point at size 1");
 
@@ -2646,7 +2642,7 @@ async fn test_parity_fighters_support_and_space_superiority() {
 
     // Anti-fighter missile volley vs enemy fighter
     let enemy_fighter_ball = 92_200_999i64;
-    ctx.active_fighters.write().unwrap().insert(enemy_fighter_ball, ActiveFighterSquadron {
+    fighter_test_helpers::insert_active_fighter(&ctx, enemy_fighter_ball, ActiveFighterSquadron {
         ball_id: enemy_fighter_ball, parent_ship_id: target_ship_id, owner_char_id: target_char_id,
         tube_index: 0, type_id: EQUITE_LIGHT_FIGHTER_TYPE_ID, item_id: 92_200_998,
         squadron_size: 9, target_id: None, mwd_active: false, is_abandoned: false,

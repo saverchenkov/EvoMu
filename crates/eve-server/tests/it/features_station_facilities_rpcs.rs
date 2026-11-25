@@ -521,7 +521,7 @@ async fn test_b29_drones_and_fighters_space_lifecycle() {
         ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(60_003_760)], &kw, None).await.expect("Dock");
         ctx.dispatch_rpc(&mut f_sess, "stationSvc", None, "Dock", &[PyRep::Integer(60_003_760)], &kw, None).await.expect("Carrier Dock");
         assert_eq!(ctx.db.get_item(fighter_1).unwrap().location_id, sys_id as i64);
-        assert!(ctx.active_fighters.read().unwrap().values().all(|f| f.is_abandoned));
+        assert!(eve_server::services::fighter_test_helpers::all_active_fighter_squadrons(&ctx, |f| f.is_abandoned));
 
         let _ = ctx.dispatch_rpc(&mut sess, "entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(drone_ball_1)])], &kw, None).await;
         assert_eq!(ctx.db.get_item(drone_1).unwrap().location_id, sys_id as i64);

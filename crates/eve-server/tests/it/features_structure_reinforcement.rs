@@ -612,7 +612,7 @@ async fn test_b39_standup_point_defense_battery() {
     });
     ctx.dispatch_rpc(&mut sess_hostile, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_item)], &kw, None).await.expect("Load fighter");
     ctx.dispatch_rpc(&mut sess_hostile, "fighterMgr", None, "LaunchFightersFromTubes", &[], &kw, None).await.expect("Launch fighter");
-    let fighter_ball_id = ctx.active_fighters.read().unwrap().keys().copied().next().expect("fighter ball");
+    let fighter_ball_id = eve_server::services::fighter_test_helpers::active_fighter_ids(&ctx).into_iter().next().expect("fighter ball");
 
     let spawn_drone = |did: i64, x_off: f64| {
         let h = low_handle.clone();

@@ -44,4 +44,3 @@
 60	60	crates/eve-server/src/router/context.rs::fit::ship_fittings
 60	60	crates/eve-server/src/services/fleet_social_notify.rs::tick_fleet_lifecycle::fleet_extras
 60	60	crates/eve-server/src/system_actor/disruptors.rs::try_remove_module_cycle::module_deactivation_hook
-60	60	crates/eve-server/tests/it/drones_fighters_advanced.rs::test_support_fighter_squadrons_ewar_scaling_siren_dromi_cenobite_scarab::active_fighters

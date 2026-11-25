@@ -44,6 +44,8 @@ pub mod cosmetics_events;
 pub mod cosmetics_ui_ops;
 pub mod encounter_surveillance_system;
 pub mod fast_checkout_and_activity;
+#[cfg(any(test, feature = "testkit"))]
+pub mod fighter_test_helpers;
 pub mod fitting_saved_apply;
 pub mod fitting_cycles_overheat;
 pub mod fleet_social;

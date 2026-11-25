@@ -9,7 +9,8 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::context::ActiveFighterSquadron;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{apply_damage_to_fighter_squadron, with_combat_runtime};
+use eve_server::services::combat_crimewatch::apply_damage_to_fighter_squadron;
+use eve_server::services::fighter_test_helpers;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -152,7 +153,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(hs_fighter_item, make_item(hs_fighter_item, AMETAT_HEAVY_FIGHTER_TYPE_ID, pilot_char_id, aeon_ship_id, InventoryFlag::FighterBay, 6));
     });
-    ctx.fighter_tube_loads.write().unwrap().insert((aeon_ship_id, 0), hs_fighter_item);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, aeon_ship_id, 0, hs_fighter_item);
     let hs_launch = ctx
         .dispatch_rpc(&mut highsec_sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None)
         .await
@@ -179,7 +180,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
     assert_eq!(hs_bomb_err.code, "BombForbiddenInHighSec");
 
     // Clean up highsec test entities
-    ctx.active_fighters.write().unwrap().remove(&hs_squad_ball_id);
+    fighter_test_helpers::remove_active_fighter(&ctx, hs_squad_ball_id);
     let _ = ctx.systems.get_or_spawn(highsec_sys).remove_ball(hs_squad_ball_id).await;
 
     // 2. Nullsec deployment: Kuharah (30000021, sec = -1.0)
@@ -195,7 +196,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
         // Reserve stack of 6 Ametat I in FighterBay for tube replacement
         snap.items.insert(reserve_item_id, make_item(reserve_item_id, AMETAT_HEAVY_FIGHTER_TYPE_ID, pilot_char_id, aeon_ship_id, InventoryFlag::FighterBay, 6));
     });
-    ctx.fighter_tube_loads.write().unwrap().insert((aeon_ship_id, 0), squad_item_id);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, aeon_ship_id, 0, squad_item_id);
 
     let launch_res = ctx
         .dispatch_rpc(&mut nullsec_sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None)
@@ -314,7 +315,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
     assert_eq!(lost, 1, "Expected 1 fighter unit destroyed");
     assert_eq!(remaining_size, 5, "Expected 5 fighters remaining in squadron");
     assert!(!wiped_out);
-    assert_eq!(ctx.active_fighters.read().unwrap().get(&squad_ball_id).unwrap().squadron_size, 5);
+    assert_eq!(fighter_test_helpers::active_fighter(&ctx, squad_ball_id).unwrap().squadron_size, 5);
 
     // Recall fighters to tube 0
     let recall_res = ctx
@@ -333,9 +334,8 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
     assert_eq!(recalled.len(), 1);
 
     // Verify tube rearm/refueling timer is active (15 seconds)
-    let is_rearming = with_combat_runtime(&ctx, |rt| {
-        rt.fighter_tube_rearm_until.get(&(aeon_ship_id, 0)).copied().unwrap_or(0) > ctx.now_unix()
-    });
+    let is_rearming =
+        fighter_test_helpers::fighter_tube_rearm_unix(&ctx, aeon_ship_id, 0).unwrap_or(0) > ctx.now_unix();
     assert!(is_rearming, "Recalled tube must have rearm timer active");
 
     // Verify destroyed fighters were replaced from the FighterBay reserve stack
@@ -416,11 +416,8 @@ async fn test_support_fighter_abilities_and_space_superiority() {
         snap.items.insert(cenobite_item, make_item(cenobite_item, CENOBITE_SUPPORT_FIGHTER_TYPE_ID, pilot_char_id, archon_ship_id, InventoryFlag::FighterBay, 3));
         snap.items.insert(scarab_item, make_item(scarab_item, SCARAB_SUPPORT_FIGHTER_TYPE_ID, pilot_char_id, archon_ship_id, InventoryFlag::FighterBay, 3));
     });
-    {
-        let mut loads = ctx.fighter_tube_loads.write().unwrap();
-        loads.insert((archon_ship_id, 0), siren_item);
-        loads.insert((archon_ship_id, 1), dromi_item);
-    }
+    fighter_test_helpers::set_fighter_tube_load(&ctx, archon_ship_id, 0, siren_item);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, archon_ship_id, 1, dromi_item);
 
     let launch_pair1 = ctx
         .dispatch_rpc(&mut pilot_sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)])], &kw, None)
@@ -454,7 +451,7 @@ async fn test_support_fighter_abilities_and_space_superiority() {
     assert_eq!(scram_full, 3, "Siren squadron of 3 must apply 3 warp disruption points");
 
     // Reduce Siren squadron size to 1 -> scram strength = 1 point
-    ctx.active_fighters.write().unwrap().get_mut(&siren_ball).unwrap().squadron_size = 1;
+    fighter_test_helpers::update_active_fighter(&ctx, siren_ball, |f| f.squadron_size = 1).unwrap();
     ctx.advance_secs(15);
     ctx.dispatch_rpc(&mut pilot_sess, "fighterMgr", None, "CmdActivateAbilitySlots", &[PyRep::Integer(siren_ball), PyRep::Integer(0), PyRep::Integer(target_ship_id)], &kw, None)
         .await
@@ -471,7 +468,7 @@ async fn test_support_fighter_abilities_and_space_superiority() {
     assert!(speed_full_web <= 0.75, "Full Dromi squadron must apply strong web reduction");
 
     // Reduce Dromi squadron size to 1 -> weaker web
-    ctx.active_fighters.write().unwrap().get_mut(&dromi_ball).unwrap().squadron_size = 1;
+    fighter_test_helpers::update_active_fighter(&ctx, dromi_ball, |f| f.squadron_size = 1).unwrap();
     ctx.advance_secs(15);
     ctx.dispatch_rpc(&mut pilot_sess, "fighterMgr", None, "CmdActivateAbilitySlots", &[PyRep::Integer(dromi_ball), PyRep::Integer(0), PyRep::Integer(target_ship_id)], &kw, None)
         .await
@@ -484,11 +481,8 @@ async fn test_support_fighter_abilities_and_space_superiority() {
     ctx.advance_secs(15);
 
     // Test Pair 2: Cenobite I (Energy Neutralization) and Scarab I (ECM Jamming)
-    {
-        let mut loads = ctx.fighter_tube_loads.write().unwrap();
-        loads.insert((archon_ship_id, 0), cenobite_item);
-        loads.insert((archon_ship_id, 1), scarab_item);
-    }
+    fighter_test_helpers::set_fighter_tube_load(&ctx, archon_ship_id, 0, cenobite_item);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, archon_ship_id, 1, scarab_item);
     let launch_pair2 = ctx
         .dispatch_rpc(&mut pilot_sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)])], &kw, None)
         .await
@@ -565,7 +559,7 @@ async fn test_support_fighter_abilities_and_space_superiority() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(equite_item, make_item(equite_item, EQUITE_SPACE_SUPERIORITY_TYPE_ID, pilot_char_id, archon_ship_id, InventoryFlag::FighterBay, 9));
     });
-    ctx.fighter_tube_loads.write().unwrap().insert((archon_ship_id, 0), equite_item);
+    fighter_test_helpers::set_fighter_tube_load(&ctx, archon_ship_id, 0, equite_item);
 
     let equite_launch = ctx.dispatch_rpc(&mut pilot_sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap();
     let PyRep::List(eq_balls) = equite_launch else { panic!() };
@@ -596,7 +590,8 @@ async fn test_support_fighter_abilities_and_space_superiority() {
     // Spawn an enemy fighter squadron to test anti-fighter missile volley damage bonus
     let enemy_fighter_ball = 620_000_001i64;
     spawn_ship_ball(&ctx, lowsec_sys, enemy_fighter_ball, EQUITE_SPACE_SUPERIORITY_TYPE_ID, DVec3::new(2000.0, 0.0, 0.0), 5_000.0).await;
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         enemy_fighter_ball,
         ActiveFighterSquadron {
             ball_id: enemy_fighter_ball,

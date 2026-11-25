@@ -1995,23 +1995,22 @@ async fn reset_contract_space_drones_and_fighters(ctx: &ServerContext) {
             },
         );
     });
-    if let Ok(mut fighters) = ctx.active_fighters.write() {
-        fighters.insert(
-            ACTIVE_FIGHTER_ID,
-            eve_server::router::ActiveFighterSquadron {
-                ball_id: ACTIVE_FIGHTER_ID,
-                item_id: ACTIVE_FIGHTER_ID,
-                type_id: 23_057,
-                owner_char_id: CHAR_ID,
-                parent_ship_id: SHIP_ID,
-                tube_index: 0,
-                squadron_size: 9,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            },
-        );
-    }
+    eve_server::services::fighter_test_helpers::insert_active_fighter(
+        ctx,
+        ACTIVE_FIGHTER_ID,
+        eve_server::router::ActiveFighterSquadron {
+            ball_id: ACTIVE_FIGHTER_ID,
+            item_id: ACTIVE_FIGHTER_ID,
+            type_id: 23_057,
+            owner_char_id: CHAR_ID,
+            parent_ship_id: SHIP_ID,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
 }
 
 #[tokio::test]

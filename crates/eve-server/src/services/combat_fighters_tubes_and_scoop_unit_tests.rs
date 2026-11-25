@@ -7,7 +7,6 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::combat_fighters::*;
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_proto::PyRep;
@@ -99,9 +98,7 @@ async fn launch_and_unload_tube_edge_cases_warp_tether_rearm_and_empty() {
         );
     });
     fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, 602_001);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.fighter_tube_rearm_until.insert((ship_id, 0), ctx.now_unix() + 60);
-    });
+    fighter_test_helpers::set_fighter_tube_rearm_unix(&ctx, ship_id, 0, ctx.now_unix() + 60);
     let err_rearm = handle_fighters(
         &ctx,
         &mut session,
@@ -115,9 +112,7 @@ async fn launch_and_unload_tube_edge_cases_warp_tether_rearm_and_empty() {
     .unwrap_err();
     assert_eq!(err_rearm.code, "TubeRearming");
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.fighter_tube_rearm_until.remove(&(ship_id, 0));
-    });
+    fighter_test_helpers::clear_fighter_tube_rearm_unix(&ctx, ship_id, 0);
     let launched = handle_fighters(
         &ctx,
         &mut session,

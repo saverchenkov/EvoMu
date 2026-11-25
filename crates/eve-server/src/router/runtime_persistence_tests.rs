@@ -20,6 +20,7 @@ use crate::services::combat_crimewatch::{
     set_char_safety_level, with_combat_ephemeral, with_mut_combat_ephemeral, CombatRuntimeState,
     DroneBehaviorSettings, SafetyLevel, SelfDestructCountdown,
 };
+use crate::services::fighter_test_helpers;
 use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
 use crate::services::quasar_daily_goals::DailyGoalTemplate;
 use crate::services::quasar_social_chat::load_wormhole_speakers_from_db;
@@ -146,7 +147,8 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             .write()
             .unwrap()
             .insert((cid, sys_id, "ABC-123".into()), 0.75);
-        ctx.active_fighters.write().unwrap().insert(
+        fighter_test_helpers::insert_active_fighter(
+            &ctx,
             fighter_id,
             ActiveFighterSquadron {
                 ball_id: fighter_id,
@@ -161,18 +163,9 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 mwd_active: true,
             },
         );
-        ctx.fighter_cooldown_state
-            .write()
-            .unwrap()
-            .insert((fighter_id, 1), 1_700_000_500);
-        ctx.fighter_charge_state
-            .write()
-            .unwrap()
-            .insert((fighter_id, 2), 6);
-        ctx.fighter_tube_loads
-            .write()
-            .unwrap()
-            .insert((ship_id, 0), fighter_id);
+        fighter_test_helpers::set_fighter_ability_cooldown(&ctx, fighter_id, 1, 1_700_000_500);
+        fighter_test_helpers::set_fighter_ability_charges_used(&ctx, fighter_id, 2, 6);
+        fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, fighter_id);
         ctx.record_module_reactivation_delay(ship_id, mod_id, 12.5);
         ctx.mining_cycles.write().unwrap().insert(
             mod_id,
@@ -346,27 +339,21 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 .get(&(cid, sys_id, "ABC-123".into())),
             Some(&0.75)
         );
-        {
-            let fighters = ctx2.active_fighters.read().unwrap();
-            assert_eq!(fighters.get(&fighter_id).map(|f| f.squadron_size), Some(9));
-        }
         assert_eq!(
-            ctx2.fighter_cooldown_state
-                .read()
-                .unwrap()
-                .get(&(fighter_id, 1)),
-            Some(&1_700_000_500)
+            fighter_test_helpers::active_fighter(&ctx2, fighter_id).map(|f| f.squadron_size),
+            Some(9)
         );
         assert_eq!(
-            ctx2.fighter_charge_state
-                .read()
-                .unwrap()
-                .get(&(fighter_id, 2)),
-            Some(&6)
+            fighter_test_helpers::fighter_ability_cooldown(&ctx2, fighter_id, 1),
+            Some(1_700_000_500)
         );
         assert_eq!(
-            ctx2.fighter_tube_loads.read().unwrap().get(&(ship_id, 0)),
-            Some(&fighter_id)
+            fighter_test_helpers::fighter_ability_charges_used(&ctx2, fighter_id, 2),
+            Some(6)
+        );
+        assert_eq!(
+            fighter_test_helpers::loaded_fighter_in_tube(&ctx2, ship_id, 0),
+            Some(fighter_id)
         );
         assert!(ctx2
             .module_reactivation_cooldowns
@@ -854,10 +841,10 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         ctx.active_moon_probes.write().unwrap().clear();
         ctx.scanned_signatures.write().unwrap().clear();
         ctx.character_scan_progress.write().unwrap().clear();
-        ctx.active_fighters.write().unwrap().clear();
-        ctx.fighter_cooldown_state.write().unwrap().clear();
-        ctx.fighter_charge_state.write().unwrap().clear();
-        ctx.fighter_tube_loads.write().unwrap().clear();
+        fighter_test_helpers::clear_active_fighters(&ctx);
+        fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
+        fighter_test_helpers::clear_all_fighter_charges(&ctx);
+        fighter_test_helpers::clear_all_fighter_tubes(&ctx);
         ctx.module_reactivation_cooldowns.write().unwrap().clear();
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
@@ -1119,7 +1106,8 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         check_one(
             "active_fighters",
             &|c| {
-                c.active_fighters.write().unwrap().insert(
+                fighter_test_helpers::insert_active_fighter(
+                    c,
                     1,
                     ActiveFighterSquadron {
                         ball_id: 1,
@@ -1135,28 +1123,28 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                     },
                 );
             },
-            &|c| c.active_fighters.write().unwrap().clear(),
+            &|c| fighter_test_helpers::clear_active_fighters(c),
         );
         check_one(
             "fighter_cooldown_state",
             &|c| {
-                c.fighter_cooldown_state.write().unwrap().insert((1, 0), 100);
+                fighter_test_helpers::set_fighter_ability_cooldown(c, 1, 0, 100);
             },
-            &|c| c.fighter_cooldown_state.write().unwrap().clear(),
+            &|c| fighter_test_helpers::clear_all_fighter_cooldowns(c),
         );
         check_one(
             "fighter_charge_state",
             &|c| {
-                c.fighter_charge_state.write().unwrap().insert((1, 2), 6);
+                fighter_test_helpers::set_fighter_ability_charges_used(c, 1, 2, 6);
             },
-            &|c| c.fighter_charge_state.write().unwrap().clear(),
+            &|c| fighter_test_helpers::clear_all_fighter_charges(c),
         );
         check_one(
             "fighter_tube_loads",
             &|c| {
-                c.fighter_tube_loads.write().unwrap().insert((2, 0), 1);
+                fighter_test_helpers::set_fighter_tube_load(c, 2, 0, 1);
             },
-            &|c| c.fighter_tube_loads.write().unwrap().clear(),
+            &|c| fighter_test_helpers::clear_all_fighter_tubes(c),
         );
         check_one(
             "module_reactivation_cooldowns",

@@ -1,6 +1,6 @@
 //! Adversarial regression tests for Round 8 Shard D:
 //! - `#487`: `invbroker.SplitStack` / `contractProxy.SplitStack` ALSC item locks, `InventoryFlag::Locked` /
-//!   `AssetSafety` / `Impounded`, container passwords, `Plastic Wrap` (`3468`), active `fighter_tube_loads`,
+//!   `AssetSafety` / `Impounded`, container passwords, `Plastic Wrap` (`3468`), active fighter tube loads,
 //!   corp hangar division Take roles, physical co-location, and `i32` overflow rejection.
 //! - `#492`: `SystemCommand::SetCombatState` non-compounding `base_scramble_strengths` / `base_core_strengths`,
 //!   Support Fighter `Siren` (`40346`) tackle lifecycle cleanup, and `SpatialGtfo` warp suppression cleanup.
@@ -318,7 +318,7 @@ async fn test_r8_487_split_stack_locks_passwords_plastic_wrap_tubes_colocation_a
     let active_ship = ctx.db.get_character(90_000_001).unwrap().active_ship_id;
     let tube_fighter = 848_700_060_i64;
     seed_stack(&ctx, tube_fighter, SIREN_I, 90_000_001, active_ship, InventoryFlag::FighterBay, 6, false);
-    ctx.fighter_tube_loads.write().unwrap().insert((active_ship, 0), tube_fighter);
+    eve_server::services::fighter_test_helpers::set_fighter_tube_load(&ctx, active_ship, 0, tube_fighter);
     let tube_err = ctx
         .dispatch_rpc(&mut s1, "invbroker", None, "SplitStack", &[PyRep::Integer(tube_fighter), PyRep::Integer(2)], &kw, None)
         .await

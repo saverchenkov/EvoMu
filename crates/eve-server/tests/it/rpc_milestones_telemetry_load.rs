@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::{ActiveFighterSquadron, ServerContext};
+use eve_server::services::fighter_test_helpers;
 use eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK;
 
 use crate::common;
@@ -213,7 +214,8 @@ async fn test_milestones_task_tracker_and_fighters() {
         );
     });
 
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_ball_id,
         ActiveFighterSquadron {
             ball_id: fighter_ball_id,
@@ -237,8 +239,11 @@ async fn test_milestones_task_tracker_and_fighters() {
     assert_eq!(err_not_abandoned.code, "FighterNotAbandoned");
 
     // Negative 4: fighter owned by another pilot in a different corporation
-    ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id).unwrap().is_abandoned = true;
-    ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id).unwrap().owner_char_id = 90_000_999;
+    fighter_test_helpers::update_active_fighter(&ctx, fighter_ball_id, |f| {
+        f.is_abandoned = true;
+        f.owner_char_id = 90_000_999;
+    })
+    .unwrap();
     let err_not_owner = ctx
         .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(fighter_ball_id)], &kw, None)
         .await
@@ -246,7 +251,10 @@ async fn test_milestones_task_tracker_and_fighters() {
     assert_eq!(err_not_owner.code, "NotFighterOwner");
 
     // Negative 5: cannot scoop while docked
-    ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id).unwrap().owner_char_id = char_id;
+    fighter_test_helpers::update_active_fighter(&ctx, fighter_ball_id, |f| {
+        f.owner_char_id = char_id;
+    })
+    .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = Some(60_003_760);
@@ -267,7 +275,8 @@ async fn test_milestones_task_tracker_and_fighters() {
     // Negative 6: fighter out of range (> 2500m)
     let far_fighter_ball_id = 88_002i64;
     sys_handle.spawn_ball(make_test_ball(far_fighter_ball_id, 40_555, glam::DVec3::new(5000.0, 0.0, 0.0))).await.unwrap();
-    ctx.active_fighters.write().unwrap().insert(
+    fighter_test_helpers::insert_active_fighter(
+        &ctx,
         far_fighter_ball_id,
         ActiveFighterSquadron {
             ball_id: far_fighter_ball_id,
@@ -341,8 +350,8 @@ async fn test_milestones_task_tracker_and_fighters() {
         assert_eq!(it.location_id, ship_id);
         assert_eq!(it.flag, eve_db::InventoryFlag::FighterBay);
     });
-    // Verify fighter removed from active_fighters
-    assert!(!ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id));
+    // Verify active fighter squadron removed
+    assert!(!fighter_test_helpers::has_active_fighter(&ctx, fighter_ball_id));
 }
 
 #[tokio::test]
