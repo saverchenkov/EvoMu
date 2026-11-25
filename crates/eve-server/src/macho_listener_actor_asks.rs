@@ -899,39 +899,6 @@ pub(super) async fn execute_call_req_wire_with_ask_timeout(
     call_kwargs: &HashMap<String, PyRep>,
     ask_timeout: std::time::Duration,
 ) -> CallReqWireOutcome {
-    execute_call_req_wire_with_ask_timeout_and_post_dispatch(
-        ctx,
-        session,
-        wire,
-        req_source,
-        req_dest,
-        service,
-        bound_id,
-        method,
-        call_args,
-        call_kwargs,
-        ask_timeout,
-        None,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_call_req_wire_with_ask_timeout_and_post_dispatch(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    wire: &mut CallReqWireRefs<'_>,
-    req_source: &MachoAddress,
-    req_dest: &MachoAddress,
-    service: &str,
-    bound_id: Option<u64>,
-    method: &str,
-    call_args: &[PyRep],
-    call_kwargs: &HashMap<String, PyRep>,
-    ask_timeout: std::time::Duration,
-    post_dispatch: Option<Box<dyn FnOnce() + Send>>,
-) -> CallReqWireOutcome {
     let mut inner = InternalCallReqWireRefs {
         client_id: wire.client_id,
         sys_rx: TickRxSlot::Borrowed(wire.sys_rx),
@@ -951,7 +918,6 @@ pub(super) async fn execute_call_req_wire_with_ask_timeout_and_post_dispatch(
         call_args,
         call_kwargs,
         ask_timeout,
-        post_dispatch,
     )
     .await
 }

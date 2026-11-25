@@ -911,8 +911,6 @@ async fn dispatch_call_req_to_wire<W: AsyncWriteExt + Unpin>(
         call_args,
         call_kwargs,
         POST_RPC_ACTOR_ASK_TIMEOUT,
-        #[cfg(test)]
-        None,
     )
     .await;
     let frame_user_id = session.user_id.or(user_id_before_call);
@@ -1261,8 +1259,27 @@ type PreUndockDispatchHook = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(test)]
 static PRE_UNDOCK_DISPATCH_HOOKS: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<(u64, i64), PreUndockDispatchHook>>,
+    std::sync::Mutex<HashMap<(u64, i64, bool), PreUndockDispatchHook>>,
 > = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_undock_dispatch_hook_for_test(
+    ctx: &ServerContext,
+    char_id: i64,
+    is_post: bool,
+    hook: Option<PreUndockDispatchHook>,
+) {
+    let map = PRE_UNDOCK_DISPATCH_HOOKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    match hook {
+        Some(h) => {
+            guard.insert((ctx.instance_id, char_id, is_post), h);
+        }
+        None => {
+            guard.remove(&(ctx.instance_id, char_id, is_post));
+        }
+    }
+}
 
 #[cfg(test)]
 fn set_pre_undock_dispatch_hook_for_test(
@@ -1270,16 +1287,7 @@ fn set_pre_undock_dispatch_hook_for_test(
     char_id: i64,
     hook: Option<PreUndockDispatchHook>,
 ) {
-    let map = PRE_UNDOCK_DISPATCH_HOOKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-    match hook {
-        Some(h) => {
-            guard.insert((ctx.instance_id, char_id), h);
-        }
-        None => {
-            guard.remove(&(ctx.instance_id, char_id));
-        }
-    }
+    set_undock_dispatch_hook_for_test(ctx, char_id, false, hook);
 }
 
 #[cfg(test)]
@@ -1287,7 +1295,19 @@ fn run_pre_undock_dispatch_hook_for_test(ctx: &ServerContext, char_id: i64) {
     let hook = PRE_UNDOCK_DISPATCH_HOOKS.get().and_then(|map| {
         map.lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&(ctx.instance_id, char_id))
+            .remove(&(ctx.instance_id, char_id, false))
+    });
+    if let Some(h) = hook {
+        h();
+    }
+}
+
+#[cfg(test)]
+fn run_post_undock_dispatch_hook_for_test(ctx: &ServerContext, char_id: i64) {
+    let hook = PRE_UNDOCK_DISPATCH_HOOKS.get().and_then(|map| {
+        map.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(ctx.instance_id, char_id, true))
     });
     if let Some(h) = hook {
         h();
@@ -1465,8 +1485,6 @@ pub async fn execute_call_req_wire(
         call_args,
         call_kwargs,
         POST_RPC_ACTOR_ASK_TIMEOUT,
-        #[cfg(test)]
-        None,
     )
     .await
 }
@@ -1484,7 +1502,6 @@ async fn execute_call_req_wire_inner(
     call_args: &[PyRep],
     call_kwargs: &HashMap<String, PyRep>,
     ask_timeout: std::time::Duration,
-    #[cfg(test)] post_dispatch: Option<Box<dyn FnOnce() + Send>>,
 ) -> CallReqWireOutcome {
     let call_started_at = std::time::Instant::now();
     let call_id = match (req_dest, req_source) {
@@ -1585,8 +1602,13 @@ async fn execute_call_req_wire_inner(
     )
     .await;
     #[cfg(test)]
-    if let Some(hook) = post_dispatch {
-        hook();
+    if matches!(
+        (effective_service, method),
+        ("ship" | "structureDocking" | "stationSvc", "Undock")
+    ) {
+        if let Some(cid) = session.character_id {
+            run_post_undock_dispatch_hook_for_test(ctx, cid);
+        }
     }
     let pending_structure_set_state = session.character_id.and_then(|cid| {
         crate::services::space_destiny::take_pending_structure_set_state(

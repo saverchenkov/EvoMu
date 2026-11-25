@@ -1474,6 +1474,14 @@ async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_ne
     let pause_holder: Arc<Mutex<Option<PausedActorGuard>>> = Arc::new(Mutex::new(None));
     let pause_holder_hook = Arc::clone(&pause_holder);
     let sys_handle_hook = sys_handle.clone();
+    set_undock_dispatch_hook_for_test(
+        &ctx,
+        char_id,
+        true,
+        Some(Box::new(move || {
+            *pause_holder_hook.lock().unwrap() = Some(PausedActorGuard::pause(&sys_handle_hook));
+        })),
+    );
     let undock_out = {
         let mut wire_refs = CallReqWireRefs {
             client_id,
@@ -1482,7 +1490,7 @@ async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_ne
             wire_state: &mut wire_state,
             deferred_ship_id: &mut deferred_ship_id,
         };
-        execute_call_req_wire_with_ask_timeout_and_post_dispatch(
+        execute_call_req_wire_with_ask_timeout(
             &ctx,
             &mut sess,
             &mut wire_refs,
@@ -1498,9 +1506,6 @@ async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_ne
             &[],
             &kwargs,
             Duration::from_millis(80),
-            Some(Box::new(move || {
-                *pause_holder_hook.lock().unwrap() = Some(PausedActorGuard::pause(&sys_handle_hook));
-            })),
         )
         .await
     };
