@@ -6,7 +6,7 @@ use super::*;
 use crate::services::account_services::account_services_tests::{
     auth_session, test_ctx, PyRepTestExt,
 };
-use eve_db::AccountRecord;
+use eve_db::{AccountRecord, InventoryFlag};
 use eve_machonet::service_roles;
 use eve_proto::PyRep;
 use std::collections::HashMap;

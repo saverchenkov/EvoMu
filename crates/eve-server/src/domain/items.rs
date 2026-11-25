@@ -281,7 +281,9 @@ pub fn grant_character_item_tx(
     ctx.db.tx(tx_label, |wtx| {
         // Pre-validate character and destination before burning a durable entity ID.
         resolve_character_item_destination_in_snap(wtx.snap, target_char_id, delivery_policy)?;
-        let item_id = wtx.alloc_entity_id()?;
+        let item_id = wtx
+            .alloc_entity_id()
+            .map_err(<DomainError as eve_db::FromTxError>::from_tx_error)?;
         grant_item_in_snap(
             Some(&ctx.sde),
             wtx.snap,

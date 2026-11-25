@@ -7,7 +7,7 @@ use crate::services::project_discovery::{
     configure_project_discovery_bonus_samples, configure_project_discovery_mmos,
     set_project_discovery_task_consensus,
 };
-use eve_db::{IskCents, WorldRepository};
+use eve_db::{InventoryFlag, IskCents, WorldRepository};
 
 #[test]
 fn bonus_samples_rank_xp_curve_and_crate_spawning_cover_all_tiers() {

@@ -583,34 +583,12 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
         .shadow()
         .and_then(|s| s.session.station_id)
         .expect("docked station_id in ShadowClient");
-
-    // Prime station hangar listing into ShadowInventory so docked OnItemChange deltas converge cleanly.
-    let hangar_bind = harness
-        .call_ok(
-            "invbroker",
-            None,
-            "MachoBindObject",
-            &[PyRep::Integer(station_id), PyRep::None],
-            &kw,
-        )
-        .await;
-    let hangar_bid =
-        extract_bound_id_from_wire_rep(&hangar_bind).expect("station invbroker bound id");
-    harness
-        .call_ok("invbroker", Some(hangar_bid), "List", &[], &kw)
-        .await;
     harness.assert_shadow_converged();
-    assert!(
-        harness
-            .shadow()
-            .unwrap()
-            .inventory
-            .listed_containers
-            .contains(&station_id)
-    );
     let jita_loaded_before = ctx.systems.is_system_loaded(JITA);
 
     // 1. Docked `/giveitem` (stackable mineral) and `/createitem` (single module -> singleton).
+    //    `OnItemChange` deltas populate `ShadowInventory` without calling `invbroker.List` on the
+    //    shared station container (where rival demo characters also own ships).
     let hangar_trit = harness
         .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 34 50".into())], &kw)
         .await;
@@ -652,6 +630,22 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
             (sh_mod.type_id, sh_mod.owner_id, sh_mod.location_id, sh_mod.flag_id, sh_mod.quantity, sh_mod.singleton),
             (484, PILOT, station_id, InventoryFlag::Hangar as u16, 1, true)
         );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                sh_trit,
+                &eve_testkit::shadow_client::ShadowItem::from_record(
+                    &snap.items[&hangar_trit_id],
+                    Some(&ctx.sde),
+                )
+            );
+            assert_eq!(
+                sh_mod,
+                &eve_testkit::shadow_client::ShadowItem::from_record(
+                    &snap.items[&hangar_mod_id],
+                    Some(&ctx.sde),
+                )
+            );
+        });
     }
 
     // 2. Undock into space and prime active ship cargo listing into ShadowInventory.
