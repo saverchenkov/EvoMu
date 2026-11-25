@@ -356,54 +356,53 @@ fn reset_seasonal_goals_impl(ctx: &ServerContext, target_cid: i64) -> Result<PyR
     ]))
 }
 
-/// Handles GM `/season` slash commands (`start`, `end`, `clear_selection`, `reset_goals`).
-pub fn handle_season_slash(
+/// Handles GM `/season` slash subcommands given trimmed arguments `rest` (`start`, `end`, `clear_selection`, `reset_goals`).
+pub(crate) fn handle_season_slash_rest(
     ctx: &ServerContext,
     caller_char_id: i64,
-    cmd: &str,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let rest = cmd.strip_prefix("/season")?.trim();
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.first().copied() {
         Some("start") => {
             let Some(sid) = parts.get(1).and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
-                return Some(Err(rpc_err(
+                return Err(rpc_err(
                     "InvalidSlashArgument",
                     "Usage: /season start <season_id> [duration_days]",
-                )));
+                ));
             };
             let days = match parts.get(2) {
                 Some(s) => match s.parse::<i64>().ok().filter(|&d| d > 0) {
                     Some(d) => d,
                     None => {
-                        return Some(Err(rpc_err(
+                        return Err(rpc_err(
                             "InvalidSlashArgument",
                             "duration_days must be a positive integer",
-                        )));
+                        ));
                     }
                 },
                 None => 30,
             };
-            Some(start_season_impl(ctx, caller_char_id, sid, days))
+            start_season_impl(ctx, caller_char_id, sid, days)
         }
         Some("end") => {
             let Some(sid) = parts.get(1).and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
-                return Some(Err(rpc_err(
+                return Err(rpc_err(
                     "InvalidSlashArgument",
                     "Usage: /season end <season_id>",
-                )));
+                ));
             };
-            Some(end_season_impl(ctx, caller_char_id, sid))
+            end_season_impl(ctx, caller_char_id, sid)
         }
         Some("clear_selection" | "clear") => {
             let target_cid = match parts.get(1) {
                 Some(s) => match s.parse::<i64>().ok().filter(|&id| id > 0) {
                     Some(id) => id,
                     None => {
-                        return Some(Err(rpc_err(
+                        return Err(rpc_err(
                             "InvalidSlashArgument",
                             "Usage: /season clear_selection [char_id]",
-                        )));
+                        ));
                     }
                 },
                 None => caller_char_id,
@@ -412,33 +411,47 @@ pub fn handle_season_slash(
                 .db
                 .with_snapshot(|snap| snap.characters.contains_key(&target_cid));
             if !exists {
-                return Some(Err(rpc_err(
+                return Err(rpc_err(
                     "CharacterNotFound",
                     format!("Character {target_cid} not found"),
-                )));
+                ));
             }
             handle_select_season_clear_if_none_or_zero(ctx, target_cid, Some(&PyRep::None))
+                .unwrap_or_else(|| Ok(PyRep::Bool(true)))
         }
         Some("reset_goals" | "reset") => {
             let target_cid = match parts.get(1) {
                 Some(s) => match s.parse::<i64>().ok().filter(|&id| id > 0) {
                     Some(id) => id,
                     None => {
-                        return Some(Err(rpc_err(
+                        return Err(rpc_err(
                             "InvalidSlashArgument",
                             "Usage: /season reset_goals [char_id]",
-                        )));
+                        ));
                     }
                 },
                 None => caller_char_id,
             };
-            Some(reset_seasonal_goals_impl(ctx, target_cid))
+            reset_seasonal_goals_impl(ctx, target_cid)
         }
-        _ => Some(Err(rpc_err(
+        _ => Err(rpc_err(
             "InvalidSlashArgument",
             "Usage: /season <start|end|clear_selection|reset_goals> ...",
-        ))),
+        )),
     }
+}
+
+/// Handles GM `/season` slash commands (`start`, `end`, `clear_selection`, `reset_goals`).
+pub fn handle_season_slash(
+    ctx: &ServerContext,
+    caller_char_id: i64,
+    cmd: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let inv = crate::router::slash_registry::parse_slash_invocation(cmd)?;
+    if inv.head_raw != "season" {
+        return None;
+    }
+    Some(handle_season_slash_rest(ctx, caller_char_id, inv.rest))
 }
 
 /// Checks catalog diff on `seasonManager.reload_fsd_data` and emits `OnSeasonStarted` / `OnSeasonEnded`.

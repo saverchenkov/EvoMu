@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::rng::MechanicRng;
+use crate::router::slash_registry::{SlashBoxFuture, SlashInvocation};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::services::inventory_fitting::fitting_scanners_superweapons::ActiveDbuffEntry;
@@ -1556,7 +1557,7 @@ pub(crate) fn derive_sde_wreck_loot(
     loot
 }
 
-async fn handle_spawnwreck_cmd(
+pub(crate) async fn handle_spawnwreck_cmd(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
@@ -1762,29 +1763,50 @@ async fn handle_spawnwreck_cmd(
     ]))
 }
 
-/// Dispatches `#1088` GM soak and repro commands (`/soak`, `/deadwarp`, `/sysjunkclear`, `/backintime`, `/spawnwreck`).
-pub(crate) async fn handle_gm_soak_slash_cmd(
+/// Registry dispatch target for `/soak` (`#1193`).
+pub(crate) fn dispatch_soak_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        handle_soak_cmd(ctx, session, cid, inv.raw).await
+    })
+}
+
+/// Registry dispatch target for `/deadwarp` (`#1193`).
+pub(crate) fn dispatch_deadwarp_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        handle_deadwarp_cmd(ctx, session, cid, inv.raw).await
+    })
+}
+
+/// Registry dispatch target for `/sysjunkclear` (`#1193`).
+pub(crate) fn dispatch_sysjunkclear_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        handle_sysjunkclear_cmd(ctx, session, cid, inv.raw).await
+    })
+}
+
+/// Registry dispatch target for `/backintime` (`#1193`).
+pub(crate) fn dispatch_backintime_slash(
     ctx: &ServerContext,
     session: &SessionState,
-    cid: i64,
-    cmd: &str,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    if cmd == "/soak" || cmd.starts_with("/soak ") {
-        return Some(handle_soak_cmd(ctx, session, cid, cmd).await);
-    }
-    if cmd == "/deadwarp" || cmd.starts_with("/deadwarp ") {
-        return Some(handle_deadwarp_cmd(ctx, session, cid, cmd).await);
-    }
-    if cmd == "/sysjunkclear" || cmd.starts_with("/sysjunkclear ") {
-        return Some(handle_sysjunkclear_cmd(ctx, session, cid, cmd).await);
-    }
-    if cmd == "/backintime" || cmd.starts_with("/backintime ") {
-        return Some(handle_backintime_cmd(ctx, cid, cmd));
-    }
-    if cmd == "/spawnwreck" || cmd.starts_with("/spawnwreck ") {
-        return Some(handle_spawnwreck_cmd(ctx, session, cid, cmd).await);
-    }
-    None
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    handle_backintime_cmd(ctx, cid, inv.raw)
 }
 
 fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {

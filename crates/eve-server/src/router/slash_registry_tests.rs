@@ -55,16 +55,13 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
     assert_eq!(derived_all.as_slice(), all);
     assert_eq!(auth_remote_slash_commands_for_role(full_mask).as_slice(), all);
 
-    let pending = count_pending_handlers(SLASH_COMMAND_REGISTRY);
-    assert_eq!(pending, PENDING_SLASH_HANDLER_COUNT);
-    assert!(
-        pending <= 4,
-        "PENDING_SLASH_HANDLER_COUNT must be shrink-only (got {pending})"
-    );
+    assert_eq!(PENDING_SLASH_HANDLER_COUNT, 0);
+    assert_eq!(SLASH_COMMAND_REGISTRY.len(), all.len());
     for bound in [
         "achievements",
         "advancetime",
         "autotidi",
+        "backintime",
         "ban",
         "campaign",
         "chatban",
@@ -75,6 +72,7 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
         "contact",
         "createccpevent",
         "createitem",
+        "deadwarp",
         "despawn",
         "downtime",
         "energy",
@@ -111,6 +109,7 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
         "setskill",
         "setunderage",
         "shutdown",
+        "soak",
         "spawn",
         "spawnanomaly",
         "spawnnpc",
@@ -120,6 +119,7 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
         "structuretimer",
         "survey",
         "suspend",
+        "sysjunkclear",
         "teleport",
         "tidi",
         "tr",
@@ -132,14 +132,21 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
         "whoami",
     ] {
         assert!(
-            lookup_slash_entry(bound).and_then(|e| e.handler).is_some(),
-            "Migrated command '/{bound}' must bind Some(handler)"
+            lookup_slash_entry(bound).is_some(),
+            "Migrated command '/{bound}' must be registered in SLASH_COMMAND_REGISTRY"
         );
     }
-    for deferred in ["backintime", "deadwarp", "soak", "sysjunkclear"] {
+    assert!(matches!(
+        lookup_slash_entry("backintime").map(|e| e.handler),
+        Some(SlashHandler::Sync(_))
+    ));
+    for async_b4 in ["deadwarp", "soak", "sysjunkclear"] {
         assert!(
-            lookup_slash_entry(deferred).and_then(|e| e.handler).is_none(),
-            "Batch-4 command '/{deferred}' must remain deferred until final batch"
+            matches!(
+                lookup_slash_entry(async_b4).map(|e| e.handler),
+                Some(SlashHandler::Async(_))
+            ),
+            "Batch-4 command '/{async_b4}' must bind SlashHandler::Async"
         );
     }
 
@@ -335,14 +342,21 @@ fn slash_invocation_parser_and_central_dispatcher_routing() {
         assert_eq!(unk.code, "UnknownSlashCommand"); // rpc-lint: allow MachoNet error code assertion
     }
 
-    // Bound Batch-3 sync rows execute cleanly (including case-insensitive `cmd_icase!` heads);
-    // remaining Batch-4 rows yield PendingLegacyChain when authorized.
+    // Bound sync rows execute cleanly (including case-insensitive `cmd_icase!` heads and
+    // Batch-4 `/backintime`); async Batch-4 rows yield RequiresAsync on the sync fast-path.
     let SlashDispatchOutcome::Handled(Ok(who_rep)) =
         dispatch_slash_command(&ctx, &sess, "slash", &[PyRep::String("/whoami".into())])
     else {
         panic!("expected Handled Ok for /whoami");
     };
     assert!(who_rep.as_str().is_some_and(|s| s.contains("charID=")));
+
+    let SlashDispatchOutcome::Handled(Ok(back_rep)) =
+        dispatch_slash_command(&ctx, &sess, "slash", &[PyRep::String("/backintime".into())])
+    else {
+        panic!("expected Handled Ok for sync /backintime");
+    };
+    assert_eq!(back_rep.dict_get("queueLength"), Some(&PyRep::Integer(0)));
 
     let SlashDispatchOutcome::Handled(Err(struct_err)) = dispatch_slash_command(
         &ctx,
@@ -354,15 +368,20 @@ fn slash_invocation_parser_and_central_dispatcher_routing() {
     };
     assert_eq!(struct_err.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
 
-    assert!(matches!(
-        dispatch_slash_command(
-            &ctx,
-            &sess,
-            "slash",
-            &[PyRep::String("/soak logi status".into())]
-        ),
-        SlashDispatchOutcome::PendingLegacyChain
-    ));
+    for async_cmd in ["/soak logi status", "/deadwarp status", "/sysjunkclear"] {
+        assert!(
+            matches!(
+                dispatch_slash_command(
+                    &ctx,
+                    &sess,
+                    "slash",
+                    &[PyRep::String(async_cmd.into())],
+                ),
+                SlashDispatchOutcome::RequiresAsync
+            ),
+            "expected RequiresAsync on sync fast-path for {async_cmd}"
+        );
+    }
 
     // Bound Batch-1 rows execute cleanly via central dispatch.
     let SlashDispatchOutcome::Handled(Ok(pd_rep)) = dispatch_slash_command(
@@ -433,13 +452,9 @@ fn shrink_only_legacy_slash_prefix_parsing_outside_registry() {
     .into_iter()
     .collect();
 
-    // Shrink-only baseline for remaining deferred legacy chains + `strip_slash_command*` helper
-    // calls (prevents spelling-evasion by counting both patterns together). Each subsequent
-    // Track 1 batch reduces its migrated file(s) to 0.
-    let shrink_only_max_by_file: BTreeMap<&str, usize> = BTreeMap::from([
-        ("services/gm_soak_commands.rs", 5),
-        ("services/notify_emitters_seasons_tactical.rs", 1),
-    ]);
+    // All GM slash command parsing now routes through `slash_registry`; 0 legacy
+    // leading-slash prefix chains or `strip_slash_command*` helpers remain.
+    let shrink_only_max_by_file: BTreeMap<&str, usize> = BTreeMap::new();
 
     let mut observed: BTreeMap<String, usize> = BTreeMap::new();
     let mut unexpected_violations = Vec::new();
@@ -484,6 +499,10 @@ fn shrink_only_legacy_slash_prefix_parsing_outside_registry() {
         "found unmigrated leading-slash prefix checks outside deferred Track 1 chains:\n{}",
         unexpected_violations.join("\n")
     );
+    assert!(
+        shrink_only_max_by_file.is_empty() && observed.is_empty(),
+        "expected 0 legacy slash prefix parse sites remaining, got {observed:?}"
+    );
     for (rel, max_hits) in &shrink_only_max_by_file {
         let actual = observed.get(*rel).copied().unwrap_or(0);
         assert!(
@@ -524,12 +543,7 @@ async fn exec_slash_async(
     svc: &str,
     cmd: &str,
 ) -> Result<PyRep, BridgeRpcError> {
-    match dispatch_slash_command_async(ctx, sess, svc, &[PyRep::String(cmd.into())]).await {
-        SlashDispatchOutcome::Handled(res) => res,
-        SlashDispatchOutcome::PendingLegacyChain => {
-            panic!("expected bound SlashHandler for '{cmd}' on '{svc}', got PendingLegacyChain")
-        }
-    }
+    dispatch_slash_command_async(ctx, sess, svc, &[PyRep::String(cmd.into())]).await
 }
 
 #[tokio::test]
@@ -601,7 +615,7 @@ async fn slash_registry_async_and_account_admin_dispatch_parity() {
             "slash",
             &[PyRep::String("/role slash_reg_target GML".into())],
         ),
-        SlashDispatchOutcome::PendingLegacyChain
+        SlashDispatchOutcome::RequiresAsync
     ));
     assert!(matches!(
         dispatch_slash_command(
@@ -610,7 +624,7 @@ async fn slash_registry_async_and_account_admin_dispatch_parity() {
             "slash",
             &[PyRep::String("/heal".into())],
         ),
-        SlashDispatchOutcome::PendingLegacyChain
+        SlashDispatchOutcome::RequiresAsync
     ));
 
     // Bare commands that require trailing whitespace in legacy auth_cache still return UnknownSlashCommand.
@@ -932,4 +946,242 @@ async fn slash_registry_batch3_gm_tools_and_notify_emitters_parity() {
             .await;
     }
     assert!(exec_slash_async(&ctx, &mut sess, "slash", "/spawnwreck 606 1").await.is_ok());
+}
+
+#[tokio::test]
+async fn slash_registry_batch4_gm_soak_commands_final_cutover_parity() {
+    let ctx = test_ctx();
+    let demo_uid = ctx
+        .db
+        .with_snapshot(|s| s.accounts.values().next().map(|a| a.user_id))
+        .expect("seeded account");
+    let cid = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.active_ship_id))
+        .filter(|&id| id > 0)
+        .unwrap_or(100_000_001);
+    let target_race = ctx
+        .sde
+        .races
+        .iter()
+        .find(|(_, r)| r.starter_skills.values().any(|&lvl| lvl > 0))
+        .map(|(&rid, _)| rid)
+        .or_else(|| ctx.sde.races.keys().next().copied())
+        .unwrap_or(1);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.race_id = target_race;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.skills.entry(cid).or_default().insert(
+            99_999_999,
+            eve_db::TrainedSkillRecord {
+                type_id: 99_999_999,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.skill_queues.insert(
+            cid,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3300,
+                target_level: 5,
+                start_sp: 0.0,
+                end_sp: 1_000.0,
+                duration_seconds: 60.0,
+                started_at_unix: None,
+            }],
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 606,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await;
+
+    // 1. 72/72 mandatory handlers & exact-case role parity.
+    assert_eq!(PENDING_SLASH_HANDLER_COUNT, 0);
+    assert_eq!(SLASH_COMMAND_REGISTRY.len(), 72);
+    assert_eq!(all_remote_slash_commands().len(), 72);
+    for cmd in [
+        "/backintime",
+        "/backintime me",
+        "/deadwarp",
+        "/deadwarp status",
+        "/deadwarp stop",
+        "/soak logi status",
+        "/soak logi 2",
+        "/sysjunkclear",
+    ] {
+        assert_eq!(required_slash_role(cmd), service_roles::ROLE_GM_MASK, "{cmd}");
+        assert_eq!(required_slash_role(cmd), auth_required_slash_role(cmd), "{cmd}");
+    }
+
+    // 2. Role gate rejection on both slash and publicQaToolsServer without mutating state.
+    for role in [service_roles::ROLE_PLAYER, service_roles::ROLE_QA] {
+        let mut denied_sess = auth_session(demo_uid, cid, 98_000_001, sys_id);
+        denied_sess.ship_id = Some(ship_id);
+        denied_sess.role = role;
+        for svc in ["slash", "publicQaToolsServer"] {
+            for cmd in ["/backintime", "/deadwarp status", "/soak logi status", "/sysjunkclear"] {
+                let err = exec_slash_async(&ctx, &mut denied_sess, svc, cmd)
+                    .await
+                    .expect_err("unprivileged caller must be rejected");
+                assert_eq!(err.code, "InsufficientRole", "{svc} {cmd}"); // rpc-lint: allow MachoNet error code assertion
+            }
+        }
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.skills.get(&cid).is_some_and(|m| m.contains_key(&99_999_999)));
+        assert!(snap.skill_queues.contains_key(&cid));
+    });
+
+    // 3. Exact-case enforcement & prefix collision rejection.
+    let mut sess = auth_session(demo_uid, cid, 98_000_001, sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.role = service_roles::ROLE_GM_MASK;
+    for bad in [
+        "/BACKINTIME",
+        "/BackInTime",
+        "/backintime2",
+        "/DEADWARP status",
+        "/deadwarpextra",
+        "/SOAK logi status",
+        "/soakextra logi status",
+        "/SYSJUNKCLEAR",
+        "/sysjunkclearall",
+        "/SEASON reset_goals",
+        "/seasonextra",
+    ] {
+        let err = exec_slash_async(&ctx, &mut sess, "slash", bad)
+            .await
+            .expect_err("uppercase or prefix-colliding command must fail");
+        assert_eq!(err.code, "UnknownSlashCommand", "{bad}"); // rpc-lint: allow MachoNet error code assertion
+    }
+
+    // 4. Whitespace handling, argument forwarding, and end-to-end execution for all 4 commands.
+    let back_bad = exec_slash_async(&ctx, &mut sess, "slash", "/backintime extra")
+        .await
+        .expect_err("extra arg to /backintime must fail");
+    assert_eq!(back_bad.code, "InvalidArguments"); // rpc-lint: allow MachoNet error code assertion
+
+    let back_rep = exec_slash_async(&ctx, &mut sess, "slash", "  /backintime   me  ")
+        .await
+        .expect("/backintime me succeeds with whitespace");
+    assert_eq!(back_rep.dict_get("command"), Some(&PyRep::String("/backintime   me".into())));
+    assert_eq!(back_rep.dict_get("characterID"), Some(&PyRep::Integer(cid)));
+    assert_eq!(back_rep.dict_get("queueLength"), Some(&PyRep::Integer(0)));
+    assert!(
+        back_rep
+            .dict_get("removedSkillCount")
+            .and_then(PyRep::as_i64)
+            .unwrap_or(0)
+            >= 1
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.skills.get(&cid).is_some_and(|m| m.contains_key(&99_999_999)));
+        assert!(!snap.skill_queues.contains_key(&cid));
+    });
+
+    // /soak status, spawn ring, stop, and argument errors.
+    let soak_bare = exec_slash_async(&ctx, &mut sess, "slash", "/soak")
+        .await
+        .expect_err("bare /soak returns InvalidArguments");
+    assert_eq!(soak_bare.code, "InvalidArguments"); // rpc-lint: allow MachoNet error code assertion
+    let soak_status = exec_slash_async(&ctx, &mut sess, "slash", "  /soak   logi   status  ")
+        .await
+        .expect("/soak logi status succeeds");
+    assert_eq!(
+        soak_status.dict_get("command"),
+        Some(&PyRep::String("/soak   logi   status".into()))
+    );
+    assert_eq!(soak_status.dict_get("active"), Some(&PyRep::Bool(false)));
+    let soak_spawn = exec_slash_async(&ctx, &mut sess, "slash", "/soak logi 2")
+        .await
+        .expect("/soak logi 2 spawns ring");
+    assert_eq!(soak_spawn.dict_get("active"), Some(&PyRep::Bool(true)));
+    assert_eq!(soak_spawn.dict_get("npcCount"), Some(&PyRep::Integer(2)));
+    let soak_stop = exec_slash_async(&ctx, &mut sess, "publicQaToolsServer", "/soak   stop")
+        .await
+        .expect("/soak stop succeeds");
+    assert_eq!(soak_stop.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert_eq!(soak_stop.dict_get("stoppedCount"), Some(&PyRep::Integer(2)));
+
+    // /deadwarp status, start, stop, and argument errors.
+    let dw_bad = exec_slash_async(&ctx, &mut sess, "slash", "/deadwarp bogus")
+        .await
+        .expect_err("/deadwarp bogus fails");
+    assert_eq!(dw_bad.code, "InvalidArguments"); // rpc-lint: allow MachoNet error code assertion
+    let dw_idle = exec_slash_async(&ctx, &mut sess, "slash", "  /deadwarp   status ")
+        .await
+        .expect("/deadwarp status idle");
+    assert_eq!(dw_idle.dict_get("command"), Some(&PyRep::String("/deadwarp   status".into())));
+    assert_eq!(dw_idle.dict_get("active"), Some(&PyRep::Bool(false)));
+    let dw_start = exec_slash_async(&ctx, &mut sess, "slash", "/deadwarp")
+        .await
+        .expect("/deadwarp starts outbound warp");
+    assert_eq!(dw_start.dict_get("active"), Some(&PyRep::Bool(true)));
+    assert_eq!(dw_start.dict_get("phase"), Some(&PyRep::String("Outbound".into())));
+    let dw_stop = exec_slash_async(&ctx, &mut sess, "slash", "/deadwarp stop")
+        .await
+        .expect("/deadwarp stop cancels");
+    assert_eq!(dw_stop.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert_eq!(dw_stop.dict_get("stopped"), Some(&PyRep::Bool(true)));
+
+    // /sysjunkclear argument check, live jetcan purge, and /season whitespace parity.
+    let sj_bad = exec_slash_async(&ctx, &mut sess, "slash", "/sysjunkclear extra")
+        .await
+        .expect_err("/sysjunkclear extra fails");
+    assert_eq!(sj_bad.code, "InvalidArguments"); // rpc-lint: allow MachoNet error code assertion
+    let jetcan_id = 880_999_113_i64;
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: jetcan_id,
+                type_id: 23,
+                position: glam::DVec3::new(2_500.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 20.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .expect("spawn test jetcan");
+    let sj_ok = exec_slash_async(&ctx, &mut sess, "slash", "  /sysjunkclear  ")
+        .await
+        .expect("/sysjunkclear succeeds");
+    assert_eq!(sj_ok.dict_get("command"), Some(&PyRep::String("/sysjunkclear".into())));
+    assert_eq!(sj_ok.dict_get("jetcansPurged"), Some(&PyRep::Integer(1)));
+    assert_eq!(sj_ok.dict_get("totalPurged"), Some(&PyRep::Integer(1)));
+    assert!(sys_handle.view().ball(jetcan_id).is_none());
+
+    let season_rep = exec_slash_async(&ctx, &mut sess, "slash", "  /season   reset_goals  ")
+        .await
+        .expect("/season reset_goals succeeds with whitespace");
+    assert_eq!(season_rep.dict_get("reset"), Some(&PyRep::Bool(true)));
 }

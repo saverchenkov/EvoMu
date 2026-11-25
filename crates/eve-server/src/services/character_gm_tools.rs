@@ -13,7 +13,6 @@ use crate::router::notify_registry::{
 #[cfg(test)]
 use crate::router::slash_registry::{
     dispatch_registered_for_test, parse_slash_invocation_preserving_trailing_ws,
-    SlashDispatchOutcome,
 };
 use crate::router::slash_registry::{unknown_slash_error, SlashBoxFuture, SlashInvocation};
 use crate::router::{NotificationTarget, ServerContext};
@@ -2062,8 +2061,7 @@ pub(crate) fn dispatch_season_slash(
     inv: &SlashInvocation<'_>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, cid) = ServerContext::require_character(session)?;
-    crate::services::notify_emitters_seasons_tactical::handle_season_slash(ctx, cid, inv.raw)
-        .unwrap_or_else(|| Err(unknown_slash_error(inv.raw)))
+    crate::services::notify_emitters_seasons_tactical::handle_season_slash_rest(ctx, cid, inv.rest)
 }
 
 /// Registry dispatch target for `/energy` (`#1193`).
@@ -2173,14 +2171,13 @@ pub(crate) fn dispatch_spawnwreck_slash<'a>(
                 }
             });
         }
-        crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(
+        crate::services::gm_soak_commands::handle_spawnwreck_cmd(
             ctx,
             &target_session,
             target_cid,
             &forwarded_cmd,
         )
         .await
-        .unwrap_or_else(|| Err(unknown_slash_error(inv.raw)))
     })
 }
 
@@ -2198,11 +2195,7 @@ pub async fn handle_gm_slash_ext(
     let outcome = dispatch_registered_for_test(ctx, session, &inv).await;
     let res = match outcome {
         None => None,
-        Some(SlashDispatchOutcome::PendingLegacyChain) => {
-            crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(ctx, session, cid, cmd)
-                .await
-        }
-        Some(SlashDispatchOutcome::Handled(Err(ref e)))
+        Some(Err(ref e))
             if e.code == "UnknownSlashCommand"
                 && matches!(
                     inv.head_lower.as_str(),
@@ -2211,31 +2204,10 @@ pub async fn handle_gm_slash_ext(
         {
             None
         }
-        Some(SlashDispatchOutcome::Handled(res)) => Some(res),
+        Some(res) => Some(res),
     };
     session.character_id = prev_cid;
     res
-}
-
-async fn handle_pending_gm_qa_rpcs(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    service: &str,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-    let cid = session.character_id?;
-    if let Some(ext_res) =
-        crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(ctx, session, cid, cmd).await
-    {
-        crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
-        return Some(ext_res);
-    }
-    if service == "publicQaToolsServer" {
-        crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
-        return Some(Err(unknown_slash_error(cmd)));
-    }
-    None
 }
 
 pub async fn handle_gm_qa_rpcs(
@@ -2256,13 +2228,10 @@ pub async fn handle_gm_qa_rpcs(
     {
         return None;
     }
-    if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+    Some(
         crate::router::slash_registry::dispatch_slash_command_async(ctx, session, service, args)
-            .await
-    {
-        return Some(res);
-    }
-    handle_pending_gm_qa_rpcs(ctx, session, service, args).await
+            .await,
+    )
 }
 
 use crate::router::rpc_registry::{
@@ -2278,15 +2247,12 @@ fn dispatch_qa_rpc<'a>(
     _kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
     Box::pin(async move {
-        if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+        Some(
             crate::router::slash_registry::dispatch_slash_command_async(
                 ctx, session, service, args,
             )
-            .await
-        {
-            return Some(res);
-        }
-        handle_pending_gm_qa_rpcs(ctx, session, service, args).await
+            .await,
+        )
     })
 }
 
@@ -2294,23 +2260,17 @@ fn dispatch_slash_cmd<'a>(
     ctx: &'a ServerContext,
     session: &'a mut SessionState,
     service: &'a str,
-    method: &'a str,
+    _method: &'a str,
     args: &'a [PyRep],
-    kwargs: &'a HashMap<String, PyRep>,
+    _kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
     Box::pin(async move {
-        if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+        Some(
             crate::router::slash_registry::dispatch_slash_command_async(
                 ctx, session, service, args,
             )
-            .await
-        {
-            return Some(res);
-        }
-        if let Some(res) = handle_pending_gm_qa_rpcs(ctx, session, service, args).await {
-            return Some(res);
-        }
-        crate::services::auth_cache::handle(ctx, session, service, method, args, kwargs).await
+            .await,
+        )
     })
 }
 
