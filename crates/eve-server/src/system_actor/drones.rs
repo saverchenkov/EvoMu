@@ -83,14 +83,43 @@ pub(crate) type ActiveDroneMutOp = Box<
         + Send,
 >;
 
-/// Closure executed atomically inside [`SystemActor`] with read access to active transient
-/// `scoop_claimed_drones` so reconnect/abandon paths skip or reject drones currently claimed for scoop.
+/// Deferred disconnect/abandon intent stamped onto `scoop_claimed_drones` when
+/// warp, disconnect, or `CmdAbandonDrone` runs while a scoop holds a transient claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingScoopAbandonKind {
+    Disconnect,
+    Abandon,
+}
+
+/// Metadata required to apply and notify a deferred disconnect/abandon on `ReleaseClaim`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingScoopAbandon {
+    pub kind: PendingScoopAbandonKind,
+    pub notify_char_id: i64,
+    pub drone_item_id: i64,
+    pub type_id: u32,
+    pub solar_system_id: u32,
+}
+
+impl PendingScoopAbandon {
+    /// Merges `next` into `slot`, ensuring `Abandon` overrides `Disconnect` and never downgrades.
+    pub fn merge_into(slot: &mut Option<Self>, next: Self) {
+        match slot {
+            Some(existing) if existing.kind == PendingScoopAbandonKind::Abandon => {}
+            _ => *slot = Some(next),
+        }
+    }
+}
+
+/// Closure executed atomically inside [`SystemActor`] with mutable access to active
+/// transient `scoop_claimed_drones` so reconnect skips claimed drones and abandon/disconnect
+/// stamps deferred intent onto claimed drones instead of dropping updates silently.
 pub(crate) type ActiveDroneMutWithClaimsOp = Box<
     dyn FnOnce(
             &mut HashMap<BallId, DroneSpaceState>,
             &mut HashMap<BallId, DroneMiningState>,
             &mut HashMap<BallId, u64>,
-            &std::collections::HashSet<BallId>,
+            &mut HashMap<BallId, Option<PendingScoopAbandon>>,
         ) -> bool
         + Send,
 >;
@@ -130,6 +159,7 @@ pub enum DroneScoopClaimOutcome {
     OwnedByOther,
     NotEligible,
     Released,
+    ReleasedWithPending(PendingScoopAbandon),
     Consumed(Option<DroneSpaceState>),
     TakeForAbandon(Option<DroneSpaceState>),
 }
@@ -445,15 +475,15 @@ pub(crate) fn migrate_legacy_active_drones_at_startup(ctx: &crate::router::Serve
                 }
             }
         });
-    }
-    if !by_sys.is_empty() {
-        let mut guard = ctx
-            .systems
-            .migrated_legacy_drone_systems
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for sys_id in by_sys.keys() {
-            guard.insert(*sys_id);
+        if !by_sys.is_empty() {
+            let mut guard = ctx
+                .systems
+                .migrated_legacy_drone_systems
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for sys_id in by_sys.keys() {
+                guard.insert(*sys_id);
+            }
         }
     }
 }
@@ -668,6 +698,49 @@ fn finalize_drone_launches_in_actor(
     Ok(updated)
 }
 
+fn apply_pending_scoop_abandon_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ball_id: BallId,
+    pending: PendingScoopAbandon,
+) -> Option<PendingScoopAbandon> {
+    if ball_id <= 0 {
+        return None;
+    }
+    let st = ctx.actor_st.active_drones_in_space.get_mut(&ball_id)?;
+    if st.is_abandoned {
+        return None;
+    }
+    let notify_char_id = if pending.notify_char_id > 0 {
+        pending.notify_char_id
+    } else {
+        st.owner_char_id
+    };
+    let out = PendingScoopAbandon {
+        kind: pending.kind,
+        notify_char_id,
+        drone_item_id: st.drone_item_id,
+        type_id: st.type_id,
+        solar_system_id: if st.solar_system_id > 0 {
+            st.solar_system_id
+        } else {
+            ctx.solar_system_id
+        },
+    };
+    st.parent_ship_id = 0;
+    st.target_id = None;
+    st.activity_state = 0;
+    ctx.actor_st.active_drone_miners.remove(&ball_id);
+    if pending.kind == PendingScoopAbandonKind::Abandon {
+        st.is_abandoned = true;
+        st.owner_char_id = 0;
+        st.assist_char_id = None;
+        st.guard_char_id = None;
+        ctx.actor_st.drone_next_ready_unix.remove(&ball_id);
+    }
+    mark_active_drones_dirty_in_state(ctx.actor_st);
+    Some(out)
+}
+
 fn execute_drone_scoop_claim_op_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     ball_id: BallId,
@@ -682,7 +755,7 @@ fn execute_drone_scoop_claim_op_in_actor(
     };
     match action {
         DroneScoopClaimAction::ClaimPlayerScoop { char_id } => {
-            if ctx.actor_st.scoop_claimed_drones.contains(&ball_id) {
+            if ctx.actor_st.scoop_claimed_drones.contains_key(&ball_id) {
                 return Ok(DroneScoopClaimOutcome::AlreadyClaimed);
             }
             if let Some(st) = ctx.actor_st.active_drones_in_space.get(&ball_id) {
@@ -690,7 +763,7 @@ fn execute_drone_scoop_claim_op_in_actor(
                     return Ok(DroneScoopClaimOutcome::OwnedByOther);
                 }
             }
-            ctx.actor_st.scoop_claimed_drones.insert(ball_id);
+            ctx.actor_st.scoop_claimed_drones.insert(ball_id, None);
             Ok(DroneScoopClaimOutcome::Claimed(
                 ctx.actor_st.active_drones_in_space.get(&ball_id).cloned(),
             ))
@@ -699,7 +772,7 @@ fn execute_drone_scoop_claim_op_in_actor(
             expected_owner,
             target_ship_id,
         } => {
-            if ctx.actor_st.scoop_claimed_drones.contains(&ball_id) {
+            if ctx.actor_st.scoop_claimed_drones.contains_key(&ball_id) {
                 return Ok(DroneScoopClaimOutcome::AlreadyClaimed);
             }
             let Some(existing) = ctx.actor_st.active_drones_in_space.get(&ball_id).cloned() else {
@@ -708,12 +781,18 @@ fn execute_drone_scoop_claim_op_in_actor(
             if !is_returning_for_ship(&existing, expected_owner, target_ship_id) {
                 return Ok(DroneScoopClaimOutcome::NotEligible);
             }
-            ctx.actor_st.scoop_claimed_drones.insert(ball_id);
+            ctx.actor_st.scoop_claimed_drones.insert(ball_id, None);
             Ok(DroneScoopClaimOutcome::Claimed(Some(existing)))
         }
         DroneScoopClaimAction::ReleaseClaim => {
-            ctx.actor_st.scoop_claimed_drones.remove(&ball_id);
-            Ok(DroneScoopClaimOutcome::Released)
+            let pending = ctx.actor_st.scoop_claimed_drones.remove(&ball_id).flatten();
+            if let Some(applied) =
+                pending.and_then(|p| apply_pending_scoop_abandon_in_actor(ctx, ball_id, p))
+            {
+                Ok(DroneScoopClaimOutcome::ReleasedWithPending(applied))
+            } else {
+                Ok(DroneScoopClaimOutcome::Released)
+            }
         }
         DroneScoopClaimAction::ConsumeScoop => {
             ctx.actor_st.scoop_claimed_drones.remove(&ball_id);
@@ -727,7 +806,7 @@ fn execute_drone_scoop_claim_op_in_actor(
             char_id_opt,
             ship_id,
         } => {
-            ctx.actor_st.scoop_claimed_drones.remove(&ball_id);
+            let pending = ctx.actor_st.scoop_claimed_drones.remove(&ball_id).flatten();
             let can_abandon = ctx
                 .actor_st
                 .active_drones_in_space
@@ -746,6 +825,10 @@ fn execute_drone_scoop_claim_op_in_actor(
                     mark_active_drones_dirty_in_state(ctx.actor_st);
                 }
                 Ok(DroneScoopClaimOutcome::TakeForAbandon(removed))
+            } else if let Some(applied) =
+                pending.and_then(|p| apply_pending_scoop_abandon_in_actor(ctx, ball_id, p))
+            {
+                Ok(DroneScoopClaimOutcome::ReleasedWithPending(applied))
             } else {
                 Ok(DroneScoopClaimOutcome::TakeForAbandon(None))
             }
@@ -755,7 +838,29 @@ fn execute_drone_scoop_claim_op_in_actor(
             target_ship_id,
             require_returning,
         } => {
-            if ctx.actor_st.scoop_claimed_drones.contains(&ball_id) {
+            if let Some(pending_slot) = ctx.actor_st.scoop_claimed_drones.get_mut(&ball_id) {
+                if let Some(st) = ctx.actor_st.active_drones_in_space.get(&ball_id) {
+                    if st.ball_id > 0
+                        && (!require_returning || st.activity_state == 4)
+                        && is_returning_for_ship(st, expected_owner, target_ship_id)
+                    {
+                        let notify_char_id = if st.owner_char_id > 0 {
+                            st.owner_char_id
+                        } else {
+                            expected_owner
+                        };
+                        PendingScoopAbandon::merge_into(
+                            pending_slot,
+                            PendingScoopAbandon {
+                                kind: PendingScoopAbandonKind::Abandon,
+                                notify_char_id,
+                                drone_item_id: st.drone_item_id,
+                                type_id: st.type_id,
+                                solar_system_id: st.solar_system_id,
+                            },
+                        );
+                    }
+                }
                 return Ok(DroneScoopClaimOutcome::TakeForAbandon(None));
             }
             let can_take = ctx
@@ -802,7 +907,7 @@ fn mutate_active_drones_with_claims_in_actor(
         &mut ctx.actor_st.active_drones_in_space,
         &mut ctx.actor_st.active_drone_miners,
         &mut ctx.actor_st.drone_next_ready_unix,
-        &ctx.actor_st.scoop_claimed_drones,
+        &mut ctx.actor_st.scoop_claimed_drones,
     );
     if dirty {
         mark_active_drones_dirty_in_state(ctx.actor_st);
@@ -1360,14 +1465,14 @@ impl SystemHandle {
     }
 
     /// Executes an atomic closure over this system's active drones, mining states, cooldown timers,
-    /// and transient `scoop_claimed_drones` set inside [`SystemActor`].
+    /// and transient `scoop_claimed_drones` map inside [`SystemActor`].
     pub async fn mutate_active_drones_with_claims<R: Send + 'static>(
         &self,
         op: impl FnOnce(
                 &mut HashMap<BallId, DroneSpaceState>,
                 &mut HashMap<BallId, DroneMiningState>,
                 &mut HashMap<BallId, u64>,
-                &std::collections::HashSet<BallId>,
+                &mut HashMap<BallId, Option<PendingScoopAbandon>>,
             ) -> (bool, R)
             + Send
             + 'static,
@@ -1397,7 +1502,7 @@ impl SystemHandle {
                 &mut HashMap<BallId, DroneSpaceState>,
                 &mut HashMap<BallId, DroneMiningState>,
                 &mut HashMap<BallId, u64>,
-                &std::collections::HashSet<BallId>,
+                &mut HashMap<BallId, Option<PendingScoopAbandon>>,
             ) -> (bool, R)
             + Send
             + 'static,

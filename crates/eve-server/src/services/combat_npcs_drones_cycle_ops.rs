@@ -436,7 +436,8 @@ pub async fn step_engaged_drones_in_system(
         view.active_drones_in_space
             .values()
             .filter(|d| {
-                !d.is_abandoned
+                d.ball_id > 0
+                    && !d.is_abandoned
                     && d.activity_state == 1
                     && d.target_id.is_some()
                     && now_unix >= view.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
@@ -650,7 +651,8 @@ pub async fn step_drone_auto_aggression_and_assist(
         .active_drones_in_space
         .values()
         .filter(|d| {
-            d.solar_system_id == solar_system_id
+            d.ball_id > 0
+                && d.solar_system_id == solar_system_id
                 && d.owner_char_id == owner_char_id
                 && !d.is_abandoned
                 && d.activity_state != 4
@@ -1110,14 +1112,25 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 };
             }
 
-            let caller_unavailable = snap.characters.get(&char_id).is_some_and(|ch| {
-                ch.station_id.is_some()
-                    || ch.structure_id.is_some()
-                    || ch.solar_system_id != sys_id
-                    || ch.active_ship_id != ship_id
-            }) || !snap.items.get(&ship_id).is_some_and(|sh| {
-                sh.location_id == sys_id as i64 && sh.flag == InventoryFlag::None
-            });
+            let caller_unavailable =
+                crate::sp6_lifecycle::drone_return::is_ship_ball_warping(
+                    &sys_handle,
+                    Some(&ship_ball),
+                    ship_id,
+                ) || snap.characters.get(&char_id).is_some_and(|ch| {
+                    ch.station_id.is_some()
+                        || ch.structure_id.is_some()
+                        || ch.solar_system_id != sys_id
+                        || ch.active_ship_id != ship_id
+                }) || snap.sp6_lifecycle.disconnected_ships.contains_key(&char_id)
+                    || snap
+                        .sp6_lifecycle
+                        .disconnected_ships
+                        .values()
+                        .any(|d| d.ship_id == ship_id)
+                    || !snap.items.get(&ship_id).is_some_and(|sh| {
+                        sh.location_id == sys_id as i64 && sh.flag == InventoryFlag::None
+                    });
             if caller_unavailable {
                 let should_abandon = active_drone.as_ref().is_some_and(|st| {
                     !st.is_abandoned
@@ -1237,9 +1250,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
         }
         ScoopTxResult::CallerUnavailableAbandon(should_abandon, msg) => {
             if should_abandon {
-                if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
-                    live_st,
-                ))) = sys_handle
+                match sys_handle
                     .drone_scoop_claim_op(
                         drone_ball_id,
                         crate::system_actor::DroneScoopClaimAction::ReleaseOrTakeForAbandon {
@@ -1249,20 +1260,36 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                     )
                     .await
                 {
-                    crate::sp6_lifecycle::drone_return::abandon_returning_drone_in_space(
-                        ctx,
-                        &sys_handle,
+                    Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
                         live_st,
-                    )
-                    .await;
+                    ))) => {
+                        crate::sp6_lifecycle::drone_return::abandon_returning_drone_in_space(
+                            ctx,
+                            &sys_handle,
+                            live_st,
+                        )
+                        .await;
+                    }
+                    Ok(crate::system_actor::DroneScoopClaimOutcome::ReleasedWithPending(
+                        applied,
+                    )) => {
+                        crate::sp6_lifecycle::drone_return::finish_pending_scoop_abandon(
+                            ctx,
+                            &sys_handle,
+                            drone_ball_id,
+                            applied,
+                        )
+                        .await;
+                    }
+                    _ => {}
                 }
             } else {
-                let _ = sys_handle
-                    .drone_scoop_claim_op(
-                        drone_ball_id,
-                        crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
-                    )
-                    .await;
+                crate::sp6_lifecycle::drone_return::release_scoop_claim_and_apply_pending(
+                    ctx,
+                    &sys_handle,
+                    drone_ball_id,
+                )
+                .await;
             }
             return Err(BridgeRpcError::with_client_error(
                 "DroneNotInSpace",
@@ -1281,12 +1308,12 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             return Err(e);
         }
         ScoopTxResult::Err(e) => {
-            let _ = sys_handle
-                .drone_scoop_claim_op(
-                    drone_ball_id,
-                    crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
-                )
-                .await;
+            crate::sp6_lifecycle::drone_return::release_scoop_claim_and_apply_pending(
+                ctx,
+                &sys_handle,
+                drone_ball_id,
+            )
+            .await;
             return Err(e);
         }
     };

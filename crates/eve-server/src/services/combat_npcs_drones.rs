@@ -1714,7 +1714,8 @@ pub async fn handle_npcs_drones(
                 .active_drones_in_space
                 .values()
                 .filter(|d| {
-                    d.solar_system_id == sys_id
+                    d.ball_id > 0
+                        && d.solar_system_id == sys_id
                         && d.parent_ship_id == ship_id
                         && !d.is_abandoned
                         && filter_drone_ids
@@ -1892,7 +1893,8 @@ pub async fn handle_npcs_drones(
                 .active_drones_in_space
                 .values()
                 .filter(|d| {
-                    d.solar_system_id == sys_id
+                    d.ball_id > 0
+                        && d.solar_system_id == sys_id
                         && d.parent_ship_id == ship_id
                         && !d.is_abandoned
                         && filter_drones
@@ -2405,7 +2407,8 @@ pub async fn handle_npcs_drones(
                 Err(e) => return Some(Err(e)),
             };
             let has_salvage_drone = sys_handle.view().active_drones_in_space.values().any(|d| {
-                d.solar_system_id == sys_id
+                d.ball_id > 0
+                    && d.solar_system_id == sys_id
                     && d.parent_ship_id == ship_id
                     && !d.is_abandoned
                     && (d.group_id == 1159 || d.type_id == 32787)

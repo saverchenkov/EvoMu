@@ -914,9 +914,11 @@ pub(crate) struct SystemActorState {
     pub(crate) pending_recall_or_scoop_claims: HashMap<i64, super::PendingClaimedSquadron>,
     pub(crate) fighters_removed_pre_hydration: HashSet<i64>,
     pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
-    /// Transient in-memory claim set preventing double-scoop races without mutating
+    /// Transient in-memory claim map preventing double-scoop races without mutating
     /// `active_drones_in_space` or dirtying SQLite checkpoints until a scoop commits.
-    pub(crate) scoop_claimed_drones: std::collections::HashSet<BallId>,
+    /// Stores an optional deferred abandon/disconnect action stamped if warp/logoff/abandon
+    /// arrives while the scoop awaits DB commit (`ReleaseClaim` executes it; `ConsumeScoop` discards it).
+    pub(crate) scoop_claimed_drones: HashMap<BallId, Option<super::PendingScoopAbandon>>,
     pub(crate) active_drones_checkpoint_dirty: bool,
     pub(crate) active_drones_checkpoint_seq: u64,
     pub(crate) active_drones_flush_mutex: Arc<std::sync::Mutex<()>>,

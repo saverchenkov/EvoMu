@@ -1754,21 +1754,29 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         entered_rx.await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-        // While ScoopToDroneBay holds the transient claim awaiting `ctx.db`, abandon `d_bayfull` in SystemActor:
-        // the live map entry is still present so the abandon mutation succeeds without being overwritten!
-        sys_handle
-            .mutate_active_drones(move |drones, _, _| {
-                let st = drones
-                    .get_mut(&d_bayfull)
-                    .expect("claimed drone stays live in active_drones_in_space");
-                st.is_abandoned = true;
-                st.owner_char_id = 0;
-                st.parent_ship_id = 0;
-                st.activity_state = 0;
-                (true, ())
-            })
-            .await
-            .unwrap();
+        // While ScoopToDroneBay holds the transient claim awaiting `ctx.db`, invoke real production
+        // `handle_cmd_abandon_drone`: it stamps deferred abandon without emitting premature control-lost notices.
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let _ = super::handle_cmd_abandon_drone(
+            &ctx,
+            &mut owner_sess,
+            &[PyRep::List(vec![PyRep::Integer(d_bayfull)])],
+            &kw,
+        )
+        .await
+        .unwrap();
+        let live_mid = drone_test_helpers::active_drone(&ctx, d_bayfull)
+            .expect("claimed drone stays live while scoop awaits DB");
+        assert!(
+            !live_mid.is_abandoned && live_mid.owner_char_id == char_id && live_mid.parent_ship_id == ship_id,
+            "deferred abandon must not mutate active entry before claim resolution: {live_mid:?}"
+        );
+        assert!(
+            ctx.drain_notifications_for_char(char_id)
+                .iter()
+                .all(|n| n.event != "OnDroneControlLost"),
+            "deferred abandon must not emit premature OnDroneControlLost before scoop failure"
+        );
 
         let _ = release_tx.send(());
         holder.await.unwrap();
@@ -1784,8 +1792,25 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
             .expect("drone stays tracked after scoop failure");
         assert!(
             live_after.is_abandoned && live_after.owner_char_id == 0 && live_after.parent_ship_id == 0,
-            "releasing transient scoop claim must preserve concurrent abandonment mutation, got {live_after:?}"
+            "releasing transient scoop claim must execute deferred abandonment on InsufficientDroneBayCapacity, got {live_after:?}"
         );
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        let c_state = notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnDroneStateChange"
+                    && matches!(n.args.first(), Some(PyRep::Integer(id)) if *id == d_bayfull)
+                    && matches!(n.args.get(1), Some(PyRep::Integer(0)))
+            })
+            .expect("ReleaseClaim deferred abandon must emit OnDroneStateChange(0,0)");
+        let c_lost = notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnDroneControlLost"
+                    && matches!(n.args.first(), Some(PyRep::Integer(id)) if *id == d_bayfull)
+            })
+            .expect("ReleaseClaim deferred abandon must emit OnDroneControlLost");
+        assert!(c_state < c_lost, "OnDroneStateChange(0,0) must precede OnDroneControlLost");
 
         // Claim was cleanly released, so expanding capacity and retrying ScoopToDroneBay succeeds.
         ctx.db.with_mut_snapshot(|snap| {
@@ -1806,6 +1831,168 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         .await
         .expect("handled")
         .expect("retry after claim release must succeed");
+    }
+
+    // 5. Return-scoop BayFull executes deferred disconnect->abandon upgrade on ReleaseClaim,
+    //    and both MovementMode::Warp & disconnected_ships reject scoop commits.
+    {
+        let d_ret_full = 777_990_005i64;
+        let d_warp_rej = 777_990_006i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items
+                .get_mut(&ship_id)
+                .unwrap()
+                .dynamic_attributes
+                .insert(283, 0.0);
+            for did in [d_ret_full, d_warp_rej] {
+                snap.items.insert(
+                    did,
+                    InventoryItemRecord {
+                        item_id: did,
+                        type_id: 2_454,
+                        owner_id: char_id,
+                        location_id: sys_id as i64,
+                        flag: InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        for did in [d_ret_full, d_warp_rej] {
+            let _ = sys_handle
+                .spawn_ball(Ball {
+                    id: did,
+                    type_id: 2_454,
+                    position: DVec3::new(300.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 1_500.0,
+                    inertia: 1.0,
+                    mass: 5_000.0,
+                    radius: 5.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                })
+                .await;
+        }
+        let ret_full_state = make_drone_state(d_ret_full, d_ret_full, 2_454, char_id, ship_id, sys_id, false, 4);
+        let warp_rej_state = make_drone_state(d_warp_rej, d_warp_rej, 2_454, char_id, ship_id, sys_id, false, 4);
+        drone_test_helpers::seed_active_drones(&ctx, [ret_full_state.clone(), warp_rej_state.clone()]);
+
+        let db_hold = Arc::clone(&ctx.db);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::task::spawn_blocking(move || {
+            db_hold.with_mut_snapshot(|_| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.blocking_recv();
+            });
+        });
+        locked_rx.await.unwrap();
+
+        let c_ret = Arc::clone(&ctx);
+        let h_ret = sys_handle.clone();
+        let ret_scoop = tokio::spawn(async move {
+            super::try_atomic_scoop_drone(&c_ret, &h_ret, &ret_full_state, ship_id).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let _ = ctx.drain_notifications_for_char(char_id);
+        super::disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
+        super::abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
+
+        let _ = release_tx.send(());
+        holder.await.unwrap();
+        assert!(!ret_scoop.await.unwrap(), "zero-capacity bay must fail return scoop");
+        let after_ret = drone_test_helpers::active_drone(&ctx, d_ret_full).unwrap();
+        assert!(
+            after_ret.is_abandoned && after_ret.owner_char_id == 0 && after_ret.parent_ship_id == 0,
+            "BayFull release must execute deferred Abandon upgraded from Disconnect: {after_ret:?}"
+        );
+        let ret_notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(ret_notifs.iter().any(|n| n.event == "OnDroneControlLost" && matches!(n.args.first(), Some(PyRep::Integer(id)) if *id == d_ret_full)));
+
+        // Expand capacity so capacity is NOT the reason for warp/disconnected rejection.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items
+                .get_mut(&ship_id)
+                .unwrap()
+                .dynamic_attributes
+                .insert(283, 25.0);
+        });
+        let _ = sys_handle
+            .set_movement_mode(
+                ship_id,
+                MovementMode::Warp {
+                    origin: DVec3::ZERO,
+                    destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+                    warp_speed_au_s: 3.0,
+                    total_distance: 1_000_000.0,
+                    phase: eve_destiny::WarpPhase::Cruising,
+                    elapsed_warp_time: 1.0,
+                },
+            )
+            .await;
+        let warp_err = handle_npcs_drones(
+            &ctx,
+            &mut owner_sess.clone(),
+            "ship",
+            "ScoopToDroneBay",
+            &[PyRep::Integer(d_warp_rej)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("ScoopToDroneBay must reject while ship is in MovementMode::Warp");
+        assert_eq!(warp_err.code, "DroneNotInSpace");
+        assert_eq!(
+            ctx.db.with_snapshot(|s| (s.items[&d_warp_rej].location_id, s.items[&d_warp_rej].flag)),
+            (sys_id as i64, InventoryFlag::None)
+        );
+
+        // Stop ship warp and test `disconnected_ships` rejection for both return scoop & ScoopToDroneBay.
+        let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+        drone_test_helpers::seed_active_drone(&ctx, warp_rej_state.clone());
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sp6_lifecycle.disconnected_ships.insert(
+                char_id,
+                eve_db::DisconnectedShipEntry {
+                    char_id,
+                    ship_id,
+                    ship_type_id: 645,
+                    solar_system_id: sys_id,
+                    disconnected_at_unix: 100,
+                    remove_at_unix: 200,
+                    emergency_warp_dest: None,
+                    last_position: [0.0; 3],
+                    last_velocity: [0.0; 3],
+                    removed_from_space: false,
+                    pre_warp_position: None,
+                },
+            );
+        });
+        assert!(
+            !super::try_atomic_scoop_drone(&ctx, &sys_handle, &warp_rej_state, ship_id).await,
+            "return scoop must reject ship present in disconnected_ships"
+        );
+        let disc_err = handle_npcs_drones(
+            &ctx,
+            &mut owner_sess.clone(),
+            "ship",
+            "ScoopToDroneBay",
+            &[PyRep::Integer(d_warp_rej)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("ScoopToDroneBay must reject disconnected ship");
+        assert_eq!(disc_err.code, "DroneNotInSpace");
+        assert_eq!(
+            ctx.db.with_snapshot(|s| (s.items[&d_warp_rej].location_id, s.items[&d_warp_rej].flag)),
+            (sys_id as i64, InventoryFlag::None)
+        );
     }
 }
 

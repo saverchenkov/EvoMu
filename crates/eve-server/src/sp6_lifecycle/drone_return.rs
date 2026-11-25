@@ -83,7 +83,8 @@ pub async fn handle_cmd_return_bay(
         .active_drones_in_space
         .values()
         .filter(|d| {
-            d.solar_system_id == sys_id
+            d.ball_id > 0
+                && d.solar_system_id == sys_id
                 && (d.parent_ship_id == ship_id || (d.owner_char_id == char_id && d.parent_ship_id == 0))
                 && !d.is_abandoned
                 && filter_drone_ids.as_ref().map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id)).unwrap_or(true)
@@ -117,7 +118,7 @@ pub async fn handle_cmd_return_bay(
             let target_bid = d.ball_id;
             let still_controlled = sys_handle
                 .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-                    if claimed.contains(&target_bid) {
+                    if claimed.contains_key(&target_bid) {
                         return (false, false);
                     }
                     if let Some(st) = drones.get_mut(&target_bid) {
@@ -237,6 +238,76 @@ fn emit_drone_control_lost_sync(
     );
 }
 
+/// Completes post-actor teardown and notifications for a deferred disconnect/abandon
+/// executed when a failing scoop releases its transient claim (`ReleaseClaim`).
+pub(crate) async fn finish_pending_scoop_abandon(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    ball_id: i64,
+    applied: crate::system_actor::PendingScoopAbandon,
+) {
+    let _ = sys_handle.remove_module_cycle(ball_id, -ball_id).await;
+    if applied.kind == crate::system_actor::PendingScoopAbandonKind::Abandon {
+        sys_handle.try_stop_ball(ball_id);
+    }
+    let _ = sys_handle
+        .emit_destiny_event(
+            ball_id,
+            eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id: applied.drone_item_id,
+                owner_id: 0,
+                controller_id: 0,
+                activity_state: 0,
+                type_id: applied.type_id,
+                controller_owner_id: 0,
+                target_id: None,
+            },
+        )
+        .await;
+    emit_drone_control_lost_sync(
+        ctx,
+        applied.solar_system_id,
+        applied.notify_char_id,
+        applied.drone_item_id,
+        applied.type_id,
+    );
+}
+
+/// Releases a transient scoop claim and executes any deferred abandon/disconnect stamped while held.
+pub(crate) async fn release_scoop_claim_and_apply_pending(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    ball_id: i64,
+) {
+    if let Ok(crate::system_actor::DroneScoopClaimOutcome::ReleasedWithPending(applied)) =
+        sys_handle
+            .drone_scoop_claim_op(
+                ball_id,
+                crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
+            )
+            .await
+    {
+        finish_pending_scoop_abandon(ctx, sys_handle, ball_id, applied).await;
+    }
+}
+
+/// Returns `true` when `ship_id` is currently in `MovementMode::Warp` or tracked in `active_warps`.
+pub(crate) fn is_ship_ball_warping(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ship_ball_opt: Option<&eve_destiny::Ball>,
+    ship_id: i64,
+) -> bool {
+    if ship_ball_opt.is_some_and(|sb| matches!(sb.mode, eve_destiny::MovementMode::Warp { .. })) {
+        return true;
+    }
+    let view = sys_handle.view();
+    view.active_warps.contains_key(&ship_id)
+        || view
+            .balls
+            .get(&ship_id)
+            .is_some_and(|sb| matches!(sb.mode, eve_destiny::MovementMode::Warp { .. }))
+}
+
 /// Abandons a returning or scoop-interrupted drone in place when its parent ship is destroyed,
 /// docked, or no longer in the drone's solar system, leaving both the space ball and item intact
 /// unless the item was already moved out of space.
@@ -353,9 +424,18 @@ fn is_ship_available_for_scoop_in_snap(
         c.active_ship_id == target_ship_id
             && (c.station_id.is_some()
                 || c.structure_id.is_some()
-                || c.solar_system_id != solar_system_id)
+                || c.solar_system_id != solar_system_id
+                || snap
+                    .sp6_lifecycle
+                    .disconnected_ships
+                    .contains_key(&c.character_id))
     });
-    ship_in_this_system && !pilot_docked_or_elsewhere
+    let ship_disconnected = snap
+        .sp6_lifecycle
+        .disconnected_ships
+        .values()
+        .any(|d| d.ship_id == target_ship_id);
+    ship_in_this_system && !pilot_docked_or_elsewhere && !ship_disconnected
 }
 
 fn is_scoopable_controlled_drone(
@@ -433,11 +513,15 @@ async fn try_atomic_scoop_drone(
         }
         return false;
     };
-    if ship_ball_opt
-        .as_ref()
-        .is_none_or(|sb| sb.surface_distance(db) > 2_500.0)
+    let ship_warping_pre =
+        is_ship_ball_warping(sys_handle, ship_ball_opt.as_ref(), target_ship_id);
+    if ship_warping_pre
+        || ship_ball_opt
+            .as_ref()
+            .is_none_or(|sb| sb.surface_distance(db) > 2_500.0)
     {
-        let ship_valid = ship_ball_opt.is_some()
+        let ship_valid = !ship_warping_pre
+            && ship_ball_opt.is_some()
             && ctx.db.with_snapshot(|snap| {
                 is_ship_available_for_scoop_in_snap(snap, target_ship_id, d.solar_system_id)
             });
@@ -519,11 +603,12 @@ async fn try_atomic_scoop_drone(
         }) {
             return ScoopOutcome::NotInSpace;
         }
-        let ship_opt = is_ship_available_for_scoop_in_snap(
-            snap,
-            target_ship_id,
-            existing.solar_system_id,
-        )
+        let ship_opt = (!is_ship_ball_warping(sys_handle, None, target_ship_id)
+            && is_ship_available_for_scoop_in_snap(
+                snap,
+                target_ship_id,
+                existing.solar_system_id,
+            ))
         .then(|| snap.items.get(&target_ship_id))
         .flatten();
         let Some(sh) = ship_opt else {
@@ -585,12 +670,7 @@ async fn try_atomic_scoop_drone(
             *claimed
         }
         ScoopOutcome::BayFull => {
-            let _ = sys_handle
-                .drone_scoop_claim_op(
-                    d.ball_id,
-                    crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
-                )
-                .await;
+            release_scoop_claim_and_apply_pending(ctx, sys_handle, d.ball_id).await;
             return false;
         }
         ScoopOutcome::NotInSpace => {
@@ -604,9 +684,7 @@ async fn try_atomic_scoop_drone(
             return false;
         }
         ScoopOutcome::ShipUnavailable => {
-            if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
-                live_drone,
-            ))) = sys_handle
+            match sys_handle
                 .drone_scoop_claim_op(
                     d.ball_id,
                     crate::system_actor::DroneScoopClaimAction::ReleaseOrTakeForAbandon {
@@ -616,7 +694,15 @@ async fn try_atomic_scoop_drone(
                 )
                 .await
             {
-                abandon_returning_drone_in_space(ctx, sys_handle, live_drone).await;
+                Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
+                    live_drone,
+                ))) => {
+                    abandon_returning_drone_in_space(ctx, sys_handle, live_drone).await;
+                }
+                Ok(crate::system_actor::DroneScoopClaimOutcome::ReleasedWithPending(applied)) => {
+                    finish_pending_scoop_abandon(ctx, sys_handle, d.ball_id, applied).await;
+                }
+                _ => {}
             }
             return false;
         }
@@ -683,7 +769,7 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
         .systems
         .all_active_drones()
         .into_iter()
-        .filter(|(_, d)| d.activity_state == 4 && !d.is_abandoned)
+        .filter(|(_, d)| d.ball_id > 0 && d.activity_state == 4 && !d.is_abandoned)
         .collect();
 
     for (sys_handle, d) in returning_drones {
@@ -696,18 +782,11 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
             .ok()
             .flatten()
             .map(|(_, b)| b);
-        let ship_explicitly_invalid = ctx.db.with_snapshot(|snap| {
-            let ship_bad = snap.items.get(&d.parent_ship_id).is_some_and(|sh| {
-                sh.location_id != d.solar_system_id as i64 || sh.flag != eve_db::InventoryFlag::None
+        let ship_warping = is_ship_ball_warping(&sys_handle, ship_ball.as_ref(), d.parent_ship_id);
+        let ship_explicitly_invalid = ship_warping
+            || !ctx.db.with_snapshot(|snap| {
+                is_ship_available_for_scoop_in_snap(snap, d.parent_ship_id, d.solar_system_id)
             });
-            let pilot_bad = snap.characters.values().any(|c| {
-                c.active_ship_id == d.parent_ship_id
-                    && (c.station_id.is_some()
-                        || c.structure_id.is_some()
-                        || c.solar_system_id != d.solar_system_id)
-            });
-            ship_bad || pilot_bad
-        });
         if ship_ball.is_none() || ship_explicitly_invalid {
             if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
                 claimed_drone,
@@ -736,6 +815,39 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
     }
 }
 
+fn try_stamp_pending_scoop_abandon(
+    claimed: &mut HashMap<i64, Option<crate::system_actor::PendingScoopAbandon>>,
+    d: &DroneSpaceState,
+    kind: crate::system_actor::PendingScoopAbandonKind,
+    fallback_char_id: i64,
+    fallback_sys_id: u32,
+) -> bool {
+    let Some(slot) = claimed.get_mut(&d.ball_id) else {
+        return false;
+    };
+    let notify_char_id = if d.owner_char_id > 0 {
+        d.owner_char_id
+    } else {
+        fallback_char_id
+    };
+    let solar_system_id = if d.solar_system_id > 0 {
+        d.solar_system_id
+    } else {
+        fallback_sys_id
+    };
+    crate::system_actor::PendingScoopAbandon::merge_into(
+        slot,
+        crate::system_actor::PendingScoopAbandon {
+            kind,
+            notify_char_id,
+            drone_item_id: d.drone_item_id,
+            type_id: d.type_id,
+            solar_system_id,
+        },
+    );
+    true
+}
+
 /// Disconnects active drones when ship initiates in-system warp without abandoning ownership.
 pub fn disconnect_drones_for_ship_on_warp_sync(
     ctx: &ServerContext,
@@ -746,7 +858,9 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
     let mut lost_balls: Vec<(crate::system_actor::SystemHandle, i64, i64, u32, u32)> = Vec::new();
     for (_actor_sys_id, h) in ctx.systems.active_system_handles() {
         let has_match = h.view().active_drones_in_space.values().any(|d| {
-            (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned
+            d.ball_id > 0
+                && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
+                && !d.is_abandoned
         });
         if !has_match {
             continue;
@@ -754,10 +868,19 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
         if let Ok(rows) = h.mutate_active_drones_with_claims_sync(move |drones, _, _, claimed| {
             let mut changed = Vec::new();
             for d in drones.values_mut() {
-                if !claimed.contains(&d.ball_id)
+                if d.ball_id > 0
                     && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
                     && !d.is_abandoned
                 {
+                    if try_stamp_pending_scoop_abandon(
+                        claimed,
+                        d,
+                        crate::system_actor::PendingScoopAbandonKind::Disconnect,
+                        char_id,
+                        sys_id,
+                    ) {
+                        continue;
+                    }
                     d.parent_ship_id = 0;
                     d.target_id = None;
                     d.activity_state = 0;
@@ -807,11 +930,20 @@ pub fn abandon_drones_on_warp_sync(
             .mutate_active_drones_with_claims_sync(move |drones, _, _, claimed| {
                 let mut rows = Vec::new();
                 for d in drones.values_mut() {
-                    if !claimed.contains(&d.ball_id)
+                    if d.ball_id > 0
                         && d.solar_system_id == sys_id
                         && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
                         && !d.is_abandoned
                     {
+                        if try_stamp_pending_scoop_abandon(
+                            claimed,
+                            d,
+                            crate::system_actor::PendingScoopAbandonKind::Abandon,
+                            char_id,
+                            sys_id,
+                        ) {
+                            continue;
+                        }
                         let notify_char_id = if d.owner_char_id > 0 {
                             d.owner_char_id
                         } else {
@@ -1154,7 +1286,7 @@ pub async fn handle_cmd_abandon_drone(
         .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
             let mut abandoned = Vec::new();
             for d in drones.values_mut() {
-                if !claimed.contains(&d.ball_id)
+                if d.ball_id > 0
                     && d.solar_system_id == sys_id
                     && d.owner_char_id == char_id
                     && !d.is_abandoned
@@ -1163,6 +1295,15 @@ pub async fn handle_cmd_abandon_drone(
                         || target_ids_for_mut.contains(&d.ball_id)
                         || target_ids_for_mut.contains(&d.drone_item_id);
                     if matches_filter {
+                        if try_stamp_pending_scoop_abandon(
+                            claimed,
+                            d,
+                            crate::system_actor::PendingScoopAbandonKind::Abandon,
+                            char_id,
+                            sys_id,
+                        ) {
+                            continue;
+                        }
                         d.is_abandoned = true;
                         d.owner_char_id = 0;
                         d.parent_ship_id = 0;
@@ -1261,7 +1402,8 @@ pub async fn handle_cmd_reconnect_to_drones(
         .active_drones_in_space
         .values()
         .filter(|d| {
-            d.solar_system_id == sys_id
+            d.ball_id > 0
+                && d.solar_system_id == sys_id
                 && ((d.is_abandoned && d.original_owner_char_id == char_id)
                     || (d.owner_char_id == char_id && d.parent_ship_id == 0))
                 && (target_ids.is_empty()
@@ -1300,7 +1442,7 @@ pub async fn handle_cmd_reconnect_to_drones(
 
         let updated = sys_handle
             .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-                if claimed.contains(&bid) {
+                if claimed.contains_key(&bid) {
                     return (false, false);
                 }
                 if let Some(d) = drones.get_mut(&bid) {
