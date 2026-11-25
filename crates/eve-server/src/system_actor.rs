@@ -274,7 +274,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) scrambled_balls_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) warp_stopped_at_actor: &'a Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(in crate::system_actor) active_module_ships_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    pub(in crate::system_actor) module_deactivation_hook_actor: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(in crate::system_actor) deactivation_sink_hook: &'a Option<ModuleDeactivationHook>,
     pub(in crate::system_actor) target_lock_completed_hook_actor: &'a Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(in crate::system_actor) tidi_factor_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) sim_elapsed_secs_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
@@ -353,9 +353,11 @@ pub struct SystemRegistry {
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_post_unlock_hook:
+        Arc<RankedRwLock<Option<ModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
-    pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    cooldown_persist_gates: RankedMutex<HashMap<SolarSystemId, Arc<CooldownPersistGate>>, RANK_SERVICE_STATE>,
     /// PvE special-site balls (system, ball id) in-flight or already spawned into this registry's
     /// ballparks. Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed.
     special_site_spawned_balls: SpecialSiteBallSpawnMap,
@@ -416,9 +418,10 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RankedRwLock::new(None)),
             module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
+            module_deactivation_post_unlock_hook: Arc::new(RankedRwLock::new(None)),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
-            post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+            cooldown_persist_gates: RankedMutex::new(HashMap::new()),
             special_site_spawned_balls: Arc::new(RankedMutex::new(HashMap::new())),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
@@ -706,19 +709,19 @@ impl SystemRegistry {
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
+    pub fn set_module_deactivation_post_unlock_hook(&self, hook: ModuleDeactivationPostUnlockHook) {
+        *self
+            .module_deactivation_post_unlock_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
     pub fn set_target_lock_completed_hook(&self, hook: TargetLockCompletedHook) {
         *self.target_lock_completed_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     pub fn set_system_step_hook(&self, hook: SystemStepHook) {
         *self.system_step_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
-    }
-
-    pub(crate) fn enqueue_post_unlock_action(&self, action: PostUnlockHookAction) {
-        self.post_unlock_actions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(action);
     }
 
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
@@ -1141,21 +1144,44 @@ impl SystemRegistry {
                 }
             }
         }
+        let initial_tidi = self
+            .cluster_nodes
+            .read()
+            .ok()
+            .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
+            .or_else(|| {
+                if db_read_safe {
+                    self.db.as_ref().and_then(|db| {
+                        db.with_snapshot(|snap| {
+                            let nid =
+                                -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
+                            snap.owner_notes
+                                .get(&nid)
+                                .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+                        })
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1.0)
+            .clamp(0.10, 1.0);
+        let has_tidi_history = initial_tidi < 0.999_999
+            || self
+                .cluster_nodes
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .sim_clock_anchoring
+                .contains_key(&solar_system_id);
+        let persist_epoch = self.cooldown_persist_gate(solar_system_id).bump_epoch();
         let initial_cooldowns = if db_read_safe {
             if let Some(ref db) = db_opt {
-                let tidi = self.get_system_tidi_factor(solar_system_id);
-                let has_tidi_history = tidi < 0.999_999
-                    || self
-                        .cluster_nodes
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .sim_clock_anchoring
-                        .contains_key(&solar_system_id);
                 ewar_cooldowns::load_active_system_module_cooldowns_for_boot(
                     db,
                     solar_system_id,
-                    tidi,
+                    initial_tidi,
                     has_tidi_history,
+                    0.0,
                 )
             } else {
                 HashMap::new()
@@ -1168,13 +1194,16 @@ impl SystemRegistry {
             asteroid_templates: initial_asteroid_templates,
             pending_anchoring_disruptors: initial_pending_disruptors,
             sde_opt,
-            db_opt,
+            db_opt: db_opt.clone(),
             mechanic_rng_opt: Some(mechanic_rng.clone()),
             tactical_state: self.tactical_state.clone(),
             module_cooldowns: ActorModuleCooldownState {
                 reactivation_cooldowns: initial_cooldowns,
+                boot_db_pending_merge: !db_read_safe && db_opt.is_some(),
                 ..Default::default()
             },
+            module_cooldown_persist_epoch: persist_epoch,
+            has_tidi_history,
             pending_notifications_opt: self.pending_notifications_opt.clone(),
             notify_tx_opt: self.notify_tx_opt.clone(),
             hibernated: Arc::clone(&hibernated),
@@ -1233,13 +1262,6 @@ impl SystemRegistry {
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         celestials::update_system_hibernation_flag(&initial_actor_state, &initial_ballpark, 0);
         protection::sync_all_protection_registry_in_actor(&initial_ballpark, &mut initial_actor_state);
-        let initial_tidi = self.cluster_nodes.read().ok()
-            .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
-            .or_else(|| self.db.as_ref().and_then(|db| db.with_snapshot(|snap| {
-                let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-                snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-            })))
-            .unwrap_or(1.0).clamp(0.10, 1.0);
         let initial_view = SystemView::from_ballpark(
             &initial_ballpark,
             Some(&initial_actor_state),
@@ -1301,9 +1323,15 @@ impl SystemRegistry {
         let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
         let mechanic_rng = self.mechanic_rng.clone();
         let module_deactivation_hook_actor = self.module_deactivation_hook.clone();
+        let module_deactivation_post_unlock_hook_actor =
+            self.module_deactivation_post_unlock_hook.clone();
         let target_lock_completed_hook_actor = self.target_lock_completed_hook.clone();
-        let post_unlock_actions_actor = self.post_unlock_actions.clone();
         let db_opt_actor = self.db.clone();
+        let post_unlock_actions_actor: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>> =
+            Arc::new(RankedMutex::new(Vec::new()));
+        let cooldown_persist_gate_actor = self.cooldown_persist_gate(solar_system_id);
+        let post_unlock_actions_for_handle = Arc::clone(&post_unlock_actions_actor);
+        let cooldown_persist_gate_for_handle = Arc::clone(&cooldown_persist_gate_actor);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
         let warp_stopped_at_actor = warp_stopped_at.clone();
@@ -1412,9 +1440,20 @@ impl SystemRegistry {
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_delivery: Option<PendingActorDelivery> = None;
-
                 for cmd in cmd_batch {
                 let cmd_may_mutate_view = cmd.may_mutate_system_view();
+                let raw_hook_cmd = module_deactivation_hook_actor
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let post_hook_cmd = module_deactivation_post_unlock_hook_actor
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let deact_batch =
+                    ewar_cooldowns::ActorDeactivationBatch::new(raw_hook_cmd, post_hook_cmd);
+                let deactivation_sink_hook = deact_batch.collector_hook().cloned();
+                let cur_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
                 let countdown_hit = {
@@ -1438,7 +1477,7 @@ impl SystemRegistry {
                 let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut cmd_post_unlock_ops = post_unlock::PostUnlockOps::default();
                 let mut cmd_slim_changed = false;
-                let actor_delivery_out: Option<PendingActorDelivery> = {
+                let (deact_mutated_actor, actor_delivery_out): (bool, Option<PendingActorDelivery>) = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 post_unlock::prune_actor_shadows_for_cmd(solar_system_id, &mut actor_st, &completed_post_unlock_seq_actor);
@@ -1468,7 +1507,7 @@ impl SystemRegistry {
                     scrambled_balls_actor: &scrambled_balls_actor,
                     warp_stopped_at_actor: &warp_stopped_at_actor,
                     active_module_ships_actor: &active_module_ships_actor,
-                    module_deactivation_hook_actor: &module_deactivation_hook_actor,
+                    deactivation_sink_hook: &deactivation_sink_hook,
                     target_lock_completed_hook_actor: &target_lock_completed_hook_actor,
                     tidi_factor_bits_actor: &tidi_factor_bits_actor,
                     sim_elapsed_secs_bits_actor: &sim_elapsed_secs_bits_actor,
@@ -1506,7 +1545,7 @@ impl SystemRegistry {
                                 let spawned_checkpoint_ball = &mut *exec_ctx.spawned_checkpoint_ball;
                                 let ball_positions_actor = exec_ctx.ball_positions_actor;
                                 let scrambled_balls_actor = exec_ctx.scrambled_balls_actor;
-                                let module_deactivation_hook_actor = exec_ctx.module_deactivation_hook_actor;
+                                let deactivation_sink_hook = exec_ctx.deactivation_sink_hook;
                                 let last_visible_stamp_actor = exec_ctx.last_visible_stamp_actor;
                                 let last_fx_stamp_actor = exec_ctx.last_fx_stamp_actor;
                                 let broadcast_seq_gate_actor = exec_ctx.broadcast_seq_gate_actor;
@@ -1921,10 +1960,7 @@ impl SystemRegistry {
                                     if !volley_destroyed.is_empty() {
                                         let dead_ids: Vec<BallId> =
                                             volley_destroyed.iter().map(|&(bid, _)| bid).collect();
-                                        let deact_guard = module_deactivation_hook_actor
-                                            .read()
-                                            .unwrap_or_else(|e| e.into_inner())
-                                            .clone();
+                                        let deact_guard = deactivation_sink_hook.as_ref();
                                         cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls_collecting(
                                             solar_system_id, ballpark,
                                             active_module_cycles,
@@ -1935,7 +1971,7 @@ impl SystemRegistry {
                                                 .as_deref()
                                                 .map(|r| r as &dyn AnyRwLock<_>),
                                             notify_tx_opt.as_ref(),
-                                            deact_guard.as_ref(),
+                                            deact_guard,
                                             &dead_ids,
                                             post_unlock_ops,
                                         );
@@ -2180,23 +2216,27 @@ impl SystemRegistry {
                     &post_unlock_in_flight_actor,
                     cmd_post_unlock_ops,
                 );
-                out
+                let deact_mutated = false;
+                (deact_mutated, out)
                 };
                 (
                     cmd_slim_changed,
+                    deact_mutated_actor,
                     deferred_replies,
                     deferred_db_replies,
                     actor_delivery_out,
                 )
                 }));
+                flush_post_unlock_actions(&post_unlock_actions_actor);
                 match cmd_outcome {
                     Ok((
                         cmd_slim_changed,
+                        deact_mutated_actor,
                         deferred_replies,
                         deferred_db_replies,
                         actor_delivery_out,
                     )) => {
-                        if cmd_may_mutate_view || cmd_slim_changed {
+                        if cmd_may_mutate_view || cmd_slim_changed || deact_mutated_actor {
                             batch_view_dirty = true;
                         }
                         batch_deferred_replies.extend(deferred_replies);
@@ -2392,9 +2432,11 @@ impl SystemRegistry {
             #[cfg(test)] before_step_reply_hook_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            module_deactivation_post_unlock_hook: Arc::clone(&self.module_deactivation_post_unlock_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
             system_step_hook: Arc::clone(&self.system_step_hook),
-            post_unlock_actions: Arc::clone(&self.post_unlock_actions),
+            post_unlock_actions: post_unlock_actions_for_handle,
+            cooldown_persist_gate: cooldown_persist_gate_for_handle,
         };
         (handle, lazy_gates)
     }

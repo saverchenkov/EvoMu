@@ -36,6 +36,7 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     pub(in crate::system_actor) ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(in crate::system_actor) scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    deactivation_sink_hook: Option<ModuleDeactivationHook>,
     explicit_update_state_guards:
         Option<&'a Arc<RankedMutex<HashMap<(u64, i64), ExplicitUpdateStateGuard>, RANK_LEAF>>>,
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
@@ -52,6 +53,7 @@ impl<'a> BallOpsCtx<'a> {
             ball_positions: exec_ctx.ball_positions_actor,
             scrambled_balls: exec_ctx.scrambled_balls_actor,
             module_deactivation_hook: exec_ctx.module_deactivation_hook_actor,
+            deactivation_sink_hook: exec_ctx.deactivation_sink_hook.clone(),
             explicit_update_state_guards: Some(exec_ctx.explicit_update_state_guards_actor),
             ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
@@ -60,10 +62,7 @@ impl<'a> BallOpsCtx<'a> {
     }
 
     fn read_deact_hook(&self) -> Option<ModuleDeactivationHook> {
-        self.module_deactivation_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.deactivation_sink_hook.clone()
     }
 
     pub(in crate::system_actor) fn sync_positions(&self) {
@@ -146,7 +145,11 @@ fn run_direct_ball_op_on_current_thread<R>(
             actor_st: &mut actor_st,
             ball_positions: &handle.ball_positions,
             scrambled_balls: &handle.scrambled_balls,
-            module_deactivation_hook: &handle.module_deactivation_hook,
+            deactivation_sink_hook: handle
+                .module_deactivation_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             explicit_update_state_guards: None,
             ball_spawn_tokens: None,
             removed_checkpoint_ball: None,
@@ -2052,9 +2055,11 @@ mod tests {
             before_step_reply_hook_for_test: Arc::new(RankedMutex::new(None)),
             npc_death_hook: Arc::new(RankedRwLock::new(None)),
             module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
+            module_deactivation_post_unlock_hook: Arc::new(RankedRwLock::new(None)),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+            cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),
         };
         handle.ballpark.attach_actor_state(&handle.actor_state);
         (handle, cmd_rx)

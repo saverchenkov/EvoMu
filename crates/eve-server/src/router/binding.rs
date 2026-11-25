@@ -1649,249 +1649,267 @@ impl ServerContext {
     /// Wires the module deactivation hook on the `SystemRegistry` to handle automatic cycle deactivations
     /// (e.g. entering warp, target out of range, or target leaving the ballpark).
     /// Emits `OnGodmaShipEffect` (with `isActive = 0`) to the pilot and invalidates the cached ship fitting.
+    /// Wires both the synchronous actor post-unlock deactivation hook (`#1541`) and the legacy
+    /// 3-argument hook (`module_deactivation_hook`) used by non-actor callers/unit tests.
     pub fn wire_module_deactivation_hook(&self) {
         let ctx_w = self.downgrade();
-
-        self.systems.set_module_deactivation_hook(Arc::new(move |sys_id, char_id, cycle| {
-            let Some(step_ctx) = ctx_w.upgrade() else { return; };
-            let sde = &step_ctx.sde;
-            let db = &step_ctx.db;
-            let pending = &step_ctx.pending_notifications;
-            let notify_tx = &step_ctx.notify_tx;
-            let solar_system_id = (sys_id > 0).then_some(sys_id);
-            if eve_db::lock_rank::held_lock_ranks().is_empty() {
-                step_ctx.invalidate_and_push_fit(cycle.ship_id);
-            } else {
-                step_ctx.invalidate_ship_fitting_cache_only(cycle.ship_id);
-                if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                    let ctx_w_spawn = ctx_w.clone();
-                    let sid = cycle.ship_id;
-                    rt.spawn(async move {
-                        if let Some(c) = ctx_w_spawn.upgrade() {
-                            c.push_fit_projection_for_ship(sid);
-                        }
-                    });
-                }
-            }
-
-            let is_cloak = sde.types.get(&cycle.module_type_id).is_some_and(|t| t.group_id == 330)
-                || cycle.effect_name.to_ascii_lowercase().contains("cloak");
-            if is_cloak {
-                let reactiv_delay_s = if cycle.reactivation_delay_s > 0.0 {
-                    cycle.reactivation_delay_s
-                } else {
-                    sde.types
-                        .get(&cycle.module_type_id)
-                        .and_then(|t| t.default_attributes.get(&669).copied())
-                        .map(|ms| ms / 1000.0)
-                        .unwrap_or(0.0)
+        let run_deact_cleanup = Arc::new(
+            move |sys_id: u32,
+                  char_id: i64,
+                  cycle: &crate::system_actor::ActiveModuleCycle,
+                  pre_flushed_ewar: Option<crate::system_actor::ModuleEwarFlushSnapshot>,
+                  already_recorded_in_actor: bool| {
+                let Some(step_ctx) = ctx_w.upgrade() else {
+                    return;
                 };
-                if reactiv_delay_s > 0.0 {
-                    if let Some(sys_id) = solar_system_id {
+                let sde = &step_ctx.sde;
+                let db = &step_ctx.db;
+                let pending = &step_ctx.pending_notifications;
+                let notify_tx = &step_ctx.notify_tx;
+                let solar_system_id = (sys_id > 0).then_some(sys_id);
+                if eve_db::lock_rank::held_lock_ranks().is_empty() {
+                    step_ctx.invalidate_and_push_fit(cycle.ship_id);
+                } else {
+                    step_ctx.invalidate_ship_fitting_cache_only(cycle.ship_id);
+                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                        let ctx_w_spawn = ctx_w.clone();
                         let sid = cycle.ship_id;
-                        let mid = cycle.module_id;
-                        let mtid = cycle.module_type_id;
-                        let actor_locked = eve_db::lock_rank::held_lock_ranks().iter().any(|&r| {
-                            r == eve_db::lock_rank::RANK_BALLPARK
-                                || r == eve_db::lock_rank::RANK_ACTOR_STATE
+                        rt.spawn(async move {
+                            if let Some(c) = ctx_w_spawn.upgrade() {
+                                c.push_fit_projection_for_ship(sid);
+                            }
                         });
-                        if !actor_locked {
-                            step_ctx.record_module_reactivation_delay_for_system(
-                                Some(sys_id),
-                                sid,
-                                mid,
-                                mtid,
-                                reactiv_delay_s,
-                            );
-                        } else if let Some(handle) = step_ctx.systems.get_handle(sys_id) {
-                            let now_s = db.clock().now_unix_secs() as f64;
-                            let (tidi_factor, has_tidi_history) =
-                                step_ctx.resolve_sys_tidi_mode(Some(sys_id));
-                            step_ctx.systems.enqueue_post_unlock_action(Box::new(move || {
-                                handle.record_module_cooldown_unlocked_direct(
-                                    sid,
-                                    mid,
-                                    mtid,
-                                    now_s,
-                                    reactiv_delay_s,
-                                    tidi_factor,
-                                    has_tidi_history,
+                    }
+                }
+
+                let is_cloak = sde
+                    .types
+                    .get(&cycle.module_type_id)
+                    .is_some_and(|t| t.group_id == 330)
+                    || cycle.effect_name.to_ascii_lowercase().contains("cloak");
+                if is_cloak {
+                    let reactiv_delay_s = if cycle.reactivation_delay_s > 0.0 {
+                        cycle.reactivation_delay_s
+                    } else {
+                        sde.types
+                            .get(&cycle.module_type_id)
+                            .and_then(|t| t.default_attributes.get(&669).copied())
+                            .map(|ms| ms / 1000.0)
+                            .unwrap_or(0.0)
+                    };
+                    if reactiv_delay_s > 0.0 {
+                        if let Some(sys_id) = solar_system_id {
+                            if already_recorded_in_actor {
+                                step_ctx.purge_module_cooldown_other_systems(
+                                    sys_id,
+                                    cycle.ship_id,
+                                    cycle.module_id,
+                                    cycle.module_type_id,
                                 );
-                            }));
+                            } else {
+                                step_ctx.record_module_reactivation_delay_for_system(
+                                    Some(sys_id),
+                                    cycle.ship_id,
+                                    cycle.module_id,
+                                    cycle.module_type_id,
+                                    reactiv_delay_s,
+                                );
+                            }
                         }
                     }
                 }
-            }
 
-            let fanout_modules: Vec<i64> = if cycle.linked_turrets.is_empty() {
-                vec![cycle.module_id]
-            } else {
-                cycle.linked_turrets.clone()
-            };
-            let (removed_charge_tid, fanout_types, user_id, char_in_origin_space) =
-                db.with_mut_snapshot(|snap| {
-                    snap.module_active_states.remove(&cycle.module_id);
-                    let removed_charge = snap.module_active_charges.remove(&cycle.module_id);
-                    for &mid in &fanout_modules {
-                        if mid != cycle.module_id {
-                            snap.module_active_states.remove(&mid);
-                            snap.module_active_charges.remove(&mid);
+                let fanout_modules: Vec<i64> = if cycle.linked_turrets.is_empty() {
+                    vec![cycle.module_id]
+                } else {
+                    cycle.linked_turrets.clone()
+                };
+                let (removed_charge_tid, fanout_types, user_id, char_in_origin_space) =
+                    db.with_mut_snapshot(|snap| {
+                        snap.module_active_states.remove(&cycle.module_id);
+                        let removed_charge = snap.module_active_charges.remove(&cycle.module_id);
+                        for &mid in &fanout_modules {
+                            if mid != cycle.module_id {
+                                snap.module_active_states.remove(&mid);
+                                snap.module_active_charges.remove(&mid);
+                            }
                         }
-                    }
-                    let types: Vec<(i64, u32)> = fanout_modules
-                        .iter()
-                        .map(|&mid| {
-                            let tid = snap
-                                .items
-                                .get(&mid)
-                                .map(|i| i.type_id)
-                                .unwrap_or(cycle.module_type_id);
-                            (mid, tid)
-                        })
-                        .collect();
-                    let uid = snap.characters.get(&char_id).map(|c| c.user_id);
-                    let char_in_origin_space = solar_system_id.is_some_and(|sfx_sys| {
-                        step_ctx.space_char_sys_in_snapshot(snap, char_id) == Some(sfx_sys)
+                        let types: Vec<(i64, u32)> = fanout_modules
+                            .iter()
+                            .map(|&mid| {
+                                let tid = snap
+                                    .items
+                                    .get(&mid)
+                                    .map(|i| i.type_id)
+                                    .unwrap_or(cycle.module_type_id);
+                                (mid, tid)
+                            })
+                            .collect();
+                        let uid = snap.characters.get(&char_id).map(|c| c.user_id);
+                        let char_in_origin_space = solar_system_id.is_some_and(|sfx_sys| {
+                            step_ctx.space_char_sys_in_snapshot(snap, char_id) == Some(sfx_sys)
+                        });
+                        (removed_charge, types, uid, char_in_origin_space)
                     });
-                    (removed_charge, types, uid, char_in_origin_space)
-                });
-            let charge_type_id = cycle.ammo_type_id.or(removed_charge_tid);
+                let charge_type_id = cycle.ammo_type_id.or(removed_charge_tid);
 
-            let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
-                &step_ctx,
-                char_id,
-                solar_system_id,
-                cycle.ship_id,
-                cycle.module_id,
-            );
-            crate::services::tactical_modules::remove_projected_remote_assistance(
-                &step_ctx,
-                cycle.ship_id,
-                cycle.module_id,
-            );
-            if sde
-                .types
-                .get(&cycle.module_type_id)
-                .is_some_and(|t| t.group_id == 1815)
-            {
-                let cleared =
-                    crate::services::inventory_fitting::clear_ship_dbuffs_by_source_module(
+                if let Some(snap) = pre_flushed_ewar {
+                    let _ = crate::services::notify_emitters_space_dungeons::finish_flushed_module_ewar(
                         &step_ctx,
+                        char_id,
+                        solar_system_id,
+                        cycle.ship_id,
+                        cycle.module_id,
+                        snap,
+                    );
+                } else {
+                    let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
+                        &step_ctx,
+                        char_id,
+                        solar_system_id,
+                        cycle.ship_id,
                         cycle.module_id,
                     );
-                if !cleared.is_empty() {
-                    let sync_now = step_ctx.now_unix_secs();
-                    if eve_db::lock_rank::held_lock_ranks().is_empty() {
-                        crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
+                }
+                crate::services::tactical_modules::remove_projected_remote_assistance(
+                    &step_ctx,
+                    cycle.ship_id,
+                    cycle.module_id,
+                );
+                if sde
+                    .types
+                    .get(&cycle.module_type_id)
+                    .is_some_and(|t| t.group_id == 1815)
+                {
+                    let cleared =
+                        crate::services::inventory_fitting::clear_ship_dbuffs_by_source_module(
                             &step_ctx,
-                            &cleared,
-                            sync_now,
+                            cycle.module_id,
                         );
-                    } else {
-                        for &sid in &cleared {
-                            step_ctx.invalidate_ship_fitting_cache_only(sid);
-                        }
-                        let ctx_w_dbuff = ctx_w.clone();
-                        step_ctx.systems.enqueue_post_unlock_action(Box::new(move || {
-                            if let Some(c) = ctx_w_dbuff.upgrade() {
-                                crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
-                                    &c,
-                                    &cleared,
-                                    sync_now,
-                                );
+                    if !cleared.is_empty() {
+                        let sync_now = step_ctx.now_unix_secs();
+                        if eve_db::lock_rank::held_lock_ranks().is_empty() {
+                            crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
+                                &step_ctx, &cleared, sync_now,
+                            );
+                        } else {
+                            for &sid in &cleared {
+                                step_ctx.invalidate_ship_fitting_cache_only(sid);
                             }
-                        }));
+                            if let Some(handle) = solar_system_id
+                                .and_then(|sid| step_ctx.systems.get_handle(sid))
+                                .or_else(|| step_ctx.systems.find_ship_live_handle(cycle.ship_id))
+                            {
+                                let ctx_w_dbuff = ctx_w.clone();
+                                handle.enqueue_post_unlock_action(Box::new(move || {
+                                    if let Some(c) = ctx_w_dbuff.upgrade() {
+                                        crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
+                                            &c,
+                                            &cleared,
+                                            sync_now,
+                                        );
+                                    }
+                                }));
+                            }
+                        }
                     }
                 }
-            }
 
-            let effect_id = effect_id_for_module_sde(sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
-            let now = step_ctx.now_system_sim_filetime(solar_system_id);
-            let environment = PyRep::Tuple(vec![
-                PyRep::Integer(cycle.module_id),
-                PyRep::Integer(char_id),
-                PyRep::Integer(cycle.ship_id),
-                cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                PyRep::None,
-                PyRep::List(vec![]),
-                PyRep::Integer(effect_id),
-            ]);
-            emit_typed_target_to_char_capped(
-                Some(&**pending),
-                Some(notify_tx),
-                char_id,
-                user_id,
-                OnGodmaShipEffect::DEFAULT_ID_TYPE,
-                now.as_ticks(),
-                512,
-                OnGodmaShipEffect {
-                    item_id: cycle.module_id,
-                    effect: PyRep::Integer(effect_id),
-                    start_or_time: GodmaEffectStartOrTime::SimTime(now),
-                    start: Some(PyRep::Integer(0)),
-                    active: Some(PyRep::Integer(0)),
-                    environment: Some(environment),
-                    start_time: Some(now),
-                    duration: Some(PyRep::Real(0.0)),
-                    repeat: Some(PyRep::Integer(0)),
-                    error: Some(PyRep::None),
-                    actual_stop_time: None,
-                },
-            );
+                let effect_id = effect_id_for_module_sde(
+                    sde,
+                    cycle.module_type_id,
+                    Some(&cycle.effect_name),
+                )
+                .unwrap_or(0);
+                let now = step_ctx.now_system_sim_filetime(solar_system_id);
+                let environment = PyRep::Tuple(vec![
+                    PyRep::Integer(cycle.module_id),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(cycle.ship_id),
+                    cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::None,
+                    PyRep::List(vec![]),
+                    PyRep::Integer(effect_id),
+                ]);
+                emit_typed_target_to_char_capped(
+                    Some(&**pending),
+                    Some(notify_tx),
+                    char_id,
+                    user_id,
+                    OnGodmaShipEffect::DEFAULT_ID_TYPE,
+                    now.as_ticks(),
+                    512,
+                    OnGodmaShipEffect {
+                        item_id: cycle.module_id,
+                        effect: PyRep::Integer(effect_id),
+                        start_or_time: GodmaEffectStartOrTime::SimTime(now),
+                        start: Some(PyRep::Integer(0)),
+                        active: Some(PyRep::Integer(0)),
+                        environment: Some(environment),
+                        start_time: Some(now),
+                        duration: Some(PyRep::Real(0.0)),
+                        repeat: Some(PyRep::Integer(0)),
+                        error: Some(PyRep::None),
+                        actual_stop_time: None,
+                    },
+                );
 
-            if let Some(sfx_sys_id) = solar_system_id {
-                if let Some(sfx_base_scene) =
-                    crate::router::notify_registry::BallparkScene::try_solar_system(sfx_sys_id)
-                {
-                    let observers = step_ctx.space_observer_chars_in_system(sfx_sys_id, char_id);
-                    let pilot_scene_opt = if char_in_origin_space {
-                        match cycle.origin_scene_epoch {
-                            Some(origin_ep) => {
-                                let cur_epoch = step_ctx.active_session_scene_epoch_for_char(char_id);
-                                if cur_epoch.is_some_and(|cur| cur != origin_ep) {
-                                    None
-                                } else {
-                                    crate::router::notify_registry::BallparkScene::try_with_epoch(
-                                        sfx_sys_id, origin_ep,
-                                    )
+                if let Some(sfx_sys_id) = solar_system_id {
+                    if let Some(sfx_base_scene) =
+                        crate::router::notify_registry::BallparkScene::try_solar_system(sfx_sys_id)
+                    {
+                        let observers = step_ctx.space_observer_chars_in_system(sfx_sys_id, char_id);
+                        let pilot_scene_opt = if char_in_origin_space {
+                            match cycle.origin_scene_epoch {
+                                Some(origin_ep) => {
+                                    let cur_epoch =
+                                        step_ctx.active_session_scene_epoch_for_char(char_id);
+                                    if cur_epoch.is_some_and(|cur| cur != origin_ep) {
+                                        None
+                                    } else {
+                                        crate::router::notify_registry::BallparkScene::try_with_epoch(
+                                            sfx_sys_id, origin_ep,
+                                        )
+                                    }
                                 }
+                                None => Some(sfx_base_scene),
                             }
-                            None => Some(sfx_base_scene),
-                        }
-                    } else {
-                        None
-                    };
-                    for (fan_mod_id, fan_type_id) in fanout_types {
-                        let fan_effect_id =
-                            effect_id_for_module_sde(sde, fan_type_id, Some(&cycle.effect_name))
-                                .unwrap_or(effect_id);
-                        if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
-                            sde,
-                            fan_type_id,
-                            fan_effect_id,
-                            Some(&cycle.effect_name),
-                        ) {
-                            let sfx_notif = OnSpecialFX {
-                                scene: sfx_base_scene,
-                                ship_id: cycle.ship_id,
-                                module_id: Some(fan_mod_id),
-                                module_type_id: Some(i64::from(fan_type_id)),
-                                target_id: cycle.target_id,
-                                other_type_id: charge_type_id.map(i64::from),
-                                guid: sfx_guid,
-                                is_offensive,
-                                start: 0,
-                                active: 0,
-                                duration: cycle.duration_s * 1000.0,
-                                repeat: 0,
-                                start_time: now.as_ticks(),
-                                time_from_start: 0.0,
-                                graphic_info: None,
-                            };
-                            let push_sfx =
-                                |recip_cid: i64,
-                                 recip_uid: Option<u64>,
-                                 recip_scene: crate::router::notify_registry::BallparkScene| {
+                        } else {
+                            None
+                        };
+                        for (fan_mod_id, fan_type_id) in fanout_types {
+                            let fan_effect_id = effect_id_for_module_sde(
+                                sde,
+                                fan_type_id,
+                                Some(&cycle.effect_name),
+                            )
+                            .unwrap_or(effect_id);
+                            if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
+                                sde,
+                                fan_type_id,
+                                fan_effect_id,
+                                Some(&cycle.effect_name),
+                            ) {
+                                let sfx_notif = OnSpecialFX {
+                                    scene: sfx_base_scene,
+                                    ship_id: cycle.ship_id,
+                                    module_id: Some(fan_mod_id),
+                                    module_type_id: Some(i64::from(fan_type_id)),
+                                    target_id: cycle.target_id,
+                                    other_type_id: charge_type_id.map(i64::from),
+                                    guid: sfx_guid,
+                                    is_offensive,
+                                    start: 0,
+                                    active: 0,
+                                    duration: cycle.duration_s * 1000.0,
+                                    repeat: 0,
+                                    start_time: now.as_ticks(),
+                                    time_from_start: 0.0,
+                                    graphic_info: None,
+                                };
+                                let push_sfx = |recip_cid: i64,
+                                                recip_uid: Option<u64>,
+                                                recip_scene: crate::router::notify_registry::BallparkScene| {
                                     let mut notif = sfx_notif.clone();
                                     notif.scene = recip_scene;
                                     emit_typed_target_to_char_capped(
@@ -1905,43 +1923,56 @@ impl ServerContext {
                                         notif,
                                     );
                                 };
-                            if let Some(pilot_scene) = pilot_scene_opt {
-                                push_sfx(char_id, user_id, pilot_scene);
-                            }
-                            for &(obs_cid, obs_uid) in &observers {
-                                if let Some(obs_scene) =
-                                    step_ctx.ballpark_scene_for_char(obs_cid, sfx_sys_id)
-                                {
-                                    push_sfx(obs_cid, Some(obs_uid), obs_scene);
+                                if let Some(pilot_scene) = pilot_scene_opt {
+                                    push_sfx(char_id, user_id, pilot_scene);
+                                }
+                                for &(obs_cid, obs_uid) in &observers {
+                                    if let Some(obs_scene) =
+                                        step_ctx.ballpark_scene_for_char(obs_cid, sfx_sys_id)
+                                    {
+                                        push_sfx(obs_cid, Some(obs_uid), obs_scene);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            let auto_reload_ev: Option<(Vec<i64>, u32, f64)> = db.with_mut_snapshot(|snap| {
-                snap.cluster_and_runtime
-                    .auto_reloaded_event
-                    .remove(&cycle.module_id)
-            });
-            if let Some((mod_ids, charge_tid, reload_ms)) = auto_reload_ev {
-                emit_typed_target_to_char_capped(
-                    Some(&**pending),
-                    Some(notify_tx),
-                    char_id,
-                    user_id,
-                    OnChargeBeingLoadedToModule::DEFAULT_ID_TYPE,
-                    now.as_ticks(),
-                    512,
-                    OnChargeBeingLoadedToModule {
-                        item_ids: mod_ids,
-                        charge_type_id: i64::from(charge_tid),
-                        time_ms: reload_ms,
-                    },
-                );
-            }
-        }));
+                let auto_reload_ev: Option<(Vec<i64>, u32, f64)> = db.with_mut_snapshot(|snap| {
+                    snap.cluster_and_runtime
+                        .auto_reloaded_event
+                        .remove(&cycle.module_id)
+                });
+                if let Some((mod_ids, charge_tid, reload_ms)) = auto_reload_ev {
+                    emit_typed_target_to_char_capped(
+                        Some(&**pending),
+                        Some(notify_tx),
+                        char_id,
+                        user_id,
+                        OnChargeBeingLoadedToModule::DEFAULT_ID_TYPE,
+                        now.as_ticks(),
+                        512,
+                        OnChargeBeingLoadedToModule {
+                            item_ids: mod_ids,
+                            charge_type_id: i64::from(charge_tid),
+                            time_ms: reload_ms,
+                        },
+                    );
+                }
+            },
+        );
+        let run_for_post_unlock = Arc::clone(&run_deact_cleanup);
+        self.systems
+            .set_module_deactivation_post_unlock_hook(Arc::new(
+                move |sys_id, char_id, cycle, ewar_snap| {
+                    run_for_post_unlock(sys_id, char_id, &cycle, Some(ewar_snap), true);
+                },
+            ));
+        self.systems.set_module_deactivation_hook(Arc::new(
+            move |sys_id, char_id, cycle| {
+                run_deact_cleanup(sys_id, char_id, cycle, None, false);
+            },
+        ));
 
         let db_lock = Arc::downgrade(&self.db);
         let pending_lock = Arc::downgrade(&self.pending_notifications);
@@ -2017,13 +2048,14 @@ impl ServerContext {
                     .or_else(|| self.resolve_ship_system_opt(source_ship_id))
                     .and_then(|sid| self.systems.get_handle(sid))
             });
-        if let Some(handle) = handle_opt {
-            let _ = handle.upsert_projected_ewar_sync(
-                source_ship_id,
-                target_ship_id,
-                effect.clone(),
-            );
-        }
+        let Some(handle) = handle_opt else {
+            return;
+        };
+        let _ = handle.upsert_projected_ewar_sync(
+            source_ship_id,
+            target_ship_id,
+            effect.clone(),
+        );
         {
             let mut fit_guard = self
                 .ship_fittings

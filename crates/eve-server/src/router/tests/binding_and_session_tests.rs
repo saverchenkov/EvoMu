@@ -161,6 +161,7 @@ async fn object_binding_lifecycle_session_closer_ewar_and_prereqs() {
     let _saved_notifs = ctx.notify_new_skill_queue_saved(90_000_001, PyRep::List(vec![]));
 
     // Projected EWAR (Target Painter bloom) & skill prereq check
+    let _ewar_sys = ctx.systems.get_or_spawn(30_000_142);
     let _ = ctx.get_or_rebuild_ship_fitting(90_000_001, 100_000_001);
     let eff = ProjectedEwarEffect {
         source_module_id: 900_800_001,

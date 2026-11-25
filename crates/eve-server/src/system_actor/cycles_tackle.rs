@@ -1579,18 +1579,14 @@ impl SystemRegistry {
 }
 
 fn reconcile_and_sync_positions(exec_ctx: &mut ActorExecCtx<'_>) {
-    let deact_guard = exec_ctx
-        .module_deactivation_hook_actor
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let deact_guard = exec_ctx.deactivation_sink_hook.as_ref();
     reconcile_tackle_and_bubbles_collecting(
         exec_ctx.solar_system_id, exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
         &exec_ctx.actor_st.base_scramble_strengths,
         &exec_ctx.actor_st.base_core_strengths,
         &exec_ctx.actor_st.db_opt,
-        deact_guard.as_ref(),
+        deact_guard,
         exec_ctx.post_unlock_ops,
     );
     sync_ball_positions(
@@ -1948,6 +1944,9 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
     } else {
         1.0
     };
+    if tidi < 0.999_999 {
+        exec_ctx.actor_st.has_tidi_history = true;
+    }
     let dt_sim = if dt > 0.0 && dt.is_finite() {
         dt * tidi
     } else {
@@ -1959,6 +1958,32 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             exec_ctx.actor_st.sim_elapsed_secs.to_bits(),
             std::sync::atomic::Ordering::Release,
         );
+    }
+    let now_unix_f64 = exec_ctx
+        .actor_st
+        .db_opt
+        .as_ref()
+        .map(|db| db.clock().now_unix_secs() as f64)
+        .unwrap_or(0.0);
+    if !exec_ctx
+        .actor_st
+        .module_cooldowns
+        .reactivation_cooldowns
+        .is_empty()
+        && super::ewar_cooldowns::prune_expired_module_cooldowns_in_state(
+            &mut exec_ctx.actor_st.module_cooldowns,
+            exec_ctx.solar_system_id,
+            now_unix_f64,
+            exec_ctx.actor_st.sim_elapsed_secs,
+            tidi,
+            exec_ctx.actor_st.has_tidi_history,
+        )
+    {
+        exec_ctx.actor_st.module_cooldown_checkpoint_dirty = true;
+        exec_ctx.actor_st.module_cooldown_checkpoint_seq = exec_ctx
+            .actor_st
+            .module_cooldown_checkpoint_seq
+            .saturating_add(1);
     }
     belts::respawn_due_asteroids_collecting(
         exec_ctx.ballpark,
@@ -2030,11 +2055,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let deact_guard = exec_ctx
-        .module_deactivation_hook_actor
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let deact_guard = exec_ctx.deactivation_sink_hook.clone();
     for ev in &events {
         if let DestinyEvent::OnTarget {
             mode,

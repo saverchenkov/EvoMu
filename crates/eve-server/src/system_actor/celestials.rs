@@ -3163,8 +3163,11 @@ pub struct SystemHandle {
         Arc<RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_post_unlock_hook:
+        Arc<RankedRwLock<Option<super::ModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
+    pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,
 }
 

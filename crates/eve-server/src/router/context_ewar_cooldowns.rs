@@ -75,6 +75,75 @@ impl ServerContext {
         )
     }
 
+    fn resolve_best_active_cooldown(
+        &self,
+        ship_id: i64,
+        module_id: i64,
+        type_id: u32,
+        now_unix_f64: f64,
+    ) -> Option<(Option<u32>, ModuleCooldownEntry, f64, f64, bool)> {
+        let key = (ship_id, module_id, type_id);
+        let mut best: Option<(Option<u32>, ModuleCooldownEntry, f64, f64, bool)> = None;
+        let mut consider =
+            |sys_opt: Option<u32>,
+             entry: ModuleCooldownEntry,
+             cur_sys_sim_s: f64,
+             tidi_factor: f64,
+             has_tidi_history: bool| {
+                let rem = Self::remaining_cooldown_secs_with_tidi(
+                    &entry,
+                    now_unix_f64,
+                    sys_opt,
+                    cur_sys_sim_s,
+                    tidi_factor,
+                    has_tidi_history,
+                );
+                if rem <= 1e-6 {
+                    return;
+                }
+                let replace = best
+                    .as_ref()
+                    .is_none_or(|(_, _, best_rem, _, _)| rem > *best_rem);
+                if replace {
+                    best = Some((sys_opt, entry, rem, tidi_factor, has_tidi_history));
+                }
+            };
+
+        for (sid, handle) in self.systems.active_system_handles() {
+            if let Some(entry) = handle.module_reactivation_cooldown(&key) {
+                let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(Some(sid));
+                consider(
+                    Some(sid),
+                    entry,
+                    handle.sim_elapsed_secs(),
+                    tidi_factor,
+                    has_tidi_history,
+                );
+            }
+        }
+        for (cold_sid, entry) in
+            crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key)
+        {
+            if let Some(live_h) = self.systems.get_handle(cold_sid) {
+                let view = live_h.view();
+                if !view.module_cooldowns.boot_db_pending_merge
+                    || view.module_cooldowns.pending_db_clear_all
+                    || view
+                        .module_cooldowns
+                        .pending_db_cleared_ships
+                        .contains(&ship_id)
+                    || view.module_cooldowns.pending_db_removed_keys.contains(&key)
+                {
+                    continue;
+                }
+            }
+            let cand_sys = (cold_sid > 0).then_some(cold_sid);
+            let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(cand_sys);
+            consider(cand_sys, entry, 0.0, tidi_factor, has_tidi_history);
+        }
+        best
+    }
+
     fn resolve_module_cooldown_entry(
         &self,
         ship_id: i64,
@@ -82,16 +151,15 @@ impl ServerContext {
         type_id: u32,
         sys_opt: Option<u32>,
     ) -> Option<ModuleCooldownEntry> {
+        let now = self.now_unix_secs() as f64;
+        if let Some((_, entry, _, _, _)) =
+            self.resolve_best_active_cooldown(ship_id, module_id, type_id, now)
+        {
+            return Some(entry);
+        }
         let key = (ship_id, module_id, type_id);
         if let Some(sid) = sys_opt {
             if let Some(handle) = self.systems.get_handle(sid) {
-                if let Some(entry) = handle.module_reactivation_cooldown(&key) {
-                    return Some(entry);
-                }
-            }
-        }
-        for (sid, handle) in self.systems.active_system_handles() {
-            if Some(sid) != sys_opt {
                 if let Some(entry) = handle.module_reactivation_cooldown(&key) {
                     return Some(entry);
                 }
@@ -102,34 +170,20 @@ impl ServerContext {
     }
 
     /// Resolves the Unix expiry timestamp (`f64`) of `(ship_id, module_id)`'s active reactivation
-    /// cooldown, returning `None` if no cooldown exists or it has already elapsed.
+    /// cooldown across all live and cold systems, picking the longest active expiry (`G1A-01`).
     fn resolve_active_reactivation_cooldown(&self, ship_id: i64, module_id: i64) -> Option<f64> {
         let now = self.now_unix_secs() as f64;
-        let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
-        let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(sys_opt);
-        self.resolve_module_cooldown_entry(ship_id, module_id, type_id, sys_opt)
-            .and_then(|entry| {
-                let rem = Self::remaining_cooldown_secs_with_tidi(
-                    &entry,
-                    now,
-                    sys_opt,
-                    cur_sys_sim_s,
-                    tidi_factor,
-                    has_tidi_history,
-                );
-                if rem <= 1e-6 {
-                    None
-                } else {
-                    let eff_tidi = tidi_factor.clamp(0.10, 1.0);
-                    if eff_tidi < 0.999_999 {
-                        Some(now + rem / eff_tidi)
-                    } else if has_tidi_history {
-                        Some(now + rem)
-                    } else {
-                        Some(entry.recorded_unix_f64 + entry.delay_s)
-                    }
-                }
-            })
+        let (type_id, _sys_opt, _) = self.resolve_ship_cooldown_clock(ship_id, module_id);
+        let (_, entry, rem, tidi_factor, has_tidi_history) =
+            self.resolve_best_active_cooldown(ship_id, module_id, type_id, now)?;
+        let eff_tidi = tidi_factor.clamp(0.10, 1.0);
+        if eff_tidi < 0.999_999 {
+            Some(now + rem / eff_tidi)
+        } else if has_tidi_history {
+            Some(now + rem)
+        } else {
+            Some(entry.recorded_unix_f64 + entry.delay_s)
+        }
     }
 
     /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
@@ -149,6 +203,89 @@ impl ServerContext {
         self.resolve_active_reactivation_cooldown(ship_id, module_id)
     }
 
+    /// Enforces single-system cooldown ownership by purging `key` from every other live system
+    /// actor and non-owning cold SQLite system checkpoint (`G1A-01`), returning the maximum active
+    /// remaining cooldown across those other systems before purge.
+    fn collect_and_purge_other_systems_cooldown(
+        &self,
+        keep_sys_id: u32,
+        ship_id: i64,
+        module_id: i64,
+        type_id: u32,
+        now_unix_f64: f64,
+        measure_remaining: bool,
+    ) -> f64 {
+        let key = (ship_id, module_id, type_id);
+        let mut max_other_rem = 0.0_f64;
+        for (other_sid, handle) in self.systems.active_system_handles() {
+            if other_sid == keep_sys_id {
+                continue;
+            }
+            let view = handle.view();
+            if let Some(entry) = view.module_cooldowns.reactivation_cooldowns.get(&key) {
+                if measure_remaining {
+                    let (tidi, has_tidi) = self.resolve_sys_tidi_mode(Some(other_sid));
+                    let rem = Self::remaining_cooldown_secs_with_tidi(
+                        entry,
+                        now_unix_f64,
+                        Some(other_sid),
+                        handle.sim_elapsed_secs(),
+                        tidi,
+                        has_tidi,
+                    );
+                    max_other_rem = max_other_rem.max(rem);
+                }
+                let _ = handle.remove_module_cooldown_sync(key);
+            } else if view.module_cooldowns.boot_db_pending_merge {
+                let _ = handle.remove_module_cooldown_sync(key);
+            }
+        }
+        if measure_remaining {
+            for (cold_sid, entry) in
+                crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key)
+            {
+                if cold_sid == keep_sys_id {
+                    continue;
+                }
+                let cand_sys = (cold_sid > 0).then_some(cold_sid);
+                let (tidi, has_tidi) = self.resolve_sys_tidi_mode(cand_sys);
+                let rem = Self::remaining_cooldown_secs_with_tidi(
+                    &entry,
+                    now_unix_f64,
+                    cand_sys,
+                    0.0,
+                    tidi,
+                    has_tidi,
+                );
+                max_other_rem = max_other_rem.max(rem);
+            }
+        }
+        let _ = self.systems.remove_cold_module_cooldown_key_across_systems(
+            &self.db,
+            Some(keep_sys_id),
+            true,
+            key,
+        );
+        max_other_rem
+    }
+
+    pub(crate) fn purge_module_cooldown_other_systems(
+        &self,
+        keep_sys_id: u32,
+        ship_id: i64,
+        module_id: i64,
+        type_id: u32,
+    ) {
+        let _ = self.collect_and_purge_other_systems_cooldown(
+            keep_sys_id,
+            ship_id,
+            module_id,
+            type_id,
+            self.now_unix_secs() as f64,
+            false,
+        );
+    }
+
     pub(crate) fn record_module_reactivation_delay_for_system(
         &self,
         sys_opt: Option<u32>,
@@ -164,6 +301,10 @@ impl ServerContext {
             return;
         };
         let now = self.now_unix_secs() as f64;
+        let other_max = self.collect_and_purge_other_systems_cooldown(
+            sys_id, ship_id, module_id, type_id, now, true,
+        );
+        let effective_delay = delay_s.max(other_max);
         let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(Some(sys_id));
         if let Some(handle) = self.systems.get_handle(sys_id) {
             let _ = handle.record_module_cooldown_sync(
@@ -171,19 +312,19 @@ impl ServerContext {
                 module_id,
                 type_id,
                 now,
-                delay_s,
+                effective_delay,
                 tidi_factor,
                 has_tidi_history,
             );
         } else {
-            crate::system_actor::record_cold_system_module_cooldown_in_db(
+            self.systems.record_cold_system_module_cooldown_in_db(
                 &self.db,
                 sys_id,
                 ship_id,
                 module_id,
                 type_id,
                 now,
-                delay_s,
+                effective_delay,
                 tidi_factor,
                 has_tidi_history,
             );
@@ -201,7 +342,8 @@ impl ServerContext {
         );
     }
 
-    /// Removes a specific module reactivation cooldown across active system actors and checkpoints.
+    /// Removes a specific module reactivation cooldown across ALL active system actors and ALL
+    /// cold SQLite system checkpoints (`G1A-01`).
     pub fn remove_module_reactivation_delay(
         &self,
         ship_id: i64,
@@ -211,20 +353,24 @@ impl ServerContext {
         let key = (ship_id, module_id, module_type_id);
         let mut removed = false;
         for (_, handle) in self.systems.active_system_handles() {
-            if handle.module_reactivation_cooldown(&key).is_some()
-                && handle.remove_module_cooldown_sync(key).unwrap_or(false)
-            {
-                removed = true;
+            let view = handle.view();
+            let existed_in_actor = view
+                .module_cooldowns
+                .reactivation_cooldowns
+                .contains_key(&key);
+            if existed_in_actor {
+                if handle.remove_module_cooldown_sync(key).unwrap_or(false) {
+                    removed = true;
+                }
+            } else if view.module_cooldowns.boot_db_pending_merge {
+                let _ = handle.remove_module_cooldown_sync(key);
             }
         }
-        if let Some(sys_id) = self.resolve_ship_system_opt(ship_id) {
-            if self.systems.get_handle(sys_id).is_none()
-                && crate::system_actor::remove_cold_system_module_cooldown_in_db(
-                    &self.db, sys_id, key,
-                )
-            {
-                removed = true;
-            }
+        if self
+            .systems
+            .remove_cold_module_cooldown_key_across_systems(&self.db, None, true, key)
+        {
+            removed = true;
         }
         removed
     }
@@ -234,7 +380,8 @@ impl ServerContext {
         for (_, handle) in self.systems.active_system_handles() {
             let _ = handle.clear_ship_module_cooldowns_sync(ship_id);
         }
-        crate::system_actor::clear_cold_ship_module_cooldowns_in_db(&self.db, ship_id);
+        self.systems
+            .clear_cold_ship_module_cooldowns_in_db(&self.db, ship_id);
     }
 
     #[cfg(any(test, feature = "testkit"))]
@@ -242,7 +389,7 @@ impl ServerContext {
         for (_, handle) in self.systems.active_system_handles() {
             let _ = handle.clear_all_module_cooldowns_sync();
         }
-        crate::system_actor::clear_all_cold_module_cooldowns_in_db(&self.db);
+        self.systems.clear_all_cold_module_cooldowns_in_db(&self.db);
     }
 
     #[cfg(any(test, feature = "testkit"))]
@@ -264,9 +411,8 @@ impl ServerContext {
         if let Some(handle) = self.systems.get_handle(sys_id) {
             let _ = handle.seed_module_cooldown_entry_sync(key, entry);
         } else {
-            crate::system_actor::seed_cold_system_module_cooldown_in_db(
-                &self.db, sys_id, key, entry,
-            );
+            self.systems
+                .seed_cold_system_module_cooldown_in_db(&self.db, sys_id, key, entry);
         }
     }
 

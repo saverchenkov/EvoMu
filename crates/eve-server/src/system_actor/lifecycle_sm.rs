@@ -1149,9 +1149,6 @@ impl SystemRegistry {
             Arc::clone(&gate),
             handle,
         );
-        if let Some(ref handle) = cleanup.handle {
-            let _ = handle.flush_module_cooldown_checkpoint().await;
-        }
         let cmd_tx = cleanup
             .handle
             .as_ref()
@@ -1163,14 +1160,20 @@ impl SystemRegistry {
             .send(SystemCommand::ShutdownActor { reply: tx })
             .await
             .is_ok();
-        if let Some(handle) = cleanup.handle.take() {
+        let stopped_actor_state = cleanup.handle.take().map(|handle| {
             self.clear_db_ballpark_for_handle(solar_system_id, &handle);
+            let actor_state = Arc::clone(&handle.actor_state);
             drop(handle);
-        }
+            actor_state
+        });
         if sent {
             let _ = rx.await;
         }
         cmd_tx.closed().await;
+        if let Some(ref actor_state) = stopped_actor_state {
+            self.flush_stopped_actor_module_cooldowns(solar_system_id, actor_state);
+            drop(stopped_actor_state);
+        }
         if origin.reclaim_transient() {
             self.reclaim_transient_items_in_db(solar_system_id);
         }

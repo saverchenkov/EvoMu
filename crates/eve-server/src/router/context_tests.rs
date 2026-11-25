@@ -1687,3 +1687,301 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         "ServerContext lock-guarded field count regressed above 35: {locked_fields} (#1541)"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cross_system_expired_cooldown_does_not_shadow_active_entry_and_cold_removal_cleans_db() {
+    let ctx = test_ctx();
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_002_187_u32;
+    let sys_c = 30_000_144_u32;
+    let ship_id = 100_980_001_i64;
+    let mod_id = 100_980_002_i64;
+    let cloak_tid = 11_370_u32;
+    let now_unix = ctx.now_unix_secs() as f64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: 90_000_001,
+                location_id: sys_b as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: cloak_tid,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let _h_a = ctx.systems.get_or_spawn(sys_a);
+    let _h_b = ctx.systems.get_or_spawn(sys_b);
+
+    // Seed expired stale entry in lower-ID System A AND active 25s entry in System B.
+    ctx.seed_module_cooldown_entry_for_test(
+        ship_id,
+        mod_id,
+        cloak_tid,
+        crate::system_actor::ModuleCooldownEntry {
+            recorded_unix_f64: now_unix - 120.0,
+            delay_s: 10.0,
+            solar_system_id: Some(sys_a),
+            recorded_sys_sim_s: 0.0,
+        },
+    );
+    ctx.record_module_reactivation_delay(ship_id, mod_id, 25.0);
+
+    // Active System B cooldown MUST NOT be shadowed by expired System A entry.
+    assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+    let until = ctx
+        .module_reactivation_cooldown_until_unix(ship_id, mod_id)
+        .expect("active cooldown resolves");
+    assert!(until > now_unix + 20.0);
+
+    // Move ship into System B live while leaving a 40s cooldown persisted in COLD System C.
+    ctx.seed_module_cooldown_entry_for_test(
+        ship_id,
+        mod_id,
+        cloak_tid,
+        crate::system_actor::ModuleCooldownEntry {
+            recorded_unix_f64: now_unix,
+            delay_s: 40.0,
+            solar_system_id: Some(sys_c),
+            recorded_sys_sim_s: 0.0,
+        },
+    );
+    assert!(ctx.systems.get_handle(sys_c).is_none());
+
+    // Resolve picks the longest active entry (40s in cold System C > 25s in live System B).
+    let max_until = ctx
+        .module_reactivation_cooldown_until_unix(ship_id, mod_id)
+        .expect("max active cooldown");
+    assert!(max_until >= now_unix + 39.0);
+
+    // Recording in live System B transfers ownership into B (preserving >= 40s) and purges A + C!
+    ctx.record_module_reactivation_delay_for_system(Some(sys_b), ship_id, mod_id, cloak_tid, 5.0);
+    assert!(
+        ctx.systems
+            .get_handle(sys_a)
+            .unwrap()
+            .module_reactivation_cooldown(&(ship_id, mod_id, cloak_tid))
+            .is_none()
+    );
+    assert!(
+        crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_c).is_empty()
+    );
+    assert!(
+        ctx.systems
+            .get_handle(sys_b)
+            .unwrap()
+            .module_reactivation_cooldown(&(ship_id, mod_id, cloak_tid))
+            .is_some_and(|e| e.delay_s >= 39.0)
+    );
+
+    // Seed another entry in cold System C while ship's live location resolves to System B,
+    // then remove via `remove_module_reactivation_delay`: both live B and cold C MUST clear!
+    ctx.seed_module_cooldown_entry_for_test(
+        ship_id,
+        mod_id,
+        cloak_tid,
+        crate::system_actor::ModuleCooldownEntry {
+            recorded_unix_f64: now_unix,
+            delay_s: 45.0,
+            solar_system_id: Some(sys_c),
+            recorded_sys_sim_s: 0.0,
+        },
+    );
+    assert!(ctx.remove_module_reactivation_delay(ship_id, mod_id, cloak_tid));
+    assert!(!ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+    assert!(
+        crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_c).is_empty()
+    );
+    assert!(!ctx.has_any_reactivation_delays_for_test());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_batch_cycle_deactivation_and_recon_cooldown_override_plus_actor_isolation() {
+    let ctx = test_ctx();
+    let jita = 30_000_142_u32;
+    let amarr = 30_002_187_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_990_001_i64;
+    let target_id = 100_990_002_i64;
+    let cloak_id = 100_990_003_i64;
+    let cloak_tid = 11_370_u32;
+    let now_unix = ctx.now_unix_secs() as f64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = jita;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: jita as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cloak_id,
+            InventoryItemRecord {
+                item_id: cloak_id,
+                type_id: cloak_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let h_jita = ctx.systems.get_or_spawn(jita);
+    let h_amarr = ctx.systems.get_or_spawn(amarr);
+
+    // Cross-actor isolation: each actor owns a distinct `post_unlock_actions` queue.
+    assert!(!Arc::ptr_eq(
+        &h_jita.post_unlock_actions,
+        &h_amarr.post_unlock_actions
+    ));
+    let jita_drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let jita_drained_c = Arc::clone(&jita_drained);
+    h_jita.enqueue_post_unlock_action(Box::new(move || {
+        jita_drained_c.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let amarr_marker = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let amarr_marker_c = Arc::clone(&amarr_marker);
+    h_amarr.enqueue_post_unlock_action(Box::new(move || {
+        amarr_marker_c.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let _ = h_amarr.has_active_modules_or_cloak_sync(ship_id);
+    // Stepping Jita drains Jita's queue without touching Amarr's queued action.
+    h_jita.step_manual(0.1).await.unwrap();
+    assert!(jita_drained.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!amarr_marker.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Seed active cloak cycle (with 30s default delay) + active EWAR start.
+    h_jita
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h_jita
+        .record_active_ewar_start(ship_id, cloak_id, target_id, "electronic")
+        .await
+        .unwrap();
+    let cycle = crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: cloak_id,
+        module_type_id: cloak_tid,
+        owner_char_id: Some(char_id),
+        effect_name: "cloaking".to_string(),
+        repeat: 1,
+        duration_s: 5.0,
+        reactivation_delay_s: 30.0,
+        ..Default::default()
+    };
+    let (tx_add, rx_add) = tokio::sync::oneshot::channel();
+    h_jita
+        .cmd_sender()
+        .send(crate::system_actor::SystemCommand::AddModuleCycle { cycle, reply: tx_add })
+        .await
+        .unwrap();
+    rx_add.await.unwrap().unwrap();
+    // Force deactivation via `ForceDecloak` + `RemoveModuleCooldown` + `RecordModuleCooldown(5s)`
+    // queued back-to-back in the SAME `cmd_batch`!
+    let (tx_decloak, rx_decloak) = tokio::sync::oneshot::channel();
+    let (tx_remove, rx_remove) = tokio::sync::oneshot::channel();
+    let (tx_record, rx_record) = tokio::sync::oneshot::channel();
+    h_jita
+        .cmd_sender()
+        .try_send(crate::system_actor::SystemCommand::ForceDecloak {
+            ball_id: ship_id,
+            char_id: Some(char_id),
+            reason: crate::system_actor::ProtectionBreakReason::Manual,
+            real_now_unix: now_unix as u64,
+            reply: tx_decloak,
+        })
+        .unwrap();
+    h_jita
+        .cmd_sender()
+        .try_send(crate::system_actor::SystemCommand::RemoveModuleCooldown {
+            key: (ship_id, cloak_id, cloak_tid),
+            reply: tx_remove,
+        })
+        .unwrap();
+    h_jita
+        .cmd_sender()
+        .try_send(crate::system_actor::SystemCommand::RecordModuleCooldown {
+            ship_id,
+            module_id: cloak_id,
+            module_type_id: cloak_tid,
+            now_unix_f64: now_unix,
+            delay_s: 5.0,
+            tidi_factor: 1.0,
+            has_tidi_history: false,
+            reply: tx_record,
+        })
+        .unwrap();
+
+    rx_decloak.await.unwrap().unwrap();
+    assert!(
+        rx_remove.await.unwrap().unwrap().is_some(),
+        "ForceDecloak must have synchronously recorded default cloak cooldown before RemoveModuleCooldown"
+    );
+    let _payload = rx_record.await.unwrap().unwrap();
+
+    // Per-command `post_unlock_actions` drain ran ForceDecloak cleanup + Remove + Record(5s) in
+    // exact command order, leaving 5.0s (NOT 30.0s!) in actor & SystemView and zero EWAR starts.
+    let entry = h_jita
+        .module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid))
+        .expect("5s Recon override recorded");
+    assert!(
+        (entry.delay_s - 5.0).abs() < 1e-6,
+        "expected 5.0s override, got {}",
+        entry.delay_s
+    );
+    assert_eq!(ctx.systems.ewar_starts_count(), 0);
+}

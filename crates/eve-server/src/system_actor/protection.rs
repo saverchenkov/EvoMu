@@ -566,7 +566,7 @@ pub(crate) fn sync_active_module_ships_cache(
 pub(in crate::system_actor) fn read_deact_hook(
     exec_ctx: &ActorExecCtx<'_>,
 ) -> Option<ModuleDeactivationHook> {
-    exec_ctx.module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone()
+    exec_ctx.deactivation_sink_hook.clone()
 }
 
 pub(in crate::system_actor) fn sync_positions_in_actor(exec_ctx: &mut ActorExecCtx<'_>) {

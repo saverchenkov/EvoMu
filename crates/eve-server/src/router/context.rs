@@ -2346,12 +2346,8 @@ impl ServerContext {
                 let _ = handle.try_send_fit_projection(ship_id, proj);
             }
         } else {
-            self.systems.enqueue_post_unlock_action(Box::new(move || {
-                let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
-                if let Some(proj) = proj_opt {
-                    let _ = handle.try_send_fit_projection(ship_id, proj);
-                }
-            }));
+            let h = handle.clone();
+            h.enqueue_post_unlock_action(Box::new(move || { let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh); if let Some(proj) = proj_opt { let _ = handle.try_send_fit_projection(ship_id, proj); } }));
         }
     }
 
@@ -2533,9 +2529,8 @@ impl ServerContext {
                     if eve_db::lock_rank::held_lock_ranks().is_empty() {
                         let _ = handle.try_send_fit_projection(ship_id, projection);
                     } else {
-                        self.systems.enqueue_post_unlock_action(Box::new(move || {
-                            let _ = handle.try_send_fit_projection(ship_id, projection);
-                        }));
+                        let h = handle.clone();
+                        h.enqueue_post_unlock_action(Box::new(move || { let _ = handle.try_send_fit_projection(ship_id, projection); }));
                     }
                 }
                 return Some(rev);

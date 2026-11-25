@@ -1964,6 +1964,7 @@ impl SystemHandle {
 
     pub fn try_step_full_tick(&self, dt: f64) -> u64 {
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
+        let tidi = self.tidi_factor();
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
         let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
@@ -1977,14 +1978,17 @@ impl SystemHandle {
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
             pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
             fit_projections, weapon_cycle_start_modules,
-            module_cooldowns, module_reload_sim_remaining,
+            module_cooldowns, module_cooldown_checkpoint_dirty, module_cooldown_checkpoint_seq,
+            has_tidi_history, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
             warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
             next_post_unlock_seq, post_unlock_shadows, ..
         } = &mut *st;
         let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
-        let tidi = self.tidi_factor();
+        if tidi < 0.999_999 {
+            *has_tidi_history = true;
+        }
         let dt_sim = if dt > 0.0 && dt.is_finite() {
             dt * tidi
         } else {
@@ -1996,6 +2000,23 @@ impl SystemHandle {
                 sim_elapsed_secs.to_bits(),
                 std::sync::atomic::Ordering::Release,
             );
+        }
+        let now_unix_f64 = db_opt
+            .as_ref()
+            .map(|db| db.clock().now_unix_secs() as f64)
+            .unwrap_or(0.0);
+        if !module_cooldowns.reactivation_cooldowns.is_empty()
+            && super::ewar_cooldowns::prune_expired_module_cooldowns_in_state(
+                module_cooldowns,
+                self.solar_system_id,
+                now_unix_f64,
+                *sim_elapsed_secs,
+                tidi,
+                *has_tidi_history || tidi < 0.999_999,
+            )
+        {
+            *module_cooldown_checkpoint_dirty = true;
+            *module_cooldown_checkpoint_seq = module_cooldown_checkpoint_seq.saturating_add(1);
         }
         let dt = dt_sim;
         super::belts::respawn_due_asteroids_collecting(

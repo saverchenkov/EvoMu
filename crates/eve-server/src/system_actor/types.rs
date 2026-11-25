@@ -880,6 +880,9 @@ pub(crate) struct SystemActorState {
     pub ewar_state: super::ActorEwarState,
     pub module_cooldowns: super::ActorModuleCooldownState,
     pub module_cooldown_checkpoint_dirty: bool,
+    pub module_cooldown_persist_epoch: u64,
+    pub module_cooldown_checkpoint_seq: u64,
+    pub has_tidi_history: bool,
     pub pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub ball_space_entry_epochs: HashMap<BallId, u64>,
@@ -1810,7 +1813,7 @@ pub enum SystemCommand {
         reply: oneshot::Sender<Result<Option<super::ModuleCooldownPersistPayload>, String>>,
     },
     ClearAllModuleCooldowns {
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<super::ModuleCooldownPersistPayload, String>>,
     },
     ReplaceModuleCooldowns {
         cooldowns: HashMap<(i64, i64, u32), super::ModuleCooldownEntry>,
@@ -1903,6 +1906,11 @@ pub type TypeId = u32;
 pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
 pub type ModuleDeactivationHook = Arc<dyn Fn(SolarSystemId, CharacterId, &ActiveModuleCycle) + Send + Sync>;
+pub type ModuleDeactivationPostUnlockHook = Arc<
+    dyn Fn(SolarSystemId, CharacterId, ActiveModuleCycle, super::ModuleEwarFlushSnapshot)
+        + Send
+        + Sync,
+>;
 pub type TargetLockCompletedHook = Arc<dyn Fn(CharacterId, BallId) + Send + Sync>;
 pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type SystemStepHook =

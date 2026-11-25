@@ -578,7 +578,7 @@ pub fn emit_module_activation_godma_notifications(
     );
 }
 
-fn finish_flushed_module_ewar(
+pub(crate) fn finish_flushed_module_ewar(
     ctx: &ServerContext,
     char_id: i64,
     solar_system_id: Option<u32>,
@@ -696,36 +696,6 @@ pub fn flush_module_ewar_end(
             .get(&module_id)
             .is_some_and(|i| i.location_id == ship_id)
     });
-    let actor_locked = eve_db::lock_rank::held_lock_ranks().iter().any(|&r| {
-        r == eve_db::lock_rank::RANK_BALLPARK || r == eve_db::lock_rank::RANK_ACTOR_STATE
-    });
-    if actor_locked {
-        let handle_opt = solar_system_id
-            .and_then(|sid| ctx.systems.get_handle(sid))
-            .or_else(|| ctx.systems.find_ship_live_handle(ship_id));
-        if let Some(handle) = handle_opt {
-            let ctx_w = ctx.downgrade();
-            ctx.systems.enqueue_post_unlock_action(Box::new(move || {
-                let Some(c) = ctx_w.upgrade() else {
-                    return;
-                };
-                let snap = handle.flush_module_ewar_unlocked_direct(
-                    ship_id,
-                    module_id,
-                    allow_db_source_fallback,
-                );
-                let _ = finish_flushed_module_ewar(
-                    &c,
-                    char_id,
-                    solar_system_id,
-                    ship_id,
-                    module_id,
-                    snap,
-                );
-            }));
-        }
-        return Vec::new();
-    }
 
     let mut merged = ModuleEwarFlushSnapshot::default();
     for (sid, handle) in ctx.systems.active_system_handles() {
