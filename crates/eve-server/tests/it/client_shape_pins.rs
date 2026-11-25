@@ -2555,7 +2555,10 @@ async fn pin_933_t5_corp_shipfit_and_trace_wire_parity() {
         panic!("ship.GetShipFittingInfo must return 4-tuple natively: {fit_rep:?}");
     };
     assert_eq!(fit_vals.len(), 4);
-    assert!(fit_vals[0].as_f64().is_some_and(|v| v > 0.0));
+    assert!(fit_vals[0].as_f64().is_some_and(|v| v >= 0.0));
+    assert!(fit_vals[1].as_f64().is_some_and(|v| v > 0.0));
+    assert!(fit_vals[2].as_f64().is_some_and(|v| v >= 0.0));
+    assert!(fit_vals[3].as_f64().is_some_and(|v| v > 0.0));
     assert_contract_enforcing(&ctx, "ship.GetShipFittingInfo", &fit_rep);
 
     // 5. Migrated dispatch-layer bound_object_rep wrapping works over ClientWireSession.

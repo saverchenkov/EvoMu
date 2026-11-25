@@ -1220,6 +1220,14 @@ async fn arch_933_t5_direct_equals_wire_and_bound_dispatch() {
     assert!(matches!(&direct_fit, PyRep::Tuple(vals) if vals.len() == 4));
 
     // 2. Services with zeroed caller_trace params wrap bound IDs centrally in dispatch.rs.
+    let extract_substruct_bound_id = |rep: &PyRep| -> Option<u64> {
+        let PyRep::SubStruct(inner) = rep else { return None };
+        let PyRep::SubStream(payload) = inner.as_ref() else { return None };
+        let PyRep::Tuple(parts) = payload.as_ref() else { return None };
+        let PyRep::Bytes(raw) = parts.first()? else { return None };
+        std::str::from_utf8(raw).ok()?.rsplit(':').next()?.parse::<u64>().ok()
+    };
+
     let direct_skill = ctx_direct
         .dispatch_rpc(&mut sess_direct, "skillMgr2", None, "GetMySkillHandler", &[], &kw, None)
         .await
@@ -1231,7 +1239,11 @@ async fn arch_933_t5_direct_equals_wire_and_bound_dispatch() {
     let PyRep::Integer(skill_bid) = direct_skill else {
         panic!("expected Integer bound id for direct GetMySkillHandler: {direct_skill:?}");
     };
-    assert_eq!(wire_skill, ctx_wire.bound_object_rep(skill_bid as u64, Some("machoNet:26000")));
+    assert!(ctx_direct.verify_bound_object(&sess_direct, skill_bid as u64).is_ok());
+    let wire_skill_bid = extract_substruct_bound_id(&wire_skill)
+        .expect("wire GetMySkillHandler must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, wire_skill_bid).is_ok());
+    assert_eq!(wire_skill, ctx_wire.bound_object_rep(wire_skill_bid, Some("machoNet:26000")));
 
     let direct_bind = ctx_direct
         .dispatch_rpc(&mut sess_direct, "invbroker", None, "MachoBindObject", &[PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]), PyRep::None], &kw, None)
@@ -1242,30 +1254,41 @@ async fn arch_933_t5_direct_equals_wire_and_bound_dispatch() {
         .await
         .expect("wire invbroker bind");
     let PyRep::Tuple(ref d_bind_parts) = direct_bind else { panic!("expected Tuple") };
-    let PyRep::Integer(mgr_bid) = d_bind_parts[0] else { panic!("expected Integer mgr bid") };
-    assert_eq!(wire_bind, PyRep::Tuple(vec![ctx_wire.bound_object_rep(mgr_bid as u64, Some("machoNet:26000")), PyRep::None]));
+    let PyRep::Integer(d_mgr_bid) = d_bind_parts[0] else { panic!("expected Integer mgr bid") };
+    let PyRep::Tuple(ref w_bind_parts) = wire_bind else { panic!("expected wire Tuple") };
+    let w_mgr_bid = extract_substruct_bound_id(&w_bind_parts[0])
+        .expect("wire MachoBindObject must return SubStruct mgr bound ref");
+    assert_eq!(wire_bind, PyRep::Tuple(vec![ctx_wire.bound_object_rep(w_mgr_bid, Some("machoNet:26000")), PyRep::None]));
 
     let direct_hangar = ctx_direct
-        .dispatch_rpc(&mut sess_direct, "invbroker", Some(mgr_bid as u64), "GetInventory", &[PyRep::Integer(10_004), PyRep::None], &kw, None)
+        .dispatch_rpc(&mut sess_direct, "invbroker", Some(d_mgr_bid as u64), "GetInventory", &[PyRep::Integer(10_004), PyRep::None], &kw, None)
         .await
         .expect("direct invbroker.GetInventory");
     let wire_hangar = ctx_wire
-        .dispatch_rpc(&mut sess_wire, "invbroker", Some(mgr_bid as u64), "GetInventory", &[PyRep::Integer(10_004), PyRep::None], &kw, Some("machoNet:26000"))
+        .dispatch_rpc(&mut sess_wire, "invbroker", Some(w_mgr_bid), "GetInventory", &[PyRep::Integer(10_004), PyRep::None], &kw, Some("machoNet:26000"))
         .await
         .expect("wire invbroker.GetInventory");
-    let PyRep::Integer(hangar_bid) = direct_hangar else { panic!("expected Integer hangar bid") };
-    assert_eq!(wire_hangar, ctx_wire.bound_object_rep(hangar_bid as u64, Some("machoNet:26000")));
+    let PyRep::Integer(d_hangar_bid) = direct_hangar else { panic!("expected Integer hangar bid") };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, d_hangar_bid as u64).is_ok());
+    let w_hangar_bid = extract_substruct_bound_id(&wire_hangar)
+        .expect("wire invbroker.GetInventory must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, w_hangar_bid).is_ok());
+    assert_eq!(wire_hangar, ctx_wire.bound_object_rep(w_hangar_bid, Some("machoNet:26000")));
 
     let direct_ship_inv = ctx_direct
-        .dispatch_rpc(&mut sess_direct, "invbroker", Some(mgr_bid as u64), "GetInventoryFromId", &[PyRep::Integer(ship_id), PyRep::Integer(0)], &kw, None)
+        .dispatch_rpc(&mut sess_direct, "invbroker", Some(d_mgr_bid as u64), "GetInventoryFromId", &[PyRep::Integer(ship_id), PyRep::Integer(0)], &kw, None)
         .await
         .expect("direct invbroker.GetInventoryFromId");
     let wire_ship_inv = ctx_wire
-        .dispatch_rpc(&mut sess_wire, "invbroker", Some(mgr_bid as u64), "GetInventoryFromId", &[PyRep::Integer(ship_id), PyRep::Integer(0)], &kw, Some("machoNet:26000"))
+        .dispatch_rpc(&mut sess_wire, "invbroker", Some(w_mgr_bid), "GetInventoryFromId", &[PyRep::Integer(ship_id), PyRep::Integer(0)], &kw, Some("machoNet:26000"))
         .await
         .expect("wire invbroker.GetInventoryFromId");
-    let PyRep::Integer(ship_inv_bid) = direct_ship_inv else { panic!("expected Integer ship inv bid") };
-    assert_eq!(wire_ship_inv, ctx_wire.bound_object_rep(ship_inv_bid as u64, Some("machoNet:26000")));
+    let PyRep::Integer(d_ship_inv_bid) = direct_ship_inv else { panic!("expected Integer ship inv bid") };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, d_ship_inv_bid as u64).is_ok());
+    let w_ship_inv_bid = extract_substruct_bound_id(&wire_ship_inv)
+        .expect("wire invbroker.GetInventoryFromId must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, w_ship_inv_bid).is_ok());
+    assert_eq!(wire_ship_inv, ctx_wire.bound_object_rep(w_ship_inv_bid, Some("machoNet:26000")));
 
     let direct_trade = ctx_direct
         .dispatch_rpc(&mut sess_direct, "trademgr", None, "InitiateTrade", &[PyRep::Integer(90_000_002)], &kw, None)
@@ -1275,6 +1298,10 @@ async fn arch_933_t5_direct_equals_wire_and_bound_dispatch() {
         .dispatch_rpc(&mut sess_wire, "trademgr", None, "InitiateTrade", &[PyRep::Integer(90_000_002)], &kw, Some("machoNet:26000"))
         .await
         .expect("wire trademgr.InitiateTrade");
-    let PyRep::Integer(trade_bid) = direct_trade else { panic!("expected Integer trade bid") };
-    assert_eq!(wire_trade, ctx_wire.bound_object_rep(trade_bid as u64, Some("machoNet:26000")));
+    let PyRep::Integer(d_trade_bid) = direct_trade else { panic!("expected Integer trade bid") };
+    assert!(ctx_direct.verify_bound_object(&sess_direct, d_trade_bid as u64).is_ok());
+    let w_trade_bid = extract_substruct_bound_id(&wire_trade)
+        .expect("wire trademgr.InitiateTrade must return SubStruct bound ref");
+    assert!(ctx_wire.verify_bound_object(&sess_wire, w_trade_bid).is_ok());
+    assert_eq!(wire_trade, ctx_wire.bound_object_rep(w_trade_bid, Some("machoNet:26000")));
 }

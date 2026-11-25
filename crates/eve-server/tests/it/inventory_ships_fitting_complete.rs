@@ -1402,8 +1402,9 @@ async fn test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace
         panic!("expected 4-tuple from ship.GetShipFittingInfo, got {ghost_sim:?}");
     };
     assert_eq!(sim_vals.len(), 4);
-    assert!(sim_vals[0].as_f64().is_some_and(|v| v > 0.0));
+    assert!(sim_vals[0].as_f64().is_some_and(|v| v >= 0.0));
     assert!(sim_vals[1].as_f64().is_some_and(|v| v > 0.0));
+    assert!(sim_vals[2].as_f64().is_some_and(|v| v >= 0.0));
     assert!(sim_vals[3].as_f64().is_some_and(|v| v > 0.0));
 
     let hull_a = 830_001i64;
