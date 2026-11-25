@@ -334,7 +334,7 @@ pub fn try_remove_ball_for_db(
                     let mut removed_ext = false;
                     if let Some(st) = st_opt.as_mut() {
                         st.protection_registry.remove(&ball_id);
-                        super::drones::clear_removed_ball_drones_in_state(st, ball_id);
+                        crate::system_actor::drones::clear_removed_ball_drones_in_state(st, ball_id);
                         let before = st.external_active_modules.len();
                         st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
                         removed_ext = st.external_active_modules.len() != before;

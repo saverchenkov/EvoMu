@@ -678,11 +678,16 @@ impl SystemRegistry {
     }
 
     pub fn with_sde(sde: Arc<SdeRegistry>) -> Self {
-        Self { sde: Some(sde), ..Self::new() }
+        let mut reg = Self::new();
+        reg.sde = Some(sde);
+        reg
     }
 
     pub fn with_sde_and_db(sde: Arc<SdeRegistry>, db: Arc<eve_db::WorldRepository>) -> Self {
-        Self { sde: Some(sde), db: Some(db), ..Self::new() }
+        let mut reg = Self::new();
+        reg.sde = Some(sde);
+        reg.db = Some(db);
+        reg
     }
 
     pub fn with_notifications(
@@ -1222,6 +1227,7 @@ impl SystemRegistry {
             fighters: initial_fighters, fighters_lifecycle_gen: generation, fighters_needs_sqlite_hydration: initial_fighters_needs_hydration, fighters_persist: Arc::clone(&self.fighter_persist),
             active_drones_in_space: initial_active_drones,
             active_drones_checkpoint_dirty: initial_drones_dirty,
+            active_drones_checkpoint_seq: u64::from(initial_drones_dirty),
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
@@ -1441,7 +1447,7 @@ impl SystemRegistry {
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
-            drones::flush_actor_active_drones_checkpoint_post_unlock(
+            drones::try_flush_actor_active_drones_checkpoint_post_unlock(
                 solar_system_id,
                 &actor_state_actor,
             );
@@ -2371,7 +2377,7 @@ impl SystemRegistry {
                     }
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
-                drones::flush_actor_active_drones_checkpoint_post_unlock(
+                drones::try_flush_actor_active_drones_checkpoint_post_unlock(
                     solar_system_id,
                     &actor_state_actor,
                 );

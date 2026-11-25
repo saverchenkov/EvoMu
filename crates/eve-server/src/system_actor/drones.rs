@@ -186,6 +186,13 @@ pub(in crate::system_actor) fn clear_drone_runtime_in_state(
     actor_st.drone_next_ready_unix.remove(&ball_id);
 }
 
+pub(in crate::system_actor) fn mark_active_drones_dirty_in_state(
+    actor_st: &mut SystemActorState,
+) {
+    actor_st.active_drones_checkpoint_dirty = true;
+    actor_st.active_drones_checkpoint_seq = actor_st.active_drones_checkpoint_seq.saturating_add(1);
+}
+
 /// Clears repeating mining state, combat cooldown, and any active-space drone entry on explicit ball removal.
 pub(in crate::system_actor) fn clear_removed_ball_drones_in_state(
     actor_st: &mut SystemActorState,
@@ -193,18 +200,16 @@ pub(in crate::system_actor) fn clear_removed_ball_drones_in_state(
 ) {
     clear_drone_runtime_in_state(actor_st, ball_id);
     if actor_st.active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
-        actor_st.active_drones_checkpoint_dirty = true;
+        mark_active_drones_dirty_in_state(actor_st);
     }
 }
 
-/// Captures a sorted post-unlock SQLite checkpoint batch when `active_drones_in_space` is dirty.
-pub(crate) fn take_dirty_active_drones_snapshot(
-    actor_st: &mut SystemActorState,
-) -> Option<(Arc<eve_db::WorldRepository>, Vec<(BallId, DroneSpaceState)>)> {
+fn capture_dirty_active_drones_snapshot(
+    actor_st: &SystemActorState,
+) -> Option<(u64, Arc<eve_db::WorldRepository>, Vec<(BallId, DroneSpaceState)>)> {
     if !actor_st.active_drones_checkpoint_dirty {
         return None;
     }
-    actor_st.active_drones_checkpoint_dirty = false;
     let db = actor_st.db_opt.as_ref().map(Arc::clone)?;
     let mut entries: Vec<(BallId, DroneSpaceState)> = actor_st
         .active_drones_in_space
@@ -213,58 +218,107 @@ pub(crate) fn take_dirty_active_drones_snapshot(
         .map(|(&bid, d)| (bid, d.clone()))
         .collect();
     entries.sort_by_key(|(bid, _)| *bid);
-    Some((db, entries))
+    Some((actor_st.active_drones_checkpoint_seq, db, entries))
 }
 
-/// Flushes a captured `active_drones_in_space` snapshot for `solar_system_id` into SQLite
-/// `system_checkpoint` without holding any `Ballpark` or `SystemActorState` lock (`#1541` Rule 3).
-pub(crate) fn flush_active_drones_checkpoint_snapshot(
+fn flush_actor_active_drones_checkpoint_post_unlock_inner(
     solar_system_id: SolarSystemId,
-    db: &Arc<eve_db::WorldRepository>,
-    entries: &[(BallId, DroneSpaceState)],
+    actor_state_lock: &super::RankedRwLock<SystemActorState, { super::RANK_ACTOR_STATE }>,
+    blocking: bool,
 ) {
     if !eve_db::lock_rank::held_lock_ranks().is_empty() {
         return;
     }
+    let (dirty_fast, flush_mutex) = match actor_state_lock.read() {
+        Ok(st) => (
+            st.active_drones_checkpoint_dirty,
+            Arc::clone(&st.active_drones_flush_mutex),
+        ),
+        Err(e) => {
+            let st = e.into_inner();
+            (
+                st.active_drones_checkpoint_dirty,
+                Arc::clone(&st.active_drones_flush_mutex),
+            )
+        }
+    };
+    if !dirty_fast {
+        return;
+    }
+    let _flush_guard = if blocking {
+        flush_mutex.lock().unwrap_or_else(|e| e.into_inner())
+    } else {
+        match flush_mutex.try_lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        }
+    };
+    let batch = {
+        let st = actor_state_lock.read().unwrap_or_else(|e| e.into_inner());
+        capture_dirty_active_drones_snapshot(&st)
+    };
+    let Some((seq, db, entries)) = batch else {
+        return;
+    };
     let now_unix = db.clock().now_unix_secs();
     let keyed: Vec<(String, &DroneSpaceState)> = entries
         .iter()
         .map(|(bid, d)| (bid.to_string(), d))
         .collect();
-    let _ = db.with_sqlite_conn(|conn| {
-        eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
-            conn,
-            solar_system_id,
-            eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-            &keyed,
-            now_unix,
-        )
-    });
+    let write_res = if blocking {
+        Some(db.with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+                conn,
+                solar_system_id,
+                eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                &keyed,
+                now_unix,
+            )
+        }))
+    } else {
+        db.try_with_sqlite_conn_mut(|conn| {
+            eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+                conn,
+                solar_system_id,
+                eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                &keyed,
+                now_unix,
+            )
+        })
+    };
+    if matches!(write_res, Some(Ok(()))) {
+        let mut st = actor_state_lock.write().unwrap_or_else(|e| e.into_inner());
+        if st.active_drones_checkpoint_seq == seq {
+            st.active_drones_checkpoint_dirty = false;
+        }
+    }
+}
+
+/// Opportunistically flushes dirty `active_drones_in_space` to SQLite without blocking on `db.writer`
+/// or `active_drones_flush_mutex` (`#1541` Rule 3; prevents deadlocking the actor loop while another
+/// thread holds `db.with_mut_snapshot`). Leaves dirty flag set if contended.
+pub(crate) fn try_flush_actor_active_drones_checkpoint_post_unlock(
+    solar_system_id: SolarSystemId,
+    actor_state_lock: &super::RankedRwLock<SystemActorState, { super::RANK_ACTOR_STATE }>,
+) {
+    flush_actor_active_drones_checkpoint_post_unlock_inner(
+        solar_system_id,
+        actor_state_lock,
+        false,
+    );
 }
 
 /// Acquires `actor_state` briefly only to take a dirty active-drones snapshot, drops the lock,
-/// and commits to SQLite post-unlock.
+/// and commits to SQLite post-unlock (used outside live actor turns, e.g. `stop_system` / shutdown).
 pub(crate) fn flush_actor_active_drones_checkpoint_post_unlock(
     solar_system_id: SolarSystemId,
     actor_state_lock: &super::RankedRwLock<SystemActorState, { super::RANK_ACTOR_STATE }>,
 ) {
-    if !eve_db::lock_rank::held_lock_ranks().is_empty() {
-        return;
-    }
-    let dirty_fast = actor_state_lock
-        .read()
-        .map(|st| st.active_drones_checkpoint_dirty)
-        .unwrap_or(false);
-    if !dirty_fast {
-        return;
-    }
-    let batch = {
-        let mut st = actor_state_lock.write().unwrap_or_else(|e| e.into_inner());
-        take_dirty_active_drones_snapshot(&mut st)
-    };
-    if let Some((db, entries)) = batch {
-        flush_active_drones_checkpoint_snapshot(solar_system_id, &db, &entries);
-    }
+    flush_actor_active_drones_checkpoint_post_unlock_inner(
+        solar_system_id,
+        actor_state_lock,
+        true,
+    );
 }
 
 /// Loads `active_drones_in_space` for `solar_system_id` from SQLite `system_checkpoint`,
@@ -345,7 +399,7 @@ fn upsert_active_drones_in_actor(
         }
     }
     if any_persistent_change {
-        ctx.actor_st.active_drones_checkpoint_dirty = true;
+        mark_active_drones_dirty_in_state(ctx.actor_st);
     }
     Ok(inserted)
 }
@@ -457,7 +511,7 @@ fn finalize_drone_launches_in_actor(
         if ctx.actor_st.active_drones_in_space.remove(&rid).is_some() {
             updated += 1;
             if rid > 0 {
-                ctx.actor_st.active_drones_checkpoint_dirty = true;
+                mark_active_drones_dirty_in_state(ctx.actor_st);
             }
         }
     }
@@ -470,7 +524,7 @@ fn finalize_drone_launches_in_actor(
             ctx.actor_st.active_drones_in_space.insert(bid, st);
             updated += 1;
             if bid > 0 {
-                ctx.actor_st.active_drones_checkpoint_dirty = true;
+                mark_active_drones_dirty_in_state(ctx.actor_st);
             }
         }
     }
@@ -487,7 +541,7 @@ fn mutate_active_drones_in_actor(
         &mut ctx.actor_st.drone_next_ready_unix,
     );
     if dirty {
-        ctx.actor_st.active_drones_checkpoint_dirty = true;
+        mark_active_drones_dirty_in_state(ctx.actor_st);
     }
     Ok(())
 }
@@ -1152,7 +1206,7 @@ impl SystemRegistry {
             return handle;
         }
         let reason = super::SystemWakeReason::ClusterTick(
-            super::ClusterTickWakeReason::Unclassified,
+            super::ClusterTickWakeReason::ScheduledWork,
         );
         #[cfg(any(test, feature = "testkit"))]
         if tokio::runtime::Handle::try_current().is_err() {
@@ -1173,24 +1227,6 @@ impl SystemRegistry {
         self.wake_with_reason(solar_system_id, reason)
             .unwrap_or_else(|err| {
                 panic!("failed to activate solar system {solar_system_id} for drone seed: {err}")
-            })
-    }
-
-    /// Async-friendly variant of [`Self::wake_for_drone_seed`] avoiding sync wait if already loading.
-    pub(crate) async fn wake_for_drone_seed_async(
-        &self,
-        solar_system_id: SolarSystemId,
-    ) -> SystemHandle {
-        if let Some(handle) = self.get_handle(solar_system_id) {
-            return handle;
-        }
-        let reason = super::SystemWakeReason::ClusterTick(
-            super::ClusterTickWakeReason::Unclassified,
-        );
-        self.wake_with_reason_async(solar_system_id, reason)
-            .await
-            .unwrap_or_else(|err| {
-                panic!("failed to activate solar system {solar_system_id}: {err}")
             })
     }
 }

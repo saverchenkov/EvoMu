@@ -199,7 +199,7 @@ fn run_direct_ball_op_on_current_thread<R>(
         lock_guard.as_ref(),
         ticket,
     );
-    super::drones::flush_actor_active_drones_checkpoint_post_unlock(
+    super::drones::try_flush_actor_active_drones_checkpoint_post_unlock(
         handle.solar_system_id,
         &handle.actor_state,
     );

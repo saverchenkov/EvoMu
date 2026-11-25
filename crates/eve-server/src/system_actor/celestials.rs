@@ -1131,6 +1131,7 @@ impl SystemHandle {
                         drone_next_ready_unix,
                         active_drones_in_space,
                         active_drones_checkpoint_dirty,
+                        active_drones_checkpoint_seq,
                         db_opt,
                         sde_opt,
                         ..
@@ -1152,6 +1153,8 @@ impl SystemHandle {
                     drone_next_ready_unix.remove(&ball_id);
                     if active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
                         *active_drones_checkpoint_dirty = true;
+                        *active_drones_checkpoint_seq =
+                            active_drones_checkpoint_seq.saturating_add(1);
                     }
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
@@ -1207,7 +1210,7 @@ impl SystemHandle {
             remove_from_bp_and_st(&mut bp, &mut st)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
-        super::drones::flush_actor_active_drones_checkpoint_post_unlock(
+        super::drones::try_flush_actor_active_drones_checkpoint_post_unlock(
             self.solar_system_id,
             &self.actor_state,
         );

@@ -915,6 +915,8 @@ pub(crate) struct SystemActorState {
     pub(crate) fighters_removed_pre_hydration: HashSet<i64>,
     pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
     pub(crate) active_drones_checkpoint_dirty: bool,
+    pub(crate) active_drones_checkpoint_seq: u64,
+    pub(crate) active_drones_flush_mutex: Arc<std::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
