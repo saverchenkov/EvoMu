@@ -202,7 +202,7 @@ async fn test_pve_agent_levels_standing_gates_and_faction_losses() {
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(c_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept");
 
     let dest_sid = ctx.db.with_snapshot(|snap| {
-        eve_server::services::agents_missions::load_mission_meta(snap, char_id, mid).and_then(|m| m.destination_station_id)
+        eve_server::services::mission_fixture::get(snap, char_id, mid).and_then(|m| m.destination_station_id)
     });
     if let Some(dsid) = dest_sid {
         let dsys = ctx.sde.stations.get(&dsid).map(|s| s.solar_system_id).unwrap_or(c_sys_id);
@@ -217,9 +217,9 @@ async fn test_pve_agent_levels_standing_gates_and_faction_losses() {
     }
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mid)) {
+        eve_server::services::mission_fixture::edit(snap, char_id, mid, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
 
     let gallente_before = ctx.db.with_snapshot(|snap| snap.characters[&char_id].standings.get(&500_004).copied().unwrap_or(0.0));
@@ -231,13 +231,14 @@ async fn test_pve_agent_levels_standing_gates_and_faction_losses() {
     assert_eq!(comp_kv["missionTally"].as_i64(), Some(16), "Tally must reach 16");
     assert_eq!(comp_kv["storylineTriggered"], PyRep::Bool(true), "16th mission must trigger Storyline offer");
 
-    // Storyline mission offer created in active_missions
+    // Storyline mission offer created in mission store
     let has_storyline = ctx.db.with_snapshot(|snap| {
-        snap.active_missions.values().any(|m| {
-            m.character_id == char_id
-                && m.state == "Offered"
-                && ctx.sde.agents.get(&m.agent_id).is_some_and(|a| matches!(a.agent_type_id, 6 | 7))
-        })
+        eve_server::services::mission_fixture::list_for_character(snap, char_id)
+            .into_iter()
+            .any(|m| {
+                m.state == "Offered"
+                    && ctx.sde.agents.get(&m.agent_id).is_some_and(|a| matches!(a.agent_type_id, 6 | 7))
+            })
     });
     assert!(has_storyline, "Storyline mission must be offered by nearby storyline agent");
 
@@ -351,10 +352,10 @@ async fn test_pve_mining_missions_career_and_data_centers() {
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(car_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept career");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, car_mid)) {
+        eve_server::services::mission_fixture::edit(snap, char_id, car_mid, |m| {
             m.state = "Completed".into();
             m.npcs_remaining = 0;
-        }
+        });
     });
 
     let car_completed_dict = ctx
@@ -754,42 +755,20 @@ async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_gua
             ch.standings.insert(std_agent.agent_id, 5.0);
             ch.standings.insert(std_agent.corporation_id, 5.0);
         }
-        snap.active_missions.insert(
-            (char_id, combat_mid),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: combat_mid,
-                agent_id: std_agent.agent_id,
-                solar_system_id: ag_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        eve_server::services::agents_missions::save_mission_meta(
+        eve_server::services::mission_fixture::insert(
             snap,
-            char_id,
-            &eve_server::services::agents_missions::MissionTimingAndCargoMeta {
-                mission_id: combat_mid,
-                agent_id: std_agent.agent_id,
-                offered_at_unix: now,
-                offer_expiry_unix: now + 86_400,
-                accepted_at_unix: None,
-                accept_expiry_unix: None,
-                bonus_expiry_unix: None,
-                completed_at_unix: None,
-                required_delivery_type_id: None,
-                required_delivery_qty: 0,
-                granted_courier_item_id: None,
-                granted_courier_qty: 0,
-                is_anomic_burner: false,
-                chosen_branch: None,
-                destination_station_id: None,
-                origin_station_id: Some(ag_sta),
-                offered_level: Some(1),
-            },
+            eve_server::services::mission_fixture::MissionFixture::offered(
+                char_id,
+                combat_mid,
+                std_agent.agent_id,
+                ag_sys,
+            )
+            .current_room_id(1)
+            .npcs_remaining(1)
+            .offered_at_unix(now)
+            .offer_expiry_unix(now + 86_400)
+            .origin_station_id(Some(ag_sta))
+            .offered_level(Some(1)),
         );
     });
     sess.solar_system_id = Some(remote_sys);
@@ -832,46 +811,25 @@ async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_gua
             ch.solar_system_id = remote_sys;
             ch.station_id = None;
         }
-        if let Some(mut mt) = eve_server::services::agents_missions::load_mission_meta(snap, char_id, combat_mid) {
-            mt.is_anomic_burner = true;
-            eve_server::services::agents_missions::save_mission_meta(snap, char_id, &mt);
-        }
-        snap.active_missions.insert(
-            (char_id, mining_mid),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: mining_mid,
-                agent_id: std_agent.agent_id,
-                solar_system_id: ag_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        eve_server::services::agents_missions::save_mission_meta(
+        eve_server::services::mission_fixture::edit(snap, char_id, combat_mid, |m| {
+            m.is_anomic_burner = true;
+        });
+        eve_server::services::mission_fixture::insert(
             snap,
-            char_id,
-            &eve_server::services::agents_missions::MissionTimingAndCargoMeta {
-                mission_id: mining_mid,
-                agent_id: std_agent.agent_id,
-                offered_at_unix: now,
-                offer_expiry_unix: now + 86_400,
-                accepted_at_unix: None,
-                accept_expiry_unix: None,
-                bonus_expiry_unix: None,
-                completed_at_unix: None,
-                required_delivery_type_id: Some(1230),
-                required_delivery_qty: 500,
-                granted_courier_item_id: None,
-                granted_courier_qty: 0,
-                is_anomic_burner: true,
-                chosen_branch: None,
-                destination_station_id: None,
-                origin_station_id: Some(ag_sta),
-                offered_level: Some(1),
-            },
+            eve_server::services::mission_fixture::MissionFixture::offered(
+                char_id,
+                mining_mid,
+                std_agent.agent_id,
+                ag_sys,
+            )
+            .current_room_id(1)
+            .offered_at_unix(now)
+            .offer_expiry_unix(now + 86_400)
+            .required_delivery_type_id(Some(1230))
+            .required_delivery_qty(500)
+            .is_anomic_burner(true)
+            .origin_station_id(Some(ag_sta))
+            .offered_level(Some(1)),
         );
     });
     sess.solar_system_id = Some(remote_sys);
@@ -904,7 +862,9 @@ async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_gua
 
     // 3. DoAction(6) requires co-location; DoAction(7) rejects physical item delivery; DoAction(7) succeeds on non-item combat
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, combat_mid)).unwrap().npcs_remaining = 0;
+        eve_server::services::mission_fixture::edit(snap, char_id, combat_mid, |m| {
+            m.npcs_remaining = 0;
+        });
         snap.items.insert(
             990_701,
             InventoryItemRecord {
@@ -967,16 +927,13 @@ async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_gua
         .await
         .expect("Accept Epic Arc Mission #1");
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, m1_id)) {
+        eve_server::services::mission_fixture::edit(snap, char_id, m1_id, |m| {
             m.npcs_remaining = 0;
-        }
-        // Clear any delivery requirement so Mission #1 completes cleanly regardless of which SDE EpicArc template was picked
-        if let Some(mut mt) = eve_server::services::agents_missions::load_mission_meta(snap, char_id, m1_id) {
-            mt.required_delivery_type_id = None;
-            mt.required_delivery_qty = 0;
-            mt.destination_station_id = None;
-            eve_server::services::agents_missions::save_mission_meta(snap, char_id, &mt);
-        }
+            // Clear any delivery requirement so Mission #1 completes cleanly regardless of which SDE EpicArc template was picked
+            m.required_delivery_type_id = None;
+            m.required_delivery_qty = 0;
+            m.destination_station_id = None;
+        });
     });
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(soe_oid), "DoAction", &[PyRep::Integer(6), PyRep::Integer(m1_id as i64)], &kw, None)
         .await

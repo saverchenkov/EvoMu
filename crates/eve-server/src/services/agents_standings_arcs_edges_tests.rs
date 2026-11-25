@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::router::{BoundObjectEntry, ServerContext};
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::{
-    ActiveMissionRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    TrainedSkillRecord, VirtualServerClock, WorldRepository,
+    CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
+    VirtualServerClock, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -581,29 +582,11 @@ async fn extended_rpcs_cover_agent_attr_errors_corp_standings_and_gate_checks() 
             98_000_001,
             { let mut __corp = CorporationRecord::default(); __corp.corporation_id = 98_000_001; __corp.name = "T".into(); __corp.ticker = "T".into(); __corp.ceo_id = char_id; __corp.members = HashSet::from([char_id, char2_id]); __corp.ensure_wallet_divisions(); __corp },
         );
-        snap.active_missions.insert(
-            (char_id, 700),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 700,
-                agent_id: 3_099_030,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 700,
-                agent_id: 3_099_030,
-                is_anomic_burner: true,
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 700, 3_099_030, 30_000_142)
+                .npcs_remaining(2)
+                .is_anomic_burner(true),
         );
         snap.items.insert(
             ship_id,
@@ -769,7 +752,7 @@ async fn extended_rpcs_cover_agent_attr_errors_corp_standings_and_gate_checks() 
 
     // State Accepted, npcs_remaining = 2 -> RoomNpcsRemaining
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, 700)).unwrap().state = "Accepted".into();
+        mission_fixture::edit(snap, char_id, 700, |m| m.state = "Accepted".into());
     });
     let npc_err = handle_extended_with_bound(
         &ctx,
@@ -787,7 +770,7 @@ async fn extended_rpcs_cover_agent_attr_errors_corp_standings_and_gate_checks() 
 
     // npcs_remaining = 0, frigate -> succeeds & advances room 0 -> 1
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, 700)).unwrap().npcs_remaining = 0;
+        mission_fixture::edit(snap, char_id, 700, |m| m.npcs_remaining = 0);
     });
     let gate_ok = handle_extended_with_bound(
         &ctx,
@@ -803,7 +786,7 @@ async fn extended_rpcs_cover_agent_attr_errors_corp_standings_and_gate_checks() 
     .unwrap();
     assert_eq!(gate_ok.dict_get("currentRoomID").and_then(|v| v.as_i64()), Some(1));
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, 700)].current_room_id, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 700).unwrap().current_room_id, 1);
     });
 }
 

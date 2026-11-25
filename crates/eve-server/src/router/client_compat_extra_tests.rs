@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::router::ServerContext;
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::{UpwellStructureRecord, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -1353,34 +1354,16 @@ async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
             (13_514_u32, ag1.agent_id, ag1.solar_system_id.unwrap(), 3_840_u64),
             (900_u32, ag4.agent_id, ag4.solar_system_id.unwrap(), 14_400_u64),
         ] {
-            snap.active_missions.insert(
-                (char_id, mid),
-                eve_db::ActiveMissionRecord {
-                    character_id: char_id,
-                    mission_id: mid,
-                    agent_id: aid,
-                    solar_system_id: sys_id,
-                    state: "Accepted".into(),
-                    current_room_id: 1,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: Vec::new(),
-                    bookmark_id: None,
-                },
-            );
-            crate::services::agents_missions::save_mission_meta(
+            mission_fixture::insert(
                 snap,
-                char_id,
-                &crate::services::agents_missions::MissionTimingAndCargoMeta {
-                    mission_id: mid,
-                    agent_id: aid,
-                    offered_at_unix: now0,
-                    offer_expiry_unix: now0 + 86_400,
-                    accepted_at_unix: Some(now0),
-                    accept_expiry_unix: Some(now0 + 604_800),
-                    bonus_expiry_unix: Some(now0 + win_s),
-                    offered_level: Some(if mid == 900 { 4 } else { 1 }),
-                    ..Default::default()
-                },
+                MissionFixture::accepted(char_id, mid, aid, sys_id)
+                    .current_room_id(1)
+                    .offered_at_unix(now0)
+                    .offer_expiry_unix(now0 + 86_400)
+                    .accepted_at_unix(Some(now0))
+                    .accept_expiry_unix(Some(now0 + 604_800))
+                    .bonus_expiry_unix(Some(now0 + win_s))
+                    .offered_level(Some(if mid == 900 { 4 } else { 1 })),
             );
         }
         (uid, corp_id)

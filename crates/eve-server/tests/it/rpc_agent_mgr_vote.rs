@@ -10,12 +10,11 @@
 //!   `GetCorpSanctionedActions`, `ActivateSanctionedAction`
 
 use crate::common;
-use eve_db::{
-    ActiveMissionRecord, CorporationRecord, IskCents, TrainedSkillRecord,
-};
+use eve_db::{CorporationRecord, IskCents, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use std::collections::{HashMap, HashSet};
 
 const PILOT1: i64 = 90_000_001;
@@ -179,18 +178,9 @@ async fn test_agent_mgr_career_and_epic_arcs() {
 
     // Seed a completed career agent mission for PILOT1
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (PILOT1, 9901),
-            ActiveMissionRecord {
-                mission_id: 9901,
-                character_id: PILOT1,
-                agent_id: CAREER_AGENT_ID,
-                solar_system_id: 30012547,
-                state: "Completed".into(),
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(PILOT1, 9901, CAREER_AGENT_ID, 30012547, "Completed"),
         );
     });
 

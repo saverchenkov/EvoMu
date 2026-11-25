@@ -672,8 +672,8 @@ async fn complete_live_fw_mission(
     .await
     .expect("Accept FW mission");
     let (m_sys_id, npc_ids) = ctx.db.with_snapshot(|s| {
-        let m = &s.active_missions[&(char_id, mid as u32)];
-        (m.solar_system_id, m.spawned_npc_ball_ids.clone())
+        let m = eve_server::services::mission_fixture::get(s, char_id, mid as u32).unwrap();
+        (m.solar_system_id, m.spawned_npc_ball_ids)
     });
 
     dock_at_station(ctx, sess, char_id, m_sys_id, None);
@@ -974,7 +974,11 @@ async fn test_b36_storyline_offer_counter() {
         if non_qual_agent.agent_type_id == 3 {
             complete_live_courier(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
             ctx.db.with_mut_snapshot(|snap| {
-                snap.active_missions.retain(|_, m| m.agent_id != non_qual_agent.agent_id);
+                for m in eve_server::services::mission_fixture::list(snap) {
+                    if m.agent_id == non_qual_agent.agent_id {
+                        eve_server::services::mission_fixture::remove(snap, m.character_id, m.mission_id);
+                    }
+                }
             });
         } else if non_qual_agent.agent_type_id == 5 {
             let dc_sys = non_qual_agent.solar_system_id.unwrap();
@@ -1005,12 +1009,16 @@ async fn test_b36_storyline_offer_counter() {
             ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &kw, None).await.unwrap();
             ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid)], &kw, None).await.unwrap();
             ctx.db.with_mut_snapshot(|snap| {
-                snap.active_missions.remove(&(char_id, mid as u32));
+                eve_server::services::mission_fixture::remove(snap, char_id, mid as u32);
             });
         } else {
             complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
             ctx.db.with_mut_snapshot(|snap| {
-                snap.active_missions.retain(|_, m| m.agent_id != non_qual_agent.agent_id);
+                for m in eve_server::services::mission_fixture::list(snap) {
+                    if m.agent_id == non_qual_agent.agent_id {
+                        eve_server::services::mission_fixture::remove(snap, m.character_id, m.mission_id);
+                    }
+                }
             });
         }
     }
@@ -1115,7 +1123,7 @@ async fn test_b36_storyline_offer_counter() {
             .await
             .expect("Accept Storyline mission"),
     );
-    let sl_npcs = ctx.db.with_snapshot(|s| s.active_missions[&(char_id, first_sl_mid as u32)].spawned_npc_ball_ids.clone());
+    let sl_npcs = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().spawned_npc_ball_ids);
     if let Some(dest_sta) = briefing_1.get("destinationStationID").and_then(|v| v.as_i64()) {
         let courier_tag = format!("courier_cargo:{char_id}:{first_sl_mid}");
         let cargo_iid = ctx.db.with_snapshot(|s| {

@@ -4,7 +4,8 @@ use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_sde_registry, make_fighter_type,
 };
-use eve_db::{ActiveMissionRecord, InventoryFlag};
+use crate::services::mission_fixture::{self, MissionFixture};
+use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_proto::PyRep;
 use glam::DVec3;
@@ -36,6 +37,9 @@ fn step_dynamic_bounty_multiplier_decay_boost_equilibrium_and_clamp() {
 #[tokio::test]
 async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
     let kwargs = HashMap::new();
 
     // Deleted legacy RPCs return UnimplementedRPC and legacy 1-arg Activate path is removed
@@ -261,19 +265,11 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
             ammo_id,
             make_fighter_item(ammo_id, 192, char_id, ship_id, InventoryFlag::HiSlot0, 5),
         );
-        snap.active_missions.insert(
-            (char_id, 3_018_418),
-            ActiveMissionRecord {
-                character_id: char_id,
-                agent_id: 3_018_418,
-                mission_id: 1,
-                state: "Accepted".into(),
-                solar_system_id: sys_id,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![npc_ball_id],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 1, 3_018_418, sys_id)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![npc_ball_id]),
         );
     });
 
@@ -307,7 +303,7 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
     );
     assert!((payout.pilot_isk - 90_000.0).abs() < 1e-6);
     ctx.db.with_snapshot(|snap| {
-        let m = snap.active_missions.get(&(char_id, 3_018_418)).unwrap();
+        let m = mission_fixture::get(snap, char_id, 1).unwrap();
         assert_eq!(m.npcs_remaining, 0);
         assert_eq!(snap.items.get(&ammo_id).unwrap().quantity, 4);
     });
@@ -661,19 +657,11 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
         .await
         .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 3_018_418),
-            ActiveMissionRecord {
-                character_id: char_id,
-                agent_id: 3_018_418,
-                mission_id: 2,
-                state: "Accepted".into(),
-                solar_system_id: sys_id,
-                current_room_id: 0,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![primary_bid, sleeper_arc_bid],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 2, 3_018_418, sys_id)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![primary_bid, sleeper_arc_bid]),
         );
     });
 
@@ -713,7 +701,7 @@ async fn legacy_activate_rejects_concord_props_zero_res_and_chains_vorton_across
     );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            snap.active_missions[&(char_id, 3_018_418)].npcs_remaining,
+            mission_fixture::get(snap, char_id, 2).unwrap().npcs_remaining,
             1,
             "Secondary Vorton arc Sleeper kill decrements active mission counter"
         );

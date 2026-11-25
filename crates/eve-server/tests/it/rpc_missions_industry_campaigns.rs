@@ -74,18 +74,15 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
     // Setup active mission in snapshot
     let mission_id: u32 = 10_001;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (PILOT_1, mission_id),
-            eve_db::ActiveMissionRecord {
+        eve_server::services::mission_fixture::insert(
+            snap,
+            eve_server::services::mission_fixture::MissionFixture::accepted(
+                PILOT_1,
                 mission_id,
-                character_id: PILOT_1,
-                agent_id: 3010001,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-            },
+                3010001,
+                30_000_142,
+            )
+            .current_room_id(1),
         );
         // Setup standing in snapshot for PILOT_1
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
@@ -202,8 +199,8 @@ async fn test_plan_e5_mission_complete_tracker_standings_and_reward_payouts() {
         "plan:E-5",
     ]);
 
-    use eve_db::{ActiveMissionRecord, IskCents, TrainedSkillRecord};
-    use eve_server::services::agents_missions::{save_mission_meta, MissionTimingAndCargoMeta};
+    use eve_db::{IskCents, TrainedSkillRecord};
+    use eve_server::services::mission_fixture::{self, MissionFixture};
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -234,31 +231,13 @@ async fn test_plan_e5_mission_complete_tracker_standings_and_reward_payouts() {
         let sk = snap.skills.entry(PILOT_1).or_default();
         sk.insert(3356, TrainedSkillRecord { type_id: 3356, level: 2, skill_points: 10_000.0 });
         sk.insert(3895, TrainedSkillRecord { type_id: 3895, level: 5, skill_points: 256_000.0 });
-        snap.active_missions.insert(
-            (PILOT_1, 13_493),
-            ActiveMissionRecord {
-                character_id: PILOT_1,
-                mission_id: 13_493, // Interstellar Railroad (4 of 4): 15,000 ISK, 16,000 bonus, 3,600s, 19 base LP
-                agent_id: agent.agent_id,
-                solar_system_id: ag_sys,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            PILOT_1,
-            &MissionTimingAndCargoMeta {
-                mission_id: 13_493,
-                agent_id: agent.agent_id,
-                offered_at_unix: now0,
-                offer_expiry_unix: now0 + 86_400,
-                offered_level: Some(1),
-                ..Default::default()
-            },
+            MissionFixture::offered(PILOT_1, 13_493, agent.agent_id, ag_sys)
+                .current_room_id(1)
+                .offered_at_unix(now0)
+                .offer_expiry_unix(now0 + 86_400)
+                .offered_level(Some(1)),
         );
     });
     sess.solar_system_id = Some(ag_sys);

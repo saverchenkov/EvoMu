@@ -8,11 +8,11 @@ use crate::router::ServerContext;
 use crate::services::agents_missions::agents_standings_arcs::{
     save_rnd_research_entries, RndResearchEntry,
 };
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::services::pve_ess_reserve_banks::*;
 use eve_db::clock::VirtualServerClock;
 use eve_db::{
-    ActiveMissionRecord, CorporationRecord, IskCents, TrainedSkillRecord, WorldRepository,
-    WorldStateSnapshot,
+    CorporationRecord, IskCents, TrainedSkillRecord, WorldRepository, WorldStateSnapshot,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_sde::{AgentInfo, SdeRegistry, SolarSystemId};
@@ -200,20 +200,10 @@ fn rnd_access_validation_branches_standing_thresholds_and_rp_formula() {
         let rp = compute_rnd_rp_per_day(&ctx, snap, char_id, agent.agent_id, 4, 3);
         assert!((rp - 61.74).abs() < 1e-6);
 
-        // has_completed_mission_with_agent via active_missions state == "Completed"
-        snap.active_missions.insert(
-            (char_id, 701),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 701,
-                agent_id: agent.agent_id,
-                solar_system_id: sys_id,
-                state: "Completed".into(),
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        // has_completed_mission_with_agent via mission state == "Completed"
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(char_id, 701, agent.agent_id, sys_id, "Completed"),
         );
         assert!(has_completed_mission_with_agent(snap, char_id, agent.agent_id));
         agent.level = 1;

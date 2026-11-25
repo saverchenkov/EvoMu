@@ -6,8 +6,9 @@ use super::{
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, ExtendedNpcEntity};
-use crate::sp6_lifecycle::{record_wreck_or_container_meta_in_snap, with_sp6_state};
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord};
+use crate::services::mission_fixture::{self, MissionFixture};
+use crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap;
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -92,42 +93,24 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
                 blueprint_runs_remaining: None,
             },
         );
-        snap.active_missions.insert(
-            (char_id, 3_000_001),
-            ActiveMissionRecord {
-                mission_id: 501,
-                character_id: char_id,
-                agent_id: 3_000_001,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 3,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![old_mission_npc_id],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 501, 3_000_001, sys_id)
+                .current_room_id(3)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![old_mission_npc_id]),
         );
-        snap.active_missions.insert(
-            (90_000_002, 3_000_002),
-            ActiveMissionRecord {
-                mission_id: 502,
-                character_id: 90_000_002,
-                agent_id: 3_000_002,
-                solar_system_id: sys_id,
-                state: "Completed".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(90_000_002, 502, 3_000_002, sys_id, "Completed")
+                .current_room_id(1)
+                .initial_wave_count(Some(3)),
         );
         snap.sp6_lifecycle
             .space_object_meta
             .entry(npc_wreck_id)
             .or_default()
             .is_npc_wreck = true;
-        snap.sp6_lifecycle
-            .mission_initial_npc_counts
-            .insert("90000002:502".into(), 3);
     });
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -205,14 +188,15 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
         assert!(!snap.items.contains_key(&npc_wreck_id));
         assert!(!snap.items.contains_key(&npc_loot_id));
         assert!(snap.items.contains_key(&player_wreck_id));
-        let m = &snap.active_missions[&(char_id, 3_000_001)];
+        let m = mission_fixture::get(snap, char_id, 501).unwrap();
         assert_eq!(m.current_room_id, 1);
         assert_eq!(m.npcs_remaining, 4);
         assert!(m.spawned_npc_ball_ids.is_empty());
-    });
-    with_sp6_state(&ctx.db, |st| {
-        assert!(!st.mission_initial_npc_counts.contains_key("90000002:502"));
-        assert!(st.missions_awaiting_downtime_respawn.contains(&(char_id, 3_000_001)));
+        assert!(m.awaiting_downtime_respawn);
+        assert!(mission_fixture::get(snap, 90_000_002, 502)
+            .unwrap()
+            .initial_wave_count
+            .is_none());
     });
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.container_lifetimes.contains_key(&npc_wreck_id));
@@ -228,11 +212,9 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
     );
     assert_eq!(spawned, 4);
     ctx.db.with_snapshot(|snap| {
-        let m = &snap.active_missions[&(char_id, 3_000_001)];
+        let m = mission_fixture::get(snap, char_id, 501).unwrap();
         assert_eq!(m.spawned_npc_ball_ids.len(), 4);
-    });
-    with_sp6_state(&ctx.db, |st| {
-        assert!(!st.missions_awaiting_downtime_respawn.contains(&(char_id, 3_000_001)));
+        assert!(!m.awaiting_downtime_respawn);
     });
 }
 

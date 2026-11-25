@@ -4,13 +4,14 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::services::mobile_deployables::MobileDeployableRecord;
 use crate::sp6_lifecycle::{
     record_anchor_meta_in_snap, with_mut_sp6_state, with_sp6_state, DisconnectedShipEntry,
     PersistedSpaceObjectMeta, SafeLogoffEntry, MOBILE_WARP_DISRUPTOR_DECAY_SECS,
     SECURE_CONTAINER_DECAY_SECS,
 };
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord, ServerClock, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, ServerClock, WorldRepository};
 use eve_destiny::Ballpark;
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -72,8 +73,8 @@ async fn deep_downtime_npc_wreck_purge_and_mission_wave_respawn() {
     let now_unix = ctx.now_unix();
 
     ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_all(snap);
         let st = snap.sp6_lifecycle.as_inner_mut();
-        snap.active_missions.clear();
         snap.items.insert(
             npc_wreck_id,
             InventoryItemRecord {
@@ -139,38 +140,21 @@ async fn deep_downtime_npc_wreck_purge_and_mission_wave_respawn() {
             },
         );
 
-        snap.active_missions.insert(
-            (char_id, agent_accepted),
-            ActiveMissionRecord {
-                mission_id: 701,
-                character_id: char_id,
-                agent_id: agent_accepted as i64,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 4,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![stale_npc_id],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 701, agent_accepted as i64, sys_id)
+                .current_room_id(4)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![stale_npc_id])
+                .initial_wave_count(Some(3)),
         );
-        snap.active_missions.insert(
-            (char_id, agent_offered),
-            ActiveMissionRecord {
-                mission_id: 702,
-                character_id: char_id,
-                agent_id: agent_offered as i64,
-                solar_system_id: sys_id,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 3,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 702, agent_offered as i64, sys_id)
+                .current_room_id(1)
+                .npcs_remaining(3)
+                .initial_wave_count(Some(9)),
         );
-        st.mission_initial_npc_counts
-            .insert(format!("{char_id}:701"), 3);
-        st.mission_initial_npc_counts
-            .insert(format!("{char_id}:702"), 9);
     });
 
     let (wrecks_purged, missions_reset) =
@@ -182,17 +166,14 @@ async fn deep_downtime_npc_wreck_purge_and_mission_wave_respawn() {
         assert!(!snap.items.contains_key(&npc_wreck_id));
         assert!(!snap.items.contains_key(&child_cargo_id));
         assert!(snap.items.contains_key(&player_wreck_id));
-        let m = snap
-            .active_missions
-            .get(&(char_id, agent_accepted))
-            .expect("accepted mission retained");
+        let m = mission_fixture::get(snap, char_id, 701).expect("accepted mission retained");
         assert_eq!(m.current_room_id, 1);
         assert_eq!(m.npcs_remaining, 3);
         assert!(m.spawned_npc_ball_ids.is_empty());
-        assert!(!snap
-            .sp6_lifecycle
-            .mission_initial_npc_counts
-            .contains_key(&format!("{char_id}:702")));
+        assert!(mission_fixture::get(snap, char_id, 702)
+            .unwrap()
+            .initial_wave_count
+            .is_none());
     });
 
     // Wrong solar system / wrong character does not spawn wave

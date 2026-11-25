@@ -10,17 +10,18 @@ use crate::services::agents_missions::agents_standings_arcs::{
     apply_faction_standing_with_derived, apply_mission_completion_standings,
     compute_effective_agent_standing, compute_effective_standing_breakdown,
     get_sde_npc_npc_standings, handle_extended, handle_special_dialogue_action,
-    is_pirate_entity, is_trig_or_edencom_entity, load_epic_arc_states, load_mission_meta,
+    is_pirate_entity, is_trig_or_edencom_entity, load_epic_arc_states,
     load_rnd_research_entries, notify_standing_changes, resolve_epic_arc_id_for_agent,
-    save_epic_arc_states, save_mission_meta, save_rnd_research_entries,
-    static_npc_faction_standings, EpicArcStateEntry, MissionTimingAndCargoMeta, RndResearchEntry,
+    save_epic_arc_states, save_rnd_research_entries, static_npc_faction_standings,
+    EpicArcStateEntry, RndResearchEntry,
 };
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::services::config_service::{
     get_celestial_statistic, get_map_connections, get_map_objects, get_multi_graphics_ex,
     get_multi_inv_types_ex, get_multi_station_ex, handle as handle_config,
 };
 use crate::services::fleet_social::handle as handle_social;
-use eve_db::{corp_roles, ActiveMissionRecord, CosmicSignatureRecord, TrainedSkillRecord, VirtualServerClock, WorldRepository};
+use eve_db::{corp_roles, CosmicSignatureRecord, TrainedSkillRecord, VirtualServerClock, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SdeRegistry;
@@ -232,18 +233,17 @@ fn standings_math_derived_arcs_and_extended_agent_standing_rpcs() {
         assert!(!m_chg.is_empty());
 
         // Mission meta, R&D research entries, and Epic Arc note serialization helpers
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            cid,
-            &MissionTimingAndCargoMeta {
-                mission_id: 101,
-                agent_id: 3_008_416,
-                offered_at_unix: now,
-                offer_expiry_unix: now + 7200,
-                ..Default::default()
-            },
+            MissionFixture::accepted(cid, 101, 3_008_416, 30_000_142)
+                .current_room_id(1)
+                .offered_at_unix(now)
+                .offer_expiry_unix(now + 7200),
         );
-        assert_eq!(load_mission_meta(snap, cid, 101).unwrap().offer_expiry_unix, now + 7200);
+        assert_eq!(
+            mission_fixture::get(snap, cid, 101).unwrap().offer_expiry_unix,
+            now + 7200
+        );
         save_rnd_research_entries(
             snap,
             cid,
@@ -271,20 +271,6 @@ fn standings_math_derived_arcs_and_extended_agent_standing_rpcs() {
             }],
         );
         assert_eq!(load_epic_arc_states(snap, cid).len(), 1);
-        snap.active_missions.insert(
-            (cid, 101),
-            ActiveMissionRecord {
-                mission_id: 101,
-                character_id: cid,
-                agent_id: 3_008_416,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
-        );
         m_chg
     });
     notify_standing_changes(&ctx, cid, &m_chg);

@@ -72,6 +72,8 @@ pub mod mining_phased_autotarget;
 pub mod market_contracts;
 pub mod market_price_history;
 pub mod market_trading;
+#[cfg(any(test, feature = "testkit"))]
+pub mod mission_fixture;
 pub mod mining_advanced;
 pub mod mining_cycle;
 pub mod mining_sites;

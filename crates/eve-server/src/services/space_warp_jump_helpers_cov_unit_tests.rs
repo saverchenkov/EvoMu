@@ -590,10 +590,10 @@ async fn stargate_jump_errors_concurrent_toctou_and_dock_station_upwell_paths() 
 
 #[tokio::test]
 async fn cmd_warp_to_stuff_dispatch_targets_bookmark_anomaly_fleet_and_cap_paths() {
+    use crate::services::mission_fixture::{self, MissionFixture};
     use eve_db::{
-        ActiveMissionRecord, BookmarkRecord, CosmicAnomalyRecord, CosmicSignatureRecord,
-        FleetRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord,
-        VirtualServerClock,
+        BookmarkRecord, CosmicAnomalyRecord, CosmicSignatureRecord, FleetRecord, InventoryFlag,
+        InventoryItemRecord, UpwellStructureRecord, VirtualServerClock,
     };
     use eve_destiny::{Ball, CombatState, MovementMode};
     use glam::DVec3;
@@ -740,19 +740,11 @@ async fn cmd_warp_to_stuff_dispatch_targets_bookmark_anomaly_fleet_and_cap_paths
             max_jump_mass_kg: 300_000_000.0,
             collapsed: false,
         });
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                mission_id,
-                character_id: char_id,
-                agent_id: 3_010_001,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mission_id, 3_010_001, sys_id)
+                .current_room_id(1)
+                .npcs_remaining(2),
         );
         snap.fleets.insert(
             99_001,
@@ -1132,9 +1124,10 @@ async fn stargate_jump_pochven_zarzakh_and_cmd_dock_structure_and_crimewatch_pat
 
 #[tokio::test]
 async fn warp_stargate_and_dock_full_error_guard_zarzakh_and_outlaw_matrix() {
+    use crate::services::mission_fixture::{self, MissionFixture};
     use eve_db::{
-        ActiveMissionRecord, BookmarkRecord, CosmicAnomalyRecord, FleetRecord, InventoryFlag,
-        InventoryItemRecord, ServerClock, VirtualServerClock,
+        BookmarkRecord, CosmicAnomalyRecord, FleetRecord, InventoryFlag, InventoryItemRecord,
+        ServerClock, VirtualServerClock,
     };
     use eve_destiny::{Ball, CombatState, MovementMode};
     use glam::DVec3;
@@ -1233,19 +1226,11 @@ async fn warp_stargate_and_dock_full_error_guard_zarzakh_and_outlaw_matrix() {
             lifetime_seconds: 86_400,
             cleared: true,
         });
-        snap.active_missions.insert(
-            (char_id, 55_900),
-            ActiveMissionRecord {
-                mission_id: 55_900,
-                character_id: char_id,
-                agent_id: 3_010_001,
-                solar_system_id: other_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 55_900, 3_010_001, other_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(1),
         );
         snap.fleets.insert(
             99_501,

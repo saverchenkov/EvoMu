@@ -8,10 +8,11 @@ use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, ExtendedNpcEntity,
 };
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::sp6_lifecycle::{
     with_mut_sp6_state, with_sp6_state, PersistedCombatHp, PersistedSpaceObjectMeta,
 };
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::DamageVector;
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -40,7 +41,7 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
 
     // Empty run returns (0, 0) when no wrecks or Accepted missions exist.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.clear();
+        mission_fixture::clear_all(snap);
     });
     assert_eq!(cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx), (0, 0));
 
@@ -61,7 +62,7 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
     let w_other_child = 910_000_006; // child inside w_below_bound (kept)
 
     let char_id = 90_000_001;
-    let m1_agent = 3_010_001u32; // Uses explicit mission_initial_npc_counts = 7
+    let m1_agent = 3_010_001u32; // Uses explicit initial_wave_count = 7
     let m2_agent = 3_010_002u32; // Uses spawned_npc_ball_ids.len() = 6 (> npcs_remaining=2, > 4)
     let m3_agent = 3_010_003u32; // Uses npcs_remaining = 5 (> spawned_npc_ball_ids.len()=1, > 4)
 
@@ -120,58 +121,33 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
             },
         );
 
-        // Missions with distinct target_count branches and pre-existing awaiting key.
-        snap.active_missions.insert(
-            (char_id, m1_agent),
-            ActiveMissionRecord {
-                mission_id: 601,
-                character_id: char_id,
-                agent_id: m1_agent as i64,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 2,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![910_100_001],
-                bookmark_id: None,
-            },
-        );
-        st.mission_initial_npc_counts
-            .insert(format!("{char_id}:601"), 7);
-        st.mission_initial_npc_types
-            .insert(format!("{char_id}:601"), vec![10_019, 10_020]);
         st.mission_initial_npc_types
             .insert("stale:999".into(), vec![10_019]);
-        // Pre-populate awaiting key to verify no duplicate is pushed.
-        st.missions_awaiting_downtime_respawn
-            .push((char_id, m1_agent));
 
-        snap.active_missions.insert(
-            (char_id, m2_agent),
-            ActiveMissionRecord {
-                mission_id: 602,
-                character_id: char_id,
-                agent_id: m2_agent as i64,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 3,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![1, 2, 3, 4, 5, 6],
-                bookmark_id: None,
-            },
+        // Missions with distinct target_count branches and pre-existing awaiting key.
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 601, m1_agent as i64, 30_000_142)
+                .current_room_id(2)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![910_100_001])
+                .initial_wave_count(Some(7))
+                .initial_wave_types(Some(vec![10_019, 10_020]))
+                .awaiting_downtime_respawn(true),
         );
-        snap.active_missions.insert(
-            (char_id, m3_agent),
-            ActiveMissionRecord {
-                mission_id: 603,
-                character_id: char_id,
-                agent_id: m3_agent as i64,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 4,
-                npcs_remaining: 5,
-                spawned_npc_ball_ids: vec![7],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 602, m2_agent as i64, 30_000_142)
+                .current_room_id(3)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![1, 2, 3, 4, 5, 6]),
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 603, m3_agent as i64, 30_000_142)
+                .current_room_id(4)
+                .npcs_remaining(5)
+                .spawned_npc_ball_ids(vec![7]),
         );
     });
 
@@ -223,19 +199,12 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
         assert!(st.ship_combat_hp.contains_key(&w_above_bound));
         assert!(st.ship_combat_hp.contains_key(&w_non_wreck_type));
 
-        assert_eq!(
-            st.mission_initial_npc_counts.get(&format!("{char_id}:601")),
-            Some(&7)
-        );
-        assert!(st
-            .mission_initial_npc_types
-            .contains_key(&format!("{char_id}:601")));
         assert!(!st.mission_initial_npc_types.contains_key("stale:999"));
 
         let m1_await_count = st
             .missions_awaiting_downtime_respawn
             .iter()
-            .filter(|&&k| k == (char_id, m1_agent))
+            .filter(|&&k| k == (char_id, 601))
             .count();
         assert_eq!(m1_await_count, 1);
     });
@@ -252,9 +221,12 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
         assert!(snap.items.contains_key(&w_non_wreck_type));
         assert!(snap.items.contains_key(&w_other_child));
 
-        assert_eq!(snap.active_missions[&(char_id, m1_agent)].npcs_remaining, 7);
-        assert_eq!(snap.active_missions[&(char_id, m2_agent)].npcs_remaining, 6);
-        assert_eq!(snap.active_missions[&(char_id, m3_agent)].npcs_remaining, 5);
+        let m1 = mission_fixture::get(snap, char_id, 601).unwrap();
+        assert_eq!(m1.initial_wave_count, Some(7));
+        assert!(m1.initial_wave_types.is_some());
+        assert_eq!(m1.npcs_remaining, 7);
+        assert_eq!(mission_fixture::get(snap, char_id, 602).unwrap().npcs_remaining, 6);
+        assert_eq!(mission_fixture::get(snap, char_id, 603).unwrap().npcs_remaining, 5);
     });
 }
 
@@ -276,32 +248,15 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
     let fallback_npc_tid = 999_888_777u32;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.clear();
-    });
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let st = snap.sp6_lifecycle.as_inner_mut();
-        st.missions_awaiting_downtime_respawn.clear();
+        mission_fixture::clear_all(snap);
         // Mission needs respawn via (spawned_npc_ball_ids.is_empty() && npcs_remaining > 0) even without awaiting flag!
-        snap.active_missions.insert(
-            (char_id, agent_id),
-            ActiveMissionRecord {
-                mission_id: 701,
-                character_id: char_id,
-                agent_id: agent_id as i64,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 2,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        st.mission_initial_npc_counts
-            .insert(format!("{char_id}:701"), 4);
-        st.mission_initial_npc_types.insert(
-            format!("{char_id}:701"),
-            vec![valid_npc_tid, fallback_npc_tid],
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 701, agent_id as i64, sys_id)
+                .current_room_id(2)
+                .npcs_remaining(2)
+                .initial_wave_count(Some(4))
+                .initial_wave_types(Some(vec![valid_npc_tid, fallback_npc_tid])),
         );
     });
 
@@ -326,10 +281,10 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
     );
 
     let bids = ctx.db.with_snapshot(|snap| {
-        let m = &snap.active_missions[&(char_id, agent_id)];
+        let m = mission_fixture::get(snap, char_id, 701).unwrap();
         assert_eq!(m.current_room_id, 1);
         assert_eq!(m.npcs_remaining, 4);
-        m.spawned_npc_ball_ids.clone()
+        m.spawned_npc_ball_ids
     });
     assert_eq!(bids.len(), 4);
 
@@ -786,7 +741,7 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     assert!(ctx.bound_objects.read().unwrap().contains_key(&55_002));
 
     // 3. cleanup_npc_wrecks_and_reset_missions_on_downtime:
-    //    - non-Accepted mission cleaned out of mission_initial_npc_counts & awaiting
+    //    - non-Accepted mission cleaned out of initial wave count & awaiting respawn
     //    - has_combat_wave == false clears npcs_remaining without awaiting respawn
     //    - initial_count == 0, spawned=1, npcs_remaining=1 -> target_count floor 4
     let m_offered = 3_020_001u32;
@@ -795,56 +750,24 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     let origin = DVec3::new(10_000.0, 0.0, 20_000.0);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let st = snap.sp6_lifecycle.as_inner_mut();
-        snap.active_missions.clear();
-        st.mission_initial_npc_counts.clear();
-        st.missions_awaiting_downtime_respawn.clear();
-
-        snap.active_missions.insert(
-            (c1, m_offered),
-            ActiveMissionRecord {
-                character_id: c1,
-                agent_id: m_offered as i64,
-                mission_id: 1,
-                solar_system_id: sys1,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::clear_all(snap);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(c1, 1, m_offered as i64, sys1)
+                .current_room_id(1)
+                .initial_wave_count(Some(6))
+                .awaiting_downtime_respawn(true),
         );
-        st.mission_initial_npc_counts.insert(format!("{c1}:1"), 6);
-        st.missions_awaiting_downtime_respawn.push((c1, m_offered));
-
-        snap.active_missions.insert(
-            (c1, m_non_combat),
-            ActiveMissionRecord {
-                character_id: c1,
-                agent_id: m_non_combat as i64,
-                mission_id: 2,
-                solar_system_id: sys1,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(c1, 2, m_non_combat as i64, sys1).current_room_id(1),
         );
-
-        snap.active_missions.insert(
-            (c1, m_floor4),
-            ActiveMissionRecord {
-                character_id: c1,
-                agent_id: m_floor4 as i64,
-                mission_id: 3,
-                solar_system_id: sys1,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![990_000_001],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(c1, 3, m_floor4 as i64, sys1)
+                .current_room_id(1)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![990_000_001]),
         );
     });
 
@@ -853,22 +776,25 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     assert_eq!(purged_wrecks, 0);
     assert_eq!(reset_missions, 1);
 
-    with_sp6_state(&ctx.db, |st| {
-        assert!(!st.mission_initial_npc_counts.contains_key(&format!("{c1}:1")));
-        assert!(!st.missions_awaiting_downtime_respawn.contains(&(c1, m_offered)));
-        assert!(!st.missions_awaiting_downtime_respawn.contains(&(c1, m_non_combat)));
-        assert!(st.missions_awaiting_downtime_respawn.contains(&(c1, m_floor4)));
-    });
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(c1, m_non_combat)].npcs_remaining, 0);
-        assert_eq!(snap.active_missions[&(c1, m_floor4)].npcs_remaining, 4);
+        let m1 = mission_fixture::get(snap, c1, 1).unwrap();
+        let m2 = mission_fixture::get(snap, c1, 2).unwrap();
+        let m3 = mission_fixture::get(snap, c1, 3).unwrap();
+        assert!(m1.initial_wave_count.is_none());
+        assert!(!m1.awaiting_downtime_respawn);
+        assert!(!m2.awaiting_downtime_respawn);
+        assert!(m3.awaiting_downtime_respawn);
+        assert_eq!(m2.npcs_remaining, 0);
+        assert_eq!(m3.npcs_remaining, 4);
     });
 
     // Pocket entry clears awaiting respawn and respawns 4 NPCs (even without prior initial_count)
     let spawned = spawn_mission_wave_on_pocket_entry_if_needed(&ctx, c1, sys1, origin);
     assert_eq!(spawned, 4);
-    with_sp6_state(&ctx.db, |st| {
-        assert!(!st.missions_awaiting_downtime_respawn.contains(&(c1, m_floor4)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!mission_fixture::get(snap, c1, 3)
+            .unwrap()
+            .awaiting_downtime_respawn);
     });
 }
 

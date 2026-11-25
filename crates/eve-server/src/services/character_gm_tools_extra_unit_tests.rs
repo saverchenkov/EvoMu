@@ -7,6 +7,7 @@ use crate::services::character_skills::character_gm_tools::{
     bloodline_name_pools, handle_char_unbound, handle_gm_qa_rpcs, handle_gm_slash_ext,
     is_valid_character_name_syntax,
 };
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::{
     AllianceRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, WorldRepository,
     WorldStateSnapshot,
@@ -469,19 +470,11 @@ async fn gm_slash_kill_contact_cluster_energy_secstatus_and_qa_rpcs() {
 
     let npc_ball_id = 950_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 892),
-            eve_db::ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 892,
-                agent_id: 3_011_918,
-                state: "Accepted".into(),
-                solar_system_id: sys_id,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![npc_ball_id],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 892, 3_011_918, sys_id)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![npc_ball_id]),
         );
     });
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -505,10 +498,7 @@ async fn gm_slash_kill_contact_cluster_energy_secstatus_and_qa_rpcs() {
     let kill_ball = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/kill {npc_ball_id}")).await.unwrap().unwrap();
     assert_eq!(kill_ball.dict_get("destroyed"), Some(&PyRep::Bool(true)));
     ctx.db.with_snapshot(|snap| {
-        let m = snap
-            .active_missions
-            .get(&(char_id, 892))
-            .expect("mission 892 tracked");
+        let m = mission_fixture::get(snap, char_id, 892).expect("mission 892 tracked");
         assert_eq!(
             m.npcs_remaining, 0,
             "/kill <npc_ball_id> must invoke on_mission_npc_destroyed_core (#1003)"

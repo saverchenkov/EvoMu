@@ -2,12 +2,13 @@ use crate::router::ServerContext;
 use crate::services::agents_missions::agents_standings_arcs::{
     compute_effective_agent_standing, compute_effective_standing_breakdown,
 };
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::services::pve_ess_reserve_banks::{
     is_interbus_or_militia_corp, record_mission_completion_and_resolve_storyline,
 };
 use eve_db::{
-    ActiveMissionRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    NeuralAttributes, ServerClock, TrainedSkillRecord, VirtualServerClock, WorldRepository,
+    CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes, ServerClock,
+    TrainedSkillRecord, VirtualServerClock, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -375,20 +376,6 @@ async fn test_storyline_16_mission_trigger_and_courier_expiry_lifecycle() {
     let char_id = 91_000_004i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.insert(char_id, mk_char(char_id, "CourierStoryTester", 2, Some(60_003_760), 2_000_004));
-        snap.active_missions.insert(
-            (char_id, 10_050),
-            ActiveMissionRecord {
-                mission_id: 10_050,
-                character_id: char_id,
-                agent_id: 3_010_002,
-                solar_system_id: 30_000_142,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
         snap.items.insert(
             2_000_004,
             InventoryItemRecord {
@@ -403,21 +390,17 @@ async fn test_storyline_16_mission_trigger_and_courier_expiry_lifecycle() {
                 ..Default::default()
             },
         );
-        crate::services::agents_missions::agents_standings_arcs::save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &crate::services::agents_missions::agents_standings_arcs::MissionTimingAndCargoMeta {
-                mission_id: 10_050,
-                agent_id: 3_010_002,
-                offered_at_unix: 200_000,
-                offer_expiry_unix: 200_000 + 604_800,
-                offered_level: Some(1),
-                required_delivery_type_id: Some(34),
-                required_delivery_qty: 100,
-                origin_station_id: Some(60_003_760),
-                destination_station_id: Some(60_003_761),
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 10_050, 3_010_002, 30_000_142)
+                .current_room_id(1)
+                .offered_at_unix(200_000)
+                .offer_expiry_unix(200_000 + 604_800)
+                .offered_level(Some(1))
+                .required_delivery_type_id(Some(34))
+                .required_delivery_qty(100)
+                .origin_station_id(Some(60_003_760))
+                .destination_station_id(Some(60_003_761)),
         );
     });
 

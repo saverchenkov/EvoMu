@@ -582,19 +582,16 @@ async fn test_e5_research_agent_access_and_rp_formula() {
     assert!((ppd_no_mission - 54.0).abs() < 1e-6, "Expected 54.0 RP/day without Connections bonus, got {ppd_no_mission}");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 99_001),
-            eve_db::ActiveMissionRecord {
-                mission_id: 99_001,
-                character_id: char_id,
-                agent_id: second_rd.agent_id,
-                solar_system_id: second_sys_id,
-                state: "Completed".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        eve_server::services::mission_fixture::insert(
+            snap,
+            eve_server::services::mission_fixture::MissionFixture::new(
+                char_id,
+                99_001,
+                second_rd.agent_id,
+                second_sys_id,
+                "Completed",
+            )
+            .current_room_id(1),
         );
     });
     let ok_second_with_mission = rpc_call(

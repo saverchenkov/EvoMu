@@ -2287,14 +2287,9 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
 
     // Check if mission spawned pocket NPCs or assigned courier destination
     let (spawned_balls, dest_station_opt) = ctx.db.with_snapshot(|s| {
-        let m = s.active_missions.get(&(char_id, mission_id)).cloned();
-        let meta = s
-            .owner_notes
-            .values()
-            .find(|n| n.character_id == char_id && n.label == format!("mission_meta:{mission_id}"))
-            .and_then(|n| serde_json::from_str::<serde_json::Value>(&n.note).ok());
-        let dest = meta.and_then(|v| v.get("destination_station_id").and_then(|x| x.as_i64()));
-        (m.map(|x| x.spawned_npc_ball_ids).unwrap_or_default(), dest)
+        eve_server::services::mission_fixture::get(s, char_id, mission_id)
+            .map(|m| (m.spawned_npc_ball_ids, m.destination_station_id))
+            .unwrap_or_default()
     });
 
     // Negative check: trying DoAction(6) before clearing objectives or remotely when in space fails

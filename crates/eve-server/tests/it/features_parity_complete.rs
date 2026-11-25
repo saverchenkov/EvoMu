@@ -4453,7 +4453,7 @@ use eve_proto::PyRep;
 use eve_server::esi::router::EsiRouter;
 use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
 use eve_server::router::ServerContext;
-use eve_server::services::agents_missions::load_mission_meta;
+use eve_server::services::mission_fixture;
 use glam::DVec3;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -4621,8 +4621,10 @@ async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
     let initial_agent_st = ctx.db.with_snapshot(|snap| snap.characters[&char_id].standings.get(&agent_id).copied().unwrap_or(0.0));
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission2_id)) { m.npcs_remaining = 0; }
-        if let Some(ref m_meta) = load_mission_meta(snap, char_id, mission2_id) {
+        mission_fixture::edit(snap, char_id, mission2_id, |m| {
+            m.npcs_remaining = 0;
+        });
+        if let Some(ref m_meta) = mission_fixture::get(snap, char_id, mission2_id).filter(|m| m.has_metadata) {
             if let Some(tid) = m_meta.required_delivery_type_id {
                 let qty = m_meta.required_delivery_qty.max(1);
                 snap.next_entity_id += 1;

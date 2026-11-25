@@ -666,13 +666,14 @@ use crate::quasar_sov_equinox_hub::{id_req, rpc as q_sov_rpc, structure};
 use crate::scenario_common::ServerScenarioBackend;
 use crate::sovereignty_equinox_gameplay::{find_nullsec_planets, make_ball, rpc_call, ALLIANCE};
 use eve_db::{
-    corp_roles, ActiveMissionRecord, InventoryFlag, InventoryItemRecord, WorldRepository,
+    corp_roles, InventoryFlag, InventoryItemRecord, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::quasar_gateway::STATUS_CONFLICT;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::{save_rnd_research_entries, RndResearchEntry};
+use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_server::services::quasar_sov_mercden::TYPE_MERCENARY_DEN_MANAGEMENT;
 use eve_server::services::sov_gameplay::{
     apply_mercenary_den_weapon_damage, MERC_DEN_BASE_HP, MERC_DEN_REINFORCEMENT_SECS,
@@ -789,9 +790,9 @@ async fn test_pve_mission_bonus_timer_payout_and_expiry() {
     assert!(bonus_expiry > ctx.now_unix());
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(pilot_id, mid)) {
+        mission_fixture::edit(snap, pilot_id, mid, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
     let comp = rpc(&ctx, sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid as i64)])
         .await
@@ -801,7 +802,7 @@ async fn test_pve_mission_bonus_timer_payout_and_expiry() {
 
     let reloaded = reload_db(&ctx);
     reloaded.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(pilot_id, mid)].state, "Completed");
+        assert_eq!(mission_fixture::get(snap, pilot_id, mid).unwrap().state, "Completed");
     });
 
     let agent_l1 = ctx
@@ -821,9 +822,9 @@ async fn test_pve_mission_bonus_timer_payout_and_expiry() {
         .expect("Accept mission B");
     assert!(accept_b.dict_get("bonusExpiryUnix").and_then(|v| v.as_i64()).is_some());
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(pilot_id, mid_b)) {
+        mission_fixture::edit(snap, pilot_id, mid_b, |m| {
             m.npcs_remaining = 0;
-        }
+        });
     });
     ctx.advance_secs(10_800);
     let comp_b = rpc(&ctx, sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid_b as i64)])
@@ -865,14 +866,14 @@ async fn test_pve_mission_offer_expiry_no_penalty_and_cosmos_lockout() {
         panic!("expected 2-tuple from GetMyJournalDetails, got {journal:?}");
     };
     assert_eq!(parts.len(), 2);
-    let PyRep::List(active_missions) = &parts[0] else {
+    let PyRep::List(journal_missions) = &parts[0] else {
         panic!("expected active missions list, got {:?}", parts[0]);
     };
-    assert!(active_missions.is_empty(), "expired mission {mid} must be swept from journal");
+    assert!(journal_missions.is_empty(), "expired mission {mid} must be swept from journal");
 
     let reloaded = reload_db(&ctx);
     reloaded.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(pilot_id, mid)].state, "Expired");
+        assert_eq!(mission_fixture::get(snap, pilot_id, mid).unwrap().state, "Expired");
         let standing_after = snap.characters.get(&pilot_id).and_then(|c| c.standings.get(&agent.corporation_id).copied()).unwrap_or(0.0);
         assert_eq!(standing_before, standing_after);
     });
@@ -887,19 +888,10 @@ async fn test_pve_mission_offer_expiry_no_penalty_and_cosmos_lockout() {
     let sess = &mut actor.harness.transport_mut().inner.session;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&pilot_id).unwrap().standings.insert(cosmos_agent.corporation_id, 5.0);
-        snap.active_missions.insert(
-            (pilot_id, 99_999),
-            ActiveMissionRecord {
-                mission_id: 99_999,
-                character_id: pilot_id,
-                agent_id: cosmos_agent.agent_id,
-                solar_system_id: SYS_ID,
-                state: "Expired".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(pilot_id, 99_999, cosmos_agent.agent_id, SYS_ID, "Expired")
+                .current_room_id(1),
         );
     });
     let reoffer_err = rpc(&ctx, sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(cosmos_agent.agent_id)])
@@ -1001,7 +993,7 @@ async fn test_pve_research_agent_daily_mission_and_persistence() {
 
     let reloaded = reload_db(&ctx);
     reloaded.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(pilot_id, mid)].state, "Offered");
+        assert_eq!(mission_fixture::get(snap, pilot_id, mid).unwrap().state, "Offered");
     });
 }
 

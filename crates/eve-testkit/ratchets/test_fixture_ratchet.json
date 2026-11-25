@@ -189,6 +189,28 @@
         "crates/eve-server/tests/it/wormhole_special_systems.rs": 2,
         "crates/eve-server/tests/it/xmpp_social_tourney_edge_coverage.rs": 6
       }
+    },
+    "direct_mission_store_access": {
+      "rule": "No direct snap.active_missions, ActiveMissionRecord, load_mission_meta, save_mission_meta, MissionTimingAndCargoMeta, mission_meta_note_id, or sp6_lifecycle mission wave map access in crates/eve-server tests (excluding mission_fixture.rs); use eve_server::services::mission_fixture (#1496)",
+      "zero_required": false,
+      "owning_issue": "#1496",
+      "files": {
+        "crates/eve-server/src/services/agents_missions_tests.rs": 2,
+        "crates/eve-server/src/services/agents_standings_arcs_edges_tests.rs": 2,
+        "crates/eve-server/src/sp6_lifecycle/cluster_tick_downtime_extra_tests.rs": 3,
+        "crates/eve-server/tests/it/crimewatch_fleet_lifecycle_live.rs": 1,
+        "crates/eve-server/tests/it/crimewatch_kill_rights_sec_status_live.rs": 1,
+        "crates/eve-server/tests/it/features_corp_and_structure_ops.rs": 1,
+        "crates/eve-server/tests/it/features_industry_manufacturing_rpcs.rs": 1,
+        "crates/eve-server/tests/it/journeys_mining_combat_and_missions.rs": 1,
+        "crates/eve-server/tests/it/lp_structures_lookup_dungeons_live.rs": 1,
+        "crates/eve-server/tests/it/mining_advanced.rs": 1,
+        "crates/eve-server/tests/it/notify_autopilot_session.rs": 1,
+        "crates/eve-server/tests/it/notify_fleet_corp_standings.rs": 1,
+        "crates/eve-server/tests/it/notify_structures_clones_pi.rs": 1,
+        "crates/eve-server/tests/it/pve_missions_progression_e2e.rs": 1,
+        "crates/eve-server/tests/it/rpc_negative_matrix.rs": 2
+      }
     }
   }
 }

@@ -4,13 +4,9 @@
 
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::agents_missions::agents_missions_helpers::*;
-use crate::services::agents_missions::agents_standings_arcs::{
-    load_mission_meta, save_mission_meta, MissionTimingAndCargoMeta,
-};
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::clock::VirtualServerClock;
-use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository,
-};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::{
@@ -355,15 +351,9 @@ fn rewards_divisions_alpha_vs_omega_target_resolution_and_security_encounters() 
                 skill_points: 256_000.0,
             },
         );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 200,
-                agent_id: 3_100_001,
-                offered_level: Some(5), // floor = 500, lp_alpha = 600 -> 600
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 200, 3_100_001, 30_000_142).offered_level(Some(5)), // floor = 500, lp_alpha = 600 -> 600
         );
     });
 
@@ -507,27 +497,6 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
     );
 
     ctx.db.with_mut_snapshot(|snap| {
-        for (mid, aid, st) in [
-            (301_u32, 3_200_001_i64, "Offered"),
-            (302_u32, 3_200_001_i64, "Offered"),
-            (303_u32, 3_200_002_i64, "Offered"),
-            (304_u32, 3_200_001_i64, "Completed"),
-        ] {
-            snap.active_missions.insert(
-                (char_id, mid),
-                ActiveMissionRecord {
-                    character_id: char_id,
-                    mission_id: mid,
-                    agent_id: aid,
-                    state: st.into(),
-                    solar_system_id: 30_000_142,
-                    current_room_id: 0,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: vec![],
-                    bookmark_id: Some(88_001),
-                },
-            );
-        }
         // Partial courier cargo stack (qty 25 > 10 granted) to test partial reclaim
         snap.items.insert(
             66_001,
@@ -543,20 +512,26 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
                 ..Default::default()
             },
         );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 301,
-                agent_id: 3_200_001,
-                granted_courier_item_id: Some(66_001),
-                granted_courier_qty: 10,
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 301, 3_200_001, 30_000_142)
+                .bookmark_id(Some(88_001))
+                .granted_courier_item_id(Some(66_001))
+                .granted_courier_qty(10),
         );
+        for (mid, aid, st) in [
+            (302_u32, 3_200_001_i64, "Offered"),
+            (303_u32, 3_200_002_i64, "Offered"),
+            (304_u32, 3_200_001_i64, "Completed"),
+        ] {
+            mission_fixture::insert(
+                snap,
+                MissionFixture::new(char_id, mid, aid, 30_000_142, st).bookmark_id(Some(88_001)),
+            );
+        }
     });
 
-    // Arg[0] <= 19 is an action code, NOT a mission_id; arg[1] or active_missions lookup resolves
+    // Arg[0] <= 19 is an action code, NOT a mission_id; arg[1] or active mission lookup resolves
     assert_eq!(
         resolve_target_mission_id(
             &ctx,
@@ -606,7 +581,7 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
     assert!(!pen1 && !acc1);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&66_001].quantity, 15);
-        assert!(load_mission_meta(snap, char_id, 301)
+        assert!(mission_fixture::get(snap, char_id, 301)
             .unwrap()
             .granted_courier_item_id
             .is_none());
@@ -973,33 +948,13 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
             ch.clone_grade = 1; // Alpha
         }
         snap.skills.remove(&char_id);
-        snap.active_missions.insert(
-            (char_id, 701),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 701,
-                agent_id: 4_200_002,
-                state: "Accepted".into(),
-                solar_system_id: 30_300_001,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 701, 4_200_002, 30_300_001),
         );
-        snap.active_missions.insert(
-            (char_id, 702),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 702,
-                agent_id: 4_200_001,
-                state: "Completed".into(),
-                solar_system_id: 30_300_001,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::new(char_id, 702, 4_200_001, 30_300_001, "Completed"),
         );
     });
 
@@ -1058,7 +1013,7 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
         4
     );
 
-    // resolve_target_mission_id: arg[1] precedence, active_missions (non-SDE) via arg[0] > 19, fallback ignoring agent_id, fallback ignoring state
+    // resolve_target_mission_id: arg[1] precedence, active mission (non-SDE) via arg[0] > 19, fallback ignoring agent_id, fallback ignoring state
     let kw = HashMap::new();
     assert_eq!(
         resolve_target_mission_id(
@@ -1171,16 +1126,11 @@ async fn wave4_courier_multi_stack_reclaim_decline_boundary_clamp_and_npc_filter
                     .insert(iid, format!("courier_cargo:{char_id}:801"));
             }
         }
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 801,
-                agent_id: 4_300_001,
-                granted_courier_item_id: Some(77_001),
-                granted_courier_qty: 10, // deletes both 77_001 (6) and 77_002 (4) regardless of HashMap order
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 801, 4_300_001, 30_000_142)
+                .granted_courier_item_id(Some(77_001))
+                .granted_courier_qty(10), // deletes both 77_001 (6) and 77_002 (4) regardless of HashMap order
         );
         reclaim_courier_cargo(snap, char_id, 801);
         assert!(!snap.items.contains_key(&77_001));
@@ -1204,16 +1154,11 @@ async fn wave4_courier_multi_stack_reclaim_decline_boundary_clamp_and_npc_filter
         );
         snap.item_custom_names
             .insert(77_004, format!("courier_cargo:{char_id}:805"));
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 805,
-                agent_id: 4_300_001,
-                granted_courier_item_id: Some(77_004),
-                granted_courier_qty: 10,
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 805, 4_300_001, 30_000_142)
+                .granted_courier_item_id(Some(77_004))
+                .granted_courier_qty(10),
         );
         reclaim_courier_cargo(snap, char_id, 805);
         assert_eq!(snap.items[&77_004].quantity, 10);
@@ -1221,33 +1166,13 @@ async fn wave4_courier_multi_stack_reclaim_decline_boundary_clamp_and_npc_filter
         assert!(!snap.item_custom_names.contains_key(&77_004));
 
         // Decline boundary at exact 14_400s (no penalty) vs 14_399s (penalty clamped at -10.0)
-        snap.active_missions.insert(
-            (char_id, 801),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 801,
-                agent_id: 4_300_001,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 801, 4_300_001, 30_000_142),
         );
-        snap.active_missions.insert(
-            (char_id, 802),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 802,
-                agent_id: 4_300_001,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 802, 4_300_001, 30_000_142),
         );
         snap.last_mission_decline_times
             .insert(char_id, 1_775_200_000 - 14_400);
@@ -1279,33 +1204,17 @@ async fn wave4_courier_multi_stack_reclaim_decline_boundary_clamp_and_npc_filter
 
     // on_mission_npc_destroyed_core: ignores Offered/Completed & wrong sys_id, decrements even with mismatched killer when ball_id matches!
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 803),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 803,
-                agent_id: 4_300_001,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![999_001],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 803, 4_300_001, 30_000_142)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![999_001]),
         );
-        snap.active_missions.insert(
-            (char_id, 804),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 804,
-                agent_id: 4_300_001,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![999_002],
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 804, 4_300_001, 30_000_142)
+                .npcs_remaining(1)
+                .spawned_npc_ball_ids(vec![999_002]),
         );
     });
     // Wrong system does not decrement
@@ -1314,9 +1223,10 @@ async fn wave4_courier_multi_stack_reclaim_decline_boundary_clamp_and_npc_filter
     // Fleetmate kill (killer != char_id) still decrements when ball_id matches
     on_mission_npc_destroyed_core(&ctx.db, 30_000_142, 999_001, Some(other_char));
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.active_missions[&(char_id, 803)].npcs_remaining, 0);
-        assert!(snap.active_missions[&(char_id, 803)].spawned_npc_ball_ids.is_empty());
-        assert_eq!(snap.active_missions[&(char_id, 804)].npcs_remaining, 1);
+        let m803 = mission_fixture::get(snap, char_id, 803).unwrap();
+        assert_eq!(m803.npcs_remaining, 0);
+        assert!(m803.spawned_npc_ball_ids.is_empty());
+        assert_eq!(mission_fixture::get(snap, char_id, 804).unwrap().npcs_remaining, 1);
     });
 
     // `compute_character_mission_rewards`: verify every `no_lp_mission` disjunct in isolation

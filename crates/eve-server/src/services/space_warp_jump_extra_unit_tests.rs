@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{BoundObjectEntry, ServerContext};
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::services::space_warp_jump::*;
 use eve_db::{
     BookmarkRecord, CorporationRecord, CosmicAnomalyRecord, FleetRecord, InventoryFlag,
@@ -618,21 +619,11 @@ async fn warp_targets_mission_fleet_celestial_rigid_stargate_pochven_zarzakh_and
 
     spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, DVec3::ZERO);
 
-    // 1. WarpToStuff("mission", mission_id) via active_missions fallback
+    // 1. WarpToStuff("mission", mission_id) via mission fixture fallback
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 4401),
-            eve_db::ActiveMissionRecord {
-                mission_id: 4401,
-                character_id: char_id,
-                agent_id: 3_018_681,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 4401, 3_018_681, sys_id),
         );
     });
     let w_miss = call_beyonce(&ctx, &mut sess, None, "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(4401), PyRep::Real(0.0)], &kw)

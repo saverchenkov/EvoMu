@@ -1151,11 +1151,18 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
     })
     .expect("Death pipeline must spawn an NPC wreck with is_npc_wreck = true");
     ctx.db.with_mut_snapshot(|s| {
-        s.active_missions.insert((char_id, 3_008_416), eve_db::ActiveMissionRecord {
-            mission_id: 1, character_id: char_id, agent_id: 3_008_416, solar_system_id: highsec_sys,
-            state: "Accepted".into(), current_room_id: 2, npcs_remaining: 1,
-            spawned_npc_ball_ids: vec![1_880_000_098], bookmark_id: None,
-        });
+        eve_server::services::mission_fixture::insert(
+            s,
+            eve_server::services::mission_fixture::MissionFixture::accepted(
+                char_id,
+                1,
+                3_008_416,
+                highsec_sys,
+            )
+            .current_room_id(2)
+            .npcs_remaining(1)
+            .spawned_npc_ball_ids(vec![1_880_000_098]),
+        );
     });
 
     ctx.advance_secs(60); // 11:00:30 UTC (only 60s elapsed, so 2h decay has not fired)
@@ -1164,7 +1171,7 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
         st.space_object_meta.contains_key(&expired_wreck_id)
     });
     let (wreck_in_items, mission_room, mission_npcs) = ctx.db.with_snapshot(|s| {
-        let m = s.active_missions.get(&(char_id, 3_008_416)).expect("active mission");
+        let m = eve_server::services::mission_fixture::get(s, char_id, 1).expect("active mission");
         (s.items.contains_key(&expired_wreck_id), m.current_room_id, m.npcs_remaining)
     });
     assert!(!wreck_in_items && !wreck_in_meta, "11:00 UTC downtime must delete NPC wreck");

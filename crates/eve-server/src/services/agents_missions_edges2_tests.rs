@@ -3,10 +3,10 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::agents_missions::agents_standings_arcs::{
-    EpicArcStateEntry, MissionTimingAndCargoMeta, RndResearchEntry, save_epic_arc_states,
-    save_mission_meta, save_rnd_research_entries,
+    EpicArcStateEntry, RndResearchEntry, save_epic_arc_states, save_rnd_research_entries,
 };
-use eve_db::{ActiveMissionRecord, InventoryFlag, InventoryItemRecord, WorldRepository};
+use crate::services::mission_fixture::{self, MissionFixture};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -498,90 +498,38 @@ async fn mission_briefing_objective_journal_state_mapping_and_expiry_sweeps() {
 
     ctx.db.with_mut_snapshot(|snap| {
         for &(mid, st_str, _mtype, _) in &states {
-            snap.active_missions.insert(
-                (char_id, mid),
-                ActiveMissionRecord {
-                    character_id: char_id,
-                    mission_id: mid,
-                    agent_id: ag.agent_id,
-                    solar_system_id: sys_id,
-                    state: st_str.to_string(),
-                    current_room_id: 1,
-                    npcs_remaining: 3,
-                    spawned_npc_ball_ids: Vec::new(),
-                    bookmark_id: if mid == 71_002 { Some(9001) } else { None },
-                },
-            );
-            save_mission_meta(
+            mission_fixture::insert(
                 snap,
-                char_id,
-                &MissionTimingAndCargoMeta {
-                    mission_id: mid,
-                    agent_id: ag.agent_id,
-                    offered_at_unix: now.saturating_sub(120),
-                    offer_expiry_unix: now + 3600,
-                    accepted_at_unix: Some(now.saturating_sub(60)),
-                    accept_expiry_unix: Some(now + 3600),
-                    required_delivery_type_id: Some(34),
-                    required_delivery_qty: 10,
-                    destination_station_id: Some(st_id),
-                    ..Default::default()
-                },
+                MissionFixture::new(char_id, mid, ag.agent_id, sys_id, st_str)
+                    .current_room_id(1)
+                    .npcs_remaining(3)
+                    .bookmark_id(if mid == 71_002 { Some(9001) } else { None })
+                    .offered_at_unix(now.saturating_sub(120))
+                    .offer_expiry_unix(now + 3600)
+                    .accepted_at_unix(Some(now.saturating_sub(60)))
+                    .accept_expiry_unix(Some(now + 3600))
+                    .required_delivery_type_id(Some(34))
+                    .required_delivery_qty(10)
+                    .destination_station_id(Some(st_id)),
             );
         }
 
         // Add expired Offered and expired Accepted missions to exercise sweep paths
-        snap.active_missions.insert(
-            (char_id, 71_901),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 71_901,
-                agent_id: ag.agent_id,
-                solar_system_id: sys_id,
-                state: "Offered".to_string(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 71_901,
-                agent_id: ag.agent_id,
-                offered_at_unix: 1,
-                offer_expiry_unix: 1,
-                ..Default::default()
-            },
+            MissionFixture::offered(char_id, 71_901, ag.agent_id, sys_id)
+                .current_room_id(1)
+                .offered_at_unix(1)
+                .offer_expiry_unix(1),
         );
-        snap.active_missions.insert(
-            (char_id, 71_902),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 71_902,
-                agent_id: ag.agent_id,
-                solar_system_id: sys_id,
-                state: "Accepted".to_string(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 71_902,
-                agent_id: ag.agent_id,
-                offered_at_unix: 1,
-                offer_expiry_unix: 100,
-                accepted_at_unix: Some(1),
-                accept_expiry_unix: Some(1),
-                ..Default::default()
-            },
+            MissionFixture::accepted(char_id, 71_902, ag.agent_id, sys_id)
+                .current_room_id(1)
+                .offered_at_unix(1)
+                .offer_expiry_unix(100)
+                .accepted_at_unix(Some(1))
+                .accept_expiry_unix(Some(1)),
         );
 
         // Add R&D research entry so GetMyJournalDetails accrues RP
@@ -661,12 +609,12 @@ async fn mission_briefing_objective_journal_state_mapping_and_expiry_sweeps() {
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            snap.active_missions.get(&(char_id, 71_901)).map(|m| m.state.as_str()),
-            Some("Expired")
+            mission_fixture::get(snap, char_id, 71_901).map(|m| m.state),
+            Some("Expired".to_string())
         );
         assert_eq!(
-            snap.active_missions.get(&(char_id, 71_902)).map(|m| m.state.as_str()),
-            Some("Failed")
+            mission_fixture::get(snap, char_id, 71_902).map(|m| m.state),
+            Some("Failed".to_string())
         );
     });
 }
@@ -783,19 +731,10 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     {
         ctx.db.with_mut_snapshot(|snap| {
             snap.characters.get_mut(&char_id).unwrap().clone_grade = 1;
-            snap.active_missions.insert(
-                (char_id, 72_001),
-                ActiveMissionRecord {
-                    character_id: char_id,
-                    mission_id: 72_001,
-                    agent_id: l4_ag.agent_id,
-                    solar_system_id: l4_ag.solar_system_id.unwrap(),
-                    state: "Offered".into(),
-                    current_room_id: 1,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: Vec::new(),
-                    bookmark_id: None,
-                },
+            mission_fixture::insert(
+                snap,
+                MissionFixture::offered(char_id, 72_001, l4_ag.agent_id, l4_ag.solar_system_id.unwrap())
+                    .current_room_id(1),
             );
         });
         let mut l4_sess = char_session(char_id, l4_ag.solar_system_id.unwrap(), l4_ag.station_id);
@@ -826,31 +765,13 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
         .min()
         .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mid_deliv),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: mid_deliv,
-                agent_id: ag.agent_id,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: mid_deliv,
-                agent_id: ag.agent_id,
-                required_delivery_type_id: Some(34),
-                required_delivery_qty: 1,
-                destination_station_id: Some(st_id),
-                ..Default::default()
-            },
+            MissionFixture::accepted(char_id, mid_deliv, ag.agent_id, sys_id)
+                .current_room_id(1)
+                .required_delivery_type_id(Some(34))
+                .required_delivery_qty(1)
+                .destination_station_id(Some(st_id)),
         );
         snap.items.insert(
             990_001,
@@ -934,34 +855,16 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     let l4_sys_id = l4_tax_ag.solar_system_id.unwrap();
     let mut sess_l4_tax = char_session(char_id, l4_sys_id, l4_tax_ag.station_id);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(char_id, mid_deliv));
+        mission_fixture::remove(snap, char_id, mid_deliv);
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.corporation_id = 1_000_009; // NPC corp, non-exempt
         ch.solar_system_id = l4_sys_id;
         ch.station_id = l4_tax_ag.station_id;
-        snap.active_missions.insert(
-            (char_id, 72_003),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 72_003,
-                agent_id: l4_tax_ag.agent_id,
-                solar_system_id: l4_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 72_003,
-                agent_id: l4_tax_ag.agent_id,
-                offered_level: Some(4), // >= 100k ISK reward -> 11% NPC corp ISK tax applies; 0% LP tax
-                ..Default::default()
-            },
+            MissionFixture::accepted(char_id, 72_003, l4_tax_ag.agent_id, l4_sys_id)
+                .current_room_id(1)
+                .offered_level(Some(4)), // >= 100k ISK reward -> 11% NPC corp ISK tax applies; 0% LP tax
         );
         snap.items.insert(
             990_002,
@@ -1072,19 +975,10 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
                 cooldown_until_unix: Some(0),
             }];
             save_epic_arc_states(snap, char_id, &entries);
-            snap.active_missions.insert(
-                (char_id, 72_101),
-                ActiveMissionRecord {
-                    character_id: char_id,
-                    mission_id: 72_101,
-                    agent_id: epic_ag.agent_id,
-                    solar_system_id: esys,
-                    state: "Accepted".into(),
-                    current_room_id: 1,
-                    npcs_remaining: 0,
-                    spawned_npc_ball_ids: Vec::new(),
-                    bookmark_id: None,
-                },
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, 72_101, epic_ag.agent_id, esys)
+                    .current_room_id(1),
             );
         });
         let comp_arc = handle(
@@ -1222,19 +1116,10 @@ async fn warp_to_location_dungeon_initiates_warp_arrives_and_spawns_wave_gh1367(
                 ..InventoryItemRecord::default()
             },
         );
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id,
-                agent_id,
-                solar_system_id: inoue_sys_id,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, mission_id, agent_id, inoue_sys_id)
+                .current_room_id(1),
         );
     });
 
@@ -1281,10 +1166,10 @@ async fn warp_to_location_dungeon_initiates_warp_arrives_and_spawns_wave_gh1367(
 
     // Simulate downtime/stale NPC ball IDs so pocket entry must spawn fresh mission NPCs.
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+        mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.spawned_npc_ball_ids = vec![999_999_888];
             m.npcs_remaining = 3;
-        }
+        });
     });
 
     let (mut space_sess, sys_h) =
@@ -1346,9 +1231,8 @@ async fn warp_to_location_dungeon_initiates_warp_arrives_and_spawns_wave_gh1367(
 
     // Verify stale NPC ball was reconciled and pocket NPC wave spawned in ballpark near site_origin.
     let spawned_ids = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_id, mission_id))
-            .map(|m| (m.npcs_remaining, m.spawned_npc_ball_ids.clone()))
+        mission_fixture::get(snap, char_id, mission_id)
+            .map(|m| (m.npcs_remaining, m.spawned_npc_ball_ids))
             .unwrap()
     });
     assert!(spawned_ids.0 > 0);
@@ -1413,42 +1297,17 @@ async fn warp_to_location_range_homebase_objective_and_agent_in_space() {
         setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, start_pos).await;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id,
-                agent_id,
-                solar_system_id: inoue_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id,
-                agent_id,
-                offered_at_unix: 1,
-                offer_expiry_unix: u64::MAX / 2,
-                accepted_at_unix: Some(1),
-                accept_expiry_unix: Some(u64::MAX / 2),
-                bonus_expiry_unix: None,
-                completed_at_unix: None,
-                required_delivery_type_id: None,
-                required_delivery_qty: 0,
-                granted_courier_item_id: None,
-                granted_courier_qty: 0,
-                origin_station_id: Some(home_st_id),
-                destination_station_id: Some(dest_st_id),
-                is_anomic_burner: false,
-                chosen_branch: None,
-                offered_level: None,
-            },
+            MissionFixture::accepted(char_id, mission_id, agent_id, inoue_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(2)
+                .offered_at_unix(1)
+                .offer_expiry_unix(u64::MAX / 2)
+                .accepted_at_unix(Some(1))
+                .accept_expiry_unix(Some(u64::MAX / 2))
+                .origin_station_id(Some(home_st_id))
+                .destination_station_id(Some(dest_st_id)),
         );
     });
 
@@ -1697,19 +1556,11 @@ async fn warp_to_location_negative_guards_do_not_mutate_state() {
         .map(|a| a.agent_id)
         .unwrap_or(3_008_416);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id,
-                agent_id: jita_agent,
-                solar_system_id: jita_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mission_id, jita_agent, jita_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(2),
         );
     });
     assert_eq!(
@@ -1730,10 +1581,10 @@ async fn warp_to_location_negative_guards_do_not_mutate_state() {
 
     // 7. Same-system mission < 150 km away -> WarpDistanceTooShort
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+        mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.solar_system_id = inoue_sys_id;
             m.agent_id = 3_012_050;
-        }
+        });
     });
     assert_eq!(
         handle(
@@ -1755,9 +1606,8 @@ async fn warp_to_location_negative_guards_do_not_mutate_state() {
     let (_, final_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(matches!(final_ball.mode, MovementMode::Stop));
     let npc_ids = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_id, mission_id))
-            .map(|m| m.spawned_npc_ball_ids.clone())
+        mission_fixture::get(snap, char_id, mission_id)
+            .map(|m| m.spawned_npc_ball_ids)
             .unwrap()
     });
     assert!(npc_ids.is_empty());
@@ -1862,19 +1712,12 @@ async fn warp_to_location_bookmark_acl_expiry_and_zarzakh_enforcement() {
         snap.bookmarks.insert(bm_zarzakh, mk_bm(bm_zarzakh, char_z, zarzakh_sys_id, DVec3::new(0.0, 300_000.0, 0.0), None, false));
 
         // Mission whose bookmark_id points to an unauthorized shared bookmark must ignore its coords.
-        snap.active_missions.insert(
-            (char_a, 877),
-            ActiveMissionRecord {
-                character_id: char_a,
-                mission_id: 877,
-                agent_id: 3_012_050,
-                solar_system_id: inoue_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: Some(bm_shared_no_folder_b),
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_a, 877, 3_012_050, inoue_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(1)
+                .bookmark_id(Some(bm_shared_no_folder_b)),
         );
     });
 
@@ -1978,19 +1821,11 @@ async fn goto_location_v24_referring_agent_and_on_grid_vs_off_grid() {
         setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, off_grid_start).await;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id,
-                agent_id,
-                solar_system_id: inoue_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mission_id, agent_id, inoue_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(2),
         );
     });
 
@@ -2149,19 +1984,12 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     )
     .await;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_a, mid_a),
-            ActiveMissionRecord {
-                character_id: char_a,
-                mission_id: mid_a,
-                agent_id: 3_012_050,
-                solar_system_id: inoue_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![9_999_001], // stale missing ball ID
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_a, mid_a, 3_012_050, inoue_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(2)
+                .spawned_npc_ball_ids(vec![9_999_001]), // stale missing ball ID
         );
     });
     let _ = sys_h
@@ -2212,9 +2040,8 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
         .db
         .with_snapshot(|snap| snap.sp6_lifecycle.safe_logoffs.contains_key(&char_a)));
     let npc_ids_a = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_a, mid_a))
-            .map(|m| m.spawned_npc_ball_ids.clone())
+        mission_fixture::get(snap, char_a, mid_a)
+            .map(|m| m.spawned_npc_ball_ids)
             .unwrap()
     });
     assert!(!npc_ids_a.is_empty());
@@ -2249,19 +2076,11 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
             },
         );
         snap.module_active_states.insert(cloak_mod_id);
-        snap.active_missions.insert(
-            (char_b, mid_b),
-            ActiveMissionRecord {
-                character_id: char_b,
-                mission_id: mid_b,
-                agent_id: 3_012_050,
-                solar_system_id: inoue_sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_b, mid_b, 3_012_050, inoue_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(1),
         );
     });
     let _ = sys_h

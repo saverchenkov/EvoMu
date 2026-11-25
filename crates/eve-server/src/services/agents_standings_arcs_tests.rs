@@ -1,9 +1,9 @@
 use super::*;
 use crate::router::ServerContext;
+use crate::services::mission_fixture::{self, MissionFixture};
 use eve_machonet::SessionState;
 use eve_db::{
-    ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
-    WorldRepository,
+    InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, WorldRepository,
 };
 use eve_proto::PyRep;
 use eve_sde::{AgentInfo, NpcCorporationInfo, SdeRegistry};
@@ -335,29 +335,11 @@ async fn handle_extended_rpcs_cover_agent_mgr_epic_arc_tracker_standings_keeper_
                 cooldown_until_unix: None,
             }],
         );
-        snap.active_missions.insert(
-            (char_id, 500),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 500,
-                agent_id: 3_018_921,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![],
-                bookmark_id: None,
-            },
-        );
-        save_mission_meta(
+        mission_fixture::insert(
             snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 500,
-                agent_id: 3_018_921,
-                is_anomic_burner: true,
-                ..Default::default()
-            },
+            MissionFixture::accepted(char_id, 500, 3_018_921, 30_000_142)
+                .npcs_remaining(1)
+                .is_anomic_burner(true),
         );
         snap.items.insert(
             100_000_999,
@@ -504,10 +486,7 @@ async fn handle_extended_rpcs_cover_agent_mgr_epic_arc_tracker_standings_keeper_
     );
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions
-            .get_mut(&(char_id, 500))
-            .unwrap()
-            .npcs_remaining = 0;
+        mission_fixture::edit(snap, char_id, 500, |m| m.npcs_remaining = 0);
     });
     let gate_ok = handle_extended(
         &ctx,
@@ -739,19 +718,9 @@ async fn get_my_epic_arc_status_handles_unstarted_offered_accepted_mid_arc_and_c
 
     // 2. Offered initial Epic Arc mission (before EpicArcStateEntry exists).
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, 14117),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 14117,
-                agent_id: 3_019_001,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 14117, 3_019_001, 30_000_142),
         );
     });
     let offered = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
@@ -778,17 +747,10 @@ async fn get_my_epic_arc_status_handles_unstarted_offered_accepted_mid_arc_and_c
 
     // 3. Accepted initial Epic Arc mission populates acceptedDate.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, 14117)).unwrap().state = "Accepted".into();
-        save_mission_meta(
-            snap,
-            char_id,
-            &MissionTimingAndCargoMeta {
-                mission_id: 14117,
-                agent_id: 3_019_001,
-                accepted_at_unix: Some(1_775_400_100),
-                ..Default::default()
-            },
-        );
+        mission_fixture::edit(snap, char_id, 14117, |m| {
+            m.state = "Accepted".into();
+            m.accepted_at_unix = Some(1_775_400_100);
+        });
     });
     let accepted = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
         .await
@@ -805,20 +767,10 @@ async fn get_my_epic_arc_status_handles_unstarted_offered_accepted_mid_arc_and_c
 
     // 4. Mid-arc: mission 14117 completed and mission 14118 offered via a different chapter agent.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(char_id, 14117));
-        snap.active_missions.insert(
-            (char_id, 14118),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 14118,
-                agent_id: 3_019_002,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::remove(snap, char_id, 14117);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 14118, 3_019_002, 30_000_142),
         );
         save_epic_arc_states(
             snap,
@@ -854,7 +806,7 @@ async fn get_my_epic_arc_status_handles_unstarted_offered_accepted_mid_arc_and_c
     // 5. Completed / on cooldown state.
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(char_id, 14118));
+        mission_fixture::remove(snap, char_id, 14118);
         save_epic_arc_states(
             snap,
             char_id,
@@ -980,19 +932,9 @@ async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_a
                 cooldown_until_unix: None,
             }],
         );
-        snap.active_missions.insert(
-            (char_id, 88_001),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 88_001,
-                agent_id: 3_018_921,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 88_001, 3_018_921, 30_000_142),
         );
     });
     let isolated = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
@@ -1012,7 +954,7 @@ async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_a
 
     // 2. Legacy faction-mapped `epic_arc_id: 1` with V24 mission 14117 coalesces into Arc 29 alongside active 14118.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(char_id, 88_001));
+        mission_fixture::remove(snap, char_id, 88_001);
         save_epic_arc_states(
             snap,
             char_id,
@@ -1027,19 +969,9 @@ async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_a
                 cooldown_until_unix: None,
             }],
         );
-        snap.active_missions.insert(
-            (char_id, 14118),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 14118,
-                agent_id: 3_019_002,
-                state: "Offered".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::offered(char_id, 14118, 3_019_002, 30_000_142),
         );
     });
     let coalesced = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
@@ -1064,7 +996,7 @@ async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_a
     // 3. Restarting an arc after cooldown expires resets stale completion timestamps in favor of active mission.
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(char_id, 14118));
+        mission_fixture::remove(snap, char_id, 14118);
         save_epic_arc_states(
             snap,
             char_id,
@@ -1079,19 +1011,9 @@ async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_a
                 cooldown_until_unix: Some(now.saturating_sub(100)),
             }],
         );
-        snap.active_missions.insert(
-            (char_id, 14117),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id: 14117,
-                agent_id: 3_019_001,
-                state: "Accepted".into(),
-                solar_system_id: 30_000_142,
-                current_room_id: 0,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, 14117, 3_019_001, 30_000_142),
         );
     });
     let restarted = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())

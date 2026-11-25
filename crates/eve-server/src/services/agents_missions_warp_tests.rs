@@ -1,10 +1,10 @@
 use super::super::{
     deterministic_mission_site_origin, find_accepted_mission_for_warp, handle,
-    parse_agent_warp_args, resolve_agent_warp_target, ActiveMissionRecord, MissionLocationRef,
-    WarpTarget,
+    parse_agent_warp_args, resolve_agent_warp_target, MissionLocationRef, WarpTarget,
 };
 use super::test_ctx;
 use crate::router::{BoundObjectEntry, ServerContext};
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::system_actor::SystemHandle;
 use eve_db::{
     BookmarkRecord, FleetMemberRecord, FleetRecord, FleetRole, InventoryFlag, InventoryItemRecord,
@@ -48,7 +48,7 @@ async fn setup_agent_fleet_warp_fixture(seed_base: i64) -> AgentFleetWarpFixture
     let pocket_pos = DVec3::new(10_000_000.0, 0.0, 0.0);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_fc);
+        mission_fixture::clear_character(snap, char_fc);
         let template_ch = snap.characters.values().next().unwrap().clone();
         let template_acc = snap.accounts.values().next().unwrap().clone();
         for (idx, (cid, sid)) in [(char_fc, ship_fc), (char_wing, ship_wing)]
@@ -103,19 +103,11 @@ async fn setup_agent_fleet_warp_fixture(seed_base: i64) -> AgentFleetWarpFixture
                 is_shared: false,
             },
         );
-        snap.active_missions.insert(
-            (char_fc, mission_id),
-            ActiveMissionRecord {
-                character_id: char_fc,
-                mission_id,
-                agent_id,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: Some(bm_id),
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_fc, mission_id, agent_id, sys_id)
+                .current_room_id(1)
+                .bookmark_id(Some(bm_id)),
         );
         let mut member_details = HashMap::new();
         member_details.insert(
@@ -348,7 +340,7 @@ async fn warp_target_enum_replaces_loc_lt_64_heuristics_and_resolves_typed_varia
 
     // Seed 66 mission pocket bookmarks so ordinal index 65 (>= 64!) is valid while 66 is out-of-range.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        mission_fixture::clear_character(snap, char_id);
         let template_ch = snap.characters.values().next().unwrap().clone();
         let mut ch = template_ch;
         ch.character_id = char_id;
@@ -377,19 +369,11 @@ async fn warp_target_enum_replaces_loc_lt_64_heuristics_and_resolves_typed_varia
                 },
             );
         }
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                character_id: char_id,
-                mission_id,
-                agent_id: agent.agent_id,
-                solar_system_id: sys_id,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: Some(990_000),
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mission_id, agent.agent_id, sys_id)
+                .current_room_id(1)
+                .bookmark_id(Some(990_000)),
         );
     });
 

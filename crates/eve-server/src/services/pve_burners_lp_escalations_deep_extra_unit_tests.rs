@@ -1,12 +1,12 @@
 use crate::router::ServerContext;
 use crate::services::lp_store::CONCORD_CORP_ID;
+use crate::services::mission_fixture::{self, MissionFixture};
 use crate::services::pve_expeditions::{
     advance_expedition_step, create_escalation_expedition, get_my_escalating_path_details_rowset,
 };
 use eve_db::{
-    ActiveMissionRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    LoyaltyStoreOfferItemRecord, LoyaltyStoreOfferRecord, NeuralAttributes, ServerClock,
-    VirtualServerClock, WorldRepository,
+    CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, LoyaltyStoreOfferItemRecord,
+    LoyaltyStoreOfferRecord, NeuralAttributes, ServerClock, VirtualServerClock, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -234,19 +234,11 @@ async fn test_anomic_burner_gate_ship_group_and_mass_restrictions() {
                 },
             );
         }
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            ActiveMissionRecord {
-                mission_id,
-                character_id: char_id,
-                agent_id: 3_010_004,
-                solar_system_id: 30_000_142,
-                state: "Accepted".into(),
-                current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: Vec::new(),
-                bookmark_id: None,
-            },
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mission_id, 3_010_004, 30_000_142)
+                .current_room_id(1)
+                .npcs_remaining(1),
         );
     });
 
@@ -266,7 +258,7 @@ async fn test_anomic_burner_gate_ship_group_and_mass_restrictions() {
     assert_eq!(call_keeper_gate(&ctx, &mut sess, mission_id).await.unwrap().unwrap_err().code, "RoomNpcsRemaining");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.get_mut(&(char_id, mission_id)).unwrap().npcs_remaining = 0;
+        mission_fixture::edit(snap, char_id, mission_id, |m| m.npcs_remaining = 0);
     });
     let ok = call_keeper_gate(&ctx, &mut sess, mission_id).await.unwrap().expect("frigate unlocks gate");
     assert_eq!(ok.dict_get("currentRoomID").and_then(|v| v.as_i64()), Some(2));

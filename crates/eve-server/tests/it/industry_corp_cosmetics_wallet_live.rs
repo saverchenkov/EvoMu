@@ -24,7 +24,7 @@ use eve_proto::PyRep;
 use eve_server::formulas::compute_manufacturing_material_qty;
 use eve_server::quasar_gateway::STATUS_FORBIDDEN;
 use eve_server::router::ServerContext;
-use eve_server::services::agents_missions::load_mission_meta;
+use eve_server::services::mission_fixture;
 use eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id;
 use eve_server::world_seeder::seed_full_market_catalog;
 use std::sync::{Arc, OnceLock};
@@ -526,14 +526,16 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
         .await
         .expect("Accept Caldari agent mission");
     if let Some((tid, qty, dest_st, granted_cid)) = ctx.db.with_snapshot(|s| {
-        load_mission_meta(s, PILOT_1, mid as u32).map(|m| {
-            (
-                m.required_delivery_type_id.unwrap_or(0),
-                m.required_delivery_qty.max(1),
-                m.destination_station_id,
-                m.granted_courier_item_id,
-            )
-        })
+        mission_fixture::get(s, PILOT_1, mid as u32)
+            .filter(|m| m.has_metadata)
+            .map(|m| {
+                (
+                    m.required_delivery_type_id.unwrap_or(0),
+                    m.required_delivery_qty.max(1),
+                    m.destination_station_id,
+                    m.granted_courier_item_id,
+                )
+            })
     }) {
         if let Some(cid_item) = granted_cid {
             if let Some(ship_id) = s1.ship_id {
@@ -554,9 +556,8 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
         }
     }
     let (ball_ids, m_sys) = ctx.db.with_snapshot(|s| {
-        s.active_missions
-            .get(&(PILOT_1, mid as u32))
-            .map(|m| (m.spawned_npc_ball_ids.clone(), m.solar_system_id))
+        mission_fixture::get(s, PILOT_1, mid as u32)
+            .map(|m| (m.spawned_npc_ball_ids, m.solar_system_id))
             .unwrap_or((Vec::new(), 30_000_142))
     });
     for bid in ball_ids {
