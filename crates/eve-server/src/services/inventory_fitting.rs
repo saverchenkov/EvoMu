@@ -806,7 +806,7 @@ pub(crate) async fn handle_invbroker_add(
                     }
                     let eff_qty = split_qty_opt.unwrap_or(item.quantity);
                     if eff_qty != 1 {
-                        return Err(BridgeRpcError::cannot_fit_stacked_module(Some(new_loc), Some(item_id), eff_qty, format!("Item {item_id} has quantity {eff_qty} and must be split to 1 before fitting")));
+                        return Err(BridgeRpcError::cannot_fit_stacked_module(Some(new_loc), Some(item_id), eff_qty.into(), format!("Item {item_id} has quantity {eff_qty} and must be split to 1 before fitting")));
                     }
                     let item_cat = ctx
                         .sde
@@ -1572,7 +1572,7 @@ pub(crate) async fn handle_invbroker_add(
                     }
                     let eff_qty = split_qty_opt.unwrap_or(orig_item.quantity);
                     if eff_qty != 1 {
-                        return Err(BridgeRpcError::cannot_fit_stacked_module(Some(new_loc), Some(orig_item_id), eff_qty, format!("Item {orig_item_id} has quantity {eff_qty} and must be split to 1 before fitting")));
+                        return Err(BridgeRpcError::cannot_fit_stacked_module(Some(new_loc), Some(orig_item_id), eff_qty.into(), format!("Item {orig_item_id} has quantity {eff_qty} and must be split to 1 before fitting")));
                     }
                     let Some(ship_item) = snap.items.get(&new_loc) else {
                         return Err(BridgeRpcError {

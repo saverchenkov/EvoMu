@@ -472,18 +472,24 @@ pub fn check_crimewatch_action_restriction(
                 | "jump_portal"
         ) && !is_capsule
         {
+            let msg = format!(
+                "Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"
+            );
             return Err(match action {
-                "stargate_jump" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantJumpGlobalCriminalFlag),
                 "dock" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantDockGlobalCriminalFlag),
                 "wormhole_jump" | "wh_jump" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantEnterWormholeGlobalCriminalFlag),
-                "jump_drive" | "jump_bridge" | "jump_portal" => BridgeRpcError::with_client_error(
-                    "CantBeaconJumpGlobalCriminalFlag",
-                    format!("Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"),
-                    eve_proto::ClientError::user(eve_proto::UserErrorKey::CantJumpGlobalCriminalFlag),
-                ),
+                "jump_drive" | "jump_bridge" | "jump_portal" => BridgeRpcError {
+                    code: "CantBeaconJumpGlobalCriminalFlag".into(),
+                    message: msg,
+                    client_error: None,
+                },
                 "store_ship" | "switch_ship" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotBoardShipInHighSecAsCriminal),
                 "eject" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotEjectInvolvedInCrime),
-                _ => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantJumpGlobalCriminalFlag),
+                _ => BridgeRpcError {
+                    code: "CantJumpGlobalCriminalFlag".into(),
+                    message: msg,
+                    client_error: None,
+                },
             });
         }
     }

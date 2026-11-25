@@ -1177,10 +1177,10 @@ async fn warp_and_subwarp_commit_break_ballpark_protection_and_preserve_on_rejec
 #[test]
 fn gh1195_t1_warp_phase_table_and_subwarp_rejection_emit_ship_in_warp_facts() {
     for (phase, expected_kind, should_block) in [
-        (WarpPhase::Aligning, eve_proto::WarpPhaseKind::Aligning, false),
-        (WarpPhase::Accelerating, eve_proto::WarpPhaseKind::Accelerating, true),
-        (WarpPhase::Cruising, eve_proto::WarpPhaseKind::Cruising, true),
-        (WarpPhase::Decelerating, eve_proto::WarpPhaseKind::Decelerating, true),
+        (eve_destiny::WarpPhase::Aligning, eve_proto::WarpPhaseKind::Aligning, false),
+        (eve_destiny::WarpPhase::Accelerating, eve_proto::WarpPhaseKind::Accelerating, true),
+        (eve_destiny::WarpPhase::Cruising, eve_proto::WarpPhaseKind::Cruising, true),
+        (eve_destiny::WarpPhase::Decelerating, eve_proto::WarpPhaseKind::Decelerating, true),
     ] {
         assert_eq!(warp_phase_kind(phase), expected_kind);
         assert!(eve_proto::WARP_PHASE_REJECTION_TABLE.iter().any(|&(k, blk, _)| {
