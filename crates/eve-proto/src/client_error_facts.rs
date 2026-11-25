@@ -8,6 +8,109 @@ use super::{round_user_error_real_6dp, ClientError, IntoUserErrorArg, UserErrorA
 use crate::BridgeRpcError;
 use serde::{Deserialize, Serialize};
 
+/// Warp phases governing `#1454` active-warp vs warp-restricted rejection rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WarpPhaseKind {
+    Aligning,
+    Accelerating,
+    Cruising,
+    Decelerating,
+}
+
+impl WarpPhaseKind {
+    /// Canonical warp phase label stored in [`RejectionFacts::ShipInWarp`].
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Aligning => "Aligning",
+            Self::Accelerating => "Accelerating",
+            Self::Cruising => "Cruising",
+            Self::Decelerating => "Decelerating",
+        }
+    }
+
+    /// Returns `true` when active warp blocks navigation overrides, non-warp-safe module
+    /// activations, Doomsdays, fighter abilities, and direct `Eject` / `BoardShip` (`Aligning` allowed).
+    pub const fn blocks_active_warp_actions(&self) -> bool {
+        !matches!(self, Self::Aligning)
+    }
+
+    /// Returns `true` when any warp phase (including `Aligning`) blocks restricted warp-entry,
+    /// jump, filament, deployable MJU, or bay-boarding transitions (`#1454`).
+    pub const fn blocks_warp_restricted_actions(&self) -> bool {
+        true
+    }
+
+    /// Returns the V24 navigation `UserErrorKey` (`ShipInWarp`) for blocking active-warp phases (`#1454`).
+    pub const fn active_warp_error_key(&self) -> Option<UserErrorKey> {
+        if self.blocks_active_warp_actions() {
+            Some(UserErrorKey::ShipInWarp)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the V24 navigation `UserErrorKey` (`ShipInWarp`) for restricted jump/deploy/bay ops.
+    pub const fn restricted_warp_error_key(&self) -> UserErrorKey {
+        UserErrorKey::ShipInWarp
+    }
+
+    /// Returns the V24 module-activation `UserErrorKey` (`DeniedActivateInWarp`) for active-warp phases (`#1454`).
+    pub const fn active_module_error_key(&self) -> Option<UserErrorKey> {
+        if self.blocks_active_warp_actions() {
+            Some(UserErrorKey::DeniedActivateInWarp)
+        } else {
+            None
+        }
+    }
+}
+
+/// Canonical `#1454` per-phase rejection policy row for active-warp vs warp-restricted ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarpPhasePolicy {
+    pub phase: WarpPhaseKind,
+    pub blocks_active_warp: bool,
+    pub blocks_restricted_ops: bool,
+    pub active_warp_key: Option<UserErrorKey>,
+    pub active_module_key: Option<UserErrorKey>,
+    pub restricted_op_key: UserErrorKey,
+}
+
+/// Canonical `#1454` warp-phase policy table across all four [`WarpPhaseKind`] states.
+pub const WARP_PHASE_REJECTION_TABLE: &[WarpPhasePolicy] = &[
+    WarpPhasePolicy {
+        phase: WarpPhaseKind::Aligning,
+        blocks_active_warp: false,
+        blocks_restricted_ops: true,
+        active_warp_key: None,
+        active_module_key: None,
+        restricted_op_key: UserErrorKey::ShipInWarp,
+    },
+    WarpPhasePolicy {
+        phase: WarpPhaseKind::Accelerating,
+        blocks_active_warp: true,
+        blocks_restricted_ops: true,
+        active_warp_key: Some(UserErrorKey::ShipInWarp),
+        active_module_key: Some(UserErrorKey::DeniedActivateInWarp),
+        restricted_op_key: UserErrorKey::ShipInWarp,
+    },
+    WarpPhasePolicy {
+        phase: WarpPhaseKind::Cruising,
+        blocks_active_warp: true,
+        blocks_restricted_ops: true,
+        active_warp_key: Some(UserErrorKey::ShipInWarp),
+        active_module_key: Some(UserErrorKey::DeniedActivateInWarp),
+        restricted_op_key: UserErrorKey::ShipInWarp,
+    },
+    WarpPhasePolicy {
+        phase: WarpPhaseKind::Decelerating,
+        blocks_active_warp: true,
+        blocks_restricted_ops: true,
+        active_warp_key: Some(UserErrorKey::ShipInWarp),
+        active_module_key: Some(UserErrorKey::DeniedActivateInWarp),
+        restricted_op_key: UserErrorKey::ShipInWarp,
+    },
+];
+
 /// Structured game-state facts explaining why a server RPC rejected a client request (`#1195`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RejectionFacts {
@@ -15,6 +118,14 @@ pub enum RejectionFacts {
     QuantumCoreRequired { structure_id: i64, service: String },
     /// Action cannot proceed while the ship is in warp (`ShipAlreadyInWarp` / `ShipInWarp`, `#1454`).
     ShipInWarp { ship_id: Option<i64>, action: String, warp_phase: Option<String> },
+    /// Target lock acquisition failed (`TargetingFailed`: range, cloak, decloak delay, validation).
+    TargetingFailed {
+        ship_id: Option<i64>,
+        target_id: Option<i64>,
+        reason: String,
+        distance_m: Option<f64>,
+        max_range_m: Option<f64>,
+    },
     /// Weapon or launcher has no compatible charges loaded (`NoAmmoLoaded`).
     NoAmmoLoaded { module_id: Option<i64>, launcher_type_id: Option<i64>, required_charge_group: Option<u32> },
     /// Entity lacks enough capacitor energy (`NotEnoughCapacitor`).
@@ -152,6 +263,55 @@ impl BridgeRpcError {
         })
     }
 
+    /// Constructs a phase-aware `ShipAlreadyInWarp` (`#1454`) error for active-warp phases.
+    pub fn ship_already_in_warp_for_phase(
+        ship_id: Option<i64>, action: impl Into<String>, phase: WarpPhaseKind, message: impl Into<String>,
+    ) -> Self {
+        debug_assert!(
+            phase.blocks_active_warp_actions(),
+            "Aligning must not emit ShipAlreadyInWarp for active-warp overrides"
+        );
+        Self::ship_already_in_warp(ship_id, action, Some(phase.as_str().to_owned()), message)
+    }
+
+    /// Constructs a phase-aware `ShipInWarp` (`#1454`) error for active-warp phases.
+    pub fn ship_in_warp_for_phase(
+        ship_id: Option<i64>, action: impl Into<String>, phase: WarpPhaseKind, message: impl Into<String>,
+    ) -> Self {
+        debug_assert!(
+            phase.blocks_active_warp_actions(),
+            "Use ship_in_warp_for_restricted_phase when Aligning also rejects"
+        );
+        Self::ship_in_warp(ship_id, action, Some(phase.as_str().to_owned()), message)
+    }
+
+    /// Constructs a phase-aware `ShipInWarp` (`#1454`) error for restricted jumps, deploys, and bay boarding (incl. `Aligning`).
+    pub fn ship_in_warp_for_restricted_phase(
+        ship_id: Option<i64>, action: impl Into<String>, phase: WarpPhaseKind, message: impl Into<String>,
+    ) -> Self {
+        Self::ship_in_warp(ship_id, action, Some(phase.as_str().to_owned()), message)
+    }
+
+    /// Constructs a phase-aware `CantActivateInWarp` (`DeniedActivateInWarp`) error for active-warp phases (`#1454`).
+    pub fn cant_activate_in_warp_for_phase(
+        ship_id: Option<i64>, action: impl Into<String>, phase: WarpPhaseKind, message: impl Into<String>,
+    ) -> Self {
+        debug_assert!(
+            phase.blocks_active_warp_actions(),
+            "Aligning must not emit CantActivateInWarp"
+        );
+        Self::cant_activate_in_warp(ship_id, action, Some(phase.as_str().to_owned()), message)
+    }
+
+    /// Constructs a typed `CantActivateInWarp` (`DeniedActivateInWarp` V24 dialog 774) error.
+    pub fn cant_activate_in_warp(
+        ship_id: Option<i64>, action: impl Into<String>, warp_phase: Option<String>, message: impl Into<String>,
+    ) -> Self {
+        Self::reject("CantActivateInWarp", message, UserErrorKey::DeniedActivateInWarp, RejectionFacts::ShipInWarp {
+            ship_id, action: action.into(), warp_phase,
+        })
+    }
+
     /// Constructs a typed `NoAmmoLoaded` (`NoCharges` V24 dialog 1291) error.
     pub fn no_ammo_loaded(
         module_id: Option<i64>, launcher_type_id: Option<i64>, required_charge_group: Option<u32>,
@@ -263,6 +423,55 @@ impl BridgeRpcError {
         Self::reject("InvalidTarget", message, UserErrorKey::DeniedTargetSelf, RejectionFacts::InvalidTarget {
             target_id: Some(target_id), module_id: None, reason: reason.into(),
         })
+    }
+
+    /// Constructs a typed out-of-range `TargetingFailed` (`TargetTooFar` V24 dialog 1632) error.
+    pub fn targeting_too_far(
+        ship_id: Option<i64>,
+        target_id: Option<i64>,
+        target_name: impl Into<String>,
+        module_type_id: i64,
+        distance_m: f64,
+        max_range_m: f64,
+        message: impl Into<String>,
+    ) -> Self {
+        let dist = round_user_error_real_6dp(distance_m);
+        let max_r = round_user_error_real_6dp(max_range_m);
+        Self::with_rejection(
+            "TargetingFailed",
+            message,
+            UserErrorKey::TargetTooFar,
+            ClientError::target_too_far_args(target_name, module_type_id, dist),
+            RejectionFacts::TargetingFailed {
+                ship_id,
+                target_id,
+                reason: "exceeds_max_target_range".to_owned(),
+                distance_m: Some(dist),
+                max_range_m: Some(max_r),
+            },
+        )
+    }
+
+    /// Constructs a typed `TargetingFailed` error mapped to a concrete V24 targeting [`UserErrorKey`].
+    pub fn targeting_failed(
+        ship_id: Option<i64>,
+        target_id: Option<i64>,
+        key: UserErrorKey,
+        reason: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::reject(
+            "TargetingFailed",
+            message,
+            key,
+            RejectionFacts::TargetingFailed {
+                ship_id,
+                target_id,
+                reason: reason.into(),
+                distance_m: None,
+                max_range_m: None,
+            },
+        )
     }
 
     /// Constructs a typed `InventoryNotAccessible` (`AccessDenied` V24 dialog 7256) error.

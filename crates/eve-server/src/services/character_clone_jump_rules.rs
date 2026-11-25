@@ -1119,11 +1119,19 @@ pub async fn activate_clone_vat_bay(
                 eve_proto::ClientError::user(eve_proto::UserErrorKey::ShipCloaked),
             ));
         }
-        return Err(crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            mod_type.type_id,
-            e,
-        ));
+        return Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                mod_type.type_id,
+                None,
+                None,
+                e,
+            )
+            .await,
+        );
     }
 
     ctx.emit_reserved_fuel_item_diffs(

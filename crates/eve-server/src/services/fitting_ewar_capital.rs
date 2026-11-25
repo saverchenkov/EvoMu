@@ -1591,26 +1591,37 @@ pub(crate) async fn validate_passive_targeter_activation(
         if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
             || cs.decloak_targeting_delay_remaining_s > 0.0
         {
-            return Err(BridgeRpcError {
-                code: "TargetingFailed".into(),
-                message: "Cannot acquire target lock while cloaked or during decloak delay".into(),
-                client_error: None,
-            });
+            let key = if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+                eve_proto::UserErrorKey::CantTargetWhileCloaked
+            } else {
+                eve_proto::UserErrorKey::DeniedTargetAfterCloak
+            };
+            return Err(BridgeRpcError::targeting_failed(
+                Some(ship_id),
+                Some(target_id),
+                key,
+                "cloak_or_decloak_delay",
+                "Cannot acquire target lock while cloaked or during decloak delay",
+            ));
         }
     }
     let Some((_, s_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Err(BridgeRpcError {
-            code: "TargetingFailed".into(),
-            message: "Ship is not present in space ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::targeting_failed(
+            Some(ship_id),
+            Some(target_id),
+            eve_proto::UserErrorKey::CantShipNotPresent,
+            "ship_not_in_space",
+            "Ship is not present in space ballpark",
+        ));
     };
     let Some((_, t_ball)) = sys.get_ball_snapshot(target_id).await.ok().flatten() else {
-        return Err(BridgeRpcError {
-            code: "TargetingFailed".into(),
-            message: format!("Target {target_id} not found in space"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::targeting_failed(
+            Some(ship_id),
+            Some(target_id),
+            eve_proto::UserErrorKey::TargetCantValidate,
+            "target_not_present",
+            format!("Target {target_id} not found in space"),
+        ));
     };
     let t_cs = sys.get_combat_state(target_id).await.ok().flatten().map(|mut cs| {
         cs.sync_action_breaks();
@@ -1625,11 +1636,13 @@ pub(crate) async fn validate_passive_targeter_activation(
                     client_error: None,
                 });
             }
-            return Err(BridgeRpcError {
-                code: "TargetingFailed".into(),
-                message: format!("Target {target_id} is cloaked"),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::targeting_failed(
+                Some(ship_id),
+                Some(target_id),
+                eve_proto::UserErrorKey::DeniedTargetingTargetCloaked,
+                "target_cloaked",
+                format!("Target {target_id} is cloaked"),
+            ));
         }
     }
     let max_range = fit

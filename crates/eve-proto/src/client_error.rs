@@ -7,7 +7,7 @@
 
 #[path = "client_error_facts.rs"]
 mod client_error_facts;
-pub use client_error_facts::RejectionFacts;
+pub use client_error_facts::{RejectionFacts, WarpPhaseKind, WarpPhasePolicy, WARP_PHASE_REJECTION_TABLE};
 
 use crate::{marshal, BridgeRpcError, PyRep};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -664,10 +664,16 @@ pub enum UserErrorKey {
     ConContractInvalid,
     ConAuctionHasBids,
     ModuleNoLongerPresentForCharges,
+    TargetCantValidate,
+    CantTargetWhileCloaked,
+    DeniedTargetAfterCloak,
+    DeniedTargetingTargetCloaked,
+    UnableToTarget,
+    DeniedActivateInWarp,
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all 118 typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 124 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -787,6 +793,12 @@ impl UserErrorKey {
         Self::ConContractInvalid,
         Self::ConAuctionHasBids,
         Self::ModuleNoLongerPresentForCharges,
+        Self::TargetCantValidate,
+        Self::CantTargetWhileCloaked,
+        Self::DeniedTargetAfterCloak,
+        Self::DeniedTargetingTargetCloaked,
+        Self::UnableToTarget,
+        Self::DeniedActivateInWarp,
     ];
 
     /// Exact V24 `eveexceptions.UserError` message key string sent on the wire.
@@ -920,6 +932,12 @@ impl UserErrorKey {
             Self::ConContractInvalid => "ConContractInvalid",
             Self::ConAuctionHasBids => "ConAuctionHasBids",
             Self::ModuleNoLongerPresentForCharges => "ModuleNoLongerPresentForCharges",
+            Self::TargetCantValidate => "TargetCantValidate",
+            Self::CantTargetWhileCloaked => "CantTargetWhileCloaked",
+            Self::DeniedTargetAfterCloak => "DeniedTargetAfterCloak",
+            Self::DeniedTargetingTargetCloaked => "DeniedTargetingTargetCloaked",
+            Self::UnableToTarget => "UnableToTarget",
+            Self::DeniedActivateInWarp => "DeniedActivateInWarp",
         }
     }
 
@@ -1050,6 +1068,12 @@ impl UserErrorKey {
             Self::ConContractInvalid => Some(5048),
             Self::ConAuctionHasBids => Some(2045),
             Self::ModuleNoLongerPresentForCharges => Some(1230),
+            Self::TargetCantValidate => Some(1613),
+            Self::CantTargetWhileCloaked => Some(2436),
+            Self::DeniedTargetAfterCloak => Some(781),
+            Self::DeniedTargetingTargetCloaked => Some(794),
+            Self::UnableToTarget => Some(1669),
+            Self::DeniedActivateInWarp => Some(774),
         }
     }
 
@@ -1173,7 +1197,13 @@ impl UserErrorKey {
             | Self::ModuleNoLongerPresentForCharges
             | Self::NotEnoughEnergy
             | Self::StructureDockingDenied
-            | Self::StructureServiceUnavailable => Some(3),
+            | Self::StructureServiceUnavailable
+            | Self::TargetCantValidate
+            | Self::CantTargetWhileCloaked
+            | Self::DeniedTargetAfterCloak
+            | Self::DeniedTargetingTargetCloaked
+            | Self::UnableToTarget
+            | Self::DeniedActivateInWarp => Some(3),
             Self::InsureShipAlreadyInsured | Self::CustomQuestion => Some(4),
             Self::CustomError => Some(7),
         }
@@ -1514,12 +1544,11 @@ impl ClientError {
         )
     }
 
-    /// Constructs a typed `TargetTooFar` (`{targetname, module, distance}`).
-    pub fn target_too_far(
+    pub(crate) fn target_too_far_args(
         target_name: impl Into<String>,
         module_type_id: i64,
         distance_m: f64,
-    ) -> Self {
+    ) -> [(&'static str, UserErrorArg); 3] {
         let target_name = target_name.into();
         let target_name = if target_name.trim().is_empty() {
             "Target".to_string()
@@ -1531,13 +1560,22 @@ impl ClientError {
         } else {
             0.0
         };
+        [
+            ("targetname", UserErrorArg::Str(target_name)),
+            ("module", UserErrorArg::Int(module_type_id.max(0))),
+            ("distance", UserErrorArg::Real(distance_m)),
+        ]
+    }
+
+    /// Constructs a typed `TargetTooFar` (`{targetname, module, distance}`).
+    pub fn target_too_far(
+        target_name: impl Into<String>,
+        module_type_id: i64,
+        distance_m: f64,
+    ) -> Self {
         Self::user_with_args(
             UserErrorKey::TargetTooFar,
-            [
-                ("targetname", UserErrorArg::Str(target_name)),
-                ("module", UserErrorArg::Int(module_type_id.max(0))),
-                ("distance", UserErrorArg::Real(distance_m)),
-            ],
+            Self::target_too_far_args(target_name, module_type_id, distance_m),
         )
     }
 
@@ -2085,6 +2123,10 @@ impl BridgeRpcError {
                 key: UserErrorKey::TargetTooFar,
                 args: UserErrorKey::TargetTooFar.default_args(),
             },
+            "TargetingFailed" => ClientError::user(UserErrorKey::UnableToTarget),
+            "CantActivateInWarp" | "DeniedActivateInWarp" => {
+                ClientError::user(UserErrorKey::DeniedActivateInWarp)
+            }
             "NoChargesLoaded" | "NoAmmoLoaded" => ClientError::User {
                 key: UserErrorKey::NoCharges,
                 args: UserErrorKey::NoCharges.default_args(),

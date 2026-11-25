@@ -68,11 +68,13 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
             if target_id == source_id {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: "Cannot target self".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::targeting_failed(
+                    Some(source_id),
+                    Some(target_id),
+                    eve_proto::UserErrorKey::DeniedTargetSelf,
+                    "self_target",
+                    "Cannot target self",
+                )));
             }
 
             let is_assumed_structure = ctx.db.with_snapshot(|s| {
@@ -112,18 +114,22 @@ pub(crate) async fn handle_dogma_ops(
 
             let sys = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = sys.get_ball_snapshot(source_id).await.unwrap_or(None) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Source ball {source_id} not found in system"),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::targeting_failed(
+                    Some(source_id),
+                    Some(target_id),
+                    eve_proto::UserErrorKey::CantShipNotPresent,
+                    "ship_not_in_space",
+                    format!("Source ball {source_id} not found in system"),
+                )));
             };
             let Some((_, target_ball)) = sys.get_ball_snapshot(target_id).await.unwrap_or(None) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Target ball {target_id} not found in system"),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::targeting_failed(
+                    Some(source_id),
+                    Some(target_id),
+                    eve_proto::UserErrorKey::TargetCantValidate,
+                    "target_not_present",
+                    format!("Target ball {target_id} not found in system"),
+                )));
             };
 
             if sys
@@ -151,11 +157,18 @@ pub(crate) async fn handle_dogma_ops(
                 if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
                     || cs.decloak_targeting_delay_remaining_s > 0.0
                 {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetingFailed".into(),
-                        message: "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay".into(),
-                        client_error: None,
-                    }));
+                    let cloak_key = if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+                        eve_proto::UserErrorKey::CantTargetWhileCloaked
+                    } else {
+                        eve_proto::UserErrorKey::DeniedTargetAfterCloak
+                    };
+                    return Some(Err(BridgeRpcError::targeting_failed(
+                        Some(source_id),
+                        Some(target_id),
+                        cloak_key,
+                        "cloak_or_decloak_delay",
+                        "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay",
+                    )));
                 }
             }
 
@@ -166,11 +179,15 @@ pub(crate) async fn handle_dogma_ops(
             let surface_offset = ship_ball.radius + target_ball.radius;
             let dist = ((ship_ball.position - target_ball.position).length() - surface_offset).max(0.0);
             if dist > max_range {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::targeting_too_far(
+                    Some(source_id),
+                    Some(target_id),
+                    super::fitting_dogma_im::resolve_target_display_name(ctx, target_id),
+                    fit_res.as_ref().map_or(ship_ball.type_id as i64, |f| f.ship.type_id as i64),
+                    dist,
+                    max_range,
+                    format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)"),
+                )));
             }
 
             let (max_locked, skill_bottleneck) = fit_res
@@ -288,11 +305,18 @@ pub(crate) async fn handle_dogma_ops(
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetingFailed".into(),
-                        message: e,
-                        client_error: None,
-                    }));
+                    let key = if e.contains("tethered") {
+                        eve_proto::UserErrorKey::DeniedTethered
+                    } else {
+                        eve_proto::UserErrorKey::UnableToTarget
+                    };
+                    return Some(Err(BridgeRpcError::targeting_failed(
+                        Some(source_id),
+                        Some(target_id),
+                        key,
+                        "lock_actor_rejected",
+                        e,
+                    )));
                 }
             }
 

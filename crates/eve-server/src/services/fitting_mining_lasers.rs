@@ -458,11 +458,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             if !fit.modules.contains_key(&module_id) {
-                let msg = format!("Module {module_id} is not fitted to active ship {ship_id}");
-                return Some(Err(BridgeRpcError::with_client_error(
-                    "ModuleNotFound",
-                    msg.clone(),
-                    eve_proto::ClientError::CustomInfo(msg),
+                return Some(Err(BridgeRpcError::module_not_found(
+                    module_id,
+                    Some(ship_id),
+                    None,
+                    false,
+                    format!("Module {module_id} is not fitted to active ship {ship_id}"),
                 )));
             }
             let was_cycling = if let Some(sys_id) = session.solar_system_id {
@@ -531,11 +532,13 @@ pub(crate) async fn handle_mining_and_deactivate(
             };
             let target_rack_idx: usize = if let Some(fm) = fit.modules.get(&arg_val) {
                 let Some(idx) = crate::services::fitting_cycles_overheat::rack_index_for_flag(fm.flag_id) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "ModuleNotFound".into(),
-                        message: format!("Module {arg_val} is not fitted in a thermodynamic rack"),
-                        client_error: None,
-                    }));
+                    return Some(Err(BridgeRpcError::module_not_found(
+                        arg_val,
+                        Some(ship_id),
+                        Some(fm.type_id as i64),
+                        false,
+                        format!("Module {arg_val} is not fitted in a thermodynamic rack"),
+                    )));
                 };
                 idx
             } else if matches!(arg_val, 0 | 1 | 2) {
@@ -546,11 +549,13 @@ pub(crate) async fn handle_mining_and_deactivate(
             {
                 idx
             } else {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleNotFound".into(),
-                    message: format!("Module or rack {arg_val} not found on ship {ship_id}"),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::module_not_found(
+                    arg_val,
+                    Some(ship_id),
+                    None,
+                    false,
+                    format!("Module or rack {arg_val} not found on ship {ship_id}"),
+                )));
             };
             let overloaded = method == "OverloadRack";
             if overloaded
@@ -729,11 +734,13 @@ pub(crate) async fn handle_mining_and_deactivate(
 
             let mod_check = ctx.db.with_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ModuleNotFound".into(),
-                        message: format!("Module {module_id} not found"),
-                        client_error: None,
-                    });
+                    return Err(BridgeRpcError::module_not_found(
+                        module_id,
+                        Some(ship_id),
+                        None,
+                        false,
+                        format!("Module {module_id} not found"),
+                    ));
                 };
                 if m_item.owner_id != char_id
                     || m_item.location_id != ship_id
@@ -823,11 +830,13 @@ pub(crate) async fn handle_mining_and_deactivate(
 
             let deduct_res: Result<i32, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ModuleNotFound".into(),
-                        message: format!("Module {module_id} not found"),
-                        client_error: None,
-                    });
+                    return Err(BridgeRpcError::module_not_found(
+                        module_id,
+                        Some(ship_id),
+                        None,
+                        false,
+                        format!("Module {module_id} not found"),
+                    ));
                 };
                 if m_item.owner_id != char_id
                     || m_item.location_id != ship_id
@@ -1220,11 +1229,13 @@ fn validate_ship_and_fitted_module(
             });
         }
         let Some(mod_item) = snap.items.get(&module_id) else {
-            return Err(BridgeRpcError {
-                code: "ModuleNotFound".into(),
-                message: format!("Module {module_id} not found"),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::module_not_found(
+                module_id,
+                Some(ship_id),
+                None,
+                false,
+                format!("Module {module_id} not found"),
+            ));
         };
         let flag_u16 = mod_item.flag as u16;
         let is_fitted_slot = matches!(flag_u16, 11..=34 | 125..=129 | 158 | 159..=163);

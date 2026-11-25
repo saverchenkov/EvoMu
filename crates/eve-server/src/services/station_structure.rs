@@ -781,11 +781,13 @@ pub async fn handle(
                     }))
                 }
             }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "Dock",
+                    format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+                )));
             };
 
             let now_unix = ctx.now_unix();
@@ -1292,11 +1294,13 @@ pub async fn handle(
                     }))
                 }
             }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Active ship is not spawned in space".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "DeployItem",
+                    "Active ship is not spawned in space",
+                )));
             };
 
             let requested_pos = args.get(1).and_then(|p| match p {
@@ -1373,11 +1377,13 @@ pub async fn handle(
             if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 if let Some(ch) = snap.characters.get(&char_id) {
                     if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
-                        return Err(BridgeRpcError {
-                            code: "ShipNotInSpace".into(),
-                            message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError::ship_not_in_space(
+                            ship_id,
+                            Some(char_id),
+                            Some(sys_id),
+                            "DeployItem",
+                            format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                        ));
                     }
                 }
                 let item_locked_job = snap.is_item_locked_in_contract_or_job(item_id);

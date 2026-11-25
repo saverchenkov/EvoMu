@@ -62,10 +62,14 @@ pub fn handle_upgrade_gantry(
     let ship_pos = ctx
         .systems
         .get_ball_position_sync(sys_id, ship_id)
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship must be spawned in space to online an orbital".into(),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "OnlineOrbital",
+                "Active ship must be spawned in space to online an orbital",
+            )
         })?;
     let orbital_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let upgrade_item_arg = args.get(1).and_then(|a| a.as_i64());
@@ -377,10 +381,14 @@ pub fn handle_anchor_orbital(
     let ship_pos = ctx
         .systems
         .get_ball_position_sync(sys_id, ship_id)
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship must be spawned in space to anchor an orbital".into(),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "AnchorOrbital",
+                "Active ship must be spawned in space to anchor an orbital",
+            )
         })?;
 
     let planets_in_sys: Vec<_> = ctx
@@ -739,8 +747,11 @@ pub fn handle_unanchor_orbital(
                 )
             })?;
             let ship_pos = ship_pos_opt.ok_or_else(|| {
-                err(
-                    "ShipNotInSpace",
+                BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "UnanchorOrbital",
                     format!("Active ship {ship_id} must be spawned in space to unanchor orbital {item_id}"),
                 )
             })?;
@@ -756,14 +767,20 @@ pub fn handle_unanchor_orbital(
                 .get(&ship_id)
                 .filter(|sh| sh.owner_id == char_id && sh.location_id == i64::from(sys_id))
                 .ok_or_else(|| {
-                    err(
-                        "ShipNotInSpace",
+                    BridgeRpcError::ship_not_in_space(
+                        ship_id,
+                        Some(char_id),
+                        Some(sys_id),
+                        "UnanchorOrbital",
                         format!("Active ship {ship_id} is not in solar system {sys_id}"),
                     )
                 })?;
             let ship_type = ctx.sde.types.get(&ship_item.type_id).ok_or_else(|| {
-                err(
-                    "ShipNotInSpace",
+                BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "UnanchorOrbital",
                     format!("Active ship type {} not found in SDE", ship_item.type_id),
                 )
             })?;

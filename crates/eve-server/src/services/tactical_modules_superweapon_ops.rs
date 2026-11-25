@@ -475,7 +475,7 @@ async fn commit_lancer_activation_and_break_protection(
     mod_type_id: u32,
     cap_cost: f64,
 ) -> Result<(), BridgeRpcError> {
-    crate::router::box_fut(|| {
+    match crate::router::box_fut(|| {
         crate::services::inventory_fitting::fitting_module_cycles::commit_lancer_activation_atomic_with_notifications(
             ctx,
             sys,
@@ -486,14 +486,22 @@ async fn commit_lancer_activation_and_break_protection(
         )
     })
     .await
-    .map(|_| ())
-    .map_err(|err| {
-        crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            mod_type_id,
-            err,
-        )
-    })
+    {
+        Ok(_) => Ok(()),
+        Err(err) => Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                mod_type_id,
+                Some(cap_cost),
+                None,
+                err,
+            )
+            .await,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -529,7 +537,9 @@ async fn commit_superweapon_cycle_and_break_protection(
     cycle: crate::system_actor::ActiveModuleCycle,
 ) -> Result<(), BridgeRpcError> {
     let mod_type_id = cycle.module_type_id;
-    crate::router::box_fut(|| {
+    let cap_need = cycle.cap_need_per_cycle;
+    let effective_max_cap = cycle.effective_max_capacitor;
+    match crate::router::box_fut(|| {
         crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_notifications(
             ctx,
             sys,
@@ -543,14 +553,22 @@ async fn commit_superweapon_cycle_and_break_protection(
         )
     })
     .await
-    .map(|_| ())
-    .map_err(|err| {
-        crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            mod_type_id,
-            err,
-        )
-    })
+    {
+        Ok(_) => Ok(()),
+        Err(err) => Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                mod_type_id,
+                Some(cap_need),
+                effective_max_cap,
+                err,
+            )
+            .await,
+        ),
+    }
 }
 
 fn module_in_reactivation_delay_error(message: String) -> BridgeRpcError {
@@ -633,11 +651,13 @@ async fn activate_superweapon_with_args_inner(
         });
     }
     let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
-        return Err(BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Superweapon module {module_id} not found on ship"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::module_not_found(
+            module_id,
+            Some(ship_id),
+            Some(mod_type_id as i64),
+            false,
+            format!("Superweapon module {module_id} not found on ship"),
+        ));
     };
     if mod_type.group_id != 588 {
         return Err(BridgeRpcError {
@@ -672,11 +692,13 @@ async fn activate_superweapon_with_args_inner(
             });
         }
         if sys.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
-            return Err(BridgeRpcError {
-                code: "ShipNotInSpace".into(),
-                message: "Disruptive Lance can only be activated while ship is in space".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "ActivateDisruptiveLance",
+                "Disruptive Lance can only be activated while ship is in space",
+            ));
         }
         crate::services::inventory_fitting::fitting_module_cycles::check_space_action_cloak_and_warp_readonly(
             ctx,
@@ -700,11 +722,13 @@ async fn activate_superweapon_with_args_inner(
         let cap_cost = base_cap * (1.0 - cap_bonus_pct * (op_lvl.min(5) as f64));
         let cur_cap_opt = if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
             if cs.capacitor + 1e-4 < cap_cost {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!("Insufficient capacitor for Disruptive Lance: need {cap_cost:.1} GJ"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::not_enough_capacitor(
+                    Some(ship_id),
+                    &mod_type.name,
+                    cap_cost,
+                    cs.capacitor,
+                    format!("Insufficient capacitor for Disruptive Lance: need {cap_cost:.1} GJ"),
+                ));
             }
             Some(cs.capacitor)
         } else {
@@ -915,11 +939,13 @@ async fn activate_superweapon_with_args_inner(
 
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id).cloned() else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Superweapon can only be activated while ship is in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ActivateSuperweapon",
+            "Superweapon can only be activated while ship is in space",
+        ));
     };
     crate::services::inventory_fitting::fitting_module_cycles::check_space_action_cloak_and_warp_readonly(
         ctx,
@@ -944,11 +970,11 @@ async fn activate_superweapon_with_args_inner(
             });
         };
         if tid == ship_id {
-            return Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: "Cannot fire Doomsday at own ship".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::invalid_target_self(
+                ship_id,
+                "self_doomsday",
+                "Cannot fire Doomsday at own ship",
+            ));
         }
         let Some(tb) = all_balls.iter().find(|b| b.id == tid).cloned() else {
             return Err(BridgeRpcError {
@@ -976,11 +1002,13 @@ async fn activate_superweapon_with_args_inner(
             });
         }
         if !is_eligible_single_target_doomsday_target(ctx, tid, tb.type_id) {
-            return Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: "Single-target Doomsdays can only target Capital ships or Structures".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::invalid_target(
+                Some(tid),
+                Some(module_id),
+                &mod_type.name,
+                "not_capital_or_structure",
+                "Single-target Doomsdays can only target Capital ships or Structures",
+            ));
         }
         let max_dd_range = mod_type
             .default_attributes
@@ -1039,11 +1067,13 @@ async fn activate_superweapon_with_args_inner(
     let dd_cur_cap_opt = if dd_cap_cost > 0.0 {
         if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
             if cs.capacitor + 1e-4 < dd_cap_cost {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!("Insufficient capacitor for Doomsday: need {dd_cap_cost:.1} GJ"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::not_enough_capacitor(
+                    Some(ship_id),
+                    &mod_type.name,
+                    dd_cap_cost,
+                    cs.capacitor,
+                    format!("Insufficient capacitor for Doomsday: need {dd_cap_cost:.1} GJ"),
+                ));
             }
             Some(cs.capacitor)
         } else {

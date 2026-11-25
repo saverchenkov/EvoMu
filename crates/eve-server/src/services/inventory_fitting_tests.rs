@@ -2269,3 +2269,103 @@ async fn seeded_pilot_90000001_fits_core_probe_launcher_i_with_starter_astrometr
         err.message
     );
 }
+
+#[tokio::test]
+async fn gh1195_t1_cannot_fit_stacked_module_emits_cannot_perform_on_multiple_items_with_facts() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_599_001i64;
+    let station_id = 60_003_760i64;
+    let ship_id = 96_599_100i64;
+    let stacked_mod_id = 96_599_200i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 96_599_1;
+        ch.name = "StackedFitPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        for sk in [3300u32, 3302] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            stacked_mod_id,
+            InventoryItemRecord {
+                item_id: stacked_mod_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 3,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = SessionState::default();
+    session.user_id = Some(96_599_1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = Some(ship_id);
+
+    let err = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(stacked_mod_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::HiSlot0 as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("fitting stacked module must fail");
+    assert_eq!(err.code, "CannotFitStackedModule");
+    assert_eq!(
+        err.to_client_error("invbroker", "Add").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CannotPerformOnMultipleItems)
+    );
+    assert_eq!(
+        err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::CannotFitStackedModule {
+            ship_id: Some(ship_id),
+            item_id: Some(stacked_mod_id),
+            quantity: 3,
+        })
+    );
+}

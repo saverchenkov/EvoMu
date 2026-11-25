@@ -21,8 +21,17 @@ pub const STATION_DOCKING_RING_STANDOFF_M: f64 = 0.0;
 pub const WARP_VECTOR_COOLDOWN_SECS: u64 = 300;
 
 const ERR_CANT_MOVE_IMMOBILIZED: &str = "CantMoveWhileModuleActive";
-const ERR_SHIP_ALREADY_IN_WARP: &str = "ShipAlreadyInWarp";
 const ERR_DESTINY_COMMAND_FAILED: &str = "DestinyCommandFailed";
+
+/// Maps destiny's internal [`eve_destiny::WarpPhase`] to proto [`eve_proto::WarpPhaseKind`] (`#1454`).
+pub(crate) const fn warp_phase_kind(phase: eve_destiny::WarpPhase) -> eve_proto::WarpPhaseKind {
+    match phase {
+        eve_destiny::WarpPhase::Aligning => eve_proto::WarpPhaseKind::Aligning,
+        eve_destiny::WarpPhase::Accelerating => eve_proto::WarpPhaseKind::Accelerating,
+        eve_destiny::WarpPhase::Cruising => eve_proto::WarpPhaseKind::Cruising,
+        eve_destiny::WarpPhase::Decelerating => eve_proto::WarpPhaseKind::Decelerating,
+    }
+}
 
 fn nav_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -477,17 +486,21 @@ pub(crate) async fn validate_pre_warp_common(
 /// slightly ahead of the server's 1 Hz `WarpPhase::Decelerating` dropout (`#1439`).
 pub(crate) const WARP_EXIT_APPROACH_HORIZON_SECS: f64 = 4.0;
 
-/// Rejects mid-warp trajectory redirection once a ship has exited `WarpPhase::Aligning`.
+/// `#1454`: Rejects mid-warp trajectory redirection once a ship has exited `WarpPhase::Aligning`.
 pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), BridgeRpcError> {
-    if matches!(
-        mode,
-        MovementMode::Warp { phase, .. } if *phase != eve_destiny::WarpPhase::Aligning
-    ) {
-        return Err(BridgeRpcError {
-            code: "ShipAlreadyInWarp".into(),
-            message: "Cannot initiate or redirect warp while already in warp".into(),
-            client_error: None,
-        });
+    if let MovementMode::Warp { phase, .. } = mode {
+        let kind = warp_phase_kind(*phase);
+        if kind.blocks_active_warp_actions() {
+            return Err(BridgeRpcError::ship_already_in_warp_for_phase(
+                None,
+                "NavigationCommand",
+                kind,
+                format!(
+                    "Cannot initiate or redirect warp while already in warp ({})",
+                    kind.as_str()
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -653,14 +666,16 @@ pub(crate) async fn execute_agency_content_warp(
                 requested_dist_m
             };
             if affordable_dist_m < 150_000.0 {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!(
+                return Err(BridgeRpcError::not_enough_capacitor(
+                    Some(ship_id),
+                    "Warp Drive",
+                    cap_per_m * 150_000.0,
+                    cs.capacitor,
+                    format!(
                         "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp",
                         cs.capacitor
                     ),
-                    client_error: None,
-                });
+                ));
             }
             dest_pos = current_ball.position + warp_dir * affordable_dist_m;
             cs.capacitor = 0.0;
@@ -691,12 +706,18 @@ pub(crate) async fn execute_agency_content_warp(
     {
         Ok(res) => res,
         Err(e) => {
+            if e.contains("ShipAlreadyInWarp") {
+                return Err(BridgeRpcError::ship_already_in_warp(
+                    Some(ship_id),
+                    "WarpTo",
+                    None,
+                    e,
+                ));
+            }
             let code = if e.contains("WarpScrambled") {
                 "WarpScrambled"
             } else if e.contains("CloakedCannotWarp") {
                 "CloakedCannotWarp"
-            } else if e.contains(ERR_SHIP_ALREADY_IN_WARP) {
-                ERR_SHIP_ALREADY_IN_WARP
             } else {
                 ERR_DESTINY_COMMAND_FAILED
             };
@@ -795,12 +816,11 @@ pub(crate) async fn execute_subwarp_goto_point(
         )
         .await
         .map_err(|e| {
-            let code = if e.starts_with(ERR_SHIP_ALREADY_IN_WARP) {
-                ERR_SHIP_ALREADY_IN_WARP
+            if e.starts_with("ShipAlreadyInWarp") {
+                BridgeRpcError::ship_already_in_warp(Some(ship_id), "CmdGotoPoint", None, e)
             } else {
-                ERR_DESTINY_COMMAND_FAILED
-            };
-            nav_err(code, e)
+                nav_err(ERR_DESTINY_COMMAND_FAILED, e)
+            }
         })?;
 
     crate::services::space_destiny::emit_protection_break_notifications(
@@ -913,10 +933,14 @@ pub async fn handle_use_warp_vector(
             crate::services::space_nav_movement_guard::MovementIntent::VectorWarp { sys_id },
         )
         .await?;
-    let ship_ball = validated.ball.ok_or_else(|| BridgeRpcError {
-        code: "ShipNotInSpace".into(),
-        message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
-        client_error: None,
+    let ship_ball = validated.ball.ok_or_else(|| {
+        BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "UseWarpVector",
+            format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        )
     })?;
     ensure_not_in_active_warp(&ship_ball.mode)?;
 

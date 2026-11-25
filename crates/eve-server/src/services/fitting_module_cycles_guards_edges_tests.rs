@@ -1268,3 +1268,154 @@ async fn handle_module_cycles_missile_launcher_cycle() {
     );
 }
 
+#[tokio::test]
+async fn map_atomic_cycle_activation_error_for_ship_populates_cap_warp_and_ship_facts() {
+    let ctx = make_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_001i64;
+    let missing_ship_id = 100_999_001i64;
+    let live_ship_id = 100_999_002i64;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let (cap_mod_tid, cap_attr_need) = ctx
+        .sde
+        .types
+        .iter()
+        .find_map(|(&tid, t)| {
+            t.default_attributes
+                .get(&attr_ids::CAPACITOR_NEED)
+                .copied()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| (tid, v))
+        })
+        .expect("canonical SDE contains at least one capacitor-using module");
+
+    // 1. Missing ball in space -> real ship_id, char_id, solar_system_id
+    let not_in_space = map_atomic_cycle_activation_error_for_ship(
+        &ctx,
+        &sys,
+        char_id,
+        missing_ship_id,
+        cap_mod_tid,
+        Some(50.0),
+        None,
+        "Ship is not in space".into(),
+    )
+    .await;
+    assert_eq!(not_in_space.code, "ShipNotInSpace");
+    assert_eq!(
+        not_in_space.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::ShipNotInSpace {
+            ship_id: missing_ship_id,
+            char_id: Some(char_id),
+            solar_system_id: Some(sys_id),
+            action: "Activate".into(),
+        })
+    );
+
+    // Spawn live ship with real low capacitor & Cruising warp phase.
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: live_ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Warp {
+                    origin: DVec3::ZERO,
+                    destination: DVec3::new(1_000_000.0, 0.0, 0.0),
+                    warp_speed_au_s: 3.0,
+                    total_distance: 1_000_000.0,
+                    phase: WarpPhase::Cruising,
+                    elapsed_warp_time: 1.0,
+                },
+            },
+            CombatState {
+                capacitor: 12.5,
+                max_capacitor: 250.0,
+                ..Default::default()
+            },
+            Default::default(),
+        )
+        .await;
+
+    // 2. Insufficient capacitor -> real required_gj & available_gj from CombatState + hint/SDE
+    let cap_err = map_atomic_cycle_activation_error_for_ship(
+        &ctx,
+        &sys,
+        char_id,
+        live_ship_id,
+        cap_mod_tid,
+        Some(75.0),
+        Some(400.0),
+        "Insufficient capacitor to activate module".into(),
+    )
+    .await;
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
+    let cap_ce = cap_err.to_client_error("dogmaIM", "Activate");
+    let (cap_key, cap_args) = cap_ce.as_user_error().expect("typed NotEnoughEnergy");
+    assert_eq!(cap_key, eve_proto::UserErrorKey::NotEnoughEnergy);
+    assert!(cap_args.iter().any(|(k, v)| k == "need" && *v == PyRep::Real(75.0)));
+    assert!(cap_args.iter().any(|(k, v)| k == "got" && *v == PyRep::Real(12.5)));
+    assert!(matches!(
+        cap_err.rejection_facts(),
+        Some(eve_proto::RejectionFacts::NotEnoughCapacitor {
+            entity_id: Some(eid),
+            required_gj,
+            available_gj,
+            ..
+        }) if *eid == live_ship_id
+            && (*required_gj - 75.0).abs() < 1e-6
+            && (*available_gj - 12.5).abs() < 1e-6
+    ));
+
+    // When required_gj hint is omitted, falls back to SDE CAPACITOR_NEED instead of 0.0.
+    let sde_cap_err = map_atomic_cycle_activation_error_for_ship(
+        &ctx,
+        &sys,
+        char_id,
+        live_ship_id,
+        cap_mod_tid,
+        None,
+        None,
+        "Insufficient capacitor to activate module".into(),
+    )
+    .await;
+    assert!(matches!(
+        sde_cap_err.rejection_facts(),
+        Some(eve_proto::RejectionFacts::NotEnoughCapacitor { required_gj, available_gj, .. })
+            if (*required_gj - cap_attr_need).abs() < 1e-3 && (*available_gj - 12.5).abs() < 1e-6
+    ));
+
+    // 3. CantActivateInWarp -> real ship_id and live WarpPhaseKind
+    let warp_err = map_atomic_cycle_activation_error_for_ship(
+        &ctx,
+        &sys,
+        char_id,
+        live_ship_id,
+        cap_mod_tid,
+        Some(75.0),
+        None,
+        "CantActivateInWarp: Cannot activate modules while in warp".into(),
+    )
+    .await;
+    assert_eq!(warp_err.code, "CantActivateInWarp");
+    assert_eq!(
+        warp_err.to_client_error("dogmaIM", "Activate").as_user_error().map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::DeniedActivateInWarp)
+    );
+    assert_eq!(
+        warp_err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::ShipInWarp {
+            ship_id: Some(live_ship_id),
+            action: "Activate".into(),
+            warp_phase: Some("Cruising".into()),
+        })
+    );
+}
+

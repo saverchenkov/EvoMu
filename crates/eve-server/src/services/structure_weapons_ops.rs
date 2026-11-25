@@ -488,10 +488,22 @@ pub async fn handle_structure_add_target(
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, st_ball)) = sys_handle.get_ball_snapshot(structure_id).await.unwrap_or(None) else {
-        return Err(err("TargetingFailed", "Structure ball not in space"));
+        return Err(BridgeRpcError::targeting_failed(
+            Some(structure_id),
+            Some(target_id),
+            eve_proto::UserErrorKey::CantShipNotPresent,
+            "structure_not_in_space",
+            "Structure ball not in space",
+        ));
     };
     let Some((_, target_ball)) = sys_handle.get_ball_snapshot(target_id).await.unwrap_or(None) else {
-        return Err(err("TargetingFailed", format!("Target {target_id} not found on grid")));
+        return Err(BridgeRpcError::targeting_failed(
+            Some(structure_id),
+            Some(target_id),
+            eve_proto::UserErrorKey::TargetCantValidate,
+            "target_not_present",
+            format!("Target {target_id} not found on grid"),
+        ));
     };
     if sys_handle
         .get_combat_state(target_id)
@@ -515,8 +527,13 @@ pub async fn handle_structure_add_target(
         .unwrap_or(7.0) as usize;
     let dist = ((st_ball.position - target_ball.position).length() - st_ball.radius - target_ball.radius).max(0.0);
     if dist > max_range {
-        return Err(err(
-            "TargetingFailed",
+        return Err(BridgeRpcError::targeting_too_far(
+            Some(structure_id),
+            Some(target_id),
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, target_id),
+            st_type_id as i64,
+            dist,
+            max_range,
             format!("Target distance ({dist:.0} m) exceeds structure maxTargetRange ({max_range:.0} m)"),
         ));
     }
@@ -564,7 +581,14 @@ pub async fn handle_structure_add_target(
             },
         )
         .await
-        .map_err(|e| err("TargetingFailed", e))?;
+        .map_err(|e| {
+            let key = if e.contains("tethered") {
+                eve_proto::UserErrorKey::DeniedTethered
+            } else {
+                eve_proto::UserErrorKey::UnableToTarget
+            };
+            BridgeRpcError::targeting_failed(Some(structure_id), Some(target_id), key, "lock_actor_rejected", e)
+        })?;
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnStructureTargetAdded {
@@ -728,7 +752,7 @@ pub async fn handle_structure_module_activate(
                 .items
                 .get(&module_id)
                 .filter(|i| i.location_id == structure_id && (11..=34).contains(&(i.flag as u16)))
-                .ok_or_else(|| err("ModuleNotFound", format!("Module {module_id} is not fitted to structure {structure_id}")))?;
+                .ok_or_else(|| BridgeRpcError::module_not_found(module_id, Some(structure_id), None, false, format!("Module {module_id} is not fitted to structure {structure_id}")))?;
             if !snap.module_online_states.get(&module_id).copied().unwrap_or(true) {
                 return Err(err("ModuleOffline", format!("Module {module_id} is offline")));
             }
@@ -839,7 +863,7 @@ pub async fn handle_structure_module_activate(
             return Err(err("StructureDestroyed", format!("Structure {structure_id} is destroyed")));
         }
         let Some(live_mod) = snap.items.get(&module_id) else {
-            return Err(err("ModuleNotFound", format!("Module {module_id} no longer exists")));
+            return Err(BridgeRpcError::module_not_found(module_id, Some(structure_id), None, false, format!("Module {module_id} no longer exists")));
         };
         if live_mod.location_id != structure_id || snap.module_online_states.get(&module_id) != Some(&true) {
             return Err(err("ModuleOffline", format!("Module {module_id} is no longer fitted and online on structure {structure_id}")));
@@ -864,8 +888,11 @@ pub async fn handle_structure_module_activate(
             None => seed_cap.min(max_cap),
         };
         if cur_cap + 1e-6 < cap_need {
-            return Err(err(
-                "NotEnoughCapacitor",
+            return Err(BridgeRpcError::not_enough_capacitor(
+                Some(structure_id),
+                &mod_sde.name,
+                cap_need,
+                cur_cap,
                 format!("Structure capacitor {cur_cap:.0} GJ is below required {cap_need:.0} GJ"),
             ));
         }

@@ -254,7 +254,7 @@ async fn try_start_or_resolve_cycle<'a>(
             })).unwrap_or(0)
     };
     let Some(mut m) = fit.modules.get(&module_id).cloned().or_else(|| resolve_snapshot_fitted_module(ctx, ship_id, module_id)) else {
-        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship"), client_error: None })));
+        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::module_not_found(module_id, Some(ship_id), None, false, format!("Module {module_id} not found on ship")))));
     };
     if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
         return std::ops::ControlFlow::Break(Some(Err(e)));
@@ -269,7 +269,7 @@ async fn try_start_or_resolve_cycle<'a>(
         return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleOffline".into(), message: format!("Module {module_id} is offline"), client_error: None })));
     }
     let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
-        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id), client_error: None })));
+        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::module_not_found(module_id, Some(ship_id), Some(m.type_id as i64), false, format!("Module type {} not found in SDE", m.type_id)))));
     };
     let is_weapon = is_weapon_group(mod_type.group_id);
     if method == "Overload" && matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
@@ -991,12 +991,13 @@ async fn reconcile_and_validate_cycle_activation(
         )
         .await
         {
-            return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons"
-                    .into(),
-                client_error: None,
-            })));
+            return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::invalid_target(
+                Some(target_id),
+                Some(module_id),
+                &mod_type.name,
+                "interdiction_probe_untargetable",
+                "Interdiction probes cannot be targeted directly; use area-of-effect weapons",
+            ))));
         }
         if target_id == ship_id
             && matches!(
@@ -2031,6 +2032,8 @@ async fn commit_cycle_to_actor_and_effects(
     kwargs: &HashMap<String, PyRep>, prep: &mut EwarCapitalPrep, params: &PreparedCycleParams, kin: &WeaponKinematics,
 ) -> Result<((f64, f64), Option<PyRep>), BridgeRpcError> {
     let cycle = build_active_module_cycle_sync(ctx, sys_id, char_id, ship_id, module_id, m, mod_type, mod_state, fit, target_id_opt, is_overloaded, is_mwd_or_mjd, effect_name, prep, params, kin);
+    let required_cap_gj = cycle.cap_need_per_cycle;
+    let effective_max_cap = cycle.effective_max_capacitor;
     let allow_while_warping = mod_type.group_id == 4117 || is_warp_safe_cloak_module(ctx, mod_type);
     let allow_while_cloaked = matches!(mod_type.group_id, 330 | 481 | 4117);
     let replace_existing_cycle = mod_type.group_id == 72;
@@ -2048,7 +2051,22 @@ async fn commit_cycle_to_actor_and_effects(
         false,
     )
     .await
-    .map_err(|e| map_atomic_cycle_activation_error(ctx, m.type_id, e))?;
+    .map_err(|e| {
+        map_atomic_cycle_activation_error_for_ship(
+            ctx,
+            sys,
+            char_id,
+            ship_id,
+            m.type_id,
+            Some(required_cap_gj),
+            effective_max_cap,
+            e,
+        )
+    });
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(fut) => return Err(fut.await),
+    };
     if let Err(e) = evaluate_module_cycle_aggression_or_assistance(ctx, sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt).await {
         let _ = sys.remove_module_cycle(ship_id, module_id).await;
         return Err(e);

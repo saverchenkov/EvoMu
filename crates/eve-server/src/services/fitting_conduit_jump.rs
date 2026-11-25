@@ -244,7 +244,9 @@ pub(crate) async fn bridge_to_resolved_beacon(
     let (portal_id, portal_tid) =
         portal.ok_or_else(|| err("NoJumpPortalGenerator", "No online jump portal generator fitted"))?;
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
-    let portal_type = ctx.sde.types.get(&portal_tid).ok_or_else(|| err("ModuleNotFound", "Portal type unknown"))?;
+    let portal_type = ctx.sde.types.get(&portal_tid).ok_or_else(|| {
+        BridgeRpcError::module_not_found(portal_id, Some(ship_id), Some(portal_tid as i64), false, "Portal type unknown")
+    })?;
     if !hull_allowed(ctx, portal_type, ship_type) {
         return Err(err(
             "ShipCannotBridgeToBeacon",
@@ -359,6 +361,8 @@ pub(crate) async fn bridge_to_resolved_beacon(
     );
     cycle.owner_char_id = Some(char_id);
     cycle.started_at_unix = now_reserve;
+    let cycle_cap_need = cycle.cap_need_per_cycle;
+    let cycle_eff_max_cap = cycle.effective_max_capacitor;
     if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::commit_module_cycle_atomic_with_replace_notifications(
         ctx,
         &sys,
@@ -374,11 +378,19 @@ pub(crate) async fn bridge_to_resolved_beacon(
     .await
     {
         clear_bridge_claim();
-        return Err(crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error(
-            ctx,
-            portal_tid,
-            e,
-        ));
+        return Err(
+            crate::services::inventory_fitting::fitting_module_cycles::map_atomic_cycle_activation_error_for_ship(
+                ctx,
+                &sys,
+                char_id,
+                ship_id,
+                portal_tid,
+                Some(cycle_cap_need),
+                cycle_eff_max_cap,
+                e,
+            )
+            .await,
+        );
     }
     if act_type != 0 && act_qty > 0 {
         if let Err(e) = consume_or_err(ctx, ship_id, act_type, act_qty, |have| {
@@ -633,8 +645,10 @@ pub(crate) async fn group_jump_to_resolved_beacon(
     if let Ok(Some(cs)) = origin_handle.get_combat_state(ship_id).await {
         let cap_needed = cs.max_capacitor * cap_frac;
         if cs.capacitor + 1e-4 < cap_needed {
-            return Err(err(
-                "NotEnoughCapacitor",
+            return Err(BridgeRpcError::jump_not_enough_capacitor(
+                Some(ship_id),
+                cap_needed,
+                cs.capacitor,
                 format!("Conduit jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor),
             ));
         }
@@ -1008,7 +1022,7 @@ pub(super) async fn jump_through_fleet(
         .sde
         .types
         .get(&bridge.portal_module_type_id)
-        .ok_or_else(|| err("ModuleNotFound", "Portal type unknown"))?;
+        .ok_or_else(|| BridgeRpcError::module_not_found(0, Some(ship_id), Some(bridge.portal_module_type_id as i64), false, "Portal type unknown"))?;
     let required_attr = type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_PASSENGER_REQUIRED_ATTR) as AttributeId;
     let (pvals, _) = evaluated_attrs(
         ctx,

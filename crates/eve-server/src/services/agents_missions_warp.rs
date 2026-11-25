@@ -61,11 +61,11 @@ impl AgentWarpError {
             Self::NoActiveShip => BridgeRpcError::with_client_error("NoActiveShip", msg, client_error),
             Self::NoSolarSystem => BridgeRpcError::with_client_error("NoSolarSystem", msg, client_error),
             Self::DestinyQueryFailed => BridgeRpcError::with_client_error("DestinyQueryFailed", msg, client_error),
-            Self::ShipNotInSpace => BridgeRpcError::with_client_error("ShipNotInSpace", msg, client_error),
+            Self::ShipNotInSpace => BridgeRpcError::ship_not_in_space(0, None, None, "AgentMissionWarp", msg),
             Self::CrossSystemWarp => BridgeRpcError::with_client_error("CrossSystemWarp", msg, client_error),
             Self::BookmarkExpired => BridgeRpcError::with_client_error("BookmarkExpired", msg, client_error),
             Self::BookmarkNotFound => BridgeRpcError::with_client_error("BookmarkNotFound", msg, client_error),
-            Self::ShipAlreadyInWarp => BridgeRpcError::with_client_error("ShipAlreadyInWarp", msg, client_error),
+            Self::ShipAlreadyInWarp => BridgeRpcError::ship_already_in_warp(None, "AgentMissionWarp", None, msg),
             Self::CantMoveWhileModuleActive => BridgeRpcError::with_client_error("CantMoveWhileModuleActive", msg, client_error),
             Self::CloakedCannotWarp => BridgeRpcError::with_client_error("CloakedCannotWarp", msg, client_error),
         }
