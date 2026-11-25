@@ -356,12 +356,6 @@ fn dispatch_rpc<'a>(
                 return Some(res);
             }
         }
-        if matches!(
-            (service, method),
-            ("invbroker", "ClearCharges" | "DestroyFitting" | "BreakPlasticWrap" | "AssembleCargoContainer")
-        ) {
-            crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
-        }
         if (service, method) == ("invbroker", "GetAllItems") {
             crate::services::station_structure::structure_lifecycle::sync_asset_safety_wraps(ctx);
         }

@@ -480,7 +480,9 @@ pub(crate) async fn handle_mining_and_deactivate(
                     }
                 }
                 fit.recalculate_stats(&ctx.sde);
-                ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+                ctx.db.with_mut_snapshot(|snap| {
+                    ServerContext::clear_persisted_module_overload(snap, ship_id, module_id);
+                });
                 ctx.invalidate_and_push_fit(ship_id);
                 if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
                     crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -625,40 +627,60 @@ pub(crate) async fn handle_mining_and_deactivate(
                     notified_modules.push(mid);
                 }
             }
+            let mut idle_persisted_ids = pending_to_insert.clone();
             fit.pending_overload_modules.extend(pending_to_insert);
             notified_modules.sort_unstable();
-            let sync_idle_overload_state = |fit: &mut eve_dogma::ShipFittingEngine, mid: i64| {
-                if overloaded {
-                    if let Some(fm) = fit.modules.get_mut(&mid) {
-                        if fm.state == eve_dogma::ModuleState::Active {
-                            fm.state = eve_dogma::ModuleState::Overloaded;
-                            fit.pending_overload_modules.insert(mid);
+            let sync_idle_overload_state =
+                |fit: &mut eve_dogma::ShipFittingEngine, idle_ids: &mut Vec<i64>, mid: i64| {
+                    if overloaded {
+                        if let Some(fm) = fit.modules.get_mut(&mid) {
+                            if fm.state == eve_dogma::ModuleState::Active {
+                                fm.state = eve_dogma::ModuleState::Overloaded;
+                                fit.pending_overload_modules.insert(mid);
+                                idle_ids.push(mid);
+                            }
                         }
-                    }
-                } else {
-                    fit.pending_overload_modules.remove(&mid);
-                    if let Some(fm) = fit.modules.get_mut(&mid) {
-                        if fm.state == eve_dogma::ModuleState::Overloaded {
-                            fm.state = eve_dogma::ModuleState::Online;
+                    } else {
+                        fit.pending_overload_modules.remove(&mid);
+                        if let Some(fm) = fit.modules.get_mut(&mid) {
+                            if fm.state == eve_dogma::ModuleState::Overloaded {
+                                fm.state = eve_dogma::ModuleState::Online;
+                            }
                         }
+                        idle_ids.push(mid);
                     }
-                }
-            };
+                };
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 for &mid in &cycling_modules {
                     let was_cycling = sys.update_module_overload(ship_id, mid, overloaded).await.unwrap_or(false);
                     if !was_cycling {
-                        sync_idle_overload_state(&mut fit, mid);
+                        sync_idle_overload_state(&mut fit, &mut idle_persisted_ids, mid);
                     }
                 }
             } else {
                 for &mid in &cycling_modules {
-                    sync_idle_overload_state(&mut fit, mid);
+                    sync_idle_overload_state(&mut fit, &mut idle_persisted_ids, mid);
                 }
             }
             fit.recalculate_stats(&ctx.sde);
-            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+            if !idle_persisted_ids.is_empty() {
+                ctx.db.with_mut_snapshot(|snap| {
+                    for mid in idle_persisted_ids {
+                        if overloaded {
+                            if snap.module_online_states.get(&mid) != Some(&false) {
+                                snap.ship_fit_inputs
+                                    .entry(ship_id)
+                                    .or_default()
+                                    .overloaded_modules
+                                    .insert(mid);
+                            }
+                        } else {
+                            ServerContext::clear_persisted_module_overload(snap, ship_id, mid);
+                        }
+                    }
+                });
+            }
             ctx.invalidate_and_push_fit(ship_id);
             let heat_id = crate::services::fitting_cycles_overheat::rack_heat_attr_id_for_rack(target_rack_idx);
             for &mid in &notified_modules {

@@ -1397,9 +1397,6 @@ pub(crate) async fn handle_dogma_im(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if matches!((service, method), ("dogmaIM", "LoadAmmo" | "UnloadAmmo" | "DestroyFitting" | "SetModuleOnline" | "TakeModuleOffline")) {
-        super::wait_in_space_post_unlock_barrier(ctx, session).await;
-    }
     match (service, method) {
         // parity: rpc:dogmaIM.SetSessionCheck
         ("dogmaIM", "SetSessionCheck") => {

@@ -843,18 +843,15 @@ fn dispatch_rpc<'a>(
     args: &'a [PyRep],
     kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
-    Box::pin(async move {
-        crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
-        handle_stack_ops(
-            ctx,
-            session,
-            bound_entry,
-            service,
-            method,
-            args,
-            kwargs,
-        )
-    })
+    Box::pin(std::future::ready(handle_stack_ops(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    )))
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[

@@ -1553,6 +1553,9 @@ impl ServerContext {
         }
 
         if let Some(entry) = entry_opt {
+            if entry.access == crate::router::rpc_registry::RpcAccess::Write {
+                self.wait_in_space_post_unlock_barrier(session).await;
+            }
             use crate::router::rpc_registry::RpcDispatchHandler;
             let registry_res = match entry.handler {
                 RpcDispatchHandler::Sync(f) => {
@@ -1613,6 +1616,15 @@ impl ServerContext {
         }
 
         self.unimplemented_rpc_error(session, effective_service, method, args, kwargs, caller_trace)
+    }
+
+    pub(crate) async fn wait_in_space_post_unlock_barrier(&self, session: &SessionState) {
+        if session.station_id.is_some() || session.structure_id.is_some() {
+            return;
+        }
+        if let Some(sys) = session.solar_system_id.and_then(|id| self.systems.get_handle(id)) {
+            let _ = sys.wait_for_post_unlock_barrier().await;
+        }
     }
 
     pub(crate) fn unimplemented_rpc_error(

@@ -616,7 +616,6 @@ pub(crate) async fn handle_dogma_ops(
 
         // parity: rpc:dogmaIM.ShipOnlineModules
         "ShipOnlineModules" => {
-            crate::services::inventory_fitting::wait_in_space_post_unlock_barrier(ctx, session).await;
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

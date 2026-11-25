@@ -2307,15 +2307,9 @@ fn dispatch_rpc<'a>(
     ctx: &'a ServerContext, session: &'a mut SessionState, bound_entry: Option<&'a BoundObjectEntry>,
     service: &'a str, method: &'a str, args: &'a [PyRep], kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
-    Box::pin(async move {
-        if (service, method) == ("invbroker", "TrashItems") {
-            super::wait_in_space_post_unlock_barrier(ctx, session).await;
-        }
-        handle_ships_mastery_and_fitting_ext(
-            ctx, session, bound_entry, service, method, args, kwargs,
-        )
-        .await
-    })
+    Box::pin(handle_ships_mastery_and_fitting_ext(
+        ctx, session, bound_entry, service, method, args, kwargs,
+    ))
 }
 
 pub(crate) const RPCS: &[RpcEntry] = &[

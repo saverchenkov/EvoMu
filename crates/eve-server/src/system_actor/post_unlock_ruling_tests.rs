@@ -647,8 +647,8 @@ async fn bf_1170_r8_02_cross_tick_charge_reservations_and_rpc_unload_barrier() {
     let (st_missiles, cyc_len, aar_rep) = { let st = sys.actor_state.read().unwrap(); (st.active_guided_missiles.len(), st.active_module_cycles.len(), st.active_module_cycles.iter().find(|c| c.module_id == m_aar).map(|c| c.armor_repair_amount)) };
     assert!((st_cap - 50.0).abs() < 1e-6 && st_missiles == 1 && aar_rep == Some(20.0) && cyc_len == 2);
 
-    let unload_fut = tokio::spawn({ let (c, mut s) = (ctx.clone(), mk_sess(&ctx.db, ship_id)); async move { crate::services::inventory_fitting::fitting_dogma_im::handle_dogma_im(&c, &mut s, None, "dogmaIM", "UnloadAmmo", &[PyRep::Integer(ship_id), PyRep::PySet(vec![PyRep::Integer(m_tur)])], &HashMap::new()).await } });
-    let add_fut = tokio::spawn({ let (c, mut s) = (ctx.clone(), mk_sess(&ctx.db, ship_id)); async move { crate::services::inventory_fitting::handle(&c, &mut s, None, "invbroker", "Add", &[], &HashMap::new()).await } });
+    let unload_fut = spawn_rpc(&ctx, ship_id, "dogmaIM", "UnloadAmmo", vec![PyRep::Integer(ship_id), PyRep::PySet(vec![PyRep::Integer(m_tur)])]);
+    let add_fut = spawn_rpc(&ctx, ship_id, "invbroker", "Add", vec![]);
     tokio::time::sleep(Duration::from_millis(25)).await; assert!(!unload_fut.is_finished() && !add_fut.is_finished());
     release_writer(held);
     let _ = unload_fut.await.unwrap(); let _ = add_fut.await.unwrap();
@@ -721,4 +721,47 @@ async fn bf_1170_r9_03_contract_proxy_split_stack_waits_behind_in_space_charge_w
     tokio::time::sleep(Duration::from_millis(25)).await; assert!(!split_fut.is_finished());
     release_writer(held);
     assert!(split_fut.await.unwrap().unwrap_err().code == "SplitFailed" && ctx.db.with_snapshot(|s| s.items[&stack_id].quantity) == 1);
+}
+
+/// `BF-1170-1A-R10-01`: Structural `dispatch.rs` `RpcAccess::Write` barrier protects `Deactivate(..., "online")`, `OverloadRack`, `StopOverload`, `SetShipStance`, & `LinkWeapons`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r10_01_dispatch_write_barrier_protects_deactivate_overload_stance_and_link() {
+    use eve_proto::PyRep;
+    let (ship_id, w1, w2) = (778_224_001_i64, 778_224_101, 778_224_102);
+    let (ctx, sys) = boot_ship(ship_id, &[(w1, 484, InventoryFlag::HiSlot0, 0.0), (w2, 484, InventoryFlag::HiSlot1, 0.0)], None, None).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&ship_id).unwrap().type_id = 34317;
+        s.skills.entry(CHAR_ID).or_default().insert(28164, eve_db::TrainedSkillRecord { type_id: 28164, level: 4, skill_points: 100_000.0 });
+        s.ship_fit_inputs.insert(ship_id, eve_db::ShipFitInputsRecord { overloaded_modules: [w1].into_iter().collect(), ..Default::default() });
+    });
+    let held = hold_db_writer(&ctx.db);
+    send_intent(&sys, &ctx, PostUnlockIntent::ModuleBurnout { ship_id, module_id: w1 }, true);
+    let deact = spawn_rpc(&ctx, ship_id, "dogmaIM", "Deactivate", vec![PyRep::Integer(w1), PyRep::String("online".into())]);
+    let ov_rack = spawn_rpc(&ctx, ship_id, "dogmaIM", "OverloadRack", vec![PyRep::Integer(0)]);
+    let stop_ov = spawn_rpc(&ctx, ship_id, "dogmaIM", "StopOverload", vec![PyRep::Integer(w1)]);
+    let stance = spawn_rpc(&ctx, ship_id, "shipStanceMgr", "SetShipStance", vec![PyRep::Integer(ship_id), PyRep::Integer(2)]);
+    let link = spawn_rpc(&ctx, ship_id, "dogmaIM", "LinkWeapons", vec![PyRep::Integer(ship_id), PyRep::Integer(w1), PyRep::Integer(w2)]);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!deact.is_finished() && !ov_rack.is_finished() && !stop_ov.is_finished() && !stance.is_finished() && !link.is_finished());
+    release_writer(held);
+    assert_eq!(deact.await.unwrap().unwrap_err().code, "ModuleBurnedOut");
+    assert_eq!(ov_rack.await.unwrap().unwrap(), PyRep::List(vec![PyRep::Integer(w2)]));
+    assert!(stop_ov.await.unwrap().is_ok());
+    assert_eq!(stance.await.unwrap().unwrap(), PyRep::Integer(34323));
+    assert_eq!(link.await.unwrap().unwrap_err().code, "InvalidWeaponGroup");
+    ctx.db.with_snapshot(|s| {
+        let inputs = s.ship_fit_inputs.get(&ship_id).unwrap();
+        assert!(inputs.active_stance_type_id == Some(34323) && !inputs.overloaded_modules.contains(&w1));
+    });
+    let _ = spawn_rpc(&ctx, ship_id, "dogmaIM", "StopOverload", vec![PyRep::Integer(w2)]).await.unwrap().unwrap();
+    assert_eq!(spawn_rpc(&ctx, ship_id, "dogmaIM", "OverloadRack", vec![PyRep::Integer(0)]).await.unwrap().unwrap(), PyRep::List(vec![PyRep::Integer(w2)]));
+    ctx.db.with_snapshot(|s| {
+        let inputs = s.ship_fit_inputs.get(&ship_id).unwrap();
+        assert!(inputs.active_stance_type_id == Some(34323) && inputs.overloaded_modules.contains(&w2) && !inputs.overloaded_modules.contains(&w1));
+    });
+    assert!(spawn_rpc(&ctx, ship_id, "dogmaIM", "StopOverload", vec![PyRep::Integer(w2)]).await.unwrap().is_ok());
+    ctx.db.with_snapshot(|s| {
+        let inputs = s.ship_fit_inputs.get(&ship_id).unwrap();
+        assert!(inputs.active_stance_type_id == Some(34323) && inputs.overloaded_modules.is_empty());
+    });
 }
