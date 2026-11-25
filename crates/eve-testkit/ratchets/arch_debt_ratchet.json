@@ -968,6 +968,7 @@
         "system_actor.rs": 2,
         "system_actor/activation_ops.rs": 3,
         "system_actor/ball_ops.rs": 1,
+        "system_actor/celestials.rs": 32,
         "system_actor/celestials_helpers.rs": 4,
         "system_actor/cycles.rs": 6,
         "system_actor/disruptors.rs": 1,

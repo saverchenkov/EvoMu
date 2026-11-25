@@ -293,12 +293,30 @@ fn scan_arch_debt_in_dir_for_rules(
                     let raw = std::fs::read_to_string(path)
                         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
                     let fully_stripped = strip_rust_comments_and_literals(&raw);
-                    let prod_stripped =
-                        if fully_stripped.contains("cfg") && fully_stripped.contains("test") {
-                            strip_cfg_test_items(&fully_stripped)
-                        } else {
-                            fully_stripped.clone()
-                        };
+                    let has_cfg_test =
+                        fully_stripped.contains("cfg") && fully_stripped.contains("test");
+                    let prod_stripped = if has_cfg_test {
+                        strip_cfg_test_items(&fully_stripped)
+                    } else {
+                        fully_stripped.clone()
+                    };
+                    let needs_depth_aware = has_cfg_test
+                        && active_ref.iter().any(|(_, k, _, _)| {
+                            matches!(
+                                k,
+                                PatternKind::SystemHandleSyncLockHelpers
+                                    | PatternKind::ActorStateLocksOutsideSystemActor
+                            )
+                        });
+                    let prod_depth_stripped = if needs_depth_aware {
+                        Some(
+                            crate::process_global_ratchet::strip_cfg_test_items_depth_aware(
+                                &fully_stripped,
+                            ),
+                        )
+                    } else {
+                        None
+                    };
                     let prod_keep_literals = if needs_keep_literals {
                         Some(strip_comments_and_cfg_tests_keep_literals(
                             &raw,
@@ -328,7 +346,16 @@ fn scan_arch_debt_in_dir_for_rules(
                                 None => 0,
                             }
                         } else {
-                            count_pattern_in_source(*kind, rel_key, &prod_stripped)
+                            let target_src = if matches!(
+                                kind,
+                                PatternKind::SystemHandleSyncLockHelpers
+                                    | PatternKind::ActorStateLocksOutsideSystemActor
+                            ) {
+                                prod_depth_stripped.as_deref().unwrap_or(&prod_stripped)
+                            } else {
+                                &prod_stripped
+                            };
+                            count_pattern_in_source(*kind, rel_key, target_src)
                         };
                         if count > 0 {
                             hits.push((rule_idx, rel_key.clone(), count));
@@ -2290,6 +2317,67 @@ mod tests {
         assert_eq!(entry.occurrences, 1);
         assert_eq!(entry.per_file.get("services/sample.rs"), Some(&1));
         assert!(!entry.per_file.contains_key("router/session.rs"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_1342_cfg_test_struct_field_does_not_mask_impl_locks() {
+        let tmp = make_temp_dir("1342_cfg_test_field");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("system_actor")).expect("create system_actor dir");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::write(
+            src.join("system_actor/celestials.rs"),
+            r#"
+pub struct SystemHandle {
+    pub ballpark: BallparkHandle,
+    #[cfg(test)]
+    pub panic_next_command_for_test: std::sync::atomic::AtomicBool,
+    pub actor_state: ActorLock,
+}
+
+impl SystemHandle {
+    pub fn sync_helper(&self) {
+        let _bp = self.ballpark.read();
+        let _st = self.actor_state.write();
+    }
+
+    #[cfg(test)]
+    pub fn test_helper(&self) {
+        let _bp = self.ballpark.write();
+    }
+}
+"#,
+        )
+        .expect("write system_actor/celestials.rs");
+        std::fs::write(
+            src.join("services/ext.rs"),
+            r#"
+pub struct ExtHolder {
+    #[cfg(test)]
+    pub flag: bool,
+    pub sys: Sys,
+}
+
+impl ExtHolder {
+    pub fn leak(&self) {
+        let _st = self.sys.actor_state.read();
+    }
+}
+"#,
+        )
+        .expect("write services/ext.rs");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan 1342 cfg(test) struct field");
+        let sync_entry = &report.patterns["system_handle_sync_lock_helpers"];
+        assert_eq!(
+            sync_entry.per_file.get("system_actor/celestials.rs"),
+            Some(&2),
+            "post-field impl locks must be scanned while #[cfg(test)] method remains masked"
+        );
+        let ext_entry = &report.patterns["actor_state_locks_outside_system_actor"];
+        assert_eq!(ext_entry.per_file.get("services/ext.rs"), Some(&1));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
