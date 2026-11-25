@@ -1016,9 +1016,9 @@ impl SystemRegistry {
             return 0;
         }
         let mut total = 0usize;
-        for (sys_id, handle) in self.active_system_handles() {
+        for (_, handle) in self.active_system_handles() {
             total += handle.flush_dirty_condition_checkpoint_sync();
-            drones::flush_actor_active_drones_checkpoint_post_unlock(sys_id, &handle.actor_state);
+            drones::flush_from_handle(&handle);
         }
         total
     }
@@ -1387,7 +1387,10 @@ impl SystemRegistry {
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
-            drones::try_flush_actor_active_drones_checkpoint_post_unlock(solar_system_id, &actor_state_actor);
+            drones::flush_actor_active_drones_with_view(
+                solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
+                &tidi_factor_bits_actor, event_tx_actor.receiver_count(), false,
+            );
             while let Some((cmd_batch, shutdown_requested)) =
                 post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0).await
             {
@@ -2314,7 +2317,10 @@ impl SystemRegistry {
                     }
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
-                drones::try_flush_actor_active_drones_checkpoint_post_unlock(solar_system_id, &actor_state_actor);
+                drones::flush_actor_active_drones_with_view(
+                    solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
+                    &tidi_factor_bits_actor, event_tx_actor.receiver_count(), false,
+                );
                 if shutdown_requested {
                     break;
                 }
@@ -2343,7 +2349,10 @@ impl SystemRegistry {
                     }
                 }
             }
-            drones::flush_actor_active_drones_checkpoint_post_unlock(solar_system_id, &actor_state_actor);
+            drones::flush_actor_active_drones_with_view(
+                solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
+                &tidi_factor_bits_actor, event_tx_actor.receiver_count(), true,
+            );
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,

@@ -897,8 +897,8 @@ impl ServerContext {
                 crate::services::ice_heist_ops::step_ice_heist_system(&ctx, sys_id).await;
                 crate::services::doomsday_aoe_ops::step_bosonic_doomsday_system(&ctx, sys_id).await;
                 crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
-                if let Some(sys_handle) = (dt > 0.0).then(|| ctx.systems.get_handle(sys_id)).flatten() {
-                    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones_in_system(&ctx, &sys_handle, ctx.now_unix()).await;
+                if let Some(h) = (dt > 0.0).then(|| ctx.systems.get_handle(sys_id)).flatten() {
+                    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones_in_system(&ctx, &h, ctx.now_unix()).await;
                 }
             })
         }));
@@ -2659,13 +2659,8 @@ impl ServerContext {
     pub(crate) fn invalidate_and_push_fit(&self, ship_id: i64) -> Option<eve_dogma::FitRev> {
         self.invalidate_ship_fitting_cache_only(ship_id);
         let rev = self.push_fit_projection_for_ship(ship_id);
-        // `push_fit_projection_for_ship` computes and caches the fit via `self.fit` when the
-        // ship's system actor is awake; drop it from `ship_fittings` afterward without bumping
-        // `FitRev` again so `invalidate_ship_fitting` preserves its cache-invalidation contract.
-        self.ship_fittings
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
+        // Drop cached fit without bumping FitRev again so invalidation contract holds.
+        self.ship_fittings.write().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
         rev
     }
 
@@ -2998,13 +2993,11 @@ impl ServerContext {
                 });
             for (_, d) in self.systems.all_active_drones() {
                 if d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned {
-                    if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
-                        existing.drones.push((d.drone_item_id, d.type_id));
-                        drones_changed = true;
-                    }
-                    if !existing.drones.iter().any(|&(id, _)| id == d.ball_id) {
-                        existing.drones.push((d.ball_id, d.type_id));
-                        drones_changed = true;
+                    for id in [d.drone_item_id, d.ball_id] {
+                        if !existing.drones.iter().any(|&(eid, _)| eid == id) {
+                            existing.drones.push((id, d.type_id));
+                            drones_changed = true;
+                        }
                     }
                 }
             }
@@ -3223,11 +3216,10 @@ impl ServerContext {
         }
         for (_, d) in self.systems.all_active_drones() {
             if d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned {
-                if !fit.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
-                    fit.drones.push((d.drone_item_id, d.type_id));
-                }
-                if !fit.drones.iter().any(|&(id, _)| id == d.ball_id) {
-                    fit.drones.push((d.ball_id, d.type_id));
+                for id in [d.drone_item_id, d.ball_id] {
+                    if !fit.drones.iter().any(|&(eid, _)| eid == id) {
+                        fit.drones.push((id, d.type_id));
+                    }
                 }
             }
         }

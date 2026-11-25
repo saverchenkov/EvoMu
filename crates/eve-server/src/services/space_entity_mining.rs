@@ -242,50 +242,31 @@ pub(crate) async fn handle_mine(
     drone_ids.dedup();
 
     // Reject drones already present in active_drone_miners for this ship/target (`NF-1`)
-    let drone_ball_ids: Vec<i64> = {
-        let view = handle.view();
-        drone_ids
-            .iter()
-            .map(|did| {
-                view.active_drones_in_space
-                    .values()
-                    .find(|d| d.ball_id > 0 && (d.drone_item_id == *did || d.ball_id == *did))
-                    .map(|d| d.ball_id)
-                    .unwrap_or(*did)
-            })
-            .collect()
-    };
     let already_mining = {
         let view = handle.view();
-        drone_ball_ids.iter().any(|bid| {
+        drone_ids.iter().any(|did| {
+            let bid = view.active_drones_in_space
+                .values()
+                .find(|d| d.ball_id > 0 && (d.drone_item_id == *did || d.ball_id == *did))
+                .map(|d| d.ball_id)
+                .unwrap_or(*did);
             view.active_drone_miners
-                .get(bid)
+                .get(&bid)
                 .is_some_and(|m| m.ship_id == ship_id && m.asteroid_id == asteroid_id)
         })
     };
     if already_mining {
-        return Err(BridgeRpcError {
-            code: "DroneAlreadyMining".into(),
-            message: "One or more drones are already mining this asteroid".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError { code: "DroneAlreadyMining".into(), message: "One or more drones are already mining this asteroid".into(), client_error: None });
     }
 
     // Reject drone IDs not owned by caller (`rpc:entity.CmdMineRepeatedly`)
+    let view = handle.view();
     for &did in &drone_ids {
-        let is_owned = ctx.db.with_snapshot(|snap| {
-            snap.items.get(&did).is_some_and(|i| i.owner_id == char_id)
-        }) || {
-            let view = handle.view();
-            view.active_drones_in_space.get(&did).is_some_and(|d| d.ball_id > 0 && d.owner_char_id == char_id)
-                || view.active_drones_in_space.values().any(|d| d.ball_id > 0 && d.drone_item_id == did && d.owner_char_id == char_id)
-        };
+        let is_owned = ctx.db.with_snapshot(|snap| snap.items.get(&did).is_some_and(|i| i.owner_id == char_id))
+            || view.active_drones_in_space.get(&did).is_some_and(|d| d.ball_id > 0 && d.owner_char_id == char_id)
+            || view.active_drones_in_space.values().any(|d| d.ball_id > 0 && d.drone_item_id == did && d.owner_char_id == char_id);
         if !is_owned {
-            return Err(BridgeRpcError {
-                code: "InvalidDroneOwner".into(),
-                message: format!("Drone {did} is not owned by character {char_id}"),
-                client_error: None,
-            });
+            return Err(BridgeRpcError { code: "InvalidDroneOwner".into(), message: format!("Drone {did} is not owned by character {char_id}"), client_error: None });
         }
     }
 
@@ -611,8 +592,10 @@ pub(crate) async fn handle_mine(
             let d_units = ((d_yield_m3 / unit_vol).floor() as u64).max(1);
 
             let target_item_id = d_item.item_id;
+            let waste_prob = per_drone_waste_prob.get(&target_item_id).copied().unwrap_or(0.0);
+            let ore_type_id = ast_state.type_id;
             let matched_ball_id = handle
-                .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                .mutate_active_drones_with_claims(move |drones, miners, _, claimed| {
                     let Some(bid) = drones.iter().find_map(|(&bid, d)| {
                         (d.ball_id > 0
                             && !d.is_abandoned
@@ -627,13 +610,17 @@ pub(crate) async fn handle_mine(
                     if claimed.contains_key(&bid) {
                         return (false, None);
                     }
-                    if let Some(d) = drones.get_mut(&bid) {
-                        d.activity_state = 2;
-                        d.target_id = Some(asteroid_id);
-                        (true, Some(bid))
-                    } else {
-                        (false, None)
-                    }
+                    let Some(d) = drones.get_mut(&bid) else {
+                        return (false, None);
+                    };
+                    (d.activity_state, d.target_id) = (2, Some(asteroid_id));
+                    miners.insert(bid, crate::system_actor::DroneMiningState {
+                        drone_id: bid, asteroid_id, ship_id, owner_char_id: char_id,
+                        solar_system_id: sys_id, yield_units: d_units, duration_secs: dur,
+                        next_cycle_unix: now_unix.saturating_add(dur), waste_prob,
+                        ore_type_id, destination_flag: target_flag,
+                    });
+                    (true, Some(bid))
                 })
                 .await
                 .ok()
@@ -646,30 +633,11 @@ pub(crate) async fn handle_mine(
                 .emit_destiny_event(
                     drone_ball_id,
                     eve_destiny::DestinyEvent::OnDroneStateChange {
-                        drone_id: drone_ball_id,
-                        owner_id: char_id,
-                        controller_id: ship_id,
-                        activity_state: 2, // Mining (entityMining = 2)
-                        type_id: d_item.type_id,
-                        controller_owner_id: char_id,
+                        drone_id: drone_ball_id, owner_id: char_id, controller_id: ship_id,
+                        activity_state: 2, type_id: d_item.type_id, controller_owner_id: char_id,
                         target_id: Some(asteroid_id),
                     },
                 )
-                .await;
-            let _ = handle
-                .upsert_drone_miner(crate::system_actor::DroneMiningState {
-                    drone_id: drone_ball_id,
-                    asteroid_id,
-                    ship_id,
-                    owner_char_id: char_id,
-                    solar_system_id: sys_id,
-                    yield_units: d_units,
-                    duration_secs: dur,
-                    next_cycle_unix: now_unix.saturating_add(dur),
-                    waste_prob: per_drone_waste_prob.get(&d_item.item_id).copied().unwrap_or(0.0),
-                    ore_type_id: ast_state.type_id,
-                    destination_flag: target_flag,
-                })
                 .await;
             crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, drone_ball_id, 2, Some("mining"));
         }

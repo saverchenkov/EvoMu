@@ -1127,14 +1127,6 @@ impl SystemHandle {
                         base_scramble_strengths,
                         base_core_strengths,
                         protection_registry,
-                        active_drone_miners,
-                        drone_next_ready_unix,
-                        active_drones_in_space,
-                        scoop_claimed_drones,
-                        active_drones_checkpoint_dirty,
-                        active_drones_checkpoint_seq,
-                        active_drones_needs_sqlite_hydration,
-                        active_drones_removed_pre_hydration,
                         db_opt,
                         sde_opt,
                         ..
@@ -1152,17 +1144,6 @@ impl SystemHandle {
                     base_scramble_strengths.remove(&ball_id);
                     base_core_strengths.remove(&ball_id);
                     protection_registry.remove(&ball_id);
-                    active_drone_miners.remove(&ball_id);
-                    drone_next_ready_unix.remove(&ball_id);
-                    scoop_claimed_drones.remove(&ball_id);
-                    if *active_drones_needs_sqlite_hydration && ball_id > 0 {
-                        active_drones_removed_pre_hydration.insert(ball_id);
-                    }
-                    if active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
-                        *active_drones_checkpoint_dirty = true;
-                        *active_drones_checkpoint_seq =
-                            active_drones_checkpoint_seq.saturating_add(1);
-                    }
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
                     } else {
@@ -1172,6 +1153,7 @@ impl SystemHandle {
                     (removed_cycles, fallback_slim_owner, db_opt.clone(), sde_opt.clone())
                 };
                 let _ = st.clear_fighter_ball_and_track(ball_id);
+                super::drones::clear_removed_ball_drones_in_state(st, ball_id);
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
                 celestials_helpers::update_system_hibernation_flag(st, bp, self.event_tx.receiver_count());
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
@@ -1217,10 +1199,7 @@ impl SystemHandle {
             remove_from_bp_and_st(&mut bp, &mut st)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
-        super::drones::try_flush_actor_active_drones_checkpoint_post_unlock(
-            self.solar_system_id,
-            &self.actor_state,
-        );
+        super::drones::try_flush_from_handle(self);
     }
 
     pub fn has_active_nanite_repair_sync(&self, ship_id: BallId, module_id: i64) -> bool {
@@ -2406,10 +2385,7 @@ impl SystemHandle {
             SystemCommand::FlushConditionCheckpoint { reply }
         })
         .await?;
-        super::drones::flush_actor_active_drones_checkpoint_post_unlock(
-            self.solar_system_id,
-            &self.actor_state,
-        );
+        super::drones::flush_from_handle(self);
         Ok(count)
     }
 

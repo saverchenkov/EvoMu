@@ -278,14 +278,19 @@ pub(crate) async fn release_scoop_claim_and_apply_pending(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
     ball_id: i64,
+    mut guard: Option<&mut crate::system_actor::ScoopClaimGuard<'_>>,
 ) {
+    let release_res = sys_handle
+        .drone_scoop_claim_op(
+            ball_id,
+            crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
+        )
+        .await;
+    if let Some(g) = guard.as_deref_mut() {
+        g.disarm();
+    }
     if let Ok(crate::system_actor::DroneScoopClaimOutcome::ReleasedWithPending(applied)) =
-        sys_handle
-            .drone_scoop_claim_op(
-                ball_id,
-                crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
-            )
-            .await
+        release_res
     {
         finish_pending_scoop_abandon(ctx, sys_handle, ball_id, applied).await;
     }
@@ -314,7 +319,7 @@ pub(crate) fn is_ship_ball_warping(
 pub(crate) async fn abandon_returning_drone_in_space(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
-    mut drone: DroneSpaceState,
+    drone: DroneSpaceState,
 ) {
     let bid = drone.ball_id;
     let item_id = drone.drone_item_id;
@@ -332,32 +337,36 @@ pub(crate) async fn abandon_returning_drone_in_space(
                 .combat_crimewatch_state
                 .is_recently_destroyed_item_id(item_id)
     });
-    let restored = if is_destroyed {
-        false
-    } else {
-        drone.is_abandoned = true;
-        drone.owner_char_id = 0;
-        drone.parent_ship_id = 0;
-        drone.target_id = None;
-        drone.activity_state = 0;
-        drone.assist_char_id = None;
-        drone.guard_char_id = None;
-        sys_handle.upsert_active_drone(drone).await.is_ok()
-    };
     let _ = sys_handle.clear_drone_runtime(bid).await;
     let _ = sys_handle.remove_module_cycle(bid, -bid).await;
-    if !restored {
-        return;
-    }
-    sys_handle.try_stop_ball(bid);
-    let _ = sys_handle
-        .set_movement_mode(bid, eve_destiny::MovementMode::Stop)
-        .await;
-    let live_pos = sys_handle.get_ball_position_sync(bid);
-    let still_in_space = ctx
-        .db
-        .with_mut_snapshot(|snap| match snap.items.get_mut(&item_id) {
+    let live_pos = if is_destroyed {
+        None
+    } else {
+        sys_handle.try_stop_ball(bid);
+        let _ = sys_handle
+            .set_movement_mode(bid, eve_destiny::MovementMode::Stop)
+            .await;
+        sys_handle.get_ball_position_sync(bid)
+    };
+    let still_in_space = ctx.db.with_mut_snapshot(|snap| {
+        let destroyed = crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
+            &snap.combat_crimewatch_state,
+            bid,
+            item_id,
+        );
+        match snap.items.get_mut(&item_id) {
             Some(it) if it.location_id != sys_id as i64 || it.flag != eve_db::InventoryFlag::None => {
+                false
+            }
+            Some(_) if destroyed => {
+                snap.combat_crimewatch_state.record_destroyed_item_id(bid);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(item_id);
+                crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
+                    snap,
+                    Some(item_id),
+                    bid,
+                );
                 false
             }
             Some(it) => {
@@ -372,15 +381,7 @@ pub(crate) async fn abandon_returning_drone_in_space(
                 }
                 true
             }
-            None
-                if crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
-                    &snap.combat_crimewatch_state,
-                    bid,
-                    item_id,
-                ) =>
-            {
-                false
-            }
+            None if destroyed => false,
             None => {
                 super::record_drone_ball_meta_in_snap(snap, item_id, bid);
                 if let Some(pos) = live_pos {
@@ -390,7 +391,8 @@ pub(crate) async fn abandon_returning_drone_in_space(
                 }
                 true
             }
-        });
+        }
+    });
     if !still_in_space {
         let _ = sys_handle.remove_active_drone(bid).await;
         return;
@@ -557,6 +559,7 @@ async fn try_atomic_scoop_drone(
     else {
         return false;
     };
+    let mut scoop_guard = crate::system_actor::ScoopClaimGuard::new(sys_handle, existing.ball_id);
 
     enum ScoopOutcome {
         Moved(Box<DroneSpaceState>),
@@ -667,10 +670,12 @@ async fn try_atomic_scoop_drone(
                     crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
                 )
                 .await;
+            scoop_guard.disarm();
             *claimed
         }
         ScoopOutcome::BayFull => {
-            release_scoop_claim_and_apply_pending(ctx, sys_handle, d.ball_id).await;
+            release_scoop_claim_and_apply_pending(ctx, sys_handle, d.ball_id, Some(&mut scoop_guard))
+                .await;
             return false;
         }
         ScoopOutcome::NotInSpace => {
@@ -680,11 +685,12 @@ async fn try_atomic_scoop_drone(
                     crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
                 )
                 .await;
+            scoop_guard.disarm();
             let _ = sys_handle.clear_drone_runtime(d.ball_id).await;
             return false;
         }
         ScoopOutcome::ShipUnavailable => {
-            match sys_handle
+            let claim_res = sys_handle
                 .drone_scoop_claim_op(
                     d.ball_id,
                     crate::system_actor::DroneScoopClaimAction::ReleaseOrTakeForAbandon {
@@ -692,8 +698,9 @@ async fn try_atomic_scoop_drone(
                         ship_id: target_ship_id,
                     },
                 )
-                .await
-            {
+                .await;
+            scoop_guard.disarm();
+            match claim_res {
                 Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
                     live_drone,
                 ))) => {
@@ -713,6 +720,7 @@ async fn try_atomic_scoop_drone(
                     crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
                 )
                 .await;
+            scoop_guard.disarm();
             let _ = sys_handle.remove_module_cycle(d.ball_id, -d.ball_id).await;
             let _ = sys_handle.remove_ball(d.ball_id).await;
             return false;
@@ -1091,6 +1099,27 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
     }
 }
 
+async fn clear_unclaimed_drone_mining_state(
+    sys: &crate::system_actor::SystemHandle,
+    did: i64,
+    clear_activity: bool,
+) {
+    let _ = sys
+        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+            if !claimed.contains_key(&did) {
+                if let Some(d) = drones.get_mut(&did) {
+                    d.target_id = None;
+                    if clear_activity {
+                        d.activity_state = 0;
+                    }
+                    return (true, ());
+                }
+            }
+            (false, ())
+        })
+        .await;
+}
+
 /// Executes repeating drone mining cycles on the cluster tick (`rpc:entity.CmdMineRepeatedly`).
 pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
     let pending: Vec<(crate::system_actor::SystemHandle, crate::system_actor::DroneMiningState)> = ctx
@@ -1109,9 +1138,29 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
             continue;
         };
-        let valid = sys.active_drone(m.drone_id).is_some_and(|d| {
-            !d.is_abandoned && d.solar_system_id == m.solar_system_id && d.owner_char_id == m.owner_char_id
-        });
+        let (did, expected_sys, expected_owner, owner_sys_id) = (
+            m.drone_id,
+            m.solar_system_id,
+            m.owner_char_id,
+            owner_sys.solar_system_id,
+        );
+        let (claim_blocked, valid) = sys
+            .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                if claimed.contains_key(&did) {
+                    return (false, (true, false));
+                }
+                let ok = drones.get(&did).is_some_and(|d| {
+                    !d.is_abandoned
+                        && d.solar_system_id == expected_sys
+                        && d.owner_char_id == expected_owner
+                });
+                (false, (false, ok))
+            })
+            .await
+            .unwrap_or((false, false));
+        if claim_blocked {
+            continue;
+        }
         if !valid {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
             continue;
@@ -1128,17 +1177,7 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
         let in_range = matches!((ship_pos, drone_pos), (Some(sp), Some(dp)) if sp.distance(dp) <= ctrl_range);
         if !in_space || !in_range {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            let did = m.drone_id;
-            let _ = sys
-                .mutate_active_drones(move |drones, _, _| {
-                    if let Some(d) = drones.get_mut(&did) {
-                        d.target_id = None;
-                        (true, ())
-                    } else {
-                        (false, ())
-                    }
-                })
-                .await;
+            clear_unclaimed_drone_mining_state(&sys, did, false).await;
             continue;
         }
 
@@ -1170,22 +1209,28 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
 
         if hold_cap > 0.0 && (used_vol + needed_vol > hold_cap + 1e-4) {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            let did = m.drone_id;
-            let _ = sys
-                .mutate_active_drones(move |drones, _, _| {
-                    if let Some(d) = drones.get_mut(&did) {
-                        d.target_id = None;
-                        d.activity_state = 0;
-                        (true, ())
-                    } else {
-                        (false, ())
-                    }
-                })
-                .await;
+            clear_unclaimed_drone_mining_state(&sys, did, true).await;
             let _ = sys.emit_destiny_event(m.drone_id, eve_destiny::DestinyEvent::OnDroneStateChange {
                 drone_id: m.drone_id, owner_id: m.owner_char_id, controller_id: m.ship_id,
                 activity_state: 0, type_id: 0, controller_owner_id: m.owner_char_id, target_id: None,
             }).await;
+            continue;
+        }
+
+        let still_unclaimed = sys
+            .mutate_active_drones_with_claims(move |drones, miners, _, claimed| {
+                let ok = !claimed.contains_key(&did)
+                    && (owner_sys_id != expected_sys || miners.contains_key(&did))
+                    && drones.get(&did).is_some_and(|d| {
+                        !d.is_abandoned
+                            && d.solar_system_id == expected_sys
+                            && d.owner_char_id == expected_owner
+                    });
+                (false, ok)
+            })
+            .await
+            .unwrap_or(false);
+        if !still_unclaimed {
             continue;
         }
 
@@ -1194,18 +1239,7 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             Ok(e) => e,
             Err(_) => {
                 let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-                let did = m.drone_id;
-                let _ = sys
-                    .mutate_active_drones(move |drones, _, _| {
-                        if let Some(d) = drones.get_mut(&did) {
-                            d.target_id = None;
-                            d.activity_state = 0;
-                            (true, ())
-                        } else {
-                            (false, ())
-                        }
-                    })
-                    .await;
+                clear_unclaimed_drone_mining_state(&sys, did, true).await;
                 let _ = sys.emit_destiny_event(m.drone_id, eve_destiny::DestinyEvent::OnDroneStateChange {
                     drone_id: m.drone_id, owner_id: m.owner_char_id, controller_id: m.ship_id,
                     activity_state: 0, type_id: 0, controller_owner_id: m.owner_char_id, target_id: None,
@@ -1246,18 +1280,7 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
 
         if extraction.depleted {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            let did = m.drone_id;
-            let _ = sys
-                .mutate_active_drones(move |drones, _, _| {
-                    if let Some(d) = drones.get_mut(&did) {
-                        d.target_id = None;
-                        d.activity_state = 0;
-                        (true, ())
-                    } else {
-                        (false, ())
-                    }
-                })
-                .await;
+            clear_unclaimed_drone_mining_state(&sys, did, true).await;
         } else {
             let _ = owner_sys.reschedule_drone_miner(m.drone_id, now_unix).await;
         }

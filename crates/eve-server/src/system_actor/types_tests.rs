@@ -523,6 +523,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::MutateActiveDrones { .. } => "MutateActiveDrones",
             SystemCommand::MutateActiveDronesWithClaims { .. } => "MutateActiveDronesWithClaims",
             SystemCommand::ScoopDroneClaimOp { .. } => "ScoopDroneClaimOp",
+            SystemCommand::HydrateActiveDronesFromSqlite { .. } => "HydrateActiveDronesFromSqlite",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -947,6 +948,11 @@ fn system_command_all_variants_construct_and_match() {
             action: crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
             reply: oneshot::channel().0,
         },
+        SystemCommand::HydrateActiveDronesFromSqlite {
+            drones: Vec::new(),
+            legacy_dirty: false,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -958,7 +964,7 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 124);
+    assert_eq!(tags.len(), 125);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -994,9 +1000,10 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[119], "MutateActiveDrones");
     assert_eq!(tags[120], "MutateActiveDronesWithClaims");
     assert_eq!(tags[121], "ScoopDroneClaimOp");
-    assert_eq!(tags[122], "ShutdownActor");
+    assert_eq!(tags[122], "HydrateActiveDronesFromSqlite");
+    assert_eq!(tags[123], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[123], "TestAccess");
+    assert_eq!(tags[124], "TestAccess");
 }
 
 #[test]

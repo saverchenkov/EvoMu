@@ -927,8 +927,10 @@ pub(crate) struct SystemActorState {
     pub(crate) active_drones_checkpoint_dirty: bool,
     pub(crate) active_drones_checkpoint_seq: u64,
     pub(crate) active_drones_needs_sqlite_hydration: bool,
-    pub(crate) active_drones_removed_pre_hydration: std::collections::HashSet<BallId>,
+    pub(crate) active_drones_removed_pre_hydration: HashSet<BallId>,
     pub(crate) active_drones_flush_mutex: Arc<std::sync::Mutex<()>>,
+    pub(crate) migrated_legacy_drone_systems_opt:
+        Option<Arc<RankedMutex<HashSet<SolarSystemId>, RANK_LEAF>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1788,6 +1790,11 @@ pub enum SystemCommand {
         action: super::DroneScoopClaimAction,
         reply: oneshot::Sender<Result<super::DroneScoopClaimOutcome, String>>,
     },
+    HydrateActiveDronesFromSqlite {
+        drones: Vec<super::DroneSpaceState>,
+        legacy_dirty: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1993,6 +2000,7 @@ pub struct SystemView {
     pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     pub drone_next_ready_unix: HashMap<BallId, u64>,
     pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    pub active_drones_needs_sqlite_hydration: bool,
     pub stargate_activation_states: BTreeMap<BallId, eve_destiny::StargateActivationState>,
     pub active_module_cycles: Vec<ActiveModuleCycle>,
     pub external_active_modules: HashSet<(BallId, ItemId)>,
@@ -2042,6 +2050,7 @@ impl Default for SystemView {
             active_drone_miners: HashMap::new(),
             drone_next_ready_unix: HashMap::new(),
             active_drones_in_space: HashMap::new(),
+            active_drones_needs_sqlite_hydration: false,
             stargate_activation_states: BTreeMap::new(),
             active_module_cycles: Vec::new(),
             external_active_modules: HashSet::new(),
@@ -2072,6 +2081,7 @@ struct ViewActorSnapshot {
     active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     drone_next_ready_unix: HashMap<BallId, u64>,
     active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    active_drones_needs_sqlite_hydration: bool,
     active_module_cycles: Vec<ActiveModuleCycle>,
     external_active_modules: HashSet<(BallId, ItemId)>,
     active_nanite_repairs: Vec<ActiveNaniteRepair>,
@@ -2171,6 +2181,7 @@ impl SystemView {
                 active_drone_miners: st.active_drone_miners.clone(),
                 drone_next_ready_unix: st.drone_next_ready_unix.clone(),
                 active_drones_in_space: st.active_drones_in_space.clone(),
+                active_drones_needs_sqlite_hydration: st.active_drones_needs_sqlite_hydration,
                 active_module_cycles: st.active_module_cycles.clone(),
                 external_active_modules: st.external_active_modules.clone(),
                 active_nanite_repairs: st.active_nanite_repairs.clone(),
@@ -2199,6 +2210,7 @@ impl SystemView {
                 active_drone_miners: prev.active_drone_miners.clone(),
                 drone_next_ready_unix: prev.drone_next_ready_unix.clone(),
                 active_drones_in_space: prev.active_drones_in_space.clone(),
+                active_drones_needs_sqlite_hydration: prev.active_drones_needs_sqlite_hydration,
                 active_module_cycles: prev.active_module_cycles.clone(),
                 external_active_modules: prev.external_active_modules.clone(),
                 active_nanite_repairs: prev.active_nanite_repairs.clone(),
@@ -2256,6 +2268,7 @@ impl SystemView {
             active_drone_miners: actor.active_drone_miners,
             drone_next_ready_unix: actor.drone_next_ready_unix,
             active_drones_in_space: actor.active_drones_in_space,
+            active_drones_needs_sqlite_hydration: actor.active_drones_needs_sqlite_hydration,
             stargate_activation_states: ballpark.stargate_activation_states.clone(),
             active_module_cycles: actor.active_module_cycles,
             external_active_modules: actor.external_active_modules,

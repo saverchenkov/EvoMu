@@ -199,178 +199,87 @@ impl Drop for TempSqliteGuard {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn active_drones_checkpoint_persists_across_stop_and_sqlite_restart() {
-    let tmp = std::env::temp_dir().join(format!(
-        "evomu_active_drones_d2b_{}_{}.sqlite",
-        std::process::id(),
-        1
-    ));
-    let _guard = TempSqliteGuard(tmp.clone());
+fn temp_sqlite_db(tag: &str) -> (std::path::PathBuf, TempSqliteGuard) {
+    let tmp = std::env::temp_dir().join(format!("evomu_active_drones_{tag}_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let _ = std::fs::remove_file(tmp.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(tmp.with_extension("sqlite-shm"));
+    (tmp.clone(), TempSqliteGuard(tmp))
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_drones_checkpoint_persists_across_stop_and_sqlite_restart() {
+    let (tmp, _guard) = temp_sqlite_db("d2b_1");
     let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
-    let jita_sys = 30_000_142u32;
-    let perim_sys = 30_000_144u32;
-    let drone_jita = 880_001i64;
-    let drone_perim = 880_002i64;
-
+    let (jita_sys, perim_sys, drone_jita, drone_perim) = (30_000_142u32, 30_000_144u32, 880_001i64, 880_002i64);
     {
         let db1 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 1"));
-        let reg1 = Arc::new(SystemRegistry::with_sde_and_db(
-            Arc::clone(&sde),
-            Arc::clone(&db1),
-        ));
-        let sys_jita = reg1.get_or_spawn(jita_sys);
-        let sys_perim = reg1.get_or_spawn(perim_sys);
+        let reg1 = Arc::new(SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db1)));
+        let (sys_jita, sys_perim) = (reg1.get_or_spawn(jita_sys), reg1.get_or_spawn(perim_sys));
+        sys_jita.upsert_active_drone(make_space_drone(drone_jita, 100_001, 900_001, jita_sys, false)).await.unwrap();
+        sys_perim.upsert_active_drone(make_space_drone(drone_perim, 100_002, 900_002, perim_sys, true)).await.unwrap();
 
-        sys_jita
-            .upsert_active_drone(make_space_drone(drone_jita, 100_001, 900_001, jita_sys, false))
-            .await
-            .unwrap();
-        sys_perim
-            .upsert_active_drone(make_space_drone(drone_perim, 100_002, 900_002, perim_sys, true))
-            .await
-            .unwrap();
-
-        // Stop Jita actor -> flushes `KIND_ACTIVE_DRONES` checkpoint to SQLite under its own system scope.
         assert!(reg1.stop_system(jita_sys).await);
-        let persisted_jita = db1
-            .with_sqlite_conn(|conn| {
-                eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
-                    conn,
-                    jita_sys,
-                    eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-                )
-            })
-            .expect("load jita active drones");
-        assert_eq!(persisted_jita.len(), 1);
-        assert_eq!(persisted_jita[0].1.ball_id, drone_jita);
-        assert_eq!(persisted_jita[0].1.solar_system_id, jita_sys);
+        let persisted_jita = db1.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+            c, jita_sys, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+        )).expect("load jita active drones");
+        assert_eq!((persisted_jita.len(), persisted_jita[0].1.ball_id, persisted_jita[0].1.solar_system_id), (1, drone_jita, jita_sys));
 
-        // Re-wake Jita -> drone restored only inside Jita, not Perimeter's drone.
         let sys_jita_re = reg1.get_or_spawn(jita_sys);
-        assert!(sys_jita_re.active_drone(drone_jita).is_some());
-        assert!(sys_jita_re.active_drone(drone_perim).is_none());
-
-        // Removing the drone and stopping Jita clears stale SQLite checkpoint rows.
+        assert!(sys_jita_re.active_drone(drone_jita).is_some() && sys_jita_re.active_drone(drone_perim).is_none());
         assert!(sys_jita_re.remove_active_drone(drone_jita).await.unwrap().is_some());
         assert!(reg1.stop_system(jita_sys).await);
-        let cleared_jita = db1
-            .with_sqlite_conn(|conn| {
-                eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
-                    conn,
-                    jita_sys,
-                    eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-                )
-            })
-            .expect("load cleared jita active drones");
+        let cleared_jita = db1.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+            c, jita_sys, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+        )).expect("load cleared jita");
         assert!(cleared_jita.is_empty());
 
-        // Re-seed Jita drone and stop both systems before reopening SQLite from disk.
         let sys_jita_re2 = reg1.get_or_spawn(jita_sys);
-        sys_jita_re2
-            .upsert_active_drone(make_space_drone(drone_jita, 100_001, 900_001, jita_sys, false))
-            .await
-            .unwrap();
-        assert!(reg1.stop_system(jita_sys).await);
-        assert!(reg1.stop_system(perim_sys).await);
+        sys_jita_re2.upsert_active_drone(make_space_drone(drone_jita, 100_001, 900_001, jita_sys, false)).await.unwrap();
+        assert!(reg1.stop_system(jita_sys).await && reg1.stop_system(perim_sys).await);
     }
 
     let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 2"));
     let reg2 = Arc::new(SystemRegistry::with_sde_and_db(sde, db2));
-    let sys_jita2 = reg2.get_or_spawn(jita_sys);
-    let sys_perim2 = reg2.get_or_spawn(perim_sys);
-
-    let restored_jita = sys_jita2
-        .active_drone(drone_jita)
-        .expect("jita drone survived sqlite restart");
-    assert_eq!(restored_jita.solar_system_id, jita_sys);
-    assert!(!restored_jita.is_abandoned);
+    let (sys_jita2, sys_perim2) = (reg2.get_or_spawn(jita_sys), reg2.get_or_spawn(perim_sys));
+    let restored_jita = sys_jita2.active_drone(drone_jita).expect("jita survived");
+    assert_eq!((restored_jita.solar_system_id, restored_jita.is_abandoned), (jita_sys, false));
     assert!(sys_jita2.active_drone(drone_perim).is_none());
-
-    let restored_perim = sys_perim2
-        .active_drone(drone_perim)
-        .expect("perim drone survived sqlite restart");
-    assert_eq!(restored_perim.solar_system_id, perim_sys);
-    assert!(restored_perim.is_abandoned);
+    let restored_perim = sys_perim2.active_drone(drone_perim).expect("perim survived");
+    assert_eq!((restored_perim.solar_system_id, restored_perim.is_abandoned), (perim_sys, true));
     assert!(sys_perim2.active_drone(drone_jita).is_none());
-
-    assert!(reg2.stop_system(jita_sys).await);
-    assert!(reg2.stop_system(perim_sys).await);
+    assert!(reg2.stop_system(jita_sys).await && reg2.stop_system(perim_sys).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_extended_runtime_json_fallback_is_one_way_and_system_scoped() {
-    let tmp = std::env::temp_dir().join(format!(
-        "evomu_active_drones_legacy_d2b_{}_{}.sqlite",
-        std::process::id(),
-        2
-    ));
-    let _guard = TempSqliteGuard(tmp.clone());
-    let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(tmp.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(tmp.with_extension("sqlite-shm"));
-
+    let (tmp, _guard) = temp_sqlite_db("legacy_d2b_2");
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite legacy"));
     let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
-    let jita_sys = 30_000_142u32;
-    let perim_sys = 30_000_144u32;
+    let (jita_sys, perim_sys) = (30_000_142u32, 30_000_144u32);
     let d1 = make_space_drone(880_101, 100_001, 900_001, jita_sys, false);
     let d2 = make_space_drone(880_102, 100_002, 900_002, perim_sys, true);
 
     db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state.extended_runtime_json = serde_json::json!({
-            "active_drones_in_space": {
-                "880101": d1,
-                "880102": d2,
-            }
-        })
-        .to_string();
+        snap.combat_crimewatch_state.extended_runtime_json = serde_json::json!({"active_drones_in_space": {"880101": d1, "880102": d2}}).to_string();
     });
 
     let ctx = crate::router::ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
-    assert!(
-        ctx.systems.get_handle(perim_sys).is_none(),
-        "upfront legacy migration must not wake cold system {perim_sys}"
-    );
+    assert!(ctx.systems.get_handle(perim_sys).is_none(), "upfront legacy migration must not wake cold {perim_sys}");
     let sys_jita = ctx.systems.get_or_spawn(jita_sys);
-    assert!(sys_jita.active_drone(880_101).is_some());
-    assert!(sys_jita.active_drone(880_102).is_none());
+    assert!(sys_jita.active_drone(880_101).is_some() && sys_jita.active_drone(880_102).is_none());
 
-    // Flushing combat runtime must NEVER write `active_drones_in_space` back into persisted combat payload.
     crate::services::combat_crimewatch::flush_combat_runtime_to_db(&ctx);
-    let ext_after_flush = db.with_snapshot(|snap| {
-        snap.combat_crimewatch_state.extended_runtime_json.clone()
-    });
-    assert!(
-        !ext_after_flush.contains("active_drones_in_space"),
-        "flush_combat_runtime_to_db must not persist active_drones_in_space: {ext_after_flush}"
-    );
-
-    // Stopping Jita leaves the migrated entry in SQLite `system_checkpoint` (`KIND_ACTIVE_DRONES`).
+    assert!(db.with_snapshot(|s| !s.combat_crimewatch_state.extended_runtime_json.contains("active_drones_in_space")));
     assert!(ctx.systems.stop_system(jita_sys).await);
-    let persisted = db
-        .with_sqlite_conn(|conn| {
-            eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
-                conn,
-                jita_sys,
-                eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-            )
-        })
-        .expect("load migrated jita checkpoint");
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].1.ball_id, 880_101);
+    let persisted = db.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+        c, jita_sys, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+    )).expect("load migrated jita checkpoint");
+    assert_eq!((persisted.len(), persisted[0].1.ball_id), (1, 880_101));
 
-    // Waking previously cold `perim_sys` *after* `flush_combat_runtime_to_db` must still restore `880_102`.
     let sys_perim = ctx.systems.get_or_spawn(perim_sys);
-    let restored_perim = sys_perim
-        .active_drone(880_102)
-        .expect("cold perim_sys must restore migrated legacy drone 880_102 after legacy JSON flush");
-    assert_eq!(restored_perim.solar_system_id, perim_sys);
-    assert!(restored_perim.is_abandoned);
+    let restored_perim = sys_perim.active_drone(880_102).expect("cold perim_sys must restore migrated 880_102");
+    assert_eq!((restored_perim.solar_system_id, restored_perim.is_abandoned), (perim_sys, true));
     assert!(ctx.systems.stop_system(perim_sys).await);
 }
 
@@ -517,121 +426,118 @@ async fn system_actor_step_manual_drives_engaged_drones_in_system() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upfront_legacy_migration_clears_disk_json_without_flush_preventing_resurrection() {
-    let tmp = std::env::temp_dir().join(format!(
-        "evomu_active_drones_legacy_clear_{}_{}.sqlite",
-        std::process::id(),
-        3
-    ));
-    let _guard = TempSqliteGuard(tmp.clone());
-    let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(tmp.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(tmp.with_extension("sqlite-shm"));
-
+    let (tmp, _guard) = temp_sqlite_db("legacy_clear_3");
     let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
-    let jita_sys = 30_000_142u32;
-    let perim_sys = 30_000_144u32;
-    let d1 = make_space_drone(880_201, 100_001, 900_001, jita_sys, false);
-    let d2 = make_space_drone(880_202, 100_002, 900_002, perim_sys, true);
-
+    let (jita_sys, perim_sys) = (30_000_142u32, 30_000_144u32);
+    let (d1, d2) = (make_space_drone(880_201, 100_001, 900_001, jita_sys, false), make_space_drone(880_202, 100_002, 900_002, perim_sys, true));
     {
         let db1 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 1"));
         db1.with_mut_snapshot(|snap| {
-            snap.combat_crimewatch_state.extended_runtime_json = serde_json::json!({
-                "active_drones_in_space": {
-                    "880201": d1,
-                    "880202": d2,
-                }
-            })
-            .to_string();
+            snap.combat_crimewatch_state.extended_runtime_json = serde_json::json!({"active_drones_in_space": {"880201": d1, "880202": d2}}).to_string();
         });
-
-        // Boot without ever calling `flush_combat_runtime_to_db`.
-        let ctx1 = crate::router::ServerContext::with_sde_and_repository(
-            Arc::clone(&sde),
-            Arc::clone(&db1),
-        );
-        assert!(
-            db1.with_snapshot(|s| !s
-                .combat_crimewatch_state
-                .extended_runtime_json
-                .contains("active_drones_in_space")),
-            "startup migration must immediately strip active_drones_in_space from persisted extended_runtime_json"
-        );
-
-        let sys_jita = ctx1.systems.get_or_spawn(jita_sys);
-        let sys_perim = ctx1.systems.get_or_spawn(perim_sys);
-        assert!(sys_jita.active_drone(880_201).is_some());
-        assert!(sys_perim.active_drone(880_202).is_some());
-
-        // Remove all migrated drones (emulating scoop/destruction) leaving KIND_ACTIVE_DRONES empty.
-        assert!(sys_jita.remove_active_drone(880_201).await.unwrap().is_some());
-        assert!(sys_perim.remove_active_drone(880_202).await.unwrap().is_some());
-        assert!(ctx1.systems.stop_system(jita_sys).await);
-        assert!(ctx1.systems.stop_system(perim_sys).await);
+        let ctx1 = crate::router::ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db1));
+        assert!(db1.with_snapshot(|s| !s.combat_crimewatch_state.extended_runtime_json.contains("active_drones_in_space")));
+        let (sys_jita, sys_perim) = (ctx1.systems.get_or_spawn(jita_sys), ctx1.systems.get_or_spawn(perim_sys));
+        assert!(sys_jita.active_drone(880_201).is_some() && sys_perim.active_drone(880_202).is_some());
+        assert!(sys_jita.remove_active_drone(880_201).await.unwrap().is_some() && sys_perim.remove_active_drone(880_202).await.unwrap().is_some());
+        assert!(ctx1.systems.stop_system(jita_sys).await && ctx1.systems.stop_system(perim_sys).await);
     }
-
-    // Reopen from disk without flush_combat_runtime_to_db: emptied systems must NOT resurrect drones.
     let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 2"));
-    assert!(db2.with_snapshot(|s| !s
-        .combat_crimewatch_state
-        .extended_runtime_json
-        .contains("active_drones_in_space")));
+    assert!(db2.with_snapshot(|s| !s.combat_crimewatch_state.extended_runtime_json.contains("active_drones_in_space")));
     let ctx2 = crate::router::ServerContext::with_sde_and_repository(sde, db2);
-    let sys_jita2 = ctx2.systems.get_or_spawn(jita_sys);
-    let sys_perim2 = ctx2.systems.get_or_spawn(perim_sys);
-    assert!(sys_jita2.active_drone(880_201).is_none());
-    assert!(sys_perim2.active_drone(880_202).is_none());
+    assert!(ctx2.systems.get_or_spawn(jita_sys).active_drone(880_201).is_none() && ctx2.systems.get_or_spawn(perim_sys).active_drone(880_202).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dirty_active_drone_checkpoint_prevents_hibernation_until_flushed() {
-    let tmp = std::env::temp_dir().join(format!(
-        "evomu_active_drones_dirty_hib_{}_{}.sqlite",
-        std::process::id(),
-        4
-    ));
-    let _guard = TempSqliteGuard(tmp.clone());
-    let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(tmp.with_extension("sqlite-wal"));
-    let _ = std::fs::remove_file(tmp.with_extension("sqlite-shm"));
-
+    let (tmp, _guard) = temp_sqlite_db("dirty_hib_4");
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite dirty hib"));
     let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
     let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
     let sys_id = 30_000_142u32;
     let sys = reg.get_or_spawn(sys_id);
 
-    // Hold `db.with_mut_snapshot` in a background thread so `try_flush_actor_active_drones_checkpoint_post_unlock`
-    // cannot acquire `db.writer` while an abandoned idle drone becomes dirty.
     let db_hold = Arc::clone(&db);
     let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let holder = tokio::task::spawn_blocking(move || {
-        db_hold.with_mut_snapshot(|_| {
-            let _ = locked_tx.send(());
-            let _ = release_rx.blocking_recv();
-        });
+        db_hold.with_mut_snapshot(|_| { let _ = locked_tx.send(()); let _ = release_rx.blocking_recv(); });
     });
     locked_rx.await.unwrap();
 
-    sys.upsert_active_drone(make_space_drone(950_777, 100_001, 900_001, sys_id, true))
-        .await
-        .unwrap();
+    sys.upsert_active_drone(make_space_drone(950_777, 100_001, 900_001, sys_id, true)).await.unwrap();
     let _ = sys.step_manual(1.0).await.unwrap();
-    assert!(
-        !sys.is_hibernated(),
-        "actor with un-flushed dirty active_drones_checkpoint must not hibernate while writer is contended"
-    );
+    assert!(!sys.is_hibernated(), "actor with un-flushed dirty checkpoint must not hibernate while writer contended");
 
     let _ = release_tx.send(());
     holder.await.unwrap();
-    // Tick 1 triggers post-unlock active-drones SQLite flush after `step_manual` unlocks `actor_state`.
     let _ = sys.step_manual(1.0).await.unwrap();
-    // Tick 2 observes `active_drones_checkpoint_dirty == false` inside `update_system_hibernation_flag`.
     let _ = sys.step_manual(1.0).await.unwrap();
-    assert!(
-        sys.is_hibernated(),
-        "actor with only idle abandoned drone must hibernate once dirty checkpoint flushes"
-    );
+    assert!(sys.is_hibernated(), "actor with only idle abandoned drone must hibernate once dirty checkpoint flushes");
     assert!(reg.stop_system(sys_id).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_sqlite_hydration_contended_and_unsafe_read_preserves_view_hibernation_and_capacity() {
+    let (tmp, _guard) = temp_sqlite_db("deferred_hyd_5");
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let (jita_sys, perim_sys, ren_sys) = (30_000_142u32, 30_000_144u32, 30_000_145u32);
+    {
+        let db1 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 1"));
+        let reg1 = Arc::new(SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db1)));
+        let (jita, perim, ren) = (reg1.get_or_spawn(jita_sys), reg1.get_or_spawn(perim_sys), reg1.get_or_spawn(ren_sys));
+        jita.upsert_active_drones(vec![make_space_drone(951_101, 100_001, 900_001, jita_sys, false), make_space_drone(951_102, 100_001, 900_001, jita_sys, false)], false).await.unwrap();
+        perim.upsert_active_drone(make_space_drone(951_201, 100_002, 900_002, perim_sys, true)).await.unwrap();
+        ren.upsert_active_drone(make_space_drone(951_301, 100_003, 900_003, ren_sys, true)).await.unwrap();
+        assert!(reg1.stop_system(jita_sys).await && reg1.stop_system(perim_sys).await && reg1.stop_system(ren_sys).await);
+    }
+
+    let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 2"));
+    let reg2 = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db2)));
+    let hold_writer = |db: &Arc<eve_db::WorldRepository>| {
+        let (db_c, (ltx, lrx), (rtx, rrx)) = (Arc::clone(db), tokio::sync::oneshot::channel::<()>(), tokio::sync::oneshot::channel::<()>());
+        let h = tokio::task::spawn_blocking(move || db_c.with_mut_snapshot(|_| { let _ = ltx.send(()); let _ = rrx.blocking_recv(); }));
+        (lrx, rtx, h)
+    };
+
+    // (a) Contended `db.writer` wake stays non-hibernated, never overwrites SQLite, republishes SystemView, and enforces capacity.
+    let (lrx1, rtx1, h1) = hold_writer(&db2);
+    lrx1.await.unwrap();
+    let jita = reg2.get_or_spawn(jita_sys);
+    assert!(!jita.is_hibernated(), "unhydrated DB-backed actor must not hibernate while db.writer is contended");
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert!(!jita.is_hibernated());
+    let _ = rtx1.send(()); h1.await.unwrap();
+    let _ = jita.step_manual(1.0).await.unwrap();
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert!(jita.active_drone(951_101).is_some() && jita.active_drone(951_102).is_some(), "SystemView must expose hydrated drones immediately");
+    assert_eq!(jita.reserve_drone_launches(ReserveDroneLaunchesReq {
+        ship_id: 900_001, max_drones_allowed: 2, max_bandwidth: 25.0, partial_ok: false,
+        drones: vec![(1, make_space_drone(-200_501, 100_001, 900_001, jita_sys, false))],
+    }).await.unwrap().rejected_error, Some("NoDroneManagementAbilitiesLeft"));
+
+    // (b) `!db_read_safe` wake marks `needs_sqlite_hydration`, preserves persisted drones, updates hibernation & SystemView.
+    let (lrx2, rtx2, h2) = hold_writer(&db2);
+    lrx2.await.unwrap();
+    let perim = db2.with_snapshot(|_| reg2.get_or_spawn(perim_sys));
+    assert!(!perim.is_hibernated(), "!db_read_safe unhydrated actor must not hibernate");
+    let _ = rtx2.send(()); h2.await.unwrap();
+    let saw_persisted = perim.mutate_active_drones(move |drones, _, _| {
+        let had = drones.contains_key(&951_201);
+        drones.insert(951_202, make_space_drone(951_202, 100_002, 900_002, perim_sys, true));
+        (true, had)
+    }).await.unwrap();
+    assert!(saw_persisted, "command after !db_read_safe wake must hydrate SQLite first without overwriting");
+    assert!(perim.active_drone(951_201).is_some() && perim.active_drone(951_202).is_some());
+    assert!(reg2.stop_system(perim_sys).await);
+    let saved_perim = db2.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+        c, perim_sys, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+    )).unwrap();
+    assert_eq!(saved_perim.len(), 2, "persisted drone 951_201 must survive !db_read_safe mutation");
+
+    // Idle abandoned `!db_read_safe` system with free writer exposes SystemView and hibernates once hydrated.
+    let ren = db2.with_snapshot(|_| reg2.get_or_spawn(ren_sys));
+    let _ = ren.flush_condition_checkpoint().await.unwrap();
+    assert!(ren.active_drone(951_301).is_some() && ren.is_hibernated());
+    assert!(reg2.stop_system(jita_sys).await && reg2.stop_system(ren_sys).await);
 }

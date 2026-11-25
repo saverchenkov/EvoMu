@@ -349,7 +349,10 @@ pub(crate) async fn finish_engaged_drone_cycle(
     next_cycle_unix: u64,
 ) {
     let (clear_web, ready_action) = sys_handle
-        .mutate_active_drones(move |drones, _, _| {
+        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+            if claimed.contains_key(&ball_id) {
+                return (false, (false, None));
+            }
             let Some(st) = drones.get_mut(&ball_id) else {
                 return (false, (true, Some(false)));
             };
@@ -405,10 +408,35 @@ pub(crate) fn disengage_drones_targeting(ctx: &ServerContext, solar_system_id: u
     }
 }
 
+async fn check_unclaimed_engaged_drone(
+    sys_handle: &crate::system_actor::SystemHandle,
+    bid: i64,
+    expected_sys: u32,
+    target_id: i64,
+) -> (bool, bool) {
+    sys_handle
+        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+            let is_claimed = claimed.contains_key(&bid);
+            let ok = !is_claimed
+                && drones.get(&bid).is_some_and(|st| {
+                    !st.is_abandoned
+                        && st.solar_system_id == expected_sys
+                        && st.activity_state == 1
+                        && st.target_id == Some(target_id)
+                });
+            (false, (is_claimed, ok))
+        })
+        .await
+        .unwrap_or((false, false))
+}
+
 /// Disengages a single drone by `drone_ball_id` in `sys_handle`.
 fn disengage_single_drone(sys_handle: &crate::system_actor::SystemHandle, drone_ball_id: i64) {
     let cleared = sys_handle
-        .mutate_active_drones_sync(move |drones, _, _| {
+        .mutate_active_drones_with_claims_sync(move |drones, _, _, claimed| {
+            if claimed.contains_key(&drone_ball_id) {
+                return (false, false);
+            }
             if let Some(d) = drones.get_mut(&drone_ball_id) {
                 d.target_id = None;
                 d.activity_state = 0;
@@ -431,20 +459,24 @@ pub async fn step_engaged_drones_in_system(
     sys_handle: &crate::system_actor::SystemHandle,
     now_unix: u64,
 ) {
-    let due_drones: Vec<DroneSpaceState> = {
-        let view = sys_handle.view();
-        view.active_drones_in_space
-            .values()
-            .filter(|d| {
-                d.ball_id > 0
-                    && !d.is_abandoned
-                    && d.activity_state == 1
-                    && d.target_id.is_some()
-                    && now_unix >= view.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
-            })
-            .cloned()
-            .collect()
-    };
+    let due_drones: Vec<DroneSpaceState> = sys_handle
+        .mutate_active_drones_with_claims(move |drones, _, timers, claimed| {
+            let due = drones
+                .values()
+                .filter(|d| {
+                    d.ball_id > 0
+                        && !d.is_abandoned
+                        && d.activity_state == 1
+                        && d.target_id.is_some()
+                        && !claimed.contains_key(&d.ball_id)
+                        && now_unix >= timers.get(&d.ball_id).copied().unwrap_or(0)
+                })
+                .cloned()
+                .collect();
+            (false, due)
+        })
+        .await
+        .unwrap_or_default();
     for d in due_drones {
         let Some(target_id) = d.target_id else {
             continue;
@@ -483,14 +515,13 @@ pub async fn step_engaged_drones_in_system(
             disengage_single_drone(sys_handle, d.ball_id);
             continue;
         }
-        let still_engaged = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
-            !st.is_abandoned
-                && st.solar_system_id == d.solar_system_id
-                && st.activity_state == 1
-                && st.target_id == Some(target_id)
-        });
+        let (bid, expected_sys) = (d.ball_id, d.solar_system_id);
+        let (claimed_hit, still_engaged) =
+            check_unclaimed_engaged_drone(sys_handle, bid, expected_sys, target_id).await;
         if !still_engaged {
-            clear_drone_web_cycle(sys_handle, d.ball_id).await;
+            if !claimed_hit {
+                clear_drone_web_cycle(sys_handle, d.ball_id).await;
+            }
             continue;
         }
         if d.damage_vector.total() > 0.0 {
@@ -564,14 +595,13 @@ pub async fn step_engaged_drones_in_system(
             }
         }
         if d.web_speed_factor < 0.0 {
-            let still_targeting = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
-                !st.is_abandoned
-                    && st.solar_system_id == d.solar_system_id
-                    && st.activity_state == 1
-                    && st.target_id == Some(target_id)
-            });
+            let (claimed_web, still_targeting) =
+                check_unclaimed_engaged_drone(sys_handle, bid, expected_sys, target_id).await;
             let in_web_range =
                 drone_ball.surface_distance(&target_ball) <= d.effective_optimal_range(ctx);
+            if claimed_web {
+                continue;
+            }
             if !still_targeting
                 || !in_web_range
                 || is_target_immune_to_drone_ewar(ctx, sys_handle, target_id, target_ball.type_id)
@@ -606,13 +636,21 @@ pub async fn step_engaged_drones_in_system(
             .clamp(0.1, 1.0);
         let scaled_cycle_secs = ((d.cycle_duration_secs(ctx) as f64) / tidi).round().max(1.0) as u64;
         let next_ready = now_unix.saturating_add(scaled_cycle_secs);
-        let should_set_ready = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
-            !st.is_abandoned
-                && st.solar_system_id == d.solar_system_id
-                && st.owner_char_id == d.owner_char_id
-                && st.parent_ship_id == d.parent_ship_id
-                && st.activity_state != 4
-        });
+        let (expected_owner, expected_ship) = (d.owner_char_id, d.parent_ship_id);
+        let should_set_ready = sys_handle
+            .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                let ok = !claimed.contains_key(&bid)
+                    && drones.get(&bid).is_some_and(|st| {
+                        !st.is_abandoned
+                            && st.solar_system_id == expected_sys
+                            && st.owner_char_id == expected_owner
+                            && st.parent_ship_id == expected_ship
+                            && st.activity_state != 4
+                    });
+                (false, ok)
+            })
+            .await
+            .unwrap_or(false);
         if should_set_ready {
             let _ = sys_handle
                 .set_drone_next_ready_unix_if_present(d.ball_id, next_ready)
@@ -647,18 +685,23 @@ pub async fn step_drone_auto_aggression_and_assist(
             .unwrap_or_default()
     });
     let drones: Vec<DroneSpaceState> = sys_handle
-        .view()
-        .active_drones_in_space
-        .values()
-        .filter(|d| {
-            d.ball_id > 0
-                && d.solar_system_id == solar_system_id
-                && d.owner_char_id == owner_char_id
-                && !d.is_abandoned
-                && d.activity_state != 4
+        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+            let out = drones
+                .values()
+                .filter(|d| {
+                    d.ball_id > 0
+                        && d.solar_system_id == solar_system_id
+                        && d.owner_char_id == owner_char_id
+                        && !d.is_abandoned
+                        && d.activity_state != 4
+                        && !claimed.contains_key(&d.ball_id)
+                })
+                .cloned()
+                .collect();
+            (false, out)
         })
-        .cloned()
-        .collect();
+        .await
+        .unwrap_or_default();
 
     let now_unix = ctx.now_unix();
     let mut engaged_drone_balls = Vec::new();
@@ -717,7 +760,10 @@ pub async fn step_drone_auto_aggression_and_assist(
             let expected_target = d.target_id;
             let expected_state = d.activity_state;
             let switched_target = sys_handle
-                .mutate_active_drones(move |drones, _, _| {
+                .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                    if claimed.contains_key(&target_bid) {
+                        return (false, None);
+                    }
                     let Some(st) = drones.get_mut(&target_bid) else {
                         return (false, None);
                     };
@@ -757,14 +803,12 @@ pub async fn step_drone_auto_aggression_and_assist(
                     )
                     .await;
             }
-            let still_engaged = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
-                !st.is_abandoned
-                    && st.solar_system_id == solar_system_id
-                    && st.activity_state == 1
-                    && st.target_id == Some(tid)
-            });
+            let (claimed_hit, still_engaged) =
+                check_unclaimed_engaged_drone(&sys_handle, target_bid, solar_system_id, tid).await;
             if !still_engaged {
-                clear_drone_web_cycle(&sys_handle, d.ball_id).await;
+                if !claimed_hit {
+                    clear_drone_web_cycle(&sys_handle, d.ball_id).await;
+                }
                 continue;
             }
             let mut target_destroyed = false;
@@ -829,6 +873,7 @@ async fn reject_destroyed_drone_scoop(
     item_id_opt: Option<i64>,
     purge_db: bool,
     msg: String,
+    mut scoop_guard: Option<&mut crate::system_actor::ScoopClaimGuard<'_>>,
 ) -> BridgeRpcError {
     if purge_db {
         let _ = cleanup_destroyed_drone_db_item(
@@ -844,6 +889,9 @@ async fn reject_destroyed_drone_scoop(
             crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
         )
         .await;
+    if let Some(g) = scoop_guard.as_deref_mut() {
+        g.disarm();
+    }
     if !purge_db {
         ctx.db.with_mut_snapshot(|snap| {
             let moved_out = item_id_opt
@@ -916,6 +964,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             stale_item,
             true,
             format!("Drone ball {drone_ball_id} was destroyed"),
+            None,
         )
         .await);
     }
@@ -960,6 +1009,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             ));
         }
     };
+    let mut scoop_guard = crate::system_actor::ScoopClaimGuard::new(&sys_handle, drone_ball_id);
     if let Some(ref drone_st) = active_drone {
         let item_id = drone_st.drone_item_id;
         if ctx
@@ -973,6 +1023,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 Some(item_id),
                 true,
                 format!("Drone item {item_id} was destroyed"),
+                Some(&mut scoop_guard),
             )
             .await);
         }
@@ -1231,6 +1282,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                     crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
                 )
                 .await;
+            scoop_guard.disarm();
             id
         }
         ScoopTxResult::Destroyed {
@@ -1245,12 +1297,13 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 item_id,
                 purge_db,
                 msg,
+                Some(&mut scoop_guard),
             )
             .await);
         }
         ScoopTxResult::CallerUnavailableAbandon(should_abandon, msg) => {
             if should_abandon {
-                match sys_handle
+                let claim_res = sys_handle
                     .drone_scoop_claim_op(
                         drone_ball_id,
                         crate::system_actor::DroneScoopClaimAction::ReleaseOrTakeForAbandon {
@@ -1258,8 +1311,9 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                             ship_id,
                         },
                     )
-                    .await
-                {
+                    .await;
+                scoop_guard.disarm();
+                match claim_res {
                     Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
                         live_st,
                     ))) => {
@@ -1288,6 +1342,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                     ctx,
                     &sys_handle,
                     drone_ball_id,
+                    Some(&mut scoop_guard),
                 )
                 .await;
             }
@@ -1304,6 +1359,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                     crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
                 )
                 .await;
+            scoop_guard.disarm();
             let _ = sys_handle.clear_drone_runtime(drone_ball_id).await;
             return Err(e);
         }
@@ -1312,6 +1368,7 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 ctx,
                 &sys_handle,
                 drone_ball_id,
+                Some(&mut scoop_guard),
             )
             .await;
             return Err(e);

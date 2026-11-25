@@ -422,10 +422,20 @@ pub fn try_remove_ball_for_db(
                     }
                     sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
-                if let Some(st_arc) = st_opt.as_ref() {
-                    crate::system_actor::drones::try_flush_actor_active_drones_checkpoint_post_unlock(
+                if let (Some(st_arc), Some(vtx), Some(tidi)) = (
+                    st_opt.as_ref(),
+                    entry.view_tx.upgrade(),
+                    entry.tidi_factor_bits.upgrade(),
+                ) {
+                    crate::system_actor::drones::try_flush_actor_active_drones_checkpoint_post_unlock_with_view(
                         solar_system_id,
-                        st_arc,
+                        crate::system_actor::drones::ActiveDroneViewCtx {
+                            ballpark: &bp_arc,
+                            actor_state: st_arc,
+                            view_tx: &vtx,
+                            tidi_factor_bits: &tidi,
+                            active_subscribers: 0,
+                        },
                     );
                 }
             }
@@ -976,7 +986,9 @@ pub(crate) fn update_system_hibernation_flag(
             .active_drones_in_space
             .values()
             .any(|d| !d.is_abandoned || d.target_id.is_some())
-        || (state.db_opt.is_some() && state.active_drones_checkpoint_dirty)
+        || (state.db_opt.is_some()
+            && (state.active_drones_checkpoint_dirty
+                || state.active_drones_needs_sqlite_hydration))
         || state.pending_destroyed_balls.is_non_empty()
         || state
             .asteroids
