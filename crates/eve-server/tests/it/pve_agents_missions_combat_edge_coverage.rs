@@ -6,10 +6,12 @@
 //! All tests drive real RPCs and GM slash commands deterministically with zero direct
 //! snapshot mutations (`with_mut_snapshot`) in test code.
 
-use crate::common::{gm_pilot_in_space, login_pilot, pin_clock, slash_cmd, LivePilot};
+use crate::common::{gm_pilot_in_space, pin_clock, slash_cmd, LivePilot};
+use crate::scenario_common::ServerScenarioBackend;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::router::ServerContext;
+use eve_server::router::{ServerContext, TestContext};
+use eve_testkit::scenario::{ActorSpec, ScenarioBuilder, ShipLoadoutSpec};
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -845,7 +847,7 @@ async fn edge_agent_missions_colocation_standing_alpha_clone_and_actions() {
         "MissionNotActive"
     );
     // Request & accept mission -> try Complete immediately -> MissionIncomplete
-    let _req = rpc(
+    let req = rpc(
         &ctx,
         &mut gm.sess,
         "agentMgr",
@@ -854,7 +856,11 @@ async fn edge_agent_missions_colocation_standing_alpha_clone_and_actions() {
     )
     .await
     .expect("Request L1 mission");
-    let _acc = rpc(
+    assert!(
+        req.dict_get("missionID").is_some() || req.dict_get("agentSays").is_some(),
+        "expected L1 offer payload: {req:?}"
+    );
+    let acc = rpc(
         &ctx,
         &mut gm.sess,
         "agentMgr",
@@ -863,6 +869,11 @@ async fn edge_agent_missions_colocation_standing_alpha_clone_and_actions() {
     )
     .await
     .expect("Accept L1 mission");
+    assert_eq!(
+        acc.dict_get("state").and_then(PyRep::as_str),
+        Some("Accepted"),
+        "expected Accepted mission state: {acc:?}"
+    );
     let e_inc = rpc(
         &ctx,
         &mut gm.sess,
@@ -882,7 +893,7 @@ async fn edge_agent_missions_colocation_standing_alpha_clone_and_actions() {
     );
 
     // Quit mission -> then verify standing/Alpha checks on L4
-    let _quit = rpc(
+    let quit = rpc(
         &ctx,
         &mut gm.sess,
         "agentMgr",
@@ -891,6 +902,16 @@ async fn edge_agent_missions_colocation_standing_alpha_clone_and_actions() {
     )
     .await
     .expect("Quit L1 mission");
+    assert_eq!(
+        quit.dict_get("state").and_then(PyRep::as_str),
+        Some("Quit"),
+        "expected Quit mission state: {quit:?}"
+    );
+    assert_eq!(
+        quit.dict_get("dungeonCleaned").and_then(PyRep::as_bool),
+        Some(true),
+        "expected Quit L1 mission to clean dungeon: {quit:?}"
+    );
 
     // Co-locate with L4 agent -> CantDoMissionAlphaClone / InsufficientAgentStanding
     dock_at_station(
@@ -1875,27 +1896,32 @@ async fn edge_targeting_ammo_loading_and_weapon_overload_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
-    let ctx = ServerContext::new();
+    let ctx = TestContext::new();
     pin_clock(&ctx);
 
-    // Non-GM player (demo char 90_000_001) cannot query remote system scanMgr
-    let mut player_sess = SessionState::new(5512);
-    login_pilot(&ctx, &mut player_sess, "demo", "demo-secret").await;
-    rpc(
-        &ctx,
-        &mut player_sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-    )
-    .await
-    .expect("Select demo char");
+    // Non-GM docked player cannot query remote system scanMgr
+    let mut backend = ServerScenarioBackend::from_test_ctx(&ctx);
+    let mut scenario = ScenarioBuilder::new()
+        .add_actor(ActorSpec {
+            label: "player".into(),
+            username: "edge_scan_player".into(),
+            character_name: "Edge Scan Player".into(),
+            ship: Some(ShipLoadoutSpec {
+                hull_type_id: TYPE_TRISTAN,
+                ..Default::default()
+            }),
+            in_space: false,
+            ..ActorSpec::default()
+        })
+        .build(&mut backend)
+        .await;
+    let player_sess = &mut scenario.actor_mut(0).harness.transport_mut().inner.session;
 
     let remote_sys = find_lowsec_system(&ctx);
     assert_eq!(
         rpc(
             &ctx,
-            &mut player_sess,
+            player_sess,
             "scanMgr",
             "GetSystemScanMgr",
             &[PyRep::Integer(i64::from(remote_sys))],
@@ -1910,7 +1936,7 @@ async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
     let own_sys = player_sess.solar_system_id.unwrap_or(SYS_JITA);
     let scan_rep = rpc(
         &ctx,
-        &mut player_sess,
+        player_sess,
         "scanMgr",
         "GetSystemScanMgr",
         &[PyRep::Integer(i64::from(own_sys))],
@@ -1923,7 +1949,7 @@ async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
     let err_invalid_probe_state = "InvalidProbeState";
     if player_sess.station_id.is_some() {
         assert_eq!(
-            rpc(&ctx, &mut player_sess, "scanMgr", "ConeScan", &[])
+            rpc(&ctx, player_sess, "scanMgr", "ConeScan", &[])
                 .await
                 .unwrap_err()
                 .code,
@@ -1933,7 +1959,7 @@ async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
         assert_eq!(
             rpc_bound(
                 &ctx,
-                &mut player_sess,
+                player_sess,
                 "scanMgr",
                 scan_oid,
                 "RequestScans",
@@ -1947,7 +1973,7 @@ async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
     }
     // Docked caller calling InSpace SetActivityState rejects at dispatch with NotInSpace
     assert_eq!(
-        rpc_bound(&ctx, &mut player_sess, "scanMgr", scan_oid, "SetActivityState", &[PyRep::Integer(99)])
+        rpc_bound(&ctx, player_sess, "scanMgr", scan_oid, "SetActivityState", &[PyRep::Integer(99)])
             .await
             .unwrap_err()
             .code,

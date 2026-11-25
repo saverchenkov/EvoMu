@@ -4,8 +4,11 @@
 //! - Proving Grounds Matchmaking Queue, Boundary/Damage Hazards & Arena Rewards (1 tag)
 
 use std::collections::HashMap;
+use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::SolarSystemId;
+use eve_server::router::ServerContext;
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
 use eve_server::services::insurgency_complex_ops::{
     load_ops_state, sync_insurgency_complex_sites_and_facilities, tick_insurgency_complex_ops,
     MINING_AMBUSH_RANSOM_SECS, TYPE_GURISTAS_LAUNDERING_FACILITY, TYPE_UPWELL_CONSORTIUM_DATA_CACHE,
@@ -27,6 +30,88 @@ use crate::pve_e2e_common::{
     undock_from_station, wait_for_warp_end, warp_and_engage_ball, JITA_STATION, JITA_SYS,
     LOWSEC_NOURVUKAIKEN_SYS,
 };
+
+async fn assert_pilot_in_space_legal(ctx: &ServerContext, sess: &SessionState, char_id: i64, sys_id: u32) {
+    assert_eq!(sess.character_id, Some(char_id));
+    assert_eq!(sess.solar_system_id, Some(sys_id));
+    let ship_in_ballpark = match sess.ship_id {
+        Some(ship_id) => match ctx.systems.get_handle(sys_id) {
+            Some(h) => h.get_ball_snapshot(ship_id).await.ok().flatten().is_some(),
+            None => false,
+        },
+        None => false,
+    };
+    let view = FixtureSessionView {
+        session_id: sess.session_id,
+        user_id: sess.user_id,
+        character_id: sess.character_id,
+        corporation_id: sess.corporation_id,
+        alliance_id: sess.alliance_id,
+        station_id: sess.station_id,
+        structure_id: sess.structure_id,
+        solar_system_id: sess.solar_system_id,
+        ship_id: sess.ship_id,
+        corp_role: sess.corp_role,
+        fleet_id: sess.fleet_id,
+        role: sess.role,
+        now_unix: Some(ctx.now_unix()),
+    };
+    let snap = ctx.db.with_snapshot(Clone::clone);
+    assert_legal_fixture(
+        "pve_insurgency_wormholes_arena_e2e",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
+}
+
+async fn set_speed_fraction_checked(ctx: &ServerContext, sess: &mut SessionState, beyonce_bound: u64, fraction: f64) {
+    let spd_rep = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            Some(beyonce_bound),
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(fraction)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("beyonce.CmdSetSpeedFraction");
+    assert!(spd_rep.as_i64().is_some(), "CmdSetSpeedFraction reply: {spd_rep:?}");
+}
+
+async fn stop_bound_ship(ctx: &ServerContext, sess: &mut SessionState, beyonce_bound: u64) {
+    match ctx
+        .dispatch_rpc(sess, "beyonce", Some(beyonce_bound), "CmdStop", &[], &HashMap::new(), None)
+        .await
+    {
+        Ok(rep) => assert!(rep.as_i64().is_some(), "CmdStop reply: {rep:?}"),
+        Err(e) if e.code == "ShipAlreadyInWarp" => {}
+        Err(e) => panic!("beyonce.CmdStop failed: {e:?}"),
+    }
+}
+
+async fn goto_point_checked(ctx: &ServerContext, sess: &mut SessionState, beyonce_bound: u64, pt: glam::DVec3) {
+    let rep = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            Some(beyonce_bound),
+            "CmdGotoPoint",
+            &[PyRep::Real(pt.x), PyRep::Real(pt.y), PyRep::Real(pt.z)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("beyonce.CmdGotoPoint");
+    assert!(rep.as_i64().is_some(), "CmdGotoPoint reply: {rep:?}");
+}
 
 // parity: feat:pve.insurgency-laundering
 // parity: feat:pve.insurgency-mining-ambush
@@ -50,13 +135,14 @@ async fn test_insurgency_laundering_mining_ambush_and_outpost_raid_e2e() {
         &[PyRep::Integer(FACTION_GURISTAS)],
     )
     .await;
+    assert_eq!(kv_get(&enlist_rep, "enlisted"), Some(&PyRep::Bool(true)), "JoinFactionAsCharacter reply: {enlist_rep:?}");
     assert_eq!(
         ctx.db.get_character(char_id).ok().and_then(|c| c.war_faction_id),
         Some(FACTION_GURISTAS)
     );
-    let _ = enlist_rep;
 
     undock_from_station(&ctx, &mut sess, JITA_SYS).await;
+    assert_pilot_in_space_legal(&ctx, &sess, char_id, JITA_SYS).await;
     let fob_sys: SolarSystemId = 30_002_758; // Tama / Frontline Low-Sec
     fly_stargates_to(&ctx, &mut sess, fob_sys).await;
     init_insurgency_campaign(
@@ -93,7 +179,7 @@ async fn test_insurgency_laundering_mining_ambush_and_outpost_raid_e2e() {
 
     // 1. Outpost Raid: warp to acceleration gate, approach within 2500m, activate gate, kill Mordu defender & hold grid
     move_ship_to_ball(&ctx, &mut sess, fob_sys, ship_id, "item", PyRep::Integer(raid_gate_id)).await;
-    let _ = rpc_ok(
+    let raid_gate_rep = rpc_ok(
         &ctx,
         &mut sess,
         "keeper",
@@ -101,6 +187,10 @@ async fn test_insurgency_laundering_mining_ambush_and_outpost_raid_e2e() {
         &[PyRep::Integer(raid_gate_id)],
     )
     .await;
+    assert!(
+        matches!(raid_gate_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_) | PyRep::None),
+        "ActivateAccelerationGate reply: {raid_gate_rep:?}"
+    );
     tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
 
     let raid_info =
@@ -162,7 +252,7 @@ async fn test_insurgency_laundering_mining_ambush_and_outpost_raid_e2e() {
         .flatten()
         .and_then(|(recipes, _)| recipes.first().copied())
         .unwrap_or(1);
-    let _trade_rep = rpc_ok(
+    let trade_rep = rpc_ok(
         &ctx,
         &mut sess,
         "beyonce",
@@ -176,6 +266,7 @@ async fn test_insurgency_laundering_mining_ambush_and_outpost_raid_e2e() {
         ],
     )
     .await;
+    assert_ne!(trade_rep, PyRep::None, "CallComponentFromClient trade reply must be non-empty");
     let fob_corr_after = read_insurgency_runtime(&ctx, |rt| {
         rt.campaigns.values().filter_map(|c| c.corruption_points.get(&fob_sys).copied()).sum::<i64>()
     });
@@ -206,7 +297,8 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     for (sid, tgt_lvl) in [(3412_i64, 5_i64), (25_810, 5), (25_811, 5)] {
         rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(sid), PyRep::Integer(tgt_lvl)])])]).await;
         ctx.advance_secs(86_400 * 45);
-        let _ = rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "GetSkills", &[]).await;
+        let skills_rep = rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "GetSkills", &[]).await;
+        assert!(!skills_rep.crowset_rows().unwrap_or(&[]).is_empty(), "cyno GetSkills must return trained skills");
     }
 
     let (dread_id, guns1) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 19_720, 37_296, 17_686, 3, 100).await;
@@ -233,7 +325,7 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     rpc_ok(&ctx, &mut cyno_sess, "ship", "AssembleShip", &[PyRep::List(vec![PyRep::Integer(cyno_ship)])]).await;
     rpc_ok(&ctx, &mut cyno_sess, "ship", "Board", &[PyRep::Integer(cyno_ship)]).await;
     ctx.advance_secs(11);
-    cyno_sess.ship_id = Some(cyno_ship);
+    assert_eq!(cyno_sess.ship_id, Some(cyno_ship));
     let cmod = buy_item_at_station(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, 21_096, 1).await;
     rpc_ok(&ctx, &mut cyno_sess, "invbroker", "Add", &[PyRep::Integer(cmod), PyRep::Integer(cyno_ship), PyRep::Integer(27)]).await;
     let probe_launcher = buy_item_at_station(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, 28_758, 1).await;
@@ -244,17 +336,21 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     rpc_ok(&ctx, &mut cyno_sess, "invbroker", "Add", &[PyRep::Integer(ozone), PyRep::Integer(cyno_ship), PyRep::Integer(5)]).await;
     let (k_entry_sys, k_sig_id, wh_c5_sys) = find_kspace_entrance_to_c5(&ctx, 1_000_000_000.0).await;
 
-    let _ = rpc_ok(&ctx, &mut cyno_sess, "fleetMgr", "CreateFleet", &[]).await;
+    let fleet_rep = rpc_ok(&ctx, &mut cyno_sess, "fleetMgr", "CreateFleet", &[]).await;
+    let fleet_id = kv_get(&fleet_rep, "fleetID").and_then(PyRep::as_i64).expect("CreateFleet fleetID");
     for (cap_cid, s_ref) in [(cid1, &mut sess1), (cid2, &mut sess2), (cid3, &mut sess3)] {
-        let _ = rpc_res(&ctx, &mut cyno_sess, "fleetMgr", "Invite", &[PyRep::Integer(cap_cid), PyRep::Integer(4)]).await;
-        let _ = rpc_res(&ctx, s_ref, "fleetMgr", "AcceptInvite", &[]).await;
+        let inv_rep = rpc_res(&ctx, &mut cyno_sess, "fleetMgr", "Invite", &[PyRep::Integer(cap_cid), PyRep::Integer(4)]).await.expect("fleetMgr.Invite");
+        assert_eq!(kv_get(&inv_rep, "fleetID").and_then(PyRep::as_i64), Some(fleet_id), "Invite reply: {inv_rep:?}");
+        let acc_rep = rpc_res(&ctx, s_ref, "fleetMgr", "AcceptInvite", &[]).await.expect("fleetMgr.AcceptInvite");
+        assert_eq!(kv_get(&acc_rep, "fleetID").and_then(PyRep::as_i64), Some(fleet_id), "AcceptInvite reply: {acc_rep:?}");
     }
     undock_from_station(&ctx, &mut cyno_sess, JITA_SYS).await;
+    assert_pilot_in_space_legal(&ctx, &cyno_sess, cyno_cid, JITA_SYS).await;
     fly_stargates_to(&ctx, &mut cyno_sess, k_entry_sys).await;
     let cyno_kb = bind_service(&ctx, &mut cyno_sess, "beyonce", PyRep::Integer(i64::from(k_entry_sys))).await as u64;
-    let _ = ctx.dispatch_rpc(&mut cyno_sess, "beyonce", Some(cyno_kb), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
+    set_speed_fraction_checked(&ctx, &mut cyno_sess, cyno_kb, 0.1).await;
     let _ = ctx.systems.get_or_spawn(k_entry_sys).step_manual(2.0).await;
-    let _ = ctx.dispatch_rpc(&mut cyno_sess, "beyonce", Some(cyno_kb), "CmdStop", &[], &HashMap::new(), None).await;
+    stop_bound_ship(&ctx, &mut cyno_sess, cyno_kb).await;
     ctx.advance_secs(35);
     let (sigs, _) = eve_server::services::space_destiny::ensure_system_signatures_and_anomalies(&ctx, k_entry_sys).await;
     let sig_pos = sigs.iter().find(|s| s.signature_id == k_sig_id).expect("k_sig_id").position;
@@ -273,12 +369,13 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
         undock_from_station(&ctx, s_ref, JITA_SYS).await;
         ctx.advance_secs(35);
         let jita_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
-        ctx.dispatch_rpc(s_ref, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_cid), PyRep::Integer(i64::from(k_entry_sys)), PyRep::Integer(cyno_beacon_id)], &HashMap::new(), None).await.unwrap();
-        s_ref.solar_system_id = Some(k_entry_sys);
+        let jmp_rep = ctx.dispatch_rpc(s_ref, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_cid), PyRep::Integer(i64::from(k_entry_sys)), PyRep::Integer(cyno_beacon_id)], &HashMap::new(), None).await.unwrap();
+        assert_eq!(kv_get(&jmp_rep, "solarSystemID").and_then(PyRep::as_i64), Some(i64::from(k_entry_sys)));
         let kb = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(k_entry_sys))).await as u64;
-        let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(kb), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
+        assert_eq!(s_ref.solar_system_id, Some(k_entry_sys));
+        set_speed_fraction_checked(&ctx, s_ref, kb, 0.1).await;
         let _ = ctx.systems.get_or_spawn(k_entry_sys).step_manual(2.0).await;
-        let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(kb), "CmdStop", &[], &HashMap::new(), None).await;
+        stop_bound_ship(&ctx, s_ref, kb).await;
         let _ = ctx.systems.get_or_spawn(k_entry_sys).step_manual(1.0).await;
     }
 
@@ -318,9 +415,9 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     for (idx, &sid) in [dread_id, carrier_id, dread2_id].iter().enumerate() {
         let s_sess = match idx { 0 => &mut sess1, 1 => &mut sess2, _ => &mut sess3 };
         let wh_b = bind_service(&ctx, s_sess, "beyonce", PyRep::Integer(i64::from(wh_c5_sys))).await as u64;
-        let _ = ctx.dispatch_rpc(s_sess, "beyonce", Some(wh_b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
+        set_speed_fraction_checked(&ctx, s_sess, wh_b, 0.1).await;
         let _ = wh_sys.step_manual(2.0).await;
-        let _ = ctx.dispatch_rpc(s_sess, "beyonce", Some(wh_b), "CmdStop", &[], &HashMap::new(), None).await;
+        stop_bound_ship(&ctx, s_sess, wh_b).await;
         let _ = wh_sys.step_manual(1.0).await;
         move_ship_to_ball(&ctx, s_sess, wh_c5_sys, sid, "dungeon", PyRep::String(combat_site_id.clone())).await;
     }
@@ -433,7 +530,8 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
     rpc_ok(&ctx, &mut sess1, "invbroker", "Add", &[PyRep::Integer(fil1), PyRep::Integer(ship1), PyRep::Integer(5)]).await;
     rpc_ok(&ctx, &mut sess2, "invbroker", "Add", &[PyRep::Integer(fil2), PyRep::Integer(ship2), PyRep::Integer(5)]).await;
 
-    let _events = rpc_ok(&ctx, &mut sess1, "pvpFilamentMgr", "GetActiveEvents", &[]).await;
+    let events = rpc_ok(&ctx, &mut sess1, "pvpFilamentMgr", "GetActiveEvents", &[]).await;
+    assert_ne!(events, PyRep::None, "GetActiveEvents must return event listing");
     undock_from_station(&ctx, &mut sess1, JITA_SYS).await;
     undock_from_station(&ctx, &mut sess2, JITA_SYS).await;
     let jita_station_pos = ctx
@@ -492,8 +590,9 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
             }
         }
     }
-    let _b_oid1 = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
-    let _b_oid2 = bind_service(&ctx, &mut sess2, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
+    let pre_b_oid1 = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
+    let pre_b_oid2 = bind_service(&ctx, &mut sess2, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
+    assert!(pre_b_oid1 > 0 && pre_b_oid2 > 0);
     wait_for_warp_end(&ctx, JITA_SYS, ship1).await;
     wait_for_warp_end(&ctx, JITA_SYS, ship2).await;
     let bm1_id = safe_bm1.expect("mid-warp safe bookmark 1 (>1000km from Jita stations/gates)");
@@ -525,10 +624,12 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
     assert_ne!(q2, PyRep::None);
 
     let arena_sys: SolarSystemId = 32_000_001;
-    sess1.solar_system_id = Some(arena_sys);
-    sess2.solar_system_id = Some(arena_sys);
     let b_oid1 = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(arena_sys))).await as u64;
     let b_oid2 = bind_service(&ctx, &mut sess2, "beyonce", PyRep::Integer(i64::from(arena_sys))).await as u64;
+    assert_eq!(sess1.solar_system_id, Some(arena_sys));
+    assert_eq!(sess2.solar_system_id, Some(arena_sys));
+    assert_pilot_in_space_legal(&ctx, &sess1, cid1, arena_sys).await;
+    assert_pilot_in_space_legal(&ctx, &sess2, cid2, arena_sys).await;
 
     // 1. Pilot 1 engages Pilot 2 with turrets inside the arena; Pilot 2 then burns outside the 75km arena boundary hazard
     let arena = ctx.systems.get_or_spawn(arena_sys);
@@ -552,42 +653,32 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
     let center = arena.get_ball_position_sync(end_gate_id).unwrap_or(glam::DVec3::ZERO);
 
     let d_oid1 = bind_service(&ctx, &mut sess1, "dogmaIM", PyRep::Integer(ship1)).await as u64;
-    let _ = rpc_res(&ctx, &mut sess1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
+    match rpc_res(&ctx, &mut sess1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await {
+        Ok(lock_rep) => assert_eq!(kv_get(&lock_rep, "targetID").and_then(PyRep::as_i64), Some(ship2)),
+        Err(e) if matches!(e.code.as_str(), "TargetingFailed" | "TargetOutOfRange" | "TargetInvulnerable") => {}
+        Err(e) => panic!("dogmaIM.AddTarget({ship2}) failed: {e:?}"),
+    }
     for _ in 0..5 {
         let _ = arena.step_manual(4.0).await;
         ctx.advance_secs(4);
     }
     if let Some(&g1) = guns1.first() {
-        let _ = ctx.dispatch_rpc(
+        match ctx.dispatch_rpc(
             &mut sess1, "dogmaIM", Some(d_oid1), "Activate",
             &[PyRep::Integer(g1), PyRep::String("targetAttack".into()), PyRep::Integer(ship2)],
             &HashMap::new(), None,
-        ).await;
+        ).await {
+            Ok(act_rep) => assert_eq!(kv_get(&act_rep, "active"), Some(&PyRep::Bool(true))),
+            Err(e) if matches!(e.code.as_str(), "TargetNotLocked" | "OutOfRange" | "TargetingFailed" | "NotEnoughCapacitor" | "ModuleAlreadyActive") => {}
+            Err(e) => panic!("dogmaIM.Activate({g1}) failed: {e:?}"),
+        }
     }
 
-    let _ = ctx.dispatch_rpc(&mut sess2, "beyonce", Some(b_oid2), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &HashMap::new(), None).await;
+    set_speed_fraction_checked(&ctx, &mut sess2, b_oid2, 1.0).await;
     let far_out = center + (p2_pos - center).normalize_or(glam::DVec3::Z) * 150_000.0;
-    let _ = ctx.dispatch_rpc(
-        &mut sess2,
-        "beyonce",
-        Some(b_oid2),
-        "CmdGotoPoint",
-        &[PyRep::Real(far_out.x), PyRep::Real(far_out.y), PyRep::Real(far_out.z)],
-        &HashMap::new(),
-        None,
-    )
-    .await;
-    let _ = ctx.dispatch_rpc(&mut sess1, "beyonce", Some(b_oid1), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &HashMap::new(), None).await;
-    let _ = ctx.dispatch_rpc(
-        &mut sess1,
-        "beyonce",
-        Some(b_oid1),
-        "CmdGotoPoint",
-        &[PyRep::Real(center.x), PyRep::Real(center.y), PyRep::Real(center.z)],
-        &HashMap::new(),
-        None,
-    )
-    .await;
+    goto_point_checked(&ctx, &mut sess2, b_oid2, far_out).await;
+    set_speed_fraction_checked(&ctx, &mut sess1, b_oid1, 1.0).await;
+    goto_point_checked(&ctx, &mut sess1, b_oid1, center).await;
     let bal1_before = ctx.db.get_character(cid1).map(|c| c.balance.raw_cents()).unwrap_or(0);
     for _ in 0..80 {
         ctx.advance_secs(10);
@@ -602,7 +693,8 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
     assert!(bal1_after >= bal1_before, "Proving Grounds winner must receive match completion reward credit");
 
     move_ship_to_ball(&ctx, &mut sess1, arena_sys, ship1, "item", PyRep::Integer(end_gate_id)).await;
-    let _ = rpc_ok(&ctx, &mut sess1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(end_gate_id)]).await;
+    let exit_rep = rpc_ok(&ctx, &mut sess1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(end_gate_id)]).await;
+    assert_ne!(exit_rep, PyRep::None, "AbyssalPVPEndGateActivation reply must be non-empty");
     let stats = rpc_ok(&ctx, &mut sess1, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await;
     assert_ne!(stats, PyRep::None);
 

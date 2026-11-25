@@ -8,7 +8,8 @@ use eve_destiny::DVec3;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use std::collections::HashMap;
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const JITA_SYS: u32 = 30_000_142;
@@ -44,6 +45,66 @@ async fn ok(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &st
     rpc(ctx, sess, svc, method, args).await.unwrap_or_else(|e| panic!("{svc}.{method} failed: {e:?}"))
 }
 
+async fn assert_pilot_in_space_legal(ctx: &ServerContext, sess: &SessionState, char_id: i64, sys_id: u32) {
+    assert_eq!(sess.character_id, Some(char_id));
+    assert_eq!(sess.solar_system_id, Some(sys_id));
+    let ship_in_ballpark = match sess.ship_id {
+        Some(ship_id) => match ctx.systems.get_handle(sys_id) {
+            Some(h) => h.get_ball_snapshot(ship_id).await.ok().flatten().is_some(),
+            None => false,
+        },
+        None => false,
+    };
+    let view = FixtureSessionView {
+        session_id: sess.session_id,
+        user_id: sess.user_id,
+        character_id: sess.character_id,
+        corporation_id: sess.corporation_id,
+        alliance_id: sess.alliance_id,
+        station_id: sess.station_id,
+        structure_id: sess.structure_id,
+        solar_system_id: sess.solar_system_id,
+        ship_id: sess.ship_id,
+        corp_role: sess.corp_role,
+        fleet_id: sess.fleet_id,
+        role: sess.role,
+        now_unix: Some(ctx.now_unix()),
+    };
+    let snap = ctx.db.with_snapshot(Clone::clone);
+    assert_legal_fixture(
+        "pve_crab_storms_special_sites_live",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(true),
+            ship_in_space_ballpark: Some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
+}
+
+async fn grant_type_prereq_skills(ctx: &ServerContext, sess: &mut SessionState, type_ids: &[u32]) {
+    fn visit(sde: &eve_sde::SdeRegistry, tid: u32, seen: &mut HashSet<u32>, out: &mut Vec<(u32, u8)>) {
+        if !seen.insert(tid) {
+            return;
+        }
+        for (sid, lvl) in sde.required_skills_for_type(tid) {
+            visit(sde, sid, seen, out);
+            out.push((sid, lvl.max(1)));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut skills = Vec::new();
+    for &tid in type_ids {
+        visit(&ctx.sde, tid, &mut seen, &mut skills);
+    }
+    for (sid, lvl) in skills {
+        let rep = common::slash_cmd(ctx, sess, &format!("/giveskill {sid} {lvl}")).await;
+        assert!(matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "/giveskill {sid} {lvl} failed: {rep:?}");
+    }
+}
+
 async fn gm_pilot_fitted_in_space(
     ctx: &ServerContext,
     sess_id: u64,
@@ -56,9 +117,17 @@ async fn gm_pilot_fitted_in_space(
     let user = format!("live{char_id}");
     let pass = format!("{user}-secret");
     ctx.db.provision_gm_account(&user, &pass, char_id, &format!("Live Pilot {char_id}"));
-    let mut sess = SessionState::new(sess_id);
-    common::login_pilot(ctx, &mut sess, &user, &pass).await;
-    ok(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[int(char_id)]).await;
+    let kw = HashMap::new();
+    let mut harness = common::new_wire_harness(ctx, sess_id);
+    let login_rep = harness
+        .call_ok("authentication", None, "Login", &[PyRep::String(user), PyRep::String(pass)], &kw)
+        .await;
+    assert!(matches!(login_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "Login must return KeyVal/Dict, got {login_rep:?}");
+    let select_rep = harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[int(char_id)], &kw)
+        .await;
+    assert!(matches!(select_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "SelectCharacterID must return KeyVal/Dict, got {select_rep:?}");
+    let mut sess = harness.into_transport().inner.into_session();
 
     let ship_id = common::slash_cmd(ctx, &mut sess, &format!("/createitem {ship_type_id} 1")).await.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
     let mut stack = vec![ship_type_id];
@@ -119,15 +188,19 @@ async fn gm_pilot_fitted_in_space(
         ok(ctx, &mut sess, "dogmaIM", "ShipOnlineModules", &[int(ship_id)]).await;
     }
     ctx.advance_secs(31);
-    ok(ctx, &mut sess, "stationSvc", "Undock", &[]).await;
-    common::slash_cmd(ctx, &mut sess, &format!("/tr {sys_id}")).await;
-    sess.ship_id = Some(ship_id);
+    let undock_rep = ok(ctx, &mut sess, "stationSvc", "Undock", &[]).await;
+    assert_eq!(undock_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(JITA_SYS)), "Undock reply: {undock_rep:?}");
+    let tr_rep = common::slash_cmd(ctx, &mut sess, &format!("/tr {sys_id}")).await;
+    assert!(matches!(tr_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "/tr {sys_id} reply: {tr_rep:?}");
     let PyRep::Tuple(bound) = ok(ctx, &mut sess, "beyonce", "MachoBindObject", &[int(i64::from(sys_id)), PyRep::None]).await else { panic!("bind") };
     let beyonce = bound[0].as_i64().unwrap() as u64;
     ctx.advance_secs(70);
     let h = ctx.systems.get_or_spawn(sys_id);
     h.step_manual(10.0).await.unwrap();
-    common::slash_cmd(ctx, &mut sess, "/heal").await;
+    let heal_rep = common::slash_cmd(ctx, &mut sess, "/heal").await;
+    assert!(matches!(heal_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "/heal reply: {heal_rep:?}");
+    assert_eq!(sess.ship_id, Some(ship_id));
+    assert_pilot_in_space_legal(ctx, &sess, char_id, sys_id).await;
     (LivePilot { sess, char_id, ship_id, beyonce }, fitted_ids)
 }
 
@@ -166,7 +239,11 @@ async fn qty_of(ctx: &ServerContext, sess: &mut SessionState, loc_id: i64, type_
 async fn kill_npc_with_weapons(ctx: &ServerContext, p: &mut LivePilot, weapon_ids: &[i64], npc_id: i64, pos: DVec3) {
     let sys_id = p.sess.solar_system_id.unwrap();
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let _ = ctx.dispatch_rpc(&mut p.sess, "beyonce", Some(p.beyonce), "CmdStop", &[], &HashMap::new(), None).await;
+    match ctx.dispatch_rpc(&mut p.sess, "beyonce", Some(p.beyonce), "CmdStop", &[], &HashMap::new(), None).await {
+        Ok(stop_rep) => assert!(stop_rep.as_i64().is_some(), "CmdStop must return tick integer, got {stop_rep:?}"),
+        Err(e) if e.code == "ShipAlreadyInWarp" => {}
+        Err(e) => panic!("beyonce.CmdStop failed: {e:?}"),
+    }
     let mut pending_secs = 0_u64;
     let tick_step = |ctx: &ServerContext, pending: &mut u64, dt: u64| {
         *pending += dt;
@@ -257,7 +334,15 @@ async fn kill_npc_with_weapons(ctx: &ServerContext, p: &mut LivePilot, weapon_id
                     break;
                 }
                 Err(e) if e.code == "TargetNotLocked" => {
-                    let _ = rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[int(npc_id)]).await;
+                    match rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[int(npc_id)]).await {
+                        Ok(lock_rep) => assert_eq!(
+                            lock_rep.dict_get("targetID"),
+                            Some(&int(npc_id)),
+                            "AddTarget must lock NPC {npc_id}: {lock_rep:?}"
+                        ),
+                        Err(e) if matches!(e.code.as_str(), "TargetingFailed" | "TargetInvulnerable") => {}
+                        Err(e) => panic!("dogmaIM.AddTarget({npc_id}) unexpected error: {e:?}"),
+                    }
                     tick_step(ctx, &mut pending_secs, 5);
                     sys_h.step_manual(5.0).await.unwrap();
                     break;
@@ -575,10 +660,12 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
     let (mut hf1, hf1_mods) = gm_pilot_fitted_in_space(&ctx, 72_040, 92_100_040, 28_659 /* Paladin */, JITA_SYS, &gun_skill, &gun_mod).await;
     let (mut hf2, _) = gm_pilot_fitted_in_space(&ctx, 72_041, 92_100_041, 626, JITA_SYS, &[(3386, 5)], &[(483, HIGH_SLOT_0, None)]).await;
     let fid = ok(&ctx, &mut hf1.sess, "fleetObjectHandler", "CreateFleet", &[]).await.as_i64().unwrap();
-    hf1.sess.fleet_id = Some(fid);
-    ok(&ctx, &mut hf1.sess, "fleetObjectHandler", "Invite", &[int(hf2.char_id)]).await;
-    ok(&ctx, &mut hf2.sess, "fleetObjectHandler", "AcceptInvite", &[int(fid)]).await;
-    hf2.sess.fleet_id = Some(fid);
+    assert_eq!(hf1.sess.fleet_id, Some(fid));
+    let inv_rep = ok(&ctx, &mut hf1.sess, "fleetObjectHandler", "Invite", &[int(hf2.char_id)]).await;
+    assert!(matches!(inv_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Bool(true) | PyRep::None), "Invite reply: {inv_rep:?}");
+    let acc_rep = ok(&ctx, &mut hf2.sess, "fleetObjectHandler", "AcceptInvite", &[int(fid)]).await;
+    assert_eq!(acc_rep.dict_get("fleetID"), Some(&int(fid)), "AcceptInvite reply: {acc_rep:?}");
+    assert_eq!(hf2.sess.fleet_id, Some(fid));
 
     let hf_jita = ok(&ctx, &mut hf1.sess, "dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", &[]).await;
     let jita_site_count: usize = dict_get_int(&hf_jita, i64::from(JITA_SYS)).and_then(|d| match d {
@@ -609,62 +696,45 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
         .expect_err("Marauder must be rejected by Homefront acceleration gate");
     assert_eq!(paladin_err.code, "ShipRestrictedByGate");
 
-    // Re-board hf1 into a T1 Venture (32_880) with online Miner I (483); both hf1 (Venture) + hf2 (Vexor) enter & mine
-    let hf1_venture_id = 92_100_140_i64;
-    let hf1_miner_id = 92_100_141_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&hf1.char_id) {
-            ch.active_ship_id = hf1_venture_id;
-        }
-        snap.skills.entry(hf1.char_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
-        snap.items.insert(
-            hf1_venture_id,
-            eve_db::InventoryItemRecord {
-                item_id: hf1_venture_id,
-                type_id: 32_880,
-                owner_id: hf1.char_id,
-                location_id: JITA_SYS as i64,
-                flag: eve_db::InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            hf1_miner_id,
-            eve_db::InventoryItemRecord {
-                item_id: hf1_miner_id,
-                type_id: 483,
-                owner_id: hf1.char_id,
-                location_id: hf1_venture_id,
-                flag: eve_db::InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.module_online_states.insert(hf1_miner_id, true);
-    });
-    ctx.invalidate_ship_fitting(hf1_venture_id);
+    // Re-board hf1 into a T1 Venture (32_880) with online Miner I (483) via legal dock -> board -> fit -> undock;
+    // both hf1 (Venture) + hf2 (Vexor) enter & mine
+    const JITA_FOUR_FOUR: i64 = 60_003_760;
+    let jita_dock_pos = ctx.sde.stations[&JITA_FOUR_FOUR].position;
+    jita_h.set_ball_position(hf1.ship_id, jita_dock_pos).await;
+    ctx.advance_secs(11);
+    let dock_rep = ok(&ctx, &mut hf1.sess, "stationSvc", "Dock", &[int(JITA_FOUR_FOUR)]).await;
+    assert!(matches!(dock_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_) | PyRep::None), "Dock reply: {dock_rep:?}");
+    assert_eq!(hf1.sess.station_id, Some(JITA_FOUR_FOUR));
+    ctx.advance_secs(11);
+    grant_type_prereq_skills(&ctx, &mut hf1.sess, &[32_880, 483]).await;
+    let hf1_venture_id = common::slash_cmd(&ctx, &mut hf1.sess, "/createitem 32880 1")
+        .await
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Venture itemID");
+    let hf1_miner_id = common::slash_cmd(&ctx, &mut hf1.sess, "/createitem 483 1")
+        .await
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Miner I itemID");
+    let board_rep = ok(&ctx, &mut hf1.sess, "ship", "Board", &[int(hf1_venture_id)]).await;
+    assert!(matches!(board_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Integer(_) | PyRep::None), "Board reply: {board_rep:?}");
+    let add_rep = ok(&ctx, &mut hf1.sess, "invbroker", "Add", &[int(hf1_miner_id), int(hf1_venture_id), int(HIGH_SLOT_0)]).await;
+    assert_eq!(add_rep.dict_get("itemID"), Some(&int(hf1_miner_id)), "invbroker.Add Miner I reply: {add_rep:?}");
+    let online_rep = ok(&ctx, &mut hf1.sess, "dogmaIM", "ShipOnlineModules", &[int(hf1_venture_id)]).await;
+    assert!(matches!(online_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::List(_) | PyRep::Integer(_) | PyRep::None), "ShipOnlineModules reply: {online_rep:?}");
+    ctx.advance_secs(31);
+    let hf1_undock = ok(&ctx, &mut hf1.sess, "stationSvc", "Undock", &[]).await;
+    assert_eq!(hf1_undock.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(JITA_SYS)), "Undock reply: {hf1_undock:?}");
+    let PyRep::Tuple(rebound) = ok(&ctx, &mut hf1.sess, "beyonce", "MachoBindObject", &[int(i64::from(JITA_SYS)), PyRep::None]).await else { panic!("rebind beyonce") };
+    hf1.beyonce = rebound[0].as_i64().unwrap() as u64;
     hf1.ship_id = hf1_venture_id;
-    hf1.sess.ship_id = Some(hf1_venture_id);
-    let _ = jita_h
-        .spawn_ball_with_combat(
-            eve_destiny::Ball {
-                id: hf1_venture_id,
-                type_id: 32_880,
-                position: hf_st.site_position + DVec3::new(500.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 335.0,
-                inertia: 1.0,
-                mass: 1_200_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(hf1.char_id, hf1_venture_id, 32_880),
-        )
-        .await;
+    assert_eq!(hf1.sess.ship_id, Some(hf1_venture_id));
+    assert_eq!(hf1.sess.fleet_id, Some(fid));
+    ctx.advance_secs(70);
+    jita_h.step_manual(10.0).await.unwrap();
+    assert_pilot_in_space_legal(&ctx, &hf1.sess, hf1.char_id, JITA_SYS).await;
+    jita_h.set_ball_position(hf1.ship_id, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
     jita_h.set_ball_position(hf2.ship_id, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
 
     ok(&ctx, &mut hf1.sess, "beyonce", "ActivateAccelerationGate", &[int(hf_st.outer_gate_ball_id)]).await;
@@ -724,7 +794,9 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
     }
     let warden_id = 1_898_000_000 + 5649 * 100 + 30;
     let wpos = vh.get_ball_snapshot(warden_id).await.unwrap().unwrap().1.position;
-    let _ = rpc(&ctx, &mut sub_hive.sess, "dogmaIM", "Activate", &[int(sub_mods[4]), PyRep::String("moduleBonusBastion".into()), PyRep::None, int(1)]).await;
+    let bast_rep = ok(&ctx, &mut sub_hive.sess, "dogmaIM", "Activate", &[int(sub_mods[4]), PyRep::String("moduleBonusBastion".into()), PyRep::None, int(1)]).await;
+    assert_eq!(bast_rep.dict_get("moduleID"), Some(&int(sub_mods[4])), "Bastion moduleID mismatch: {bast_rep:?}");
+    assert_eq!(bast_rep.dict_get("active"), Some(&PyRep::Bool(true)), "Bastion must activate: {bast_rep:?}");
     kill_npc_with_weapons(&ctx, &mut sub_hive, &sub_mods[..4], warden_id, wpos).await;
     let elem_qty = qty_of(&ctx, &mut sub_hive.sess, sub_hive.ship_id, 34_558 /* Vidette Element */, None).await;
     let blue_qty = qty_of(&ctx, &mut sub_hive.sess, sub_hive.ship_id, 30_745 /* Antikythera Element */, None).await;

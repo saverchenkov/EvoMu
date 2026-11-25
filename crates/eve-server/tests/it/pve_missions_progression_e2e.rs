@@ -108,8 +108,28 @@ async fn test_agent_missions_complete_reward_formula_and_storyline_e2e() {
     fly_stargates_to(&ctx, &mut sess, site_sys).await;
     let b_oid = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(site_sys))).await as u64;
     let (init_ws, init_wt) = if let Some(b) = bm_id { ("bookmark", PyRep::Integer(b)) } else { ("mission", PyRep::Integer(i64::from(mission_id))) };
-    let _ = ctx.dispatch_rpc(&mut sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String(init_ws.into()), init_wt], &HashMap::new(), None).await;
-    wait_for_warp_end(&ctx, site_sys, ship_id).await;
+    match ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(b_oid),
+            "CmdWarpToStuff",
+            &[PyRep::String(init_ws.into()), init_wt],
+            &HashMap::new(),
+            None,
+        )
+        .await
+    {
+        Ok(warp_rep) => {
+            assert!(
+                warp_rep.as_i64().is_some(),
+                "expected numeric warp completion/ball id from CmdWarpToStuff, got {warp_rep:?}"
+            );
+            wait_for_warp_end(&ctx, site_sys, ship_id).await;
+        }
+        Err(e) if matches!(e.code.as_str(), "WarpDistanceTooShort" | "ShipInvulnerable") => {}
+        Err(e) => panic!("CmdWarpToStuff to mission site failed: {e:?}"),
+    }
     for _pass in 0..5 {
         let npcs_to_clear: Vec<i64> = ctx.db.with_snapshot(|s| {
             eve_server::services::mission_fixture::get(s, char_id, mission_id)
@@ -398,17 +418,61 @@ async fn test_project_discovery_rpcs_ak_notify_and_login_campaigns_e2e() {
         .find(|&&id| Some(id) != kv_get(&camp_state, "campaign_id").and_then(|v| v.as_i64()))
         .or_else(|| sde_campaigns.keys().next())
     {
-        let (mut gm_sess, _) =
-            login_existing_player(&ctx, 5104, "demo", "demo-secret", 90_000_001).await;
-        gm_sess.role = eve_machonet::service_roles::ROLE_ADMIN;
-        let _ = rpc_ok(
-            &ctx,
-            &mut gm_sess,
-            "slash",
-            "SlashCmd",
-            &[PyRep::String(format!("/campaign enroll {alt_camp_id} {char_id}"))],
-        )
-        .await;
+        ctx.db.provision_gm_account(
+            "isd_camp_gm",
+            "isd_camp_gm-secret",
+            90_000_199,
+            "ISD Campaign GM",
+        );
+        let mut gm_harness = crate::common::new_wire_harness(&ctx, 5104);
+        let empty_kw = HashMap::new();
+        let gm_login = gm_harness
+            .call_ok(
+                "authentication",
+                None,
+                "Login",
+                &[
+                    PyRep::String("isd_camp_gm".into()),
+                    PyRep::String("isd_camp_gm-secret".into()),
+                ],
+                &empty_kw,
+            )
+            .await;
+        assert!(
+            matches!(gm_login, PyRep::KeyVal(_) | PyRep::Dict(_)),
+            "expected GM Login payload, got {gm_login:?}"
+        );
+        let gm_sel = gm_harness
+            .call_ok(
+                "charUnboundMgr",
+                None,
+                "SelectCharacterID",
+                &[PyRep::Integer(90_000_199)],
+                &empty_kw,
+            )
+            .await;
+        assert!(
+            matches!(gm_sel, PyRep::KeyVal(_) | PyRep::Dict(_)),
+            "expected GM SelectCharacterID payload, got {gm_sel:?}"
+        );
+        let enroll_rep = gm_harness
+            .call_ok(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(format!("/campaign enroll {alt_camp_id} {char_id}"))],
+                &empty_kw,
+            )
+            .await;
+        assert_eq!(kv_get(&enroll_rep, "enrolled"), Some(&PyRep::Bool(true)));
+        assert_eq!(
+            kv_get(&enroll_rep, "campaignID"),
+            Some(&PyRep::Integer(alt_camp_id))
+        );
+        assert_eq!(
+            kv_get(&enroll_rep, "characterID"),
+            Some(&PyRep::Integer(char_id))
+        );
         let notifs_camp = drain_all_notifications(&ctx, &mut sess, char_id);
         assert!(
             notifs_camp.iter().any(|(ev, _)| ev == "OnCampaignEnrollmentChanged"),

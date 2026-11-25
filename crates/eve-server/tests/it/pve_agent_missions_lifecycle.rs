@@ -15,21 +15,225 @@
 
 #![forbid(unsafe_code)]
 
-use eve_db::{BookmarkRecord, IskCents};
+use crate::common::{new_wire_harness, ServerWireTransport};
+use crate::scenario_common::ServerScenarioBackend;
+use eve_db::{BookmarkRecord, InventoryFlag, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::ClientHarness;
+use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
+use eve_testkit::scenario::ScenarioBackend as _;
 use std::collections::HashMap;
 
-async fn create_auth_session(ctx: &ServerContext, session_id: u64, char_id: i64) -> SessionState {
+async fn assert_pilot_fixture_legal(
+    label: &str,
+    ctx: &ServerContext,
+    sess: &SessionState,
+    expected_dock_location_id: Option<i64>,
+    expect_in_space: bool,
+) {
+    let ship_in_ballpark = if expect_in_space {
+        match (sess.ship_id, sess.solar_system_id) {
+            (Some(ship_id), Some(sys_id)) => match ctx.systems.get_handle(sys_id) {
+                Some(h) => h.get_ball_snapshot(ship_id).await.ok().flatten().is_some(),
+                None => false,
+            },
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let view = FixtureSessionView {
+        session_id: sess.session_id,
+        user_id: sess.user_id,
+        character_id: sess.character_id,
+        corporation_id: sess.corporation_id,
+        alliance_id: sess.alliance_id,
+        station_id: sess.station_id,
+        structure_id: sess.structure_id,
+        solar_system_id: sess.solar_system_id,
+        ship_id: sess.ship_id,
+        corp_role: sess.corp_role,
+        fleet_id: sess.fleet_id,
+        role: sess.role,
+        now_unix: Some(ctx.now_unix()),
+    };
+    let snap = ctx.db.with_snapshot(Clone::clone);
+    assert_legal_fixture(
+        label,
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expected_dock_location_id,
+            expect_in_space: Some(expect_in_space),
+            ship_in_space_ballpark: expect_in_space.then_some(ship_in_ballpark),
+            ..Default::default()
+        },
+    );
+}
+
+async fn relocate_docked_pilot(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    sys_id: u32,
+    station_id: Option<i64>,
+) {
+    let sys_meta = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .unwrap_or_else(|| panic!("unknown solar system {sys_id} in SDE"));
+    let constellation_id = sys_meta.constellation_id;
+    let region_id = sys_meta.region_id;
+
+    let (ship_id, prev_sys, spawn_type_id) = ctx.db.with_mut_snapshot(|snap| {
+        let mut ship_id = 0_i64;
+        let mut prev_sys = sys_id;
+        let mut spawn_type_id = None;
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            prev_sys = ch.solar_system_id;
+            ch.solar_system_id = sys_id;
+            ch.constellation_id = constellation_id;
+            ch.region_id = region_id;
+            ch.station_id = station_id;
+            ch.structure_id = None;
+            ship_id = ch.active_ship_id;
+        }
+        if ship_id > 0 {
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                match station_id {
+                    Some(sta) => {
+                        ship.location_id = sta;
+                        ship.flag = InventoryFlag::Hangar;
+                        snap.item_positions.remove(&ship_id);
+                    }
+                    None => {
+                        ship.location_id = i64::from(sys_id);
+                        ship.flag = InventoryFlag::None;
+                        snap.item_positions.entry(ship_id).or_insert([0.0, 0.0, 0.0]);
+                        spawn_type_id = Some(ship.type_id);
+                    }
+                }
+            }
+        }
+        (ship_id, prev_sys, spawn_type_id)
+    });
+
+    if ship_id > 0 && prev_sys != sys_id {
+        if let Some(prev_h) = ctx.systems.get_handle(prev_sys) {
+            let _ = prev_h.remove_ball(ship_id).await;
+        }
+    }
+    if let (Some(type_id), None) = (spawn_type_id, station_id) {
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        if sys_h.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
+            let _ = sys_h
+                .spawn_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: ship_id,
+                        type_id,
+                        position: glam::DVec3::ZERO,
+                        velocity: glam::DVec3::ZERO,
+                        max_velocity: 365.0,
+                        inertia: 1.0,
+                        mass: 1_200_000.0,
+                        radius: 40.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    ctx.build_ship_combat_state(char_id, ship_id, type_id),
+                    ctx.build_ship_slim_meta(char_id, type_id),
+                )
+                .await;
+        }
+    }
+
+    sess.solar_system_id = Some(sys_id);
+    sess.constellation_id = Some(constellation_id);
+    sess.region_id = Some(region_id);
+    sess.station_id = station_id;
+    sess.structure_id = None;
+    if ship_id > 0 {
+        sess.ship_id = Some(ship_id);
+    }
+
+    assert_pilot_fixture_legal(
+        "relocate_docked_pilot",
+        ctx,
+        sess,
+        station_id,
+        station_id.is_none(),
+    )
+    .await;
+}
+
+async fn auth_pilot_harness<'c>(
+    ctx: &'c ServerContext,
+    session_id: u64,
+    user: &str,
+    pass: &str,
+    char_id: i64,
+    grant_starter_ship_skills: bool,
+) -> ClientHarness<ServerWireTransport<'c>> {
     let kw = HashMap::new();
-    let mut sess = SessionState::new(session_id);
-    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login failed");
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID failed");
-    sess.solar_system_id = Some(30_000_142);
-    sess.station_id = Some(60_003_760);
-    sess.region_id = Some(10_000_002);
-    sess
+    let mut harness = new_wire_harness(ctx, session_id);
+    let login_rep = harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String(user.into()), PyRep::String(pass.into())],
+            &kw,
+        )
+        .await;
+    assert!(
+        matches!(login_rep, PyRep::KeyVal(_) | PyRep::Dict(_)),
+        "Login failed: {login_rep:?}"
+    );
+    let sel_rep = harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_id)],
+            &kw,
+        )
+        .await;
+    assert!(
+        matches!(sel_rep, PyRep::KeyVal(_) | PyRep::Dict(_)),
+        "SelectCharacterID failed: {sel_rep:?}"
+    );
+    if grant_starter_ship_skills {
+        for skill_id in [3327_i64, 3329_i64] {
+            let sk_rep = harness
+                .call_ok(
+                    "slash",
+                    None,
+                    "SlashCmd",
+                    &[PyRep::String(format!("/giveskill {skill_id} 5"))],
+                    &kw,
+                )
+                .await;
+            assert_eq!(sk_rep.dict_get("level"), Some(&PyRep::Integer(5)));
+        }
+    }
+    let backend = ServerScenarioBackend::new(ctx);
+    let view = backend.actor_session_view(harness.transport());
+    let snap = ctx.db.with_snapshot(|s| s.clone());
+    assert_legal_fixture(
+        "pve_agent_missions_lifecycle_pilot",
+        &snap,
+        &ctx.sde,
+        &view,
+        &LegalFixtureExpectation {
+            expect_in_space: Some(false),
+            ..Default::default()
+        },
+    );
+    harness
 }
 
 async fn bind_service_oid(ctx: &ServerContext, sess: &mut SessionState, service: &str, bind_param: PyRep) -> u64 {
@@ -49,7 +253,11 @@ async fn test_pve_agent_finder_and_conversation() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001_i64;
-    let mut sess = create_auth_session(&ctx, 2001, char_id).await;
+    let mut sess = auth_pilot_harness(&ctx, 2001, "demo", "demo-secret", char_id, false)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     let kw = HashMap::new();
 
     // 1. Agent Finder queries (feat:pve.agent-finder)
@@ -136,14 +344,7 @@ async fn test_pve_agent_finder_and_conversation() {
     let target_sys = target_agent[5].as_i64().unwrap() as u32;
     let target_station = target_agent[6].as_i64();
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = target_sys;
-            ch.station_id = target_station;
-        }
-    });
-    sess.solar_system_id = Some(target_sys);
-    sess.station_id = target_station;
+    relocate_docked_pilot(&ctx, &mut sess, char_id, target_sys, target_station).await;
 
     let agent_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(target_agent_id)).await;
 
@@ -192,7 +393,11 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001_i64;
-    let mut sess = create_auth_session(&ctx, 2002, char_id).await;
+    let mut sess = auth_pilot_harness(&ctx, 2002, "demo", "demo-secret", char_id, false)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     let kw = HashMap::new();
 
     let l1_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(24)], &kw, None).await.expect("GetAgents");
@@ -205,15 +410,12 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = station_id;
             ch.balance = IskCents::from_isk(10_000_000);
             ch.standings.insert(corp_id, 0.0);
             ch.loyalty_points.insert(corp_id, 100);
         }
     });
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = station_id;
+    relocate_docked_pilot(&ctx, &mut sess, char_id, sys_id, station_id).await;
 
     let agent_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(agent_id)).await;
 
@@ -333,7 +535,11 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001_i64;
-    let mut sess = create_auth_session(&ctx, 2003, char_id).await;
+    let mut sess = auth_pilot_harness(&ctx, 2003, "demo", "demo-secret", char_id, false)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     let kw = HashMap::new();
 
     let l1_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(24)], &kw, None).await.expect("GetAgents");
@@ -346,14 +552,11 @@ async fn test_pve_mission_decline_quit_and_expiration() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = station_id;
             ch.standings.insert(corp_id, 2.0);
             ch.standings.insert(agent_id, 2.0);
         }
     });
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = station_id;
+    relocate_docked_pilot(&ctx, &mut sess, char_id, sys_id, station_id).await;
 
     let agent_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(agent_id)).await;
 
@@ -502,6 +705,7 @@ async fn dock_pilot_at_station(
         sys.step_manual(0.1).await.unwrap();
     }
     ctx.dispatch_rpc(sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None).await.expect("Dock");
+    assert_pilot_fixture_legal("dock_pilot_at_station", ctx, sess, Some(station_id), false).await;
 }
 
 #[tokio::test]
@@ -510,10 +714,12 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     crate::common::pin_clock(&ctx);
     let char_id = 96_005_001_i64;
     ctx.db.provision_gm_account("e5pilot", "e5-secret", char_id, "E5 Mission Pilot");
-    let mut sess = SessionState::new(9605);
-    crate::common::login_pilot(&ctx, &mut sess, "e5pilot", "e5-secret").await;
     let kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+    let mut sess = auth_pilot_harness(&ctx, 9605, "e5pilot", "e5-secret", char_id, true)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
 
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
 
@@ -646,7 +852,23 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     // Re-requesting from same agent does not re-offer completed mission
     let next_offer = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Next offer");
     assert_ne!(next_offer.dict_get("missionID").and_then(|v| v.as_i64()), Some(chosen_mid as i64));
-    let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await;
+    let defer_sec = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            Some(sec_oid),
+            "DoAction",
+            &[PyRep::Integer(10)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Defer next security offer");
+    assert_eq!(
+        defer_sec.dict_get("state").and_then(PyRep::as_str),
+        Some("Declined"),
+        "expected Deferred/Declined state on sec offer: {defer_sec:?}"
+    );
 
     // 2b. Connections V (3359) lifts positive standing above 1.0 to unlock Level 2 agent, plus Defer/Decline/Accept/Quit
     let l2_same_fac = ctx
@@ -711,7 +933,23 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
                 break;
             }
         }
-        let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await;
+        let defer_dist = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "agentMgr",
+                Some(dist_oid),
+                "DoAction",
+                &[PyRep::Integer(10)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Defer non-remote courier offer");
+        assert_eq!(
+            defer_dist.dict_get("state").and_then(PyRep::as_str),
+            Some("Declined"),
+            "expected Deferred/Declined state on courier offer: {defer_dist:?}"
+        );
     }
     assert!(courier_dest > 0, "Expected courier mission with remote destinationStationID");
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept courier mission");
@@ -741,7 +979,11 @@ async fn test_issue_766_agent_dialogue_v24_machonet_wire_contract() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001_i64;
-    let mut sess = create_auth_session(&ctx, 2766, char_id).await;
+    let mut sess = auth_pilot_harness(&ctx, 2766, "demo", "demo-secret", char_id, false)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
     let kw = HashMap::new();
 
     let agents_rep = ctx
@@ -762,13 +1004,10 @@ async fn test_issue_766_agent_dialogue_v24_machonet_wire_contract() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = station_id;
             ch.standings.insert(corp_id, 0.0);
         }
     });
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = station_id;
+    relocate_docked_pilot(&ctx, &mut sess, char_id, sys_id, station_id).await;
 
     let agent_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(agent_id)).await;
 
@@ -874,20 +1113,12 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
     crate::common::pin_clock(&ctx);
     let char_id = 96_005_099_i64;
     ctx.db.provision_gm_account("e5rewards", "e5-rew-sec", char_id, "E5 Rewards Pilot");
-    let mut sess = SessionState::new(9699);
-    crate::common::login_pilot(&ctx, &mut sess, "e5rewards", "e5-rew-sec").await;
     let kw = HashMap::new();
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    let mut sess = auth_pilot_harness(&ctx, 9699, "e5rewards", "e5-rew-sec", char_id, true)
+        .await
+        .into_transport()
+        .inner
+        .into_session();
 
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
     // Find an L1 Security agent in high-sec and an L1 Security agent in low-sec to verify truesec (1.6288 - true_sec)
