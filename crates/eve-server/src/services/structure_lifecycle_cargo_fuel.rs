@@ -8,7 +8,7 @@ use crate::services::station_structure::structure_lifecycle as life;
 use crate::services::station_structure::structure_upwell_ops::{self as ops, load_ext_state, save_ext_state};
 use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use glam::DVec3;
 
 pub(crate) fn is_pilot_docked_or_controlling_structure(
@@ -134,7 +134,7 @@ pub async fn handle_jettison_structure_fuel(
                         return Err(err("ItemNotFuel", format!("Item {iid} (type {it_type}) is not structure fuel in fuel bay")));
                     }
                     if rules::is_fuel_block_type(ctx, it_type) {
-                        moved_blocks = moved_blocks.saturating_add(it_qty.max(0) as u32);
+                        moved_blocks = moved_blocks.saturating_add(u32::try_from(it_qty).unwrap_or(0));
                     }
                     // Fuel Technician / Station Manager / Director authorization already checked by `has_structure_fuel_bay_role`.
                     let mut spec = eve_db::TransferItemSpec::move_whole(
@@ -171,17 +171,34 @@ pub async fn handle_jettison_structure_fuel(
                 if !rules::is_valid_structure_fuel_bay_item(ctx, fuel_tid_u32) {
                     return Err(err("ItemNotFuel", format!("TypeID {fuel_tid} is not a valid structure fuel type")));
                 }
-                let req_qty_u32 = u32::try_from(req_qty).map_err(|_| err("InvalidArgument", format!("Invalid fuel quantity {req_qty}")))?;
+                let (req_qty_u32, req_qty_i32) = if req_qty == 0 {
+                    (0_u32, 0_i32)
+                } else {
+                    let validated = ItemQty::try_from_i64(req_qty).map_err(|_| {
+                        err("InvalidArgument", format!("Invalid fuel quantity {req_qty}"))
+                    })?;
+                    let qty_i32 = validated.try_into_stack_i32().map_err(|_| {
+                        err("InvalidArgument", format!("Invalid fuel quantity {req_qty}"))
+                    })?;
+                    let qty_u32 = validated.try_into_u32().map_err(|_| {
+                        err("InvalidArgument", format!("Invalid fuel quantity {req_qty}"))
+                    })?;
+                    (qty_u32, qty_i32)
+                };
                 let mut bay_matching: Vec<i64> = snap.items.values()
                     .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.type_id == fuel_tid_u32 && i.quantity > 0)
                     .map(|i| i.item_id).collect();
                 bay_matching.sort_unstable();
-                let matching_qty: u32 = bay_matching.iter().filter_map(|id| snap.items.get(id)).map(|i| i.quantity.max(0) as u32).fold(0, u32::saturating_add);
+                let matching_qty: u32 = bay_matching
+                    .iter()
+                    .filter_map(|id| snap.items.get(id))
+                    .filter_map(|i| u32::try_from(i.quantity).ok())
+                    .fold(0, u32::saturating_add);
                 let is_block = rules::is_fuel_block_type(ctx, fuel_tid_u32);
                 let avail_for_tid = if is_block {
                     let backed_all: u32 = snap.items.values()
                         .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
-                        .map(|i| i.quantity as u32).fold(0, u32::saturating_add);
+                        .filter_map(|i| u32::try_from(i.quantity).ok()).fold(0, u32::saturating_add);
                     matching_qty.saturating_add(st.fuel_blocks.saturating_sub(backed_all)).min(st.fuel_blocks)
                 } else {
                     matching_qty
@@ -192,12 +209,22 @@ pub async fn handle_jettison_structure_fuel(
                 let mut rem = req_qty_u32;
                 for iid in bay_matching {
                     if rem == 0 { break; }
-                    let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity.max(0) as u32)) else { continue; };
+                    let Some((it_owner, avail)) = snap
+                        .items
+                        .get(&iid)
+                        .map(|it| (it.owner_id, u32::try_from(it.quantity).unwrap_or(0)))
+                    else {
+                        continue;
+                    };
                     let take = rem.min(avail);
-                    if take == 0 { continue; }
+                    let Ok(take_i32) =
+                        ItemQty::try_from_u32(take).and_then(ItemQty::try_into_stack_i32)
+                    else {
+                        continue;
+                    };
                     let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
                     opts.reject_singleton = true;
-                    if snap.consume_exact_item_quantity(iid, take as i32, opts).is_ok() {
+                    if snap.consume_exact_item_quantity(iid, take_i32, opts).is_ok() {
                         rem -= take;
                     }
                 }
@@ -211,7 +238,7 @@ pub async fn handle_jettison_structure_fuel(
                 snap.items.insert(fuel_item_id, eve_db::InventoryItemRecord {
                     item_id: fuel_item_id, type_id: fuel_tid_u32, owner_id: st.owner_corp_id,
                     location_id: container_id, flag: InventoryFlag::Cargo,
-                    quantity: i32::try_from(req_qty_u32).unwrap_or(i32::MAX), singleton: false, version: 1, ..Default::default()
+                    quantity: req_qty_i32, singleton: false, version: 1, ..Default::default()
                 });
                 moved_ids.push(fuel_item_id);
             }

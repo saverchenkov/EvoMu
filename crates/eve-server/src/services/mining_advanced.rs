@@ -21,7 +21,7 @@ use eve_db::{
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use eve_sde::{SdeRegistry, TypeId};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -1447,10 +1447,11 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         && it.quantity > 0
                         && !snap_ref.is_item_locked_in_contract_or_job(it.item_id)
                     {
+                        let qty_u32 = u32::try_from(it.quantity).unwrap_or(0);
                         if ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) {
-                            item_fuel = item_fuel.saturating_add(it.quantity as u32);
+                            item_fuel = item_fuel.saturating_add(qty_u32);
                         } else if it.type_id == 81143 {
-                            gas = gas.saturating_add(it.quantity as u32);
+                            gas = gas.saturating_add(qty_u32);
                         }
                     }
                 }
@@ -1468,7 +1469,9 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         && !snap.is_item_locked_in_contract_or_job(it.item_id)
                         && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
                 })
-                .fold(0u32, |acc, it| acc.saturating_add(it.quantity as u32));
+                .fold(0u32, |acc, it| {
+                    acc.saturating_add(u32::try_from(it.quantity).unwrap_or(0))
+                });
             let last_cycle_unix = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| AutoMoonMinerRecord {
                 structure_id, fuel_units_remaining: init_fuel, magmatic_gas_remaining: init_gas, efficiency,
                 cycle_duration_seconds: cycle_secs, last_cycle_unix: prev_unix, ore_type_id: primary_mat_tid,
@@ -1504,10 +1507,14 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         let Some((owner_id, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity)) else {
                             continue;
                         };
-                        let take = (avail.max(0) as u32).min(*rem_ref);
-                        if take == 0 { continue; }
+                        let take = u32::try_from(avail).unwrap_or(0).min(*rem_ref);
+                        let Ok(take_i32) =
+                            ItemQty::try_from_u32(take).and_then(ItemQty::try_into_stack_i32)
+                        else {
+                            continue;
+                        };
                         let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
-                        if snap.consume_exact_item_quantity(iid, take as i32, opts).is_ok() {
+                        if snap.consume_exact_item_quantity(iid, take_i32, opts).is_ok() {
                             *rem_ref -= take;
                         }
                     }

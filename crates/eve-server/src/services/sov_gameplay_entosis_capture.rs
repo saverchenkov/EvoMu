@@ -10,6 +10,7 @@ use super::{
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::sov_services::{emit_sov_structures_updated, TYPE_SOVEREIGNTY_HUB};
 use eve_db::InventoryItemRecord;
+use eve_proto::ItemQty;
 use glam::DVec3;
 use std::collections::HashSet;
 
@@ -516,8 +517,16 @@ async fn complete_command_node_capture(
                     }
                 }
                 for (fuel_type, qty) in hub_data.fuel {
-                    let drop_qty = (qty + 1) / 2;
-                    if drop_qty > 0 {
+                    let mut rem = (qty / 2) + (qty & 1);
+                    while rem > 0 {
+                        let chunk = ItemQty::try_from_u32(rem)
+                            .and_then(ItemQty::try_into_stack_i32)
+                            .unwrap_or(i32::MAX);
+                        let chunk_u32 = u32::try_from(chunk).unwrap_or(0);
+                        if chunk_u32 == 0 {
+                            break;
+                        }
+                        rem -= chunk_u32;
                         snap.next_entity_id += 1;
                         let drop_id = snap.next_entity_id;
                         snap.items.insert(
@@ -527,7 +536,7 @@ async fn complete_command_node_capture(
                                 type_id: fuel_type,
                                 owner_id: 1,
                                 location_id: i64::from(hub_sys),
-                                quantity: drop_qty as i32,
+                                quantity: chunk,
                                 ..Default::default()
                             },
                         );

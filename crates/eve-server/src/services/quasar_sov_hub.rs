@@ -28,6 +28,7 @@ use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, WireField,
     WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
+use eve_proto::ItemQty;
 use eve_sde::SdeRegistry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -744,8 +745,11 @@ pub fn simulate_fuel(sde: &SdeRegistry, hub: &mut PersistedSovHubData, now: u64)
         }
         let need = u64::from(d.fuel_per_hour) * hours;
         let have = hub.fuel.entry(d.fuel_type).or_insert(0);
-        if u64::from(*have) >= need {
-            *have -= need as u32;
+        if let Some(rem) = u64::from(*have)
+            .checked_sub(need)
+            .and_then(|r| u32::try_from(r).ok())
+        {
+            *have = rem;
         } else {
             *have %= d.fuel_per_hour;
             u.low_power = true;
@@ -1167,11 +1171,17 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.fuel.api.AddRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let item_id = required_id(dyn_msg, 1, "Fuel item")?;
-                let amount = get_int_field(dyn_msg, 2).unwrap_or(0);
+                let amount_raw = get_int_field(dyn_msg, 2).unwrap_or(0);
                 let hub_id = required_id(dyn_msg, 3, "Hub")?;
-                if amount <= 0 || amount > i64::from(i32::MAX) {
-                    return Err((STATUS_BAD_REQUEST, "Fuel amount must be positive".into()));
-                }
+                let fuel_qty = ItemQty::try_from_i64(amount_raw)
+                    .map_err(|_| (STATUS_BAD_REQUEST, "Fuel amount must be positive".to_string()))?;
+                let amount_i32 = fuel_qty
+                    .try_into_stack_i32()
+                    .map_err(|_| (STATUS_BAD_REQUEST, "Fuel amount must be positive".to_string()))?;
+                let amount_u32 = fuel_qty
+                    .try_into_u32()
+                    .map_err(|_| (STATUS_BAD_REQUEST, "Fuel amount must be positive".to_string()))?;
+                let amount = fuel_qty.as_i64();
                 transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
                     let hub_st = snap
@@ -1222,10 +1232,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                                 .get(&fuel_type)
                                 .copied()
                                 .unwrap_or(0)
-                                .checked_add(amount as u32)
+                                .checked_add(amount_u32)
                                 .ok_or((STATUS_BAD_REQUEST, "Hub fuel bay capacity exceeded".to_string()))?;
                             hub.fuel.insert(fuel_type, total);
-                            consume_items(snap, item_id, amount as i32);
+                            consume_items(snap, item_id, amount_i32);
                             let now_ts = ctx.now_unix();
                             let is_hacked = snap
                                 .sov_runtime

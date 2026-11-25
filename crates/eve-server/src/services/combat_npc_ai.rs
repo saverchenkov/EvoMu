@@ -2190,7 +2190,9 @@ async fn destroy_specialized_npc_with_hint_inner(
         .map(|&ltid| {
             let is_bpc = matches!(ltid, 33817 | 33819 | 33821);
             let qty = if let Some((_, custom_qty)) = effective_custom_loot.filter(|(t, _)| *t == ltid) {
-                (custom_qty as i32).max(1)
+                eve_proto::ItemQty::try_from_i64(custom_qty.max(1))
+                    .and_then(eve_proto::ItemQty::try_into_stack_i32)
+                    .unwrap_or(i32::MAX)
             } else if let Some(ref conv) = convoy_opt {
                 if conv.cargo_type_id == ltid {
                     conv.cargo_quantity.max(1)

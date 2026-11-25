@@ -11,7 +11,7 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 }
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, ItemQty, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -1310,13 +1310,13 @@ pub fn handle(
                             "PLEX order price {price_isk} violates 4-significant-figure tick size rule"
                         ))));
                 }
-                if quantity <= 0
-                    || quantity > (i32::MAX as i64)
-                    || ![0, 1, 3, 7, 14, 30, 90].contains(&duration_days)
-                {
+                let Some(qty_i32) = ItemQty::try_from_i64(quantity)
+                    .and_then(ItemQty::try_into_stack_i32)
+                    .ok()
+                    .filter(|_| [0, 1, 3, 7, 14, 30, 90].contains(&duration_days))
+                else {
                     return Some(Err(rpc_err("InvalidMarketOrder", "PlacePlexSellOrder requires positive quantity and valid duration")));
-                }
-                let qty_i32 = quantity as i32;
+                };
                 let order_price = IskCents::from_f64_isk(price_isk);
                 let now_unix = ctx.now_unix();
                 if let Err(e) = ctx.db.with_snapshot(|snap| {
@@ -2425,3 +2425,29 @@ mod market_contracts_tests;
 #[cfg(test)]
 #[path = "market_contracts_edges2_tests.rs"]
 mod market_contracts_edges2_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::handle;
+    use super::market_contracts_tests::{jita_session, test_ctx};
+    use eve_proto::PyRep;
+    use std::collections::HashMap;
+
+    #[test]
+    fn place_plex_sell_order_rejects_overflow_quantity() {
+        let ctx = test_ctx();
+        let mut sess = jita_session(90_001, 98_001);
+        let args = [PyRep::Real(100.0), PyRep::Integer(i64::from(i32::MAX) + 1)];
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "marketProxy",
+            "PlacePlexSellOrder",
+            &args,
+            &HashMap::new(),
+        )
+        .expect("rpc handled")
+        .expect_err("overflow PLEX quantity must be rejected");
+        assert_eq!(err.code, "InvalidMarketOrder");
+    }
+}

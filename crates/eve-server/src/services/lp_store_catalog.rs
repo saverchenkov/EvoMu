@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 
 use eve_db::IskCents;
-use eve_proto::PyRep;
+use eve_proto::{ItemQty, PyRep};
 use eve_sde::TypeId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -290,19 +290,37 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
     if offers.is_empty() {
         if let Some(legacy) = snap.loyalty_store_offers.get(&corp_id) {
             for o in legacy {
+                let Ok(type_id) = TypeId::try_from(o.type_id) else {
+                    continue;
+                };
+                let Ok(quantity) = ItemQty::try_from_i64(o.quantity)
+                    .and_then(ItemQty::try_into_stack_i32)
+                else {
+                    continue;
+                };
+                let Some(req_items) = o
+                    .required_items
+                    .iter()
+                    .map(|ri| {
+                        let tid = TypeId::try_from(ri.type_id).ok()?;
+                        let q = ItemQty::try_from_i64(ri.quantity)
+                            .and_then(ItemQty::try_into_stack_i32)
+                            .ok()?;
+                        Some((tid, q))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
                 offers.push(LPOffer {
                     offer_id: o.offer_id,
                     corp_id,
-                    type_id: o.type_id as TypeId,
-                    quantity: o.quantity as i32,
+                    type_id,
+                    quantity,
                     lp_cost: o.lp_cost,
                     isk_cost: IskCents(o.isk_cost * 100),
                     ak_cost: o.ak_cost.unwrap_or(0),
-                    req_items: o
-                        .required_items
-                        .iter()
-                        .map(|ri| (ri.type_id as TypeId, ri.quantity as i32))
-                        .collect(),
+                    req_items,
                     min_standing: None,
                 });
             }
@@ -447,5 +465,56 @@ mod lp_store_catalog_tests;
 #[path = "lp_store_catalog_cov_unit_tests.rs"]
 #[cfg(test)]
 mod lp_store_catalog_cov_unit_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::get_corp_lp_offers;
+    use eve_db::{LoyaltyStoreOfferItemRecord, LoyaltyStoreOfferRecord, WorldStateSnapshot};
+
+    #[test]
+    fn get_corp_lp_offers_rejects_overflow_or_non_positive_legacy_quantities() {
+        let mut snap = WorldStateSnapshot::default();
+        let corp_id = 1_000_998;
+        snap.loyalty_store_offers.insert(
+            corp_id,
+            vec![
+                LoyaltyStoreOfferRecord {
+                    offer_id: 1,
+                    type_id: 34,
+                    quantity: i64::from(i32::MAX) + 1,
+                    lp_cost: 10,
+                    isk_cost: 0,
+                    ak_cost: None,
+                    required_items: Vec::new(),
+                },
+                LoyaltyStoreOfferRecord {
+                    offer_id: 2,
+                    type_id: 34,
+                    quantity: 1,
+                    lp_cost: 10,
+                    isk_cost: 0,
+                    ak_cost: None,
+                    required_items: vec![LoyaltyStoreOfferItemRecord {
+                        type_id: 35,
+                        quantity: 0,
+                    }],
+                },
+                LoyaltyStoreOfferRecord {
+                    offer_id: 3,
+                    type_id: 34,
+                    quantity: 5,
+                    lp_cost: 10,
+                    isk_cost: 0,
+                    ak_cost: None,
+                    required_items: Vec::new(),
+                },
+            ],
+        );
+        let offers = get_corp_lp_offers(&snap, corp_id);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].offer_id, 3);
+        assert_eq!(offers[0].quantity, 5);
+    }
+}
 
 

@@ -22,7 +22,7 @@ use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
 use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, ItemQty, PyRep};
 use eve_sde::TypeId;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -911,7 +911,10 @@ pub fn handle(
                 }
             };
             let min_volume_i32 = match rpc.opt_positive_i64(5, "minVolume") {
-                Ok(v) => v.unwrap_or(1).min(i32::MAX as i64) as i32,
+                Ok(v) => match ItemQty::try_from_i64(v.unwrap_or(1)).and_then(ItemQty::try_into_stack_i32) {
+                    Ok(mv) => mv,
+                    Err(e) => return Some(Err(e.into_rpc_error("InvalidMarketOrder"))),
+                },
                 Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
             };
             let duration_days = if is_buy_stuff_sig {
@@ -947,20 +950,23 @@ pub fn handle(
                 }
             };
 
-            if !price_isk.is_finite()
-                || price_isk <= 0.0
-                || quantity <= 0
-                || quantity > (i32::MAX as i64)
-                || ![0, 1, 3, 7, 14, 30, 90].contains(&duration_days)
-                || !matches!(order_range, -1 | 0 | 1..=40 | 32767)
-            {
+            let Some(quantity_i32) = ItemQty::try_from_i64(quantity)
+                .and_then(ItemQty::try_into_stack_i32)
+                .ok()
+                .filter(|_| {
+                    price_isk.is_finite()
+                        && price_isk > 0.0
+                        && [0, 1, 3, 7, 14, 30, 90].contains(&duration_days)
+                        && matches!(order_range, -1 | 0 | 1..=40 | 32767)
+                })
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
                     message: "Market order requires finite price > 0, positive quantity, valid range, and duration in [0, 1, 3, 7, 14, 30, 90]"
                         .into(),
                     client_error: None,
                 }));
-            }
+            };
             if !super::market_contracts::is_valid_4_sig_fig_price(price_isk) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPriceTickSize".into(),
@@ -970,7 +976,6 @@ pub fn handle(
                     client_error: None,
                 }));
             }
-            let quantity_i32 = quantity as i32;
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
                 if sys.region_id == region_id || type_id == PLEX_TYPE_ID {
                     sys.stations.iter().find(|st| st.station_id == station_id)

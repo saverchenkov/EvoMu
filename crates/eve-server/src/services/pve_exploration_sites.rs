@@ -10,7 +10,7 @@ use glam::DVec3;
 use eve_db::{InventoryFlag, InventoryItemRecord, SolarSystemId, TypeId, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use eve_sde::{InvType, SdeRegistry};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity};
@@ -30,6 +30,13 @@ use crate::services::pve_exploration_seeding::{
     pirate_faction_for_system, PirateFaction,
 };
 use crate::system_actor::SystemRegistry;
+
+/// Narrows an internal site-loot `i64` count into a valid `1..=i32::MAX` stack quantity without wrapping.
+fn clamp_loot_stack_qty(qty: i64) -> i32 {
+    ItemQty::try_from_i64(qty.max(1))
+        .and_then(ItemQty::try_into_stack_i32)
+        .unwrap_or(i32::MAX)
+}
 
 /// SDE group IDs used by exploration container loot tables.
 pub const DATACORE_GROUP_ID: u32 = 333;
@@ -151,7 +158,7 @@ pub async fn materialize_spewed_cans_core(
                     owner_id: owner_char_id,
                     location_id: can.can_item_id,
                     flag: InventoryFlag::Cargo,
-                    quantity: can.loot_quantity as i32,
+                    quantity: clamp_loot_stack_qty(can.loot_quantity),
                     singleton: false,
                     ..Default::default()
                 },
@@ -295,7 +302,7 @@ pub async fn spawn_ded_overseer_wreck_core(
                     owner_id: killer_char_id,
                     location_id: wid,
                     flag: InventoryFlag::Cargo,
-                    quantity: *qty as i32,
+                    quantity: clamp_loot_stack_qty(*qty),
                     singleton: false,
                     ..Default::default()
                 },
@@ -504,7 +511,7 @@ pub async fn drop_sleeper_wreck_core(
                     owner_id: killer_char_id,
                     location_id: wid,
                     flag: InventoryFlag::Cargo,
-                    quantity: qty as i32,
+                    quantity: clamp_loot_stack_qty(qty),
                     singleton: false,
                     ..Default::default()
                 },
@@ -1798,4 +1805,17 @@ mod pve_exploration_sites_tests;
 #[cfg(test)]
 #[path = "pve_exploration_sites_edges_tests.rs"]
 mod pve_exploration_sites_edges_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::clamp_loot_stack_qty;
+
+    #[test]
+    fn clamp_loot_stack_qty_bounds_without_wrap() {
+        assert_eq!(clamp_loot_stack_qty(0), 1);
+        assert_eq!(clamp_loot_stack_qty(-10), 1);
+        assert_eq!(clamp_loot_stack_qty(75), 75);
+        assert_eq!(clamp_loot_stack_qty(i64::from(i32::MAX) + 1), i32::MAX);
+    }
+}
 
