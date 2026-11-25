@@ -83,7 +83,19 @@ pub(crate) type ActiveDroneMutOp = Box<
         + Send,
 >;
 
-/// Transient in-actor scoop coordination command operating on `scoop_claimed_drones` (`D2B-P1-04`).
+/// Closure executed atomically inside [`SystemActor`] with read access to active transient
+/// `scoop_claimed_drones` so reconnect/abandon paths skip or reject drones currently claimed for scoop.
+pub(crate) type ActiveDroneMutWithClaimsOp = Box<
+    dyn FnOnce(
+            &mut HashMap<BallId, DroneSpaceState>,
+            &mut HashMap<BallId, DroneMiningState>,
+            &mut HashMap<BallId, u64>,
+            &std::collections::HashSet<BallId>,
+        ) -> bool
+        + Send,
+>;
+
+/// Transient in-actor scoop coordination command operating on `scoop_claimed_drones`.
 #[derive(Debug, Clone)]
 pub enum DroneScoopClaimAction {
     /// Non-destructive claim for `ship.ScoopToDroneBay`; rejects when already claimed or controlled by another pilot.
@@ -362,8 +374,8 @@ pub(crate) fn flush_actor_active_drones_checkpoint_post_unlock(
 }
 
 /// Migrates all `active_drones_in_space` entries from legacy `extended_runtime_json` directly into
-/// SQLite `system_checkpoint` (`KIND_ACTIVE_DRONES`) across all solar systems at startup before any
-/// `flush_combat_runtime_to_db` clears the legacy JSON, without waking cold systems.
+/// SQLite `system_checkpoint` (`KIND_ACTIVE_DRONES`) across all solar systems at startup and removes
+/// the migrated key from persisted `extended_runtime_json` on disk without waking cold systems.
 pub(crate) fn migrate_legacy_active_drones_at_startup(ctx: &crate::router::ServerContext) {
     let ext_json = ctx.db.with_snapshot(|snap| {
         snap.combat_crimewatch_state.extended_runtime_json.clone()
@@ -374,9 +386,6 @@ pub(crate) fn migrate_legacy_active_drones_at_startup(ctx: &crate::router::Serve
     let Ok(legacy) = serde_json::from_str::<LegacyActiveDronesPayload>(&ext_json) else {
         return;
     };
-    if legacy.active_drones_in_space.is_empty() {
-        return;
-    }
     let mut by_sys: std::collections::BTreeMap<SolarSystemId, Vec<(BallId, DroneSpaceState)>> =
         std::collections::BTreeMap::new();
     for (bid, mut d) in legacy.active_drones_in_space {
@@ -386,42 +395,66 @@ pub(crate) fn migrate_legacy_active_drones_at_startup(ctx: &crate::router::Serve
         d.ball_id = bid;
         by_sys.entry(d.solar_system_id).or_default().push((bid, d));
     }
-    if by_sys.is_empty() {
-        return;
-    }
     let now_unix = ctx.db.clock().now_unix_secs();
-    let _ = ctx.db.with_sqlite_conn(|conn| {
-        for (&sys_id, entries) in &by_sys {
-            let existing =
-                eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+    let migrated_sqlite = ctx
+        .db
+        .with_sqlite_conn(|conn| {
+            for (&sys_id, entries) in &by_sys {
+                let existing =
+                    eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<
+                        DroneSpaceState,
+                    >(
+                        conn,
+                        sys_id,
+                        eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                    )?;
+                if !existing.is_empty() {
+                    continue;
+                }
+                let mut sorted = entries.clone();
+                sorted.sort_by_key(|(bid, _)| *bid);
+                let rows: Vec<(String, &DroneSpaceState)> =
+                    sorted.iter().map(|(bid, d)| (bid.to_string(), d)).collect();
+                eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
                     conn,
                     sys_id,
                     eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                    &rows,
+                    now_unix,
                 )?;
-            if !existing.is_empty() {
-                continue;
             }
-            let mut sorted = entries.clone();
-            sorted.sort_by_key(|(bid, _)| *bid);
-            let rows: Vec<(String, &DroneSpaceState)> =
-                sorted.iter().map(|(bid, d)| (bid.to_string(), d)).collect();
-            eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
-                conn,
-                sys_id,
-                eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-                &rows,
-                now_unix,
-            )?;
+            Ok::<(), String>(())
+        })
+        .is_ok();
+    if migrated_sqlite {
+        // Persist removal of `active_drones_in_space` immediately so restarts when `KIND_ACTIVE_DRONES`
+        // becomes legitimately empty cannot re-import already-scooped or destroyed legacy drones.
+        ctx.db.with_mut_snapshot(|snap| {
+            let cur = &snap.combat_crimewatch_state.extended_runtime_json;
+            if !cur.is_empty() && cur.contains("active_drones_in_space") {
+                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(cur) {
+                    if let Some(obj) = val.as_object_mut() {
+                        if obj.remove("active_drones_in_space").is_some() {
+                            snap.combat_crimewatch_state.extended_runtime_json = if obj.is_empty() {
+                                String::new()
+                            } else {
+                                serde_json::to_string(&val).unwrap_or_default()
+                            };
+                        }
+                    }
+                }
+            }
+        });
+    }
+    if !by_sys.is_empty() {
+        let mut guard = ctx
+            .systems
+            .migrated_legacy_drone_systems
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for sys_id in by_sys.keys() {
+            guard.insert(*sys_id);
         }
-        Ok::<(), String>(())
-    });
-    let mut guard = ctx
-        .systems
-        .migrated_legacy_drone_systems
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    for sys_id in by_sys.keys() {
-        guard.insert(*sys_id);
     }
 }
 
@@ -761,6 +794,22 @@ fn mutate_active_drones_in_actor(
     Ok(())
 }
 
+fn mutate_active_drones_with_claims_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    op: ActiveDroneMutWithClaimsOp,
+) -> Result<(), String> {
+    let dirty = op(
+        &mut ctx.actor_st.active_drones_in_space,
+        &mut ctx.actor_st.active_drone_miners,
+        &mut ctx.actor_st.drone_next_ready_unix,
+        &ctx.actor_st.scoop_claimed_drones,
+    );
+    if dirty {
+        mark_active_drones_dirty_in_state(ctx.actor_st);
+    }
+    Ok(())
+}
+
 pub(in crate::system_actor) fn handle_drone_runtime_command(
     exec_ctx: &mut ActorExecCtx<'_>,
     cmd: SystemCommand,
@@ -845,6 +894,12 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         SystemCommand::MutateActiveDrones { op, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = mutate_active_drones_in_actor(&mut ctx, op);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::MutateActiveDronesWithClaims { op, reply } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = mutate_active_drones_with_claims_in_actor(&mut ctx, op);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -1304,24 +1359,100 @@ impl SystemHandle {
             .map_err(|_| format!("system {} active-drone mutation dropped result", self.solar_system_id))
     }
 
-    /// Removes and returns `ball_id` from `active_drones_in_space` inside this system actor.
+    /// Executes an atomic closure over this system's active drones, mining states, cooldown timers,
+    /// and transient `scoop_claimed_drones` set inside [`SystemActor`].
+    pub async fn mutate_active_drones_with_claims<R: Send + 'static>(
+        &self,
+        op: impl FnOnce(
+                &mut HashMap<BallId, DroneSpaceState>,
+                &mut HashMap<BallId, DroneMiningState>,
+                &mut HashMap<BallId, u64>,
+                &std::collections::HashSet<BallId>,
+            ) -> (bool, R)
+            + Send
+            + 'static,
+    ) -> Result<R, String> {
+        let (res_tx, mut res_rx) = tokio::sync::oneshot::channel::<R>();
+        let boxed: ActiveDroneMutWithClaimsOp = Box::new(move |drones, miners, timers, claimed| {
+            let (dirty, out) = op(drones, miners, timers, claimed);
+            let _ = res_tx.send(out);
+            dirty
+        });
+        call_actor_result_with_deadline(
+            self,
+            "MutateActiveDronesWithClaims",
+            ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::MutateActiveDronesWithClaims { op: boxed, reply },
+        )
+        .await?;
+        res_rx
+            .try_recv()
+            .map_err(|_| format!("system {} active-drone mutation dropped result", self.solar_system_id))
+    }
+
+    /// Synchronous bridge for [`Self::mutate_active_drones_with_claims`].
+    pub fn mutate_active_drones_with_claims_sync<R: Send + 'static>(
+        &self,
+        op: impl FnOnce(
+                &mut HashMap<BallId, DroneSpaceState>,
+                &mut HashMap<BallId, DroneMiningState>,
+                &mut HashMap<BallId, u64>,
+                &std::collections::HashSet<BallId>,
+            ) -> (bool, R)
+            + Send
+            + 'static,
+    ) -> Result<R, String> {
+        let (res_tx, mut res_rx) = tokio::sync::oneshot::channel::<R>();
+        let boxed: ActiveDroneMutWithClaimsOp = Box::new(move |drones, miners, timers, claimed| {
+            let (dirty, out) = op(drones, miners, timers, claimed);
+            let _ = res_tx.send(out);
+            dirty
+        });
+        dispatch_actor_sync_with_deadline(
+            self,
+            "MutateActiveDronesWithClaims",
+            ACTOR_CMD_TIMEOUT,
+            boxed,
+            |op, reply| SystemCommand::MutateActiveDronesWithClaims { op, reply },
+            mutate_active_drones_with_claims_in_actor,
+        )?;
+        res_rx
+            .try_recv()
+            .map_err(|_| format!("system {} active-drone mutation dropped result", self.solar_system_id))
+    }
+
+    /// Removes and returns `ball_id` from `active_drones_in_space` inside this system actor,
+    /// also clearing any transient `scoop_claimed_drones` claim on `ball_id`.
     pub async fn remove_active_drone(&self, ball_id: BallId) -> Result<Option<DroneSpaceState>, String> {
-        self.mutate_active_drones(move |drones, _, _| {
-            let removed = drones.remove(&ball_id);
-            (removed.as_ref().is_some_and(|d| d.ball_id > 0), removed)
-        })
-        .await
+        match self
+            .drone_scoop_claim_op(ball_id, DroneScoopClaimAction::ConsumeScoop)
+            .await?
+        {
+            DroneScoopClaimOutcome::Consumed(removed) => Ok(removed),
+            _ => Ok(None),
+        }
     }
 
     /// Synchronous bridge for [`Self::remove_active_drone`].
     pub fn remove_active_drone_sync(&self, ball_id: BallId) -> Result<Option<DroneSpaceState>, String> {
-        self.mutate_active_drones_sync(move |drones, _, _| {
-            let removed = drones.remove(&ball_id);
-            (removed.as_ref().is_some_and(|d| d.ball_id > 0), removed)
-        })
+        match dispatch_actor_sync_with_deadline(
+            self,
+            "ScoopDroneClaimOp",
+            ACTOR_CMD_TIMEOUT,
+            (ball_id, DroneScoopClaimAction::ConsumeScoop),
+            |(ball_id, action), reply| SystemCommand::ScoopDroneClaimOp {
+                ball_id,
+                action,
+                reply,
+            },
+            |ctx, (ball_id, action)| execute_drone_scoop_claim_op_in_actor(ctx, ball_id, action),
+        )? {
+            DroneScoopClaimOutcome::Consumed(removed) => Ok(removed),
+            _ => Ok(None),
+        }
     }
 
-    /// Executes a non-destructive transient scoop claim operation inside this system actor (`D2B-P1-04`).
+    /// Executes a non-destructive transient scoop claim operation inside this system actor.
     pub async fn drone_scoop_claim_op(
         &self,
         ball_id: BallId,

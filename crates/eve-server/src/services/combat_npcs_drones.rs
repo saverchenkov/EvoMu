@@ -454,25 +454,17 @@ pub async fn apply_damage_to_drone_in_space(
     };
     if destroyed {
         let removed_drone = sys_handle.remove_active_drone(drone_ball_id).await.ok().flatten();
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ref drone) = removed_drone {
-                snap.combat_crimewatch_state
-                    .record_destroyed_item_id(drone.ball_id);
-                snap.combat_crimewatch_state
-                    .record_destroyed_item_id(drone.drone_item_id);
-            } else {
-                snap.combat_crimewatch_state
-                    .record_destroyed_item_id(drone_ball_id);
-            }
-        });
-        let _ = sys_handle.clear_drone_runtime(drone_ball_id).await;
-        cycle_ops::clear_drone_web_cycle(&sys_handle, drone_ball_id).await;
-        let _ = sys_handle.remove_ball(drone_ball_id).await;
-        cycle_ops::cleanup_destroyed_drone_db_item(
+        let cleaned = cycle_ops::cleanup_destroyed_drone_db_item(
             ctx,
+            solar_system_id,
             drone_ball_id,
             removed_drone.as_ref().map(|d| d.drone_item_id),
         );
+        if cleaned {
+            let _ = sys_handle.clear_drone_runtime(drone_ball_id).await;
+            cycle_ops::clear_drone_web_cycle(&sys_handle, drone_ball_id).await;
+            let _ = sys_handle.remove_ball(drone_ball_id).await;
+        }
     }
     (applied, destroyed)
 }

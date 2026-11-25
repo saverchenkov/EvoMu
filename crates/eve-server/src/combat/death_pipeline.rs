@@ -1997,7 +1997,13 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
     let Some(d) = sys_handle.remove_active_drone_sync(ball_id).ok().flatten() else {
         return false;
     };
-    ctx.db.with_mut_snapshot(|snap| {
+    let still_in_space = ctx.db.with_mut_snapshot(|snap| {
+        if snap.items.get(&d.drone_item_id).is_some_and(|it| {
+            it.location_id != i64::from(sys_handle.solar_system_id)
+                || it.flag != eve_db::InventoryFlag::None
+        }) {
+            return false;
+        }
         snap.combat_crimewatch_state
             .record_destroyed_item_id(d.ball_id);
         snap.combat_crimewatch_state
@@ -2008,7 +2014,12 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
         if d.drone_item_id != d.ball_id {
             snap.sp6_lifecycle.space_object_meta.remove(&d.drone_item_id);
         }
+        true
     });
+    if !still_in_space {
+        // Scoop already committed this item to a bay/hangar; abort DB deletion, tombstoning, and control-lost alerts.
+        return true;
+    }
     let _ = sys_handle.clear_drone_runtime_sync(ball_id);
     sys_handle.try_remove_ball(ball_id);
     if d.owner_char_id > 0 {

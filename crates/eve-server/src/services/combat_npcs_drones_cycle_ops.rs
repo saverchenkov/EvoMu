@@ -233,12 +233,14 @@ pub(crate) fn is_recently_destroyed_in_persisted(
 }
 
 /// Deletes the backing DB item and space metadata when a drone ball is destroyed,
-/// even if its active runtime entry was concurrently claimed by a scoop attempt.
+/// returning `false` without deleting or tombstoning if a concurrent scoop already moved
+/// the item out of space in `solar_system_id`.
 pub(crate) fn cleanup_destroyed_drone_db_item(
     ctx: &ServerContext,
+    solar_system_id: u32,
     drone_ball_id: i64,
     claimed_item_id: Option<i64>,
-) {
+) -> bool {
     ctx.db.with_mut_snapshot(|snap| {
         let item_id = claimed_item_id
             .or_else(|| snap.items.contains_key(&drone_ball_id).then_some(drone_ball_id))
@@ -249,13 +251,23 @@ pub(crate) fn cleanup_destroyed_drone_db_item(
                     .find(|(_, m)| m.drone_ball_id == Some(drone_ball_id))
                     .map(|(&id, _)| id)
             });
-        super::purge_destroyed_drone_from_snap(snap, item_id, drone_ball_id);
         if let Some(iid) = item_id {
+            if snap.items.get(&iid).is_some_and(|it| {
+                it.location_id != i64::from(solar_system_id) || it.flag != InventoryFlag::None
+            }) {
+                return false;
+            }
+            super::purge_destroyed_drone_from_snap(snap, Some(iid), drone_ball_id);
             snap.combat_crimewatch_state
                 .record_destroyed_item_id(drone_ball_id);
             snap.combat_crimewatch_state.record_destroyed_item_id(iid);
+        } else {
+            super::purge_destroyed_drone_from_snap(snap, None, drone_ball_id);
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(drone_ball_id);
         }
-    });
+        true
+    })
 }
 
 /// Removes any synthetic stasis-web cycle registered by `drone_ball_id`.
@@ -817,7 +829,12 @@ async fn reject_destroyed_drone_scoop(
     msg: String,
 ) -> BridgeRpcError {
     if purge_db {
-        cleanup_destroyed_drone_db_item(ctx, drone_ball_id, item_id_opt);
+        let _ = cleanup_destroyed_drone_db_item(
+            ctx,
+            sys_handle.solar_system_id,
+            drone_ball_id,
+            item_id_opt,
+        );
     }
     let _ = sys_handle
         .drone_scoop_claim_op(
@@ -825,13 +842,25 @@ async fn reject_destroyed_drone_scoop(
             crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
         )
         .await;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .record_destroyed_item_id(drone_ball_id);
-        if let Some(id) = item_id_opt {
-            snap.combat_crimewatch_state.record_destroyed_item_id(id);
-        }
-    });
+    if !purge_db {
+        ctx.db.with_mut_snapshot(|snap| {
+            let moved_out = item_id_opt
+                .or_else(|| snap.items.contains_key(&drone_ball_id).then_some(drone_ball_id))
+                .is_some_and(|iid| {
+                    snap.items.get(&iid).is_some_and(|it| {
+                        it.location_id != i64::from(sys_handle.solar_system_id)
+                            || it.flag != InventoryFlag::None
+                    })
+                });
+            if !moved_out {
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(drone_ball_id);
+                if let Some(id) = item_id_opt {
+                    snap.combat_crimewatch_state.record_destroyed_item_id(id);
+                }
+            }
+        });
+    }
     clear_drone_web_cycle(sys_handle, drone_ball_id).await;
     let _ = sys_handle.remove_ball(drone_ball_id).await;
     BridgeRpcError::with_client_error(

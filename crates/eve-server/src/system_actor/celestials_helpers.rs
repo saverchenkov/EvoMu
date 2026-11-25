@@ -945,6 +945,7 @@ pub(crate) fn update_system_hibernation_flag(
             .active_drones_in_space
             .values()
             .any(|d| !d.is_abandoned || d.target_id.is_some())
+        || (state.db_opt.is_some() && state.active_drones_checkpoint_dirty)
         || state.pending_destroyed_balls.is_non_empty()
         || state
             .asteroids

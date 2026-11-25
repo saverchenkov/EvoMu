@@ -928,6 +928,62 @@ async fn test_sqlite_restart_abandons_launched_engaged_drones_and_allows_reconne
 
         assert!(ctx1.systems.stop_system(sys_id).await);
         assert!(ctx1.systems.stop_system(other_sys).await);
+
+        // Simulate crash-window stale `KIND_ACTIVE_DRONES` rows for a drone already scooped to bay
+        // and a drone recorded as recently destroyed before shutdown.
+        let d_scooped_stale = 880_950_097i64;
+        let d_dead_stale = 880_950_098i64;
+        ctx1.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                d_scooped_stale,
+                sp6_item(
+                    d_scooped_stale,
+                    2_454,
+                    90_000_001,
+                    ship_id,
+                    InventoryFlag::DroneBay,
+                    HashMap::new(),
+                ),
+            );
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(d_dead_stale);
+        });
+        let now_stale = ctx1.db.clock().now_unix_secs();
+        ctx1.db
+            .with_sqlite_conn(|conn| {
+                let mut rows = eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<
+                    eve_server::services::combat_crimewatch::DroneSpaceState,
+                >(
+                    conn,
+                    sys_id,
+                    eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                )?;
+                rows.push((
+                    d_scooped_stale.to_string(),
+                    eve_server::services::combat_crimewatch::DroneSpaceState {
+                        ball_id: d_scooped_stale,
+                        drone_item_id: d_scooped_stale,
+                        ..pre_d1.clone()
+                    },
+                ));
+                rows.push((
+                    d_dead_stale.to_string(),
+                    eve_server::services::combat_crimewatch::DroneSpaceState {
+                        ball_id: d_dead_stale,
+                        drone_item_id: d_dead_stale,
+                        ..pre_d1.clone()
+                    },
+                ));
+                eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+                    conn,
+                    sys_id,
+                    eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                    &rows,
+                    now_stale,
+                )
+            })
+            .expect("seed stale crash-window drone checkpoints");
+
         (sys_id, ship_id, d1_ball, d2_ball)
     };
 
@@ -935,6 +991,15 @@ async fn test_sqlite_restart_abandons_launched_engaged_drones_and_allows_reconne
     let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite 2"));
     let ctx2 = ServerContext::with_sde_and_repository(sde, Arc::clone(&repo2));
     pin_clock(&ctx2);
+
+    assert!(
+        eve_server::services::drone_test_helpers::active_drone(&ctx2, 880_950_097).is_none(),
+        "stale crash-window checkpoint for DroneBay item must not resurrect"
+    );
+    assert!(
+        eve_server::services::drone_test_helpers::active_drone(&ctx2, 880_950_098).is_none(),
+        "stale crash-window checkpoint for destroyed drone must not resurrect"
+    );
 
     // Launched + engaged drones from `sys_id` must restore abandoned (never controlled for offline pilot).
     for bid in [d1_ball, d2_ball] {

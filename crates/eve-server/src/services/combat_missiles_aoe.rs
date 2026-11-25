@@ -65,6 +65,17 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     let _ = sys_handle.remove_ball(ball_id).await;
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
+        if snap.items.get(&ball_id).is_some_and(|it| {
+            it.location_id != i64::from(sys_id)
+                || (ctx
+                    .sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.category_id == 18)
+                    && it.flag != eve_db::InventoryFlag::None)
+        }) {
+            return;
+        }
         snap.combat_crimewatch_state
             .record_destroyed_item_id(ball_id);
         snap.sp6_lifecycle.space_object_meta.remove(&ball_id);

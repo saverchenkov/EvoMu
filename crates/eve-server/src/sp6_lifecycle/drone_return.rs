@@ -116,7 +116,10 @@ pub async fn handle_cmd_return_bay(
         if dist > 2_500.0 {
             let target_bid = d.ball_id;
             let still_controlled = sys_handle
-                .mutate_active_drones(move |drones, _, _| {
+                .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                    if claimed.contains(&target_bid) {
+                        return (false, false);
+                    }
                     if let Some(st) = drones.get_mut(&target_bid) {
                         if !st.is_abandoned
                             && st.solar_system_id == sys_id
@@ -748,10 +751,13 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
         if !has_match {
             continue;
         }
-        if let Ok(rows) = h.mutate_active_drones_sync(move |drones, _, _| {
+        if let Ok(rows) = h.mutate_active_drones_with_claims_sync(move |drones, _, _, claimed| {
             let mut changed = Vec::new();
             for d in drones.values_mut() {
-                if (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned {
+                if !claimed.contains(&d.ball_id)
+                    && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
+                    && !d.is_abandoned
+                {
                     d.parent_ship_id = 0;
                     d.target_id = None;
                     d.activity_state = 0;
@@ -798,10 +804,11 @@ pub fn abandon_drones_on_warp_sync(
     let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
     let abandoned_drones = if let Some(ref sys_handle) = sys_handle_opt {
         sys_handle
-            .mutate_active_drones_sync(move |drones, _, _| {
+            .mutate_active_drones_with_claims_sync(move |drones, _, _, claimed| {
                 let mut rows = Vec::new();
                 for d in drones.values_mut() {
-                    if d.solar_system_id == sys_id
+                    if !claimed.contains(&d.ball_id)
+                        && d.solar_system_id == sys_id
                         && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
                         && !d.is_abandoned
                     {
@@ -1144,10 +1151,14 @@ pub async fn handle_cmd_abandon_drone(
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let target_ids_for_mut = target_ids;
     let abandoned_drones = sys_handle
-        .mutate_active_drones(move |drones, _, _| {
+        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
             let mut abandoned = Vec::new();
             for d in drones.values_mut() {
-                if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
+                if !claimed.contains(&d.ball_id)
+                    && d.solar_system_id == sys_id
+                    && d.owner_char_id == char_id
+                    && !d.is_abandoned
+                {
                     let matches_filter = target_ids_for_mut.is_empty()
                         || target_ids_for_mut.contains(&d.ball_id)
                         || target_ids_for_mut.contains(&d.drone_item_id);
@@ -1288,17 +1299,24 @@ pub async fn handle_cmd_reconnect_to_drones(
         }
 
         let updated = sys_handle
-            .mutate_active_drones(move |drones, _, _| {
-                if let Some(d) = drones.get_mut(&bid) {
-                    d.is_abandoned = false;
-                    d.owner_char_id = char_id;
-                    d.parent_ship_id = ship_id;
-                    d.activity_state = 0;
-                    d.target_id = None;
-                    (true, true)
-                } else {
-                    (false, false)
+            .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                if claimed.contains(&bid) {
+                    return (false, false);
                 }
+                if let Some(d) = drones.get_mut(&bid) {
+                    if d.solar_system_id == sys_id
+                        && ((d.is_abandoned && d.original_owner_char_id == char_id)
+                            || (d.owner_char_id == char_id && d.parent_ship_id == 0))
+                    {
+                        d.is_abandoned = false;
+                        d.owner_char_id = char_id;
+                        d.parent_ship_id = ship_id;
+                        d.activity_state = 0;
+                        d.target_id = None;
+                        return (true, true);
+                    }
+                }
+                (false, false)
             })
             .await
             .unwrap_or(false);
@@ -1347,41 +1365,48 @@ fn abandon_drone_state_for_restart(d: &mut DroneSpaceState) -> bool {
 pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
     let mut sqlite_sys_ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let now_unix = ctx.db.clock().now_unix_secs();
-    let _ = ctx.db.with_sqlite_conn(|conn| {
-        let rows =
+    let sqlite_rows = ctx
+        .db
+        .with_sqlite_conn(|conn| {
             eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<DroneSpaceState>(
                 conn,
                 eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-            )?;
-        let mut per_sys: std::collections::BTreeMap<
-            u32,
-            (bool, Vec<(String, DroneSpaceState)>),
-        > = std::collections::BTreeMap::new();
-        for (sys_id, key, d) in rows {
-            sqlite_sys_ids.insert(sys_id);
+            )
+        })
+        .unwrap_or_default();
+
+    let mut per_sys: std::collections::BTreeMap<
+        u32,
+        (bool, Vec<(String, DroneSpaceState)>),
+    > = std::collections::BTreeMap::new();
+    let mut stale_ids_by_sys: std::collections::HashMap<u32, std::collections::HashSet<i64>> =
+        std::collections::HashMap::new();
+    let mut drones = Vec::new();
+    let mut fighters = Vec::new();
+    ctx.db.with_snapshot(|snap| {
+        for (sys_id, key, d) in sqlite_rows {
             let mut d = d.in_solar_system(sys_id);
+            let is_destroyed =
+                crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
+                    &snap.combat_crimewatch_state,
+                    d.ball_id,
+                    d.drone_item_id,
+                );
+            let moved_out_of_space = snap.items.get(&d.drone_item_id).is_some_and(|it| {
+                it.location_id != i64::from(sys_id) || it.flag != eve_db::InventoryFlag::None
+            });
+            if is_destroyed || moved_out_of_space {
+                stale_ids_by_sys.entry(sys_id).or_default().insert(d.ball_id);
+                per_sys.entry(sys_id).or_insert((true, Vec::new())).0 = true;
+                continue;
+            }
+            sqlite_sys_ids.insert(sys_id);
             let changed = abandon_drone_state_for_restart(&mut d);
             let entry = per_sys.entry(sys_id).or_insert((false, Vec::new()));
             entry.0 |= changed;
             entry.1.push((key, d));
         }
-        for (sys_id, (changed, sys_rows)) in per_sys {
-            if changed {
-                eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
-                    conn,
-                    sys_id,
-                    eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
-                    &sys_rows,
-                    now_unix,
-                )?;
-            }
-        }
-        Ok::<(), String>(())
-    });
 
-    let mut drones = Vec::new();
-    let mut fighters = Vec::new();
-    ctx.db.with_snapshot(|snap| {
         for item in snap.items.values() {
             if !(30_000_000..=34_000_000).contains(&item.location_id) {
                 continue;
@@ -1395,6 +1420,9 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
                 .get(&item.item_id)
                 .and_then(|m| m.drone_ball_id)
                 .unwrap_or(item.item_id);
+            if item.flag != eve_db::InventoryFlag::None {
+                continue;
+            }
             if t.category_id == 87 {
                 let max_squadron_size = t
                     .default_attributes
@@ -1464,6 +1492,22 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
             });
         }
     });
+    if per_sys.values().any(|(changed, _)| *changed) {
+        let _ = ctx.db.with_sqlite_conn(|conn| {
+            for (sys_id, (changed, sys_rows)) in &per_sys {
+                if *changed {
+                    eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+                        conn,
+                        *sys_id,
+                        eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                        sys_rows,
+                        now_unix,
+                    )?;
+                }
+            }
+            Ok::<(), String>(())
+        });
+    }
     if !drones.is_empty() {
         let mut by_sys: HashMap<u32, Vec<DroneSpaceState>> = HashMap::new();
         for d in drones {
@@ -1471,9 +1515,15 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
         }
         for (sys_id, sys_drones) in by_sys {
             sqlite_sys_ids.remove(&sys_id);
+            let stale_ids = stale_ids_by_sys.remove(&sys_id).unwrap_or_default();
             let handle = ctx.systems.wake_for_drone_seed(sys_id);
             let _ = handle.mutate_active_drones_sync(move |active, _, _| {
                 let mut dirty = false;
+                for sid in stale_ids {
+                    if active.remove(&sid).is_some() && sid > 0 {
+                        dirty = true;
+                    }
+                }
                 for existing in active.values_mut() {
                     if abandon_drone_state_for_restart(existing) && existing.ball_id > 0 {
                         dirty = true;
@@ -1494,10 +1544,20 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
             });
         }
     }
-    for sys_id in sqlite_sys_ids {
+    let remaining_sys: Vec<u32> = sqlite_sys_ids
+        .into_iter()
+        .chain(stale_ids_by_sys.keys().copied())
+        .collect();
+    for sys_id in remaining_sys {
         if let Some(handle) = ctx.systems.get_handle(sys_id) {
-            let _ = handle.mutate_active_drones_sync(|active, _, _| {
+            let stale_ids = stale_ids_by_sys.remove(&sys_id).unwrap_or_default();
+            let _ = handle.mutate_active_drones_sync(move |active, _, _| {
                 let mut dirty = false;
+                for sid in stale_ids {
+                    if active.remove(&sid).is_some() && sid > 0 {
+                        dirty = true;
+                    }
+                }
                 for existing in active.values_mut() {
                     if abandon_drone_state_for_restart(existing) && existing.ball_id > 0 {
                         dirty = true;
