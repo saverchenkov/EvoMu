@@ -10,6 +10,12 @@ use crate::combat::death_pipeline::execute_death_pipeline;
 use crate::router::notify_registry::{
     OnModuleFitted, OnSecurityStatusUpdate, OnSetPlayerStanding,
 };
+#[cfg(test)]
+use crate::router::slash_registry::{
+    dispatch_registered_for_test, parse_slash_invocation_preserving_trailing_ws,
+    SlashDispatchOutcome,
+};
+use crate::router::slash_registry::{unknown_slash_error, SlashBoxFuture, SlashInvocation};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, SkillHistoryEntry};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -673,28 +679,48 @@ async fn rollback_spawned_entities(
     }
 }
 
-pub async fn handle_gm_slash_ext(
-    ctx: &ServerContext,
-    session: &mut SessionState,
+fn parse_optional_target_char_and_value<'a>(
     cid: i64,
-    cmd: &str,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    if cmd == "/heal" || cmd.starts_with("/heal ") {
-        return Some(execute_gm_heal(ctx, session, cid, cmd).await);
+    rest: &'a str,
+) -> Option<(i64, &'a str)> {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    match parts.as_slice() {
+        [val_s] => Some((cid, *val_s)),
+        [cid_s, val_s] => {
+            let target = if is_me_or_myship(cid_s) || cid_s.eq_ignore_ascii_case("self") {
+                Some(cid)
+            } else {
+                cid_s.parse::<i64>().ok()
+            };
+            target.filter(|&id| id > 0).map(|id| (id, *val_s))
+        }
+        _ => None,
     }
+}
 
-    if let Some(rest) = cmd.strip_prefix("/spawn ") {
-        let tokens = parse_slash_tokens(rest);
+/// Registry dispatch target for `/spawn` (`#1193`).
+pub(crate) fn dispatch_spawn_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        if !inv.had_whitespace_after_head {
+            return Err(unknown_slash_error(inv.raw));
+        }
+        let (_, cid) = ServerContext::require_character(session)?;
+        let cmd = inv.raw;
+        let tokens = parse_slash_tokens(inv.rest);
         let (target_cid, arg_tokens) = resolve_gm_char_prefix(ctx, cid, &tokens, 1);
         let Some(type_id) = arg_tokens.first().and_then(|s| s.parse::<u32>().ok()) else {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn [char_id] <type_id> [quantity]".into(), client_error: None }));
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn [char_id] <type_id> [quantity]".into(), client_error: None });
         };
         let qty = arg_tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
         if !(1..=100).contains(&qty) {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into(), client_error: None }));
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into(), client_error: None });
         }
         let Some(inv_type) = ctx.sde.types.get(&type_id).cloned() else {
-            return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None }));
+            return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None });
         };
         let (db_sys_id, db_ship_id) = ctx
             .db
@@ -925,18 +951,14 @@ pub async fn handle_gm_slash_ext(
             };
             if let Err(err) = spawn_res {
                 rollback_spawned_entities(ctx, &handle, sys_id, entity_id, &spawned_ids).await;
-                return Some(Err(BridgeRpcError {
-                    code: "SpawnFailed".into(),
-                    message: err,
-                    client_error: None,
-                }));
+                return Err(BridgeRpcError { code: "SpawnFailed".into(), message: err, client_error: None });
             }
             spawned_ids.push(entity_id);
         }
 
         let first_id = spawned_ids.first().copied().unwrap_or(0);
         let id_reps: Vec<PyRep> = spawned_ids.into_iter().map(PyRep::Integer).collect();
-        return Some(Ok(PyRep::keyval([
+        Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
             ("spawnedID", PyRep::Integer(first_id)),
             ("itemID", PyRep::Integer(first_id)),
@@ -944,13 +966,24 @@ pub async fn handle_gm_slash_ext(
             ("typeID", PyRep::Integer(type_id as i64)),
             ("quantity", PyRep::Integer(qty as i64)),
             ("solarSystemID", PyRep::Integer(sys_id as i64)),
-        ])));
-    }
+        ]))
+    })
+}
 
-    if let Some(rest) = cmd.strip_prefix("/unspawn ").or_else(|| cmd.strip_prefix("/despawn ")) {
-        let tokens = parse_slash_tokens(rest);
+/// Registry dispatch target for `/unspawn` and `/despawn` (`#1193`).
+pub(crate) fn dispatch_unspawn_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        if !inv.had_whitespace_after_head {
+            return Err(unknown_slash_error(inv.raw));
+        }
+        let (_, cid) = ServerContext::require_character(session)?;
+        let tokens = parse_slash_tokens(inv.rest);
         let Some(target_id) = tokens.first().and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into(), client_error: None }));
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into(), client_error: None });
         };
         let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
             let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
@@ -969,248 +1002,211 @@ pub async fn handle_gm_slash_ext(
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;
         }
         if !removed_db && !removed_ball {
-            return Some(Err(BridgeRpcError { code: "EntityNotFound".into(), message: format!("Entity {target_id} not found in space or inventory"), client_error: None }));
+            return Err(BridgeRpcError { code: "EntityNotFound".into(), message: format!("Entity {target_id} not found in space or inventory"), client_error: None });
         }
-        return Some(Ok(PyRep::keyval([
-            ("command", PyRep::String(cmd.to_string())),
+        Ok(PyRep::keyval([
+            ("command", PyRep::String(inv.raw.to_string())),
             ("unspawnedID", PyRep::Integer(target_id)),
             ("removedFromSpace", PyRep::Bool(removed_ball)),
             ("removedFromDb", PyRep::Bool(removed_db)),
-        ])));
-    }
+        ]))
+    })
+}
 
-    if let Some(rest) = cmd.strip_prefix("/setattr ") {
-        let tokens = parse_slash_tokens(rest);
-        let Some(item_tok) = tokens.first().map(String::as_str) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(),
-                client_error: None,
-            }));
+/// Registry dispatch target for `/setattr` (`#1193`).
+pub(crate) fn dispatch_setattr_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    let tokens = parse_slash_tokens(inv.rest);
+    let Some(item_tok) = tokens.first().map(String::as_str) else {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(), client_error: None });
+    };
+    let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(), client_error: None });
+    };
+    let Some(val) = tokens
+        .get(2)
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+    else {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Attribute value for /setattr must be a finite number".into(), client_error: None });
+    };
+
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let (item_id, owner_id, loc_id, old_val) = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(item_id) = resolve_item_or_char_active_ship(snap, cid, item_tok) else {
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: format!("Invalid item_id '{item_tok}' for /setattr"), client_error: None });
         };
-        let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(),
-                client_error: None,
-            }));
+        let Some(item) = snap.items.get_mut(&item_id) else {
+            return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found"), client_error: None });
         };
-        let Some(val) = tokens
+        let default_val = ctx
+            .sde
+            .types
+            .get(&item.type_id)
+            .and_then(|t| t.default_attributes.get(&attr_id).copied())
+            .unwrap_or(0.0);
+        let old_val = item
+            .dynamic_attributes
+            .insert(attr_id, val)
+            .unwrap_or(default_val);
+        item.version += 1;
+        Ok((item_id, item.owner_id, item.location_id, old_val))
+    })?;
+    ctx.invalidate_and_push_fit(item_id);
+    ctx.invalidate_and_push_fit(loc_id);
+    crate::services::notify_emitters_character_services::emit_setattr_notifications(
+        ctx, owner_id, loc_id, item_id, attr_id, now_ft, val, old_val,
+    );
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(inv.raw.to_string())),
+        ("itemID", PyRep::Integer(item_id)),
+        ("attributeID", PyRep::Integer(attr_id as i64)),
+        ("oldValue", PyRep::Real(old_val)),
+        ("newValue", PyRep::Real(val)),
+        ("value", PyRep::Real(val)),
+    ]))
+}
+
+/// Registry dispatch target for `/getattr` (`#1193`).
+pub(crate) fn dispatch_getattr_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    let tokens = parse_slash_tokens(inv.rest);
+    let Some(item_tok) = tokens.first().map(String::as_str) else {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /getattr <item_id|me> <attribute_id>".into(), client_error: None });
+    };
+    let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /getattr <item_id|me> <attribute_id>".into(), client_error: None });
+    };
+    let res = ctx.db.with_snapshot(|snap| {
+        let item_id = resolve_item_or_char_active_ship(snap, cid, item_tok).unwrap_or(0);
+        let item = snap.items.get(&item_id)?;
+        let val = item
+            .dynamic_attributes
+            .get(&attr_id)
+            .copied()
+            .or_else(|| {
+                ctx.sde
+                    .types
+                    .get(&item.type_id)
+                    .and_then(|t| t.default_attributes.get(&attr_id).copied())
+            })
+            .unwrap_or(0.0);
+        Some((item_id, item.type_id, val))
+    });
+    let Some((item_id, type_id, val)) = res else {
+        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item '{item_tok}' not found for /getattr"), client_error: None });
+    };
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(inv.raw.to_string())),
+        ("itemID", PyRep::Integer(item_id)),
+        ("typeID", PyRep::Integer(type_id as i64)),
+        ("attributeID", PyRep::Integer(attr_id as i64)),
+        ("value", PyRep::Real(val)),
+    ]))
+}
+
+/// Registry dispatch target for `/fit` (`#1193`).
+pub(crate) fn dispatch_fit_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    let cmd = inv.raw;
+    let tokens = parse_slash_tokens(inv.rest);
+    if tokens.is_empty() {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit [ship_id|me] <type_id> [flag_id]".into(), client_error: None });
+    }
+    let caller_ship_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.active_ship_id))
+        .or(session.ship_id)
+        .unwrap_or(0);
+
+    let (ship_id, type_id, explicit_flag) = if is_me_or_myship(&tokens[0]) {
+        let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit me <type_id> [flag_id]".into(), client_error: None });
+        };
+        let flg = tokens
             .get(2)
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-        else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Attribute value for /setattr must be a finite number".into(),
-                client_error: None,
-            }));
-        };
-
-        let now_ft = ctx.now_blueos_filetime_ticks();
-        let res = ctx.db.try_with_mut_snapshot(|snap| {
-            let Some(item_id) = resolve_item_or_char_active_ship(snap, cid, item_tok) else {
-                return Err(BridgeRpcError {
-                    code: "InvalidSlashArgument".into(),
-                    message: format!("Invalid item_id '{item_tok}' for /setattr"),
-                    client_error: None,
-                });
-            };
-            let Some(item) = snap.items.get_mut(&item_id) else {
-                return Err(BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("Item {item_id} not found"),
-                    client_error: None,
-                });
-            };
-            let default_val = ctx
-                .sde
-                .types
-                .get(&item.type_id)
-                .and_then(|t| t.default_attributes.get(&attr_id).copied())
-                .unwrap_or(0.0);
-            let old_val = item
-                .dynamic_attributes
-                .insert(attr_id, val)
-                .unwrap_or(default_val);
-            item.version += 1;
-            Ok((item_id, item.owner_id, item.location_id, old_val))
-        });
-
-        return match res {
-            Ok((item_id, owner_id, loc_id, old_val)) => {
-                ctx.invalidate_and_push_fit(item_id);
-                ctx.invalidate_and_push_fit(loc_id);
-                crate::services::notify_emitters_character_services::emit_setattr_notifications(
-                    ctx, owner_id, loc_id, item_id, attr_id, now_ft, val, old_val,
-                );
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("itemID", PyRep::Integer(item_id)),
-                    ("attributeID", PyRep::Integer(attr_id as i64)),
-                    ("oldValue", PyRep::Real(old_val)),
-                    ("newValue", PyRep::Real(val)),
-                    ("value", PyRep::Real(val)),
-                ])))
+            .and_then(|s| s.parse::<u16>().ok())
+            .map(InventoryFlag::from_u16);
+        (caller_ship_id, tid, flg)
+    } else if tokens.len() >= 2 {
+        let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
+        let matched_target_ship = ctx.db.with_snapshot(|snap| {
+            if snap
+                .items
+                .get(&first_i64)
+                .and_then(|i| ctx.sde.types.get(&i.type_id))
+                .is_some_and(|t| matches!(t.category_id, 6 | 65))
+            {
+                Some(first_i64)
+            } else {
+                snap.characters.get(&first_i64).map(|c| c.active_ship_id)
             }
-            Err(e) => Some(Err(e)),
-        };
-    }
-
-    if let Some(rest) = cmd.strip_prefix("/getattr ") {
-        let tokens = parse_slash_tokens(rest);
-        let Some(item_tok) = tokens.first().map(String::as_str) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /getattr <item_id|me> <attribute_id>".into(),
-                client_error: None,
-            }));
-        };
-        let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /getattr <item_id|me> <attribute_id>".into(),
-                client_error: None,
-            }));
-        };
-        let res = ctx.db.with_snapshot(|snap| {
-            let item_id = resolve_item_or_char_active_ship(snap, cid, item_tok).unwrap_or(0);
-            let item = snap.items.get(&item_id)?;
-            let val = item
-                .dynamic_attributes
-                .get(&attr_id)
-                .copied()
-                .or_else(|| {
-                    ctx.sde
-                        .types
-                        .get(&item.type_id)
-                        .and_then(|t| t.default_attributes.get(&attr_id).copied())
-                })
-                .unwrap_or(0.0);
-            Some((item_id, item.type_id, val))
         });
-        let Some((item_id, type_id, val)) = res else {
-            return Some(Err(BridgeRpcError {
-                code: "ItemNotFound".into(),
-                message: format!("Item '{item_tok}' not found for /getattr"),
-                client_error: None,
-            }));
-        };
-        return Some(Ok(PyRep::keyval([
-            ("command", PyRep::String(cmd.to_string())),
-            ("itemID", PyRep::Integer(item_id)),
-            ("typeID", PyRep::Integer(type_id as i64)),
-            ("attributeID", PyRep::Integer(attr_id as i64)),
-            ("value", PyRep::Real(val)),
-        ])));
-    }
-
-    if let Some(rest) = cmd.strip_prefix("/fit ") {
-        let tokens = parse_slash_tokens(rest);
-        if tokens.is_empty() {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /fit [ship_id|me] <type_id> [flag_id]".into(),
-                client_error: None,
-            }));
-        }
-        let caller_ship_id = ctx
-            .db
-            .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.active_ship_id))
-            .or(session.ship_id)
-            .unwrap_or(0);
-
-        let (ship_id, type_id, explicit_flag) = if is_me_or_myship(&tokens[0]) {
+        if let Some(target_ship_id) = matched_target_ship {
             let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSlashArgument".into(),
-                    message: "Usage: /fit me <type_id> [flag_id]".into(),
-                    client_error: None,
-                }));
+                return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit <ship_id|char_id> <type_id> [flag_id]".into(), client_error: None });
             };
             let flg = tokens
                 .get(2)
                 .and_then(|s| s.parse::<u16>().ok())
                 .map(InventoryFlag::from_u16);
-            (caller_ship_id, tid, flg)
-        } else if tokens.len() >= 2 {
-            let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
-            let matched_target_ship = ctx.db.with_snapshot(|snap| {
-                if snap
-                    .items
-                    .get(&first_i64)
-                    .and_then(|i| ctx.sde.types.get(&i.type_id))
-                    .is_some_and(|t| matches!(t.category_id, 6 | 65))
-                {
-                    Some(first_i64)
-                } else {
-                    snap.characters.get(&first_i64).map(|c| c.active_ship_id)
-                }
-            });
-            if let Some(target_ship_id) = matched_target_ship {
-                let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /fit <ship_id|char_id> <type_id> [flag_id]".into(),
-                        client_error: None,
-                    }));
-                };
-                let flg = tokens
-                    .get(2)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .map(InventoryFlag::from_u16);
-                (target_ship_id, tid, flg)
-            } else {
-                let Some(tid) = tokens[0].parse::<u32>().ok() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /fit <type_id> [flag_id]".into(),
-                        client_error: None,
-                    }));
-                };
-                let flg = tokens
-                    .get(1)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .map(InventoryFlag::from_u16);
-                (caller_ship_id, tid, flg)
-            }
+            (target_ship_id, tid, flg)
         } else {
             let Some(tid) = tokens[0].parse::<u32>().ok() else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSlashArgument".into(),
-                    message: "Usage: /fit <type_id> [flag_id]".into(),
-                    client_error: None,
-                }));
+                return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit <type_id> [flag_id]".into(), client_error: None });
             };
-            (caller_ship_id, tid, None)
+            let flg = tokens
+                .get(1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .map(InventoryFlag::from_u16);
+            (caller_ship_id, tid, flg)
+        }
+    } else {
+        let Some(tid) = tokens[0].parse::<u32>().ok() else {
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit <type_id> [flag_id]".into(), client_error: None });
         };
+        (caller_ship_id, tid, None)
+    };
 
-        let Some(mod_type) = ctx.sde.types.get(&type_id) else {
-            return Some(Err(BridgeRpcError {
-                code: "TypeNotFound".into(),
-                message: format!("Module type {type_id} not found in SDE"),
-                client_error: None,
-            }));
-        };
-        let effects = &mod_type.effect_ids;
+    let Some(mod_type) = ctx.sde.types.get(&type_id) else {
+        return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Module type {type_id} not found in SDE"), client_error: None });
+    };
+    let effects = &mod_type.effect_ids;
 
-        let Some((ship_owner_id, ship_cat_id)) = ctx.db.with_snapshot(|snap| {
-            snap.items.get(&ship_id).map(|ship_item| {
-                let cat = ctx
-                    .sde
-                    .types
-                    .get(&ship_item.type_id)
-                    .map(|t| t.category_id)
-                    .unwrap_or(6);
-                (ship_item.owner_id, cat)
-            })
-        }) else {
-            return Some(Err(BridgeRpcError {
-                code: "ShipNotFound".into(),
-                message: format!("Target ship {ship_id} not found"),
-                client_error: None,
-            }));
-        };
+    let Some((ship_owner_id, ship_cat_id)) = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&ship_id).map(|ship_item| {
+            let cat = ctx
+                .sde
+                .types
+                .get(&ship_item.type_id)
+                .map(|t| t.category_id)
+                .unwrap_or(6);
+            (ship_item.owner_id, cat)
+        })
+    }) else {
+        return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Target ship {ship_id} not found"), client_error: None });
+    };
 
         let pre_fit_opt = if ship_cat_id == 6 {
             ctx.fit(ship_owner_id, ship_id).ok()
@@ -1223,11 +1219,7 @@ pub async fn handle_gm_slash_ext(
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let Some(ship_item) = snap.items.get(&ship_id).cloned() else {
-                return Err(BridgeRpcError {
-                    code: "ShipNotFound".into(),
-                    message: format!("Target ship {ship_id} not found"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Target ship {ship_id} not found"), client_error: None });
             };
             let occupied_flags: std::collections::HashSet<InventoryFlag> = snap
                 .items
@@ -1308,41 +1300,20 @@ pub async fn handle_gm_slash_ext(
                 match explicit_flag {
                     None | Some(InventoryFlag::DroneBay) => InventoryFlag::DroneBay,
                     Some(other) => {
-                        return Err(BridgeRpcError {
-                            code: "FittingValidationFailed".into(),
-                            message: format!(
-                                "Drone type {type_id} cannot be fitted into slot flag {}",
-                                other as u16
-                            ),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Drone type {type_id} cannot be fitted into slot flag {}", other as u16), client_error: None });
                     }
                 }
             } else if ship_cat_id == 6 && mod_type.category_id == 8 {
                 match explicit_flag {
                     Some(ef) if matches!(ef as u16, 11..=34) => ef,
                     _ => {
-                        return Err(BridgeRpcError {
-                            code: "FittingValidationFailed".into(),
-                            message: format!(
-                                "Charge type {type_id} ({}) requires an explicit module slot or Cargo flag",
-                                mod_type.name
-                            ),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Charge type {type_id} ({}) requires an explicit module slot or Cargo flag", mod_type.name), client_error: None });
                     }
                 }
             } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) && has_slot_effect
             {
                 if mod_type.category_id == 32 && ship_group_id != Some(963) {
-                    return Err(BridgeRpcError {
-                        code: "FittingValidationFailed".into(),
-                        message: format!(
-                            "Subsystem type {type_id} ({}) can only be fitted to Strategic Cruisers",
-                            mod_type.name
-                        ),
-                        client_error: None,
-                    });
+                    return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Subsystem type {type_id} ({}) can only be fitted to Strategic Cruisers", mod_type.name), client_error: None });
                 }
                 if let Some(ef) = explicit_flag {
                     let raw = ef as u16;
@@ -1355,14 +1326,7 @@ pub async fn handle_gm_slash_ext(
                         _ => false,
                     };
                     if !slot_matches {
-                        return Err(BridgeRpcError {
-                            code: "FittingValidationFailed".into(),
-                            message: format!(
-                                "Type {type_id} ({}) is incompatible with slot flag {raw}",
-                                mod_type.name
-                            ),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Type {type_id} ({}) is incompatible with slot flag {raw}", mod_type.name), client_error: None });
                     }
                     ef
                 } else {
@@ -1398,15 +1362,7 @@ pub async fn handle_gm_slash_ext(
                         }
                     }
                     let Some(valid_flag) = chosen else {
-                        return Err(BridgeRpcError {
-                            code: "FittingValidationFailed".into(),
-                            message: first_err.unwrap_or_else(|| {
-                                format!(
-                                    "No free compatible fitting slot for module type {type_id} on ship {ship_id}"
-                                )
-                            }),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: first_err.unwrap_or_else(|| format!("No free compatible fitting slot for module type {type_id} on ship {ship_id}")), client_error: None });
                     };
                     valid_flag
                 }
@@ -1416,14 +1372,7 @@ pub async fn handle_gm_slash_ext(
             {
                 if let Some(ef) = explicit_flag {
                     if !matches!(ef as u16, 11..=34 | 92..=94 | 164..=171) {
-                        return Err(BridgeRpcError {
-                            code: "FittingValidationFailed".into(),
-                            message: format!(
-                                "Structure module type {type_id} is incompatible with slot flag {}",
-                                ef as u16
-                            ),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Structure module type {type_id} is incompatible with slot flag {}", ef as u16), client_error: None });
                     }
                     ef
                 } else if effects.contains(&6306) {
@@ -1439,14 +1388,7 @@ pub async fn handle_gm_slash_ext(
                         .unwrap_or(candidate_flags[0])
                 }
             } else {
-                return Err(BridgeRpcError {
-                    code: "FittingValidationFailed".into(),
-                    message: format!(
-                        "Type {type_id} ({}) cannot be fitted onto target {ship_id}",
-                        mod_type.name
-                    ),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Type {type_id} ({}) cannot be fitted onto target {ship_id}", mod_type.name), client_error: None });
             };
 
             snap.next_entity_id += 1;
@@ -1551,112 +1493,87 @@ pub async fn handle_gm_slash_ext(
                         true,
                     );
                 }
-                Some(Ok(PyRep::keyval([
+                Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
                     ("shipID", PyRep::Integer(ship_id)),
                     ("itemID", PyRep::Integer(rec.item_id)),
                     ("typeID", PyRep::Integer(type_id as i64)),
                     ("flagID", PyRep::Integer(chosen_flag as i64)),
                     ("online", PyRep::Bool(is_online)),
-                ])))
+                ]))
             }
-            Err(e) => Some(Err(e)),
-        };
+            Err(e) => Err(e),
+        }
+}
+
+/// Registry dispatch target for `/load` (`#1193`).
+pub(crate) fn dispatch_load_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    let cmd = inv.raw;
+    let tokens = parse_slash_tokens(inv.rest);
+    if tokens.is_empty() {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /load [target|me] <type_id> [quantity]".into(), client_error: None });
     }
 
-    if cmd == "/load"
-        || cmd
-            .strip_prefix("/load")
-            .is_some_and(|r| r.starts_with(char::is_whitespace))
-    {
-        let tokens = parse_slash_tokens(cmd.strip_prefix("/load").unwrap_or(""));
-        if tokens.is_empty() {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /load [target|me] <type_id> [quantity]".into(),
-                client_error: None,
-            }));
+    let parse_qty = |tok_opt: Option<&String>| -> Result<i32, BridgeRpcError> {
+        match tok_opt {
+            None => Ok(1),
+            Some(s) => s
+                .parse::<i32>()
+                .ok()
+                .filter(|&q| q > 0)
+                .ok_or_else(|| BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /load must be a positive integer".into(), client_error: None }),
         }
+    };
 
-        let parse_qty = |tok_opt: Option<&String>| -> Result<i32, BridgeRpcError> {
-            match tok_opt {
-                None => Ok(1),
-                Some(s) => s
-                    .parse::<i32>()
-                    .ok()
-                    .filter(|&q| q > 0)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Quantity for /load must be a positive integer".into(),
-                        client_error: None,
-                    }),
-            }
+    let (explicit_target_tok, type_id_tok, qty_tok) = if is_me_or_myship(&tokens[0]) {
+        let Some(tid_s) = tokens.get(1) else {
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /load me <type_id> [quantity]".into(), client_error: None });
         };
-
-        let (explicit_target_tok, type_id_tok, qty_tok) = if is_me_or_myship(&tokens[0]) {
-            let Some(tid_s) = tokens.get(1) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSlashArgument".into(),
-                    message: "Usage: /load me <type_id> [quantity]".into(),
-                    client_error: None,
+        (Some(tokens[0].as_str()), tid_s.as_str(), tokens.get(2))
+    } else if tokens.len() >= 2 {
+        let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
+        let is_known_target = first_i64 > 0
+            && (ctx.sde.stations.contains_key(&first_i64)
+                || ctx.db.with_snapshot(|snap| {
+                    snap.characters.contains_key(&first_i64)
+                        || snap.items.contains_key(&first_i64)
+                        || snap.structures.contains_key(&first_i64)
                 }));
-            };
-            (Some(tokens[0].as_str()), tid_s.as_str(), tokens.get(2))
-        } else if tokens.len() >= 2 {
-            let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
-            let is_known_target = first_i64 > 0
-                && (ctx.sde.stations.contains_key(&first_i64)
-                    || ctx.db.with_snapshot(|snap| {
-                        snap.characters.contains_key(&first_i64)
-                            || snap.items.contains_key(&first_i64)
-                            || snap.structures.contains_key(&first_i64)
-                    }));
-            if is_known_target {
-                (Some(tokens[0].as_str()), tokens[1].as_str(), tokens.get(2))
-            } else {
-                (None, tokens[0].as_str(), tokens.get(1))
-            }
+        if is_known_target {
+            (Some(tokens[0].as_str()), tokens[1].as_str(), tokens.get(2))
         } else {
-            (None, tokens[0].as_str(), None)
-        };
+            (None, tokens[0].as_str(), tokens.get(1))
+        }
+    } else {
+        (None, tokens[0].as_str(), None)
+    };
 
-        let Ok(type_id) = type_id_tok.parse::<u32>() else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /load [target|me] <type_id> [quantity]".into(),
-                client_error: None,
-            }));
-        };
-        let qty = match parse_qty(qty_tok) {
-            Ok(q) => q,
-            Err(e) => return Some(Err(e)),
-        };
-        let Some(inv_type) = ctx.sde.types.get(&type_id) else {
-            return Some(Err(BridgeRpcError {
-                code: "TypeNotFound".into(),
-                message: format!("Type ID {type_id} not found in SDE"),
-                client_error: None,
-            }));
-        };
-        let is_ship = inv_type.category_id == 6;
+    let Ok(type_id) = type_id_tok.parse::<u32>() else {
+        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /load [target|me] <type_id> [quantity]".into(), client_error: None });
+    };
+    let qty = parse_qty(qty_tok)?;
+    let Some(inv_type) = ctx.sde.types.get(&type_id) else {
+        return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None });
+    };
+    let is_ship = inv_type.category_id == 6;
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let resolve_char_dest = |char_id: i64| -> Result<(i64, i64, InventoryFlag), BridgeRpcError> {
-                let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {char_id} not found"),
-                    client_error: None,
-                })?;
+                let ch = snap
+                    .characters
+                    .get(&char_id)
+                    .ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
                 if ch.active_ship_id > 0 && snap.items.contains_key(&ch.active_ship_id) {
                     Ok((char_id, ch.active_ship_id, InventoryFlag::Cargo))
                 } else if let Some(st_id) = ch.station_id.or(ch.structure_id) {
                     Ok((char_id, st_id, InventoryFlag::Hangar))
                 } else {
-                    Err(BridgeRpcError {
-                        code: "TargetNotFound".into(),
-                        message: format!("Character {char_id} has no active ship or docked station"),
-                        client_error: None,
-                    })
+                    Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Character {char_id} has no active ship or docked station"), client_error: None })
                 }
             };
 
@@ -1664,11 +1581,9 @@ pub async fn handle_gm_slash_ext(
                 None => resolve_char_dest(cid)?,
                 Some(tok) if is_me_or_myship(tok) => resolve_char_dest(cid)?,
                 Some(tok) => {
-                    let target_id = tok.parse::<i64>().map_err(|_| BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: format!("Invalid target '{tok}' for /load"),
-                        client_error: None,
-                    })?;
+                    let target_id = tok
+                        .parse::<i64>()
+                        .map_err(|_| BridgeRpcError { code: "InvalidSlashArgument".into(), message: format!("Invalid target '{tok}' for /load"), client_error: None })?;
                     if snap.characters.contains_key(&target_id) {
                         resolve_char_dest(target_id)?
                     } else if let Some(target_item) = snap.items.get(&target_id) {
@@ -1678,11 +1593,7 @@ pub async fn handle_gm_slash_ext(
                     {
                         (cid, target_id, InventoryFlag::Hangar)
                     } else {
-                        return Err(BridgeRpcError {
-                            code: "TargetNotFound".into(),
-                            message: format!("Target {target_id} not found for /load"),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Target {target_id} not found for /load"), client_error: None });
                     }
                 }
             };
@@ -1708,7 +1619,7 @@ pub async fn handle_gm_slash_ext(
             Ok(rec)
         });
 
-        return match res {
+        match res {
             Ok(rec) => {
                 ctx.notify_item_mutation(rec.owner_id, None, Some(&rec));
                 // V24.02 `menu_implant.PlugEmIn`, `dna.Load`, and `svc_invtools.SpawnRandom`
@@ -1716,7 +1627,7 @@ pub async fn handle_gm_slash_ext(
                 // and `svc_slash.JobHandler` format non-`None` replies via `'slash result: %s' % res`.
                 // Returning a `PyRep::List` (rather than a 2-tuple) satisfies `res[0]` without
                 // triggering Python `TypeError` tuple unpacking in `%s` formatting.
-                Some(Ok(PyRep::List(vec![
+                Ok(PyRep::List(vec![
                     PyRep::Integer(rec.item_id),
                     PyRep::keyval([
                         ("command", PyRep::String(cmd.to_string())),
@@ -1726,30 +1637,33 @@ pub async fn handle_gm_slash_ext(
                         ("locationID", PyRep::Integer(rec.location_id)),
                         ("flagID", PyRep::Integer(rec.flag as i64)),
                     ]),
-                ])))
+                ]))
             }
-            Err(e) => Some(Err(e)),
-        };
-    }
+            Err(e) => Err(e),
+        }
+}
 
-    if let Some(rest) = cmd.strip_prefix("/kill ") {
-        let tokens = parse_slash_tokens(rest);
+/// Registry dispatch target for `/kill` (`#1193`).
+pub(crate) fn dispatch_kill_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        if !inv.had_whitespace_after_head {
+            return Err(unknown_slash_error(inv.raw));
+        }
+        let (_, cid) = ServerContext::require_character(session)?;
+        let cmd = inv.raw;
+        let tokens = parse_slash_tokens(inv.rest);
         let Some(tok) = tokens.first() else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /kill <target_id>".into(),
-                client_error: None,
-            }));
+            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /kill <target_id>".into(), client_error: None });
         };
         let target_id = if is_me_or_myship(tok) {
             cid
         } else {
             let Some(tid) = tok.parse::<i64>().ok().filter(|&id| id > 0) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSlashArgument".into(),
-                    message: "Usage: /kill <target_id>".into(),
-                    client_error: None,
-                }));
+                return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /kill <target_id>".into(), client_error: None });
             };
             tid
         };
@@ -1812,29 +1726,21 @@ pub async fn handle_gm_slash_ext(
                             );
                         }
                     }
-                    return Some(Ok(PyRep::keyval([
+                    return Ok(PyRep::keyval([
                         ("command", PyRep::String(cmd.to_string())),
                         ("targetID", PyRep::Integer(victim_ship_id)),
                         ("wreckID", PyRep::Integer(outcome.wreck_item_id)),
                         ("killmailID", PyRep::Integer(outcome.killmail_id)),
                         ("destroyed", PyRep::Bool(true)),
-                    ])));
+                    ]));
                 }
                 Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "KillFailed".into(),
-                        message: e,
-                        client_error: None,
-                    }))
+                    return Err(BridgeRpcError { code: "KillFailed".into(), message: e, client_error: None });
                 }
             }
         } else {
             let Some((_, ball)) = ball_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: format!("Target entity {target_id} not found"),
-                    client_error: None,
-                }));
+                return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Target entity {target_id} not found"), client_error: None });
             };
             let _ = handle.remove_ball(victim_ship_id).await;
             ctx.systems
@@ -1908,20 +1814,26 @@ pub async fn handle_gm_slash_ext(
                     CombatState::default(),
                 )
                 .await;
-            return Some(Ok(PyRep::keyval([
+            Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
                 ("targetID", PyRep::Integer(victim_ship_id)),
                 ("wreckID", PyRep::Integer(wreck_id)),
                 ("killmailID", PyRep::Integer(killmail_id)),
                 ("destroyed", PyRep::Bool(true)),
-            ])));
+            ]))
         }
-    }
+    })
+}
 
-    if cmd == "/location" || cmd.starts_with("/location ") {
-        let target_cid = cmd
-            .strip_prefix("/location")
-            .map(str::trim)
+/// Registry dispatch target for `/location` (`#1193`).
+pub(crate) fn dispatch_location_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        let target_cid = Some(inv.rest)
             .filter(|s| !s.is_empty())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(cid);
@@ -1929,11 +1841,7 @@ pub async fn handle_gm_slash_ext(
             .db
             .with_snapshot(|snap| snap.characters.get(&target_cid).cloned());
         let Some(ch) = ch_opt else {
-            return Some(Err(BridgeRpcError {
-                code: "CharacterNotFound".into(),
-                message: format!("Character {target_cid} not found"),
-                client_error: None,
-            }));
+            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None });
         };
         let handle = ctx.systems.get_or_spawn(ch.solar_system_id);
         let pos = handle
@@ -1944,229 +1852,304 @@ pub async fn handle_gm_slash_ext(
             .map(|(_, b)| b.position)
             .unwrap_or(DVec3::ZERO);
 
-        return Some(Ok(PyRep::keyval([
-            ("command", PyRep::String(cmd.to_string())), ("characterID", PyRep::Integer(ch.character_id)),
-            ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)), ("constellationID", PyRep::Integer(ch.constellation_id as i64)),
-            ("regionID", PyRep::Integer(ch.region_id as i64)), ("stationID", ch.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-            ("structureID", ch.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("shipID", PyRep::Integer(ch.active_ship_id)),
-            ("x", PyRep::Real(pos.x)), ("y", PyRep::Real(pos.y)), ("z", PyRep::Real(pos.z)),
-        ])));
-    }
+        Ok(PyRep::keyval([
+            ("command", PyRep::String(inv.raw.to_string())),
+            ("characterID", PyRep::Integer(ch.character_id)),
+            ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
+            ("constellationID", PyRep::Integer(ch.constellation_id as i64)),
+            ("regionID", PyRep::Integer(ch.region_id as i64)),
+            ("stationID", ch.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("structureID", ch.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("shipID", PyRep::Integer(ch.active_ship_id)),
+            ("x", PyRep::Real(pos.x)),
+            ("y", PyRep::Real(pos.y)),
+            ("z", PyRep::Real(pos.z)),
+        ]))
+    })
+}
 
-    if cmd == "/whoami" || cmd.starts_with("/whoami ") {
-        let ch = match ctx.db.get_character(cid) {
-            Ok(c) => c,
-            Err(e) => {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: e.to_string(),
-                    client_error: None,
-                }))
-            }
-        };
-        let summary = format!(
-            "userID={} charID={} ({}) corpID={} solarSystemID={} stationID={:?} structureID={:?} shipID={} role=0x{:x}",
-            session.user_id.unwrap_or(0),
-            cid,
-            ch.name,
-            ch.corporation_id,
-            ch.solar_system_id,
-            ch.station_id,
-            ch.structure_id,
-            ch.active_ship_id,
-            session.role,
-        );
-        return Some(Ok(PyRep::String(summary)));
-    }
+/// Registry dispatch target for `/whoami` (`#1193`).
+pub(crate) fn dispatch_whoami_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    _inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    let ch = ctx
+        .db
+        .get_character(cid)
+        .map_err(|e| BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string(), client_error: None })?;
+    let summary = format!(
+        "userID={} charID={} ({}) corpID={} solarSystemID={} stationID={:?} structureID={:?} shipID={} role=0x{:x}",
+        session.user_id.unwrap_or(0),
+        cid,
+        ch.name,
+        ch.corporation_id,
+        ch.solar_system_id,
+        ch.station_id,
+        ch.structure_id,
+        ch.active_ship_id,
+        session.role,
+    );
+    Ok(PyRep::String(summary))
+}
 
-    if cmd == "/online" || cmd.starts_with("/online ") {
-        let user_ids: Vec<u64> = ctx.db.with_snapshot(|snap| snap.accounts.values().map(|a| a.user_id).collect());
-        let mut online_pairs = Vec::new();
-        for uid in user_ids {
-            if let Some(os) = ctx.db.get_online_session(uid) { online_pairs.push((uid, os.character_id.unwrap_or(0))); }
+/// Registry dispatch target for `/online` (`#1193`).
+pub(crate) fn dispatch_online_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let user_ids: Vec<u64> = ctx.db.with_snapshot(|snap| snap.accounts.values().map(|a| a.user_id).collect());
+    let mut online_pairs = Vec::new();
+    for uid in user_ids {
+        if let Some(os) = ctx.db.get_online_session(uid) {
+            online_pairs.push((uid, os.character_id.unwrap_or(0)));
         }
-        let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
-            online_pairs.into_iter().map(|(uid, char_id_val)| {
-                let (name, sys_id) = snap.characters.get(&char_id_val).map(|c| (c.name.clone(), c.solar_system_id as i64)).unwrap_or_else(|| ("Unselected".to_string(), 0));
-                vec![PyRep::Integer(uid as i64), PyRep::Integer(char_id_val), PyRep::String(name), PyRep::Integer(sys_id)]
-            }).collect()
-        });
-        let count = rows.len() as i64;
-        return Some(Ok(PyRep::keyval([
-            ("command", PyRep::String(cmd.to_string())),
-            ("onlineCount", PyRep::Integer(count)),
-            ("characters", PyRep::rowset(vec!["userID", "characterID", "characterName", "solarSystemID"], rows)),
-        ])));
     }
+    let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+        online_pairs.into_iter().map(|(uid, char_id_val)| {
+            let (name, sys_id) = snap.characters.get(&char_id_val).map(|c| (c.name.clone(), c.solar_system_id as i64)).unwrap_or_else(|| ("Unselected".to_string(), 0));
+            vec![PyRep::Integer(uid as i64), PyRep::Integer(char_id_val), PyRep::String(name), PyRep::Integer(sys_id)]
+        }).collect()
+    });
+    let count = rows.len() as i64;
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(inv.raw.to_string())),
+        ("onlineCount", PyRep::Integer(count)),
+        ("characters", PyRep::rowset(vec!["userID", "characterID", "characterName", "solarSystemID"], rows)),
+    ]))
+}
 
-    if cmd.starts_with("/contact ") || cmd.starts_with("/standing ") {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let target_id = match parts.get(1).and_then(|s| s.parse::<i64>().ok()) {
-            Some(tid) if tid > 0 => tid,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /contact <targetID> <standing>".into(), client_error: None })),
-        };
-        let standing = match parts.get(2).and_then(|s| s.parse::<f64>().ok()) {
-            Some(s) if s.is_finite() => s.clamp(-10.0, 10.0),
-            Some(_) => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Standing must be finite".into(), client_error: None })),
-            None => 5.0,
-        };
-        let valid_entity = ctx.db.with_snapshot(|snap| {
-            snap.characters.contains_key(&target_id) || snap.corporations.contains_key(&target_id) || snap.alliances.contains_key(&target_id)
-        }) || ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32));
-        if !valid_entity {
-            return Some(Err(BridgeRpcError { code: "ContactNotFound".into(), message: format!("Target {target_id} not found"), client_error: None }));
-        }
-        let contact_type = if (99_000_000..100_000_000).contains(&target_id) { "alliance" } else if (1_000_000..2_000_000).contains(&target_id) || (98_000_000..99_000_000).contains(&target_id) { "corporation" } else { "character" };
-        if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
-            let list = guard.entry(cid).or_default();
-            if let Some(entry) = list.iter_mut().find(|e| e.contact_id == target_id) {
-                entry.standing = standing;
-            } else {
-                list.push(crate::esi::runtime_state::EsiContactEntry {
-                    contact_id: target_id, contact_type: contact_type.into(), standing, is_watched: false, is_blocked: false, label_ids: Vec::new(),
-                });
-            }
-        }
-        if ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32)) {
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(c) = snap.characters.get_mut(&cid) {
-                    c.standings.insert(target_id, standing);
-                }
+/// Registry dispatch target for `/contact` and `/standing` (`#1193`).
+pub(crate) fn dispatch_contact_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    let parts: Vec<&str> = inv.rest.split_whitespace().collect();
+    let target_id = match parts.first().and_then(|s| s.parse::<i64>().ok()) {
+        Some(tid) if tid > 0 => tid,
+        _ => return Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /contact <targetID> <standing>".into(), client_error: None }),
+    };
+    let standing = match parts.get(1).and_then(|s| s.parse::<f64>().ok()) {
+        Some(s) if s.is_finite() => s.clamp(-10.0, 10.0),
+        Some(_) => return Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Standing must be finite".into(), client_error: None }),
+        None => 5.0,
+    };
+    let valid_entity = ctx.db.with_snapshot(|snap| {
+        snap.characters.contains_key(&target_id) || snap.corporations.contains_key(&target_id) || snap.alliances.contains_key(&target_id)
+    }) || ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32));
+    if !valid_entity {
+        return Err(BridgeRpcError { code: "ContactNotFound".into(), message: format!("Target {target_id} not found"), client_error: None });
+    }
+    let contact_type = if (99_000_000..100_000_000).contains(&target_id) { "alliance" } else if (1_000_000..2_000_000).contains(&target_id) || (98_000_000..99_000_000).contains(&target_id) { "corporation" } else { "character" };
+    if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
+        let list = guard.entry(cid).or_default();
+        if let Some(entry) = list.iter_mut().find(|e| e.contact_id == target_id) {
+            entry.standing = standing;
+        } else {
+            list.push(crate::esi::runtime_state::EsiContactEntry {
+                contact_id: target_id, contact_type: contact_type.into(), standing, is_watched: false, is_blocked: false, label_ids: Vec::new(),
             });
         }
-        ctx.emit_typed(
-            NotificationTarget::Character(cid),
-            OnSetPlayerStanding {
-                contact_id: target_id,
-                standing,
-            },
-        );
-        return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
     }
-
-    if cmd == "/downtime" || cmd.starts_with("/downtime ") {
-        let rep = crate::services::serverops_cluster::run_daily_downtime_and_jobs(ctx);
-        let entries = rep.into_iter().map(|(k, v)| (PyRep::String(k), PyRep::Integer(v))).collect();
-        return Some(Ok(PyRep::Dict(entries)));
-    }
-    if let Some(r) = cmd.strip_prefix("/tidi") {
-        let arg = r.trim();
-        let Some(sys_id) = session.solar_system_id else {
-            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None }));
-        };
-        if arg.eq_ignore_ascii_case("status") || arg.is_empty() {
-            return Some(Ok(crate::services::serverops_cluster::system_tidi_status_pyrep(ctx, sys_id)));
-        }
-        if arg.eq_ignore_ascii_case("clear") || arg.eq_ignore_ascii_case("reset") {
-            return Some(Ok(PyRep::Real(crate::services::serverops_cluster::clear_manual_system_tidi_override(ctx, sys_id))));
-        }
-        let f = match arg.parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0|status|clear>".into(), client_error: None })),
-        };
-        return Some(Ok(PyRep::Real(crate::services::serverops_cluster::set_system_tidi_factor(ctx, sys_id, f))));
-    }
-    if cmd == "/reinforce" || cmd.starts_with("/reinforce ") {
-        let Some(sys_id) = session.solar_system_id else {
-            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None }));
-        };
-        let custom_node = cmd.strip_prefix("/reinforce").unwrap_or("").trim().parse::<u32>().ok().filter(|&n| n > 0);
-        let nid = match custom_node {
-            Some(n) => crate::services::serverops_cluster::assign_or_reinforce_system_node(ctx, sys_id, Some(n)),
-            None => crate::services::serverops_cluster::reinforce_solar_system_for_fleet_fight(ctx, sys_id),
-        };
-        return Some(Ok(PyRep::Integer(nid as i64)));
-    }
-    if let Some(r) = cmd.strip_prefix("/autotidi") {
-        let arg = r.trim();
-        if arg.eq_ignore_ascii_case("off") || arg == "0" {
-            crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, false);
-            return Some(Ok(PyRep::Integer(0)));
-        }
-        if arg.eq_ignore_ascii_case("on") {
-            crate::services::serverops_cluster::set_latency_auto_tidi_enabled(ctx, true);
-            return Some(Ok(PyRep::Integer(1)));
-        }
-        let thr = match arg.parse::<usize>() {
-            Ok(v) if v > 0 => v,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|on|off>".into(), client_error: None })),
-        };
-        crate::services::serverops_cluster::set_cluster_node_load_threshold(ctx, thr);
-        crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, true);
-        return Some(Ok(PyRep::Integer(thr as i64)));
-    }
-    if cmd == "/season" || cmd.starts_with("/season ") {
-        return crate::services::notify_emitters_seasons_tactical::handle_season_slash(ctx, cid, cmd);
-    }
-    if let Some(rest) = cmd.strip_prefix("/energy ") {
-        let parts: Vec<&str> = rest.split_whitespace().collect();
-        let resolve_cid_arg = |s: &str| -> Option<i64> {
-            if is_me_or_myship(s) || s.eq_ignore_ascii_case("self") {
-                Some(cid)
-            } else {
-                s.parse::<i64>().ok()
+    if ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32)) {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&cid) {
+                c.standings.insert(target_id, standing);
             }
-        };
-        let (target_cid, new_energy) = match parts.as_slice() {
-            [val_s] => (Some(cid), val_s.parse::<i64>().ok()),
-            [cid_s, val_s] => (resolve_cid_arg(cid_s), val_s.parse::<i64>().ok()),
-            _ => (None, None),
-        };
-        let (Some(target_cid), Some(energy_val)) = (target_cid.filter(|&id| id > 0), new_energy) else {
-            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /energy [char_id] <amount>".into(), client_error: None }));
-        };
-        if !ctx.db.with_snapshot(|snap| snap.characters.contains_key(&target_cid)) {
-            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None }));
-        }
-        // Update character CONCORD Encounter Surveillance System / CEQ energy state and emit OnCharacterEnergyChanged.
-        let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
-        return Some(Ok(crate::services::character_energy::energy_to_keyval(&st)));
-    }
-    if let Some(rest) = cmd.strip_prefix("/secstatus ") {
-        let parts: Vec<&str> = rest.split_whitespace().collect();
-        let resolve_cid_arg = |s: &str| -> Option<i64> {
-            if is_me_or_myship(s) || s.eq_ignore_ascii_case("self") {
-                Some(cid)
-            } else {
-                s.parse::<i64>().ok()
-            }
-        };
-        let (target_cid, new_sec) = match parts.as_slice() {
-            [val_s] => (Some(cid), val_s.parse::<f64>().ok()),
-            [cid_s, val_s] => (resolve_cid_arg(cid_s), val_s.parse::<f64>().ok()),
-            _ => (None, None),
-        };
-        let (Some(target_cid), Some(sec_val)) = (target_cid.filter(|&id| id > 0), new_sec.filter(|v| v.is_finite())) else {
-            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /secstatus [char_id] <value>".into(), client_error: None }));
-        };
-        let clamped = sec_val.clamp(-10.0, 10.0);
-        let updated = ctx.db.with_mut_snapshot(|snap| {
-            let Some(ch) = snap.characters.get_mut(&target_cid) else {
-                return false;
-            };
-            ch.security_status = clamped;
-            true
         });
-        if !updated {
-            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None }));
-        }
-        ctx.emit_typed(
-            NotificationTarget::Character(target_cid),
-            OnSecurityStatusUpdate {
-                new_security_status: clamped,
-            },
-        );
-        return Some(Ok(PyRep::Real(clamped)));
     }
+    ctx.emit_typed(
+        NotificationTarget::Character(cid),
+        OnSetPlayerStanding {
+            contact_id: target_id,
+            standing,
+        },
+    );
+    Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))]))
+}
 
-    if cmd == "/session" || cmd.starts_with("/session ") {
-        return Some(crate::services::gm_soak_commands::handle_session_cmd(
-            ctx, session, cid, cmd,
-        ));
+/// Registry dispatch target for `/downtime` (`#1193`).
+pub(crate) fn dispatch_downtime_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    _inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let rep = crate::services::serverops_cluster::run_daily_downtime_and_jobs(ctx);
+    let entries = rep.into_iter().map(|(k, v)| (PyRep::String(k), PyRep::Integer(v))).collect();
+    Ok(PyRep::Dict(entries))
+}
+
+/// Registry dispatch target for `/tidi` (`#1193`).
+pub(crate) fn dispatch_tidi_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let arg = inv.rest;
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None });
+    };
+    if arg.eq_ignore_ascii_case("status") || arg.is_empty() {
+        return Ok(crate::services::serverops_cluster::system_tidi_status_pyrep(ctx, sys_id));
     }
+    if arg.eq_ignore_ascii_case("clear") || arg.eq_ignore_ascii_case("reset") {
+        return Ok(PyRep::Real(crate::services::serverops_cluster::clear_manual_system_tidi_override(ctx, sys_id)));
+    }
+    let f = match arg.parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
+        _ => return Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0|status|clear>".into(), client_error: None }),
+    };
+    Ok(PyRep::Real(crate::services::serverops_cluster::set_system_tidi_factor(ctx, sys_id, f)))
+}
 
-    if cmd == "/spawnwreck" || cmd.starts_with("/spawnwreck ") {
-        let tokens = parse_slash_tokens(cmd.strip_prefix("/spawnwreck").unwrap_or(""));
+/// Registry dispatch target for `/reinforce` (`#1193`).
+pub(crate) fn dispatch_reinforce_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None });
+    };
+    let custom_node = inv.rest.parse::<u32>().ok().filter(|&n| n > 0);
+    let nid = match custom_node {
+        Some(n) => crate::services::serverops_cluster::assign_or_reinforce_system_node(ctx, sys_id, Some(n)),
+        None => crate::services::serverops_cluster::reinforce_solar_system_for_fleet_fight(ctx, sys_id),
+    };
+    Ok(PyRep::Integer(nid as i64))
+}
+
+/// Registry dispatch target for `/autotidi` (`#1193`).
+pub(crate) fn dispatch_autotidi_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let arg = inv.rest;
+    if arg.eq_ignore_ascii_case("off") || arg == "0" {
+        crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, false);
+        return Ok(PyRep::Integer(0));
+    }
+    if arg.eq_ignore_ascii_case("on") {
+        crate::services::serverops_cluster::set_latency_auto_tidi_enabled(ctx, true);
+        return Ok(PyRep::Integer(1));
+    }
+    let thr = match arg.parse::<usize>() {
+        Ok(v) if v > 0 => v,
+        _ => return Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|on|off>".into(), client_error: None }),
+    };
+    crate::services::serverops_cluster::set_cluster_node_load_threshold(ctx, thr);
+    crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, true);
+    Ok(PyRep::Integer(thr as i64))
+}
+
+/// Registry dispatch target for `/season` (`#1193`).
+pub(crate) fn dispatch_season_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    crate::services::notify_emitters_seasons_tactical::handle_season_slash(ctx, cid, inv.raw)
+        .unwrap_or_else(|| Err(unknown_slash_error(inv.raw)))
+}
+
+/// Registry dispatch target for `/energy` (`#1193`).
+pub(crate) fn dispatch_energy_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    let Some((target_cid, energy_val)) =
+        parse_optional_target_char_and_value(cid, inv.rest)
+            .and_then(|(tcid, val_s)| val_s.parse::<i64>().ok().map(|v| (tcid, v)))
+    else {
+        return Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /energy [char_id] <amount>".into(), client_error: None });
+    };
+    if !ctx.db.with_snapshot(|snap| snap.characters.contains_key(&target_cid)) {
+        return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None });
+    }
+    // Update character CONCORD Encounter Surveillance System / CEQ energy state and emit OnCharacterEnergyChanged.
+    let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
+    Ok(crate::services::character_energy::energy_to_keyval(&st))
+}
+
+/// Registry dispatch target for `/secstatus` (`#1193`).
+pub(crate) fn dispatch_secstatus_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    if !inv.had_whitespace_after_head {
+        return Err(unknown_slash_error(inv.raw));
+    }
+    let (_, cid) = ServerContext::require_character(session)?;
+    let Some((target_cid, sec_val)) =
+        parse_optional_target_char_and_value(cid, inv.rest).and_then(|(tcid, val_s)| {
+            val_s
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map(|v| (tcid, v))
+        })
+    else {
+        return Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /secstatus [char_id] <value>".into(), client_error: None });
+    };
+    let clamped = sec_val.clamp(-10.0, 10.0);
+    let updated = ctx.db.with_mut_snapshot(|snap| {
+        let Some(ch) = snap.characters.get_mut(&target_cid) else {
+            return false;
+        };
+        ch.security_status = clamped;
+        true
+    });
+    if !updated {
+        return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None });
+    }
+    ctx.emit_typed(
+        NotificationTarget::Character(target_cid),
+        OnSecurityStatusUpdate {
+            new_security_status: clamped,
+        },
+    );
+    Ok(PyRep::Real(clamped))
+}
+
+/// Registry dispatch target for `/session` (`#1193`).
+pub(crate) fn dispatch_session_slash(
+    ctx: &ServerContext,
+    session: &SessionState,
+    inv: &SlashInvocation<'_>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, cid) = ServerContext::require_character(session)?;
+    crate::services::gm_soak_commands::handle_session_cmd(ctx, session, cid, inv.raw)
+}
+
+/// Registry dispatch target for `/spawnwreck` (`#1193`).
+pub(crate) fn dispatch_spawnwreck_slash<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    inv: &'a SlashInvocation<'a>,
+) -> SlashBoxFuture<'a> {
+    Box::pin(async move {
+        let (_, cid) = ServerContext::require_character(session)?;
+        let tokens = parse_slash_tokens(inv.rest);
         let (target_cid, arg_tokens) = resolve_gm_char_prefix(ctx, cid, &tokens, 1);
         let tail = arg_tokens.join(" ");
         let forwarded_cmd = if arg_tokens.len() < tokens.len() {
@@ -2176,7 +2159,7 @@ pub async fn handle_gm_slash_ext(
                 format!("/spawnwreck {tail}")
             }
         } else {
-            cmd.to_string()
+            inv.raw.to_string()
         };
         let mut target_session = session.clone();
         if target_cid != cid {
@@ -2190,67 +2173,68 @@ pub async fn handle_gm_slash_ext(
                 }
             });
         }
-        if let Some(res) = crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(
+        crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(
             ctx,
             &target_session,
             target_cid,
             &forwarded_cmd,
         )
         .await
-        {
-            return Some(res);
-        }
-    }
+        .unwrap_or_else(|| Err(unknown_slash_error(inv.raw)))
+    })
+}
 
-    if let Some(res) =
+/// Legacy test shim delegating into [`crate::router::slash_registry`] (`#1193`).
+#[cfg(test)]
+pub async fn handle_gm_slash_ext(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    cid: i64,
+    cmd: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let inv = parse_slash_invocation_preserving_trailing_ws(cmd)?;
+    let prev_cid = session.character_id;
+    session.character_id = Some(cid);
+    let outcome = dispatch_registered_for_test(ctx, session, &inv).await;
+    let res = match outcome {
+        None => None,
+        Some(SlashDispatchOutcome::PendingLegacyChain) => {
+            crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(ctx, session, cid, cmd)
+                .await
+        }
+        Some(SlashDispatchOutcome::Handled(Err(ref e)))
+            if e.code == "UnknownSlashCommand"
+                && matches!(
+                    inv.head_lower.as_str(),
+                    "achievements" | "campaign" | "shutdown"
+                ) =>
+        {
+            None
+        }
+        Some(SlashDispatchOutcome::Handled(res)) => Some(res),
+    };
+    session.character_id = prev_cid;
+    res
+}
+
+async fn handle_pending_gm_qa_rpcs(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+    let cid = session.character_id?;
+    if let Some(ext_res) =
         crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(ctx, session, cid, cmd).await
     {
-        return Some(res);
+        crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
+        return Some(ext_res);
     }
-
-    if let Some(res) = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
-        if let Ok(ref rep) = res {
-            let head_lower = cmd
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if matches!(head_lower.as_str(), "/advancetime" | "/fastforward" | "/ff") {
-                let adv_cid = rep.dict_get("characterID").and_then(PyRep::as_i64).unwrap_or(cid);
-                let adv_secs = rep
-                    .dict_get("advancedSeconds")
-                    .and_then(PyRep::as_i64)
-                    .unwrap_or(0)
-                    .max(0) as u64;
-                if adv_secs > 0 {
-                    let explicit_space = if adv_cid == cid {
-                        match (session.solar_system_id, session.ship_id) {
-                            (Some(sys_id), Some(ship_id))
-                                if session.station_id.is_none()
-                                    && session.structure_id.is_none()
-                                    && sys_id > 0
-                                    && ship_id > 0 =>
-                            {
-                                Some((sys_id, ship_id))
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    crate::services::notify_emitters_character_services::fast_forward_and_sync_space_clock(
-                        ctx,
-                        adv_cid,
-                        explicit_space,
-                        adv_secs,
-                    )
-                    .await;
-                }
-            }
-        }
-        return Some(res);
+    if service == "publicQaToolsServer" {
+        crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+        return Some(Err(unknown_slash_error(cmd)));
     }
-
     None
 }
 
@@ -2261,72 +2245,24 @@ pub async fn handle_gm_qa_rpcs(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if (service, method) == ("slash", "SlashCmd") {
-        let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-        if cmd == "/" {
-            // Defer remote command list query (`FetchRemoteCommandList`) to `auth_cache`.
-            return None;
-        }
-        let (_, cid) = match ServerContext::require_character(session) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        };
-        let req_role = crate::services::auth_cache::required_slash_role(cmd);
-        if !ServerContext::has_gm_role_mask(session.role, req_role) {
-            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
-            return Some(Err(BridgeRpcError {
-                code: "InsufficientRole".into(),
-                message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
-                client_error: None,
-            }));
-        }
-        if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
-            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
-            return Some(ext_res);
-        }
+    if !matches!(
+        (service, method),
+        ("slash", "SlashCmd") | ("publicQaToolsServer", "SlashCmd")
+    ) {
         return None;
     }
-    match (service, method) {
-        ("publicQaToolsServer", "SlashCmd") => {
-            let (_, cid) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-            let req_role = crate::services::auth_cache::required_slash_role(cmd);
-            if !ServerContext::has_gm_role_mask(session.role, req_role) {
-                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: format!("publicQaToolsServer.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
-                    client_error: None,
-                }));
-            }
-            if cmd == "/" {
-                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
-                return Some(Err(BridgeRpcError {
-                    code: "SlashError".into(),
-                    message: crate::services::auth_cache::format_remote_command_list_reason(
-                        session.role,
-                    ),
-                    client_error: None,
-                }));
-            }
-            if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
-                crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
-                return Some(ext_res);
-            }
-            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
-            Some(Err(BridgeRpcError {
-                code: "UnknownSlashCommand".into(),
-                message: format!("Unknown or unsupported QA slash command '{cmd}'"),
-                client_error: None,
-            }))
-        }
-        // `publicQaToolsServer.MoveMeTo` and `publicQaToolsServer.CanGiveItemForMultifit`
-        // dispatch via `jump_clone_names::RPCS` in `RpcRegistry`.
-        _ => None,
+    if (service, method) == ("slash", "SlashCmd")
+        && args.first().and_then(|a| a.as_str()).unwrap_or("").trim() == "/"
+    {
+        return None;
     }
+    if let crate::router::slash_registry::SlashDispatchOutcome::Handled(res) =
+        crate::router::slash_registry::dispatch_slash_command_async(ctx, session, service, args)
+            .await
+    {
+        return Some(res);
+    }
+    handle_pending_gm_qa_rpcs(ctx, session, service, args).await
 }
 
 use crate::router::rpc_registry::{
@@ -2337,7 +2273,7 @@ fn dispatch_qa_rpc<'a>(
     ctx: &'a ServerContext,
     session: &'a mut SessionState,
     service: &'a str,
-    method: &'a str,
+    _method: &'a str,
     args: &'a [PyRep],
     _kwargs: &'a HashMap<String, PyRep>,
 ) -> RpcBoxFuture<'a> {
@@ -2350,7 +2286,7 @@ fn dispatch_qa_rpc<'a>(
         {
             return Some(res);
         }
-        handle_gm_qa_rpcs(ctx, session, service, method, args).await
+        handle_pending_gm_qa_rpcs(ctx, session, service, args).await
     })
 }
 
@@ -2371,7 +2307,7 @@ fn dispatch_slash_cmd<'a>(
         {
             return Some(res);
         }
-        if let Some(res) = handle_gm_qa_rpcs(ctx, session, service, method, args).await {
+        if let Some(res) = handle_pending_gm_qa_rpcs(ctx, session, service, args).await {
             return Some(res);
         }
         crate::services::auth_cache::handle(ctx, session, service, method, args, kwargs).await

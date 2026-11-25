@@ -939,7 +939,6 @@
       "files": {
         "bug_reporting.rs": 2,
         "esi/router.rs": 4,
-        "services/character_gm_tools.rs": 27,
         "services/gm_soak_commands.rs": 5,
         "services/notify_emitters_seasons_tactical.rs": 1,
         "sso.rs": 4

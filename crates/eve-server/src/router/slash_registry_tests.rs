@@ -58,38 +58,88 @@ fn slash_registry_bijection_no_duplicates_and_handler_binding_ratchet() {
     let pending = count_pending_handlers(SLASH_COMMAND_REGISTRY);
     assert_eq!(pending, PENDING_SLASH_HANDLER_COUNT);
     assert!(
-        pending <= 48,
+        pending <= 4,
         "PENDING_SLASH_HANDLER_COUNT must be shrink-only (got {pending})"
     );
     for bound in [
-        "operation",
-        "pd",
-        "setomega",
-        "setunderage",
-        "survey",
+        "achievements",
+        "advancetime",
+        "autotidi",
         "ban",
+        "campaign",
+        "chatban",
+        "chatunban",
+        "cleartimers",
+        "completeindustry",
+        "completeskills",
+        "contact",
         "createccpevent",
         "createitem",
+        "despawn",
+        "downtime",
+        "energy",
+        "fastcheckout",
+        "fastforward",
+        "ff",
+        "finishjobs",
+        "finishskills",
+        "finishstructure",
+        "fit",
+        "fwcapture",
+        "getattr",
         "giveisk",
         "giveitem",
         "giveskill",
         "heal",
         "help",
+        "industrytimer",
         "kick",
+        "kill",
+        "load",
+        "location",
         "moveme",
+        "online",
+        "operation",
+        "pd",
+        "reinforce",
         "role",
+        "season",
+        "secstatus",
+        "session",
+        "setattr",
+        "setomega",
         "setskill",
+        "setunderage",
+        "shutdown",
+        "spawn",
+        "spawnanomaly",
         "spawnnpc",
+        "spawnwreck",
+        "standing",
+        "structure",
+        "structuretimer",
+        "survey",
         "suspend",
         "teleport",
+        "tidi",
         "tr",
+        "trainskills",
         "translocate",
         "unban",
+        "unspawn",
         "unsuspend",
+        "upwelltimer",
+        "whoami",
     ] {
         assert!(
             lookup_slash_entry(bound).and_then(|e| e.handler).is_some(),
             "Migrated command '/{bound}' must bind Some(handler)"
+        );
+    }
+    for deferred in ["backintime", "deadwarp", "soak", "sysjunkclear"] {
+        assert!(
+            lookup_slash_entry(deferred).and_then(|e| e.handler).is_none(),
+            "Batch-4 command '/{deferred}' must remain deferred until final batch"
         );
     }
 
@@ -285,17 +335,31 @@ fn slash_invocation_parser_and_central_dispatcher_routing() {
         assert_eq!(unk.code, "UnknownSlashCommand"); // rpc-lint: allow MachoNet error code assertion
     }
 
-    // Pending legacy rows yield PendingLegacyChain when authorized.
-    assert!(matches!(
-        dispatch_slash_command(&ctx, &sess, "slash", &[PyRep::String("/whoami".into())]),
-        SlashDispatchOutcome::PendingLegacyChain
-    ));
+    // Bound Batch-3 sync rows execute cleanly (including case-insensitive `cmd_icase!` heads);
+    // remaining Batch-4 rows yield PendingLegacyChain when authorized.
+    let SlashDispatchOutcome::Handled(Ok(who_rep)) =
+        dispatch_slash_command(&ctx, &sess, "slash", &[PyRep::String("/whoami".into())])
+    else {
+        panic!("expected Handled Ok for /whoami");
+    };
+    assert!(who_rep.as_str().is_some_and(|s| s.contains("charID=")));
+
+    let SlashDispatchOutcome::Handled(Err(struct_err)) = dispatch_slash_command(
+        &ctx,
+        &sess,
+        "slash",
+        &[PyRep::String("/STRUCTURE state".into())],
+    ) else {
+        panic!("expected Handled Err for malformed /STRUCTURE state");
+    };
+    assert_eq!(struct_err.code, "InvalidSlashArgument"); // rpc-lint: allow MachoNet error code assertion
+
     assert!(matches!(
         dispatch_slash_command(
             &ctx,
             &sess,
             "slash",
-            &[PyRep::String("/STRUCTURE state 1001 110".into())]
+            &[PyRep::String("/soak logi status".into())]
         ),
         SlashDispatchOutcome::PendingLegacyChain
     ));
@@ -373,7 +437,6 @@ fn shrink_only_legacy_slash_prefix_parsing_outside_registry() {
     // calls (prevents spelling-evasion by counting both patterns together). Each subsequent
     // Track 1 batch reduces its migrated file(s) to 0.
     let shrink_only_max_by_file: BTreeMap<&str, usize> = BTreeMap::from([
-        ("services/character_gm_tools.rs", 25),
         ("services/gm_soak_commands.rs", 5),
         ("services/notify_emitters_seasons_tactical.rs", 1),
     ]);
@@ -734,4 +797,139 @@ async fn slash_registry_async_and_account_admin_dispatch_parity() {
         .await
         .expect("ROLE_GMH /createccpevent ok");
     assert!(ccp_rep.dict_get("eventID").and_then(PyRep::as_i64).unwrap_or(0) > 0);
+}
+
+#[tokio::test]
+async fn slash_registry_batch3_gm_tools_and_notify_emitters_parity() {
+    let ctx = test_ctx();
+    let demo_uid = ctx
+        .db
+        .with_snapshot(|s| s.accounts.values().next().map(|a| a.user_id))
+        .expect("seeded account");
+    let cid = 90_000_001_i64;
+    let ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.active_ship_id))
+        .unwrap_or(0);
+    let mut sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+    if ship_id > 0 {
+        sess.ship_id = Some(ship_id);
+    }
+    sess.role = service_roles::ROLE_GM_MASK
+        | service_roles::ROLE_SPAWN
+        | service_roles::ROLE_QA
+        | service_roles::ROLE_ADMIN;
+
+    // 1. Derived role matches legacy auth_cache policy + case/whitespace gates.
+    for cmd in [
+        "/achievements reset", "/advancetime 60", "/autotidi 50", "/campaign enroll 1",
+        "/chatban 90000001 60", "/chatunban 90000001", "/cleartimers", "/completeindustry",
+        "/completeskills", "/contact 90000002 5.0", "/despawn 1", "/downtime", "/energy 100",
+        "/fastcheckout 1", "/FastCheckout 1", "/fastforward 60", "/ff 60", "/finishjobs",
+        "/finishskills", "/finishstructure", "/fit me 2048", "/fwcapture 30000142 100",
+        "/getattr me 37", "/industrytimer", "/kill me", "/load me 2048 1", "/location",
+        "/online", "/reinforce", "/season reset_goals", "/secstatus 2.0", "/session",
+        "/setattr me 37 500.0", "/shutdown cancel", "/spawn 606 1", "/spawnanomaly",
+        "/spawnwreck 606 1", "/standing 90000002 5.0", "/structure state 1001 110",
+        "/STRUCTURE state 1001 110", "/structuretimer", "/tidi status", "/trainskills",
+        "/unspawn 1", "/upwelltimer", "/whoami", "/WHOAMI",
+    ] {
+        assert_eq!(required_slash_role(cmd), auth_required_slash_role(cmd), "role mismatch for '{cmd}'");
+    }
+    for bad in [
+        "/WHOAMI", "/FIT me 2048", "/LOAD me 2048 1", "/spawn", "/unspawn", "/despawn",
+        "/setattr", "/getattr", "/fit", "/kill", "/contact", "/standing", "/energy",
+        "/secstatus", "/achievements", "/campaign", "/shutdown",
+    ] {
+        let err = exec_slash_async(&ctx, &mut sess, "slash", bad)
+            .await
+            .expect_err("must return UnknownSlashCommand");
+        assert_eq!(err.code, "UnknownSlashCommand", "{bad}"); // rpc-lint: allow MachoNet error code assertion
+    }
+
+    // 2. Narrower role gates: ROLE_QA, ROLE_SPAWN, ROLE_STRUCTURE_GM.
+    let mut qa_sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+    qa_sess.role = service_roles::ROLE_QA;
+    for ok_cmd in ["/whoami", "/online", "/location"] {
+        assert!(exec_slash_async(&ctx, &mut qa_sess, "publicQaToolsServer", ok_cmd).await.is_ok());
+    }
+    let qa_spawn_err = exec_slash_async(&ctx, &mut qa_sess, "publicQaToolsServer", "/spawn 606 1")
+        .await
+        .expect_err("ROLE_QA must be denied /spawn");
+    assert_eq!(qa_spawn_err.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+
+    let mut gms_sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+    gms_sess.role = service_roles::ROLE_GMS;
+    let struct_role_err = exec_slash_async(&ctx, &mut gms_sess, "slash", "/STRUCTURE state 1001 110")
+        .await
+        .expect_err("ROLE_GMS must be denied /STRUCTURE");
+    assert_eq!(struct_role_err.code, "InsufficientRole"); // rpc-lint: allow MachoNet error code assertion
+
+    // 3. End-to-end registry execution for Batch 3 character_gm_tools & notify_emitters handlers.
+    let campaign_id = crate::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde)
+        .keys()
+        .next()
+        .copied()
+        .unwrap_or(1);
+    let enroll_cmd = format!("/Campaign Enroll {campaign_id}");
+    for ok_cmd in [
+        "/setattr me 37 450.5", "/getattr me 37", "/fit me 2048", "/load me 2048 1",
+        "/contact 90000002 6.0", "/standing 90000002 4.0", "/downtime", "/tidi status",
+        "/reinforce", "/autotidi off", "/energy 500", "/secstatus 3.5", "/season reset_goals",
+        "/session", "/Achievements Reset", "/ChatBan 90000002 60", "/ChatUnban 90000002",
+        enroll_cmd.as_str(), "/Shutdown Cancel", "/FastCheckout 1", "/SpawnAnomaly",
+        "/FwCapture 30000142 100", "/AdvanceTime 30", "/FastForward 15", "/FF 10",
+        "/CompleteSkills", "/TrainSkills", "/FinishSkills", "/UpwellTimer",
+        "/StructureTimer", "/FinishStructure", "/CompleteIndustry", "/FinishJobs",
+        "/IndustryTimer", "/ClearTimers",
+    ] {
+        assert!(exec_slash_async(&ctx, &mut sess, "slash", ok_cmd).await.is_ok(), "{ok_cmd}");
+    }
+
+    let s1 = exec_slash_async(&ctx, &mut sess, "slash", "/spawn 606 1").await.expect("/spawn 1");
+    let id1 = s1.dict_get("spawnedID").and_then(PyRep::as_i64).expect("spawnedID 1");
+    assert!(exec_slash_async(&ctx, &mut sess, "slash", &format!("/despawn {id1}")).await.is_ok());
+
+    let s2 = exec_slash_async(&ctx, &mut sess, "slash", "/spawn 606 1").await.expect("/spawn 2");
+    let id2 = s2.dict_get("spawnedID").and_then(PyRep::as_i64).expect("spawnedID 2");
+    let k2 = exec_slash_async(&ctx, &mut sess, "slash", &format!("/kill {id2}")).await.expect("/kill");
+    assert_eq!(k2.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+
+    let miss = exec_slash_async(&ctx, &mut sess, "slash", "/unspawn 999999991")
+        .await
+        .expect_err("missing entity returns EntityNotFound");
+    assert_eq!(miss.code, "EntityNotFound"); // rpc-lint: allow MachoNet error code assertion
+
+    let sw_err = exec_slash_async(&ctx, &mut sess, "slash", "/spawnwreck")
+        .await
+        .expect_err("bare /spawnwreck returns InvalidArguments");
+    assert_eq!(sw_err.code, "InvalidArguments"); // rpc-lint: allow MachoNet error code assertion
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    if ship_id > 0 {
+        let _ = ctx
+            .systems
+            .get_or_spawn(30_000_142)
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: ship_id,
+                    type_id: 606,
+                    position: glam::DVec3::ZERO,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 30.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                eve_destiny::CombatState::default(),
+            )
+            .await;
+    }
+    assert!(exec_slash_async(&ctx, &mut sess, "slash", "/spawnwreck 606 1").await.is_ok());
 }
