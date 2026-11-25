@@ -704,7 +704,7 @@ pub fn collect_live_market_adjusted_prices(
     snap: &eve_db::WorldStateSnapshot,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
     if let Ok(base_prices) =
-        crate::with_default_sde_db_path(eve_sde::SdeRegistry::load_type_base_prices)
+        crate::with_default_sde_db_path(|p| eve_sde::SdeRegistry::load_type_base_prices(p))
     {
         return collect_live_market_adjusted_prices_with_lookup(snap, None, |tid| {
             base_prices.get(&tid).copied()
@@ -731,7 +731,7 @@ pub fn compute_market_adjusted_price_from_snap(
     type_id: eve_sde::TypeId,
 ) -> Option<f64> {
     if let Ok(base_prices) =
-        crate::with_default_sde_db_path(eve_sde::SdeRegistry::load_type_base_prices)
+        crate::with_default_sde_db_path(|p| eve_sde::SdeRegistry::load_type_base_prices(p))
     {
         return compute_market_adjusted_price_with_lookup(snap, None, type_id, |tid| {
             base_prices.get(&tid).copied()
