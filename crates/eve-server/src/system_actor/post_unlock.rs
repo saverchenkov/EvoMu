@@ -1300,7 +1300,8 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
         let _done_guard = WorkerDoneGuard(Some(done_tx));
         let _ = worker_thread_id.set(std::thread::current().id());
         let process_item = |item: PostUnlockWorkItem| {
-            let (deact_hook, lock_hook) = (deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone(), lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone());
+            let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard } = item;
             let extra_actions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 execute_post_unlock_ops(db_opt.as_ref(), sde_opt.as_ref(), ops, deact_hook.as_ref(), lock_hook.as_ref())
