@@ -1769,6 +1769,10 @@ pub enum SystemCommand {
         rollback_res_ids: Vec<BallId>,
         reply: oneshot::Sender<Result<usize, String>>,
     },
+    ReconnectDrones {
+        req: super::ReconnectDronesReq,
+        reply: oneshot::Sender<Result<super::ReconnectDronesOutcome, String>>,
+    },
     MutateActiveDrones {
         op: super::ActiveDroneMutOp,
         reply: oneshot::Sender<Result<(), String>>,

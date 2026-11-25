@@ -107,6 +107,14 @@ async fn auto_discovered_drones_ownership_and_ice_drone_harvesting() {
             CombatState::default(),
         )
         .await;
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        crate::system_actor::DroneSpaceState {
+            ball_id: ice_drone_id, drone_item_id: ice_drone_id, type_id: 997_002, group_id: 101,
+            owner_char_id: char_id, original_owner_char_id: char_id,
+            parent_ship_id: ship_id, solar_system_id: sys_id, ..Default::default()
+        },
+    );
 
     let mut sess = make_session(char_id, corp_id, Some(sys_id), Some(ship_id));
 

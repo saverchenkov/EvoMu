@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Runtime state for a launched or abandoned drone in solar-system space (`#1541` Track D2b).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroneSpaceState {
     pub ball_id: i64,
     pub drone_item_id: i64,
@@ -70,6 +70,25 @@ pub struct ReserveDroneLaunchesOutcome {
     pub reserved_ids: Vec<BallId>,
     pub per_item_errors: Vec<(i64, &'static str)>,
     pub rejected_error: Option<&'static str>,
+}
+
+/// Request payload for atomic per-ship drone reconnect validation and ownership transition.
+#[derive(Debug, Clone)]
+pub struct ReconnectDronesReq {
+    pub char_id: i64,
+    pub ship_id: BallId,
+    pub max_drones_allowed: usize,
+    pub max_bandwidth: f64,
+    pub target_ids: Vec<i64>,
+}
+
+/// Outcome of [`ReconnectDronesReq`] executed atomically inside [`SystemActor`].
+#[derive(Debug, Clone, Default)]
+pub struct ReconnectDronesOutcome {
+    pub reconnected: Vec<(i64, i64, u32)>,
+    pub out_of_range: Vec<i64>,
+    pub max_drones_exceeded: Vec<i64>,
+    pub insufficient_bandwidth: Vec<i64>,
 }
 
 /// Closure executed atomically inside [`SystemActor`] to inspect or mutate active drones.
@@ -511,8 +530,9 @@ pub(crate) fn load_initial_active_drones_for_system(
         )
     }) {
         for (_, d) in rows {
-            let d = d.in_solar_system(solar_system_id);
-            drones.insert(d.ball_id, d);
+            if d.ball_id > 0 {
+                drones.insert(d.ball_id, d.in_solar_system(solar_system_id));
+            }
         }
     }
     if drones.is_empty() {
@@ -528,7 +548,7 @@ pub(crate) fn load_initial_active_drones_for_system(
             if !ext_json.is_empty() && ext_json.contains("active_drones_in_space") {
                 if let Ok(legacy) = serde_json::from_str::<LegacyActiveDronesPayload>(&ext_json) {
                     for (bid, mut d) in legacy.active_drones_in_space {
-                        if d.solar_system_id == solar_system_id {
+                        if bid > 0 && d.solar_system_id == solar_system_id {
                             d.ball_id = bid;
                             drones.insert(bid, d);
                             dirty = true;
@@ -572,18 +592,24 @@ fn upsert_active_drones_in_actor(
     Ok(inserted)
 }
 
+fn count_ship_controlled_and_reserved_drones(
+    actor_st: &SystemActorState,
+    ship_id: BallId,
+) -> (usize, f64) {
+    actor_st
+        .active_drones_in_space
+        .values()
+        .filter(|d| d.ball_id > 0)
+        .chain(actor_st.reserved_drone_launches.values())
+        .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+        .fold((0usize, 0.0f64), |(c, bw), d| (c + 1, bw + d.bandwidth_used))
+}
+
 fn reserve_drone_launches_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     req: ReserveDroneLaunchesReq,
 ) -> Result<ReserveDroneLaunchesOutcome, String> {
-    let (cur_count, cur_bw) = ctx
-        .actor_st
-        .active_drones_in_space
-        .values()
-        .filter(|d| d.ball_id > 0)
-        .chain(ctx.actor_st.reserved_drone_launches.values())
-        .filter(|d| d.parent_ship_id == req.ship_id && !d.is_abandoned)
-        .fold((0usize, 0.0f64), |(c, bw), d| (c + 1, bw + d.bandwidth_used));
+    let (cur_count, cur_bw) = count_ship_controlled_and_reserved_drones(ctx.actor_st, req.ship_id);
     let mut kept_indices = Vec::new();
     let mut reserved_ids = Vec::new();
     let mut per_item_errors = Vec::new();
@@ -694,6 +720,59 @@ fn finalize_drone_launches_in_actor(
         }
     }
     Ok(updated)
+}
+
+fn reconnect_drones_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    req: ReconnectDronesReq,
+) -> Result<ReconnectDronesOutcome, String> {
+    let (mut cur_count, mut cur_bw) = count_ship_controlled_and_reserved_drones(ctx.actor_st, req.ship_id);
+    let ship_pos = ctx.ballpark.balls.get(&req.ship_id).map(|b| b.position).unwrap_or(glam::DVec3::ZERO);
+    let mut candidate_bids: Vec<BallId> = ctx
+        .actor_st
+        .active_drones_in_space
+        .values()
+        .filter(|d| {
+            d.ball_id > 0
+                && d.solar_system_id == ctx.solar_system_id
+                && ((d.is_abandoned && d.original_owner_char_id == req.char_id)
+                    || (d.owner_char_id == req.char_id && d.parent_ship_id == 0))
+                && (req.target_ids.is_empty()
+                    || req.target_ids.contains(&d.ball_id)
+                    || req.target_ids.contains(&d.drone_item_id))
+        })
+        .map(|d| d.ball_id)
+        .collect();
+    candidate_bids.sort_unstable();
+
+    let mut out = ReconnectDronesOutcome::default();
+    for bid in candidate_bids {
+        if ctx.actor_st.scoop_claimed_drones.contains_key(&bid) {
+            continue;
+        }
+        if ctx.ballpark.balls.get(&bid).is_some_and(|b| b.position.distance(ship_pos) > 250_000.0) {
+            out.out_of_range.push(bid);
+            continue;
+        }
+        let Some(d) = ctx.actor_st.active_drones_in_space.get_mut(&bid) else {
+            continue;
+        };
+        if cur_count >= req.max_drones_allowed {
+            out.max_drones_exceeded.push(bid);
+        } else if cur_bw + d.bandwidth_used > req.max_bandwidth + 1e-4 {
+            out.insufficient_bandwidth.push(bid);
+        } else {
+            (d.is_abandoned, d.owner_char_id, d.parent_ship_id, d.activity_state, d.target_id) =
+                (false, req.char_id, req.ship_id, 0, None);
+            cur_count += 1;
+            cur_bw += d.bandwidth_used;
+            out.reconnected.push((bid, d.drone_item_id, d.type_id));
+        }
+    }
+    if !out.reconnected.is_empty() {
+        mark_active_drones_dirty_in_state(ctx.actor_st);
+    }
+    Ok(out)
 }
 
 fn apply_pending_scoop_abandon_in_actor(
@@ -991,6 +1070,12 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = finalize_drone_launches_in_actor(&mut ctx, mappings, rollback_res_ids);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::ReconnectDrones { req, reply } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = reconnect_drones_in_actor(&mut ctx, req);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -1405,6 +1490,40 @@ impl SystemHandle {
                 reply,
             },
         )
+        .await
+    }
+
+    /// Best-effort non-blocking rollback of unpromoted `LaunchDrones` reservations on cancellation/drop.
+    pub fn try_rollback_drone_launches(&self, rollback_res_ids: Vec<BallId>) {
+        if rollback_res_ids.is_empty() {
+            return;
+        }
+        let (reply, _) = tokio::sync::oneshot::channel();
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
+            self.cmd_sender().try_send(SystemCommand::FinalizeDroneLaunches {
+                mappings: Vec::new(),
+                rollback_res_ids,
+                reply,
+            })
+        {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let tx = self.cmd_sender().clone();
+                rt.spawn(async move {
+                    let _ = tx.send(cmd).await;
+                });
+            }
+        }
+    }
+
+    /// Atomically validates drone control/bandwidth limits (including `reserved_drone_launches`)
+    /// and range inside [`SystemActor`], transitioning unclaimed eligible drones to `ship_id`.
+    pub async fn reconnect_drones(
+        &self,
+        req: ReconnectDronesReq,
+    ) -> Result<ReconnectDronesOutcome, String> {
+        call_actor_result_with_deadline(self, "ReconnectDrones", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::ReconnectDrones { req, reply }
+        })
         .await
     }
 

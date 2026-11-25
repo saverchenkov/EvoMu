@@ -1389,93 +1389,39 @@ pub async fn handle_cmd_reconnect_to_drones(
     }
     let (max_drones_allowed, ship_bw, _) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let view = sys_handle.view();
-    let (mut cur_count, mut cur_bw) = {
-        let active: Vec<&DroneSpaceState> = view
-            .active_drones_in_space
-            .values()
-            .filter(|d| d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned)
-            .collect();
-        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
-    };
-    let candidates: Vec<(i64, i64, f64, u32)> = view
-        .active_drones_in_space
-        .values()
-        .filter(|d| {
-            d.ball_id > 0
-                && d.solar_system_id == sys_id
-                && ((d.is_abandoned && d.original_owner_char_id == char_id)
-                    || (d.owner_char_id == char_id && d.parent_ship_id == 0))
-                && (target_ids.is_empty()
-                    || target_ids.contains(&d.ball_id)
-                    || target_ids.contains(&d.drone_item_id))
+    let outcome = sys_handle
+        .reconnect_drones(crate::system_actor::ReconnectDronesReq {
+            char_id,
+            ship_id,
+            max_drones_allowed,
+            max_bandwidth: ship_bw,
+            target_ids,
         })
-        .map(|d| (d.ball_id, d.drone_item_id, d.bandwidth_used, d.type_id))
-        .collect();
-    drop(view);
-    let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
+        .await
+        .unwrap_or_default();
 
-    let mut reconnected = Vec::new();
-    let mut errors: HashMap<String, Vec<i64>> = HashMap::new();
+    super::drone_reconnect_finish::finish_reconnect_drones(
+        ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        &outcome.reconnected,
+    )
+    .await;
 
-    for (bid, did, bw, tid) in candidates {
-        let drone_pos = sys_handle
-            .get_ball_snapshot(bid)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position);
-        if let Some(pos) = drone_pos {
-            if pos.distance(ship_pos) > 250_000.0 {
-                errors.entry("OutOfRange".into()).or_default().push(bid);
-                continue;
-            }
-        }
-        if cur_count >= max_drones_allowed {
-            errors.entry("MaxDronesExceeded".into()).or_default().push(bid);
-            continue;
-        }
-        if cur_bw + bw > ship_bw {
-            errors.entry("InsufficientBandwidth".into()).or_default().push(bid);
-            continue;
-        }
-
-        let updated = sys_handle
-            .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-                if claimed.contains_key(&bid) {
-                    return (false, false);
-                }
-                if let Some(d) = drones.get_mut(&bid) {
-                    if d.solar_system_id == sys_id
-                        && ((d.is_abandoned && d.original_owner_char_id == char_id)
-                            || (d.owner_char_id == char_id && d.parent_ship_id == 0))
-                    {
-                        d.is_abandoned = false;
-                        d.owner_char_id = char_id;
-                        d.parent_ship_id = ship_id;
-                        d.activity_state = 0;
-                        d.target_id = None;
-                        return (true, true);
-                    }
-                }
-                (false, false)
-            })
-            .await
-            .unwrap_or(false);
-        if updated {
-            cur_count += 1;
-            cur_bw += bw;
-            reconnected.push((bid, did, tid));
+    let mut errors_py: Vec<(PyRep, PyRep)> = Vec::new();
+    for (k, v) in [
+        ("OutOfRange", outcome.out_of_range),
+        ("MaxDronesExceeded", outcome.max_drones_exceeded),
+        ("InsufficientBandwidth", outcome.insufficient_bandwidth),
+    ] {
+        if !v.is_empty() {
+            errors_py.push((
+                PyRep::String(k.into()),
+                PyRep::List(v.into_iter().map(PyRep::Integer).collect()),
+            ));
         }
     }
-
-    super::drone_reconnect_finish::finish_reconnect_drones(ctx, &sys_handle, char_id, ship_id, &reconnected)
-        .await;
-
-    let errors_py: Vec<(PyRep, PyRep)> = errors
-        .into_iter()
-        .map(|(k, v)| (PyRep::String(k), PyRep::List(v.into_iter().map(PyRep::Integer).collect())))
-        .collect();
     Ok(PyRep::Dict(errors_py))
 }
 

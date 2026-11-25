@@ -1440,6 +1440,21 @@ pub async fn handle_npcs_drones(
                     .collect();
                 res_ids = reserve_outcome.reserved_ids;
             }
+            struct DroneLaunchReserveGuard<'a> {
+                sys_handle: &'a crate::system_actor::SystemHandle,
+                res_ids: Vec<i64>,
+            }
+            impl Drop for DroneLaunchReserveGuard<'_> {
+                fn drop(&mut self) {
+                    if !self.res_ids.is_empty() {
+                        self.sys_handle.try_rollback_drone_launches(std::mem::take(&mut self.res_ids));
+                    }
+                }
+            }
+            let mut launch_reserve_guard = DroneLaunchReserveGuard {
+                sys_handle: &sys_handle,
+                res_ids: res_ids.clone(),
+            };
 
             let db_launch = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&char_id) {
@@ -1509,7 +1524,8 @@ pub async fn handle_npcs_drones(
             let committed_launches = match db_launch {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = sys_handle.finalize_drone_launches(Vec::new(), res_ids).await;
+                    let rollback_ids = std::mem::take(&mut launch_reserve_guard.res_ids);
+                    let _ = sys_handle.finalize_drone_launches(Vec::new(), rollback_ids).await;
                     return Some(Err(e));
                 }
             };
@@ -1524,6 +1540,7 @@ pub async fn handle_npcs_drones(
             let _ = sys_handle
                 .finalize_drone_launches(launch_mappings, Vec::new())
                 .await;
+            launch_reserve_guard.res_ids.clear();
 
             let mut launched_ball_ids = Vec::with_capacity(prepared_drones.len());
             let mut launched_by_source: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -1737,7 +1754,10 @@ pub async fn handle_npcs_drones(
                 }
                 let target_bid = d.ball_id;
                 let updated = sys_handle
-                    .mutate_active_drones(move |drones, _, _| {
+                    .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                        if claimed.contains_key(&target_bid) {
+                            return (false, false);
+                        }
                         let Some(st) = drones.get_mut(&target_bid) else {
                             return (false, false);
                         };
@@ -1945,7 +1965,10 @@ pub async fn handle_npcs_drones(
             for (d, drone_ball) in engaging_drones {
                 let target_bid = d.ball_id;
                 let claim_res = sys_handle
-                    .mutate_active_drones(move |drones, _, _| {
+                    .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                        if claimed.contains_key(&target_bid) {
+                            return (false, None);
+                        }
                         let Some(st) = drones.get_mut(&target_bid) else {
                             return (false, None);
                         };
@@ -2221,11 +2244,12 @@ pub async fn handle_npcs_drones(
             let is_assist = method == "CmdAssist";
             let drone_filter_for_mut = drone_filter;
             let (updated, drone_events) = sys_handle
-                .mutate_active_drones(move |drones, _, _| {
+                .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
                     let mut count = 0i64;
                     let mut events = Vec::new();
                     for d in drones.values_mut() {
                         if d.ball_id > 0
+                            && !claimed.contains_key(&d.ball_id)
                             && d.solar_system_id == sys_id
                             && !d.is_abandoned
                             && (d.parent_ship_id == ship_id || d.owner_char_id == char_id)

@@ -610,13 +610,37 @@ pub(crate) async fn handle_mine(
                 .unwrap_or(base_yield_m3);
             let d_units = ((d_yield_m3 / unit_vol).floor() as u64).max(1);
 
-            let drone_ball_id = handle
-                .view()
-                .active_drones_in_space
-                .values()
-                .find(|d| d.ball_id > 0 && (d.drone_item_id == d_item.item_id || d.ball_id == d_item.item_id))
-                .map(|d| d.ball_id)
-                .unwrap_or(d_item.item_id);
+            let target_item_id = d_item.item_id;
+            let matched_ball_id = handle
+                .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                    let Some(bid) = drones.iter().find_map(|(&bid, d)| {
+                        (d.ball_id > 0
+                            && !d.is_abandoned
+                            && d.solar_system_id == sys_id
+                            && d.parent_ship_id == ship_id
+                            && d.owner_char_id == char_id
+                            && (d.drone_item_id == target_item_id || d.ball_id == target_item_id))
+                            .then_some(bid)
+                    }) else {
+                        return (false, None);
+                    };
+                    if claimed.contains_key(&bid) {
+                        return (false, None);
+                    }
+                    if let Some(d) = drones.get_mut(&bid) {
+                        d.activity_state = 2;
+                        d.target_id = Some(asteroid_id);
+                        (true, Some(bid))
+                    } else {
+                        (false, None)
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
+            let Some(drone_ball_id) = matched_ball_id else {
+                continue;
+            };
 
             let _ = handle
                 .emit_destiny_event(
@@ -631,18 +655,6 @@ pub(crate) async fn handle_mine(
                         target_id: Some(asteroid_id),
                     },
                 )
-                .await;
-
-            let _ = handle
-                .mutate_active_drones(move |drones, _, _| {
-                    if let Some(d) = drones.get_mut(&drone_ball_id) {
-                        d.activity_state = 2;
-                        d.target_id = Some(asteroid_id);
-                        (drone_ball_id > 0, ())
-                    } else {
-                        (false, ())
-                    }
-                })
                 .await;
             let _ = handle
                 .upsert_drone_miner(crate::system_actor::DroneMiningState {

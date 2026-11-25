@@ -519,6 +519,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::UpsertActiveDrones { .. } => "UpsertActiveDrones",
             SystemCommand::ReserveDroneLaunches { .. } => "ReserveDroneLaunches",
             SystemCommand::FinalizeDroneLaunches { .. } => "FinalizeDroneLaunches",
+            SystemCommand::ReconnectDrones { .. } => "ReconnectDrones",
             SystemCommand::MutateActiveDrones { .. } => "MutateActiveDrones",
             SystemCommand::MutateActiveDronesWithClaims { .. } => "MutateActiveDronesWithClaims",
             SystemCommand::ScoopDroneClaimOp { .. } => "ScoopDroneClaimOp",
@@ -923,6 +924,16 @@ fn system_command_all_variants_construct_and_match() {
             rollback_res_ids: Vec::new(),
             reply: oneshot::channel().0,
         },
+        SystemCommand::ReconnectDrones {
+            req: crate::system_actor::ReconnectDronesReq {
+                char_id: 1,
+                ship_id: 2,
+                max_drones_allowed: 1,
+                max_bandwidth: 5.0,
+                target_ids: Vec::new(),
+            },
+            reply: oneshot::channel().0,
+        },
         SystemCommand::MutateActiveDrones {
             op: Box::new(|_, _, _| false),
             reply: oneshot::channel().0,
@@ -947,7 +958,7 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 123);
+    assert_eq!(tags.len(), 124);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -979,12 +990,13 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[115], "UpsertActiveDrones");
     assert_eq!(tags[116], "ReserveDroneLaunches");
     assert_eq!(tags[117], "FinalizeDroneLaunches");
-    assert_eq!(tags[118], "MutateActiveDrones");
-    assert_eq!(tags[119], "MutateActiveDronesWithClaims");
-    assert_eq!(tags[120], "ScoopDroneClaimOp");
-    assert_eq!(tags[121], "ShutdownActor");
+    assert_eq!(tags[118], "ReconnectDrones");
+    assert_eq!(tags[119], "MutateActiveDrones");
+    assert_eq!(tags[120], "MutateActiveDronesWithClaims");
+    assert_eq!(tags[121], "ScoopDroneClaimOp");
+    assert_eq!(tags[122], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[122], "TestAccess");
+    assert_eq!(tags[123], "TestAccess");
 }
 
 #[test]
