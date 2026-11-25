@@ -1019,6 +1019,7 @@ fn system_command_all_variants_construct_and_match() {
             now_unix_f64: 1.0,
             tidi_factor: 1.0,
             has_tidi_history: false,
+            force_persist: false,
             reply: oneshot::channel().0,
         },
         SystemCommand::SnapshotModuleCooldownCheckpoint {

@@ -303,13 +303,6 @@ pub(in crate::system_actor) fn apply_destiny_event_in_actor(
                             is_interactive,
                         },
                     );
-                    ballpark.emit_event(
-                        scope,
-                        DestinyEvent::SetBallInteractive {
-                            ball_id: id,
-                            is_interactive,
-                        },
-                    );
                 }
             }
             DestinyEvent::SetBallRadius {
@@ -404,6 +397,24 @@ pub(in crate::system_actor) fn apply_destiny_event_in_actor(
         }
     }
     known
+}
+
+#[cfg(test)]
+mod set_ball_interactive_tests {
+    use super::*;
+
+    #[test]
+    fn set_ball_interactive_unapplied_ball_emits_single_event() {
+        let mut bp = Ballpark::new(30_000_142);
+        bp.add_ball(Ball {
+            id: 1001, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 100.0,
+            inertia: 1.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        });
+        assert!(apply_destiny_event_in_actor(&mut bp, 1001, eve_destiny::DestinyEvent::SetBallInteractive { ball_id: 2002, is_interactive: true }));
+        let count = bp.pending_events.iter().filter(|ev| matches!(ev, eve_destiny::DestinyEvent::SetBallInteractive { ball_id: 2002, is_interactive: true })).count();
+        assert_eq!(count, 1);
+        assert_eq!(bp.ball_interactive_overrides.get(&2002), Some(&true));
+    }
 }
 
 #[cfg(test)]

@@ -1824,6 +1824,7 @@ pub enum SystemCommand {
         now_unix_f64: f64,
         tidi_factor: f64,
         has_tidi_history: bool,
+        force_persist: bool,
         reply: oneshot::Sender<Result<Option<super::ModuleCooldownPersistPayload>, String>>,
     },
     SnapshotModuleCooldownCheckpoint {

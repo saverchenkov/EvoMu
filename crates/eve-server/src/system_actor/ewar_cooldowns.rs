@@ -192,6 +192,71 @@ pub(in crate::system_actor) fn active_sink_hook(
         .or_else(|| post_hook.map(|(paired_raw, _)| Arc::clone(paired_raw)))
 }
 
+pub(in crate::system_actor) fn read_tick_deactivation_hooks(
+    raw_lock: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    post_lock: &Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
+) -> (Option<ModuleDeactivationHook>, Option<PairedModuleDeactivationPostUnlockHook>, Option<ModuleDeactivationHook>) {
+    let (raw_hook, post_hook) = read_deactivation_hooks(raw_lock, post_lock);
+    let sink_hook = active_sink_hook(raw_hook.as_ref(), post_hook.as_ref());
+    (raw_hook, post_hook, sink_hook)
+}
+
+pub(crate) fn run_staged_deactivation_hooks(
+    ops: super::post_unlock::PostUnlockOps,
+    hook_opt: Option<&ModuleDeactivationHook>,
+) {
+    let Some(hook) = hook_opt else { return };
+    for intent in ops.intents {
+        if let super::post_unlock::PostUnlockIntent::DeactivationHook(h) = intent {
+            if let Some(cid) = h.char_id.or(h.fallback_owner_id) { hook(h.solar_system_id, cid, &h.cycle); }
+        }
+    }
+}
+
+/// Updates TiDi history, advances per-system `sim_elapsed_secs`, and prunes expired
+/// actor cooldowns at tick start, returning the effective simulated `dt` (`cycles.rs` helper).
+pub(in crate::system_actor) fn prepare_tick_cooldowns_in_actor(
+    handle: &SystemHandle, st: &mut SystemActorState, dt: f64, tidi: f64,
+) -> f64 {
+    if tidi < 0.999_999 {
+        handle.cooldown_persist_gate.mark_tidi_history();
+        st.has_tidi_history = true;
+    } else if handle.cooldown_persist_gate.has_tidi_history() {
+        st.has_tidi_history = true;
+    }
+    let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { 0.0 };
+    if dt_sim > 0.0 {
+        st.sim_elapsed_secs += dt_sim;
+        handle.sim_elapsed_secs_bits.store(st.sim_elapsed_secs.to_bits(), std::sync::atomic::Ordering::Release);
+    }
+    let now_unix_f64 = st.db_opt.as_ref().map(|db| db.clock().now_unix_secs() as f64).unwrap_or(0.0);
+    if !st.module_cooldowns.reactivation_cooldowns.is_empty()
+        && prune_expired_module_cooldowns_in_state(
+            &mut st.module_cooldowns, handle.solar_system_id, now_unix_f64,
+            st.sim_elapsed_secs, tidi, st.has_tidi_history || tidi < 0.999_999,
+        )
+    {
+        st.module_cooldown_checkpoint_dirty = true;
+        st.module_cooldown_checkpoint_seq = st.module_cooldown_checkpoint_seq.saturating_add(1);
+    }
+    dt_sim
+}
+
+pub(in crate::system_actor) fn record_auto_reload_deadlines_from_actions(
+    pending_cycle_actions: &[super::PendingCycleAction], sim_elapsed_secs: f64,
+    module_cooldowns: &mut ActorModuleCooldownState,
+) {
+    for action in pending_cycle_actions {
+        if let super::PendingCycleAction::AutoReloadStarted { module_ids, sim_deadline_s, .. } = action {
+            for &mid in module_ids {
+                module_cooldowns.reload_sim_deadlines.insert(mid, super::ModuleReloadSimDeadline {
+                    sim_start_s: sim_elapsed_secs, sim_deadline_s: *sim_deadline_s,
+                });
+            }
+        }
+    }
+}
+
 fn resolve_removed_cycle_char_id(
     char_id_opt: Option<CharacterId>,
     ship_id: eve_destiny::BallId,
@@ -508,44 +573,21 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::PruneExpiredModuleCooldowns {
-            now_unix_f64,
-            tidi_factor,
-            has_tidi_history,
-            reply,
-        } => {
+        SystemCommand::PruneExpiredModuleCooldowns { now_unix_f64, tidi_factor, has_tidi_history, force_persist, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
-            let res = prune_expired_module_cooldowns_in_actor(
-                &mut ctx,
-                now_unix_f64,
-                tidi_factor,
-                has_tidi_history,
-            );
+            let res = prune_expired_module_cooldowns_in_actor(&mut ctx, now_unix_f64, tidi_factor, has_tidi_history, force_persist);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::SnapshotModuleCooldownCheckpoint {
-            only_if_dirty,
-            reply,
-        } => {
+        SystemCommand::SnapshotModuleCooldownCheckpoint { only_if_dirty, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = snapshot_module_cooldown_checkpoint_in_actor(&mut ctx, only_if_dirty);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::RecordModuleReloadSimDeadlines {
-            module_ids,
-            sim_start_s,
-            sim_deadline_s,
-            reply,
-        } => {
+        SystemCommand::RecordModuleReloadSimDeadlines { module_ids, sim_start_s, sim_deadline_s, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
-            let res = record_module_reload_sim_deadlines_in_actor(
-                &mut ctx,
-                module_ids,
-                sim_start_s,
-                sim_deadline_s,
-            );
+            let res = record_module_reload_sim_deadlines_in_actor(&mut ctx, module_ids, sim_start_s, sim_deadline_s);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -559,111 +601,36 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lock-free SystemView readers
-// ---------------------------------------------------------------------------
-
 impl SystemView {
-    pub fn projected_ewar_for(&self, target_ship_id: i64) -> Option<&[eve_dogma::ProjectedEwarEffect]> {
-        self.ewar.projected_ewar.get(&target_ship_id).map(Vec::as_slice)
-    }
-
-    pub fn projected_ewar_source(&self, source_module_id: i64) -> Option<i64> {
-        self.ewar.projected_ewar_sources.get(&source_module_id).copied()
-    }
-
-    pub fn active_ewar_starts_for(&self, ship_id: i64, module_id: i64) -> Option<&[(i64, &'static str)]> {
-        self.ewar
-            .active_ewar_starts
-            .get(&(ship_id, module_id))
-            .map(Vec::as_slice)
-    }
-
-    pub fn module_reactivation_cooldown(&self, key: &(i64, i64, u32)) -> Option<ModuleCooldownEntry> {
-        self.module_cooldowns.reactivation_cooldowns.get(key).copied()
-    }
-
-    pub fn module_reload_sim_deadline(&self, module_id: i64) -> Option<ModuleReloadSimDeadline> {
-        self.module_cooldowns.reload_sim_deadlines.get(&module_id).copied()
-    }
+    pub fn projected_ewar_for(&self, target_ship_id: i64) -> Option<&[eve_dogma::ProjectedEwarEffect]> { self.ewar.projected_ewar.get(&target_ship_id).map(Vec::as_slice) }
+    pub fn projected_ewar_source(&self, source_module_id: i64) -> Option<i64> { self.ewar.projected_ewar_sources.get(&source_module_id).copied() }
+    pub fn active_ewar_starts_for(&self, ship_id: i64, module_id: i64) -> Option<&[(i64, &'static str)]> { self.ewar.active_ewar_starts.get(&(ship_id, module_id)).map(Vec::as_slice) }
+    pub fn module_reactivation_cooldown(&self, key: &(i64, i64, u32)) -> Option<ModuleCooldownEntry> { self.module_cooldowns.reactivation_cooldowns.get(key).copied() }
+    pub fn module_reload_sim_deadline(&self, module_id: i64) -> Option<ModuleReloadSimDeadline> { self.module_cooldowns.reload_sim_deadlines.get(&module_id).copied() }
 }
-
-// ---------------------------------------------------------------------------
-// SystemHandle async / sync / post-unlock APIs
-// ---------------------------------------------------------------------------
 
 impl SystemHandle {
     /// Reads the latest projected EWAR effects targeting `target_ship_id` lock-free from [`SystemView`].
-    pub fn projected_ewar_for(&self, target_ship_id: i64) -> Vec<eve_dogma::ProjectedEwarEffect> {
-        self.view()
-            .ewar
-            .projected_ewar
-            .get(&target_ship_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
+    pub fn projected_ewar_for(&self, target_ship_id: i64) -> Vec<eve_dogma::ProjectedEwarEffect> { self.view().ewar.projected_ewar.get(&target_ship_id).cloned().unwrap_or_default() }
     /// Reads the published `ActorEwarState` snapshot lock-free from [`SystemView`].
-    pub fn ewar_state_snapshot(&self) -> ActorEwarState {
-        self.view().ewar.clone()
-    }
-
+    pub fn ewar_state_snapshot(&self) -> ActorEwarState { self.view().ewar.clone() }
     /// Reads the published module reactivation cooldown map lock-free from [`SystemView`].
-    pub fn module_cooldowns_snapshot(&self) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
-        self.view().module_cooldowns.reactivation_cooldowns.clone()
-    }
-
-    pub fn module_reactivation_cooldown(&self, key: &(i64, i64, u32)) -> Option<ModuleCooldownEntry> {
-        self.view().module_reactivation_cooldown(key)
-    }
+    pub fn module_cooldowns_snapshot(&self) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> { self.view().module_cooldowns.reactivation_cooldowns.clone() }
+    pub fn module_reactivation_cooldown(&self, key: &(i64, i64, u32)) -> Option<ModuleCooldownEntry> { self.view().module_reactivation_cooldown(key) }
 
     /// Upserts projected EWAR onto `target_ship_id` inside this solar system actor (`#1541`).
-    pub async fn upsert_projected_ewar(
-        &self,
-        source_ship_id: i64,
-        target_ship_id: i64,
-        effect: eve_dogma::ProjectedEwarEffect,
-    ) -> Result<(), String> {
+    pub async fn upsert_projected_ewar(&self, source_ship_id: i64, target_ship_id: i64, effect: eve_dogma::ProjectedEwarEffect) -> Result<(), String> {
         call_actor_result_with_deadline(self, "UpsertProjectedEwar", ACTOR_CMD_TIMEOUT, |reply| {
-            SystemCommand::UpsertProjectedEwar {
-                source_ship_id,
-                target_ship_id,
-                effect,
-                reply,
-            }
-        })
-        .await
+            SystemCommand::UpsertProjectedEwar { source_ship_id, target_ship_id, effect, reply }
+        }).await
     }
 
     /// Synchronous bridge for [`Self::upsert_projected_ewar`].
-    pub fn upsert_projected_ewar_sync(
-        &self,
-        source_ship_id: i64,
-        target_ship_id: i64,
-        effect: eve_dogma::ProjectedEwarEffect,
-    ) -> Result<(), String> {
+    pub fn upsert_projected_ewar_sync(&self, source_ship_id: i64, target_ship_id: i64, effect: eve_dogma::ProjectedEwarEffect) -> Result<(), String> {
         dispatch_actor_sync_with_deadline(
-            self,
-            "UpsertProjectedEwar",
-            ACTOR_CMD_TIMEOUT,
-            (source_ship_id, target_ship_id, effect),
-            |(source_ship_id, target_ship_id, effect), reply| {
-                SystemCommand::UpsertProjectedEwar {
-                    source_ship_id,
-                    target_ship_id,
-                    effect,
-                    reply,
-                }
-            },
-            |ctx, (source_ship_id, target_ship_id, effect)| {
-                upsert_projected_ewar_in_state(
-                    &mut ctx.actor_st.ewar_state,
-                    source_ship_id,
-                    target_ship_id,
-                    effect,
-                );
-                Ok(())
-            },
+            self, "UpsertProjectedEwar", ACTOR_CMD_TIMEOUT, (source_ship_id, target_ship_id, effect),
+            |(source_ship_id, target_ship_id, effect), reply| SystemCommand::UpsertProjectedEwar { source_ship_id, target_ship_id, effect, reply },
+            |ctx, (s, t, e)| { upsert_projected_ewar_in_state(&mut ctx.actor_st.ewar_state, s, t, e); Ok(()) },
         )
     }
 
@@ -992,37 +959,18 @@ impl SystemHandle {
     }
 
     pub fn prune_expired_module_cooldowns_sync(
-        &self,
-        now_unix_f64: f64,
-        tidi_factor: f64,
-        has_tidi_history: bool,
+        &self, now_unix_f64: f64, tidi_factor: f64, has_tidi_history: bool, force_persist: bool,
     ) -> Result<bool, String> {
         let payload_opt = dispatch_actor_sync_with_deadline(
-            self,
-            "PruneExpiredModuleCooldowns",
-            ACTOR_CMD_TIMEOUT,
-            (now_unix_f64, tidi_factor, has_tidi_history),
-            |(now_unix_f64, tidi_factor, has_tidi_history), reply| {
-                SystemCommand::PruneExpiredModuleCooldowns {
-                    now_unix_f64,
-                    tidi_factor,
-                    has_tidi_history,
-                    reply,
-                }
+            self, "PruneExpiredModuleCooldowns", ACTOR_CMD_TIMEOUT,
+            (now_unix_f64, tidi_factor, has_tidi_history, force_persist),
+            |(now_unix_f64, tidi_factor, has_tidi_history, force_persist), reply| {
+                SystemCommand::PruneExpiredModuleCooldowns { now_unix_f64, tidi_factor, has_tidi_history, force_persist, reply }
             },
-            |ctx, (now_unix_f64, tidi_factor, has_tidi_history)| {
-                prune_expired_module_cooldowns_in_actor(
-                    ctx,
-                    now_unix_f64,
-                    tidi_factor,
-                    has_tidi_history,
-                )
-            },
+            |ctx, (n, t, h, f)| prune_expired_module_cooldowns_in_actor(ctx, n, t, h, f),
         )?;
         let pruned = payload_opt.is_some();
-        if let Some(payload) = payload_opt {
-            self.persist_cooldown_payload(payload);
-        }
+        if let Some(payload) = payload_opt { self.persist_cooldown_payload(payload); }
         Ok(pruned)
     }
 
@@ -1030,41 +978,38 @@ impl SystemHandle {
     /// post-unlock (`#1541`). Called on eviction, runtime sync, and checkpoint flushes.
     pub async fn flush_module_cooldown_checkpoint(&self) -> Result<usize, String> {
         let payload_opt = call_actor_result_with_deadline(
-            self,
-            "SnapshotModuleCooldownCheckpoint",
-            ACTOR_CMD_TIMEOUT,
-            |reply| SystemCommand::SnapshotModuleCooldownCheckpoint {
-                only_if_dirty: true,
-                reply,
-            },
-        )
-        .await?;
-        let Some(payload) = payload_opt else {
-            return Ok(0);
-        };
+            self, "SnapshotModuleCooldownCheckpoint", ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::SnapshotModuleCooldownCheckpoint { only_if_dirty: true, reply },
+        ).await?;
+        let Some(payload) = payload_opt else { return Ok(0); };
         let count = payload.entries.len();
         self.persist_cooldown_payload_async(payload).await;
         Ok(count)
     }
 
-    pub fn flush_module_cooldown_checkpoint_sync(&self) -> Result<usize, String> {
+    fn flush_module_cooldown_checkpoint_sync_inner(&self, only_if_dirty: bool) -> Result<usize, String> {
         let payload_opt = dispatch_actor_sync_with_deadline(
-            self,
-            "SnapshotModuleCooldownCheckpoint",
-            ACTOR_CMD_TIMEOUT,
-            false,
-            |only_if_dirty, reply| SystemCommand::SnapshotModuleCooldownCheckpoint {
-                only_if_dirty,
-                reply,
-            },
+            self, "SnapshotModuleCooldownCheckpoint", ACTOR_CMD_TIMEOUT, only_if_dirty,
+            |only_if_dirty, reply| SystemCommand::SnapshotModuleCooldownCheckpoint { only_if_dirty, reply },
             snapshot_module_cooldown_checkpoint_in_actor,
         )?;
-        let Some(payload) = payload_opt else {
-            return Ok(0);
-        };
+        let Some(payload) = payload_opt else { return Ok(0); };
         let count = payload.entries.len();
         self.persist_cooldown_payload(payload);
         Ok(count)
+    }
+
+    pub fn flush_module_cooldown_checkpoint_sync(&self) -> Result<usize, String> { self.flush_module_cooldown_checkpoint_sync_inner(false) }
+    pub fn flush_dirty_module_cooldown_checkpoint_sync(&self) -> Result<usize, String> { self.flush_module_cooldown_checkpoint_sync_inner(true) }
+
+    pub(in crate::system_actor) fn finalize_tick_post_unlock_deactivations(
+        &self, actor_st: &mut SystemActorState, ops: &mut super::post_unlock::PostUnlockOps,
+        raw_hook: Option<ModuleDeactivationHook>, post_hook: Option<PairedModuleDeactivationPostUnlockHook>, tidi_factor: f64,
+    ) -> bool {
+        finalize_post_unlock_ops_deactivations_in_actor(
+            self.solar_system_id, actor_st, ops, raw_hook, post_hook,
+            &self.cooldown_persist_gate, Some(&self.ballpark), Some(&self.actor_state), tidi_factor,
+        )
     }
 
     pub fn record_module_reload_sim_deadlines_sync(

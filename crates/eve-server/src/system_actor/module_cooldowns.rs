@@ -1097,7 +1097,7 @@ fn commit_migrated_cooldown_map_with_gate(
                 drop(cg);
                 let Some(handle) = systems.get_handle(sys_id) else { std::thread::yield_now(); continue };
                 if let Some((p_now, p_tidi, p_hist)) = prune_cfg {
-                    if handle.prune_expired_module_cooldowns_sync(p_now, p_tidi, p_hist).is_err() { std::thread::yield_now(); continue; }
+                    if handle.prune_expired_module_cooldowns_sync(p_now, p_tidi, p_hist, migrated.is_empty()).is_err() { std::thread::yield_now(); continue; }
                 }
                 for (&(ship_id, module_id, module_type_id), &entry) in &migrated {
                     let rem = remaining_cooldown_secs_with_tidi(&entry, eval_now, Some(sys_id), 0.0, eval_tidi, eval_hist);
@@ -1460,11 +1460,21 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
     if let Some((exp_epoch, exp_last)) = expected_gate_token {
         let gate = ctx.cooldown_persist_gate.ok_or_else(|| "missing cooldown persist gate".to_string())?;
         let mut cg = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if gate.current_epoch() != exp_epoch || cg.last_persisted != exp_last {
+        let uncommitted_seq = match cg.last_persisted {
+            Some((ep, seq)) => ep != exp_epoch || ctx.actor_st.module_cooldown_checkpoint_seq > seq,
+            None => ctx.actor_st.module_cooldown_checkpoint_seq > 0,
+        };
+        if gate.current_epoch() != exp_epoch
+            || cg.last_persisted != exp_last
+            || ctx.actor_st.module_cooldown_checkpoint_dirty
+            || ctx.actor_st.module_cooldowns.boot_db_pending_merge
+            || uncommitted_seq
+        {
             return Err("STALE_REHYDRATE_TOKEN".to_string());
         }
         let next_epoch = gate.bump_epoch();
-        cg.last_persisted = Some((next_epoch, 0));
+        let next_seq = ctx.actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
+        cg.last_persisted = Some((next_epoch, next_seq));
         ctx.actor_st.module_cooldown_persist_epoch = next_epoch;
         if gate.has_tidi_history() || ctx.tidi_factor < 0.999_999 {
             ctx.actor_st.has_tidi_history = true;
@@ -1474,6 +1484,10 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
             entry.recorded_sys_sim_s = cur_sim_s;
             entry.solar_system_id.get_or_insert(ctx.solar_system_id);
         }
+        ctx.actor_st.module_cooldown_checkpoint_seq = next_seq;
+    } else {
+        ctx.actor_st.module_cooldown_checkpoint_seq =
+            ctx.actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
     }
     let mc = &mut ctx.actor_st.module_cooldowns;
     mc.reactivation_cooldowns = cooldowns;
@@ -1482,7 +1496,6 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
     mc.pending_db_cleared_ships.clear();
     mc.pending_db_removed_keys.clear();
     ctx.actor_st.module_cooldown_checkpoint_dirty = false;
-    ctx.actor_st.module_cooldown_checkpoint_seq = ctx.actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
     Ok(())
 }
 
@@ -1491,6 +1504,7 @@ pub(in crate::system_actor) fn prune_expired_module_cooldowns_in_actor(
     now_unix_f64: f64,
     tidi_factor: f64,
     has_tidi_history: bool,
+    force_persist: bool,
 ) -> Result<Option<ModuleCooldownPersistPayload>, String> {
     let eff_tidi = if ctx.tidi_factor < 0.999_999 { ctx.tidi_factor } else { tidi_factor };
     let eff_hist = ctx.actor_st.has_tidi_history
@@ -1500,10 +1514,16 @@ pub(in crate::system_actor) fn prune_expired_module_cooldowns_in_actor(
     if eff_hist {
         ctx.actor_st.has_tidi_history = true;
     }
-    if !prune_expired_module_cooldowns_in_state(
+    if force_persist {
+        for entry in ctx.actor_st.module_cooldowns.reactivation_cooldowns.values_mut() {
+            entry.solar_system_id.get_or_insert(ctx.solar_system_id);
+        }
+    }
+    let pruned = prune_expired_module_cooldowns_in_state(
         &mut ctx.actor_st.module_cooldowns, ctx.solar_system_id, now_unix_f64,
         ctx.actor_st.sim_elapsed_secs, eff_tidi, eff_hist,
-    ) {
+    );
+    if !pruned && !force_persist {
         return Ok(None);
     }
     ctx.actor_st.module_cooldown_checkpoint_dirty = true;
@@ -1515,7 +1535,19 @@ pub(in crate::system_actor) fn snapshot_module_cooldown_checkpoint_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     only_if_dirty: bool,
 ) -> Result<Option<ModuleCooldownPersistPayload>, String> {
-    if only_if_dirty && !ctx.actor_st.module_cooldown_checkpoint_dirty {
+    let has_uncommitted_seq = ctx.cooldown_persist_gate.is_some_and(|gate| {
+        let cg = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let epoch = gate.current_epoch();
+        match cg.last_persisted {
+            Some((ep, seq)) => ep != epoch || ctx.actor_st.module_cooldown_checkpoint_seq > seq,
+            None => ctx.actor_st.module_cooldown_checkpoint_seq > 0,
+        }
+    });
+    if only_if_dirty
+        && !ctx.actor_st.module_cooldown_checkpoint_dirty
+        && !ctx.actor_st.module_cooldowns.boot_db_pending_merge
+        && !has_uncommitted_seq
+    {
         return Ok(None);
     }
     if !only_if_dirty {
@@ -1752,6 +1784,7 @@ impl SystemRegistry {
                         *now_unix_f64,
                         *tidi_factor,
                         *has_tidi_history,
+                        false,
                     ),
                     PendingCooldownTransition::ClearAll => {
                         handle.clear_all_module_cooldowns_sync().map(|()| true)
@@ -1980,6 +2013,17 @@ impl SystemRegistry {
         };
         for (sys_id, handle) in self.active_system_handles() {
             for _ in 0..8 {
+                for spin in 0..512 {
+                    if !handle.has_in_flight_post_unlock() {
+                        break;
+                    }
+                    if spin < 64 {
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+                let _ = handle.flush_dirty_module_cooldown_checkpoint_sync();
                 let (tidi_factor, has_tidi_history) =
                     self.resolve_effective_tidi_mode(sys_id, true);
                 let gate = self.cooldown_persist_gate(sys_id);

@@ -2087,3 +2087,57 @@ async fn early_loading_transitions_before_prepare_survive_publish_and_abort_flus
     ctx.purge_module_cooldown_other_systems(sys_a, s_u, m_u, cloak_tid);
     assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, CLUSTER_SYSTEM_ID).is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observatory_decloak_hook_records_cloak_cooldown_and_emits_on_godma_ship_effect_off_lock() {
+    use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord, GROUP_MOBILE_OBSERVATORY, TYPE_MOBILE_OBSERVATORY};
+
+    let ctx = test_ctx();
+    ctx.wire_module_deactivation_hook();
+    let (sys_id, char_id) = (30_000_142_u32, 90_000_001_i64);
+    let (ship_id, cloak_id, obs_id) = (100_996_001_i64, 100_996_002_i64, 100_996_003_i64);
+    let now = ctx.now_unix_secs();
+    let cloak_tid = ctx.sde.types.values()
+        .find(|t| t.group_id == 330 && t.default_attributes.get(&669).copied().is_some_and(|ms| ms > 0.0))
+        .map(|t| t.type_id).expect("SDE cloak type with attr 669");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None; ch.solar_system_id = sys_id; ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(ship_id, singleton_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None));
+        snap.items.insert(cloak_id, singleton_item(cloak_id, cloak_tid, char_id, ship_id, InventoryFlag::HiSlot0));
+        snap.items.insert(obs_id, singleton_item(obs_id, TYPE_MOBILE_OBSERVATORY, char_id, sys_id as i64, InventoryFlag::Hangar));
+        snap.module_active_states.insert(cloak_id);
+        write_deployable_state_snap(snap, |st| {
+            st.deployables.insert(obs_id, MobileDeployableRecord {
+                item_id: obs_id, type_id: TYPE_MOBILE_OBSERVATORY, group_id: GROUP_MOBILE_OBSERVATORY,
+                owner_id: char_id, solar_system_id: sys_id, anchor_start_unix: now.saturating_sub(1_000),
+                anchor_duration_secs: 60, anchor_completed: true, is_unanchored: false,
+                expires_at_unix: now + 3_600, last_interaction_unix: now, reinforced_until_unix: None,
+                last_ping_unix: None, position: [0.0, 0.0, 0.0], deployed_fleet_id: None,
+            });
+        });
+    });
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle.spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: ship_id, type_id: 587, position: glam::DVec3::new(1_000.0, 0.0, 0.0), velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState { is_cloaked: true, ..eve_destiny::CombatState::default() },
+        eve_destiny::SlimItemMeta { group_id: 25, category_id: 6, owner_id: char_id, char_id: Some(char_id), ..Default::default() },
+    ).await.expect("spawn cloaked ship");
+    ctx.pending_notifications.write().unwrap().clear();
+
+    // Seed 3 draws < 0.40 decloak chance and drives PostUnlockIntent::DeactivationHook off-lock.
+    handle.step_ext_deployables_sync(
+        Arc::clone(&ctx.sde), Arc::clone(&ctx.db), Arc::new(crate::rng::MechanicRng::seeded(3)), now,
+    ).expect("step_ext_deployables_sync");
+
+    assert!(!handle.has_active_non_gate_cloak_sync(ship_id) && !handle.view().is_ball_cloaked(ship_id));
+    assert!(handle.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).is_some_and(|e| e.delay_s > 0.0));
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&cloak_id)));
+}

@@ -1971,6 +1971,7 @@ impl SystemHandle {
             super::post_unlock::begin_tick_charge_reservations(
                 self.solar_system_id, &mut st, &self.completed_post_unlock_seq,
             );
+        let dt_sim = super::ewar_cooldowns::prepare_tick_cooldowns_in_actor(self, &mut st, dt, tidi);
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
@@ -1978,49 +1979,13 @@ impl SystemHandle {
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
             pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
             fit_projections, weapon_cycle_start_modules,
-            module_cooldowns, module_cooldown_checkpoint_dirty, module_cooldown_checkpoint_seq,
-            has_tidi_history, module_reload_sim_remaining,
+            module_cooldowns, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
             warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
             next_post_unlock_seq, post_unlock_shadows, ..
         } = &mut *st;
         let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
-        if tidi < 0.999_999 {
-            self.cooldown_persist_gate.mark_tidi_history();
-            *has_tidi_history = true;
-        } else if self.cooldown_persist_gate.has_tidi_history() {
-            *has_tidi_history = true;
-        }
-        let dt_sim = if dt > 0.0 && dt.is_finite() {
-            dt * tidi
-        } else {
-            0.0
-        };
-        if dt_sim > 0.0 {
-            *sim_elapsed_secs += dt_sim;
-            self.sim_elapsed_secs_bits.store(
-                sim_elapsed_secs.to_bits(),
-                std::sync::atomic::Ordering::Release,
-            );
-        }
-        let now_unix_f64 = db_opt
-            .as_ref()
-            .map(|db| db.clock().now_unix_secs() as f64)
-            .unwrap_or(0.0);
-        if !module_cooldowns.reactivation_cooldowns.is_empty()
-            && super::ewar_cooldowns::prune_expired_module_cooldowns_in_state(
-                module_cooldowns,
-                self.solar_system_id,
-                now_unix_f64,
-                *sim_elapsed_secs,
-                tidi,
-                *has_tidi_history || tidi < 0.999_999,
-            )
-        {
-            *module_cooldown_checkpoint_dirty = true;
-            *module_cooldown_checkpoint_seq = module_cooldown_checkpoint_seq.saturating_add(1);
-        }
         let dt = dt_sim;
         super::belts::respawn_due_asteroids_collecting(
             &mut bp,
@@ -2092,13 +2057,9 @@ impl SystemHandle {
             Some((&mut post_unlock_shadows.arena_hazard_ticks, next_pu_seq)), &mut post_unlock_ops,
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
-        let (raw_hook_tick, post_hook_tick) = super::ewar_cooldowns::read_deactivation_hooks(
+        let (raw_hook_tick, post_hook_tick, deact_hook_guard) = super::ewar_cooldowns::read_tick_deactivation_hooks(
             &self.module_deactivation_hook,
             &self.module_deactivation_post_unlock_hook,
-        );
-        let deact_hook_guard = super::ewar_cooldowns::active_sink_hook(
-            raw_hook_tick.as_ref(),
-            post_hook_tick.as_ref(),
         );
         for ev in &events {
             if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
@@ -2169,24 +2130,9 @@ impl SystemHandle {
             next_missile_ball_id,
             sde_opt,
         );
-        for action in pending_cycle_actions.iter() {
-            if let PendingCycleAction::AutoReloadStarted {
-                module_ids,
-                sim_deadline_s,
-                ..
-            } = action
-            {
-                for &mid in module_ids {
-                    module_cooldowns.reload_sim_deadlines.insert(
-                        mid,
-                        super::ModuleReloadSimDeadline {
-                            sim_start_s: *sim_elapsed_secs,
-                            sim_deadline_s: *sim_deadline_s,
-                        },
-                    );
-                }
-            }
-        }
+        super::ewar_cooldowns::record_auto_reload_deadlines_from_actions(
+            pending_cycle_actions, *sim_elapsed_secs, module_cooldowns,
+        );
         record_player_ship_capacitor_deltas(&bp, &pre_tick_caps, pending_cycle_actions);
         flush_pending_cycle_damage_notifications_with_ballpark(
             &bp,
@@ -2278,16 +2224,8 @@ impl SystemHandle {
         }
         let tick = bp.current_tick;
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
-        let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-            self.solar_system_id,
-            &mut st,
-            &mut post_unlock_ops,
-            raw_hook_tick.clone(),
-            post_hook_tick,
-            &self.cooldown_persist_gate,
-            Some(&self.ballpark),
-            Some(&self.actor_state),
-            tidi,
+        let _ = self.finalize_tick_post_unlock_deactivations(
+            &mut st, &mut post_unlock_ops, raw_hook_tick.clone(), post_hook_tick, tidi,
         );
         let ops_was_empty = post_unlock_ops.is_empty();
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);

@@ -430,3 +430,74 @@ async fn stopping_to_cold_with_empty_pending_bumps_epoch_and_rejects_stale_persi
     assert!(!persist_cooldown_payload_with_gate(jita, &reg.cooldown_persist_gate(jita), None, None, stale_payload));
     assert!(load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
 }
+
+fn seed_ships_in_db(db: &WorldRepository, sys: u32, ship_ids: &[i64]) {
+    db.with_mut_snapshot(|snap| {
+        for &s in ship_ids {
+            snap.items.insert(s, InventoryItemRecord {
+                item_id: s, type_id: 587, owner_id: 90_000_001, location_id: sys as i64,
+                flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+            });
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uncommitted_live_cooldown_and_in_flight_post_unlock_survive_rehydrate() {
+    let (reg, db, _sde) = test_registry_with_db();
+    let (jita, cloak_tid, now) = (30_000_142_u32, 11_370_u32, db.clock().now_unix_secs() as f64);
+    let (k_live, k_stale) = ((545_001_i64, 645_001_i64, cloak_tid), (545_002_i64, 645_002_i64, cloak_tid));
+    seed_ships_in_db(&db, jita, &[k_live.0, k_stale.0]);
+    let h = reg.get_or_spawn(jita);
+    reg.seed_cold_system_module_cooldown_in_db(&db, jita, k_stale, cd_entry(now, 10.0, jita, 0.0));
+    let _unsent = send_rec(&h, k_live, now, 35.0).await;
+    assert!(h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+
+    let stale_token = {
+        let gate = reg.cooldown_persist_gate(jita);
+        let cg = gate.inner.lock().unwrap();
+        (gate.current_epoch(), cg.last_persisted)
+    };
+    assert_eq!(h.replace_module_cooldowns_checked_sync(HashMap::new(), Some(stale_token)), Err("STALE_REHYDRATE_TOKEN".to_string()));
+    assert!(h.module_reactivation_cooldown(&k_live).is_some());
+
+    let in_flight = Arc::clone(&h.post_unlock_in_flight);
+    in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let reg_c = Arc::clone(&reg);
+    tokio::task::spawn_blocking(move || reg_c.rehydrate_active_system_cooldowns_from_db()).await.unwrap();
+    release.await.unwrap();
+
+    assert!(h.module_reactivation_cooldown(&k_live).is_some_and(|e| e.delay_s >= 34.0));
+    assert!(load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_live));
+    assert!(!h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_system_migration_prunes_stale_sqlite_rows_when_cluster_migrated_is_empty() {
+    let (reg, db, clock) = test_tidi_reg(1_750_330_000, None);
+    let (jita, cloak_tid, now) = (30_000_142_u32, 11_370_u32, clock.now_unix_secs() as f64);
+    let (s_live, s_exp, m_live, m_exp) = (546_001_i64, 546_002_i64, 646_001_i64, 646_002_i64);
+    seed_ships_in_db(&db, jita, &[s_live, s_exp]);
+    let h = reg.get_or_spawn(jita);
+    let live_entry = ModuleCooldownEntry { recorded_unix_f64: now, delay_s: 30.0, solar_system_id: None, recorded_sys_sim_s: 0.0 };
+    h.replace_module_cooldowns_sync(HashMap::from([((s_live, m_live, cloak_tid), live_entry)])).unwrap();
+    let stale_rows = vec![
+        (module_cooldown_checkpoint_key(s_live, m_live, cloak_tid), ((s_live, m_live, cloak_tid), live_entry)),
+        (module_cooldown_checkpoint_key(s_exp, m_exp, cloak_tid), ((s_exp, m_exp, cloak_tid), cd_entry(now - 50.0, 5.0, jita, 0.0))),
+    ];
+    db.with_sqlite_conn(|c| {
+        ensure_system_checkpoint_schema(c)?;
+        replace_system_checkpoints_for_kind(c, jita, KIND_MODULE_COOLDOWNS, &stale_rows, now as u64)
+    }).unwrap();
+    assert!(load_cold_system_module_cooldowns_from_db(&db, CLUSTER_SYSTEM_ID).is_empty());
+
+    migrate_and_prune_module_cooldowns_in_db(&reg, &db, now);
+
+    let after = load_cold_system_module_cooldowns_from_db(&db, jita);
+    assert!(!after.contains_key(&(s_exp, m_exp, cloak_tid)));
+    assert_eq!(after.get(&(s_live, m_live, cloak_tid)).and_then(|e| e.solar_system_id), Some(jita));
+}
