@@ -235,11 +235,12 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 .insert(sys_id, vec![(cid, 250_000.0, 1_700_008_000)]);
             cw.ess_main_bank_thefts
                 .insert(sys_id, vec![(cid, 500_000.0, 1_700_008_500)]);
+            cw.pending_bounty_ticks.insert((sys_id, cid), 125_000.0);
+            cw.bounty_tick_next_flush_unix
+                .insert((sys_id, cid), 1_700_001_200);
+            cw.record_destroyed_item_id(888_777_666);
         });
         with_mut_combat_ephemeral(&ctx, |st| {
-            st.pending_bounty_ticks.insert((sys_id, cid), 125_000.0);
-            st.bounty_tick_next_flush_unix
-                .insert((sys_id, cid), 1_700_001_200);
             st.crimewatch_timer_states
                 .insert(cid, (1, 0, 1, 0, 0));
             st.self_destruct_countdowns.insert(
@@ -426,16 +427,17 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 cw.ess_main_bank_thefts.get(&sys_id),
                 Some(&vec![(cid, 500_000.0, 1_700_008_500)])
             );
-        });
-        with_combat_ephemeral(&ctx2, |st| {
             assert_eq!(
-                st.pending_bounty_ticks.get(&(sys_id, cid)),
+                cw.pending_bounty_ticks.get(&(sys_id, cid)),
                 Some(&125_000.0)
             );
             assert_eq!(
-                st.bounty_tick_next_flush_unix.get(&(sys_id, cid)),
+                cw.bounty_tick_next_flush_unix.get(&(sys_id, cid)),
                 Some(&1_700_001_200)
             );
+            assert!(cw.is_recently_destroyed_item_id(888_777_666));
+        });
+        with_combat_ephemeral(&ctx2, |st| {
             assert_eq!(
                 st.crimewatch_timer_states.get(&cid),
                 Some(&(1, 0, 1, 0, 0))
@@ -546,6 +548,11 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         },
     );
     set_char_safety_level(&ctx, cid, SafetyLevel::Yellow);
+    db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, cid), 10_000.0);
+    });
     with_mut_combat_ephemeral(&ctx, |st| {
         st.drone_settings.insert(
             cid,
@@ -554,7 +561,6 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
                 focus_fire: true,
             },
         );
-        st.pending_bounty_ticks.insert((sys_id, cid), 10_000.0);
     });
     ctx.quasar_gateway
         .set_server_hijack_mode(false, None, None);
@@ -606,7 +612,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
                 focus_fire: false,
             },
         );
-        guard.pending_bounty_ticks.insert((sys_id, cid), 999_999.0);
+        guard.npc_timers.insert(cid, 999_999);
         guard
     };
     *ctx.quasar_gateway.server_hijack_state.write().unwrap() =
@@ -627,6 +633,9 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         snap.combat_crimewatch_state
             .safety_levels
             .insert(cid, SafetyLevel::Red as i32);
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, cid), 999_999.0);
         snap.combat_crimewatch_state.extended_runtime_json.clear();
         Err("forced_tx_abort".into())
     });
@@ -641,6 +650,14 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     ctx.quasar_gateway.rehydrate_all_from_db();
     ctx.rehydrate_runtime_from_db();
     assert_eq!(char_safety_level(&ctx, cid), Some(SafetyLevel::Yellow));
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.combat_crimewatch_state
+                .pending_bounty_ticks
+                .get(&(sys_id, cid)),
+            Some(&10_000.0)
+        );
+    });
     with_combat_ephemeral(&ctx, |st| {
         assert_eq!(
             st.drone_settings.get(&cid),
@@ -649,7 +666,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
                 focus_fire: true,
             })
         );
-        assert_eq!(st.pending_bounty_ticks.get(&(sys_id, cid)), Some(&10_000.0));
+        assert!(!st.npc_timers.contains_key(&cid));
     });
     let list_after_abort = ctx.quasar_gateway.handle_public_request(
         &q_sess,

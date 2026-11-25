@@ -9,7 +9,7 @@ use crate::bug_reporting::{
 };
 use crate::router::{ActiveFighterSquadron, ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::DroneSpaceState;
 use crate::services::drone_test_helpers;
 use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord};
 use crate::services::pve_special_sites::{with_abyssal_state, AbyssalTraceRecord};
@@ -519,9 +519,13 @@ async fn cluster_tick_expiry_sweeps_bounties_and_concord_arrival() {
     // Seed pending bounty tick + pending CONCORD arrival, advance past 5d so planetary launch, wreck, jetcan, MWD bubble, and deployable all decay
     let now_decay = base + 6 * 86_400;
     clock.advance_secs(6 * 86_400 - 15);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, char_id), 25_000.0);
-        rt.bounty_tick_next_flush_unix.insert((sys_id, char_id), now_decay);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, char_id), 25_000.0);
+        snap.combat_crimewatch_state
+            .bounty_tick_next_flush_unix
+            .insert((sys_id, char_id), now_decay);
     });
     tick_background_cluster(&ctx).await;
 

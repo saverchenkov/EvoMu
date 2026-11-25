@@ -1042,7 +1042,7 @@ use eve_proto::PyRep;
 use eve_server::combat::npc_ai::npc_test_helpers::{any_npc_entity, find_npc_entity_in_system};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    spawn_specialized_npc_entity, with_combat_runtime, with_mut_combat_runtime,
+    spawn_specialized_npc_entity, with_combat_runtime,
 };
 use eve_server::services::insurgency_services::{
     ACTIVE_DURATION_SECS, FORECASTING_DURATION_SECS, WINDDOWN_DURATION_SECS,
@@ -1067,9 +1067,9 @@ async fn measure_live_npc_kill_bounty_and_sec_gain(
         if let Some(it) = s.items.get_mut(&ship_id) {
             it.location_id = i64::from(sys_id);
         }
-    });
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.pending_bounty_ticks.remove(&(sys_id, cid));
+        s.combat_crimewatch_state
+            .pending_bounty_ticks
+            .remove(&(sys_id, cid));
     });
     boxed_place_ship_ball(ctx, sys_id, cid, ship_id, 22_456, pos).await;
     let npc_ball_id =
@@ -1101,7 +1101,13 @@ async fn measure_live_npc_kill_bounty_and_sec_gain(
     fast_forward_secs(ctx, 12);
     sys_h.step_manual(12.0).await.unwrap();
     assert!(sys_h.get_ball_snapshot(npc_ball_id).await.unwrap().is_none(), "NPC rat {npc_ball_id} must be destroyed by live turret cycles");
-    let bounty = with_combat_runtime(ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, cid)).copied().unwrap_or(0.0));
+    let bounty = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(sys_id, cid))
+            .copied()
+            .unwrap_or(0.0)
+    });
     let sec_gain = ctx.db.with_snapshot(|s| s.characters[&cid].security_status);
     assert!(bounty > 0.0 && sec_gain > 0.0);
     (bounty, sec_gain)

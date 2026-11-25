@@ -130,9 +130,10 @@ async fn handle_destroyed_dedup_wh_zero_bounty_and_wave_advancement_without_npc(
         .await;
     }
 
-    let has_pending = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.contains_key(&(sys_id, cid))
-            || rt.pending_bounty_ticks.contains_key(&(wh_sys, cid))
+    let has_pending = ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        cw.pending_bounty_ticks.contains_key(&(sys_id, cid))
+            || cw.pending_bounty_ticks.contains_key(&(wh_sys, cid))
     });
     assert!(!has_pending);
 }
@@ -146,13 +147,16 @@ async fn bounty_tick_tax_branches_overdue_guard_and_wreck_fallbacks() {
     let unknown_sys = 39_999_999_u32;
 
     // 1. tick_overdue_npc_bounty_payouts without started_unix uses now_unix fallback so delta=0 -> does not flush
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_tick_started_unix.clear();
-        rt.pending_bounty_ticks.insert((unknown_sys, cid), 50_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = &mut snap.combat_crimewatch_state;
+        cw.pending_bounty_tick_started_unix.clear();
+        cw.pending_bounty_ticks.insert((unknown_sys, cid), 50_000.0);
     });
     tick_overdue_npc_bounty_payouts(&ctx, ctx.now_unix() + 10_000);
-    let still_pending = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.contains_key(&(unknown_sys, cid))
+    let still_pending = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .contains_key(&(unknown_sys, cid))
     });
     assert!(still_pending);
 
@@ -166,9 +170,9 @@ async fn bounty_tick_tax_branches_overdue_guard_and_wreck_fallbacks() {
             ch.corporation_id = player_corp;
             ch.balance = IskCents(0);
         }
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((unknown_sys, cid), 100_000.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((unknown_sys, cid), 100_000.0);
     });
     let payout_unk = flush_npc_bounty_tick(&ctx, unknown_sys, cid, 0.0);
     assert!((payout_unk.pilot_isk - 100_000.0).abs() < 1e-3);
@@ -183,9 +187,9 @@ async fn bounty_tick_tax_branches_overdue_guard_and_wreck_fallbacks() {
             ch.corporation_id = npc_corp;
             ch.balance = IskCents(0);
         }
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((unknown_sys, cid), 200_000.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((unknown_sys, cid), 200_000.0);
     });
     let payout_npc = flush_npc_bounty_tick(&ctx, unknown_sys, cid, 0.11);
     assert!((payout_npc.pilot_isk - 178_000.0).abs() < 1e-3);

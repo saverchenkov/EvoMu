@@ -1581,8 +1581,10 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
 
     let sys_id = 30000142; // Jita (highsec)
     // Small bounty < 100k ISK: tax exempt threshold
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 50_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, PILOT_2), 50_000.0);
     });
     let small_tax = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(
         &ctx,
@@ -1594,8 +1596,10 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     assert_eq!(small_tax, 0.0, "Bounties under 100k ISK must be tax exempt in NPC corp");
 
     // Large bounty >= 100k ISK: 11% NPC corp tax applied
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, PILOT_2), 1_000_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, PILOT_2), 1_000_000.0);
     });
     let net_payout = eve_server::services::combat_npc_encounters::flush_npc_bounty_tick(
         &ctx,

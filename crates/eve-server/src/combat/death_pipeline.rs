@@ -1172,6 +1172,8 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
                 }
             }
         }
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(victim_ship_id);
         wtx.effects.on_commit(|_| {});
         Ok::<_, DeathTxErr>(DeathTxOutcome::Committed {
             payload: (
@@ -1273,9 +1275,6 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
         victim_ship_id,
     );
     crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, victim_ship_id);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.record_destroyed_item_id(victim_ship_id);
-    });
 
     // Commit ballpark state (remove destroyed ship ball, spawn wreck ball, spawn capsule/escape
     // ship ball, and queue incremental `RemoveBall` + `AddBalls2` handoff on `cid` without
@@ -1807,13 +1806,17 @@ pub fn on_ball_destroyed_sync(
     let removed_ext_npc = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.npc_entities.contains_key(&ball_id)
     }) {
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            let removed = rt.npc_entities.remove(&ball_id);
-            if removed.is_some() {
-                rt.record_destroyed_item_id(ball_id);
-            }
-            removed
-        })
+        crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+            &ctx.db,
+            &*ctx.combat_ephemeral,
+            |snap, rt| {
+                let removed = rt.npc_entities.remove(&ball_id);
+                if removed.is_some() {
+                    snap.combat_crimewatch_state.record_destroyed_item_id(ball_id);
+                }
+                removed
+            },
+        )
     } else {
         None
     };
@@ -2000,22 +2003,23 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
     sys_handle: &crate::system_actor::SystemHandle,
     ball_id: i64,
 ) -> bool {
-    let removed_drone = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        let d = rt.active_drones_in_space.remove(&ball_id);
-        if let Some(ref drone) = d {
-            rt.record_destroyed_item_id(drone.ball_id);
-            rt.record_destroyed_item_id(drone.drone_item_id);
-        }
-        d
-    });
-    let Some(d) = removed_drone else {
+    let Some(d) = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| {
+            let d = rt.active_drones_in_space.remove(&ball_id)?;
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(d.ball_id);
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(d.drone_item_id);
+            snap.items.remove(&d.drone_item_id);
+            snap.item_positions.remove(&d.ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+            Some(d)
+        },
+    ) else {
         return false;
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&d.drone_item_id);
-        snap.item_positions.remove(&d.ball_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
-    });
     let _ = sys_handle.clear_drone_runtime_sync(ball_id);
     sys_handle.try_remove_ball(ball_id);
     if d.owner_char_id > 0 {
@@ -2071,11 +2075,11 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
         if let Ok(mut loads) = ctx.fighter_tube_loads.write() {
             loads.remove(&(f.parent_ship_id, f.tube_index));
         }
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.record_destroyed_item_id(f.ball_id);
-            rt.record_destroyed_item_id(f.item_id);
-        });
         ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(f.ball_id);
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(f.item_id);
             snap.items.remove(&f.item_id);
             snap.item_positions.remove(&f.ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&f.ball_id);
@@ -2090,10 +2094,9 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
             .any(|v| v.iter().any(|o| o.office_id == ball_id))
     });
     if is_poco {
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.record_destroyed_item_id(ball_id);
-        });
         ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(ball_id);
             for v in snap.corp_customs_offices.values_mut() {
                 v.retain(|o| o.office_id != ball_id);
             }
@@ -2127,7 +2130,6 @@ fn remove_destroyed_space_item_and_ball_sync(
 ) {
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.remove(&ball_id);
-        rt.record_destroyed_item_id(ball_id);
     });
     crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(
         ctx,
@@ -2139,6 +2141,8 @@ fn remove_destroyed_space_item_and_ball_sync(
         ball_id,
     );
     ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(ball_id);
         let child_ids: Vec<i64> = snap
             .items
             .values()

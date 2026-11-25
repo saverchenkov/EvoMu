@@ -245,20 +245,30 @@ pub(crate) async fn abandon_returning_drone_in_space(
     } else {
         drone.original_owner_char_id
     };
-    let restored = with_mut_combat_runtime(ctx, |rt| {
-        if rt.is_recently_destroyed_item_id(bid) || rt.is_recently_destroyed_item_id(item_id) {
-            return false;
-        }
-        drone.is_abandoned = true;
-        drone.owner_char_id = 0;
-        drone.parent_ship_id = 0;
-        drone.target_id = None;
-        drone.activity_state = 0;
-        drone.assist_char_id = None;
-        drone.guard_char_id = None;
-        rt.active_drones_in_space.insert(bid, drone);
-        true
-    });
+    let restored = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| {
+            if snap
+                .combat_crimewatch_state
+                .is_recently_destroyed_item_id(bid)
+                || snap
+                    .combat_crimewatch_state
+                    .is_recently_destroyed_item_id(item_id)
+            {
+                return false;
+            }
+            drone.is_abandoned = true;
+            drone.owner_char_id = 0;
+            drone.parent_ship_id = 0;
+            drone.target_id = None;
+            drone.activity_state = 0;
+            drone.assist_char_id = None;
+            drone.guard_char_id = None;
+            rt.active_drones_in_space.insert(bid, drone);
+            true
+        },
+    );
     let _ = sys_handle.clear_drone_runtime(bid).await;
     let _ = sys_handle.remove_module_cycle(bid, -bid).await;
     if !restored {
@@ -367,14 +377,20 @@ async fn try_atomic_scoop_drone(
     d: &DroneSpaceState,
     target_ship_id: i64,
 ) -> bool {
-    let pre_ok = with_combat_runtime(ctx, |rt| {
-        !rt.is_recently_destroyed_item_id(d.ball_id)
-            && !rt.is_recently_destroyed_item_id(d.drone_item_id)
-            && rt
-                .active_drones_in_space
+    let pre_not_destroyed = ctx.db.with_snapshot(|snap| {
+        !snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(d.ball_id)
+            && !snap
+                .combat_crimewatch_state
+                .is_recently_destroyed_item_id(d.drone_item_id)
+    });
+    let pre_ok = pre_not_destroyed
+        && with_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space
                 .get(&d.ball_id)
                 .is_some_and(|existing| is_scoopable_controlled_drone(existing, d, target_ship_id))
-    });
+        });
     if !pre_ok {
         return false;
     }
@@ -397,15 +413,23 @@ async fn try_atomic_scoop_drone(
         let _ = sys_handle
             .remove_module_cycle(d.ball_id, -d.ball_id)
             .await;
-        let should_purge = with_mut_combat_runtime(ctx, |rt| {
-            if rt.is_recently_destroyed_item_id(d.ball_id)
-                || rt.is_recently_destroyed_item_id(d.drone_item_id)
-            {
-                rt.active_drones_in_space.remove(&d.ball_id);
-                return true;
-            }
-            false
-        });
+        let should_purge = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+            &ctx.db,
+            &*ctx.combat_ephemeral,
+            |snap, rt| {
+                if snap
+                    .combat_crimewatch_state
+                    .is_recently_destroyed_item_id(d.ball_id)
+                    || snap
+                        .combat_crimewatch_state
+                        .is_recently_destroyed_item_id(d.drone_item_id)
+                {
+                    rt.active_drones_in_space.remove(&d.ball_id);
+                    return true;
+                }
+                false
+            },
+        );
         if should_purge {
             let _ = sys_handle.clear_drone_runtime(d.ball_id).await;
             ctx.db.with_mut_snapshot(|snap| {
@@ -454,8 +478,12 @@ async fn try_atomic_scoop_drone(
         &ctx.db,
         &*ctx.combat_ephemeral,
         |snap, rt| -> ScoopOutcome {
-            if rt.is_recently_destroyed_item_id(d.ball_id)
-                || rt.is_recently_destroyed_item_id(d.drone_item_id)
+            if snap
+                .combat_crimewatch_state
+                .is_recently_destroyed_item_id(d.ball_id)
+                || snap
+                    .combat_crimewatch_state
+                    .is_recently_destroyed_item_id(d.drone_item_id)
             {
                 let stale_item = rt
                     .active_drones_in_space
@@ -481,8 +509,10 @@ async fn try_atomic_scoop_drone(
                 existing.drone_item_id,
             ) {
                 rt.active_drones_in_space.remove(&d.ball_id);
-                rt.record_destroyed_item_id(existing.ball_id);
-                rt.record_destroyed_item_id(existing.drone_item_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(existing.ball_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(existing.drone_item_id);
                 crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
                     snap,
                     Some(existing.drone_item_id),

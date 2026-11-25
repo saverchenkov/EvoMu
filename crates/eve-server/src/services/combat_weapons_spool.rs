@@ -13,7 +13,10 @@ use crate::router::notify_registry::{
     OnGodmaShipEffect, OnModulesDeactivating, OnWeaponBanksChanged, OnWeaponGroupDestroyed,
 };
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, EntropicSpoolState};
+use crate::services::combat_crimewatch::{
+    with_combat_runtime, with_mut_combat_runtime, with_mut_combat_runtime_tx_locks,
+    EntropicSpoolState,
+};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::InvType;
 
@@ -383,7 +386,10 @@ pub async fn handle_ship_or_npc_destruction(
 
     let already_cleaned_actor_deployable = target_item_cat_id_opt.is_none()
         && ball_cat_id == 22
-        && !with_combat_runtime(ctx, |rt| rt.is_recently_destroyed_item_id(target_ball_id));
+        && !ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .is_recently_destroyed_item_id(target_ball_id)
+        });
     if target_item_cat_id_opt.is_none()
         && !already_cleaned_actor_deployable
         && (player_target_info.is_some() || active_ship_vcid.is_some())
@@ -723,23 +729,28 @@ pub async fn handle_ship_or_npc_destruction(
         if bounty > 0.0 {
             let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, sys_id);
             let eff_bounty = bounty * supp_mult;
-            let bounty_newly_credited = with_mut_combat_runtime(ctx, |rt| {
-                let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
-                if attacker_char_id > 0 && rt.bounty_credited_balls.insert(target_ball_id) {
-                    rt.pending_bounty_tick_started_unix
-                        .entry((sys_id, attacker_char_id))
-                        .or_insert(now_unix);
-                    *rt.pending_bounty_ticks
-                        .entry((sys_id, attacker_char_id))
-                        .or_insert(0.0) += eff_bounty;
-                    rt.bounty_tick_next_flush_unix
-                        .entry((sys_id, attacker_char_id))
-                        .or_insert_with(|| now_unix.saturating_add(1_200));
-                    true
-                } else {
-                    false
-                }
-            });
+            let bounty_newly_credited = with_mut_combat_runtime_tx_locks(
+                &ctx.db,
+                &*ctx.combat_ephemeral,
+                |snap, rt| {
+                    let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
+                    if attacker_char_id > 0 && rt.bounty_credited_balls.insert(target_ball_id) {
+                        let cw = &mut snap.combat_crimewatch_state;
+                        cw.pending_bounty_tick_started_unix
+                            .entry((sys_id, attacker_char_id))
+                            .or_insert(now_unix);
+                        *cw.pending_bounty_ticks
+                            .entry((sys_id, attacker_char_id))
+                            .or_insert(0.0) += eff_bounty;
+                        cw.bounty_tick_next_flush_unix
+                            .entry((sys_id, attacker_char_id))
+                            .or_insert_with(|| now_unix.saturating_add(1_200));
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
             let old_sec = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&attacker_char_id)
@@ -779,11 +790,13 @@ pub async fn handle_ship_or_npc_destruction(
         crate::services::insurgency_services::notify_stronghold_destruction(&ctx.db, Some(&ctx.quasar_gateway), Some(&ctx.pending_notifications), Some(&ctx.notify_tx), &sh_info);
     }
 
-    let valid_assists: Vec<crate::services::combat_crimewatch::AssistLogEntry> = with_mut_combat_runtime(ctx, |rt| {
-        if is_non_ship_structure_or_deployable {
-            rt.container_lifetimes.remove(&target_ball_id);
-            rt.record_destroyed_item_id(target_ball_id);
-        }
+    let valid_assists: Vec<crate::services::combat_crimewatch::AssistLogEntry> =
+        with_mut_combat_runtime_tx_locks(&ctx.db, &*ctx.combat_ephemeral, |snap, rt| {
+            if is_non_ship_structure_or_deployable {
+                rt.container_lifetimes.remove(&target_ball_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(target_ball_id);
+            }
         let assist_keys = if is_non_ship_structure_or_deployable || victim_id == target_ball_id {
             [target_ball_id, target_ball_id]
         } else {

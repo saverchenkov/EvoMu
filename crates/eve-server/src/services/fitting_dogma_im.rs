@@ -866,9 +866,12 @@ fn handle_item_get_info(
         // of misinterpreting the stale itemID as a `typeID` and raising `TypeNotFound` (#1032).
         let is_destroyed_entity = raw_id > 0
             && (TypeId::try_from(raw_id).is_err()
+                || ctx.db.with_snapshot(|snap| {
+                    snap.combat_crimewatch_state
+                        .is_recently_destroyed_item_id(raw_id)
+                })
                 || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.is_recently_destroyed_item_id(raw_id)
-                        || rt.destroyed_npc_cache.contains_key(&raw_id)
+                    rt.destroyed_npc_cache.contains_key(&raw_id)
                 }));
         if is_destroyed_entity {
             return Ok(PyRep::None);

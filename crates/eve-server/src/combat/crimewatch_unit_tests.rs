@@ -524,13 +524,17 @@ async fn crimewatch_stage5_pod_override_skip_guards_lock_drop_tick_and_bounty_de
     assert!(sys_handle.get_ball_snapshot(concord_ball_id).await.unwrap().is_none());
 
     // 4. credit_specialized_npc_bounty_and_sec_status deduplicates identical npc_ball_id
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state.pending_bounty_ticks.clear();
     });
     credit_specialized_npc_bounty_and_sec_status(&ctx, sys_id, 955_001, crim_live, 125_000.0);
     credit_specialized_npc_bounty_and_sec_status(&ctx, sys_id, 955_001, crim_live, 125_000.0);
-    let credited_total = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.get(&(sys_id, crim_live)).copied().unwrap_or(0.0)
+    let credited_total = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(sys_id, crim_live))
+            .copied()
+            .unwrap_or(0.0)
     });
     assert!((credited_total - 125_000.0).abs() < 1e-6);
 }
@@ -1100,18 +1104,21 @@ async fn step_concord_validation_despawns_kill_rights_and_tick_concord_responses
 
     // 4. Duplicate npc_ball_id & unknown killer_char_id in credit_specialized_npc_bounty_and_sec_status
     credit_specialized_npc_bounty_and_sec_status(&ctx, sys_id, 910_001, 90_000_002, 100_000.0);
-    let pending_before = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks[&(sys_id, 90_000_002)]
+    let pending_before = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, 90_000_002)]
     });
     credit_specialized_npc_bounty_and_sec_status(&ctx, sys_id, 910_001, 90_000_002, 100_000.0);
-    let pending_after = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks[&(sys_id, 90_000_002)]
+    let pending_after = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, 90_000_002)]
     });
     assert!((pending_after - pending_before).abs() < 1e-6);
 
     credit_specialized_npc_bounty_and_sec_status(&ctx, sys_id, 910_002, 777_666_555, 50_000.0);
-    let unknown_pending = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.get(&(sys_id, 777_666_555)).copied()
+    let unknown_pending = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(sys_id, 777_666_555))
+            .copied()
     });
     assert_eq!(unknown_pending, Some(50_000.0));
 }

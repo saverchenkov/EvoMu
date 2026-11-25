@@ -2,7 +2,7 @@
 
 use crate::types::IskCents;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -981,7 +981,39 @@ pub struct PersistedCombatCrimewatchState {
     #[serde(default)]
     pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     #[serde(default)]
+    pub recently_destroyed_item_ids: VecDeque<i64>,
+    #[serde(default)]
     pub extended_runtime_json: String,
+}
+
+impl PersistedCombatCrimewatchState {
+    /// Maximum number of recently destroyed item/ball IDs retained for stale `dogmaIM.ItemGetInfo`
+    /// queries and drone-scoop guards (`#1032`).
+    pub const MAX_RECENTLY_DESTROYED_ITEM_IDS: usize = 1_024;
+
+    /// Records an item or ball ID whose inventory/space state was destroyed so late client
+    /// `dogmaIM.ItemGetInfo` queries return `None` instead of `TypeNotFound` and scoop paths
+    /// reject stale balls (`#1032`).
+    pub fn record_destroyed_item_id(&mut self, item_id: i64) {
+        if item_id <= 0 {
+            return;
+        }
+        if let Some(pos) = self
+            .recently_destroyed_item_ids
+            .iter()
+            .position(|&existing| existing == item_id)
+        {
+            self.recently_destroyed_item_ids.remove(pos);
+        } else if self.recently_destroyed_item_ids.len() >= Self::MAX_RECENTLY_DESTROYED_ITEM_IDS {
+            self.recently_destroyed_item_ids.pop_front();
+        }
+        self.recently_destroyed_item_ids.push_back(item_id);
+    }
+
+    /// Returns `true` if `item_id` was recently destroyed in combat or space cleanup (`#1032`).
+    pub fn is_recently_destroyed_item_id(&self, item_id: i64) -> bool {
+        item_id > 0 && self.recently_destroyed_item_ids.contains(&item_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

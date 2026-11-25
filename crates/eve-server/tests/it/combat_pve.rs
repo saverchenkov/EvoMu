@@ -1421,11 +1421,27 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
     assert!(sys_handle.get_ball_snapshot(drone_id).await.unwrap().is_none(), "Destroyed drone ball must be removed");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&issuer_id).unwrap().active_ship_id), issuer_ship_before, "Destroying a player's drone must not pod the player");
     let sde_33132_bounty = ctx.sde.types.get(&33132).and_then(|t| t.default_attributes.get(&481).copied()).unwrap();
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, attacker_id)).copied()), Some(sde_33132_bounty), "Missile kill of NPC must queue exact 1x SDE bounty");
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap
+            .combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(sys_id, attacker_id))
+            .copied()),
+        Some(sde_33132_bounty),
+        "Missile kill of NPC must queue exact 1x SDE bounty"
+    );
     let turret_npc_id = spawn_specialized_npc_entity(&ctx, sys_id, 33132, "CloneSoldier", 500_010, DVec3::new(620.0, 0.0, 0.0)).await;
     let (_, _, turret_npc_ball) = sys_handle.apply_damage_with_attacker(turret_npc_id, DamageVector::new(50_000.0, 50_000.0, 50_000.0, 50_000.0), Some(attacker_id)).await.unwrap().unwrap();
     let _ = handle_ship_or_npc_destruction(&ctx, &sys_handle, attacker_id, 610_030_003, 587, 2905, turret_npc_id, &turret_npc_ball, None, sys_id, 50_000.0, ctx.now_unix()).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, attacker_id)).copied()), Some(sde_33132_bounty * 2.0), "Turret kill of NPC must queue exact 1x SDE bounty without doubling");
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap
+            .combat_crimewatch_state
+            .pending_bounty_ticks
+            .get(&(sys_id, attacker_id))
+            .copied()),
+        Some(sde_33132_bounty * 2.0),
+        "Turret kill of NPC must queue exact 1x SDE bounty without doubling"
+    );
 
     // Verify Contract 1 & jettisoned Contract 3 failed, collateral paid to issuer, and no orphaned items remain
     ctx.db.with_mut_snapshot(|snap| {

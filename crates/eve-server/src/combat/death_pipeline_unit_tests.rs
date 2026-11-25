@@ -1551,11 +1551,11 @@ async fn issue_1008_1020_destroyed_player_drone_emits_clear_notifications() {
             !snap.items.contains_key(&drone_id),
             "destroyed drone item must be removed from snapshot"
         );
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(drone_id));
     });
     assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_id));
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(rt.is_recently_destroyed_item_id(drone_id));
-    });
     assert!(
         sys_handle.get_ball_snapshot(drone_id).await.unwrap().is_none(),
         "destroyed drone ball must be removed from Ballpark"

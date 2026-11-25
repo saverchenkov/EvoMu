@@ -71,15 +71,21 @@ fn bounty_tick_threshold_tax_and_overdue_flush_mechanics() {
     assert_eq!((empty.pilot_isk, empty.main_ess_isk, empty.reserve_ess_isk), (0.0, 0.0, 0.0));
 
     // 2. Below 100k gross with default tax threshold -> 0% tax applied
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, char_id), 50_000.0);
-        rt.pending_bounty_tick_started_unix
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, char_id), 50_000.0);
+        snap.combat_crimewatch_state
+            .pending_bounty_tick_started_unix
             .insert((sys_id, char_id), now);
     });
     // Not overdue at now + 1199
     tick_overdue_npc_bounty_payouts(&ctx, now + 1_199);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.pending_bounty_ticks.contains_key(&(sys_id, char_id)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .combat_crimewatch_state
+            .pending_bounty_ticks
+            .contains_key(&(sys_id, char_id)));
     });
 
     // Overdue at now + 1200 -> flushes full 50,000 ISK (0% tax under 100k threshold)
@@ -93,8 +99,10 @@ fn bounty_tick_threshold_tax_and_overdue_flush_mechanics() {
     assert!((bal_after_small - bal_before - 50_000.0).abs() < 1e-2);
 
     // 3. >= 100k gross with 10% explicit tax -> 90% to pilot, 10% tax
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, char_id), 200_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, char_id), 200_000.0);
     });
     let payout = flush_npc_bounty_tick(&ctx, sys_id, char_id, 0.10);
     assert!((payout.pilot_isk - 180_000.0).abs() < 1e-2);

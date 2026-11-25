@@ -651,18 +651,20 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     let sys2 = 30_000_144u32;
 
     // 1. flush_pending_bounty_ticks_on_downtime skips <= 0.0 and flushes positive across systems/chars
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.clear();
-        rt.pending_bounty_ticks.insert((sys2, c2), 12_500.0);
-        rt.pending_bounty_ticks.insert((sys1, c1), 25_000.0);
-        rt.pending_bounty_ticks.insert((sys1, c2), 0.0);
-        rt.pending_bounty_ticks.insert((sys2, c1), -5.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = &mut snap.combat_crimewatch_state;
+        cw.pending_bounty_ticks.clear();
+        cw.pending_bounty_ticks.insert((sys2, c2), 12_500.0);
+        cw.pending_bounty_ticks.insert((sys1, c1), 25_000.0);
+        cw.pending_bounty_ticks.insert((sys1, c2), 0.0);
+        cw.pending_bounty_ticks.insert((sys2, c1), -5.0);
     });
     let flushed = super::flush_pending_bounty_ticks_on_downtime(&ctx);
     assert_eq!(flushed, 2);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.pending_bounty_ticks.contains_key(&(sys1, c1)));
-        assert!(!rt.pending_bounty_ticks.contains_key(&(sys2, c2)));
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.pending_bounty_ticks.contains_key(&(sys1, c1)));
+        assert!(!cw.pending_bounty_ticks.contains_key(&(sys2, c2)));
     });
 
     // 2. clear_safe_logoff and disconnect_safe_logoff_sessions

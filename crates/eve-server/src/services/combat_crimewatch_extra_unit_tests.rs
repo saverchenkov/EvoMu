@@ -1261,24 +1261,6 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     );
     check_ext_field!(
         |r: &mut CombatRuntimeState| {
-            r.pending_bounty_ticks.insert((30_000_142, 1), 250.0);
-        },
-        |r: &mut CombatRuntimeState| r.pending_bounty_ticks.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.bounty_tick_next_flush_unix.insert((30_000_142, 1), 1_000);
-        },
-        |r: &mut CombatRuntimeState| r.bounty_tick_next_flush_unix.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.pending_bounty_tick_started_unix.insert((30_000_142, 1), 900);
-        },
-        |r: &mut CombatRuntimeState| r.pending_bounty_tick_started_unix.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
             r.encounter_waves.insert(
                 1,
                 EncounterWaveDirector {
@@ -1358,29 +1340,10 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
         },
         |r: &mut CombatRuntimeState| r.npc_sec_gain_intervals.clear()
     );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.record_destroyed_item_id(1_897_080_352);
-        },
-        |r: &mut CombatRuntimeState| r.recently_destroyed_item_ids.clear()
-    );
-    for id in 1..=1_025_i64 {
-        rt.record_destroyed_item_id(id);
-    }
-    assert!(!rt.is_recently_destroyed_item_id(1));
-    assert!(rt.is_recently_destroyed_item_id(2));
-    assert!(rt.is_recently_destroyed_item_id(1_025));
-    rt.record_destroyed_item_id(2);
-    rt.record_destroyed_item_id(1_026);
-    assert!(rt.is_recently_destroyed_item_id(2));
-    assert!(!rt.is_recently_destroyed_item_id(3));
-    rt.recently_destroyed_item_ids.clear();
 
-    // 2. `ext_runtime_hash`, `rehydrate_from_persisted_epochs`, and `sync_from_persisted` bounty tick precedence
+    // 2. `ext_runtime_hash`, `rehydrate_from_persisted_epochs`, and DB-owned B1 no-clobber checks
     let mut rt_ext = CombatRuntimeState::default();
-    rt_ext.pending_bounty_ticks.insert((30_000_142, 11), 777.0);
-    rt_ext.bounty_tick_next_flush_unix.insert((30_000_142, 11), 888);
-    rt_ext.pending_bounty_tick_started_unix.insert((30_000_142, 11), 999);
+    rt_ext.clone_soldier_cooldown_until.insert(30_000_142, 777);
     let p_ext = rt_ext.to_persisted();
     let p_empty = CombatRuntimeState::default().to_persisted();
     let h1 = CombatRuntimeState::ext_runtime_hash(&p_ext);
@@ -1403,32 +1366,31 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     rt_rehyd.rehydrate_from_persisted_epochs(&p_empty, 4, true);
     assert!(rt_rehyd.clone_soldier_cooldown_until.is_empty());
     rt_rehyd.rehydrate_from_persisted_epochs(&p_ext, 5, false);
-    assert!(rt_rehyd.clone_soldier_cooldown_until.is_empty());
-    assert_eq!(rt_rehyd.pending_bounty_ticks.get(&(30_000_142, 11)), Some(&777.0));
+    assert_eq!(
+        rt_rehyd.clone_soldier_cooldown_until.get(&30_000_142),
+        Some(&777)
+    );
+    assert!(!rt_rehyd.clone_soldier_cooldown_until.contains_key(&99));
 
-    // sync_from_persisted bounty tick precedence:
-    // Case A: p has different core value AND ext is non-empty -> ext wins (`||` not `&&`)
-    let mut p_both = p_ext.clone();
-    p_both.pending_bounty_ticks.insert((30_000_142, 11), 111.0);
-    p_both.bounty_tick_next_flush_unix.insert((30_000_142, 11), 222);
-    p_both.pending_bounty_tick_started_unix.insert((30_000_142, 11), 333);
-    let mut rt_sync = CombatRuntimeState::default();
-    rt_sync.sync_from_persisted(&p_both);
-    assert_eq!(rt_sync.pending_bounty_ticks.get(&(30_000_142, 11)), Some(&777.0));
-    assert_eq!(rt_sync.bounty_tick_next_flush_unix.get(&(30_000_142, 11)), Some(&888));
-    assert_eq!(rt_sync.pending_bounty_tick_started_unix.get(&(30_000_142, 11)), Some(&999));
-
-    // Case B: p non-empty AND ext empty (with another ext field present) -> p preserved (`!` kept)
-    let mut rt_other_ext = CombatRuntimeState::default();
-    rt_other_ext.clone_soldier_cooldown_until.insert(30_000_142, 900);
-    let mut p_core_only = rt_other_ext.to_persisted();
-    p_core_only.pending_bounty_ticks.insert((30_000_142, 22), 111.0);
-    p_core_only.bounty_tick_next_flush_unix.insert((30_000_142, 22), 222);
-    p_core_only.pending_bounty_tick_started_unix.insert((30_000_142, 22), 333);
-    rt_sync.sync_from_persisted(&p_core_only);
-    assert_eq!(rt_sync.pending_bounty_ticks.get(&(30_000_142, 22)), Some(&111.0));
-    assert_eq!(rt_sync.bounty_tick_next_flush_unix.get(&(30_000_142, 22)), Some(&222));
-    assert_eq!(rt_sync.pending_bounty_tick_started_unix.get(&(30_000_142, 22)), Some(&333));
+    // `to_persisted_preserving` preserves DB-owned bounty ticks and destroyed IDs untouched, and
+    // `PersistedCombatExtendedPayload` never emits them into `extended_runtime_json`.
+    let mut db_owned = eve_db::PersistedCombatCrimewatchState::default();
+    db_owned.pending_bounty_ticks.insert((30_000_142, 11), 111.0);
+    db_owned.bounty_tick_next_flush_unix.insert((30_000_142, 11), 222);
+    db_owned.pending_bounty_tick_started_unix.insert((30_000_142, 11), 333);
+    db_owned.record_destroyed_item_id(1_897_080_352);
+    let preserved = rt_ext.to_persisted_preserving(&db_owned);
+    assert_eq!(preserved.pending_bounty_ticks.get(&(30_000_142, 11)), Some(&111.0));
+    assert_eq!(preserved.bounty_tick_next_flush_unix.get(&(30_000_142, 11)), Some(&222));
+    assert_eq!(
+        preserved.pending_bounty_tick_started_unix.get(&(30_000_142, 11)),
+        Some(&333)
+    );
+    assert!(preserved.is_recently_destroyed_item_id(1_897_080_352));
+    assert!(!preserved.extended_runtime_json.contains("pending_bounty_ticks"));
+    assert!(!preserved.extended_runtime_json.contains("bounty_tick_next_flush_unix"));
+    assert!(!preserved.extended_runtime_json.contains("pending_bounty_tick_started_unix"));
+    assert!(!preserved.extended_runtime_json.contains("recently_destroyed_item_ids"));
 
     // 3. `sync_combat_runtime_from_db`, `flush_combat_runtime_to_db`, `with_mut_combat_runtime`, and `dispatch_combat_rpc`
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -1889,6 +1851,12 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
         let cw = snap.combat_crimewatch_state.as_inner_mut();
         cw.player_bounty_pool.insert(victim_id, 500_000.0);
         cw.modified_system_securities.insert(sys_a, 0.4);
+        cw.pending_bounty_ticks.insert((sys_a, victim_id), 125_000.0);
+        cw.bounty_tick_next_flush_unix
+            .insert((sys_a, victim_id), 1_700_001_200);
+        cw.pending_bounty_tick_started_unix
+            .insert((sys_a, victim_id), 1_700_000_000);
+        cw.record_destroyed_item_id(998_877);
         with_mut_combat_runtime_in_snap(snap, |rt| {
             rt.npc_timers.insert(victim_id, 500_000);
             rt.clone_soldier_cooldown_until.insert(sys_a, 400);
@@ -1976,6 +1944,27 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
         Some(900_000)
     );
     assert_eq!(persisted.modified_system_securities.get(&sys_a).copied(), Some(0.4));
+    assert_eq!(
+        persisted.pending_bounty_ticks.get(&(sys_a, victim_id)).copied(),
+        Some(125_000.0)
+    );
+    assert_eq!(
+        persisted
+            .bounty_tick_next_flush_unix
+            .get(&(sys_a, victim_id))
+            .copied(),
+        Some(1_700_001_200)
+    );
+    assert_eq!(
+        persisted
+            .pending_bounty_tick_started_unix
+            .get(&(sys_a, victim_id))
+            .copied(),
+        Some(1_700_000_000)
+    );
+    assert!(persisted.is_recently_destroyed_item_id(998_877));
+    assert!(!persisted.extended_runtime_json.contains("pending_bounty_ticks"));
+    assert!(!persisted.extended_runtime_json.contains("recently_destroyed_item_ids"));
     let mut decoded = CombatRuntimeState::default();
     decoded.sync_from_persisted(&persisted);
     assert_eq!(

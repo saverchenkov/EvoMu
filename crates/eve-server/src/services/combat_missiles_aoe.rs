@@ -59,10 +59,11 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     let _ = crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id);
     with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.remove(&ball_id);
-        rt.record_destroyed_item_id(ball_id);
     });
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(ball_id);
         snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
         snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
         if snap.items.remove(&ball_id).is_some() {

@@ -661,6 +661,12 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
             .insert(sys_id, vec![(char_id, 250_000.0, 1_700_008_000)]);
         cw.ess_main_bank_thefts
             .insert(sys_id, vec![(other_id, 500_000.0, 1_700_008_500)]);
+        cw.pending_bounty_ticks.insert((sys_id, char_id), 350_000.0);
+        cw.bounty_tick_next_flush_unix
+            .insert((sys_id, char_id), 1_700_009_200);
+        cw.pending_bounty_tick_started_unix
+            .insert((sys_id, char_id), 1_700_008_000);
+        cw.record_destroyed_item_id(1_897_080_999);
     });
 
     // Mutate remaining runtime fields via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
@@ -739,6 +745,23 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
             cw.ess_main_bank_thefts.get(&sys_id),
             Some(&vec![(other_id, 500_000.0, 1_700_008_500)])
         );
+        assert_eq!(
+            cw.pending_bounty_ticks.get(&(sys_id, char_id)),
+            Some(&350_000.0)
+        );
+        assert_eq!(
+            cw.bounty_tick_next_flush_unix.get(&(sys_id, char_id)),
+            Some(&1_700_009_200)
+        );
+        assert_eq!(
+            cw.pending_bounty_tick_started_unix.get(&(sys_id, char_id)),
+            Some(&1_700_008_000)
+        );
+        assert!(cw.is_recently_destroyed_item_id(1_897_080_999));
+        assert!(!cw.extended_runtime_json.contains("pending_bounty_ticks"));
+        assert!(!cw.extended_runtime_json.contains("bounty_tick_next_flush_unix"));
+        assert!(!cw.extended_runtime_json.contains("pending_bounty_tick_started_unix"));
+        assert!(!cw.extended_runtime_json.contains("recently_destroyed_item_ids"));
 
         assert_eq!(cw.safety_levels.get(&char_id), Some(&(SafetyLevel::Red as i32)));
         assert_eq!(char_safety_level_in_snap(snap, char_id), Some(SafetyLevel::Red));

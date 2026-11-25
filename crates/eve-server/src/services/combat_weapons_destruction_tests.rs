@@ -569,8 +569,10 @@ async fn weapon_activate_destroys_mobile_warp_disruptor_mobile_depot_and_fighter
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&mwd_id));
         assert!(snap.killmails.contains_key(&mwd_kill));
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(mwd_id));
     });
-    assert!(with_combat_runtime(&ctx, |rt| rt.is_recently_destroyed_item_id(mwd_id)));
 
     // 2. Destroy Mobile Depot (cat 22, actor-cleaned) via dogmaIM.Activate
     let depot_out = handle_weapons(
@@ -599,8 +601,10 @@ async fn weapon_activate_destroys_mobile_warp_disruptor_mobile_depot_and_fighter
         assert!(!snap.items.contains_key(&depot_id));
         assert!(!read_deployable_state_snap(snap).deployables.contains_key(&depot_id));
         assert!(snap.killmails.contains_key(&depot_kill));
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(depot_id));
     });
-    assert!(with_combat_runtime(&ctx, |rt| rt.is_recently_destroyed_item_id(depot_id)));
 
     // 3. Destroy Fighter Squadron (cat 65) via dogmaIM.Activate
     let fighter_out = handle_weapons(

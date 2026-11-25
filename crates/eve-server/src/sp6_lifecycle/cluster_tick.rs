@@ -2343,32 +2343,38 @@ async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_s
     let _ = crate::services::pve_ess_reserve_banks::tick_ess_main_bank_autopayout(ctx, now_unix);
     let _ = crate::services::pve_ess_reserve_banks::tick_ess_reserve_bank_links(ctx, now_unix).await;
 
-    let has_pending_bounty_ticks = with_combat_runtime(ctx, |rt| {
-        rt.pending_bounty_ticks.values().any(|&pending| pending > 0.0)
-    });
-    let due_bounty_ticks: Vec<(u32, i64)> = if has_pending_bounty_ticks {
-        with_mut_combat_runtime(ctx, |rt| {
-            let mut due = Vec::new();
-            for (&(sys_id, char_id), &pending) in &rt.pending_bounty_ticks {
-                if pending <= 0.0 {
-                    continue;
-                }
-                let next_flush = *rt
-                    .bounty_tick_next_flush_unix
-                    .entry((sys_id, char_id))
-                    .or_insert_with(|| now_unix.saturating_add(1_200));
-                if now_unix >= next_flush {
-                    due.push((sys_id, char_id));
-                }
+    let due_bounty_ticks: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        if !cw.pending_bounty_ticks.values().any(|&pending| pending > 0.0) {
+            return Vec::new();
+        }
+        let mut due = Vec::new();
+        let mut missing_flush = Vec::new();
+        for (&(sys_id, char_id), &pending) in &cw.pending_bounty_ticks {
+            if pending <= 0.0 {
+                continue;
             }
+            match cw.bounty_tick_next_flush_unix.get(&(sys_id, char_id)).copied() {
+                Some(next_flush) if now_unix >= next_flush => due.push((sys_id, char_id)),
+                Some(_) => {}
+                None => missing_flush.push((sys_id, char_id)),
+            }
+        }
+        if !due.is_empty() || !missing_flush.is_empty() {
+            let cw_mut = &mut snap.combat_crimewatch_state;
             for key in &due {
-                rt.bounty_tick_next_flush_unix.remove(key);
+                cw_mut.bounty_tick_next_flush_unix.remove(key);
             }
-            due
-        })
-    } else {
-        Vec::new()
-    };
+            let scheduled = now_unix.saturating_add(1_200);
+            for key in missing_flush {
+                cw_mut
+                    .bounty_tick_next_flush_unix
+                    .entry(key)
+                    .or_insert(scheduled);
+            }
+        }
+        due
+    });
     for (sys_id, char_id) in due_bounty_ticks {
         let _ = crate::services::combat_npc_encounters::flush_npc_bounty_tick(
             ctx,

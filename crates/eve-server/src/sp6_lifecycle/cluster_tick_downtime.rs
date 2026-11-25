@@ -335,14 +335,14 @@ pub fn recover_scanner_probes_on_downtime(ctx: &ServerContext) -> (usize, usize)
 /// Flushes all pending 20-minute batched NPC bounty ticks during daily cluster downtime
 /// so ratting payouts (including corp tax and null-sec ESS splits) are never stranded across DT.
 pub fn flush_pending_bounty_ticks_on_downtime(ctx: &ServerContext) -> usize {
-    let mut pending_keys: Vec<(u32, i64)> =
-        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.pending_bounty_ticks
-                .iter()
-                .filter(|&(_, &amount)| amount > 0.0)
-                .map(|(&key, _)| key)
-                .collect()
-        });
+    let mut pending_keys: Vec<(u32, i64)> = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .iter()
+            .filter(|&(_, &amount)| amount > 0.0)
+            .map(|(&key, _)| key)
+            .collect()
+    });
     pending_keys.sort_unstable();
     let mut flushed = 0usize;
     for (sys_id, char_id) in pending_keys {

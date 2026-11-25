@@ -621,8 +621,9 @@ async fn test_e2e_01_to_18_integration_journeys() {
     }
     assert!(destroyed);
     assert!(shots_fired >= 2);
-    let queued_bounty = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks
+    let queued_bounty = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
             .get(&(30_002_904, 90_000_001))
             .copied()
             .unwrap_or(0.0)

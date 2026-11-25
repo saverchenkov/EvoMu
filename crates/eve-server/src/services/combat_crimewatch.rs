@@ -58,7 +58,7 @@ use eve_destiny::DamageVector;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 #[path = "combat_crimewatch_engagements.rs"]
 pub mod combat_crimewatch_engagements;
@@ -455,9 +455,6 @@ pub struct CombatRuntimeState {
     pub active_drones_in_space: HashMap<i64, DroneSpaceState>,
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
-    pub pending_bounty_ticks: HashMap<(u32, i64), f64>,
-    pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
-    pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
     pub fighter_unit_damage_accum: HashMap<i64, f64>,
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
@@ -469,7 +466,6 @@ pub struct CombatRuntimeState {
     pub ci_sentry_deployed_systems: std::collections::HashSet<u32>,
     pub npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
-    pub recently_destroyed_item_ids: VecDeque<i64>,
     pub self_destruct_sim_remaining_secs: HashMap<i64, f64>,
     pub gm_logi_soaks: HashMap<u32, crate::services::gm_soak_commands::GmLogiSoakState>,
     pub gm_deadwarps: HashMap<i64, crate::services::gm_soak_commands::GmDeadwarpState>,
@@ -494,9 +490,6 @@ struct PersistedCombatExtendedPayload {
     crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
     active_drones_in_space: HashMap<i64, DroneSpaceState>,
     npc_entities: HashMap<i64, ExtendedNpcEntity>,
-    pending_bounty_ticks: Vec<((u32, i64), f64)>,
-    bounty_tick_next_flush_unix: Vec<((u32, i64), u64)>,
-    pending_bounty_tick_started_unix: Vec<((u32, i64), u64)>,
     encounter_waves: HashMap<u32, EncounterWaveDirector>,
     fighter_unit_damage_accum: HashMap<i64, f64>,
     fighter_tube_rearm_until: Vec<((i64, usize), u64)>,
@@ -508,7 +501,6 @@ struct PersistedCombatExtendedPayload {
     ci_sentry_deployed_systems: std::collections::HashSet<u32>,
     npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     npc_sec_gain_intervals: Vec<((i64, i32), (u64, f64))>,
-    recently_destroyed_item_ids: VecDeque<i64>,
     self_destruct_sim_remaining_secs: HashMap<i64, f64>,
 }
 
@@ -646,30 +638,6 @@ impl CombatRuntimeState {
         next
     }
 
-    /// Records an item or ball ID whose inventory/space state was destroyed so late
-    /// client `dogmaIM.ItemGetInfo` queries return `None` instead of `TypeNotFound` (`#1032`).
-    pub fn record_destroyed_item_id(&mut self, item_id: i64) {
-        const MAX_RECENTLY_DESTROYED_ITEM_IDS: usize = 1_024;
-        if item_id <= 0 {
-            return;
-        }
-        if let Some(pos) = self
-            .recently_destroyed_item_ids
-            .iter()
-            .position(|&existing| existing == item_id)
-        {
-            self.recently_destroyed_item_ids.remove(pos);
-        } else if self.recently_destroyed_item_ids.len() >= MAX_RECENTLY_DESTROYED_ITEM_IDS {
-            self.recently_destroyed_item_ids.pop_front();
-        }
-        self.recently_destroyed_item_ids.push_back(item_id);
-    }
-
-    /// Returns `true` if `item_id` was recently destroyed in combat or space cleanup (`#1032`).
-    pub fn is_recently_destroyed_item_id(&self, item_id: i64) -> bool {
-        item_id > 0 && self.recently_destroyed_item_ids.contains(&item_id)
-    }
-
     pub fn sync_core_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
         self.sec_status_transactions = p.sec_status_transactions.clone();
         self.drone_settings = p
@@ -688,9 +656,6 @@ impl CombatRuntimeState {
         self.npc_timers = p.npc_timers.clone();
         self.disapproval_flags = p.disapproval_flags.clone();
         self.corp_aggression_settings = p.corp_aggression_settings.clone();
-        self.pending_bounty_ticks = p.pending_bounty_ticks.clone();
-        self.bounty_tick_next_flush_unix = p.bounty_tick_next_flush_unix.clone();
-        self.pending_bounty_tick_started_unix = p.pending_bounty_tick_started_unix.clone();
     }
 
     pub fn sync_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
@@ -720,7 +685,6 @@ impl CombatRuntimeState {
             self.ci_sentry_deployed_systems.clear();
             self.npc_scrambled_ships.clear();
             self.npc_sec_gain_intervals.clear();
-            self.recently_destroyed_item_ids.clear();
             self.self_destruct_sim_remaining_secs.clear();
         } else if let Ok(ext) =
             serde_json::from_str::<PersistedCombatExtendedPayload>(&p.extended_runtime_json)
@@ -737,21 +701,6 @@ impl CombatRuntimeState {
             self.crimewatch_timer_triggered_at = ext.crimewatch_timer_triggered_at;
             self.active_drones_in_space = ext.active_drones_in_space;
             self.npc_entities = ext.npc_entities;
-            if !ext.pending_bounty_ticks.is_empty() || p.pending_bounty_ticks.is_empty() {
-                self.pending_bounty_ticks = ext.pending_bounty_ticks.into_iter().collect();
-            }
-            if !ext.bounty_tick_next_flush_unix.is_empty()
-                || p.bounty_tick_next_flush_unix.is_empty()
-            {
-                self.bounty_tick_next_flush_unix =
-                    ext.bounty_tick_next_flush_unix.into_iter().collect();
-            }
-            if !ext.pending_bounty_tick_started_unix.is_empty()
-                || p.pending_bounty_tick_started_unix.is_empty()
-            {
-                self.pending_bounty_tick_started_unix =
-                    ext.pending_bounty_tick_started_unix.into_iter().collect();
-            }
             self.encounter_waves = ext.encounter_waves;
             self.fighter_unit_damage_accum = ext.fighter_unit_damage_accum;
             self.fighter_tube_rearm_until = ext.fighter_tube_rearm_until.into_iter().collect();
@@ -764,7 +713,6 @@ impl CombatRuntimeState {
             self.ci_sentry_deployed_systems = ext.ci_sentry_deployed_systems;
             self.npc_scrambled_ships = ext.npc_scrambled_ships;
             self.npc_sec_gain_intervals = ext.npc_sec_gain_intervals.into_iter().collect();
-            self.recently_destroyed_item_ids = ext.recently_destroyed_item_ids;
             self.self_destruct_sim_remaining_secs = ext.self_destruct_sim_remaining_secs;
         }
     }
@@ -783,9 +731,6 @@ impl CombatRuntimeState {
             || !self.crimewatch_timer_triggered_at.is_empty()
             || !self.active_drones_in_space.is_empty()
             || !self.npc_entities.is_empty()
-            || !self.pending_bounty_ticks.is_empty()
-            || !self.bounty_tick_next_flush_unix.is_empty()
-            || !self.pending_bounty_tick_started_unix.is_empty()
             || !self.encounter_waves.is_empty()
             || !self.fighter_unit_damage_accum.is_empty()
             || !self.fighter_tube_rearm_until.is_empty()
@@ -797,7 +742,6 @@ impl CombatRuntimeState {
             || !self.ci_sentry_deployed_systems.is_empty()
             || !self.npc_scrambled_ships.is_empty()
             || !self.npc_sec_gain_intervals.is_empty()
-            || !self.recently_destroyed_item_ids.is_empty()
     }
 
     fn encode_extended_runtime_json(&self) -> String {
@@ -823,21 +767,6 @@ impl CombatRuntimeState {
                 crimewatch_timer_triggered_at: self.crimewatch_timer_triggered_at.clone(),
                 active_drones_in_space: self.active_drones_in_space.clone(),
                 npc_entities: self.npc_entities.clone(),
-                pending_bounty_ticks: self
-                    .pending_bounty_ticks
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect(),
-                bounty_tick_next_flush_unix: self
-                    .bounty_tick_next_flush_unix
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect(),
-                pending_bounty_tick_started_unix: self
-                    .pending_bounty_tick_started_unix
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect(),
                 encounter_waves: self.encounter_waves.clone(),
                 fighter_unit_damage_accum: self.fighter_unit_damage_accum.clone(),
                 fighter_tube_rearm_until: self
@@ -861,14 +790,10 @@ impl CombatRuntimeState {
                     .iter()
                     .map(|(k, v)| (*k, *v))
                     .collect(),
-                recently_destroyed_item_ids: self.recently_destroyed_item_ids.clone(),
                 self_destruct_sim_remaining_secs: self.self_destruct_sim_remaining_secs.clone(),
             };
             payload.entropic_spools.sort_by_key(|(k, _)| *k);
             payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);
-            payload.pending_bounty_ticks.sort_by_key(|(k, _)| *k);
-            payload.bounty_tick_next_flush_unix.sort_by_key(|(k, _)| *k);
-            payload.pending_bounty_tick_started_unix.sort_by_key(|(k, _)| *k);
             payload.fighter_tube_rearm_until.sort_by_key(|(k, _)| *k);
             payload.authorized_shipping_storage.sort_unstable();
             payload.npc_sec_gain_intervals.sort_by_key(|(k, _)| *k);
@@ -889,9 +814,6 @@ impl CombatRuntimeState {
         dst.npc_timers = self.npc_timers.clone();
         dst.disapproval_flags = self.disapproval_flags.clone();
         dst.corp_aggression_settings = self.corp_aggression_settings.clone();
-        dst.pending_bounty_ticks = self.pending_bounty_ticks.clone();
-        dst.bounty_tick_next_flush_unix = self.bounty_tick_next_flush_unix.clone();
-        dst.pending_bounty_tick_started_unix = self.pending_bounty_tick_started_unix.clone();
         dst.extended_runtime_json = self.encode_extended_runtime_json();
     }
 
@@ -1001,30 +923,6 @@ where
     out
 }
 
-fn merge_recent_ids_3way(
-    base: &VecDeque<i64>,
-    db: &VecDeque<i64>,
-    ram: &VecDeque<i64>,
-) -> VecDeque<i64> {
-    const MAX_RECENTLY_DESTROYED_ITEM_IDS: usize = 1_024;
-    if db == base {
-        return ram.clone();
-    }
-    if ram == base {
-        return db.clone();
-    }
-    let mut out = db.clone();
-    for &id in ram {
-        if !base.contains(&id) && !out.contains(&id) {
-            if out.len() >= MAX_RECENTLY_DESTROYED_ITEM_IDS {
-                out.pop_front();
-            }
-            out.push_back(id);
-        }
-    }
-    out
-}
-
 fn merge_monotonic_u64_map_3way(
     base: &HashMap<i64, u64>,
     db: &HashMap<i64, u64>,
@@ -1122,9 +1020,6 @@ fn merge_extended_payload_3way(
         crimewatch_timer_triggered_at: merge_map_3way(&base.crimewatch_timer_triggered_at, &db.crimewatch_timer_triggered_at, &ram.crimewatch_timer_triggered_at),
         active_drones_in_space: merge_map_3way(&base.active_drones_in_space, &db.active_drones_in_space, &ram.active_drones_in_space),
         npc_entities: merge_map_3way(&base.npc_entities, &db.npc_entities, &ram.npc_entities),
-        pending_bounty_ticks: merge_pair_vec_3way(&base.pending_bounty_ticks, &db.pending_bounty_ticks, &ram.pending_bounty_ticks),
-        bounty_tick_next_flush_unix: merge_pair_vec_3way(&base.bounty_tick_next_flush_unix, &db.bounty_tick_next_flush_unix, &ram.bounty_tick_next_flush_unix),
-        pending_bounty_tick_started_unix: merge_pair_vec_3way(&base.pending_bounty_tick_started_unix, &db.pending_bounty_tick_started_unix, &ram.pending_bounty_tick_started_unix),
         encounter_waves: merge_map_3way(&base.encounter_waves, &db.encounter_waves, &ram.encounter_waves),
         fighter_unit_damage_accum: merge_map_3way(&base.fighter_unit_damage_accum, &db.fighter_unit_damage_accum, &ram.fighter_unit_damage_accum),
         fighter_tube_rearm_until: merge_pair_vec_3way(&base.fighter_tube_rearm_until, &db.fighter_tube_rearm_until, &ram.fighter_tube_rearm_until),
@@ -1136,7 +1031,6 @@ fn merge_extended_payload_3way(
         ci_sentry_deployed_systems: merge_set_3way(&base.ci_sentry_deployed_systems, &db.ci_sentry_deployed_systems, &ram.ci_sentry_deployed_systems),
         npc_scrambled_ships: merge_map_3way(&base.npc_scrambled_ships, &db.npc_scrambled_ships, &ram.npc_scrambled_ships),
         npc_sec_gain_intervals: merge_pair_vec_3way(&base.npc_sec_gain_intervals, &db.npc_sec_gain_intervals, &ram.npc_sec_gain_intervals),
-        recently_destroyed_item_ids: merge_recent_ids_3way(&base.recently_destroyed_item_ids, &db.recently_destroyed_item_ids, &ram.recently_destroyed_item_ids),
         self_destruct_sim_remaining_secs,
     }
 }
@@ -1146,18 +1040,9 @@ fn merge_persisted_3way(
     db: &eve_db::PersistedCombatCrimewatchState,
     ram: &eve_db::PersistedCombatCrimewatchState,
 ) -> eve_db::PersistedCombatCrimewatchState {
-    let pending_bounty_ticks = merge_map_3way(&base.pending_bounty_ticks, &db.pending_bounty_ticks, &ram.pending_bounty_ticks);
-    let bounty_tick_next_flush_unix = merge_map_3way(&base.bounty_tick_next_flush_unix, &db.bounty_tick_next_flush_unix, &ram.bounty_tick_next_flush_unix);
-    let pending_bounty_tick_started_unix = merge_map_3way(&base.pending_bounty_tick_started_unix, &db.pending_bounty_tick_started_unix, &ram.pending_bounty_tick_started_unix);
-    let bounty_maps_differ_from_ram = pending_bounty_ticks != ram.pending_bounty_ticks
-        || bounty_tick_next_flush_unix != ram.bounty_tick_next_flush_unix
-        || pending_bounty_tick_started_unix != ram.pending_bounty_tick_started_unix;
-
-    let extended_runtime_json = if db.extended_runtime_json == base.extended_runtime_json
-        && (!bounty_maps_differ_from_ram || ram.extended_runtime_json.is_empty())
-    {
+    let extended_runtime_json = if db.extended_runtime_json == base.extended_runtime_json {
         ram.extended_runtime_json.clone()
-    } else if ram.extended_runtime_json == base.extended_runtime_json && !bounty_maps_differ_from_ram {
+    } else if ram.extended_runtime_json == base.extended_runtime_json {
         db.extended_runtime_json.clone()
     } else {
         let parse_ext = |s: &str| -> PersistedCombatExtendedPayload {
@@ -1167,17 +1052,11 @@ fn merge_persisted_3way(
                 serde_json::from_str(s).unwrap_or_default()
             }
         };
-        let mut merged_ext = merge_extended_payload_3way(
+        let merged_ext = merge_extended_payload_3way(
             &parse_ext(&base.extended_runtime_json),
             &parse_ext(&db.extended_runtime_json),
             &parse_ext(&ram.extended_runtime_json),
         );
-        merged_ext.pending_bounty_ticks = pending_bounty_ticks.iter().map(|(k, v)| (*k, *v)).collect();
-        merged_ext.bounty_tick_next_flush_unix = bounty_tick_next_flush_unix.iter().map(|(k, v)| (*k, *v)).collect();
-        merged_ext.pending_bounty_tick_started_unix = pending_bounty_tick_started_unix.iter().map(|(k, v)| (*k, *v)).collect();
-        merged_ext.pending_bounty_ticks.sort_by_key(|(k, _)| *k);
-        merged_ext.bounty_tick_next_flush_unix.sort_by_key(|(k, _)| *k);
-        merged_ext.pending_bounty_tick_started_unix.sort_by_key(|(k, _)| *k);
         if merged_ext == PersistedCombatExtendedPayload::default() {
             String::new()
         } else {
@@ -1200,13 +1079,14 @@ fn merge_persisted_3way(
         kill_right_expires_unix: db.kill_right_expires_unix.clone(),
         kill_right_restricted_to: db.kill_right_restricted_to.clone(),
         detailed_killmails: db.detailed_killmails.clone(),
-        pending_bounty_ticks,
-        bounty_tick_next_flush_unix,
-        pending_bounty_tick_started_unix,
+        pending_bounty_ticks: db.pending_bounty_ticks.clone(),
+        bounty_tick_next_flush_unix: db.bounty_tick_next_flush_unix.clone(),
+        pending_bounty_tick_started_unix: db.pending_bounty_tick_started_unix.clone(),
         modified_system_securities: db.modified_system_securities.clone(),
         ess_reserve_unlocked_until: db.ess_reserve_unlocked_until.clone(),
         ess_reserve_bank_thefts: db.ess_reserve_bank_thefts.clone(),
         ess_main_bank_thefts: db.ess_main_bank_thefts.clone(),
+        recently_destroyed_item_ids: db.recently_destroyed_item_ids.clone(),
         extended_runtime_json,
     }
 }

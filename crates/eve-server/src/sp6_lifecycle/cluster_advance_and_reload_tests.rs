@@ -67,9 +67,13 @@ async fn cluster_advance_handles_safe_logoff_abort_scrambled_warp_bounty_concord
     }
     let _ = handle.set_warp_scramble_strength(ship2, 2).await;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((sys_id, 90_000_001), 50_000.0);
-        rt.bounty_tick_next_flush_unix.insert((sys_id, 90_000_001), base_now + 5);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .pending_bounty_ticks
+            .insert((sys_id, 90_000_001), 50_000.0);
+        snap.combat_crimewatch_state
+            .bounty_tick_next_flush_unix
+            .insert((sys_id, 90_000_001), base_now + 5);
     });
     if let Ok(mut cw) = ctx.crimewatch.write() {
         let st = cw.states.entry(90_000_002).or_default();

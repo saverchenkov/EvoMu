@@ -1434,10 +1434,14 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
         assert_eq!(st.ess_main_bank, IskCents(0));
         assert_eq!(st.ess_reserve_bank, IskCents(0));
         assert!((snap.characters[&char_id].standings[&500_002] - (-0.02)).abs() < 1e-9);
+        assert!(
+            (snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)] - 100_000.0)
+                .abs()
+                < 1e-6
+        );
     });
     with_combat_runtime(&ctx, |rt| {
         assert!(rt.bounty_credited_balls.contains(&runtime_npc_id));
-        assert!((rt.pending_bounty_ticks[&(sys_id, char_id)] - 100_000.0).abs() < 1e-6);
     });
 
     // After 20m flush: total pilot wallet + ESS Main/Reserve banks equal exactly 1x bounty split.
@@ -1461,7 +1465,7 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
 #[tokio::test]
 async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements() {
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
-    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+    use crate::services::combat_crimewatch::with_mut_combat_runtime;
     use crate::services::social_corp_fleet::social_corp_projects::{
         create_canonical_project, CanonicalProjectSpec,
     };
@@ -1698,8 +1702,8 @@ async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements
         assert!(snap.characters[&char_id].standings.is_empty());
     });
     assert_eq!(achievement_snapshot(), ach_before);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.pending_bounty_ticks.is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.combat_crimewatch_state.pending_bounty_ticks.is_empty());
     });
 
     // 2. Control check: killing a Category 11 NPC via canonical Activate DOES pass Some(char_id) and credits NPC projects.

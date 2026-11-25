@@ -1792,10 +1792,11 @@ async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistenc
             .expect("npc ball exists");
         assert!(dead);
     }
-    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+    ctx.db.with_snapshot(|snap| {
         for &npc_bid in &kill_ids {
             assert!(
-                rt.is_recently_destroyed_item_id(npc_bid),
+                snap.combat_crimewatch_state
+                    .is_recently_destroyed_item_id(npc_bid),
                 "destroyed seasonal NPC {npc_bid} must be recorded in #1032 recently_destroyed_item_ids"
             );
         }
@@ -1980,9 +1981,13 @@ async fn seasonal_expired_and_out_of_window_npc_kills_prune_without_rewards_or_c
     assert!(h1.get_ball_snapshot(site_1.boss_npc_ball_id).await.unwrap().is_none());
     assert!(h1.get_ball_snapshot(site_1.escort_ball_ids[0]).await.unwrap().is_none());
     assert!(h1.get_ball_snapshot(details_1.relay_ball_id).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(site_1.boss_npc_ball_id));
+    });
     crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
         assert!(rt.bounty_credited_balls.contains(&site_1.boss_npc_ball_id));
-        assert!(rt.is_recently_destroyed_item_id(site_1.boss_npc_ball_id));
         assert!(!rt.npc_entities.contains_key(&site_1.escort_ball_ids[0]));
     });
     let exp_pruned = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
@@ -2018,11 +2023,11 @@ async fn seasonal_expired_and_out_of_window_npc_kills_prune_without_rewards_or_c
             "out-of-season cleanup must NOT arm respawn cooldown"
         );
         assert!(!snap.transient_items.contains_key(&details_2.relay_ball_id));
+        assert!(snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(site_2.boss_npc_ball_id));
     });
     assert!(h2.get_ball_snapshot(details_2.relay_ball_id).await.unwrap().is_none());
-    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.is_recently_destroyed_item_id(site_2.boss_npc_ball_id));
-    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
