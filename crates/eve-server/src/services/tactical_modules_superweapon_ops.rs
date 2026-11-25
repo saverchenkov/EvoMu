@@ -309,16 +309,13 @@ fn refund_superweapon_fuel(
     if consumed_by_flag.is_empty() {
         return;
     }
-    let item_diffs = ctx.db.with_mut_snapshot(|snap| {
-        let mut diffs: Vec<(
-            Option<eve_db::InventoryItemRecord>,
-            Option<eve_db::InventoryItemRecord>,
-        )> = Vec::new();
+    let _ = ctx.db.tx("test_refund_superweapon_fuel", |tx| {
         for &(flag, qty) in consumed_by_flag {
             if qty <= 0 {
                 continue;
             }
-            let existing_id = snap
+            let existing_id = tx
+                .snap
                 .items
                 .values()
                 .find(|i| {
@@ -326,21 +323,18 @@ fn refund_superweapon_fuel(
                         && i.type_id == fuel_tid
                         && i.flag == flag
                         && !i.singleton
-                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                        && !tx.snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 })
                 .map(|i| i.item_id);
             if let Some(eid) = existing_id {
-                if let Some(existing) = snap.items.get_mut(&eid) {
-                    let pre = existing.clone();
+                if let Some(existing) = tx.snap.items.get_mut(&eid) {
                     existing.quantity += qty;
                     existing.version += 1;
-                    let post = existing.clone();
-                    diffs.push((Some(pre), Some(post)));
                     continue;
                 }
             }
-            snap.next_entity_id += 1;
-            let new_id = snap.next_entity_id;
+            tx.snap.next_entity_id += 1;
+            let new_id = tx.snap.next_entity_id;
             let new_item = eve_db::InventoryItemRecord {
                 item_id: new_id,
                 type_id: fuel_tid,
@@ -351,14 +345,10 @@ fn refund_superweapon_fuel(
                 singleton: false,
                 ..eve_db::InventoryItemRecord::default()
             };
-            snap.items.insert(new_id, new_item.clone());
-            diffs.push((None, Some(new_item)));
+            tx.snap.items.insert(new_id, new_item);
         }
-        diffs
+        Ok::<_, eve_db::TxError>(())
     });
-    for (pre, post) in &item_diffs {
-        ctx.notify_item_mutation(owner_char_id, pre.as_ref(), post.as_ref());
-    }
 }
 
 fn precheck_doomsday_structure_target(

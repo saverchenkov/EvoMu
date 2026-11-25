@@ -172,7 +172,6 @@ async fn test_binding_containers_and_notifications() {
     // Notifications & local chat sync
     ctx.sync_character_local_chat(char1, None, sys_id);
     ctx.sync_character_local_chat(char1, Some(sys_id), 30_000_144);
-    let _ = ctx.notify_item_change(char1, PyRep::Integer(loot_id), vec![(2, PyRep::Integer(1))]);
     let _ = ctx.notify_fleet_broadcast(1, "NeedArmor", char1, ship_id);
     let _ = ctx.notify(
         NotificationTarget::Alliance(99_000_001),

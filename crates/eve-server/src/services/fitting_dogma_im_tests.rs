@@ -4518,7 +4518,6 @@ async fn hf1476_sublocation_lookup_prefers_caller_owner_on_shared_locations() {
 #[tokio::test]
 async fn destroy_fitting_on_corp_upwell_structure_emits_on_item_change_for_loaded_charge() {
     use crate::router::delta_item_switch::ItemWireFingerprint;
-    use crate::router::ProjectedItemSwitchConfig;
     use eve_db::corp_roles::ROLE_DIRECTOR;
     use eve_db::{CharacterRecord, CorporationRecord, UpwellStructureRecord};
 
@@ -4526,7 +4525,6 @@ async fn destroy_fitting_on_corp_upwell_structure_emits_on_item_change_for_loade
         shared_sde(),
         Arc::new(WorldRepository::with_demo_seed()),
     );
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
     let (sys_id, corp_id, sid) = (30_000_142_u32, 98_476_901_i64, 1_096_476_000_901_i64);
     let (caller_id, mod_id, charge_id) = (96_476_901_i64, 96_476_910_i64, 96_476_911_i64);
     let uid = caller_id as u64;

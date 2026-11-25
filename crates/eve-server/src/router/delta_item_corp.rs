@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use eve_db::{
     ChangeSet, CharacterRecord, InventoryFlag, InventoryItemRecord, RowChange, WorldStateSnapshot,
@@ -20,9 +20,7 @@ use super::cache_notifications::{
 };
 use super::delta_item_recipients::{append_extended_rules_and_dedup, SwitchedItemRecipient};
 use super::delta_item_switch::{
-    evaluate_fitted_coords_pair, is_character_scene_or_ship_transition, is_first_set_direct_slot,
-    online_non_transitioned_owner, pair_owner_and_op_kind, ItemBeforeAfter, ProjectedItemOpKind,
-    ProjectedItemSwitchConfig,
+    is_character_scene_or_ship_transition, online_non_transitioned_owner, ItemBeforeAfter,
 };
 use super::delta_projection::{is_blueprint_type, OnlineCharacterLookup};
 use crate::services::notify_emitters_character_services::{
@@ -135,76 +133,34 @@ pub(crate) fn resolve_online_non_transitioned_corp_recipients<'a>(
     members
 }
 
-#[allow(clippy::too_many_arguments)]
-fn classify_char_same_scene_item_change_for_scope<'a>(
-    in_dispatch: bool,
-    config: ProjectedItemSwitchConfig,
+fn classify_char_item_owners<'a>(
     change: &'a RowChange<i64, InventoryItemRecord>,
     snap_after: &WorldStateSnapshot,
     changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
     online: &impl OnlineCharacterLookup,
     sde: &SdeRegistry,
-) -> [Option<(i64, ProjectedItemOpKind, &'a InventoryItemRecord)>; 2] {
+) -> [Option<i64>; 2] {
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
-    let Some(fp_rec) = after_opt.or(before_opt) else {
-        return [None, None];
+    let qualify_char = |cid: i64| {
+        online_non_transitioned_owner(cid, cid, snap_after, changed_chars, online, sde)
+            .map(|_| cid)
     };
-    if config.is_char_all_items_enabled_in_scope(in_dispatch) {
-        let qualify_char = |cid: i64, kind: ProjectedItemOpKind| {
-            online_non_transitioned_owner(cid, cid, snap_after, changed_chars, online, sde)
-                .map(|_| (cid, kind, fp_rec))
-        };
-        return match (before_opt, after_opt) {
-            (None, Some(new_item)) => [
-                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
-                None,
-            ],
-            (Some(old_item), None) => [
-                qualify_char(old_item.owner_id, ProjectedItemOpKind::Deleted),
-                None,
-            ],
-            (Some(old_item), Some(new_item)) if old_item.owner_id == new_item.owner_id => [
-                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
-                None,
-            ],
-            (Some(old_item), Some(new_item)) => [
-                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
-                qualify_char(old_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
-            ],
-            (None, None) => [None, None],
-        };
+    match (before_opt, after_opt) {
+        (None, Some(new_item)) => [qualify_char(new_item.owner_id), None],
+        (Some(old_item), None) => [qualify_char(old_item.owner_id), None],
+        (Some(old_item), Some(new_item)) if old_item.owner_id == new_item.owner_id => {
+            [qualify_char(new_item.owner_id), None]
+        }
+        (Some(old_item), Some(new_item)) => {
+            [qualify_char(new_item.owner_id), qualify_char(old_item.owner_id)]
+        }
+        (None, None) => [None, None],
     }
-
-    let Some((owner_id, op_kind)) = pair_owner_and_op_kind(before_opt, after_opt) else {
-        return [None, None];
-    };
-    let Some(ch) = online_non_transitioned_owner(
-        owner_id,
-        owner_id,
-        snap_after,
-        changed_chars,
-        online,
-        sde,
-    ) else {
-        return [None, None];
-    };
-    let direct_slot_ok = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
-        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
-    let direct_active = direct_slot_ok && config.is_kind_enabled_in_scope(in_dispatch, op_kind);
-    let fitted_active = config.is_fitted_enabled_in_scope(in_dispatch)
-        && evaluate_fitted_coords_pair(
-            before_opt.map(|r| (r.location_id, r.flag as i64)),
-            after_opt.map(|r| (r.location_id, r.flag as i64)),
-            ch,
-        );
-    [(direct_active || fitted_active).then_some((owner_id, op_kind, fp_rec)), None]
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_switched_item_recipients_for_change<'a>(
-    in_dispatch: bool,
-    cfg: ProjectedItemSwitchConfig,
     acting_char_id: Option<i64>,
     change: &'a RowChange<i64, InventoryItemRecord>,
     snap_after: &'a WorldStateSnapshot,
@@ -215,52 +171,20 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
     sde: &SdeRegistry,
     corp_recipients_cache: &mut HashMap<i64, Vec<&'a CharacterRecord>>,
 ) -> Vec<SwitchedItemRecipient<'a>> {
-    let char_entries = classify_char_same_scene_item_change_for_scope(
-        in_dispatch,
-        cfg,
-        change,
-        snap_after,
-        changed_chars,
-        online,
-        sde,
-    );
-
-    if !cfg.is_corp_all_items_enabled_in_scope(in_dispatch) {
-        let mut out = Vec::with_capacity(2);
-        let mut seen = HashSet::with_capacity(2);
-        for (cid, op_kind, fp_rec) in char_entries.into_iter().flatten() {
-            if seen.insert(cid) {
-                if let Some(ch) = snap_after.characters.get(&cid) {
-                    out.push(SwitchedItemRecipient {
-                        character: ch,
-                        op_kind,
-                        fp_rec,
-                        id_type: "charid",
-                    });
-                }
-            }
-        }
-        return out;
-    }
+    let char_entries =
+        classify_char_item_owners(change, snap_after, changed_chars, online, sde);
 
     let before_opt = change.before.as_deref();
     let after_opt = change.after.as_deref();
-    let (default_op_kind, default_fp_rec) = match (before_opt, after_opt) {
-        (Some(old_item), None) => (ProjectedItemOpKind::Deleted, old_item),
-        (_, Some(new_item)) => (ProjectedItemOpKind::CreatedOrUpdated, new_item),
-        (None, None) => return Vec::new(),
-    };
+    if before_opt.is_none() && after_opt.is_none() {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(6);
 
-    let push_char = |out: &mut Vec<SwitchedItemRecipient<'a>>,
-                     cid: i64,
-                     op_kind: ProjectedItemOpKind,
-                     fp_rec: &'a InventoryItemRecord| {
+    let push_char = |out: &mut Vec<SwitchedItemRecipient<'a>>, cid: i64| {
         if let Some(ch) = snap_after.characters.get(&cid) {
             out.push(SwitchedItemRecipient {
                 character: ch,
-                op_kind,
-                fp_rec,
                 id_type: "charid",
             });
         }
@@ -268,9 +192,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
 
     let push_corp = |out: &mut Vec<SwitchedItemRecipient<'a>>,
                      corp_recipients_cache: &mut HashMap<i64, Vec<&'a CharacterRecord>>,
-                     corp_id: i64,
-                     op_kind: ProjectedItemOpKind,
-                     fp_rec: &'a InventoryItemRecord| {
+                     corp_id: i64| {
         let members = corp_recipients_cache.entry(corp_id).or_insert_with(|| {
             resolve_online_non_transitioned_corp_recipients(
                 corp_id,
@@ -282,8 +204,6 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
         for &ch in members.iter() {
             out.push(SwitchedItemRecipient {
                 character: ch,
-                op_kind,
-                fp_rec,
                 id_type: "corpid",
             });
         }
@@ -291,44 +211,26 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
 
     match (before_opt, after_opt) {
         (None, Some(new_item)) => {
-            if let Some((cid, op_kind, fp_rec)) = char_entries[0] {
-                push_char(&mut out, cid, op_kind, fp_rec);
+            if let Some(cid) = char_entries[0] {
+                push_char(&mut out, cid);
             } else if is_corp_item_eligible(new_item, snap_after, sde) {
-                push_corp(
-                    &mut out,
-                    corp_recipients_cache,
-                    new_item.owner_id,
-                    ProjectedItemOpKind::CreatedOrUpdated,
-                    new_item,
-                );
+                push_corp(&mut out, corp_recipients_cache, new_item.owner_id);
             }
         }
         (Some(old_item), None) => {
-            if let Some((cid, op_kind, fp_rec)) = char_entries[0] {
-                push_char(&mut out, cid, op_kind, fp_rec);
+            if let Some(cid) = char_entries[0] {
+                push_char(&mut out, cid);
             } else if is_corp_item_eligible(old_item, snap_after, sde) {
-                push_corp(
-                    &mut out,
-                    corp_recipients_cache,
-                    old_item.owner_id,
-                    ProjectedItemOpKind::Deleted,
-                    old_item,
-                );
+                push_corp(&mut out, corp_recipients_cache, old_item.owner_id);
             }
         }
         (Some(old_item), Some(new_item)) if old_item.owner_id == new_item.owner_id => {
-            if let Some((cid, op_kind, fp_rec)) = char_entries[0] {
-                push_char(&mut out, cid, op_kind, fp_rec);
+            if let Some(cid) = char_entries[0] {
+                push_char(&mut out, cid);
             } else if is_corp_item_eligible(new_item, snap_after, sde)
                 || is_corp_item_eligible(old_item, snap_after, sde)
             {
-                push_corp(
-                    &mut out,
-                    corp_recipients_cache,
-                    new_item.owner_id,
-                    ProjectedItemOpKind::CreatedOrUpdated,
-                    new_item,
-                );
+                push_corp(&mut out, corp_recipients_cache, new_item.owner_id);
             }
         }
         (Some(old_item), Some(new_item)) => {
@@ -336,42 +238,27 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
             let mut char_iter = char_entries.into_iter().flatten();
             let first_char = char_iter.next();
             let second_char = char_iter.next();
-            if let Some((cid, op_kind, fp_rec)) = first_char.filter(|&(cid, _, _)| cid == new_item.owner_id) {
-                push_char(&mut out, cid, op_kind, fp_rec);
+            if let Some(cid) = first_char.filter(|&cid| cid == new_item.owner_id) {
+                push_char(&mut out, cid);
             } else if is_corp_item_eligible(new_item, snap_after, sde) {
-                push_corp(
-                    &mut out,
-                    corp_recipients_cache,
-                    new_item.owner_id,
-                    ProjectedItemOpKind::CreatedOrUpdated,
-                    new_item,
-                );
+                push_corp(&mut out, corp_recipients_cache, new_item.owner_id);
             }
 
             let old_char_opt = second_char
-                .filter(|&(cid, _, _)| cid == old_item.owner_id)
-                .or_else(|| first_char.filter(|&(cid, _, _)| cid == old_item.owner_id));
-            if let Some((cid, op_kind, fp_rec)) = old_char_opt {
-                push_char(&mut out, cid, op_kind, fp_rec);
+                .filter(|&cid| cid == old_item.owner_id)
+                .or_else(|| first_char.filter(|&cid| cid == old_item.owner_id));
+            if let Some(cid) = old_char_opt {
+                push_char(&mut out, cid);
             } else if is_corp_item_eligible(old_item, snap_after, sde) {
-                push_corp(
-                    &mut out,
-                    corp_recipients_cache,
-                    old_item.owner_id,
-                    ProjectedItemOpKind::CreatedOrUpdated,
-                    new_item,
-                );
+                push_corp(&mut out, corp_recipients_cache, old_item.owner_id);
             }
         }
         (None, None) => {}
     }
 
     append_extended_rules_and_dedup(
-        cfg.char_all_items,
         acting_char_id,
         change,
-        default_op_kind,
-        default_fp_rec,
         snap_after,
         changes,
         item_changes_by_id,
@@ -437,7 +324,6 @@ pub(crate) fn build_switched_item_commit_notifications(
     sde: &SdeRegistry,
     online: &impl OnlineCharacterLookup,
     batch: SwitchedCommitBatch,
-    corp_all_items: bool,
     now_unix: u64,
     now_ft: i64,
     active_fuel_reserves: &crate::services::tactical_modules::ActiveFuelReserveTracker,
@@ -469,9 +355,6 @@ pub(crate) fn build_switched_item_commit_notifications(
                     continue;
                 }
                 let is_personal = sub.owner_id == sub.char_id;
-                if !is_personal && !corp_all_items {
-                    continue;
-                }
                 if !is_personal {
                     let authorized = *corp_auth_cache.entry(monitor_id).or_insert_with(|| {
                         has_corp_industry_monitor_access(snap, sde, online, sub, now_unix)

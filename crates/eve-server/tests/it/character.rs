@@ -1259,18 +1259,24 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
         "CorpNews",
         vec![("text", PyRep::String("Welcome".into()))],
     );
-    let sample_item_row = DBRowDescriptor::inv_item_header().build_dbrow(vec![
-        PyRep::Integer(100_000_001),
-        PyRep::Integer(606),
-        PyRep::Integer(90_000_001),
-        PyRep::Integer(60_003_760),
-        PyRep::Integer(4),
-        PyRep::Integer(-1),
-        PyRep::Integer(25),
-        PyRep::Integer(6),
-        PyRep::String(String::new()),
-    ]);
-    let _ = ctx.notify_item_change(90_000_001, sample_item_row, vec![(3, PyRep::Integer(30_000_142))]);
+    ctx.db
+        .tx("p5_item_change", |tx| {
+            tx.snap.items.insert(
+                995_931_099,
+                eve_db::InventoryItemRecord {
+                    item_id: 995_931_099,
+                    type_id: 606,
+                    owner_id: 90_000_001,
+                    location_id: 60_003_760,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("p5_item_change tx succeeds");
     let _ = ctx.notify_skill_trained(90_000_001, 200_001, 3_300, 4);
     let created_notif = ctx.create_character_notification(
         1_000_035,
@@ -1281,7 +1287,7 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
     );
 
     let drained = ctx.drain_notifications_for_char(90_000_001);
-    assert_eq!(drained.len(), 5);
+    assert_eq!(drained.len(), 6);
     for notif in &drained {
         // Every queued notification must be a real binary-marshaled MachoPacket(Notification = 12)
         let decoded_pyrep =

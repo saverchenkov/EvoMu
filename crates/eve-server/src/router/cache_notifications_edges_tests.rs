@@ -507,9 +507,27 @@ fn persistent_notifications_login_delivery_local_chat_and_emitters() {
             .len(),
         1
     );
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.db
+        .tx("edges_fitted_item_trashed", |tx| {
+            ServerContext::push_tx_fitted_item_trashed(
+                tx.effects,
+                &ctx.sde,
+                char_id,
+                700_001,
+                mod_tid as i64,
+                1,
+                100_000_001,
+                27,
+            );
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("edges_fitted_item_trashed tx succeeds");
     assert_eq!(
-        ctx.notify_fitted_item_trashed(char_id, 700_001, mod_tid as i64, 1, 100_000_001, 27)
-            .len(),
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
         1
     );
 }

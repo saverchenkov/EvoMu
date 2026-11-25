@@ -1575,14 +1575,14 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
             .expect("reserve must succeed")
     });
     // Transfer remaining stack to char_b and notify both owners just like an inventory transfer.
-    let (pre_xfer, post_xfer) = ctx.db.with_mut_snapshot(|snap| {
-        let item = snap.items.get_mut(&stack_id).unwrap();
-        let pre = item.clone();
-        item.owner_id = char_b;
-        item.version += 1;
-        (pre, item.clone())
-    });
-    ctx.notify_item_mutation(char_a, Some(&pre_xfer), Some(&post_xfer));
+    ctx.db
+        .tx("xfer_stack_owner", |tx| {
+            let item = tx.snap.items.get_mut(&stack_id).unwrap();
+            item.owner_id = char_b;
+            item.version += 1;
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("xfer_stack_owner tx succeeds");
     for n in ctx.drain_notifications_for_char(char_a) {
         shadow_a.apply_notification(&n.event, &n.args);
     }

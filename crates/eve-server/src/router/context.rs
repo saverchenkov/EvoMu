@@ -142,9 +142,6 @@ pub struct ServerContext {
     pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fixture_census: Arc<super::fixture_census::FixtureCensusCollector>,
-    /// Per-class default-on switches & dedupe ledger for character-owned same-scene item
-    /// delta projection with env kill switches (`#931` Track 3B / 3C-1).
-    pub projected_item_switches: Arc<crate::router::delta_item_switch::ProjectedItemSwitchHandle>,
 }
 
 /// Burst token capacity for standard per-session RPC throttling.
@@ -307,7 +304,6 @@ pub(crate) struct ServerContextWeak {
     rpc_rate_budget_disabled: std::sync::Weak<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
     fixture_census: std::sync::Weak<super::fixture_census::FixtureCensusCollector>,
-    projected_item_switches: std::sync::Weak<crate::router::delta_item_switch::ProjectedItemSwitchHandle>,
 }
 
 impl ServerContextWeak {
@@ -390,7 +386,6 @@ impl ServerContextWeak {
             rpc_rate_budget_disabled: self.rpc_rate_budget_disabled.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: self.fixture_census.upgrade()?,
-            projected_item_switches: self.projected_item_switches.upgrade()?,
         })
     }
 }
@@ -748,7 +743,6 @@ impl ServerContext {
             rpc_rate_budget_disabled: Arc::downgrade(&self.rpc_rate_budget_disabled),
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::downgrade(&self.fixture_census),
-            projected_item_switches: Arc::downgrade(&self.projected_item_switches),
         }
     }
 
@@ -920,11 +914,6 @@ impl ServerContext {
             rpc_rate_budget_disabled: Arc::new(AtomicBool::new(false)),
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::new(super::fixture_census::FixtureCensusCollector::new()),
-            projected_item_switches: Arc::new(
-                crate::router::delta_item_switch::ProjectedItemSwitchHandle::new(
-                    crate::router::delta_item_switch::ProjectedItemSwitchConfig::from_env(),
-                ),
-            ),
         };
         if let Err(err) = crate::services::pve_content_providers::register_default_pve_content_providers(
             &ctx.systems,

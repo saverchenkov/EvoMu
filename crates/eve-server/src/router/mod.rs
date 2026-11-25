@@ -18,7 +18,6 @@ pub mod delta_commit_listener;
 mod delta_item_corp;
 mod delta_item_recipients;
 pub mod delta_item_switch;
-mod delta_item_switch_ctx;
 pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
@@ -42,7 +41,6 @@ pub mod test_context;
 pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
 pub use cache_notifications::*;
 pub use context::*;
-pub use delta_item_switch::{ProjectedItemSwitchConfig, ProjectedItemSwitchHandle};
 #[cfg(any(test, feature = "testkit"))]
 pub use test_context::TestContext;
 pub use delta_projection::{

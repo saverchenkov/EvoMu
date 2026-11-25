@@ -26,9 +26,7 @@ use super::cache_notifications::{
     PendingMachoNotification, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use super::delta_item_recipients::{resolve_item_holder, ItemHolderKind};
-use super::delta_item_switch::{
-    is_character_scene_or_ship_transition, ItemBeforeAfter, ProjectedItemSwitchConfig,
-};
+use super::delta_item_switch::{is_character_scene_or_ship_transition, ItemBeforeAfter};
 use super::dispatch_active_char::with_active_dispatch_char;
 use super::ServerContext;
 
@@ -97,7 +95,6 @@ fn make_corp_with_members(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_zero() {
     let ctx = test_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
     let pilot_id = 90_000_001_i64;
     let station_id = 60_003_760_i64;
     let sys_id = 30_000_142_u32;
@@ -186,107 +183,6 @@ async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_z
         pilot_notifs.is_empty(),
         "same-commit ownerless container + contents must emit nothing to acting pilot: {pilot_notifs:?}"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn step3a_ledger_suppresses_either_id_type_without_stale_event_drop() {
-    let ctx = test_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
-    let pilot_p = 90_000_001_i64;
-    let outsider_q = 90_000_002_i64;
-    let corp_id = 98_931_703_i64;
-    let station_id = 60_003_760_i64;
-    let sys_id = 30_000_142_u32;
-    let ship_p = 995_933_001_i64;
-    let ship_q = 995_933_002_i64;
-
-    setup_online_pilot_in_station(&ctx, pilot_p, station_id, sys_id, ship_p);
-    setup_online_pilot_in_station(&ctx, outsider_q, station_id, sys_id, ship_q);
-    make_corp_with_members(&ctx, corp_id, pilot_p, &[pilot_p]);
-
-    // Pre-seed corp fuel-bay item owned by corp_id (flag 133 / SpecializedFuelBay -> projects under corpid).
-    let core_item_id = 995_933_010_i64;
-    let core_pre = InventoryItemRecord {
-        item_id: core_item_id,
-        type_id: 56_201,
-        owner_id: pilot_p,
-        location_id: ship_p,
-        flag: InventoryFlag::Cargo,
-        quantity: 1,
-        singleton: true,
-        version: 1,
-        ..Default::default()
-    };
-    let mut core_post = core_pre.clone();
-    core_post.owner_id = corp_id;
-    core_post.flag = InventoryFlag::QuantumCoreRoom;
-    core_post.version = 2;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(core_item_id, core_pre.clone());
-    });
-    let _ = ctx.drain_notifications_for_char(pilot_p);
-
-    // Dispatch: pilot_p becomes member of corp_id, move updates core to corp + deletes core,
-    // and legacy hand-written emit targets Character(pilot_p) ("charid") with col 2 == pilot_p
-    // AND legacy hand-written emit targets Character(outsider_q) (NO ledger fact for q).
-    with_active_dispatch_char(Some(pilot_p), async {
-        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            ctx.db
-                .tx("core_step_1_2", |tx| -> Result<(), eve_db::TxError> {
-                    tx.snap.items.insert(core_item_id, core_post.clone());
-                    Ok(())
-                })
-                .expect("step 1");
-            ctx.db
-                .tx("core_consume", |tx| -> Result<(), eve_db::TxError> {
-                    tx.snap.items.remove(&core_item_id);
-                    Ok(())
-                })
-                .expect("consume");
-            // Hand-written follow-up for pilot_p as Character(pilot_p) ("charid") MUST be suppressed by corpid fact!
-            ctx.notify_item_record_change(
-                pilot_p,
-                &core_post,
-                vec![(2, eve_proto::PyRep::Integer(pilot_p)), (4, eve_proto::PyRep::Integer(5))],
-            );
-            // Hand-written emit for outsider_q MUST NOT be stale-dropped since projection has no fact for outsider_q.
-            ctx.notify_item_record_change(
-                outsider_q,
-                &core_post,
-                vec![(4, eve_proto::PyRep::Integer(5))],
-            );
-            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-        })
-        .await;
-    })
-    .await;
-
-    let n_p: Vec<_> = ctx
-        .drain_notifications_for_char(pilot_p)
-        .into_iter()
-        .filter(|n| n.event == "OnItemChange")
-        .collect();
-    assert_eq!(
-        n_p.len(),
-        2,
-        "pilot_p must get only the 2 projected corpid events (move + consume), zero hand-written follow-up: {n_p:?}"
-    );
-    assert!(
-        n_p.iter().all(|n| n.id_type == "corpid"),
-        "hand-written charid follow-up must be suppressed by corpid ledger fact: {n_p:?}"
-    );
-    assert_eq!(
-        n_p.last().and_then(|n| n.args[0].dbrow_get("locationID").and_then(eve_proto::PyRep::as_i64)),
-        Some(6),
-        "last OnItemChange must be consumption tombstone: {n_p:?}"
-    );
-    let n_q: Vec<_> = ctx
-        .drain_notifications_for_char(outsider_q)
-        .into_iter()
-        .filter(|n| n.event == "OnItemChange")
-        .collect();
-    assert_eq!(n_q.len(), 1, "outsider_q with no ledger fact must still receive its hand-written emit: {n_q:?}");
 }
 
 #[test]
@@ -398,7 +294,6 @@ fn step3a_holder_rules_cover_deleted_container_nested_ship_and_exclude_station_s
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn step3b1_acting_pilot_skips_destroyed_ship_holder_and_keeps_live_ship_and_space_holders() {
     let ctx = test_ctx();
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
     let killer_id = 90_000_001_i64;
     let victim_id = 90_000_002_i64;
     let other_pilot_id = 96_931_803_i64;
@@ -513,8 +408,6 @@ async fn step3b1_acting_pilot_skips_destroyed_ship_holder_and_keeps_live_ship_an
     let _ = ctx.drain_notifications_for_char(killer_id);
     let _ = ctx.drain_notifications_for_char(victim_id);
     let _ = ctx.drain_notifications_for_char(other_pilot_id);
-
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
 
     // 1. Ship destruction commit: `victim_ship` is deleted alongside destroying `victim_mod` and
     //    moving `victim_cargo` into a new `wreck_id` -> killer must receive 0 `OnItemChange`.
@@ -648,8 +541,6 @@ async fn step3b1_destroyed_space_holder_drops_leak_when_deleted_and_notifies_whe
     });
     let _ = ctx.drain_notifications_for_char(acting_pilot);
     let _ = ctx.drain_notifications_for_char(owner_pilot);
-
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
 
     // 1. Destroying a foreign space container/deployable AND deleting its enclosed contents
     //    (`ItemHolderKind::Space`, `after_opt.is_none()`) must emit zero `OnItemChange` to actor.
@@ -1206,7 +1097,15 @@ async fn cross_owner_char_corp_upwell_npc_and_role_gated_industry_projection() {
         Ok(())
     }).expect("outside corp");
     let (np1, np2) = (ctx.drain_notifications_for_char(p1_id), ctx.drain_notifications_for_char(p2_id));
-    assert_eq!((ic_cnt(&np1, "charid"), ic_cnt(&np1, "corpid"), ic_cnt(&np2, "corpid")), (0, 7, 7));
+    assert_eq!(
+        (
+            ic_cnt(&np1, "charid"),
+            ic_cnt(&np1, "corpid"),
+            ic_cnt(&np2, "charid"),
+            ic_cnt(&np2, "corpid"),
+        ),
+        (0, 7, 0, 7)
+    );
     assert_eq!(np1.iter().filter(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(corp1_id)]).count(), 1);
     assert_eq!(np2.iter().filter(|n| n.event == "OnBlueprintsUpdated" && n.args == vec![PyRep::Integer(corp1_id)]).count(), 1);
     assert_eq!((industry_mat_qty(&np1, MAT_TYPE), industry_mat_qty(&np1, bp_type_id).is_empty(), ev_cnt(&np2, "OnIndustryMaterials")), (vec![200], true, 0));

@@ -2307,7 +2307,7 @@ mod inventory_stacking_tests;
 
 #[cfg(test)]
 mod t3c2_tests {
-    use crate::router::{ProjectedItemSwitchConfig, ServerContext};
+    use crate::router::ServerContext;
     use crate::services::inventory_fitting::handle;
     use eve_db::{InventoryFlag, InventoryItemRecord};
     use eve_machonet::SessionState;
@@ -2341,8 +2341,6 @@ mod t3c2_tests {
             solar_system_id: Some(30_000_142), station_id: Some(station_id), ..Default::default()
         };
         let kw = HashMap::new();
-        // Test with switches disabled to verify no-op handlers themselves never call emit_inv_item_change.
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
 
         handle(&ctx, &mut sess, None, "invbroker", "Add",
             &[PyRep::Integer(item_id), PyRep::Integer(station_id), PyRep::Integer(InventoryFlag::Hangar as i64)], &kw)

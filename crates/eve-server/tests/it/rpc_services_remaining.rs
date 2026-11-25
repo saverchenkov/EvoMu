@@ -1775,24 +1775,37 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     // =========================================================================
     // Pipeline 2: OnItemChange
     // =========================================================================
-    let sample_item = PyRep::Tuple(vec![
-        PyRep::Integer(100_001),
-        PyRep::Integer(34),
-        PyRep::Integer(90_000_001),
-        PyRep::Integer(60_003_760),
-        PyRep::Integer(4),
-        PyRep::Integer(500),
-    ]);
-    let notifs2 = ctx.notify_item_change(
-        90_000_001,
-        sample_item.clone(),
-        vec![(5, PyRep::Integer(600))],
-    );
+    ctx.db
+        .tx("pipeline2_item_change", |tx| {
+            tx.snap.items.insert(
+                995_931_101,
+                eve_db::InventoryItemRecord {
+                    item_id: 995_931_101,
+                    type_id: 34,
+                    owner_id: 90_000_001,
+                    location_id: 60_003_760,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 500,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+            Ok::<_, eve_db::TxError>(())
+        })
+        .expect("pipeline2_item_change tx succeeds");
+    let notifs2: Vec<_> = ctx
+        .drain_notifications_for_char(90_000_001)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .collect();
     assert_eq!(notifs2.len(), 1);
     assert_eq!(notifs2[0].event, "OnItemChange");
     assert_eq!(notifs2[0].id_type, "charid");
     assert_eq!(notifs2[0].args.len(), 2);
-    assert_eq!(notifs2[0].args[0], sample_item);
+    assert_eq!(
+        notifs2[0].args[0].dbrow_get("itemID"),
+        Some(&PyRep::Integer(995_931_101))
+    );
     let rep2 = marshal::decode(&notifs2[0].marshaled_packet).expect("decode OnItemChange");
     let pkt2 = MachoPacket::from_pyrep(&rep2).expect("parse OnItemChange packet");
     assert_eq!(pkt2.packet_type, MachoPacketType::Notification);

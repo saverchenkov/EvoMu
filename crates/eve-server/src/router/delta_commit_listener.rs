@@ -12,8 +12,8 @@ use crate::router::cache_notifications::{
     enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
     insert_before_staged_seq_or_stage, is_active_dispatch_char, next_notification_seq_id,
     pending_notifications_ptr, push_pending_notification_capped, try_stage_dispatch_notification,
-    NotificationTarget, PendingMachoNotification, MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR,
-    MAX_PENDING_NOTIFICATIONS_PER_CHAR,
+    with_matching_dispatch_projection_scope, NotificationTarget, PendingMachoNotification,
+    MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
 use crate::router::delta_projection::{
@@ -51,6 +51,7 @@ struct EpochLedger {
     /// Monotonic commit counter per `(owner_id, account_key)` so unrelated DB
     /// commits (career goals, telemetry, other wallets) never evict recent records.
     wallet_epochs: HashMap<i64, HashMap<String, u64>>,
+    outside_covered_monitors: HashMap<i64, (i64, i64, HashSet<u32>)>,
 }
 
 impl EpochLedger {
@@ -416,15 +417,17 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_w = Arc::downgrade(&ctx.pending_notifications);
     let notify_tx = ctx.notify_tx.clone();
     let sde = Arc::clone(&ctx.sde);
-    let switches = Arc::clone(&ctx.projected_item_switches);
-    let switches_offline = Arc::downgrade(&ctx.projected_item_switches);
+    let offline_bridge = Arc::downgrade(&bridge);
     let active_fuel_reserves = Arc::clone(&ctx.active_fuel_reserves);
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
 
     ctx.db
         .register_session_offline_listener(Arc::new(move |offline_chars| {
-            if let Some(sw) = switches_offline.upgrade() {
-                sw.clear_outside_dispatch_chars(offline_chars);
+            if let Some(bridge) = offline_bridge.upgrade() {
+                let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+                ledger
+                    .outside_covered_monitors
+                    .retain(|_, (char_id, _, _)| !offline_chars.contains(char_id));
             }
         }));
 
@@ -509,40 +512,84 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             }
 
             if !changes.items.is_empty() || !changes.characters.is_empty() {
-                let batch = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
-                    &switches,
-                    &*pend,
-                    &notify_tx,
-                    staging_scope_id,
-                    effects.acting_char_id,
-                    &*db,
-                    snap,
-                    changes,
-                    &sde,
-                    &emitted_effects.item_effects,
-                    &active_fuel_reserves,
-                    db_key,
-                );
+                let in_dispatch = staging_scope_id.is_some();
+                let prior_transitioned = if in_dispatch {
+                    with_matching_dispatch_projection_scope(
+                        Some(&*pend),
+                        Some(&notify_tx),
+                        |scope| scope.transitioned_chars.clone(),
+                    )
+                    .unwrap_or_default()
+                } else {
+                    HashSet::new()
+                };
+                let batch =
+                    crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
+                        in_dispatch,
+                        &prior_transitioned,
+                        effects.acting_char_id,
+                        &*db,
+                        snap,
+                        changes,
+                        &sde,
+                        &emitted_effects.item_effects,
+                        &active_fuel_reserves,
+                        db_key,
+                    );
+                if in_dispatch && !changes.characters.is_empty() {
+                    let changed_chars =
+                        crate::router::delta_item_switch::index_changed_characters(changes);
+                    let newly_transitioned: Vec<i64> = changed_chars
+                        .keys()
+                        .copied()
+                        .filter(|&char_id| {
+                            crate::router::delta_item_switch::is_character_scene_or_ship_transition(
+                                char_id,
+                                &changed_chars,
+                            )
+                        })
+                        .collect();
+                    if !newly_transitioned.is_empty() {
+                        with_matching_dispatch_projection_scope(
+                            Some(&*pend),
+                            Some(&notify_tx),
+                            |scope| scope.transitioned_chars.extend(newly_transitioned),
+                        );
+                    }
+                }
                 if !batch.item_specs.is_empty() || !batch.blueprint_specs.is_empty() {
-                    let corp_all_items = switches
-                        .config()
-                        .is_corp_all_items_enabled_in_scope(staging_scope_id.is_some());
                     let built =
-                        crate::router::delta_item_switch::build_switched_item_commit_notifications(
+                        crate::router::delta_item_corp::build_switched_item_commit_notifications(
                             snap,
                             &sde,
                             &*db,
                             batch,
-                            corp_all_items,
                             now_unix,
                             now_ft,
                             &active_fuel_reserves,
                             db_key,
                         );
-                    switches.record_covered_industry_monitors(
-                        staging_scope_id,
-                        &built.covered_industry_monitors,
-                    );
+                    if !built.covered_industry_monitors.is_empty() {
+                        if in_dispatch {
+                            with_matching_dispatch_projection_scope(
+                                Some(&*pend),
+                                Some(&notify_tx),
+                                |scope| {
+                                    merge_covered_industry_monitors(
+                                        &mut scope.covered_industry_monitors,
+                                        &built.covered_industry_monitors,
+                                    );
+                                },
+                            );
+                        } else {
+                            let mut ledger =
+                                bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+                            merge_covered_industry_monitors(
+                                &mut ledger.outside_covered_monitors,
+                                &built.covered_industry_monitors,
+                            );
+                        }
+                    }
                     if !built.notifs.is_empty() {
                         enqueue_or_stage_pending_batch(&*pend, &notify_tx, &built.notifs);
                     }
@@ -1030,6 +1077,125 @@ impl ServerContext {
             Ok(())
         });
     }
+
+    /// Emits a virtual V24 `OnItemChange` (`location = 10`, `flag = 147`, old `(locationID, flagID)`)
+    /// directly via transaction effects when a fitted module or rig is destroyed so `invCache`
+    /// fires `OnModuleUnfitted` before any sibling charge deletion tombstone (`#931` Guardrail 4).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_tx_fitted_item_trashed(
+        effects: &mut Effects,
+        sde: &SdeRegistry,
+        char_id: i64,
+        item_id: i64,
+        type_id: i64,
+        quantity: i64,
+        old_location_id: i64,
+        old_flag: i64,
+    ) {
+        if char_id <= 0 {
+            return;
+        }
+        let args = build_fitted_item_trashed_args(
+            sde,
+            char_id,
+            item_id,
+            type_id,
+            quantity,
+            old_location_id,
+            old_flag,
+        );
+        effects.notify_character(char_id, "OnItemChange", "charid", args);
+    }
+}
+
+fn merge_covered_industry_monitors(
+    target: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    covered: &HashMap<i64, (i64, i64, Vec<u32>)>,
+) {
+    for (&monitor_id, (char_id, owner_id, tids)) in covered {
+        let entry = target
+            .entry(monitor_id)
+            .or_insert_with(|| (*char_id, *owner_id, HashSet::with_capacity(tids.len())));
+        entry.2.extend(tids.iter().copied());
+    }
+}
+
+pub(crate) fn is_industry_monitor_covered(
+    ctx: &ServerContext,
+    monitor_id: i64,
+    tids: &[u32],
+) -> bool {
+    if tids.is_empty() {
+        return false;
+    }
+    if let Some(covered) = with_matching_dispatch_projection_scope(
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+        |scope| {
+            scope
+                .covered_industry_monitors
+                .get(&monitor_id)
+                .is_some_and(|(_, _, types)| tids.iter().all(|tid| types.contains(tid)))
+        },
+    ) {
+        return covered;
+    }
+    let Some(bridge) = lookup_commit_bridge(ctx) else {
+        return false;
+    };
+    let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+    ledger
+        .outside_covered_monitors
+        .get(&monitor_id)
+        .is_some_and(|(_, _, types)| tids.iter().all(|tid| types.contains(tid)))
+}
+
+pub(crate) fn clear_outside_covered_monitors_for_char(ctx: &ServerContext, char_id: i64) {
+    let Some(bridge) = lookup_commit_bridge(ctx) else {
+        return;
+    };
+    let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+    ledger
+        .outside_covered_monitors
+        .retain(|_, (sub_char_id, owner_id, _)| *sub_char_id != char_id && *owner_id != char_id);
+}
+
+/// Builds the V24 `OnItemChange` payload (`location = 10`, `flag = 147`) expected for fitted
+/// module/rig destruction so `invCache` fires `OnModuleUnfitted` (`#931` Guardrail 4).
+pub(crate) fn build_fitted_item_trashed_args(
+    sde: &SdeRegistry,
+    char_id: i64,
+    item_id: i64,
+    type_id: i64,
+    quantity: i64,
+    old_location_id: i64,
+    old_flag: i64,
+) -> Vec<PyRep> {
+    let (group_id, category_id) = u32::try_from(type_id)
+        .ok()
+        .and_then(|tid| sde.types.get(&tid))
+        .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+        .unwrap_or((0, 0));
+    // Fitted modules/rigs are singleton items, so their packed inv_item quantity is -1 when qty == 1.
+    let packed_qty = if quantity == 1 { -1 } else { quantity };
+    let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+        PyRep::Integer(item_id),
+        PyRep::Integer(type_id),
+        PyRep::Integer(char_id),
+        PyRep::Integer(10),
+        PyRep::Integer(147),
+        PyRep::Integer(packed_qty),
+        PyRep::Integer(group_id),
+        PyRep::Integer(category_id),
+        PyRep::String(String::new()),
+    ]);
+    vec![
+        row,
+        PyRep::Dict(vec![
+            (PyRep::Integer(3), PyRep::Integer(old_location_id)),
+            (PyRep::Integer(4), PyRep::Integer(old_flag)),
+        ]),
+    ]
 }
 
 #[cfg(test)]

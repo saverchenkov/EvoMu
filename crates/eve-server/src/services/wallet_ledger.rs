@@ -897,7 +897,7 @@ mod t3c2_tests {
     use crate::router::cache_notifications::{
         flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
     };
-    use crate::router::{ProjectedItemSwitchConfig, ServerContext};
+    use crate::router::ServerContext;
     use eve_db::{InventoryFlag, InventoryItemRecord};
 
     #[tokio::test]
@@ -938,24 +938,8 @@ mod t3c2_tests {
         };
         let kw = HashMap::new();
 
-        // With switches test-disabled, both DepositPlexToVault and WithdrawPlexFromVault emit zero
-        // OnItemChange because both rely exclusively on commit-time projection.
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
-        handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
-            &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(20)], &kw)
-            .unwrap().unwrap();
-        let dep = ctx.drain_notifications_for_char(char_id);
-        assert_eq!(dep.iter().filter(|n| n.event == "OnItemChange").count(), 0);
-
-        handle(&ctx, &mut sess, "invbroker", "WithdrawPlexFromVault",
-            &[PyRep::Integer(10), PyRep::Integer(station_id)], &kw)
-            .unwrap().unwrap();
-        let wd_disabled = ctx.drain_notifications_for_char(char_id);
-        assert_eq!(wd_disabled.iter().filter(|n| n.event == "OnItemChange").count(), 0);
-
-        // Under always-on switches in dispatch, personal deposit and withdraw each emit 1 OnItemChange (0 duplicate),
-        // and CorpSAG1 corporation-owned PLEX deposit still emits 1 OnItemChange (routed via notify_item_mutation).
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
+        // Personal deposit, corp CorpSAG1 deposit, and withdraw each emit 1 OnItemChange (0 duplicate)
+        // exclusively via always-on commit-time projection.
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             handle(&ctx, &mut sess, "invbroker", "DepositPlexToVault",
                 &[PyRep::Integer(station_id), PyRep::Integer(70_991), PyRep::Integer(5)], &kw)
