@@ -1912,21 +1912,26 @@ pub async fn handle_npcs_drones(
             }
 
             let drones: Vec<DroneSpaceState> = sys_handle
-                .view()
-                .active_drones_in_space
-                .values()
-                .filter(|d| {
-                    d.ball_id > 0
-                        && d.solar_system_id == sys_id
-                        && d.parent_ship_id == ship_id
-                        && !d.is_abandoned
-                        && filter_drones
-                            .as_ref()
-                            .map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id))
-                            .unwrap_or(true)
+                .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                    let list = drones
+                        .values()
+                        .filter(|d| {
+                            d.ball_id > 0
+                                && !claimed.contains_key(&d.ball_id)
+                                && d.solar_system_id == sys_id
+                                && d.parent_ship_id == ship_id
+                                && !d.is_abandoned
+                                && filter_drones
+                                    .as_ref()
+                                    .map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id))
+                                    .unwrap_or(true)
+                        })
+                        .cloned()
+                        .collect();
+                    (false, list)
                 })
-                .cloned()
-                .collect();
+                .await
+                .unwrap_or_default();
 
             let mut engaging_drones = Vec::new();
             for d in drones {
