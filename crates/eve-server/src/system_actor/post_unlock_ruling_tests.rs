@@ -711,9 +711,9 @@ async fn bf_1170_seed_asteroid_enqueues_post_unlock_without_db_write() {
 async fn bf_1170_activation_and_try_remove_wait_fifo_behind_in_flight_cleanup() {
     use crate::system_actor::{AtomicActivateCycleRequest, ProtectionBreakReason};
     use eve_db::lock_rank::{RankedRwLock, RANK_CRIMEWATCH, RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY};
-    { let _g = RankedRwLock::<(), RANK_SYSTEM_REGISTRY>::new(()).read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
-    { let _g = RankedRwLock::<(), RANK_CRIMEWATCH>::new(()).read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
-    { let _g = RankedRwLock::<(), RANK_SERVICE_STATE>::new(()).read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
+    { let l = RankedRwLock::<(), RANK_SYSTEM_REGISTRY>::new(()); let _g = l.read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
+    { let l = RankedRwLock::<(), RANK_CRIMEWATCH>::new(()); let _g = l.read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
+    { let l = RankedRwLock::<(), RANK_SERVICE_STATE>::new(()); let _g = l.read().unwrap(); assert!(!super::can_run_post_unlock_sync_now()); }
 
     let ctx = test_ctx();
     let (sys_id, char_id, ship_id, mod_a, mod_b) = (
