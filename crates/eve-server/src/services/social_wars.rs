@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 
 use crate::domain::wars::{self, AllyNegotiationAction, MutualWarAcceptOutcome};
+#[cfg(test)]
+use crate::domain::wars::unix_to_filetime;
 use crate::router::ServerContext;
 use eve_db::{IskCents, PersistedNegKind as NegKind, WorldStateSnapshot};
 use eve_machonet::SessionState;

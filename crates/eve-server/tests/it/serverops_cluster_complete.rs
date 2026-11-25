@@ -725,6 +725,12 @@ async fn test_mid_cycle_tidi_transition_dilates_remaining_duration_and_aligns_wi
         jita_sys.has_module_cycle(jita_ship, mod_id).await,
         "6.0s module cycle must remain active at 2.0s sim elapsed"
     );
+    assert!(
+        !ctx.drain_notifications_for_char(P1)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "Phase 1 ticks must not prematurely complete 6.0s module cycle"
+    );
 
     // Mid-cycle TiDi change #1: 1.00 -> 0.25. Remaining 4.0s sim duration now requires 16 wall seconds.
     let applied_025 = set_system_tidi_factor(&ctx, JITA_SYSTEM_ID, 0.25);
@@ -748,6 +754,12 @@ async fn test_mid_cycle_tidi_transition_dilates_remaining_duration_and_aligns_wi
     assert!(
         jita_sys.has_module_cycle(jita_ship, mod_id).await,
         "Dilated 6.0s cycle must still have 2.0s sim remaining after 8 wall ticks at 0.25 TiDi"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(P1)
+            .iter()
+            .any(|n| n.event == "OnGodmaShipEffect"),
+        "Phase 2 ticks must not prematurely complete dilated module cycle"
     );
 
     // Mid-cycle TiDi change #2: 0.25 -> 0.50. Remaining 2.0s sim duration now requires 4 wall seconds.

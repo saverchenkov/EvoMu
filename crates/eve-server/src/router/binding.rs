@@ -1864,7 +1864,7 @@ impl ServerContext {
                                 active: 0,
                                 duration: cycle.duration_s * 1000.0,
                                 repeat: 0,
-                                start_time: now,
+                                start_time: now.as_ticks(),
                                 time_from_start: 0.0,
                                 graphic_info: None,
                             };
@@ -1880,7 +1880,7 @@ impl ServerContext {
                                         recip_cid,
                                         recip_uid,
                                         OnSpecialFX::DEFAULT_ID_TYPE,
-                                        now,
+                                        now.as_ticks(),
                                         512,
                                         notif,
                                     );
@@ -1912,7 +1912,7 @@ impl ServerContext {
                     char_id,
                     user_id,
                     OnChargeBeingLoadedToModule::DEFAULT_ID_TYPE,
-                    now,
+                    now.as_ticks(),
                     512,
                     OnChargeBeingLoadedToModule {
                         item_ids: mod_ids,

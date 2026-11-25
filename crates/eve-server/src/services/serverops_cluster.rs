@@ -29,10 +29,6 @@ fn save_downtime_state(snap: &mut WorldStateSnapshot, st: &PersistedDowntimeStat
     snap.cluster_and_runtime.cluster_downtime_state = st.clone();
 }
 
-fn unix_to_filetime(unix_secs: u64) -> i64 {
-    (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
-}
-
 /// DERIVED: Heuristic constellation-to-worker-node mapping (`workers[(constellation_id as usize) % pool_len]`).
 fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: SolarSystemId, workers: &[u32]) -> u32 {
     let pool_len = workers.len().max(1);
@@ -1963,6 +1959,11 @@ pub(crate) const RPCS: &[RpcEntry] = &[
     rpc_entry("cluster", "ReinforceNode", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
     rpc_entry("cluster", "RebalanceNodes", RpcDispatchHandler::SyncReadOnlySession(dispatch_rpc)),
 ];
+
+#[cfg(test)]
+fn unix_to_filetime(unix_secs: u64) -> i64 {
+    eve_db::clock::WallFileTime::from_unix_secs_saturating(unix_secs).as_ticks()
+}
 
 #[cfg(test)] #[path = "serverops_cluster_tests.rs"] mod serverops_cluster_tests;
 

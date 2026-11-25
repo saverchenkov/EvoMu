@@ -419,10 +419,16 @@ async fn space_fixture_clock_offset_separates_sim_and_wall_notifications_at_tidi
 
     let _ = actor.harness.drain_notifications();
     let _ = ctx.drain_notifications_for_char(char_id);
+    let user_id = actor.user_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.values_mut().find(|a| a.user_id == user_id) {
+            acc.role |= eve_server::router::ServerContext::ROLE_GM_CANONICAL_MASK;
+        }
+    });
 
     // Trigger a SimFileTime-domain notification (OnNpcTimerUpdate: +300s sim expiry) and a
     // WallFileTime-domain notification (OnClusterShutdownInitiated: +15m wall expiry) at TiDi = 1.0.
-    eve_server::services::crimewatch_timers::on_weapon_aggression_post_hook(
+    eve_server::services::combat_crimewatch::crimewatch_timers::on_weapon_aggression_post_hook(
         &ctx,
         char_id,
         None,
@@ -458,7 +464,7 @@ async fn space_fixture_clock_offset_separates_sim_and_wall_notifications_at_tidi
     );
     let shutdown_dur_mins = shutdown_notif.args[2]
         .as_i64()
-        .expect("OnClusterShutdownInitiated duration") as u64;
+        .expect("OnClusterShutdownInitiated duration");
     assert_eq!(
         shutdown_when_ft,
         wall_now.saturating_add_secs(shutdown_dur_mins * 60),
@@ -467,7 +473,7 @@ async fn space_fixture_clock_offset_separates_sim_and_wall_notifications_at_tidi
     assert_eq!(
         (shutdown_when_ft.as_ticks() - wall_now.as_ticks())
             - (npc_expiry_ft.as_ticks() - sim_now.as_ticks()),
-        ((shutdown_dur_mins * 60) as i64 - 300) * 10_000_000
+        (shutdown_dur_mins * 60 - 300) * 10_000_000
     );
     assert_ne!(
         npc_expiry_ft.as_ticks(),
