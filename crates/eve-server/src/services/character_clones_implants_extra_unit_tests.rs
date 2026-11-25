@@ -806,7 +806,8 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
         Some(1)
     );
 
-    // 5. UpdateExistingCharacterLimited apparel OnItemChange obeys `!session.live_notify_listener` (L1236)
+    // 5. UpdateExistingCharacterLimited apparel OnItemChange uses commit-driven projection
+    //    even when !session.live_notify_listener (never duplicating to sess notifications)
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.station_id = Some(station_id);
@@ -815,6 +816,7 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
     sess.station_id = Some(station_id);
     sess.structure_id = None;
     let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
     sess.live_notify_listener = false;
     handle_clones_and_sheet(
         &ctx,
@@ -831,8 +833,14 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
     .unwrap();
     let pushed = sess.drain_notifications();
     assert!(
-        pushed.iter().any(|(ev, _)| ev == "OnItemChange"),
-        "expected OnItemChange pushed to session when !live_notify_listener"
+        pushed.iter().all(|(ev, _)| ev != "OnItemChange"),
+        "legacy !live_notify_listener session OnItemChange push is deleted"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "commit-driven projection must emit OnItemChange for apparel change"
     );
 
     sess.live_notify_listener = true;
@@ -850,4 +858,10 @@ fn clone_fee_zero_vs_positive_notifications_female_paperdoll_tokens_and_apparel_
     .unwrap()
     .unwrap();
     assert!(sess.drain_notifications().is_empty());
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "commit-driven projection must emit OnItemChange for apparel change when live_notify_listener = true"
+    );
 }

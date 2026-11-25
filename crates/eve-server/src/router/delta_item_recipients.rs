@@ -299,7 +299,20 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
                     rule: RULE_OWNERLESS,
                 });
             }
-            if after_holder.is_some() || before_holder.is_some() {
+            // Gate RULE_HOLDER_ACTING_PILOT on a live holder or a surviving item relocated out of a
+            // space holder (such as salvage moving loot from a deleted wreck into a new jetcan):
+            // - Ship destruction deletes `victim_ship_id` (`ItemHolderKind::Ship`), so `before_holder`
+            //   (retained for `RULE_HOLDER_OWNER`) must not leak victim items to the killer.
+            // - Space container/deployable destruction deletes enclosed items (`after_opt.is_none()`),
+            //   so destroyed container contents must not leak to the attacker.
+            let acting_holder_live = [after_holder, before_holder]
+                .into_iter()
+                .flatten()
+                .any(|(kind, h)| {
+                    snap_after.items.contains_key(&h.item_id)
+                        || (kind == ItemHolderKind::Space && after_opt.is_some())
+                });
+            if acting_holder_live {
                 out.push(SwitchedItemRecipient {
                     character: actor_ch,
                     op_kind: default_op_kind,

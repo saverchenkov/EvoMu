@@ -304,51 +304,7 @@ pub fn sweep_expired_orders_and_notify(ctx: &ServerContext, now_unix: u64) -> us
 pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId, i64)]) {
     for (oid, owner_id, is_bid, type_id, station_id) in expired {
         super::market_trading::notify_own_order_changed(ctx, *owner_id, 0, *oid, "Expiry");
-        let follow_up = ctx.db.with_snapshot(|snap| {
-            let order_opt = snap.market_orders.get(oid);
-            let meta_opt = order_opt.map(|o| load_market_order_meta(snap, o, ctx.now_unix()));
-            let is_corp = snap.corporations.contains_key(owner_id);
-            let returned_item = if !*is_bid {
-                let target_flag = if is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
-                let ret_qty = meta_opt.as_ref().and_then(|m| m.final_vol_remaining).unwrap_or(0);
-                if !( !is_corp && *type_id == PLEX_TYPE_ID ) && ret_qty > 0 {
-                    snap.items
-                        .values()
-                        .find(|i| {
-                            i.owner_id == *owner_id
-                                && i.location_id == *station_id
-                                && i.flag == target_flag
-                                && i.type_id == *type_id
-                                && !i.singleton
-                        })
-                        .map(|rec| {
-                            let changes = if rec.quantity > ret_qty {
-                                vec![(9, PyRep::Integer((rec.quantity - ret_qty) as i64))]
-                            } else {
-                                vec![(3, PyRep::Integer(0))]
-                            };
-                            (rec.clone(), changes)
-                        })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            (returned_item, is_corp)
-        });
-        if let Some((rec, changes)) = follow_up.0 {
-            if follow_up.1 {
-                ctx.emit_item_change_with_target(
-                    NotificationTarget::Corporation(*owner_id),
-                    "corpid",
-                    &rec,
-                    changes,
-                );
-            } else {
-                ctx.emit_item_change_routed(*owner_id, &rec, changes);
-            }
-        }
+        let is_corp = ctx.db.with_snapshot(|snap| snap.corporations.contains_key(owner_id));
         if !*is_bid {
             let item_received = crate::router::notify_registry::OnMarketItemReceived {
                 item_id: *oid,
@@ -356,7 +312,7 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
                 flag: 4,
                 location_id: *station_id,
             };
-            if follow_up.1 {
+            if is_corp {
                 ctx.emit_typed_with_id_type(
                     NotificationTarget::Corporation(*owner_id),
                     "corpid",
@@ -1122,12 +1078,13 @@ pub fn handle(
                     )?;
                     let delivered_to_corp_deliveries = cross_res.delivered_to_corp_deliveries;
                     let final_escrow = cross_res.final_escrow;
+                    let _ = &cross_res.item_deliveries;
 
                     let order_owner_id = if is_corp_order { caller_corp_id } else { char_id };
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, procurement_lvl, marketing_lvl, daytrading_lvl, visibility_lvl, delivered_to_corp_deliveries,
-                        cross_res.item_deliveries, cross_res.matched_orders, cross_res.career_fills, order_owner_id,
+                        cross_res.matched_orders, cross_res.career_fills, order_owner_id,
                     ))
                 });
 
@@ -1135,15 +1092,12 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
-                        cross_item_deliveries, cross_matched_orders, cross_career_fills, order_owner_id,
+                        cross_matched_orders, cross_career_fills, order_owner_id,
                     )) => {
                         for (b_id, s_id, tid, gross) in cross_career_fills {
                             crate::services::quasar_career_goals::record_market_fill_career_goals(
                                 ctx, b_id, s_id, tid, gross,
                             );
-                        }
-                        for (rec_char, rec) in &cross_item_deliveries {
-                            super::market_trading::emit_market_item_change(ctx, *rec_char, rec, vec![(3, PyRep::Integer(0))]);
                         }
                         for (matched_oid, matched_owner) in cross_matched_orders {
                             super::market_trading::notify_own_order_changed(ctx, matched_owner, 0, matched_oid, "Change");
@@ -1863,14 +1817,6 @@ pub fn handle(
                         InventoryFlag::Hangar
                     }
                 });
-                let finish_delta = super::contracts_service::ContractNotifyDelta::capture(
-                    snap,
-                    char_id,
-                    cid,
-                    &[char_id, c.issuer_id, c.issuer_corp_id, c.current_bidder_id.unwrap_or(0), winner],
-                    &[c.start_station_id],
-                    &c.item_ids,
-                );
                 let transferred_ids = snap.settle_contract_escrow_items(
                     cid,
                     &c.item_ids,
@@ -1893,12 +1839,10 @@ pub fn handle(
                 }
                 snap.clear_contract_divisions(cid);
                 if let Some(cm) = snap.contracts.get_mut(&cid) { cm.acceptor_id = Some(winner); cm.status = "Finished".to_string(); }
-                let notify_delta = finish_delta.finish(snap);
-                Ok((transferred_ids, notify_delta))
+                Ok(transferred_ids)
             });
             match res {
-                Ok((transferred_ids, notify_delta)) => {
-                    notify_delta.emit(ctx);
+                Ok(transferred_ids) => {
                     if !transferred_ids.is_empty() {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
                         for tid in transferred_ids {

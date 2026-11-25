@@ -1662,9 +1662,9 @@ async fn board_stored_ship_on_item_change_gates_in_space_vs_docked() {
     assert!(
         st_notifs.iter().any(|n| {
             n.event == "OnItemChange"
-                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64)
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
                     == Some(st_stored)
-                && n.args.first().and_then(|r| r.dict_get("locationID")).and_then(PyRep::as_i64)
+                && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(PyRep::as_i64)
                     == Some(station_id)
         }),
         "station docked BoardStoredShip must emit stored hull OnItemChange (#13): {st_notifs:?}"
@@ -1721,9 +1721,9 @@ async fn board_stored_ship_on_item_change_gates_in_space_vs_docked() {
     assert!(
         sr_notifs.iter().any(|n| {
             n.event == "OnItemChange"
-                && n.args.first().and_then(|r| r.dict_get("itemID")).and_then(PyRep::as_i64)
+                && n.args.first().and_then(|r| r.dbrow_get("itemID")).and_then(PyRep::as_i64)
                     == Some(sr_stored)
-                && n.args.first().and_then(|r| r.dict_get("locationID")).and_then(PyRep::as_i64)
+                && n.args.first().and_then(|r| r.dbrow_get("locationID")).and_then(PyRep::as_i64)
                     == Some(structure_id)
         }),
         "structure docked BoardStoredShip must emit stored hull OnItemChange (#13): {sr_notifs:?}"

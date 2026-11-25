@@ -629,49 +629,6 @@ pub(crate) async fn handle_multi_add(
             continue;
         }
         if let Some(fin) = fin_opt {
-            if fin.item_id != pre_item.item_id {
-                super::inventory_bound::emit_inv_item_deleted(ctx, char_id, &pre_item);
-                let old_target_qty = (fin.quantity - it_qty).max(0) as i64;
-                let changes = vec![
-                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                    (9, PyRep::Integer(old_target_qty)),
-                ];
-                super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes.clone());
-                for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
-                    if extra_owner != char_id && !prev_dup {
-                        if src_ship_bay_owner == Some(extra_owner) {
-                            super::inventory_bound::emit_inv_item_deleted(ctx, extra_owner, &pre_item);
-                        }
-                        if dst_ship_bay_foreign_owner == Some(extra_owner) {
-                            super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &fin, changes.clone());
-                        }
-                    }
-                }
-            } else {
-                let mut changes = vec![
-                    (3, PyRep::Integer(pre_item.location_id)),
-                    (4, PyRep::Integer(pre_item.flag as i64)),
-                ];
-                if fin.owner_id != pre_item.owner_id {
-                    changes.push((2, PyRep::Integer(pre_item.owner_id)));
-                }
-                super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes.clone());
-                for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
-                    if extra_owner != char_id && !prev_dup {
-                        super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &fin, changes.clone());
-                    }
-                }
-            }
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::ProcessInventoryChange {
@@ -700,14 +657,6 @@ pub(crate) async fn handle_multi_add(
                 }
             }
         } else if let Some(updated) = post_it {
-            let mut changes = vec![
-                (3, PyRep::Integer(pre_item.location_id)),
-                (4, PyRep::Integer(pre_item.flag as i64)),
-            ];
-            if updated.owner_id != pre_item.owner_id {
-                changes.push((2, PyRep::Integer(pre_item.owner_id)));
-            }
-            super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes.clone());
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::ProcessInventoryChange {
@@ -724,7 +673,6 @@ pub(crate) async fn handle_multi_add(
             {
                 let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
                 if extra_owner != char_id && !prev_dup {
-                    super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &updated, changes.clone());
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(extra_owner),
                         crate::router::notify_registry::ProcessInventoryChange {
@@ -733,25 +681,6 @@ pub(crate) async fn handle_multi_add(
                             arg2: PyRep::Integer(updated.flag as i64),
                             arg3: None,
                         },
-                    );
-                }
-            }
-        }
-        for (pre_child, post_child) in &recursive_owner_changes {
-            let owner_delta = vec![(2, PyRep::Integer(pre_child.owner_id))];
-            super::inventory_bound::emit_inv_item_change(ctx, char_id, post_child, owner_delta.clone());
-            for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
-                .into_iter()
-                .flatten()
-                .enumerate()
-            {
-                let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
-                if extra_owner != char_id && !prev_dup {
-                    super::inventory_bound::emit_inv_item_change(
-                        ctx,
-                        extra_owner,
-                        post_child,
-                        owner_delta.clone(),
                     );
                 }
             }
@@ -1174,17 +1103,15 @@ async fn handle_multi_add_auto_fit(
                     eve_proto::UserErrorKey::SlotAlreadyOccupied,
                 ));
             }
-            let (old_loc, old_flag_u16, live_owner, was_singleton) =
-                (live_item.location_id, live_item.flag as u16, live_item.owner_id, live_item.singleton);
+            let (old_loc, live_owner) = (live_item.location_id, live_item.owner_id);
             let do_split = !live_item.singleton && !live_item.is_blueprint_copy && live_item.quantity > 1;
-            let (fitted_id, split_orig_opt) = if do_split {
-                let (orig_rec, split_item) = snap
+            let fitted_id = if do_split {
+                let (_orig_rec, split_item) = snap
                     .split_stack_in_snap(live_owner, plan.src_item.item_id, 1)
                     .map_err(|e| BridgeRpcError::custom_info(e.to_string()))?;
-                let old_orig_qty = orig_rec.quantity + split_item.quantity;
-                (split_item.item_id, Some((orig_rec, old_orig_qty)))
+                split_item.item_id
             } else {
-                (plan.src_item.item_id, None)
+                plan.src_item.item_id
             };
             let target_flag_enum = InventoryFlag::from_u16(plan.target_flag);
             let it = snap.items.get_mut(&fitted_id).ok_or_else(|| BridgeRpcError {
@@ -1202,14 +1129,14 @@ async fn handle_multi_add_auto_fit(
             fitting_containers_ships::record_inv_move_logs_in_snap(
                 &ctx.sde, snap, char_id, updated.item_id, plan.src_item.item_id, updated.type_id, updated.quantity, old_loc, ship_id, true, now_unix,
             )?;
-            out.push((plan, updated, split_orig_opt, old_loc, old_flag_u16, do_split, was_singleton));
+            out.push((plan, updated, old_loc));
         }
         Ok(out)
     })?;
 
     let mut fitted_ids = Vec::with_capacity(committed.len());
     let mut despawn_set = HashSet::new();
-    for (plan, updated, split_orig_opt, old_loc, old_flag_u16, did_split, was_singleton) in committed {
+    for (plan, updated, old_loc) in committed {
         let target_flag_enum = InventoryFlag::from_u16(plan.target_flag);
         if old_loc != ship_id {
             crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
@@ -1241,30 +1168,6 @@ async fn handle_multi_add_auto_fit(
         ctx.invalidate_ship_fitting(ship_id);
         let rebuilt_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
 
-        if let Some((orig_rec, old_orig_qty)) = split_orig_opt {
-            super::inventory_bound::emit_inv_item_change(
-                ctx,
-                char_id,
-                &orig_rec,
-                vec![
-                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                    (9, PyRep::Integer(old_orig_qty as i64)),
-                ],
-            );
-        }
-        let mut changes = if did_split {
-            vec![(3, PyRep::Integer(0))]
-        } else {
-            vec![
-                (3, PyRep::Integer(old_loc)),
-                (4, PyRep::Integer(old_flag_u16 as i64)),
-            ]
-        };
-        if !did_split && !was_singleton && updated.singleton {
-            // ixSingleton (10): notify invCache/godma when an unpackaged qty=1 module turns singleton on fit.
-            changes.push((10, PyRep::Integer(1)));
-        }
-        super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::ProcessInventoryChange {
@@ -2473,7 +2376,6 @@ mod t3c2_tests {
         });
         let _ = ctx.drain_notifications_for_char(char_id);
         let mut sess = SessionState { user_id: Some(uid), character_id: Some(char_id), corporation_id: Some(corp_id), corp_role: eve_db::corp_roles::ROLE_DIRECTOR, solar_system_id: Some(30_000_142), structure_id: Some(sid), ..Default::default() };
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::disabled());
         let rep = handle(&ctx, &mut sess, None, "invbroker", "Add", &[PyRep::Integer(src_id), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::SpecializedFuelBay as i64)], &HashMap::new()).await.expect("handled").expect("fuel merge");
         assert_eq!((rep.dict_get("itemID"), rep.dict_get("quantity")), (Some(&PyRep::Integer(dst_id)), Some(&PyRep::Integer(50))));
         ctx.db.with_snapshot(|s| { assert!(!s.items.contains_key(&src_id)); assert_eq!(s.items[&dst_id].quantity, 50); });

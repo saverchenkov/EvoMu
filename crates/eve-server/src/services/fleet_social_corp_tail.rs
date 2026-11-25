@@ -760,17 +760,6 @@ struct MemberRemovalOutcome {
     old_alliance: Option<i64>,
     closed: bool,
     released: Vec<(i64, i64, u32, i64)>,
-    item_mutations: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)>,
-}
-
-fn emit_closure_liquidation_notifications(
-    ctx: &ServerContext,
-    tid: i64,
-    item_mutations: &[(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)],
-) {
-    for (pre, post) in item_mutations {
-        ctx.notify_item_mutation(tid, pre.as_ref(), post.as_ref());
-    }
 }
 
 fn remove_member_to_bloodline_npc_in_snap(
@@ -791,10 +780,6 @@ fn remove_member_to_bloodline_npc_in_snap(
         .and_then(|c| c.alliance_id)
         .or_else(|| snap.characters.get(&tid).and_then(|c| c.alliance_id));
     let mut closed = false;
-    let mut mutated_by_id: std::collections::HashMap<
-        i64,
-        (Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>),
-    > = std::collections::HashMap::new();
     if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
         corp_mut.members.remove(&tid);
         corp_mut.member_roles.remove(&tid);
@@ -869,8 +854,7 @@ fn remove_member_to_bloodline_npc_in_snap(
                         version: 1,
                         ..Default::default()
                     };
-                    snap.items.insert(ret_id, ret_item.clone());
-                    mutated_by_id.insert(ret_id, (None, Some(ret_item)));
+                    snap.items.insert(ret_id, ret_item);
                 }
             }
         }
@@ -925,39 +909,22 @@ fn remove_member_to_bloodline_npc_in_snap(
             .map(|it| (it.item_id, office_to_station.get(&it.location_id).copied()))
             .collect();
         for (item_id, station_opt) in rehome_ids {
-            if let Some(pre_it) = snap.items.get(&item_id).cloned() {
-                if let Some(it_mut) = snap.items.get_mut(&item_id) {
-                    if let Some(station_id) = station_opt {
-                        it_mut.location_id = station_id;
-                        it_mut.flag = eve_db::InventoryFlag::Deliveries;
-                    } else if (116..=122).contains(&(it_mut.flag as u16))
-                        || it_mut.flag == eve_db::InventoryFlag::CorpDeliveries
-                    {
-                        it_mut.flag = eve_db::InventoryFlag::Deliveries;
-                    }
-                    it_mut.owner_id = tid;
-                    it_mut.version += 1;
-                    let post_it = it_mut.clone();
-                    mutated_by_id
-                        .entry(item_id)
-                        .and_modify(|e| e.1 = Some(post_it.clone()))
-                        .or_insert((Some(pre_it), Some(post_it)));
+            if let Some(it_mut) = snap.items.get_mut(&item_id) {
+                if let Some(station_id) = station_opt {
+                    it_mut.location_id = station_id;
+                    it_mut.flag = eve_db::InventoryFlag::Deliveries;
+                } else if (116..=122).contains(&(it_mut.flag as u16))
+                    || it_mut.flag == eve_db::InventoryFlag::CorpDeliveries
+                {
+                    it_mut.flag = eve_db::InventoryFlag::Deliveries;
                 }
+                it_mut.owner_id = tid;
+                it_mut.version += 1;
             }
-            for (c_pre, c_post) in snap.set_owner_recursive(item_id, tid) {
-                mutated_by_id
-                    .entry(c_post.item_id)
-                    .and_modify(|e| e.1 = Some(c_post.clone()))
-                    .or_insert((Some(c_pre), Some(c_post)));
-            }
+            let _ = snap.set_owner_recursive(item_id, tid);
         }
         for (office_id, _) in office_to_station {
-            if let Some(removed_office) = snap.remove_system_cleanup_item(office_id) {
-                mutated_by_id
-                    .entry(office_id)
-                    .and_modify(|e| e.1 = None)
-                    .or_insert((Some(removed_office), None));
-            }
+            snap.remove_system_cleanup_item(office_id);
         }
         snap.corporations.remove(&corp_id);
         snap.chat_channels.remove(&format!("corpid:{corp_id}"));
@@ -972,20 +939,12 @@ fn remove_member_to_bloodline_npc_in_snap(
         ch.alliance_id = None;
     }
     let released = record_corp_join_in_snap(snap, tid, old_corp_id, npc_corp, now_unix);
-    let mut item_mutations: Vec<_> = mutated_by_id.into_values().collect();
-    item_mutations.sort_by_key(|(pre, post)| {
-        post.as_ref()
-            .or(pre.as_ref())
-            .map(|it| it.item_id)
-            .unwrap_or(0)
-    });
     MemberRemovalOutcome {
         npc_corp,
         old_role,
         old_alliance,
         closed,
         released,
-        item_mutations,
     }
 }
 
@@ -1312,11 +1271,6 @@ pub(crate) fn handle_kick_out_members(
                     outcome.old_alliance,
                     now_unix,
                 );
-                emit_closure_liquidation_notifications(
-                    ctx,
-                    tid,
-                    &outcome.item_mutations,
-                );
             }
             let first_tid = target_ids[0];
             Some(Ok(PyRep::keyval([
@@ -1407,11 +1361,6 @@ pub fn execute_pending_auto_kicks_for_docked_char(
             outcome.old_alliance,
             now_unix,
         );
-        emit_closure_liquidation_notifications(
-            ctx,
-            char_id,
-            &outcome.item_mutations,
-        );
     }
 }
 
@@ -1453,11 +1402,6 @@ pub fn execute_pending_auto_kicks_on_downtime(ctx: &ServerContext) -> usize {
             outcome.old_role,
             outcome.old_alliance,
             now_unix,
-        );
-        emit_closure_liquidation_notifications(
-            ctx,
-            tid,
-            &outcome.item_mutations,
         );
     }
     count

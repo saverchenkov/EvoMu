@@ -2114,25 +2114,6 @@ pub(crate) fn validate_multiadd_structure_fuel_transfers(
     Ok(src_is_struct_fuel)
 }
 
-#[track_caller]
-pub(crate) fn emit_inv_item_change(
-    ctx: &ServerContext,
-    char_id: i64,
-    item: &eve_db::InventoryItemRecord,
-    changes: Vec<(i32, PyRep)>,
-) {
-    ctx.emit_item_change_routed(char_id, item, changes);
-}
-
-#[track_caller]
-pub(crate) fn emit_inv_item_deleted(
-    ctx: &ServerContext,
-    char_id: i64,
-    old_item: &eve_db::InventoryItemRecord,
-) {
-    ctx.emit_item_deleted_routed(char_id, old_item);
-}
-
 /// Resolves destination `locationID` for bound/unbound `invbroker.Add` and `invbroker.MultiAdd`.
 ///
 /// Bound container/ship/structure handles (`GetInventoryFromId(dest_id)`) always receive

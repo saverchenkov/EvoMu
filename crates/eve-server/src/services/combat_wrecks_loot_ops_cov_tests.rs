@@ -714,6 +714,7 @@ async fn loot_all_emits_on_item_change_for_whole_and_split_moves_to_looter() {
     let foreign_owner_id = 90_000_002_i64;
     session.session_id = 91_206;
     let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    session.user_id = Some(uid);
     ctx.db
         .acquire_online_lock(uid, session.session_id, Some(char_id), true, ctx.now_unix())
         .unwrap();
@@ -861,17 +862,18 @@ async fn loot_all_emits_on_item_change_for_whole_and_split_moves_to_looter() {
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Whole moves from wreck_whole_id -> ship Cargo emit OnItemChange before OnWreckLootAll.
-    let res_whole = super::super::handle_wrecks_killmails(
-        &ctx,
-        &mut session,
-        "invbroker",
-        "LootAll",
-        &[PyRep::Integer(wreck_whole_id)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let res_whole = ctx
+        .dispatch_rpc(
+            &mut session,
+            "invbroker",
+            None,
+            "LootAll",
+            &[PyRep::Integer(wreck_whole_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
     let PyRep::List(looted_whole_list) = res_whole
         .dict_get("lootedItemIDs")
         .expect("lootedItemIDs present")
@@ -938,17 +940,18 @@ async fn loot_all_emits_on_item_change_for_whole_and_split_moves_to_looter() {
     // 2. Partial split + skipped locked item from wreck_split_id:
     //    emits OnItemChange for both remaining stack (ixStackSize=9, no ixQuantity=5)
     //    and newly created Cargo stack (ixLocationID=0), and nothing for locked item.
-    let res_split = super::super::handle_wrecks_killmails(
-        &ctx,
-        &mut session,
-        "invbroker",
-        "LootAll",
-        &[PyRep::Integer(wreck_split_id)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let res_split = ctx
+        .dispatch_rpc(
+            &mut session,
+            "invbroker",
+            None,
+            "LootAll",
+            &[PyRep::Integer(wreck_split_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
     let PyRep::List(looted_split_list) = res_split
         .dict_get("lootedItemIDs")
         .expect("lootedItemIDs present")
@@ -1054,6 +1057,7 @@ async fn loot_all_partial_split_does_not_duplicate_on_item_change_for_non_charac
             s.characters[&foreign_char_owner_id].user_id,
         )
     });
+    session.user_id = Some(uid);
     let lock_now = ctx.now_unix();
     ctx.db
         .acquire_online_lock(uid, session.session_id, Some(char_id), true, lock_now)
@@ -1145,17 +1149,18 @@ async fn loot_all_partial_split_does_not_duplicate_on_item_change_for_non_charac
         let _ = ctx.drain_notifications_for_char(char_id);
         let _ = ctx.drain_notifications_for_char(owner_id);
 
-        let res = super::super::handle_wrecks_killmails(
-            &ctx,
-            &mut session,
-            "invbroker",
-            "LootAll",
-            &[PyRep::Integer(wreck_id)],
-            &kw,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "invbroker",
+                None,
+                "LootAll",
+                &[PyRep::Integer(wreck_id)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap();
         let PyRep::List(looted_ids) = res.dict_get("lootedItemIDs").unwrap() else {
             panic!("expected lootedItemIDs list");
         };

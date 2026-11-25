@@ -1108,8 +1108,16 @@ async fn fit_ships_dedupes_on_multiple_item_change_with_zero_compare_drift() {
     );
     let sw = projected_item_switch_summary(&ctx);
     assert_eq!(
-        sw.replaced, 5,
-        "FitShips must dedupe all 5 commit-projected Cargo/Hangar + LoSlot0 OnMultipleItemChange rows: {sw:?}"
+        sw.replaced, 0,
+        "Step 3b-1 removed FitShips handwritten emitters so zero replacements occur: {sw:?}"
+    );
+    assert_eq!(
+        sw.new, 7,
+        "FitShips must emit all 7 commit-projected Cargo/Hangar + LoSlot0 rows directly: {sw:?}"
+    );
+    assert!(
+        sw.hand_sent_by_call_site.is_empty(),
+        "FitShips must emit zero hand-written events: {sw:?}"
     );
     assert_eq!(
         sw.non_first_set_emitted, 0,
@@ -1173,27 +1181,22 @@ async fn fit_ships_partial_dedupe_with_fitted_kill_switch_off() {
         .collect();
     assert_eq!(
         fit_batch_notifs.len(),
-        1,
-        "fitted=false mixed FitShips must keep non-first-set LoSlot0 in 1 OnMultipleItemChange, got {multi_notifs:?}"
-    );
-    assert_eq!(
-        extract_multi_item_change_ids(fit_batch_notifs[0]),
-        vec![198_931_424_i64],
-        "FitShips OnMultipleItemChange must strip Cargo rows and keep only LoSlot0 module: {fit_batch_notifs:?}"
+        0,
+        "Step 3b-1 removed FitShips handwritten OnMultipleItemChange so non-projected LoSlot0 is not emitted: {multi_notifs:?}"
     );
     assert!(
         multi_notifs
             .iter()
-            .filter(|n| n.seq_id != fit_batch_notifs[0].seq_id)
             .all(|n| {
                 let ids = extract_multi_item_change_ids(n);
                 ids.len() == 1 && item_change_ids.contains(&ids[0])
             }),
-        "all other OnMultipleItemChange notifications must be single-row commit companions: {multi_notifs:?}"
+        "all OnMultipleItemChange notifications must be single-row commit companions: {multi_notifs:?}"
     );
 
     let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.replaced, 2, "expected 2 Cargo/Hangar rows replaced: {sw:?}");
-    assert_eq!(sw.non_first_set_emitted, 1, "expected LoSlot0 preserved once: {sw:?}");
+    assert_eq!(sw.replaced, 0, "expected zero handwritten replacements after Step 3b-1: {sw:?}");
+    assert_eq!(sw.new, 3, "expected 3 commit-projected Cargo/Hangar rows: {sw:?}");
+    assert_eq!(sw.non_first_set_emitted, 0, "expected zero legacy LoSlot0 emissions: {sw:?}");
     assert_eq!(sw.helper_without_token, 0, "sw={sw:?}");
 }

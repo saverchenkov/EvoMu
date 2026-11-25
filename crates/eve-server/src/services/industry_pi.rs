@@ -1105,19 +1105,6 @@ pub(crate) fn emit_industry_job(
             successful_runs: runs,
         },
     );
-    let bp_target = if ctx.db.with_snapshot(|s| {
-        s.corporations.contains_key(&eff_owner)
-            || (!s.characters.contains_key(&eff_owner)
-                && (1_000_000..=2_000_000).contains(&eff_owner))
-    }) {
-        NotificationTarget::Corporation(eff_owner)
-    } else {
-        NotificationTarget::Character(eff_owner)
-    };
-    ctx.emit_typed(
-        bp_target,
-        crate::router::notify_registry::OnBlueprintsUpdated { owner_id: eff_owner },
-    );
     if status == 1 {
         let fac_sys = ctx.db.with_snapshot(|snap| {
             snap.industry_jobs.get(&job_id).and_then(|j| {

@@ -801,8 +801,7 @@ pub fn handle_orders_escrow(
                 let mut total_sales_tax = IskCents(0);
                 let mut all_filled_immediately = true;
                 let mut matched_buyers: Vec<(i64, i64)> = Vec::new();
-                let mut consumed_items: Vec<(InventoryItemRecord, Vec<(i32, PyRep)>)> = Vec::new();
-                let mut delivered_items: Vec<(i64, InventoryItemRecord)> = Vec::new();
+                let mut consumed_item_ids: Vec<i64> = Vec::new();
                 let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
                 let mut live_vault_unused = snap.plex_vault_balance(char_id);
@@ -828,33 +827,13 @@ pub fn handle_orders_escrow(
                     )?;
                     if let Some(item) = resolved_item {
                         let item_id = item.item_id;
-                        let old_qty = item.quantity;
-                        let old_loc = item.location_id;
-                        let old_flag = item.flag;
                         let mut sell_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                         sell_opts.expected_owner_id = item.owner_id;
                         sell_opts.reject_non_empty_container = true;
                         sell_opts.active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id);
                         match snap.consume_exact_item_quantity(item_id, quantity_i32, sell_opts) {
-                            Ok(Some(updated)) => {
-                                consumed_items.push((
-                                    updated,
-                                    // V24.01 invCache uses ixStackSize (9), not legacy ixQuantity (5).
-                                    vec![(9, PyRep::Integer(old_qty as i64))],
-                                ));
-                            }
-                            Ok(None) => {
-                                let mut removed_rec = item.clone();
-                                removed_rec.location_id = 6;
-                                removed_rec.flag = InventoryFlag::None;
-                                removed_rec.quantity = 0;
-                                removed_rec.singleton = false;
-                                let changes = vec![
-                                    (3, PyRep::Integer(old_loc)),
-                                    (4, PyRep::Integer(old_flag as i64)),
-                                    (9, PyRep::Integer(old_qty as i64)),
-                                ];
-                                consumed_items.push((removed_rec, changes));
+                            Ok(_) => {
+                                consumed_item_ids.push(item_id);
                             }
                             Err(e) => {
                                 return Err(BridgeRpcError {
@@ -1064,10 +1043,7 @@ pub fn handle_orders_escrow(
                                     version: 1,
                                     ..Default::default()
                                 };
-                                snap.items.insert(new_item_id, delivered_rec.clone());
-                                let r_issued = snap.market_order_meta.get(&oid).and_then(|m| m.issued_by);
-                                let rec_char = super::resolve_corp_recipient_char(snap, resting.owner_id, r_issued);
-                                delivered_items.push((rec_char, delivered_rec));
+                                snap.items.insert(new_item_id, delivered_rec);
                             }
                         }
                         let mut resting_completed = false;
@@ -1276,22 +1252,18 @@ pub fn handle_orders_escrow(
                     }
                 }
 
-                Ok((order_ids, order_owner_id, total_broker_fee, total_sales_tax, all_filled_immediately, matched_buyers, consumed_items, delivered_items, career_fills))
+                Ok((order_ids, order_owner_id, total_broker_fee, total_sales_tax, all_filled_immediately, matched_buyers, consumed_item_ids, career_fills))
             });
 
             match res {
-                Ok((order_ids, order_owner_id, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_items, delivered_items, career_fills)) => {
+                Ok((order_ids, order_owner_id, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_item_ids, career_fills)) => {
                     for (b_id, s_id, tid, gross) in career_fills {
                         crate::services::quasar_career_goals::record_market_fill_career_goals(
                             ctx, b_id, s_id, tid, gross,
                         );
                     }
-                    for (rec, changes) in &consumed_items {
-                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, rec.item_id);
-                        super::emit_market_item_change(ctx, char_id, rec, changes.clone());
-                    }
-                    for (rec_char, rec) in &delivered_items {
-                        super::emit_market_item_change(ctx, *rec_char, rec, vec![(3, PyRep::Integer(0))]);
+                    for item_id in consumed_item_ids {
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, item_id);
                     }
                     for (matched_oid, buyer_id) in matched_buyers {
                         super::notify_own_order_changed(ctx, buyer_id, 0, matched_oid, "Change");
@@ -1439,7 +1411,6 @@ pub fn handle_orders_escrow(
                     });
                 }
                 let remaining_qty = order.vol_remaining;
-                let mut returned_item: Option<(i64, InventoryItemRecord, Vec<(i32, PyRep)>)> = None;
                 if order.is_bid {
                     // Buy order: refund remaining escrow to character or corporation balance
                     if order.escrow.0 > 0 {
@@ -1482,8 +1453,6 @@ pub fn handle_orders_escrow(
                     {
                         let _ = snap.adjust_plex_vault(order.owner_id, remaining_qty as i64);
                     } else {
-                        let issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by);
-                        let recipient_char = super::resolve_corp_recipient_char(snap, order.owner_id, issued_by);
                         let target_flag = if is_corp_order { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
                         let existing_item = snap
                             .items
@@ -1499,15 +1468,8 @@ pub fn handle_orders_escrow(
 
                         if let Some(eid) = existing_item {
                             if let Some(item) = snap.items.get_mut(&eid) {
-                                let old_qty = item.quantity;
                                 item.quantity = item.quantity.saturating_add(remaining_qty);
                                 item.version += 1;
-                                returned_item = Some((
-                                    recipient_char,
-                                    item.clone(),
-                                    // V24.01 invCache uses ixStackSize (9), not legacy ixQuantity (5).
-                                    vec![(9, PyRep::Integer(old_qty as i64))],
-                                ));
                             }
                         } else {
                             snap.next_entity_id += 1;
@@ -1523,12 +1485,7 @@ pub fn handle_orders_escrow(
                                 version: 1,
                                 ..Default::default()
                             };
-                            snap.items.insert(nid, new_rec.clone());
-                            returned_item = Some((
-                                recipient_char,
-                                new_rec,
-                                vec![(3, PyRep::Integer(0))],
-                            ));
+                            snap.items.insert(nid, new_rec);
                         }
                     }
                 }
@@ -1541,13 +1498,10 @@ pub fn handle_orders_escrow(
                 meta.final_vol_remaining = Some(remaining_qty);
                 meta.closed_unix = Some(now_unix);
                 save_market_order_meta(snap, order_id, meta);
-                Ok((returned_item, order.owner_id))
+                Ok(order.owner_id)
             });
             match res {
-                Ok((returned_item, order_owner_id)) => {
-                    if let Some((rec_char, rec, changes)) = returned_item {
-                        super::emit_market_item_change(ctx, rec_char, &rec, changes);
-                    }
+                Ok(order_owner_id) => {
                     super::notify_own_order_changed(ctx, order_owner_id, char_id, order_id, "Expiry");
                     Some(Ok(PyRep::Bool(true)))
                 }
@@ -1812,7 +1766,6 @@ pub fn handle_orders_escrow(
                 let mut total_sales_tax = IskCents(0);
                 let mut orders_created = Vec::with_capacity(planned_fills.len());
                 let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
-                let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
                 let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
@@ -1888,8 +1841,7 @@ pub fn handle_orders_escrow(
                             item_id: new_item_id, type_id: fill_tid, owner_id: char_id, location_id: ord_st_id,
                             flag: InventoryFlag::Hangar, quantity: fill_qty, singleton: false, version: 1, ..Default::default()
                         };
-                        snap.items.insert(new_item_id, rec.clone());
-                        delivered_item_records.push(rec);
+                        snap.items.insert(new_item_id, rec);
                         new_item_id
                     };
 
@@ -1902,11 +1854,11 @@ pub fn handle_orders_escrow(
                     ]));
                 }
 
-                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, delivered_item_records, matched_sellers, career_fills))
+                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, matched_sellers, career_fills))
             });
 
             match res {
-                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, delivered_item_records, matched_sellers, career_fills)) => {
+                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, matched_sellers, career_fills)) => {
                     for (b_id, s_id, tid, gross) in career_fills {
                         crate::services::quasar_career_goals::record_market_fill_career_goals(
                             ctx, b_id, s_id, tid, gross,
@@ -1914,9 +1866,6 @@ pub fn handle_orders_escrow(
                     }
                     for (matched_oid, seller_id) in matched_sellers {
                         super::notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
-                    }
-                    for rec in &delivered_item_records {
-                        super::emit_market_item_change(ctx, char_id, rec, vec![(3, PyRep::Integer(0))]);
                     }
                     if args.len() >= 3 {
                         Some(Ok(PyRep::List(orders_created)))

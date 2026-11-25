@@ -1308,7 +1308,6 @@ pub fn handle_clones_and_sheet(
                     }
                 }
                 let mut worn_types = Vec::new();
-                let mut item_changes: Vec<(eve_db::InventoryItemRecord, i64, i64, i32)> = Vec::new();
                 if let Some(ref req_apparel) = apparel_list_opt {
                     let docked_loc = session
                         .station_id
@@ -1388,10 +1387,8 @@ pub fn handle_clones_and_sheet(
                         worn_types.push(src.type_id);
                         if src.quantity > 1 {
                             if let Some(it) = snap.items.get_mut(&iid) {
-                                let old_qty = it.quantity;
                                 it.quantity -= 1;
                                 it.version += 1;
-                                item_changes.push((it.clone(), src.location_id, src.flag as i64, old_qty));
                             }
                             let max_existing = snap.items.keys().copied().max().unwrap_or(0);
                             let split_id = snap
@@ -1410,19 +1407,14 @@ pub fn handle_clones_and_sheet(
                                 version: 1,
                                 ..Default::default()
                             };
-                            snap.items.insert(split_id, worn_unit.clone());
-                            item_changes.push((worn_unit, src.location_id, src.flag as i64, 0));
+                            snap.items.insert(split_id, worn_unit);
                             equipped_item_ids.push(split_id);
                         } else if let Some(it) = snap.items.get_mut(&iid) {
-                            let old_loc = it.location_id;
-                            let old_flag = it.flag as i64;
-                            let old_qty = it.quantity;
                             if it.location_id != char_id || it.flag != InventoryFlag::Wardrobe {
                                 it.location_id = char_id;
                                 it.flag = InventoryFlag::Wardrobe;
                                 it.singleton = true;
                                 it.version += 1;
-                                item_changes.push((it.clone(), old_loc, old_flag, old_qty));
                             }
                             equipped_item_ids.push(iid);
                         }
@@ -1440,13 +1432,9 @@ pub fn handle_clones_and_sheet(
                         .collect();
                     for uid in unequip_ids {
                         if let Some(it) = snap.items.get_mut(&uid) {
-                            let old_loc = it.location_id;
-                            let old_flag = it.flag as i64;
-                            let old_qty = it.quantity;
                             it.location_id = docked_loc;
                             it.flag = InventoryFlag::Hangar;
                             it.version += 1;
-                            item_changes.push((it.clone(), old_loc, old_flag, old_qty));
                         }
                     }
                 } else {
@@ -1471,61 +1459,10 @@ pub fn handle_clones_and_sheet(
                     .unwrap_or_default();
                 let final_portrait = new_portrait_opt.unwrap_or(existing_portrait);
                 snap.character_doll_info.insert(char_id, (new_doll_str.clone(), final_portrait.clone()));
-                Ok((new_doll_str, final_portrait, worn_types, item_changes))
+                Ok((new_doll_str, final_portrait, worn_types))
             });
             match res {
-                Ok((doll, portrait, worn_types, item_changes)) => {
-                    for (it, old_loc, old_flag, old_qty) in item_changes {
-                        let mut change_entries = Vec::new();
-                        if it.location_id != old_loc {
-                            change_entries.push((PyRep::Integer(3), PyRep::Integer(old_loc)));
-                        }
-                        if (it.flag as i64) != old_flag {
-                            change_entries.push((PyRep::Integer(4), PyRep::Integer(old_flag)));
-                        }
-                        if it.quantity != old_qty {
-                            // V24.01 invCache uses ixStackSize (9), never legacy ixQuantity (5).
-                            change_entries.push((PyRep::Integer(9), PyRep::Integer(i64::from(old_qty))));
-                        }
-                        let (group_id, category_id) = ctx
-                            .sde
-                            .types
-                            .get(&it.type_id)
-                            .map(|t| (t.group_id, t.category_id))
-                            .unwrap_or((0, 0));
-                        let notif = crate::router::notify_registry::OnItemChange {
-                            item: PyRep::keyval([
-                                ("itemID", PyRep::Integer(it.item_id)),
-                                ("typeID", PyRep::Integer(i64::from(it.type_id))),
-                                ("ownerID", PyRep::Integer(it.owner_id)),
-                                ("locationID", PyRep::Integer(it.location_id)),
-                                ("flagID", PyRep::Integer(it.flag as i64)),
-                                (
-                                    "quantity",
-                                    PyRep::Integer(if it.singleton {
-                                        -1
-                                    } else {
-                                        i64::from(it.quantity)
-                                    }),
-                                ),
-                                ("groupID", PyRep::Integer(i64::from(group_id))),
-                                ("categoryID", PyRep::Integer(i64::from(category_id))),
-                                ("singleton", PyRep::Integer(if it.singleton { 1 } else { 0 })),
-                            ]),
-                            change: PyRep::Dict(change_entries),
-                            location: PyRep::None,
-                        };
-                        if !session.live_notify_listener {
-                            crate::router::notify_registry::push_typed_session_notification(
-                                session,
-                                notif.clone(),
-                            );
-                        }
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(char_id),
-                            notif,
-                        );
-                    }
+                Ok((doll, portrait, worn_types)) => {
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(char_id)),
                         ("dollDNA", PyRep::String(doll.clone())),

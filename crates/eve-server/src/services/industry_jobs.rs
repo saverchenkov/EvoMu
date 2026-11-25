@@ -1582,9 +1582,6 @@ pub fn handle_industry_jobs(
 
                 let corp_office_id = crate::services::industry_pi::resolve_corp_office_at_facility(snap, use_corp, job_owner_id, station_id);
                 let split_qty = if is_ancient_relic && activity_id == 8 { runs_i32 } else { 1 };
-                let bp_orig_pre = snap.items.get(&bp_iid).cloned();
-                let mut bp_orig_post: Option<InventoryItemRecord> = None;
-                let mut bp_split_post: Option<InventoryItemRecord> = None;
                 let mut split_item: Option<InventoryItemRecord> = None;
                 if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
                     cost_meta.blueprint_original_flag = Some(bp_mut.flag).filter(|f| *f != InventoryFlag::Locked);
@@ -1609,13 +1606,11 @@ pub fn handle_industry_jobs(
                         bp_mut.flag = InventoryFlag::Locked;
                         bp_mut.version += 1;
                     }
-                    bp_orig_post = Some(bp_mut.clone());
                 }
                 if let Some(mut cloned) = split_item {
                     snap.next_entity_id += 1;
                     let split_id = snap.next_entity_id;
                     cloned.item_id = split_id;
-                    bp_split_post = Some(cloned.clone());
                     snap.items.insert(split_id, cloned);
                     bp_iid = split_id;
                 }
@@ -1641,7 +1636,6 @@ pub fn handle_industry_jobs(
                     cost_meta,
                     effective_input_flag,
                     input_container_id,
-                    (bp_orig_pre, bp_orig_post, bp_split_post),
                 ))
             });
 
@@ -1657,18 +1651,7 @@ pub fn handle_industry_jobs(
                     cost_meta,
                     eff_in_flag,
                     in_cid,
-                    (bp_orig_pre, bp_orig_post, bp_split_post),
                 )) => {
-                    industry_jobs_lifecycle::emit_industry_job_item_changes(
-                        ctx,
-                        char_id,
-                        bp_orig_pre.as_ref(),
-                        bp_orig_post.as_ref(),
-                        &[],
-                        bp_split_post.as_slice(),
-                        &[(3, PyRep::Integer(0))],
-                        false,
-                    );
                     emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, i64::from(runs));
                     crate::services::notify_emitters_character_services::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
                     Some(Ok(PyRep::keyval([

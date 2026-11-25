@@ -163,7 +163,7 @@ impl ServerContext {
 
     /// Emits a typed notification already checked against commit-time projection switches under
     /// explicit compare `source` attribution.
-    pub(crate) fn emit_typed_checked<N: TypedNotification>(
+    pub fn emit_typed_checked<N: TypedNotification>(
         &self,
         target: NotificationTarget,
         notif: N,

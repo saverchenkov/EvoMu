@@ -1269,3 +1269,266 @@ async fn step3a_quantum_core_install_suppresses_followup_hand_written_moved_even
         "no hand-written moved event may follow the quantum core consumption event: {core_events:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step3b1_salvage_rpc_and_tick_notify_foreign_and_unowned_wrecks() {
+    let ctx = paused_ctx_with_sde(shared_sde());
+    let mut salv_sess = login_select(&ctx, 73_801, "demo", "demo-secret", PILOT_1).await;
+    let _owner_sess = login_select(&ctx, 73_802, "other", "other-secret", PILOT_2).await;
+
+    let ship_id = salv_sess.ship_id.expect("salvager active ship");
+    let salvager_id = 1_938_000_001_i64;
+    let salvage_drone_id = 1_938_000_002_i64;
+    let foreign_rpc_wreck = 1_938_000_010_i64;
+    let foreign_rpc_loot = 1_938_000_011_i64;
+    let unowned_tick_wreck = 1_938_000_020_i64;
+    let unowned_tick_loot = 1_938_000_021_i64;
+    let foreign_tick_wreck = 1_938_000_030_i64;
+    let foreign_tick_loot = 1_938_000_031_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 626; // Vexor: HiSlot0..3 + DroneBay + DroneBandwidth
+        }
+        snap.items.retain(|_, item| {
+            !(item.location_id == ship_id && matches!(item.flag, InventoryFlag::HiSlot0 | InventoryFlag::HiSlot1))
+        });
+        let sk = snap.skills.entry(PILOT_1).or_default();
+        for tid in [3436_u32, 3438_u32, 25_863_u32] {
+            sk.insert(
+                tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: tid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        eve_testkit::legal_fixture::ensure_legal_active_ship_skills_in_snap(
+            snap,
+            &ctx.sde,
+            PILOT_1,
+        );
+        for (iid, tid, owner, loc, flag, qty, single) in [
+            (salvager_id, 25_861_u32, PILOT_1, ship_id, InventoryFlag::HiSlot0, 1, true),
+            (salvage_drone_id, 32_787_u32, PILOT_1, ship_id, InventoryFlag::DroneBay, 1, true),
+            (foreign_rpc_wreck, 26_557_u32, PILOT_2, i64::from(JITA_SYS), InventoryFlag::None, 1, true),
+            (foreign_rpc_loot, 34_u32, PILOT_2, foreign_rpc_wreck, InventoryFlag::Cargo, 45, false),
+            (unowned_tick_wreck, 26_557_u32, 0, i64::from(JITA_SYS), InventoryFlag::None, 1, true),
+            (unowned_tick_loot, 34_u32, 0, unowned_tick_wreck, InventoryFlag::Cargo, 60, false),
+            (foreign_tick_wreck, 26_557_u32, PILOT_2, i64::from(JITA_SYS), InventoryFlag::None, 1, true),
+            (foreign_tick_loot, 34_u32, PILOT_2, foreign_tick_wreck, InventoryFlag::Cargo, 75, false),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag,
+                    quantity: qty,
+                    singleton: single,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let kw = HashMap::new();
+    let undock_rep = rpc(&ctx, &mut salv_sess, "structureDocking", None, "Undock", &[], &kw)
+        .await
+        .expect("Undock");
+    assert!(!format!("{undock_rep:?}").is_empty());
+    let sys_id = salv_sess.solar_system_id.expect("solar system");
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = sys_h
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("ship ball query")
+        .expect("undocked ship ball")
+        .1
+        .position;
+
+    for (wid, pos_offset) in [
+        (foreign_rpc_wreck, DVec3::new(900.0, 0.0, 0.0)),
+        (unowned_tick_wreck, DVec3::new(1_000.0, 0.0, 0.0)),
+        (foreign_tick_wreck, DVec3::new(1_100.0, 0.0, 0.0)),
+    ] {
+        let wpos = ship_pos + pos_offset;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.item_positions.insert(wid, [wpos.x, wpos.y, wpos.z]);
+        });
+        sys_h
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: wid,
+                    type_id: 26_557,
+                    position: wpos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 10_000.0,
+                    radius: 25.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(26_557),
+            )
+            .await
+            .expect("spawn wreck ball");
+        sys_h
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: wid,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .expect("lock wreck");
+    }
+
+    // 1. Part (a): RPC salvage (`ship.LaunchDrones` + `entity.CmdSalvage`) on foreign player's wreck + loot.
+    let launch_rep = rpc(
+        &ctx,
+        &mut salv_sess,
+        "ship",
+        None,
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(salvage_drone_id)])],
+        &kw,
+    )
+    .await
+    .expect("LaunchDrones");
+    assert!(!format!("{launch_rep:?}").is_empty());
+
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    let _ = ctx.drain_notifications_for_char(PILOT_2);
+    ctx.mechanic_rng.set_seed(Some(3));
+    let cmd_res = rpc(
+        &ctx,
+        &mut salv_sess,
+        "entity",
+        None,
+        "CmdSalvage",
+        &[PyRep::Integer(foreign_rpc_wreck)],
+        &kw,
+    )
+    .await
+    .expect("entity.CmdSalvage");
+    assert_eq!(cmd_res.dict_get("salvaged").and_then(PyRep::as_bool), Some(true), "{cmd_res:?}");
+
+    let rpc_can_id = ctx
+        .db
+        .with_snapshot(|s| s.items[&foreign_rpc_loot].location_id);
+    assert_ne!(rpc_can_id, foreign_rpc_wreck);
+    let salv_rpc_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    assert_eq!(
+        count_item_notifs(&salv_rpc_notifs, foreign_rpc_loot, Some(45), Some(rpc_can_id), None),
+        1,
+        "salvager must receive OnItemChange for moved foreign loot on RPC salvage: {salv_rpc_notifs:?}"
+    );
+    let owner_rpc_notifs = ctx.drain_notifications_for_char(PILOT_2);
+    assert_eq!(
+        count_item_notifs(&owner_rpc_notifs, foreign_rpc_wreck, None, Some(6), None),
+        1,
+        "foreign wreck owner must receive OnItemChange wreck tombstone on RPC salvage: {owner_rpc_notifs:?}"
+    );
+    assert_eq!(
+        count_item_notifs(&owner_rpc_notifs, foreign_rpc_loot, Some(45), Some(rpc_can_id), None),
+        1,
+        "foreign wreck owner must receive OnItemChange for loot moved to jetcan: {owner_rpc_notifs:?}"
+    );
+
+    // 2. Part (b1): Tick-driven Salvager I (`dogmaIM.Activate` -> `step_manual` -> `handle_salvage_end_action`)
+    //    on an unowned/NPC wreck (`owner_id = 0`) with loot.
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    ctx.mechanic_rng.set_seed(Some(3));
+    rpc(
+        &ctx,
+        &mut salv_sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(salvager_id), PyRep::Integer(unowned_tick_wreck)],
+        &kw,
+    )
+    .await
+    .expect("Activate Salvager on unowned wreck");
+    ctx.advance_secs(12);
+    sys_h
+        .step_manual(12.0)
+        .await
+        .expect("step unowned wreck salvage cycle");
+    assert!(
+        ctx.db.with_snapshot(|s| !s.items.contains_key(&unowned_tick_wreck)),
+        "unowned tick wreck must be salvaged and removed"
+    );
+    let unowned_can_id = ctx
+        .db
+        .with_snapshot(|s| s.items[&unowned_tick_loot].location_id);
+    assert_ne!(unowned_can_id, unowned_tick_wreck);
+    let salv_unowned_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    assert_eq!(
+        count_item_notifs(&salv_unowned_notifs, unowned_tick_loot, Some(60), Some(unowned_can_id), None),
+        1,
+        "salvager must receive OnItemChange for moved unowned wreck loot on tick salvage: {salv_unowned_notifs:?}"
+    );
+    assert_eq!(
+        count_item_notifs(&salv_unowned_notifs, unowned_tick_wreck, None, Some(6), None),
+        1,
+        "salvager must receive OnItemChange for deleted unowned wreck on tick salvage: {salv_unowned_notifs:?}"
+    );
+
+    // 3. Part (b2): Tick-driven Salvager I (`handle_salvage_end_action`) on a foreign-player wreck + loot.
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    let _ = ctx.drain_notifications_for_char(PILOT_2);
+    ctx.mechanic_rng.set_seed(Some(3));
+    rpc(
+        &ctx,
+        &mut salv_sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(salvager_id), PyRep::Integer(foreign_tick_wreck)],
+        &kw,
+    )
+    .await
+    .expect("Activate Salvager on foreign wreck");
+    ctx.advance_secs(12);
+    sys_h
+        .step_manual(12.0)
+        .await
+        .expect("step foreign wreck salvage cycle");
+    assert!(
+        ctx.db.with_snapshot(|s| !s.items.contains_key(&foreign_tick_wreck)),
+        "foreign tick wreck must be salvaged and removed"
+    );
+    let foreign_can_id = ctx
+        .db
+        .with_snapshot(|s| s.items[&foreign_tick_loot].location_id);
+    assert_ne!(foreign_can_id, foreign_tick_wreck);
+    let salv_foreign_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    assert_eq!(
+        count_item_notifs(&salv_foreign_notifs, foreign_tick_loot, Some(75), Some(foreign_can_id), None),
+        1,
+        "salvager must receive OnItemChange for moved foreign wreck loot on tick salvage: {salv_foreign_notifs:?}"
+    );
+    let owner_foreign_notifs = ctx.drain_notifications_for_char(PILOT_2);
+    assert_eq!(
+        count_item_notifs(&owner_foreign_notifs, foreign_tick_wreck, None, Some(6), None),
+        1,
+        "foreign wreck owner must receive OnItemChange wreck tombstone on tick salvage: {owner_foreign_notifs:?}"
+    );
+    assert_eq!(
+        count_item_notifs(&owner_foreign_notifs, foreign_tick_loot, Some(75), Some(foreign_can_id), None),
+        1,
+        "foreign wreck owner must receive OnItemChange for moved loot on tick salvage: {owner_foreign_notifs:?}"
+    );
+}

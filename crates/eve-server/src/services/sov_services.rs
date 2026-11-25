@@ -1317,7 +1317,7 @@ pub fn handle_contract_delete_multiple(
     }
     let session_corp_id = session.corporation_id;
     let now_unix = ctx.now_unix();
-    let (deleted, failed, item_changes, transferred_ids) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (deleted, failed, transferred_ids) = ctx.db.try_with_mut_snapshot(|snap| {
         let effective_caller_corp = resolve_contract_caller_corp(snap, char_id, session_corp_id);
         let corp_mgr = crate::services::contracts_service::has_corp_contract_role(
             snap,
@@ -1327,7 +1327,6 @@ pub fn handle_contract_delete_multiple(
         );
         let mut del = Vec::new();
         let mut fail = Vec::new();
-        let mut changes: Vec<(eve_db::InventoryItemRecord, i64, i64, eve_db::InventoryFlag)> = Vec::new();
         let mut transferred_ids = Vec::new();
         let mut restored_ids = std::collections::HashSet::new();
         for cid in cids {
@@ -1374,19 +1373,7 @@ pub fn handle_contract_delete_multiple(
                             })
                     })
                     .collect();
-                let mut prev_states: Vec<(i64, i64, i64, eve_db::InventoryFlag)> = escrow_item_ids
-                    .iter()
-                    .copied()
-                    .filter_map(|iid| snap.items.get(&iid).map(|it| (iid, it.owner_id, it.location_id, it.flag)))
-                    .collect();
-                for it in snap.items.values() {
-                    if it.location_id == cid
-                        && !restored_ids.contains(&it.item_id)
-                        && !prev_states.iter().any(|(id, _, _, _)| *id == it.item_id)
-                    {
-                        prev_states.push((it.item_id, it.owner_id, it.location_id, it.flag));
-                    }
-                }
+                restored_ids.extend(escrow_item_ids.iter().copied());
                 transferred_ids.extend(snap.settle_contract_escrow_items(
                     cid,
                     &escrow_item_ids,
@@ -1396,14 +1383,6 @@ pub fn handle_contract_delete_multiple(
                     true,
                 ));
                 snap.clear_contract_divisions(cid);
-                for (iid, po, pl, pf) in prev_states {
-                    if let Some(it) = snap.items.get(&iid) {
-                        if it.owner_id != po || it.location_id != pl || it.flag != pf {
-                            restored_ids.insert(iid);
-                            changes.push((it.clone(), po, pl, pf));
-                        }
-                    }
-                }
                 if let Some(cm) = snap.contracts.get_mut(&cid) {
                     cm.status = "Deleted".into();
                 }
@@ -1412,40 +1391,10 @@ pub fn handle_contract_delete_multiple(
                 fail.push(PyRep::Integer(cid));
             }
         }
-        Ok::<_, BridgeRpcError>((del, fail, changes, transferred_ids))
+        Ok::<_, BridgeRpcError>((del, fail, transferred_ids))
     })?;
     if !transferred_ids.is_empty() {
         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
-    }
-    for (it, prev_owner, prev_loc, prev_flag) in item_changes {
-        let (group_id, category_id) = ctx
-            .sde
-            .types
-            .get(&it.type_id)
-            .map(|t| (t.group_id, t.category_id))
-            .unwrap_or((0, 0));
-        let row = PyRep::keyval([
-            ("itemID", PyRep::Integer(it.item_id)),
-            ("typeID", PyRep::Integer(i64::from(it.type_id))),
-            ("ownerID", PyRep::Integer(it.owner_id)),
-            ("locationID", PyRep::Integer(it.location_id)),
-            ("flagID", PyRep::Integer(it.flag as i64)),
-            ("quantity", PyRep::Integer(if it.singleton { -1 } else { i64::from(it.quantity) })),
-            ("groupID", PyRep::Integer(i64::from(group_id))),
-            ("categoryID", PyRep::Integer(i64::from(category_id))),
-            ("singleton", PyRep::Bool(it.singleton)),
-        ]);
-        let mut ch = Vec::new();
-        if prev_owner != it.owner_id {
-            ch.push((2, PyRep::Integer(prev_owner)));
-        }
-        if prev_loc != it.location_id {
-            ch.push((3, PyRep::Integer(prev_loc)));
-        }
-        if prev_flag != it.flag {
-            ch.push((4, PyRep::Integer(prev_flag as i64)));
-        }
-        let _ = ctx.notify_item_change(char_id, row, ch);
     }
     Ok(PyRep::Tuple(vec![PyRep::List(deleted), PyRep::List(failed)]))
 }

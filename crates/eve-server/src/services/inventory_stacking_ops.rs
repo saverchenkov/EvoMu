@@ -893,29 +893,7 @@ pub(in crate::services) fn handle_stack_ops(
                 args,
                 kwargs,
             ) {
-                Ok((orig, new_i, foreign_ship_bay_owner)) => {
-                    let old_orig_qty = (orig.quantity + new_i.quantity) as i64;
-                    let orig_changes = vec![
-                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                        (9, PyRep::Integer(old_orig_qty)),
-                    ];
-                    let new_changes = vec![(3, PyRep::Integer(0))];
-                    inventory_bound::emit_inv_item_change(
-                        ctx,
-                        char_id,
-                        &orig,
-                        orig_changes.clone(),
-                    );
-                    inventory_bound::emit_inv_item_change(
-                        ctx,
-                        char_id,
-                        &new_i,
-                        new_changes.clone(),
-                    );
-                    if let Some(ship_owner) = foreign_ship_bay_owner.filter(|&o| o != char_id) {
-                        inventory_bound::emit_inv_item_change(ctx, ship_owner, &orig, orig_changes);
-                        inventory_bound::emit_inv_item_change(ctx, ship_owner, &new_i, new_changes);
-                    }
+                Ok((orig, new_i, _foreign_ship_bay_owner)) => {
                     Some(Ok(PyRep::keyval([
                         ("originalItemID", PyRep::Integer(orig.item_id)),
                         ("originalQuantity", PyRep::Integer(orig.quantity as i64)),
@@ -988,23 +966,6 @@ pub(in crate::services) fn handle_stack_ops(
                     message: "MultiMerge requires at least one (sourceItemID, destItemID, qty) merge operation".into(),
                     client_error: None,
                 }));
-            }
-            enum MergeChangeEvent {
-                Partial {
-                    updated_src: eve_db::InventoryItemRecord,
-                    old_src_qty: i32,
-                    updated_dst: eve_db::InventoryItemRecord,
-                    old_dst_qty: i32,
-                    old_dst_owner: i64,
-                    foreign_ship_owner: Option<i64>,
-                },
-                Full {
-                    deleted_src: eve_db::InventoryItemRecord,
-                    updated_dst: eve_db::InventoryItemRecord,
-                    old_dst_qty: i32,
-                    old_dst_owner: i64,
-                    foreign_ship_owner: Option<i64>,
-                },
             }
             let bound_loc = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
             let source_container_hint =
@@ -1269,134 +1230,31 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         })?;
                     let old_src_qty = src.quantity;
-                    let old_dst_qty = tgt.quantity;
-                    let old_dst_owner = tgt.owner_id;
                     if merge_qty < old_src_qty {
-                        let updated_src = {
-                            let src_mut = guard.items.get_mut(&src_id).unwrap();
-                            src_mut.quantity -= merge_qty;
-                            src_mut.version += 1;
-                            src_mut.clone()
-                        };
-                        let updated_dst = {
-                            let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
-                            tgt_mut.quantity = new_tgt_qty;
-                            if let Some(ship_owner) = src_foreign_ship_owner {
-                                tgt_mut.owner_id = ship_owner;
-                            }
-                            tgt_mut.version += 1;
-                            tgt_mut.clone()
-                        };
-                        events.push(MergeChangeEvent::Partial {
-                            updated_src,
-                            old_src_qty,
-                            updated_dst,
-                            old_dst_qty,
-                            old_dst_owner,
-                            foreign_ship_owner: src_foreign_ship_owner,
-                        });
+                        let src_mut = guard.items.get_mut(&src_id).unwrap();
+                        src_mut.quantity -= merge_qty;
+                        src_mut.version += 1;
                     } else {
                         guard.remove_system_cleanup_item(src_id);
-                        let updated_dst = {
-                            let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
-                            tgt_mut.quantity = new_tgt_qty;
-                            if let Some(ship_owner) = src_foreign_ship_owner {
-                                tgt_mut.owner_id = ship_owner;
-                            }
-                            tgt_mut.version += 1;
-                            tgt_mut.clone()
-                        };
-                        events.push(MergeChangeEvent::Full {
-                            deleted_src: src,
-                            updated_dst,
-                            old_dst_qty,
-                            old_dst_owner,
-                            foreign_ship_owner: src_foreign_ship_owner,
-                        });
                     }
+                    let updated_dst = {
+                        let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
+                        tgt_mut.quantity = new_tgt_qty;
+                        if let Some(ship_owner) = src_foreign_ship_owner {
+                            tgt_mut.owner_id = ship_owner;
+                        }
+                        tgt_mut.version += 1;
+                        tgt_mut.clone()
+                    };
+                    events.push(updated_dst);
                 }
                 persist_unlocked_containers_in_snap(guard, &unlock_pairs, now_unix)?;
                 Ok(events)
             });
-            let events = match tx_res {
+            let updated_records = match tx_res {
                 Ok(ev) => ev,
                 Err(e) => return Some(Err(e)),
             };
-            let mut updated_records = Vec::with_capacity(events.len());
-            for ev in events {
-                match ev {
-                    MergeChangeEvent::Partial {
-                        updated_src,
-                        old_src_qty,
-                        updated_dst,
-                        old_dst_qty,
-                        old_dst_owner,
-                        foreign_ship_owner,
-                    } => {
-                        let src_changes = vec![(9, PyRep::Integer(old_src_qty as i64))];
-                        let mut dst_changes = vec![(9, PyRep::Integer(old_dst_qty as i64))];
-                        if updated_dst.owner_id != old_dst_owner {
-                            dst_changes.push((2, PyRep::Integer(old_dst_owner)));
-                        }
-                        inventory_bound::emit_inv_item_change(
-                            ctx,
-                            char_id,
-                            &updated_src,
-                            src_changes.clone(),
-                        );
-                        inventory_bound::emit_inv_item_change(
-                            ctx,
-                            char_id,
-                            &updated_dst,
-                            dst_changes.clone(),
-                        );
-                        if let Some(ship_owner) = foreign_ship_owner.filter(|&o| o != char_id) {
-                            inventory_bound::emit_inv_item_change(
-                                ctx,
-                                ship_owner,
-                                &updated_src,
-                                src_changes,
-                            );
-                            inventory_bound::emit_inv_item_change(
-                                ctx,
-                                ship_owner,
-                                &updated_dst,
-                                dst_changes,
-                            );
-                        }
-                        updated_records.push(updated_dst);
-                    }
-                    MergeChangeEvent::Full {
-                        deleted_src,
-                        updated_dst,
-                        old_dst_qty,
-                        old_dst_owner,
-                        foreign_ship_owner,
-                    } => {
-                        let mut dst_changes = vec![(9, PyRep::Integer(old_dst_qty as i64))];
-                        if updated_dst.owner_id != old_dst_owner {
-                            dst_changes.push((2, PyRep::Integer(old_dst_owner)));
-                        }
-                        inventory_bound::emit_inv_item_deleted(ctx, char_id, &deleted_src);
-                        inventory_bound::emit_inv_item_change(
-                            ctx,
-                            char_id,
-                            &updated_dst,
-                            dst_changes.clone(),
-                        );
-                        if let Some(ship_owner) = foreign_ship_owner.filter(|&o| o != char_id) {
-                            inventory_bound::emit_inv_item_deleted(ctx, ship_owner, &deleted_src);
-                            inventory_bound::emit_inv_item_change(
-                                ctx,
-                                ship_owner,
-                                &updated_dst,
-                                dst_changes,
-                            );
-                        }
-                        updated_records.push(updated_dst);
-                    }
-                }
-            }
             let last = updated_records.last().cloned().unwrap_or_default();
             Some(Ok(PyRep::keyval([
                 ("itemID", PyRep::Integer(last.item_id)),
@@ -1496,7 +1354,7 @@ pub(in crate::services) fn handle_stack_ops(
             let loaded_tube_items = snapshot_loaded_tube_items(ctx);
             let pre_balls = snapshot_pre_balls(ctx, session, char_id);
             let now_unix = ctx.now_unix_secs();
-            let (outcome, foreign_ship_owner) = match ctx.db.try_with_mut_snapshot(|guard| {
+            let outcome = match ctx.db.try_with_mut_snapshot(|guard| {
                 let ch = character_or_session_fallback(guard, session, char_id)?;
                 let chain = collect_container_chain(guard, target_loc, 9);
                 validate_bound_and_hint_chain(
@@ -1557,39 +1415,14 @@ pub(in crate::services) fn handle_stack_ops(
                     &loaded_tube_items,
                 );
                 persist_unlocked_containers_in_snap(guard, &unlock_pairs, now_unix)?;
-                Ok((outcome, foreign_ship_owner))
+                Ok(outcome)
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let ship_notify = foreign_ship_owner.filter(|&o| o != char_id);
-            for old_src in &outcome.deleted_sources {
-                inventory_bound::emit_inv_item_deleted(ctx, char_id, old_src);
-                if let Some(ship_owner) = ship_notify {
-                    inventory_bound::emit_inv_item_deleted(ctx, ship_owner, old_src);
-                }
-            }
             let mut survivors = Vec::with_capacity(outcome.survivors.len());
             for survivor in &outcome.survivors {
-                let changes = vec![
-                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                    (9, PyRep::Integer(survivor.old_quantity as i64)),
-                ];
-                inventory_bound::emit_inv_item_change(
-                    ctx,
-                    char_id,
-                    &survivor.updated,
-                    changes.clone(),
-                );
-                if let Some(ship_owner) = ship_notify {
-                    inventory_bound::emit_inv_item_change(
-                        ctx,
-                        ship_owner,
-                        &survivor.updated,
-                        changes,
-                    );
-                }
                 survivors.push(PyRep::keyval([
                     ("itemID", PyRep::Integer(survivor.updated.item_id)),
                     ("typeID", PyRep::Integer(survivor.updated.type_id as i64)),

@@ -31,9 +31,9 @@ enum CommitSalvageError {
     Wal(String),
 }
 
-impl eve_db::FromWalError for CommitSalvageError {
-    fn from_wal_error(err: String) -> Self {
-        Self::Wal(err)
+impl eve_db::FromTxError for CommitSalvageError {
+    fn from_tx_error(err: eve_db::TxError) -> Self {
+        Self::Wal(err.to_string())
     }
 }
 
@@ -73,8 +73,9 @@ fn salvage_vol_for_materials(ctx: &ServerContext, materials: &[(u32, i32)]) -> f
         .sum()
 }
 
-/// Commits yielded salvage items, optional loot-transfer jetcan, and wreck item removal, then
-/// emits `OnItemChange` notifications after releasing the repository lock.
+/// Commits yielded salvage items, optional loot-transfer jetcan, and wreck item removal,
+/// tagging `char_id` on `wtx.effects.acting_char_id` so commit-driven item projection notifies the
+/// salvager on both RPC and tick-driven salvaging cycles.
 #[allow(clippy::too_many_arguments)]
 fn commit_salvaged_wreck_inventory_and_notify(
     ctx: &ServerContext,
@@ -87,7 +88,9 @@ fn commit_salvaged_wreck_inventory_and_notify(
 ) -> Result<Option<(i64, i64)>, CommitSalvageError> {
     let salvage_vol = salvage_vol_for_materials(ctx, salvage_materials);
     let ship_cap_opt = resolve_ship_cargo_capacity(ctx, char_id, ship_id);
-    let (spawned_can_opt, item_mutations) = ctx.db.try_with_mut_snapshot(|snap| {
+    let spawned_can_opt = ctx.db.tx("commit_salvaged_wreck", |wtx| {
+        wtx.effects.acting_char_id = Some(char_id);
+        let snap = &mut *wtx.snap;
         let Some(old_wreck) = snap.items.get(&wreck_id).cloned() else {
             return Err(CommitSalvageError::WreckMissing);
         };
@@ -120,8 +123,6 @@ fn commit_salvaged_wreck_inventory_and_notify(
             .map(|i| i.item_id)
             .collect();
         child_ids.sort_unstable();
-        let mut item_mutations: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> =
-            Vec::with_capacity(child_ids.len() + salvage_materials.len() + 1);
         let can_id_opt = if !child_ids.is_empty() {
             snap.next_entity_id += 1;
             let can_id = snap.next_entity_id;
@@ -142,10 +143,8 @@ fn commit_salvaged_wreck_inventory_and_notify(
             snap.item_positions.insert(can_id, wreck_pos);
             for cid in child_ids {
                 if let Some(child) = snap.items.get_mut(&cid) {
-                    let pre = child.clone();
                     child.location_id = can_id;
                     child.version += 1;
-                    item_mutations.push((Some(pre), Some(child.clone())));
                 }
             }
             Some((can_id, wreck_owner))
@@ -155,7 +154,6 @@ fn commit_salvaged_wreck_inventory_and_notify(
 
         snap.items.remove(&wreck_id);
         snap.item_positions.remove(&wreck_id);
-        item_mutations.push((Some(old_wreck), None));
 
         for &(tid, qty) in salvage_materials {
             snap.next_entity_id += 1;
@@ -175,31 +173,10 @@ fn commit_salvaged_wreck_inventory_and_notify(
                 is_blueprint_copy: false,
                 blueprint_runs_remaining: None,
             };
-            snap.items.insert(iid, rec.clone());
-            item_mutations.push((None, Some(rec)));
+            snap.items.insert(iid, rec);
         }
-        Ok((can_id_opt, item_mutations))
+        Ok(can_id_opt)
     })?;
-
-    for (pre, post) in &item_mutations {
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
-        if let (Some(pre_rec), Some(post_rec)) = (pre.as_ref(), post.as_ref()) {
-            if pre_rec.location_id == wreck_id && post_rec.location_id != wreck_id {
-                let (resolved_target, _) = ctx.resolve_item_notification_target(char_id, post_rec);
-                if !matches!(
-                    resolved_target,
-                    crate::router::NotificationTarget::Character(cid) if cid == char_id
-                ) {
-                    let _ = ctx.notify_item_record_change_with_target(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "charid",
-                        post_rec,
-                        vec![(3, eve_proto::PyRep::Integer(pre_rec.location_id))],
-                    );
-                }
-            }
-        }
-    }
 
     Ok(spawned_can_opt)
 }

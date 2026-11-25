@@ -750,34 +750,7 @@ fn complete_contract_validation_and_auction_bid_buyout_edges() {
 }
 
 #[test]
-fn contract_notification_tracker_item_changed_and_location_ids_pin_all_fields() {
-    let base = make_fighter_item(1, 34, 90_000_001, 60_003_760, InventoryFlag::Hangar, 10);
-    assert!(!super::ContractNotifyDelta::item_changed(&base, &base));
-
-    let mut diff_owner = base.clone();
-    diff_owner.owner_id = 90_000_002;
-    assert!(super::ContractNotifyDelta::item_changed(&base, &diff_owner));
-
-    let mut diff_loc = base.clone();
-    diff_loc.location_id = 60_003_761;
-    assert!(super::ContractNotifyDelta::item_changed(&base, &diff_loc));
-
-    let mut diff_flag = base.clone();
-    diff_flag.flag = InventoryFlag::Cargo;
-    assert!(super::ContractNotifyDelta::item_changed(&base, &diff_flag));
-
-    let mut diff_qty = base.clone();
-    diff_qty.quantity = 11;
-    assert!(super::ContractNotifyDelta::item_changed(&base, &diff_qty));
-
-    let mut diff_sing = base.clone();
-    diff_sing.singleton = !base.singleton;
-    assert!(super::ContractNotifyDelta::item_changed(&base, &diff_sing));
-
-    let mut diff_tid = base.clone();
-    diff_tid.type_id = 35;
-    assert!(super::ContractNotifyDelta::item_changed(&base, &diff_tid));
-
+fn contract_location_ids_pin_station_and_structure() {
     let (ctx, _, _, _, _, _, _, station_id, _) = setup_sandbox();
     let struct_id = 1_055_777_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -894,7 +867,7 @@ fn gh1195_contract_rejections_preserve_typed_errors_and_facts() {
 }
 
 #[test]
-fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id() {
+fn accept_contract_ignores_preexisting_high_id_items_above_next_entity_id() {
     let (ctx, mut issuer_sess, issuer_id, mut acceptor_sess, acceptor_id, _, _, station_id, _) =
         setup_sandbox();
     let kw = HashMap::new();
@@ -938,41 +911,6 @@ fn contract_notify_delta_ignores_preexisting_high_id_items_above_next_entity_id(
         );
     });
     let _ = ctx.drain_notifications_for_char(acceptor_id);
-
-    let (alloc_id, delta_notifs) = ctx.db.with_mut_snapshot(|snap| {
-        let delta = super::ContractNotifyDelta::capture(
-            snap,
-            acceptor_id,
-            0,
-            &[acceptor_id],
-            &[station_id],
-            &[],
-        );
-        let new_id = snap.alloc_entity_id();
-        snap.items.insert(
-            new_id,
-            make_fighter_item(new_id, 34, acceptor_id, station_id, InventoryFlag::Hangar, 2),
-        );
-        (new_id, delta.finish(snap))
-    });
-
-    delta_notifs.emit(&ctx);
-    let unit_item_ids: Vec<i64> = ctx
-        .drain_notifications_for_char(acceptor_id)
-        .into_iter()
-        .filter(|n| n.event == "OnItemChange")
-        .filter_map(|n| {
-            n.args
-                .first()
-                .and_then(|r| r.dbrow_get("itemID"))
-                .and_then(PyRep::as_i64)
-        })
-        .collect();
-    assert_eq!(
-        unit_item_ids,
-        vec![alloc_id],
-        "ContractNotifyDelta::finish must emit newly allocated items (<= next_entity_id) and ignore pre-existing high-ID fitted items"
-    );
 
     let cid = created_cid(
         &call_contract(

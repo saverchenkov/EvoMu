@@ -435,7 +435,7 @@ pub fn handle_anchor_orbital(
     }
     let planet_id = target_planet.celestial_id;
 
-    let (orbital_id, tid, pid, prev_cargo, updated_item, spawned_orbital) =
+    let (orbital_id, tid, pid) =
         ctx.db.try_with_mut_snapshot(|snap| {
             if snap
                 .structures
@@ -495,7 +495,7 @@ pub fn handle_anchor_orbital(
                 ));
             }
             let tid = it_snapshot.type_id;
-            let (orbital_id, updated_item, spawned_orbital) = if it_snapshot.quantity == 1 {
+            let orbital_id = if it_snapshot.quantity == 1 {
                 let it = snap.items.get_mut(&item_id).ok_or_else(|| {
                     err("ItemNotFound", format!("Gantry item {item_id} not found"))
                 })?;
@@ -505,7 +505,7 @@ pub fn handle_anchor_orbital(
                 it.quantity = 1;
                 it.singleton = true;
                 it.version = it.version.saturating_add(1);
-                (item_id, it.clone(), None)
+                item_id
             } else {
                 let it = snap.items.get_mut(&item_id).ok_or_else(|| {
                     err("ItemNotFound", format!("Gantry item {item_id} not found"))
@@ -513,7 +513,6 @@ pub fn handle_anchor_orbital(
                 it.quantity -= 1;
                 it.singleton = false;
                 it.version = it.version.saturating_add(1);
-                let updated_cargo = it.clone();
                 snap.next_entity_id += 1;
                 let new_orbital_id = snap.next_entity_id;
                 let new_orbital = eve_db::InventoryItemRecord {
@@ -527,8 +526,8 @@ pub fn handle_anchor_orbital(
                     version: 1,
                     ..Default::default()
                 };
-                snap.items.insert(new_orbital_id, new_orbital.clone());
-                (new_orbital_id, updated_cargo, Some(new_orbital))
+                snap.items.insert(new_orbital_id, new_orbital);
+                new_orbital_id
             };
             snap.structures.insert(
                 orbital_id,
@@ -551,20 +550,8 @@ pub fn handle_anchor_orbital(
                     self_destruct_at_unix: None,
                 },
             );
-            Ok((
-                orbital_id,
-                tid,
-                planet_id,
-                it_snapshot,
-                updated_item,
-                spawned_orbital,
-            ))
+            Ok((orbital_id, tid, planet_id))
         })?;
-
-    ctx.notify_item_mutation(char_id, Some(&prev_cargo), Some(&updated_item));
-    if let Some(ref spawned) = spawned_orbital {
-        ctx.notify_item_mutation(char_id, None, Some(spawned));
-    }
 
     Ok(PyRep::keyval([
         ("itemID", PyRep::Integer(orbital_id)),
@@ -615,8 +602,8 @@ pub fn handle_unanchor_orbital(
     });
     let now_unix = ctx.now_unix();
 
-    let (old_item, new_item) = ctx.db.try_with_mut_snapshot(
-        |snap| -> Result<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord), BridgeRpcError> {
+    let new_item = ctx.db.try_with_mut_snapshot(
+        |snap| -> Result<eve_db::InventoryItemRecord, BridgeRpcError> {
             let it_snapshot = snap
                 .items
                 .get(&item_id)
@@ -844,14 +831,13 @@ pub fn handle_unanchor_orbital(
             it.flag = eve_db::InventoryFlag::Cargo;
             it.singleton = false;
             it.version = it.version.saturating_add(1);
-            Ok((it_snapshot, it.clone()))
+            Ok(it.clone())
         },
     )?;
 
     if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
         sys_handle.try_remove_ball(item_id);
     }
-    ctx.notify_item_mutation(char_id, Some(&old_item), Some(&new_item));
 
     Ok(PyRep::keyval([
         ("itemID", PyRep::Integer(item_id)),

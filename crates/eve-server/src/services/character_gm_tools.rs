@@ -1453,15 +1453,8 @@ pub(crate) fn dispatch_fit_slash(
                         });
                     }
                 }
-                // ixLocationID (3) = 0, ixFlag (4) = 0 notifies `invCache`, `godma`, `dogmaLocation`,
-                // and `SlotsContainer.OnInvChange` BEFORE `invalidate_and_push_fit` / `OnModuleFitted`
-                // (#1252, parity with `inventory_fitting.rs`).
-                crate::services::inventory_bound::emit_inv_item_change(
-                    ctx,
-                    rec.owner_id,
-                    &rec,
-                    vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
-                );
+                // ProcessInventoryChange still emits right before `invalidate_and_push_fit` / `OnModuleFitted`
+                // (#1252, parity with `inventory_fitting.rs`); `OnItemChange` is commit-projected.
                 ctx.emit_typed(
                     NotificationTarget::Character(rec.owner_id),
                     crate::router::notify_registry::ProcessInventoryChange {
@@ -1636,7 +1629,6 @@ pub(crate) fn dispatch_load_slash(
 
         match res {
             Ok(rec) => {
-                ctx.notify_item_mutation(rec.owner_id, None, Some(&rec));
                 // V24.02 `menu_implant.PlugEmIn`, `dna.Load`, and `svc_invtools.SpawnRandom`
                 // index `slash.SlashCmd('/load ...')[0]` as the spawned `itemID`, while chat
                 // and `svc_slash.JobHandler` format non-`None` replies via `'slash result: %s' % res`.

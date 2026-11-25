@@ -20,10 +20,7 @@ use std::sync::Arc;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 
-use crate::router::notify_registry::{
-    push_typed_session_notification, OnItemChange, OnRedeemingQueueUpdated,
-    OnRedeemingTokensUpdated,
-};
+use crate::router::notify_registry::{OnRedeemingQueueUpdated, OnRedeemingTokensUpdated};
 use crate::router::ServerContext;
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 
@@ -302,6 +299,7 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 
 pub(crate) struct DeliveredLoginReward {
     pub(crate) primary_id: i64,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) spawned_item: Option<eve_db::InventoryItemRecord>,
     pub(crate) expire_date_time: Option<i64>,
 }
@@ -586,7 +584,7 @@ fn handle_login_campaign_claim_reward(
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     let sess_docked = session.station_id.or(session.structure_id);
 
-    let (res, spawned_items) = ctx.db.try_with_mut_snapshot(|snap| {
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let (campaign_id, _is_rookie, campaign) =
             playtime::resolve_daily_campaign(snap, char_id, now, &campaigns)?;
@@ -640,7 +638,6 @@ fn handle_login_campaign_claim_reward(
         })?;
 
         let mut delivered_item_ids = Vec::new();
-        let mut spawned_items = Vec::new();
         let mut primary_expire_date_time = None;
         for rw in [alpha_rw, omega_rw].into_iter().flatten() {
             let del = deliver_login_reward(
@@ -655,9 +652,6 @@ fn handle_login_campaign_claim_reward(
             delivered_item_ids.push(del.primary_id);
             if primary_expire_date_time.is_none() {
                 primary_expire_date_time = del.expire_date_time;
-            }
-            if let Some(rec) = del.spawned_item {
-                spawned_items.push(rec);
             }
         }
 
@@ -704,54 +698,14 @@ fn handle_login_campaign_claim_reward(
         ]);
 
         // V24 `loginCampaignService.pyj`: unpacks 4-tuple `(item_reward, updated_item_progress, received_bucket_typeID, updated_bucket_progress)`
-        Ok((
-            PyRep::Tuple(vec![
-                reward_item,
-                item_progress,
-                PyRep::None,
-                bucket_progress,
-            ]),
-            spawned_items,
-        ))
+        Ok(PyRep::Tuple(vec![
+            reward_item,
+            item_progress,
+            PyRep::None,
+            bucket_progress,
+        ]))
     })?;
     if res != PyRep::None {
-        for item in &spawned_items {
-            let (group_id, category_id) = ctx
-                .sde
-                .types
-                .get(&item.type_id)
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((0, 0));
-            let item_rep = PyRep::keyval([
-                ("itemID", PyRep::Integer(item.item_id)),
-                ("typeID", PyRep::Integer(i64::from(item.type_id))),
-                ("ownerID", PyRep::Integer(char_id)),
-                ("locationID", PyRep::Integer(item.location_id)),
-                ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                (
-                    "quantity",
-                    PyRep::Integer(if item.singleton {
-                        -1
-                    } else {
-                        i64::from(item.quantity)
-                    }),
-                ),
-                ("groupID", PyRep::Integer(i64::from(group_id))),
-                ("categoryID", PyRep::Integer(i64::from(category_id))),
-                ("singleton", PyRep::Bool(item.singleton)),
-                ("stacksize", PyRep::Integer(i64::from(item.quantity))),
-            ]);
-            if !session.live_notify_listener {
-                push_typed_session_notification(
-                    session,
-                    OnItemChange {
-                        item: item_rep,
-                        change: PyRep::Dict(Vec::new()),
-                        location: PyRep::None,
-                    },
-                );
-            }
-        }
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             OnRedeemingQueueUpdated,

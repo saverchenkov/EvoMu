@@ -652,7 +652,7 @@ fn handle_office_manager(
                     version: 1,
                     ..Default::default()
                 };
-                snap.items.insert(office_id, office_item.clone());
+                snap.items.insert(office_id, office_item);
                 snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
                 let bill_notify = if fee.0 > 0 {
                     let due_unix = now_unix.saturating_add(30 * 86_400);
@@ -678,7 +678,6 @@ fn handle_office_manager(
                     station_id,
                     bill_notify,
                     quote,
-                    office_item,
                 ))
             });
 
@@ -688,7 +687,6 @@ fn handle_office_manager(
                     st_id,
                     bill_notify,
                     quote,
-                    office_item,
                 )) => {
                     if let Some((is_corp_debtor, bill_kv)) = bill_notify {
                         super::wallet_serverops::emit_bill_received(
@@ -698,12 +696,6 @@ fn handle_office_manager(
                             bill_kv,
                         );
                     }
-                    ctx.emit_item_change_with_target(
-                        NotificationTarget::Corporation(corp_id),
-                        "corpid",
-                        &office_item,
-                        vec![(3, PyRep::Integer(0))],
-                    );
                     ctx.emit_typed(
                         NotificationTarget::Corporation(corp_id),
                         crate::router::notify_registry::OnOfficeRentalChange {

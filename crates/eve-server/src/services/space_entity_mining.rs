@@ -1942,12 +1942,6 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            enum ReprocessItemDelta {
-                Updated(InventoryItemRecord, Vec<(i32, PyRep)>),
-                Deleted(InventoryItemRecord),
-            }
-            let mut item_deltas: Vec<ReprocessItemDelta> = Vec::new();
-
             let now_unix = ctx.now_unix();
             let char_skills = ctx.character_skill_levels(char_id);
             let is_batch_call = parsed.is_batch_call;
@@ -2248,14 +2242,9 @@ pub async fn handle(
                         if let Some(im) = snap.items.get_mut(&item_id) {
                             im.quantity = p.remainder;
                             im.version += 1;
-                            item_deltas.push(ReprocessItemDelta::Updated(
-                                im.clone(),
-                                vec![(9, PyRep::Integer(old_qty as i64))],
-                            ));
                         }
                     } else {
                         snap.items.remove(&item_id);
-                        item_deltas.push(ReprocessItemDelta::Deleted(p.source_item));
                     }
 
                     let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(p.outputs.len());
@@ -2273,11 +2262,7 @@ pub async fn handle(
                             version: 1,
                             ..Default::default()
                         };
-                        snap.items.insert(mid, new_item.clone());
-                        item_deltas.push(ReprocessItemDelta::Updated(
-                            new_item,
-                            vec![(3, PyRep::Integer(0))],
-                        ));
+                        snap.items.insert(mid, new_item);
                         outputs.push((mid, mat.type_id, mat.quantity));
                     }
 
@@ -2357,16 +2342,6 @@ pub async fn handle(
 
             match res {
                 Ok((mut batch_results, reprocessed_inputs)) => {
-                    for delta in item_deltas {
-                        match delta {
-                            ReprocessItemDelta::Updated(rec, changes) => {
-                                ctx.emit_item_change_routed(char_id, &rec, changes);
-                            }
-                            ReprocessItemDelta::Deleted(rec) => {
-                                ctx.emit_item_deleted_routed(char_id, &rec);
-                            }
-                        }
-                    }
                     crate::quasar_gateway::isolate_side_effect("space_entity_mining.reprocess_achievements", || {
                         for (tid, qty) in reprocessed_inputs {
                             let group_id = ctx.sde.types.get(&tid).map(|t| t.group_id);

@@ -117,15 +117,6 @@ pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
 }
 
-pub(crate) fn emit_market_item_change(
-    ctx: &ServerContext,
-    recipient_char_id: i64,
-    item: &InventoryItemRecord,
-    changes: Vec<(i32, PyRep)>,
-) {
-    let _ = ctx.emit_item_change_routed(recipient_char_id, item, changes);
-}
-
 pub(crate) fn notify_own_order_changed(
     ctx: &ServerContext,
     owner_id: i64,
@@ -1216,7 +1207,6 @@ pub fn handle(
                 let mut actual_sales_tax_charged = IskCents(0);
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
                 let mut delivered_items: Vec<(i64, TypeId, i64, i64)> = Vec::new();
-                let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
                 for (oid, _) in candidate_ids {
@@ -1335,9 +1325,8 @@ pub fn handle(
                                 version: 1,
                                 ..Default::default()
                             };
-                            snap.items.insert(new_item_id, rec.clone());
+                            snap.items.insert(new_item_id, rec);
                             delivered_items.push((new_item_id, type_id, deliv_flag as i64, deliv_station));
-                            delivered_item_records.push(rec);
                         }
                     }
 
@@ -1389,7 +1378,6 @@ pub fn handle(
                         IskCents(0),
                         matched_sellers,
                         delivered_items,
-                        delivered_item_records,
                         career_fills,
                     ));
                 }
@@ -1528,11 +1516,11 @@ pub fn handle(
                         });
                     }
                 }
-                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, career_fills))
+                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, career_fills))
             });
 
             match res {
-                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, career_fills)) => {
+                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, career_fills)) => {
                     for (b_id, s_id, tid, gross) in career_fills {
                         crate::services::quasar_career_goals::record_market_fill_career_goals(
                             ctx, b_id, s_id, tid, gross,
@@ -1540,9 +1528,6 @@ pub fn handle(
                     }
                     for (matched_oid, seller_id) in matched_sellers {
                         notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
-                    }
-                    for rec in &delivered_item_records {
-                        emit_market_item_change(ctx, char_id, rec, vec![(3, PyRep::Integer(0))]);
                     }
                     for (iid, tid, flag_id, loc_id) in delivered_items {
                         // "OnMarketItemReceived" is emitted by the server; the client-local

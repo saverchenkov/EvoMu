@@ -236,7 +236,6 @@ pub fn prepare_ancillary_module(
             Some((pre, post))
         });
         if let Some((pre, post)) = consumed {
-            ctx.notify_item_mutation(pre.owner_id, Some(&pre), post.as_ref());
             crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
                 ctx,
                 pre.owner_id,
