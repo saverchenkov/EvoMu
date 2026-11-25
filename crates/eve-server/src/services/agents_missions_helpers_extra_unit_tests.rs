@@ -490,9 +490,16 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
 
     // No active missions -> MissionNotActive
     assert_eq!(
-        resolve_target_mission_id(&ctx, char_id, 3_200_001, Some("Offered"), &[], &kw)
-            .unwrap_err()
-            .code,
+        resolve_target_mission_id(
+            &ctx,
+            char_id,
+            3_200_001,
+            Some(eve_db::MissionState::Offered),
+            &[],
+            &kw
+        )
+        .unwrap_err()
+        .code,
         "MissionNotActive"
     );
 
@@ -537,7 +544,7 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
             &ctx,
             char_id,
             3_200_001,
-            Some("Offered"),
+            Some(eve_db::MissionState::Offered),
             &[PyRep::Integer(19)],
             &kw
         )
@@ -549,7 +556,7 @@ async fn resolve_target_mission_id_and_decline_cooldown_vs_rnd_standing_rules() 
             &ctx,
             char_id,
             3_200_001,
-            Some("Offered"),
+            Some(eve_db::MissionState::Offered),
             &[PyRep::Integer(302)],
             &kw
         )
@@ -1035,7 +1042,15 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
     // Fallback to state match on different agent only when unbound (agent_id <= 0);
     // bound agent_id > 0 must NOT leak another agent's mission (#791, #979).
     assert_eq!(
-        resolve_target_mission_id(&ctx, char_id, 0, Some("Accepted"), &[], &kw).unwrap(),
+        resolve_target_mission_id(
+            &ctx,
+            char_id,
+            0,
+            Some(eve_db::MissionState::Accepted),
+            &[],
+            &kw
+        )
+        .unwrap(),
         701
     );
     assert_eq!(
@@ -1044,9 +1059,17 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
             .code,
         "MissionNotActive"
     );
-    // Fallback to agent match with different state (702 Completed on 4_200_001 when querying "Offered")
+    // Fallback to agent match with different state (702 Completed on 4_200_001 when querying Offered)
     assert_eq!(
-        resolve_target_mission_id(&ctx, char_id, 4_200_001, Some("Offered"), &[], &kw).unwrap(),
+        resolve_target_mission_id(
+            &ctx,
+            char_id,
+            4_200_001,
+            Some(eve_db::MissionState::Offered),
+            &[],
+            &kw
+        )
+        .unwrap(),
         702
     );
 }

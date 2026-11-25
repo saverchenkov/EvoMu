@@ -3,11 +3,16 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use super::agents_standings_arcs::{load_mission_meta, save_mission_meta};
-use eve_db::StandingTransactionRecord;
+use eve_db::{MissionState, StandingTransactionRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ClientError, PyRep};
 use std::collections::HashMap;
+
+/// Maps an internal [`eve_db::MissionInstanceStore`] invariant error into a typed [`BridgeRpcError`].
+pub fn mission_store_rpc_err(err: impl std::fmt::Display) -> BridgeRpcError {
+    let msg = err.to_string();
+    BridgeRpcError::with_client_error("MissionStoreError", msg.clone(), ClientError::CustomInfo(msg))
+}
 
 pub fn parse_mission_id(args: &[PyRep]) -> Result<u32, BridgeRpcError> {
     let raw = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
@@ -784,7 +789,9 @@ pub fn resolve_mission_reward_definition(
     let tmpl = ctx.sde.missions.get(&mission_id);
     let agent_info = ctx.sde.agents.get(&agent_id);
     let offered_lvl = ctx.db.with_snapshot(|snap| {
-        load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level)
+        snap.missions
+            .get_by_character_template(char_id, mission_id)
+            .and_then(|m| m.offered_level)
     });
     let dungeon = tmpl
         .and_then(|t| t.dungeon_id)
@@ -1038,7 +1045,7 @@ pub fn resolve_target_mission_id(
     ctx: &ServerContext,
     char_id: i64,
     agent_id: i64,
-    expected_state: Option<&str>,
+    expected_state: Option<MissionState>,
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Result<u32, BridgeRpcError> {
@@ -1047,7 +1054,7 @@ pub fn resolve_target_mission_id(
             if ctx.sde.missions.contains_key(&mid)
                 || ctx
                     .db
-                    .with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
+                    .with_snapshot(|snap| snap.missions.contains_character_template(char_id, mid))
             {
                 return Ok(mid);
             }
@@ -1057,9 +1064,9 @@ pub fn resolve_target_mission_id(
         if first_arg > 19 {
             if let Ok(mid) = u32::try_from(first_arg) {
                 if ctx.sde.missions.contains_key(&mid)
-                    || ctx
-                        .db
-                        .with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
+                    || ctx.db.with_snapshot(|snap| {
+                        snap.missions.contains_character_template(char_id, mid)
+                    })
                 {
                     return Ok(mid);
                 }
@@ -1067,39 +1074,30 @@ pub fn resolve_target_mission_id(
         }
     }
     let found = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .values()
+        snap.missions
+            .iter_by_character(char_id)
             .filter(|m| {
-                m.character_id == char_id
-                    && (agent_id <= 0 || m.agent_id == agent_id)
-                    && expected_state
-                        .map_or(matches!(m.state.as_str(), "Offered" | "Accepted"), |st| {
-                            m.state == st
-                        })
+                (agent_id <= 0 || m.agent_id == agent_id)
+                    && expected_state.map_or(m.state.is_active(), |st| m.state == st)
             })
-            .map(|m| m.mission_id)
+            .map(|m| m.template_id)
             .min()
             .or_else(|| {
                 (agent_id <= 0)
                     .then(|| {
-                        snap.active_missions
-                            .values()
-                            .filter(|m| {
-                                m.character_id == char_id
-                                    && expected_state.is_none_or(|st| m.state == st)
-                            })
-                            .map(|m| m.mission_id)
+                        snap.missions
+                            .iter_by_character(char_id)
+                            .filter(|m| expected_state.is_none_or(|st| m.state == st))
+                            .map(|m| m.template_id)
                             .min()
                     })
                     .flatten()
             })
             .or_else(|| {
-                snap.active_missions
-                    .values()
-                    .filter(|m| {
-                        m.character_id == char_id && (agent_id <= 0 || m.agent_id == agent_id)
-                    })
-                    .map(|m| m.mission_id)
+                snap.missions
+                    .iter_by_character(char_id)
+                    .filter(|m| agent_id <= 0 || m.agent_id == agent_id)
+                    .map(|m| m.template_id)
                     .min()
             })
     });
@@ -1117,12 +1115,15 @@ pub fn reclaim_courier_cargo(
     char_id: i64,
     mission_id: u32,
 ) {
-    if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
+    let courier_grant = snap
+        .missions
+        .get_by_character_template(char_id, mission_id)
+        .and_then(|m| m.courier().map(|c| (c.granted_item_id, c.granted_qty)));
+    if let Some((cid, granted_qty)) = courier_grant {
         // Only run reclaim for courier missions that were actually accepted (R-MSN-RECLAIM-01, R-MSN-MINT-03)
-        if meta.granted_courier_item_id.is_some() || meta.granted_courier_qty > 0 {
-            let cid = meta.granted_courier_item_id.take();
+        if cid.is_some() || granted_qty > 0 {
             let tag = format!("courier_cargo:{char_id}:{mission_id}");
-            let mut remaining_to_reclaim = meta.granted_courier_qty.max(1);
+            let mut remaining_to_reclaim = granted_qty.max(1);
             let tagged_items: Vec<(i64, i32)> = snap
                 .items
                 .iter()
@@ -1149,9 +1150,13 @@ pub fn reclaim_courier_cargo(
                     remaining_to_reclaim = 0;
                 }
             }
-            meta.granted_courier_item_id = None;
-            meta.granted_courier_qty = 0;
-            save_mission_meta(snap, char_id, &meta);
+            let _ = snap.missions
+                .update_by_character_template(char_id, mission_id, |m| {
+                    if let Some(c) = m.courier_mut() {
+                        c.granted_item_id = None;
+                        c.granted_qty = 0;
+                    }
+                });
         }
     }
 }
@@ -1164,45 +1169,46 @@ pub async fn abandon_or_decline_mission(
 ) -> Result<(String, bool, bool), BridgeRpcError> {
     let (m_sys_id, ball_ids, new_state, penalty_applied, was_accepted) =
         ctx.db.try_with_mut_snapshot(|snap| {
-            let was_accepted;
-            let m_sys_id;
-            let m_agent_id;
-            let m_bmid;
-            let ball_ids;
-            let new_state: String;
-            {
-                let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
-                    return Err(BridgeRpcError {
-                        code: "MissionNotActive".into(),
-                        message: format!(
-                            "Mission {mission_id} is not active or offered for character {char_id}"
-                        ),
-                        client_error: None,
-                    });
-                };
-                if !matches!(m.state.as_str(), "Offered" | "Accepted") {
-                    return Err(BridgeRpcError {
-                        code: "MissionNotActive".into(),
-                        message: format!(
-                            "Mission {mission_id} is in terminal state '{}' and cannot be abandoned",
-                            m.state
-                        ),
-                        client_error: None,
-                    });
-                }
-                was_accepted = m.state == "Accepted";
-                m_sys_id = m.solar_system_id;
-                m_agent_id = m.agent_id;
-                m_bmid = m.bookmark_id;
-                new_state = if was_accepted {
-                    "Quit".into()
-                } else {
-                    "Declined".into()
-                };
-                m.state = new_state.clone();
-                m.npcs_remaining = 0;
-                ball_ids = std::mem::take(&mut m.spawned_npc_ball_ids);
+            let Some(existing) = snap.missions.get_by_character_template(char_id, mission_id)
+            else {
+                return Err(BridgeRpcError {
+                    code: "MissionNotActive".into(),
+                    message: format!(
+                        "Mission {mission_id} is not active or offered for character {char_id}"
+                    ),
+                    client_error: None,
+                });
+            };
+            if !existing.state.is_active() {
+                return Err(BridgeRpcError {
+                    code: "MissionNotActive".into(),
+                    message: format!(
+                        "Mission {mission_id} is in terminal state '{}' and cannot be abandoned",
+                        existing.state.as_str()
+                    ),
+                    client_error: None,
+                });
             }
+            let was_accepted = existing.state == MissionState::Accepted;
+            let m_sys_id = existing.solar_system_id;
+            let m_agent_id = existing.agent_id;
+            let m_bmid = existing.bookmark_id;
+            let next_state = if was_accepted {
+                MissionState::Quit
+            } else {
+                MissionState::Declined
+            };
+            let new_state = next_state.as_str().to_string();
+            let mut ball_ids = Vec::new();
+            snap.missions
+                .update_by_character_template(char_id, mission_id, |m| {
+                    m.state = next_state;
+                    if let Some(enc) = m.encounter_mut() {
+                        enc.npcs_remaining = 0;
+                        ball_ids = std::mem::take(&mut enc.spawned_npc_ball_ids);
+                    }
+                })
+                .map_err(mission_store_rpc_err)?;
             let now = ctx.now_unix();
             let mut standing_penalty_applied = false;
 
@@ -1860,20 +1866,18 @@ pub fn on_mission_npc_destroyed_core(
     db: &eve_db::WorldRepository,
     sys_id: u32,
     npc_id: i64,
-    killer_char_id: Option<i64>,
+    _killer_char_id: Option<i64>,
 ) {
+    let should_update = db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_npc_ball(npc_id)
+            .is_some_and(|m| m.state == MissionState::Accepted && m.solar_system_id == sys_id)
+    });
+    if !should_update {
+        return;
+    }
     db.with_mut_snapshot(|snap| {
-        for ((m_char_id, _), m) in snap.active_missions.iter_mut() {
-            if (killer_char_id.is_none_or(|cid| *m_char_id == cid) || m.spawned_npc_ball_ids.contains(&npc_id))
-                && m.state == "Accepted"
-                && m.solar_system_id == sys_id
-            {
-                if let Some(pos) = m.spawned_npc_ball_ids.iter().position(|&bid| bid == npc_id) {
-                    m.spawned_npc_ball_ids.remove(pos);
-                    m.npcs_remaining = m.npcs_remaining.saturating_sub(1);
-                }
-            }
-        }
+        snap.missions.on_npc_destroyed(sys_id, npc_id);
     });
 }
 

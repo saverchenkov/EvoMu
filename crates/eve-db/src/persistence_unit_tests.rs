@@ -1359,20 +1359,35 @@ fn issue_1181_is_entity_id_referenced_exact_lookup_and_collision_skip() {
                 timestamp_unix: 1_700_000_000,
             }],
         );
-        wtx.snap.active_missions.insert(
-            (cid, 1),
-            ActiveMissionRecord {
-                mission_id: 10,
+        wtx.snap
+            .missions
+            .try_insert(crate::MissionInstance {
+                instance_id: 100,
                 character_id: cid,
                 agent_id: 1,
+                template_id: 10,
+                state: crate::MissionState::Accepted,
+                kind: crate::MissionKind::Encounter,
                 solar_system_id: 30_000_142,
-                state: "Accepted".into(),
                 current_room_id: 1,
-                npcs_remaining: 1,
-                spawned_npc_ball_ids: vec![npc_id_old],
                 bookmark_id: None,
-            },
-        );
+                origin_station_id: None,
+                offered_level: None,
+                is_anomic_burner: false,
+                offered_at_unix: 0,
+                offer_expiry_unix: 0,
+                accepted_at_unix: None,
+                accept_expiry_unix: None,
+                bonus_expiry_unix: None,
+                objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
+                    npcs_remaining: 1,
+                    spawned_npc_ball_ids: vec![npc_id_old],
+                    initial_wave_count: None,
+                    initial_wave_types: Vec::new(),
+                    awaiting_downtime_respawn: false,
+                }),
+            })
+            .expect("insert mission");
         wtx.snap.entity_kv.insert(
             crate::service_domains::entity_kv::EntityKvKey {
                 ns: crate::service_domains::entity_kv::Ns::ContractDeposit,
@@ -1407,7 +1422,14 @@ fn issue_1181_is_entity_id_referenced_exact_lookup_and_collision_skip() {
         wtx.snap.mails[0].message_id = mail_id_new;
         wtx.snap.wallet_journal[0].entry_id = wj_id_new;
         wtx.snap.char_lp_logs.get_mut(&cid).unwrap()[0].log_id = lp_id_new;
-        wtx.snap.active_missions.get_mut(&(cid, 1)).unwrap().spawned_npc_ball_ids = vec![npc_id_new];
+        wtx.snap
+            .missions
+            .update(100, |m| {
+                if let Some(enc) = m.encounter_mut() {
+                    enc.spawned_npc_ball_ids = vec![npc_id_new];
+                }
+            })
+            .expect("update mission npc ids");
         wtx.snap.entity_kv.remove(&crate::service_domains::entity_kv::EntityKvKey {
             ns: crate::service_domains::entity_kv::Ns::ContractDeposit,
             entity_id: ekv_id,
@@ -1623,7 +1645,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         })
         .collect();
 
-    // Also populate CowMap, CowCell, CowLpLogs, CowActiveMissions, and cold stores.
+    // Also populate CowMap, CowCell, CowLpLogs, MissionInstanceStore, and cold stores.
     let item_id = 200_900_001_i64;
     snap.items.insert(
         item_id,
@@ -1647,20 +1669,34 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
             timestamp_unix: 1_700_000_000,
         }],
     );
-    snap.active_missions.insert(
-        (cid, 1),
-        ActiveMissionRecord {
-            mission_id: 1,
+    snap.missions
+        .try_insert(crate::MissionInstance {
+            instance_id: 1,
             character_id: cid,
             agent_id: 1,
+            template_id: 1,
+            state: crate::MissionState::Accepted,
+            kind: crate::MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Accepted".into(),
             current_room_id: 1,
-            npcs_remaining: 1,
-            spawned_npc_ball_ids: vec![800_000_001],
             bookmark_id: None,
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![800_000_001],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
     snap.entity_kv.insert(
         crate::service_domains::entity_kv::EntityKvKey {
             ns: crate::service_domains::entity_kv::Ns::ContractDeposit,
@@ -1753,7 +1789,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         .ptr_eq(&cloned_snap.wallet_journal_meta));
     assert!(before_snap.mails.ptr_eq(&cloned_snap.mails));
     assert!(before_snap.char_lp_logs.ptr_eq(&cloned_snap.char_lp_logs));
-    assert!(before_snap.active_missions.ptr_eq(&cloned_snap.active_missions));
+    assert!(before_snap.missions.ptr_eq(&cloned_snap.missions));
     assert!(before_snap.structures.ptr_eq(&cloned_snap.structures));
     assert!(before_snap.contracts.ptr_eq(&cloned_snap.contracts));
     assert!(before_snap.system_states.ptr_eq(&cloned_snap.system_states));
@@ -1816,7 +1852,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         .ptr_eq(&after_hot_snap.wallet_journal_meta));
     assert!(before_snap.mails.ptr_eq(&after_hot_snap.mails));
     assert!(before_snap.char_lp_logs.ptr_eq(&after_hot_snap.char_lp_logs));
-    assert!(before_snap.active_missions.ptr_eq(&after_hot_snap.active_missions));
+    assert!(before_snap.missions.ptr_eq(&after_hot_snap.missions));
     assert!(before_snap.contracts.ptr_eq(&after_hot_snap.contracts));
     assert!(before_snap.corp_governance.ptr_eq(&after_hot_snap.corp_governance));
     assert!(before_snap.fleet_and_social_ops.ptr_eq(&after_hot_snap.fleet_and_social_ops));
@@ -2117,22 +2153,36 @@ fn issue_1181_snapshot_alloc_entity_id_reconciles_dirty_lp_logs_and_active_missi
             timestamp_unix: 1_700_000_000,
         }],
     );
-    snap.active_missions.insert(
-        (cid, 1),
-        ActiveMissionRecord {
-            mission_id: 1,
+    snap.missions
+        .try_insert(crate::MissionInstance {
+            instance_id: 1,
             character_id: cid,
             agent_id: 1,
+            template_id: 1,
+            state: crate::MissionState::Accepted,
+            kind: crate::MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Accepted".into(),
             current_room_id: 1,
-            npcs_remaining: 1,
-            spawned_npc_ball_ids: vec![],
             bookmark_id: None,
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
 
-    // Dirty both indexes without explicit reconciliation.
+    // Dirty LP index without explicit reconciliation and update mission NPC list via checked mutator.
     for (_k, vec) in snap.char_lp_logs.iter_mut() {
         vec.push(crate::snapshot_ext::LpRewardLogEntry {
             log_id: 200_000_001,
@@ -2142,9 +2192,13 @@ fn issue_1181_snapshot_alloc_entity_id_reconciles_dirty_lp_logs_and_active_missi
             timestamp_unix: 1_700_000_001,
         });
     }
-    for m in snap.active_missions.values_mut() {
-        m.spawned_npc_ball_ids.push(200_000_002);
-    }
+    snap.missions
+        .update(1, |m| {
+            if let Some(enc) = m.encounter_mut() {
+                enc.spawned_npc_ball_ids.push(200_000_002);
+            }
+        })
+        .expect("update mission npc id");
 
     let id = snap.alloc_entity_id();
     assert_eq!(id, 200_000_003);

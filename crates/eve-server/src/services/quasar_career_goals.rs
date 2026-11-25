@@ -2198,12 +2198,11 @@ pub(crate) fn record_mission_completion_career_goals(
                     }
                 } else {
                     let done = ctx.db.with_snapshot(|snap| {
-                        snap.active_missions
-                            .values()
+                        snap.missions
+                            .iter_by_character(char_id)
                             .filter(|m| {
-                                m.character_id == char_id
-                                    && m.agent_id == agent_id
-                                    && m.state == "Completed"
+                                m.agent_id == agent_id
+                                    && m.state == eve_db::MissionState::Completed
                             })
                             .count() as u32
                     });

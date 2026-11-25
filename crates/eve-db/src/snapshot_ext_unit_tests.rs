@@ -958,20 +958,34 @@ fn id_allocation_and_reconciliation_across_all_tables_and_leap_dates() {
     assert_eq!(snap.allocate_report_id(), 800_001);
 
     // Reconcile from spawned_npc_ball_ids while ignoring >= 900_000_000 and <= 0
-    snap.active_missions.insert(
-        (90_001, 1),
-        ActiveMissionRecord {
-            mission_id: 1,
+    snap.missions
+        .try_insert(crate::MissionInstance {
+            instance_id: 1,
             character_id: 90_001,
             agent_id: 3_000_001,
+            template_id: 1,
+            state: crate::MissionState::Accepted,
+            kind: crate::MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Accepted".into(),
             current_room_id: 1,
-            npcs_remaining: 1,
-            spawned_npc_ball_ids: vec![-5, 250_000_123, 950_000_000],
             bookmark_id: None,
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![-5, 250_000_123, 950_000_000],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
     snap.next_entity_id = 0;
     snap.next_alliance_id = 0;
     snap.next_corporation_id = 0;

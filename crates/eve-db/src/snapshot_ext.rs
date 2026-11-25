@@ -655,8 +655,8 @@ pub struct WorldStateSnapshot {
     pub industry_jobs: CowCell<HashMap<i64, IndustryJobRecord>>,
     #[serde(with = "cow_cell_tuple_map_serde")]
     pub planetary_colonies: CowCell<HashMap<(i64, i64), PlanetaryColonyRecord>>,
-    #[serde(with = "crate::cow_collections::cow_active_missions_tuple_serde")]
-    pub active_missions: CowActiveMissions,
+    #[serde(default)]
+    pub missions: crate::missions::MissionInstanceStore,
     pub mission_tally: CowCell<HashMap<i64, u32>>,
     #[serde(default)]
     pub standing_transactions: CowCell<HashMap<i64, Vec<StandingTransactionRecord>>>,
@@ -1874,7 +1874,8 @@ impl WorldStateSnapshot {
         self.mails.contains_id(candidate)
             || self.wallet_journal.contains_id(candidate)
             || self.char_lp_logs.contains_log_id(candidate)
-            || self.active_missions.contains_spawned_npc_id(candidate)
+            || self.missions.contains_instance_id(candidate)
+            || self.missions.contains_spawned_npc_id(candidate)
             || crate::service_domains::entity_kv::Ns::ALL.iter().any(|&ns| {
                 self.entity_kv
                     .range(crate::service_domains::entity_kv::EntityKvKey {
@@ -1924,11 +1925,8 @@ impl WorldStateSnapshot {
             .chain(self.applied_ship_skins.keys().copied())
             .chain(self.entity_kv.keys().map(|k| k.entity_id))
             .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
-            .chain(
-                self.active_missions
-                    .values()
-                    .flat_map(|m| m.spawned_npc_ball_ids.iter().copied()),
-            )
+            .chain(self.missions.keys())
+            .chain(self.missions.spawned_npc_ball_ids())
             .chain(self.owner_notes.values().filter_map(decode_owner_note_entity_id))
     }
 
@@ -1948,9 +1946,6 @@ impl WorldStateSnapshot {
     /// persisted in `world_meta`, skipping any candidate still referenced in any ID-bearing table
     /// (`feat:invariant.ids-monotonic-across-restart`, `#1087`).
     pub fn alloc_entity_id(&mut self) -> i64 {
-        if self.active_missions.is_dirty_ids() {
-            self.active_missions.reconcile_id_index();
-        }
         if self.char_lp_logs.is_dirty_ids() {
             self.char_lp_logs.reconcile_id_index();
         }

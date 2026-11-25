@@ -4208,7 +4208,7 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         contracts: _,
         industry_jobs: _,
         planetary_colonies: _,
-        active_missions: ref sb_active_missions,
+        missions: ref sb_missions,
         mission_tally: ref sb_mission_tally,
         standing_transactions: _,
         npe_progress: _,
@@ -4381,7 +4381,7 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         contracts: _,
         industry_jobs: _,
         planetary_colonies: _,
-        active_missions: ref sc_active_missions,
+        missions: ref sc_missions,
         mission_tally: ref sc_mission_tally,
         standing_transactions: _,
         npe_progress: _,
@@ -5084,9 +5084,9 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
     if filtered_entries_changed(sb_sessions.iter(), sc_sessions.iter(), |_, s| {
         s.user_id == USER_B_ID || s.character_id == Some(CHAR_B_ID)
     }) || filtered_entries_changed(
-        sb_active_missions.iter(),
-        sc_active_missions.iter(),
-        |(cid, _), rec| *cid == CHAR_B_ID || rec.character_id == CHAR_B_ID,
+        sb_missions.iter().map(|m| (&m.instance_id, m)),
+        sc_missions.iter().map(|m| (&m.instance_id, m)),
+        |_, rec| rec.character_id == CHAR_B_ID,
     ) || sb_mission_tally.get(&CHAR_B_ID) != sc_mission_tally.get(&CHAR_B_ID)
         || sb_last_mission_decline_times.get(&CHAR_B_ID)
             != sc_last_mission_decline_times.get(&CHAR_B_ID)

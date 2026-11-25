@@ -28,15 +28,12 @@ macro_rules! for_each_lifecycle_field {
                 criminal_timers_until,
                 ship_combat_hp,
                 space_object_meta,
-                mission_initial_npc_counts,
-                mission_initial_npc_types,
                 active_scanner_probes,
                 item_velocities,
                 session_change_timers,
             ],
             scalars: [
                 last_downtime_day_idx,
-                missions_awaiting_downtime_respawn,
                 server_runtime_json,
             ]
         );
@@ -118,6 +115,11 @@ macro_rules! impl_lifecycle_persist {
                                 })
                             }
                         )*
+                        // Retired Track 3 (#1496) sp6_lifecycle mission keys: consumed during
+                        // mission_instances migration in `load.rs` and ignored here.
+                        ("missions_awaiting_downtime_respawn", None)
+                        | ("mission_initial_npc_counts", Some(_))
+                        | ("mission_initial_npc_types", Some(_)) => Ok(()),
                         _ => Err(format!("unknown domain_rows key '{raw_key}' for {domain}")),
                     };
                     if let Err(err) = res {
@@ -378,13 +380,6 @@ mod tests {
                 planet_id: Some(40_009_082),
             },
         );
-        legacy.missions_awaiting_downtime_respawn = vec![(90_000_001, 42)];
-        legacy
-            .mission_initial_npc_counts
-            .insert("30000142|7/extra".to_string(), 9);
-        legacy
-            .mission_initial_npc_types
-            .insert("30000142:8".to_string(), vec![587, 588]);
         legacy.active_scanner_probes.insert(
             900_000_001,
             crate::PersistedScannerProbe {
@@ -449,7 +444,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .expect("count lifecycle domain_rows");
-            assert_eq!(row_count, 17);
+            assert_eq!(row_count, 14);
         });
         drop(repo);
 
@@ -713,13 +708,6 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            missions_awaiting_downtime_respawn: vec![(90_000_011, 77)],
-            mission_initial_npc_counts: [("30000142|11".to_string(), 14)]
-                .into_iter()
-                .collect(),
-            mission_initial_npc_types: [("30000142|11".to_string(), vec![587, 588, 589])]
-                .into_iter()
-                .collect(),
             active_scanner_probes: [(
                 900_000_011,
                 crate::PersistedScannerProbe {

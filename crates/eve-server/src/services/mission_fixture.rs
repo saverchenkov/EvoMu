@@ -1,16 +1,16 @@
-//! Test-only façade over mission persistence (`#1496` Track 1).
+//! Test-only façade over mission persistence (`#1496` Track 1 / Track 3).
 //!
 //! Compiled under `#[cfg(any(test, feature = "testkit"))]` so both unit tests (`--lib`) and
 //! integration tests (`--test it`) read, seed, mutate, and clear mission state without touching
-//! `snap.active_missions`, `MissionTimingAndCargoMeta` owner notes, or `sp6_lifecycle` mission
-//! wave maps directly.
+//! `MissionInstanceStore` directly.
 
 #![forbid(unsafe_code)]
 
-use crate::services::agents_missions::{
-    load_mission_meta, save_mission_meta, MissionTimingAndCargoMeta,
+use eve_db::{
+    decide_mission_kind, lookup_sde_mission_and_agent, open_sde_sqlite_ro, CourierObjective,
+    DeliveryObjective, EncounterObjective, MissionInstance, MissionKind, MissionObjective,
+    MissionState, WorldRepository, WorldStateSnapshot,
 };
-use eve_db::{ActiveMissionRecord, WorldRepository, WorldStateSnapshot};
 
 /// Plain test value representing one `(character_id, mission_id)` mission entry across the
 /// active mission table, optional timing/cargo metadata note, and `sp6_lifecycle` wave state.
@@ -69,24 +69,36 @@ impl MissionFixture {
         }
     }
 
-    /// Constructs a record-only mission fixture in the `"Offered"` state.
+    /// Constructs a record-only mission fixture in the `Offered` state.
     pub fn offered(
         character_id: i64,
         mission_id: u32,
         agent_id: i64,
         solar_system_id: u32,
     ) -> Self {
-        Self::new(character_id, mission_id, agent_id, solar_system_id, "Offered")
+        Self::new(
+            character_id,
+            mission_id,
+            agent_id,
+            solar_system_id,
+            MissionState::Offered.as_str(),
+        )
     }
 
-    /// Constructs a record-only mission fixture in the `"Accepted"` state.
+    /// Constructs a record-only mission fixture in the `Accepted` state.
     pub fn accepted(
         character_id: i64,
         mission_id: u32,
         agent_id: i64,
         solar_system_id: u32,
     ) -> Self {
-        Self::new(character_id, mission_id, agent_id, solar_system_id, "Accepted")
+        Self::new(
+            character_id,
+            mission_id,
+            agent_id,
+            solar_system_id,
+            MissionState::Accepted.as_str(),
+        )
     }
 
     /// Sets the mission state string (e.g. `"Offered"`, `"Accepted"`, `"Completed"`, `"Expired"`, `"Failed"`).
@@ -278,131 +290,206 @@ impl MissionFixture {
     }
 }
 
-fn mission_wave_key(character_id: i64, mission_id: u32) -> String {
-    format!("{character_id}:{mission_id}")
+fn has_cargo_or_courier_fields(mission: &MissionFixture) -> bool {
+    mission.required_delivery_type_id.is_some()
+        || mission.required_delivery_qty != 0
+        || mission.destination_station_id.is_some()
+        || mission.granted_courier_item_id.is_some()
+        || mission.granted_courier_qty != 0
 }
 
-fn remove_mission_note(snap: &mut WorldStateSnapshot, character_id: i64, mission_id: u32) {
-    let label = format!("mission_meta:{character_id}:{mission_id}");
-    snap.owner_notes
-        .retain(|_, note| !(note.character_id == -5 && note.label == label));
+fn infer_kind_with_sde(
+    mission: &MissionFixture,
+    sde: Option<&eve_sde::SdeRegistry>,
+) -> MissionKind {
+    let (tmpl, agent) = if let Some(sde) = sde {
+        (
+            sde.missions.get(&mission.mission_id).cloned(),
+            sde.agents.get(&mission.agent_id).cloned(),
+        )
+    } else {
+        open_sde_sqlite_ro()
+            .map(|conn| lookup_sde_mission_and_agent(&conn, mission.mission_id, mission.agent_id))
+            .unwrap_or((None, None))
+    };
+    let base_kind = decide_mission_kind(tmpl.as_ref(), agent.as_ref());
+    let has_courier_fields = mission.granted_courier_item_id.is_some()
+        || mission.granted_courier_qty != 0
+        || mission.destination_station_id.is_some();
+    let has_delivery_fields =
+        mission.required_delivery_type_id.is_some() || mission.required_delivery_qty != 0;
+    let has_encounter_fields = mission.npcs_remaining != 0
+        || !mission.spawned_npc_ball_ids.is_empty()
+        || mission.initial_wave_count.is_some()
+        || mission.initial_wave_types.is_some()
+        || mission.awaiting_downtime_respawn;
+
+    if has_courier_fields {
+        return MissionKind::Courier;
+    }
+    if has_encounter_fields && !has_delivery_fields {
+        return MissionKind::Encounter;
+    }
+    match base_kind {
+        MissionKind::ResearchTurnIn
+        | MissionKind::DataCenterTurnIn
+        | MissionKind::Mining
+        | MissionKind::Trade
+        | MissionKind::Courier => base_kind,
+        MissionKind::Heraldry => {
+            if has_delivery_fields {
+                MissionKind::Trade
+            } else {
+                MissionKind::Heraldry
+            }
+        }
+        MissionKind::Encounter => {
+            if has_delivery_fields {
+                MissionKind::Trade
+            } else {
+                MissionKind::Encounter
+            }
+        }
+    }
 }
 
-fn from_snapshot_parts(
-    snap: &WorldStateSnapshot,
-    key_mission_id: u32,
-    rec: &ActiveMissionRecord,
-) -> MissionFixture {
-    let mkey = mission_wave_key(rec.character_id, rec.mission_id);
-    let meta = load_mission_meta(snap, rec.character_id, rec.mission_id);
-    let st = &snap.sp6_lifecycle;
-    let awaiting_downtime_respawn = st
-        .missions_awaiting_downtime_respawn
-        .contains(&(rec.character_id, key_mission_id));
+fn infer_kind(mission: &MissionFixture) -> MissionKind {
+    infer_kind_with_sde(mission, None)
+}
+
+fn from_instance(inst: &MissionInstance) -> MissionFixture {
     let mut out = MissionFixture {
-        character_id: rec.character_id,
-        mission_id: rec.mission_id,
-        agent_id: rec.agent_id,
-        solar_system_id: rec.solar_system_id,
-        state: rec.state.clone(),
-        current_room_id: rec.current_room_id,
-        npcs_remaining: rec.npcs_remaining,
-        spawned_npc_ball_ids: rec.spawned_npc_ball_ids.clone(),
-        bookmark_id: rec.bookmark_id,
-        has_metadata: meta.is_some(),
-        initial_wave_count: st.mission_initial_npc_counts.get(&mkey).copied(),
-        initial_wave_types: st.mission_initial_npc_types.get(&mkey).cloned(),
-        awaiting_downtime_respawn,
+        character_id: inst.character_id,
+        mission_id: inst.template_id,
+        agent_id: inst.agent_id,
+        solar_system_id: inst.solar_system_id,
+        state: inst.state.as_str().to_string(),
+        current_room_id: inst.current_room_id,
+        bookmark_id: inst.bookmark_id,
+        offered_at_unix: inst.offered_at_unix,
+        offer_expiry_unix: inst.offer_expiry_unix,
+        accepted_at_unix: inst.accepted_at_unix,
+        accept_expiry_unix: inst.accept_expiry_unix,
+        bonus_expiry_unix: inst.bonus_expiry_unix,
+        completed_at_unix: None,
+        is_anomic_burner: inst.is_anomic_burner,
+        chosen_branch: None,
+        origin_station_id: inst.origin_station_id,
+        offered_level: inst.offered_level,
         ..Default::default()
     };
-    if let Some(m) = meta {
-        out.offered_at_unix = m.offered_at_unix;
-        out.offer_expiry_unix = m.offer_expiry_unix;
-        out.accepted_at_unix = m.accepted_at_unix;
-        out.accept_expiry_unix = m.accept_expiry_unix;
-        out.bonus_expiry_unix = m.bonus_expiry_unix;
-        out.completed_at_unix = m.completed_at_unix;
-        out.required_delivery_type_id = m.required_delivery_type_id;
-        out.required_delivery_qty = m.required_delivery_qty;
-        out.granted_courier_item_id = m.granted_courier_item_id;
-        out.granted_courier_qty = m.granted_courier_qty;
-        out.is_anomic_burner = m.is_anomic_burner;
-        out.chosen_branch = m.chosen_branch;
-        out.destination_station_id = m.destination_station_id;
-        out.origin_station_id = m.origin_station_id;
-        out.offered_level = m.offered_level;
+    match &inst.objective {
+        MissionObjective::Encounter(enc) => {
+            out.npcs_remaining = enc.npcs_remaining;
+            out.spawned_npc_ball_ids = enc.spawned_npc_ball_ids.clone();
+            out.initial_wave_count = enc.initial_wave_count;
+            out.initial_wave_types = if enc.initial_wave_types.is_empty() {
+                None
+            } else {
+                Some(enc.initial_wave_types.clone())
+            };
+            out.awaiting_downtime_respawn = enc.awaiting_downtime_respawn;
+        }
+        MissionObjective::Courier(c) => {
+            out.required_delivery_type_id = c.cargo_type_id;
+            out.required_delivery_qty = c.quantity.max(0);
+            out.destination_station_id = c.destination_station_id;
+            out.granted_courier_item_id = c.granted_item_id;
+            out.granted_courier_qty = c.granted_qty.max(0);
+        }
+        MissionObjective::Delivery(d) => {
+            out.required_delivery_type_id = d.item_type_id;
+            out.required_delivery_qty = d.quantity.max(0);
+        }
+        MissionObjective::None => {}
     }
+    out.has_metadata = out.has_any_non_default_metadata();
     out
 }
 
-/// Inserts or replaces a mission in `snap`, writing only the storage layers configured on `mission`.
-pub fn insert(snap: &mut WorldStateSnapshot, mission: MissionFixture) {
-    let key = (mission.character_id, mission.mission_id);
-    snap.active_missions.insert(
-        key,
-        ActiveMissionRecord {
-            mission_id: mission.mission_id,
+fn insert_with_kind(
+    snap: &mut WorldStateSnapshot,
+    mission: MissionFixture,
+    kind: MissionKind,
+    existing_instance_id: Option<i64>,
+) {
+    let instance_id = existing_instance_id.unwrap_or_else(|| snap.alloc_entity_id());
+    let state = MissionState::parse(&mission.state).unwrap_or_else(|| {
+        panic!(
+            "invalid MissionFixture state {:?} for ({}, {})",
+            mission.state, mission.character_id, mission.mission_id
+        )
+    });
+    let objective = match kind {
+        MissionKind::Encounter => MissionObjective::Encounter(EncounterObjective {
+            npcs_remaining: mission.npcs_remaining,
+            spawned_npc_ball_ids: mission.spawned_npc_ball_ids,
+            initial_wave_count: mission.initial_wave_count,
+            initial_wave_types: mission.initial_wave_types.unwrap_or_default(),
+            awaiting_downtime_respawn: mission.awaiting_downtime_respawn,
+        }),
+        MissionKind::Courier => MissionObjective::Courier(CourierObjective {
+            cargo_type_id: mission.required_delivery_type_id,
+            quantity: i32::try_from(mission.required_delivery_qty).unwrap_or(i32::MAX),
+            destination_station_id: mission.destination_station_id,
+            granted_item_id: mission.granted_courier_item_id,
+            granted_qty: i32::try_from(mission.granted_courier_qty).unwrap_or(i32::MAX),
+        }),
+        MissionKind::Trade
+        | MissionKind::Mining
+        | MissionKind::DataCenterTurnIn
+        | MissionKind::ResearchTurnIn => MissionObjective::Delivery(DeliveryObjective {
+            item_type_id: mission.required_delivery_type_id,
+            quantity: i32::try_from(mission.required_delivery_qty).unwrap_or(i32::MAX),
+        }),
+        MissionKind::Heraldry => MissionObjective::None,
+    };
+    snap.missions
+        .upsert_by_character_template(MissionInstance {
+            instance_id,
             character_id: mission.character_id,
             agent_id: mission.agent_id,
+            template_id: mission.mission_id,
+            state,
+            kind,
             solar_system_id: mission.solar_system_id,
-            state: mission.state.clone(),
             current_room_id: mission.current_room_id,
-            npcs_remaining: mission.npcs_remaining,
-            spawned_npc_ball_ids: mission.spawned_npc_ball_ids.clone(),
             bookmark_id: mission.bookmark_id,
-        },
-    );
-
-    if mission.has_metadata || mission.has_any_non_default_metadata() {
-        let meta = MissionTimingAndCargoMeta {
-            mission_id: mission.mission_id,
-            agent_id: mission.agent_id,
+            origin_station_id: mission.origin_station_id,
+            offered_level: mission.offered_level,
+            is_anomic_burner: mission.is_anomic_burner,
             offered_at_unix: mission.offered_at_unix,
             offer_expiry_unix: mission.offer_expiry_unix,
             accepted_at_unix: mission.accepted_at_unix,
             accept_expiry_unix: mission.accept_expiry_unix,
             bonus_expiry_unix: mission.bonus_expiry_unix,
-            completed_at_unix: mission.completed_at_unix,
-            required_delivery_type_id: mission.required_delivery_type_id,
-            required_delivery_qty: mission.required_delivery_qty,
-            granted_courier_item_id: mission.granted_courier_item_id,
-            granted_courier_qty: mission.granted_courier_qty,
-            is_anomic_burner: mission.is_anomic_burner,
-            chosen_branch: mission.chosen_branch,
-            destination_station_id: mission.destination_station_id,
-            origin_station_id: mission.origin_station_id,
-            offered_level: mission.offered_level,
-        };
-        save_mission_meta(snap, mission.character_id, &meta);
-    } else {
-        remove_mission_note(snap, mission.character_id, mission.mission_id);
-    }
+            objective,
+        })
+        .expect("upsert mission fixture");
+}
 
-    let mkey = mission_wave_key(mission.character_id, mission.mission_id);
-    let st = snap.sp6_lifecycle.as_inner_mut();
-    match mission.initial_wave_count {
-        Some(count) => {
-            st.mission_initial_npc_counts.insert(mkey.clone(), count);
-        }
-        None => {
-            st.mission_initial_npc_counts.remove(&mkey);
-        }
-    }
-    match mission.initial_wave_types {
-        Some(types) => {
-            st.mission_initial_npc_types.insert(mkey, types);
-        }
-        None => {
-            st.mission_initial_npc_types.remove(&mkey);
-        }
-    }
-    if mission.awaiting_downtime_respawn {
-        if !st.missions_awaiting_downtime_respawn.contains(&key) {
-            st.missions_awaiting_downtime_respawn.push(key);
-        }
-    } else {
-        st.missions_awaiting_downtime_respawn.retain(|&k| k != key);
-    }
+/// Inserts or replaces a mission in `snap`.
+pub fn insert(snap: &mut WorldStateSnapshot, mission: MissionFixture) {
+    let existing_id = snap
+        .missions
+        .get_by_character_template(mission.character_id, mission.mission_id)
+        .map(|m| m.instance_id);
+    let kind = infer_kind(&mission);
+    insert_with_kind(snap, mission, kind, existing_id);
+}
+
+/// Inserts or replaces a mission in `snap`, resolving template/agent classification from `sde`.
+pub fn insert_with_sde(
+    snap: &mut WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    mission: MissionFixture,
+) {
+    let existing_id = snap
+        .missions
+        .get_by_character_template(mission.character_id, mission.mission_id)
+        .map(|m| m.instance_id);
+    let kind = infer_kind_with_sde(&mission, Some(sde));
+    insert_with_kind(snap, mission, kind, existing_id);
 }
 
 /// Inserts or replaces a mission in `db` inside a snapshot write transaction.
@@ -416,9 +503,9 @@ pub fn get(
     character_id: i64,
     mission_id: u32,
 ) -> Option<MissionFixture> {
-    snap.active_missions
-        .get(&(character_id, mission_id))
-        .map(|rec| from_snapshot_parts(snap, mission_id, rec))
+    snap.missions
+        .get_by_character_template(character_id, mission_id)
+        .map(from_instance)
 }
 
 /// Reads the mission identified by `(character_id, mission_id)` from `db`.
@@ -433,12 +520,27 @@ pub fn edit<R>(
     mission_id: u32,
     f: impl FnOnce(&mut MissionFixture) -> R,
 ) -> Option<R> {
-    let mut fixture = get(snap, character_id, mission_id)?;
+    let existing = snap
+        .missions
+        .get_by_character_template(character_id, mission_id)?;
+    let existing_id = existing.instance_id;
+    let existing_kind = existing.kind;
+    let mut fixture = from_instance(existing);
+    let prev_had_cargo = has_cargo_or_courier_fields(&fixture);
     let out = f(&mut fixture);
+    let now_has_cargo = has_cargo_or_courier_fields(&fixture);
+    let next_kind = if prev_had_cargo && !now_has_cargo {
+        MissionKind::Encounter
+    } else if !prev_had_cargo && now_has_cargo {
+        infer_kind(&fixture)
+    } else {
+        existing_kind
+    };
     if fixture.character_id != character_id || fixture.mission_id != mission_id {
-        remove(snap, character_id, mission_id);
+        snap.missions
+            .remove_by_character_template(character_id, mission_id);
     }
-    insert(snap, fixture);
+    insert_with_kind(snap, fixture, next_kind, Some(existing_id));
     Some(out)
 }
 
@@ -452,69 +554,48 @@ pub fn edit_in<R>(
     db.with_mut_snapshot(|snap| edit(snap, character_id, mission_id, f))
 }
 
-/// Removes `(character_id, mission_id)` and all associated note/wave/respawn entries from `snap`.
+/// Removes `(character_id, mission_id)` from `snap`.
 pub fn remove(snap: &mut WorldStateSnapshot, character_id: i64, mission_id: u32) -> bool {
-    let key = (character_id, mission_id);
-    let existed = snap.active_missions.remove(&key).is_some();
-    remove_mission_note(snap, character_id, mission_id);
-    let mkey = mission_wave_key(character_id, mission_id);
-    let st = snap.sp6_lifecycle.as_inner_mut();
-    st.mission_initial_npc_counts.remove(&mkey);
-    st.mission_initial_npc_types.remove(&mkey);
-    st.missions_awaiting_downtime_respawn.retain(|&k| k != key);
-    existed
+    snap.missions
+        .remove_by_character_template(character_id, mission_id)
+        .is_some()
 }
 
-/// Removes `(character_id, mission_id)` and all associated entries from `db`.
+/// Removes `(character_id, mission_id)` from `db`.
 pub fn remove_in(db: &WorldRepository, character_id: i64, mission_id: u32) -> bool {
     db.with_mut_snapshot(|snap| remove(snap, character_id, mission_id))
 }
 
-/// Clears all missions and associated note/wave/respawn entries belonging to `character_id` from `snap`.
+/// Clears all missions belonging to `character_id` from `snap`.
 pub fn clear_character(snap: &mut WorldStateSnapshot, character_id: i64) {
-    snap.active_missions
-        .retain(|(cid, _), _| *cid != character_id);
-    let note_prefix = format!("mission_meta:{character_id}:");
-    snap.owner_notes
-        .retain(|_, note| !(note.character_id == -5 && note.label.starts_with(&note_prefix)));
-    let wave_prefix = format!("{character_id}:");
-    let st = snap.sp6_lifecycle.as_inner_mut();
-    st.mission_initial_npc_counts
-        .retain(|k, _| !k.starts_with(&wave_prefix));
-    st.mission_initial_npc_types
-        .retain(|k, _| !k.starts_with(&wave_prefix));
-    st.missions_awaiting_downtime_respawn
-        .retain(|&(cid, _)| cid != character_id);
+    let mids: Vec<u32> = snap
+        .missions
+        .iter_by_character(character_id)
+        .map(|m| m.template_id)
+        .collect();
+    for mid in mids {
+        snap.missions.remove_by_character_template(character_id, mid);
+    }
 }
 
-/// Clears all missions and associated entries belonging to `character_id` from `db`.
+/// Clears all missions belonging to `character_id` from `db`.
 pub fn clear_character_in(db: &WorldRepository, character_id: i64) {
     db.with_mut_snapshot(|snap| clear_character(snap, character_id));
 }
 
-/// Clears all missions and associated note/wave/respawn entries across all characters from `snap`.
+/// Clears all missions across all characters from `snap`.
 pub fn clear_all(snap: &mut WorldStateSnapshot) {
-    snap.active_missions.clear();
-    snap.owner_notes
-        .retain(|_, note| !(note.character_id == -5 && note.label.starts_with("mission_meta:")));
-    let st = snap.sp6_lifecycle.as_inner_mut();
-    st.mission_initial_npc_counts.clear();
-    st.mission_initial_npc_types.clear();
-    st.missions_awaiting_downtime_respawn.clear();
+    snap.missions.clear();
 }
 
-/// Clears all missions and associated entries across all characters from `db`.
+/// Clears all missions across all characters from `db`.
 pub fn clear_all_in(db: &WorldRepository) {
     db.with_mut_snapshot(clear_all);
 }
 
 /// Lists all missions in `snap`, sorted deterministically by `(character_id, mission_id)`.
 pub fn list(snap: &WorldStateSnapshot) -> Vec<MissionFixture> {
-    let mut out: Vec<MissionFixture> = snap
-        .active_missions
-        .iter()
-        .map(|(&(_, key_mid), rec)| from_snapshot_parts(snap, key_mid, rec))
-        .collect();
+    let mut out: Vec<MissionFixture> = snap.missions.iter().map(from_instance).collect();
     out.sort_by_key(|m| (m.character_id, m.mission_id));
     out
 }
@@ -527,10 +608,9 @@ pub fn list_in(db: &WorldRepository) -> Vec<MissionFixture> {
 /// Lists all missions for `character_id` in `snap`, sorted deterministically by `mission_id`.
 pub fn list_for_character(snap: &WorldStateSnapshot, character_id: i64) -> Vec<MissionFixture> {
     let mut out: Vec<MissionFixture> = snap
-        .active_missions
-        .iter()
-        .filter(|(_, rec)| rec.character_id == character_id)
-        .map(|(&(_, key_mid), rec)| from_snapshot_parts(snap, key_mid, rec))
+        .missions
+        .iter_by_character(character_id)
+        .map(from_instance)
         .collect();
     out.sort_by_key(|m| m.mission_id);
     out
@@ -541,7 +621,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_full_mission_fixture_preserves_every_field() {
+    fn roundtrip_full_encounter_mission_fixture_preserves_encounter_fields() {
         let mut snap = WorldStateSnapshot::default();
         let full = MissionFixture::accepted(90_000_001, 42_001, 3_018_418, 30_000_142)
             .current_room_id(2)
@@ -553,14 +633,7 @@ mod tests {
             .accepted_at_unix(Some(1_700_000_100))
             .accept_expiry_unix(Some(1_700_604_800))
             .bonus_expiry_unix(Some(1_700_003_700))
-            .completed_at_unix(Some(1_700_002_500))
-            .required_delivery_type_id(Some(34))
-            .required_delivery_qty(150)
-            .granted_courier_item_id(Some(88_001))
-            .granted_courier_qty(20)
             .is_anomic_burner(true)
-            .chosen_branch(Some("AmarrBranch".into()))
-            .destination_station_id(Some(60_003_760))
             .origin_station_id(Some(60_003_763))
             .offered_level(Some(4))
             .initial_wave_count(Some(7))
@@ -570,46 +643,53 @@ mod tests {
         insert(&mut snap, full.clone());
         let got = get(&snap, 90_000_001, 42_001).expect("inserted mission must exist");
         assert_eq!(got, full);
-        assert!(load_mission_meta(&snap, 90_000_001, 42_001).is_some());
-        assert_eq!(
-            snap.sp6_lifecycle
-                .mission_initial_npc_counts
-                .get("90000001:42001"),
-            Some(&7)
-        );
-        assert_eq!(
-            snap.sp6_lifecycle
-                .mission_initial_npc_types
-                .get("90000001:42001"),
-            Some(&vec![10_019, 10_020])
-        );
-        assert!(snap
-            .sp6_lifecycle
-            .missions_awaiting_downtime_respawn
-            .contains(&(90_000_001, 42_001)));
+        assert!(snap.owner_notes.is_empty());
+        let stored = snap
+            .missions
+            .get_by_character_template(90_000_001, 42_001)
+            .expect("instance stored");
+        assert_eq!(stored.kind, MissionKind::Encounter);
+        assert_eq!(stored.initial_wave_count(), Some(7));
+        assert_eq!(stored.initial_wave_types(), &[10_019, 10_020]);
+        assert!(stored.awaiting_downtime_respawn());
+        assert!(snap.missions.contains_spawned_npc_id(910_000_001));
     }
 
     #[test]
-    fn roundtrip_record_only_mission_writes_no_note_or_sp6_rows() {
+    fn roundtrip_full_courier_and_minimal_offered_mission_fixtures() {
         let mut snap = WorldStateSnapshot::default();
+        let courier = MissionFixture::accepted(90_000_002, 42_002, 3_012_050, 30_000_144)
+            .bookmark_id(Some(88_123))
+            .offered_at_unix(1_700_000_000)
+            .offer_expiry_unix(1_700_086_400)
+            .accepted_at_unix(Some(1_700_000_100))
+            .required_delivery_type_id(Some(34))
+            .required_delivery_qty(150)
+            .granted_courier_item_id(Some(88_001))
+            .granted_courier_qty(20)
+            .destination_station_id(Some(60_003_760))
+            .origin_station_id(Some(60_003_763))
+            .offered_level(Some(2));
+        insert(&mut snap, courier.clone());
+        let got_courier = get(&snap, 90_000_002, 42_002).expect("courier mission must exist");
+        assert_eq!(got_courier, courier);
+        assert_eq!(
+            snap.missions
+                .get_by_character_template(90_000_002, 42_002)
+                .map(|m| m.kind),
+            Some(MissionKind::Courier)
+        );
+
         let record_only = MissionFixture::offered(90_000_002, 13_512, 3_012_050, 30_000_144)
             .current_room_id(1)
             .npcs_remaining(3)
             .spawned_npc_ball_ids(vec![911_000_001])
-            .bookmark_id(Some(88_123));
-
+            .bookmark_id(Some(88_124));
         insert(&mut snap, record_only.clone());
-        let got = get(&snap, 90_000_002, 13_512).expect("record-only mission must exist");
+        let got = get(&snap, 90_000_002, 13_512).expect("minimal mission must exist");
         assert_eq!(got, record_only);
         assert!(!got.has_metadata);
-        assert!(load_mission_meta(&snap, 90_000_002, 13_512).is_none());
         assert!(snap.owner_notes.is_empty());
-        assert!(snap.sp6_lifecycle.mission_initial_npc_counts.is_empty());
-        assert!(snap.sp6_lifecycle.mission_initial_npc_types.is_empty());
-        assert!(snap
-            .sp6_lifecycle
-            .missions_awaiting_downtime_respawn
-            .is_empty());
     }
 
     #[test]
@@ -638,7 +718,6 @@ mod tests {
             vec![(90_000_001, 100), (90_000_001, 300), (90_000_002, 200)]
         );
 
-        // Editing record-only keeps it record-only; editing metadata preserves metadata.
         assert!(edit(&mut snap, 90_000_001, 100, |m| {
             m.state = "Failed".into();
             m.npcs_remaining = 0;
@@ -647,15 +726,12 @@ mod tests {
         let failed = get(&snap, 90_000_001, 100).unwrap();
         assert_eq!(failed.state, "Failed");
         assert!(!failed.has_metadata);
-        assert!(load_mission_meta(&snap, 90_000_001, 100).is_none());
 
         assert!(edit(&mut snap, 90_000_001, 300, |m| {
-            m.completed_at_unix = Some(1_700_005_000);
             m.awaiting_downtime_respawn = true;
         })
         .is_some());
         let updated = get(&snap, 90_000_001, 300).unwrap();
-        assert_eq!(updated.completed_at_unix, Some(1_700_005_000));
         assert_eq!(updated.offered_level, Some(2));
         assert!(updated.awaiting_downtime_respawn);
 

@@ -1,9 +1,15 @@
 //! Relational SQLite world state loader.
 
+use crate::missions::{
+    decide_mission_kind, lookup_sde_mission_and_agent, open_sde_sqlite_ro, CourierObjective,
+    DeliveryObjective, EncounterObjective, MissionInstance, MissionKind, MissionObjective,
+    MissionState,
+};
 use crate::snapshot_ext::{decode_owner_note_entity_id, LpRewardLogEntry};
 use crate::sqlite_store::domain_rows::{
-    DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES, DOMAIN_SOCIAL_BOOKMARKS,
-    DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_MAIL, DOMAIN_WALLET_JOURNAL_META,
+    table_exists, DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES,
+    DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_MAIL,
+    DOMAIN_SP6_LIFECYCLE, DOMAIN_WALLET_JOURNAL_META,
 };
 use crate::sqlite_store::quarantine::{
     default_quarantine_unreadable, row_col_string, row_composite_key_string, row_payload_summary,
@@ -12,6 +18,7 @@ use crate::sqlite_store::quarantine::{
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
 use rusqlite::Connection;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Loads the complete `WorldStateSnapshot` from the SQLite database,
 /// failing closed on any corrupted row unless `--quarantine-unreadable` is active.
@@ -30,6 +37,7 @@ const ENTITY_ID_SQLITE_TABLES: &[(&str, &str)] = &[
     ("wallet_journal", "entry_id"),
     ("contracts", "contract_id"),
     ("industry_jobs", "job_id"),
+    ("mission_instances", "instance_id"),
     ("bookmarks", "bookmark_id"),
     ("mail", "message_id"),
     ("mail_timestamps", "mail_id"),
@@ -720,27 +728,56 @@ pub fn load_snapshot_from_sqlite_with_options(
         }
     }
 
-    {
+    if table_exists(conn, "mission_instances")? || !table_exists(conn, "missions")? {
         let mut stmt = conn
-            .prepare("SELECT rowid, character_id, mission_id, record_json FROM missions")
+            .prepare(
+                "SELECT rowid, instance_id, character_id, state, record_json FROM mission_instances ORDER BY instance_id ASC",
+            )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
             let rowid = r.get::<_, i64>(0).ok();
-            let key = row_composite_key_string(r, 1, 2);
-            let payload = row_col_string(r, 3);
-            match r
-                .get::<_, String>(3)
-                .map_err(|e| e.to_string())
-                .and_then(|js| {
-                    serde_json::from_str::<ActiveMissionRecord>(&js).map_err(|e| e.to_string())
-                }) {
-                Ok(m) => {
-                    snap.active_missions
-                        .insert((m.character_id, m.mission_id), m);
+            let key = row_col_string(r, 1);
+            let payload = row_col_string(r, 4);
+            match (|| -> Result<MissionInstance, String> {
+                let instance_id = r.get::<_, i64>(1).map_err(|e| e.to_string())?;
+                let col_char_id = r.get::<_, i64>(2).map_err(|e| e.to_string())?;
+                let col_state = r.get::<_, String>(3).map_err(|e| e.to_string())?;
+                let parsed_col_state = MissionState::parse(&col_state)
+                    .ok_or_else(|| format!("unknown mission state '{col_state}'"))?;
+                let js = r.get::<_, String>(4).map_err(|e| e.to_string())?;
+                let inst: MissionInstance = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+                if inst.instance_id != instance_id
+                    || inst.character_id != col_char_id
+                    || inst.state != parsed_col_state
+                {
+                    return Err(format!(
+                        "mission_instances row column/json mismatch for instance_id {instance_id}"
+                    ));
+                }
+                Ok(inst)
+            })() {
+                Ok(inst) => {
+                    if let Err(err) = snap.missions.try_insert(inst) {
+                        ctx.record_bad_row(
+                            "mission_instances",
+                            "mission_instances",
+                            key,
+                            payload,
+                            err,
+                            rowid,
+                        )?;
+                    }
                 }
                 Err(err) => {
-                    ctx.record_bad_row("missions", "missions", key, payload, err, rowid)?;
+                    ctx.record_bad_row(
+                        "mission_instances",
+                        "mission_instances",
+                        key,
+                        payload,
+                        err,
+                        rowid,
+                    )?;
                 }
             }
         }
@@ -1613,6 +1650,8 @@ pub fn load_snapshot_from_sqlite_with_options(
         super::domain_rows::load_ledger_domain_rows(conn, &mut snap, &mut ctx)?;
     let had_legacy_notes_lp =
         super::domain_rows::load_notes_lp_domain_rows(conn, &mut snap, &mut ctx)?;
+    let (legacy_sp6_waves, had_legacy_sp6_mission_rows) =
+        read_legacy_sp6_mission_waves(conn, &mut ctx)?;
     let had_legacy_sp6_lifecycle =
         super::domain_rows::load_sp6_lifecycle_domain_rows(conn, &mut snap, &mut ctx)?;
     super::notes_lp_sequence_store::load_d6_checked(conn, &mut snap, &mut ctx)?;
@@ -1626,14 +1665,13 @@ pub fn load_snapshot_from_sqlite_with_options(
         )?;
     let had_legacy_service_domains =
         super::service_domains_store::load_service_domains_checked(conn, &mut snap, &mut ctx)?;
-    ctx.flush_quarantined_rows(conn)?;
 
     let can_sync_migrations =
         conn.is_autocommit() && !conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false);
     let pre_migration = can_sync_migrations.then(|| snap.clone());
     // Run startup snapshot migrations and flush any migrated rows immediately into SQLite so
     // neither clean reads nor first-transaction rollbacks revert `next_entity_id`,
-    // `account_plex_vault`, `service_domains`, or `fw_system_occupations`.
+    // `account_plex_vault`, `service_domains`, `mission_instances`, or `fw_system_occupations`.
     snap.fold_legacy_plex_balances();
     snap.migrate_legacy_service_state();
     snap.reconcile_id_counters();
@@ -1645,6 +1683,14 @@ pub fn load_snapshot_from_sqlite_with_options(
     for (&sid, st) in &mut snap.system_states {
         st.solar_system_id = sid;
     }
+    let had_legacy_missions_table = table_exists(conn, "missions")?;
+    if had_legacy_missions_table {
+        migrate_legacy_missions_table(conn, &mut snap, &legacy_sp6_waves, &mut ctx)?;
+    }
+    if had_legacy_missions_table && can_sync_migrations {
+        super::schema::apply_mission_instances_ddl(conn)?;
+    }
+    ctx.flush_quarantined_rows(conn)?;
     if let Some(pre_mig) = pre_migration {
         let had_any_legacy = had_legacy_ledger
             || had_legacy_notes_lp
@@ -1652,7 +1698,9 @@ pub fn load_snapshot_from_sqlite_with_options(
             || had_legacy_social
             || had_legacy_corp_crimewatch
             || had_legacy_industry_market_pve
-            || had_legacy_service_domains;
+            || had_legacy_service_domains
+            || had_legacy_missions_table
+            || had_legacy_sp6_mission_rows;
         if had_any_legacy {
             super::domain_rows::apply_domain_rows_migration(conn)?;
         }
@@ -1701,9 +1749,386 @@ pub fn load_snapshot_from_sqlite_with_options(
                 super::service_domains_store::sync_service_domains_rows(&tx, &snap)?;
                 super::domain_rows::drop_legacy_service_domain_tables(&tx)?;
             }
+            if had_legacy_sp6_mission_rows || had_legacy_missions_table {
+                tx.execute(
+                    "DELETE FROM domain_rows WHERE domain = ?1 AND (key = 'missions_awaiting_downtime_respawn' OR key LIKE 'mission_initial_npc_counts/%' OR key LIKE 'mission_initial_npc_types/%')",
+                    rusqlite::params![DOMAIN_SP6_LIFECYCLE],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if had_legacy_missions_table {
+                tx.execute("DROP TABLE IF EXISTS missions", [])
+                    .map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())?;
         }
     }
     Ok(snap)
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct LegacySp6MissionWaves {
+    missions_awaiting_downtime_respawn: Vec<(i64, u32)>,
+    mission_initial_npc_counts: BTreeMap<String, u32>,
+    mission_initial_npc_types: BTreeMap<String, Vec<u32>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct LegacyMissionRowJson {
+    mission_id: u32,
+    character_id: i64,
+    agent_id: i64,
+    solar_system_id: SolarSystemId,
+    state: String,
+    current_room_id: u32,
+    npcs_remaining: u32,
+    spawned_npc_ball_ids: Vec<i64>,
+    bookmark_id: Option<i64>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct LegacyMissionMetaJson {
+    offered_at_unix: u64,
+    offer_expiry_unix: u64,
+    accepted_at_unix: Option<u64>,
+    accept_expiry_unix: Option<u64>,
+    bonus_expiry_unix: Option<u64>,
+    required_delivery_type_id: Option<TypeId>,
+    required_delivery_qty: i32,
+    granted_courier_item_id: Option<i64>,
+    granted_courier_qty: i32,
+    is_anomic_burner: bool,
+    destination_station_id: Option<i64>,
+    origin_station_id: Option<i64>,
+    offered_level: Option<u8>,
+}
+
+fn legacy_mission_meta_note_id(char_id: i64, mission_id: u32) -> i64 {
+    let mixed = ((char_id.unsigned_abs() & 0xFFFF_FFFF) << 20) ^ (u64::from(mission_id) & 0xFFFFF);
+    -((mixed as i64).max(1) + 5_000_000_000_000)
+}
+
+fn read_legacy_sp6_mission_waves(
+    conn: &Connection,
+    ctx: &mut LoadContext,
+) -> Result<(LegacySp6MissionWaves, bool), String> {
+    let mut waves = LegacySp6MissionWaves::default();
+    let mut had_rows = false;
+    if table_exists(conn, "sp6_lifecycle_state")? {
+        let mut stmt = conn
+            .prepare("SELECT state_json FROM sp6_lifecycle_state ORDER BY singleton_id ASC")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            if let Ok(js) = r.get::<_, String>(0) {
+                if let Ok(parsed) = serde_json::from_str::<LegacySp6MissionWaves>(&js) {
+                    if !parsed.missions_awaiting_downtime_respawn.is_empty() {
+                        waves.missions_awaiting_downtime_respawn =
+                            parsed.missions_awaiting_downtime_respawn;
+                        had_rows = true;
+                    }
+                    if !parsed.mission_initial_npc_counts.is_empty() {
+                        waves.mission_initial_npc_counts = parsed.mission_initial_npc_counts;
+                        had_rows = true;
+                    }
+                    if !parsed.mission_initial_npc_types.is_empty() {
+                        waves.mission_initial_npc_types = parsed.mission_initial_npc_types;
+                        had_rows = true;
+                    }
+                }
+            }
+        }
+    }
+    if table_exists(conn, "domain_rows")? {
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, key, value FROM domain_rows WHERE domain = ?1 AND (key = 'missions_awaiting_downtime_respawn' OR key LIKE 'mission_initial_npc_counts/%' OR key LIKE 'mission_initial_npc_types/%') ORDER BY rowid ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(rusqlite::params![DOMAIN_SP6_LIFECYCLE]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let raw_key: String = r.get(1).map_err(|e| e.to_string())?;
+            let raw_val: String = r.get(2).map_err(|e| e.to_string())?;
+            had_rows = true;
+            if raw_key == "missions_awaiting_downtime_respawn" {
+                match serde_json::from_str::<Vec<(i64, u32)>>(&raw_val) {
+                    Ok(v) => waves.missions_awaiting_downtime_respawn = v,
+                    Err(e) => ctx.record_bad_row(
+                        "domain_rows",
+                        DOMAIN_SP6_LIFECYCLE,
+                        raw_key,
+                        raw_val,
+                        e.to_string(),
+                        rowid,
+                    )?,
+                }
+            } else if let Some(sub) = raw_key.strip_prefix("mission_initial_npc_counts/") {
+                match super::domain_rows::decode_map_entry::<String, u32>(sub, &raw_val) {
+                    Ok((k, v)) => {
+                        waves.mission_initial_npc_counts.insert(k, v);
+                    }
+                    Err(err) => ctx.record_bad_row(
+                        "domain_rows",
+                        DOMAIN_SP6_LIFECYCLE,
+                        raw_key,
+                        raw_val,
+                        err,
+                        rowid,
+                    )?,
+                }
+            } else if let Some(sub) = raw_key.strip_prefix("mission_initial_npc_types/") {
+                match super::domain_rows::decode_map_entry::<String, Vec<u32>>(sub, &raw_val) {
+                    Ok((k, v)) => {
+                        waves.mission_initial_npc_types.insert(k, v);
+                    }
+                    Err(err) => ctx.record_bad_row(
+                        "domain_rows",
+                        DOMAIN_SP6_LIFECYCLE,
+                        raw_key,
+                        raw_val,
+                        err,
+                        rowid,
+                    )?,
+                }
+            }
+        }
+    }
+    Ok((waves, had_rows))
+}
+
+fn migrate_legacy_missions_table(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    waves: &LegacySp6MissionWaves,
+    ctx: &mut LoadContext,
+) -> Result<(), String> {
+    struct PendingLegacyMission {
+        rowid: Option<i64>,
+        key: String,
+        payload: String,
+        rec: LegacyMissionRowJson,
+        state: MissionState,
+        meta: LegacyMissionMetaJson,
+    }
+
+    let mut pending = Vec::new();
+    let mut pending_ball_ids = BTreeSet::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT rowid, character_id, mission_id, state, record_json FROM missions ORDER BY character_id ASC, mission_id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid = r.get::<_, i64>(0).ok();
+        let key = format!("{}:{}", row_col_string(r, 1), row_col_string(r, 2));
+        let payload = row_col_string(r, 4);
+        let parsed = (|| -> Result<(LegacyMissionRowJson, MissionState), String> {
+            let col_char_id = r.get::<_, i64>(1).map_err(|e| e.to_string())?;
+            let col_mission_i64 = r.get::<_, i64>(2).map_err(|e| e.to_string())?;
+            let col_mission_id = u32::try_from(col_mission_i64)
+                .map_err(|_| format!("invalid legacy mission_id column {col_mission_i64}"))?;
+            let col_state = r.get::<_, String>(3).map_err(|e| e.to_string())?;
+            let col_parsed = MissionState::parse(&col_state)
+                .ok_or_else(|| format!("unknown legacy mission state '{col_state}'"))?;
+            let js = r.get::<_, String>(4).map_err(|e| e.to_string())?;
+            let rec: LegacyMissionRowJson =
+                serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            if rec.character_id != col_char_id || rec.mission_id != col_mission_id {
+                return Err(format!(
+                    "legacy mission key ({col_char_id}, {col_mission_id}) != JSON ({}, {})",
+                    rec.character_id, rec.mission_id
+                ));
+            }
+            let json_parsed = MissionState::parse(&rec.state)
+                .ok_or_else(|| format!("unknown legacy mission JSON state '{}'", rec.state))?;
+            if col_parsed != json_parsed {
+                return Err(format!(
+                    "legacy mission state column '{col_state}' != JSON '{}'",
+                    rec.state
+                ));
+            }
+            Ok((rec, json_parsed))
+        })();
+        let (rec, state) = match parsed {
+            Ok(v) => v,
+            Err(err) => {
+                ctx.record_bad_row("missions", "missions", key, payload, err, rowid)?;
+                continue;
+            }
+        };
+
+        let meta_label = format!("mission_meta:{}:{}", rec.character_id, rec.mission_id);
+        let expected_nid = legacy_mission_meta_note_id(rec.character_id, rec.mission_id);
+        let matched_nid = snap
+            .owner_notes
+            .get(&expected_nid)
+            .filter(|n| n.label == meta_label || n.character_id == -5)
+            .map(|n| n.note_id)
+            .or_else(|| {
+                snap.owner_notes
+                    .iter()
+                    .find(|(_, n)| n.label == meta_label)
+                    .map(|(&nid, _)| nid)
+            });
+        let meta = matched_nid
+            .and_then(|nid| snap.owner_notes.remove(&nid))
+            .and_then(|note| serde_json::from_str::<LegacyMissionMetaJson>(&note.note).ok())
+            .unwrap_or_default();
+
+        if snap
+            .missions
+            .contains_character_template(rec.character_id, rec.mission_id)
+        {
+            continue;
+        }
+
+        for &bid in &rec.spawned_npc_ball_ids {
+            pending_ball_ids.insert(bid);
+            if bid > 0 && bid < 900_000_000 && bid > snap.next_entity_id {
+                snap.next_entity_id = bid;
+            }
+        }
+        pending.push(PendingLegacyMission {
+            rowid,
+            key,
+            payload,
+            rec,
+            state,
+            meta,
+        });
+    }
+
+    let sde_conn = if pending.is_empty() {
+        None
+    } else {
+        open_sde_sqlite_ro()
+    };
+
+    for entry in pending {
+        let PendingLegacyMission {
+            rowid,
+            key,
+            payload,
+            rec,
+            state,
+            meta,
+        } = entry;
+
+        let wave_key = format!("{}:{}", rec.character_id, rec.mission_id);
+        let wave_count = waves.mission_initial_npc_counts.get(&wave_key).copied();
+        let wave_types = waves
+            .mission_initial_npc_types
+            .get(&wave_key)
+            .cloned()
+            .unwrap_or_default();
+        let awaiting_downtime = waves
+            .missions_awaiting_downtime_respawn
+            .contains(&(rec.character_id, rec.mission_id));
+
+        let has_courier_clue = meta.destination_station_id.is_some()
+            || meta.granted_courier_item_id.is_some()
+            || meta.granted_courier_qty > 0;
+        let has_encounter_clue = rec.npcs_remaining > 0
+            || !rec.spawned_npc_ball_ids.is_empty()
+            || wave_count.is_some()
+            || !wave_types.is_empty()
+            || awaiting_downtime;
+        let has_delivery_clue =
+            meta.required_delivery_type_id.is_some() || meta.required_delivery_qty > 0;
+
+        let kind = if has_courier_clue {
+            MissionKind::Courier
+        } else if let Some((tmpl, ag)) = sde_conn
+            .as_ref()
+            .map(|conn| lookup_sde_mission_and_agent(conn, rec.mission_id, rec.agent_id))
+            .filter(|(tmpl, ag)| tmpl.is_some() || ag.is_some())
+        {
+            if has_encounter_clue && !has_delivery_clue && tmpl.is_none() {
+                MissionKind::Encounter
+            } else {
+                let base = decide_mission_kind(tmpl.as_ref(), ag.as_ref());
+                match base {
+                    MissionKind::Heraldry | MissionKind::Encounter
+                        if has_delivery_clue && !has_encounter_clue =>
+                    {
+                        if meta.required_delivery_type_id == Some(17202) {
+                            MissionKind::DataCenterTurnIn
+                        } else {
+                            MissionKind::Trade
+                        }
+                    }
+                    _ => base,
+                }
+            }
+        } else if has_encounter_clue && !has_delivery_clue {
+            MissionKind::Encounter
+        } else if meta.required_delivery_type_id == Some(17202) {
+            MissionKind::DataCenterTurnIn
+        } else if has_delivery_clue {
+            MissionKind::Trade
+        } else {
+            MissionKind::Encounter
+        };
+
+        let objective = match kind {
+            MissionKind::Encounter => MissionObjective::Encounter(EncounterObjective {
+                npcs_remaining: rec.npcs_remaining,
+                spawned_npc_ball_ids: rec.spawned_npc_ball_ids,
+                initial_wave_count: wave_count,
+                initial_wave_types: wave_types,
+                awaiting_downtime_respawn: awaiting_downtime,
+            }),
+            MissionKind::Courier => MissionObjective::Courier(CourierObjective {
+                cargo_type_id: meta.required_delivery_type_id,
+                quantity: meta.required_delivery_qty,
+                destination_station_id: meta.destination_station_id,
+                granted_item_id: meta.granted_courier_item_id,
+                granted_qty: meta.granted_courier_qty,
+            }),
+            MissionKind::Trade
+            | MissionKind::Mining
+            | MissionKind::DataCenterTurnIn
+            | MissionKind::ResearchTurnIn => MissionObjective::Delivery(DeliveryObjective {
+                item_type_id: meta.required_delivery_type_id,
+                quantity: meta.required_delivery_qty,
+            }),
+            MissionKind::Heraldry => MissionObjective::None,
+        };
+
+        let mut instance_id = snap.alloc_entity_id();
+        while pending_ball_ids.contains(&instance_id) {
+            instance_id = snap.alloc_entity_id();
+        }
+        let instance = MissionInstance {
+            instance_id,
+            character_id: rec.character_id,
+            agent_id: rec.agent_id,
+            template_id: rec.mission_id,
+            state,
+            kind,
+            solar_system_id: rec.solar_system_id,
+            current_room_id: rec.current_room_id,
+            bookmark_id: rec.bookmark_id,
+            origin_station_id: meta.origin_station_id,
+            offered_level: meta.offered_level,
+            is_anomic_burner: meta.is_anomic_burner,
+            offered_at_unix: meta.offered_at_unix,
+            offer_expiry_unix: meta.offer_expiry_unix,
+            accepted_at_unix: meta.accepted_at_unix,
+            accept_expiry_unix: meta.accept_expiry_unix,
+            bonus_expiry_unix: meta.bonus_expiry_unix,
+            objective,
+        };
+        if let Err(err) = snap.missions.try_insert(instance) {
+            ctx.record_bad_row("missions", "missions", key, payload, err, rowid)?;
+        }
+    }
+    Ok(())
 }
 #[cfg(test)] #[path = "load_unit_tests.rs"] mod load_unit_tests;

@@ -368,7 +368,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     let part2_activity = before.contracts != after.contracts
         || before.industry_jobs != after.industry_jobs
         || before.planetary_colonies != after.planetary_colonies
-        || before.active_missions != after.active_missions
+        || before.missions != after.missions
         || before.mission_tally != after.mission_tally
         || before.standing_transactions != after.standing_transactions
         || before.npe_progress != after.npe_progress
@@ -1041,9 +1041,6 @@ impl<'a> WorldTx<'a> {
     /// Aborting or panicking after calling this method still burns the allocated ID and keeps the
     /// persisted `world_meta.next_entity_block` high-water mark so IDs are never reissued.
     pub fn alloc_entity_id(&mut self) -> Result<i64, TxError> {
-        if self.snap.active_missions.is_dirty_ids() {
-            self.snap.active_missions.reconcile_id_index();
-        }
         if self.snap.char_lp_logs.is_dirty_ids() {
             self.snap.char_lp_logs.reconcile_id_index();
         }

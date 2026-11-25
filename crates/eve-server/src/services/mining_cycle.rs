@@ -1295,11 +1295,14 @@ pub fn compute_reprocessing_rates_for_item_at(
                     .and_then(|m| m.get(&3359))
                     .map(|s| s.level.min(5))
                     .unwrap_or(0);
-                let has_completed_mission_for_corp = snap.active_missions.values().any(|m| {
-                    m.character_id == char_id
-                        && m.state == "Completed"
-                        && sde.agents.get(&m.agent_id).is_some_and(|a| a.corporation_id == cid)
-                }) || snap
+                let has_completed_mission_for_corp = snap
+                    .missions
+                    .iter_by_character(char_id)
+                    .any(|m| {
+                        m.state == eve_db::MissionState::Completed
+                            && sde.agents.get(&m.agent_id).is_some_and(|a| a.corporation_id == cid)
+                    })
+                    || snap
                     .standing_transactions
                     .get(&char_id)
                     .is_some_and(|txs| {

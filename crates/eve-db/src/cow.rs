@@ -2053,7 +2053,7 @@ where
 }
 
 pub use crate::cow_collections::{
-    CowActiveMissions, CowIdVec, CowIdVecIter, CowLpLogs, CowVecDiff, HasEntityId,
+    CowIdVec, CowIdVecIter, CowLpLogs, CowVecDiff, HasEntityId,
 };
 
 #[cfg(test)]

@@ -1,4 +1,7 @@
 use crate::accounts::*;
+use crate::missions::{
+    EncounterObjective, MissionInstance, MissionKind, MissionObjective, MissionState,
+};
 use crate::persistence::*;
 use crate::types::*;
 use eve_sde::SdeRegistry;
@@ -157,7 +160,7 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
     );
     assert_eq!(IskCents::from_isk(100).checked_mul_qty(-5), None);
 
-    // Populate tuple-keyed maps (planetary_colonies & active_missions) and idempotency keys
+    // Populate tuple-keyed maps (planetary_colonies) and missions + idempotency keys
     repo.with_mut_snapshot(|snap| {
         snap.planetary_colonies.insert(
             (created.character_id, 40009082),
@@ -171,20 +174,35 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
                 last_extracted_unix: 0,
             },
         );
-        snap.active_missions.insert(
-            (created.character_id, 1001),
-            ActiveMissionRecord {
-                mission_id: 1001,
+        let mission_iid = snap.alloc_entity_id();
+        snap.missions
+            .try_insert(MissionInstance {
+                instance_id: mission_iid,
                 character_id: created.character_id,
                 agent_id: 3018924,
+                template_id: 1001,
+                state: MissionState::Accepted,
+                kind: MissionKind::Encounter,
                 solar_system_id: 30000142,
-                state: "Accepted".to_string(),
                 current_room_id: 1,
-                npcs_remaining: 3,
-                spawned_npc_ball_ids: Vec::new(),
                 bookmark_id: None,
-            },
-        );
+                origin_station_id: None,
+                offered_level: None,
+                is_anomic_burner: false,
+                offered_at_unix: 0,
+                offer_expiry_unix: 0,
+                accepted_at_unix: None,
+                accept_expiry_unix: None,
+                bonus_expiry_unix: None,
+                objective: MissionObjective::Encounter(EncounterObjective {
+                    npcs_remaining: 3,
+                    spawned_npc_ball_ids: Vec::new(),
+                    initial_wave_count: None,
+                    initial_wave_types: Vec::new(),
+                    awaiting_downtime_respawn: false,
+                }),
+            })
+            .expect("insert mission");
         snap.committed_idempotency_keys
             .insert((created.character_id, "idem-1".to_string()));
     });
@@ -236,8 +254,8 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
         snap.planetary_colonies
             .contains_key(&(created.character_id, 40009082))
             && snap
-                .active_missions
-                .contains_key(&(created.character_id, 1001))
+                .missions
+                .contains_character_template(created.character_id, 1001)
     });
     assert!(has_colony);
 
@@ -541,20 +559,35 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 ..Default::default()
             },
         );
-        snap.active_missions.insert(
-            (c1.character_id, 501),
-            ActiveMissionRecord {
-                mission_id: 501,
+        let mission_iid = snap.alloc_entity_id();
+        snap.missions
+            .try_insert(MissionInstance {
+                instance_id: mission_iid,
                 character_id: c1.character_id,
                 agent_id: 3018924,
+                template_id: 501,
+                state: MissionState::Accepted,
+                kind: MissionKind::Encounter,
                 solar_system_id: 30_000_142,
-                state: "Accepted".to_string(),
                 current_room_id: 0,
-                npcs_remaining: 2,
-                spawned_npc_ball_ids: vec![],
                 bookmark_id: None,
-            },
-        );
+                origin_station_id: None,
+                offered_level: None,
+                is_anomic_burner: false,
+                offered_at_unix: 0,
+                offer_expiry_unix: 0,
+                accepted_at_unix: None,
+                accept_expiry_unix: None,
+                bonus_expiry_unix: None,
+                objective: MissionObjective::Encounter(EncounterObjective {
+                    npcs_remaining: 2,
+                    spawned_npc_ball_ids: vec![],
+                    initial_wave_count: None,
+                    initial_wave_types: Vec::new(),
+                    awaiting_downtime_respawn: false,
+                }),
+            })
+            .expect("insert mission");
         snap.standing_transactions.insert(
             c1.character_id,
             vec![StandingTransactionRecord {
@@ -693,7 +726,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
         assert_eq!(snap.wallet_journal.len(), 1);
         assert!(snap.contracts.contains_key(&910_001));
         assert!(snap.industry_jobs.contains_key(&920_001));
-        assert!(snap.active_missions.contains_key(&(c1_id, 501)));
+        assert!(snap.missions.contains_character_template(c1_id, 501));
         assert_eq!(snap.standing_transactions[&c1_id].len(), 1);
         assert_eq!(snap.mails.len(), 1);
         assert!(snap.fleets.contains_key(&940_001));

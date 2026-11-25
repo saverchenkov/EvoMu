@@ -767,23 +767,6 @@ pub struct PlanetaryColonyRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ActiveMissionRecord {
-    pub mission_id: u32,
-    pub character_id: i64,
-    pub agent_id: i64,
-    #[serde(default)]
-    pub solar_system_id: SolarSystemId,
-    pub state: String, // "Offered", "Accepted", "Completed"
-    pub current_room_id: u32,
-    pub npcs_remaining: u32,
-    #[serde(default)]
-    pub spawned_npc_ball_ids: Vec<i64>,
-    #[serde(default)]
-    pub bookmark_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct NpeProgressRecord {
     pub character_id: i64,
     pub node_graph_id: u32,

@@ -2600,16 +2600,18 @@ async fn fetch_objective_has_cargo_eligibility_and_volume_parity() {
             ch.active_ship_id = ship_id;
             ch.station_id = Some(rnd_st);
         }
-        mission_fixture::insert(
+        mission_fixture::insert_with_sde(
             snap,
+            &ctx.sde,
             make_timed_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None, now + 3_600, Some(now + 7_200))
                 .origin_station_id(Some(rnd_st))
                 .required_delivery_type_id(Some(34))
                 .required_delivery_qty(300),
         );
 
-        mission_fixture::insert(
+        mission_fixture::insert_with_sde(
             snap,
+            &ctx.sde,
             make_timed_mission(mid_mine, char_id, mine_ag.agent_id, mine_sys, "Accepted", None, now + 3_600, Some(now + 7_200))
                 .origin_station_id(Some(mine_st))
                 .required_delivery_type_id(Some(1230))

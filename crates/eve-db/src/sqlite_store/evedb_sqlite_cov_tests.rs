@@ -7,8 +7,11 @@ use crate::persistence::WorldRepository;
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::schema::apply_migrations;
 use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_snapshot_diff_for_test};
+use crate::missions::{
+    EncounterObjective, MissionInstance, MissionKind, MissionObjective, MissionState,
+};
 use crate::types::{
-    ActiveMissionRecord, AllianceRecord, AsteroidRecord, BookmarkRecord, CharacterLoginStats,
+    AllianceRecord, AsteroidRecord, BookmarkRecord, CharacterLoginStats,
     ContractRecord, CorpProjectRecord, FleetRecord, IndustryJobRecord, JumpCloneRecord,
     KillRightRecord, KillmailRecord, MailRecord, MarketOrderRecord, MiningLedgerRecord,
     PlanetaryColonyRecord, SavedFittingRecord, SkillHistoryEntry, SkillQueueEntry,
@@ -130,20 +133,34 @@ pub(super) fn build_populated_snapshot() -> WorldStateSnapshot {
             last_extracted_unix: 1000,
         },
     );
-    snap.active_missions.insert(
-        (cid, 200),
-        ActiveMissionRecord {
-            mission_id: 200,
+    snap.missions
+        .try_insert(MissionInstance {
+            instance_id: 200_000_200,
             character_id: cid,
             agent_id: 3_018_922,
+            template_id: 200,
+            state: MissionState::Offered,
+            kind: MissionKind::Encounter,
             solar_system_id: 30_000_142,
-            state: "Offered".into(),
             current_room_id: 0,
-            npcs_remaining: 1,
-            spawned_npc_ball_ids: vec![],
             bookmark_id: None,
-        },
-    );
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            objective: MissionObjective::Encounter(EncounterObjective {
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![],
+                initial_wave_count: None,
+                initial_wave_types: Vec::new(),
+                awaiting_downtime_respawn: false,
+            }),
+        })
+        .expect("insert mission");
     snap.mission_tally.insert(cid, 7);
     snap.standing_transactions.insert(
         cid,
@@ -432,7 +449,7 @@ fn sqlite_store_sync_insert_and_delete_error_paths_on_dropped_tables() {
         "contracts",
         "industry_jobs",
         "planetary_colonies",
-        "missions",
+        "mission_instances",
         "mission_tally",
         "standings",
         "npe_progress",

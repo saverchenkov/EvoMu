@@ -29,10 +29,9 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
     assert_eq!(disc_minimal.pre_warp_position, None);
     assert_eq!(disc_minimal.last_velocity, [0.0, 0.0, 0.0]);
 
-    // 3. Full Sp6PersistedState roundtrip with all 14 fields populated
+    // 3. Full Sp6PersistedState roundtrip with all 11 fields populated
     let mut full = Sp6PersistedState {
         last_downtime_day_idx: Some(19_850),
-        missions_awaiting_downtime_respawn: vec![(90_000_001, 1001)],
         ..Default::default()
     };
     full.safe_logoffs.insert(
@@ -100,10 +99,6 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
             planet_id: Some(40_009_082),
         },
     );
-    full.mission_initial_npc_counts
-        .insert("90000001:1001".to_string(), 5);
-    full.mission_initial_npc_types
-        .insert("90000001:1001".to_string(), vec![10_001, 10_002]);
     full.active_scanner_probes.insert(
         900_000_001,
         crate::PersistedScannerProbe {

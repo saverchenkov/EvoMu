@@ -121,9 +121,6 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
             },
         );
 
-        st.mission_initial_npc_types
-            .insert("stale:999".into(), vec![10_019]);
-
         // Missions with distinct target_count branches and pre-existing awaiting key.
         mission_fixture::insert(
             snap,
@@ -198,15 +195,6 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
         assert!(st.ship_combat_hp.contains_key(&w_below_bound));
         assert!(st.ship_combat_hp.contains_key(&w_above_bound));
         assert!(st.ship_combat_hp.contains_key(&w_non_wreck_type));
-
-        assert!(!st.mission_initial_npc_types.contains_key("stale:999"));
-
-        let m1_await_count = st
-            .missions_awaiting_downtime_respawn
-            .iter()
-            .filter(|&&k| k == (char_id, 601))
-            .count();
-        assert_eq!(m1_await_count, 1);
     });
 
     with_combat_runtime(&ctx, |rt| {
@@ -224,6 +212,7 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
         let m1 = mission_fixture::get(snap, char_id, 601).unwrap();
         assert_eq!(m1.initial_wave_count, Some(7));
         assert!(m1.initial_wave_types.is_some());
+        assert!(m1.awaiting_downtime_respawn);
         assert_eq!(m1.npcs_remaining, 7);
         assert_eq!(mission_fixture::get(snap, char_id, 602).unwrap().npcs_remaining, 6);
         assert_eq!(mission_fixture::get(snap, char_id, 603).unwrap().npcs_remaining, 5);
@@ -790,10 +779,18 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
         assert_eq!(m3.npcs_remaining, 4);
     });
 
-    // Pocket entry clears awaiting respawn and respawns 4 NPCs (even without prior initial_count)
+    // Pocket entry clears awaiting respawn (even for 0-NPC missions) and respawns 4 NPCs
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::edit(snap, c1, 2, |m| {
+            m.awaiting_downtime_respawn = true;
+        });
+    });
     let spawned = spawn_mission_wave_on_pocket_entry_if_needed(&ctx, c1, sys1, origin);
     assert_eq!(spawned, 4);
     ctx.db.with_snapshot(|snap| {
+        assert!(!mission_fixture::get(snap, c1, 2)
+            .unwrap()
+            .awaiting_downtime_respawn);
         assert!(!mission_fixture::get(snap, c1, 3)
             .unwrap()
             .awaiting_downtime_respawn);

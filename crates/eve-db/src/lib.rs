@@ -21,6 +21,7 @@ pub mod gateway_tokens;
 pub mod inventory;
 pub mod ledger;
 pub mod lock_rank;
+pub mod missions;
 pub mod persistence;
 pub mod seed;
 pub mod service_domains;
@@ -63,11 +64,11 @@ pub use clock::{
 #[cfg(any(test, feature = "testkit"))]
 pub use persistence::WorldTablesSnapshot;
 pub use cow::{
-    cow_full_touch_by_site, cow_full_touch_total, reset_cow_full_touch_for_test, CowActiveMissions,
-    CowCell, CowDiffItem, CowDiffIter, CowIdVec, CowIdVecIter, CowInlineDiffItem,
-    CowInlineDiffIter, CowLpLogs, CowMap, CowMapInline, CowVecDiff, HasEntityId,
-    IMBL_ORD_CHUNK_SIZE,
+    cow_full_touch_by_site, cow_full_touch_total, reset_cow_full_touch_for_test, CowCell,
+    CowDiffItem, CowDiffIter, CowIdVec, CowIdVecIter, CowInlineDiffItem, CowInlineDiffIter,
+    CowLpLogs, CowMap, CowMapInline, CowVecDiff, HasEntityId, IMBL_ORD_CHUNK_SIZE,
 };
+pub use missions::*;
 pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
 pub use gateway_tokens::QuasarVerifiedToken;
 pub use inventory::{ConsumeExactOptions, TransferItemSpec};
@@ -228,12 +229,6 @@ pub struct Sp6PersistedState {
     pub ship_combat_hp: CowMap<i64, PersistedCombatHp>,
     #[serde(default)]
     pub space_object_meta: CowMap<i64, PersistedSpaceObjectMeta>,
-    #[serde(default)]
-    pub missions_awaiting_downtime_respawn: Vec<(i64, u32)>,
-    #[serde(default)]
-    pub mission_initial_npc_counts: CowMap<String, u32>,
-    #[serde(default)]
-    pub mission_initial_npc_types: CowMap<String, Vec<u32>>,
     #[serde(default)]
     pub active_scanner_probes: CowMap<i64, PersistedScannerProbe>,
     #[serde(default)]

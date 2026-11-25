@@ -452,7 +452,7 @@ impl WorldRepository {
             contracts: Default::default(),
             industry_jobs: Default::default(),
             planetary_colonies: Default::default(),
-            active_missions: Default::default(),
+            missions: Default::default(),
             mission_tally: Default::default(),
             standing_transactions: Default::default(),
             npe_progress: npe_progress.into(),
