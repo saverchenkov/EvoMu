@@ -122,12 +122,51 @@ pub fn signature_difficulty_level_and_min_strength(
     (level, min_strength)
 }
 
-/// Formats `OnSystemScanStarted` probe payload as the V24 client's `{probeID: KeyVal(state=4)}` Dict.
-pub(super) fn probe_scan_started_probes_dict(probe_ids: &[PyRep]) -> PyRep {
+/// Formats `OnSystemScanStarted` probe payload as the V24 client's `{probeID: KeyVal(pos=(x, y, z), state=4)}` Dict.
+pub(super) fn probe_scan_started_probes_dict(probes: &[(i64, [f64; 3])]) -> PyRep {
     PyRep::Dict(
-        probe_ids
+        probes
             .iter()
-            .map(|pid| (pid.clone(), PyRep::keyval([("state", PyRep::Integer(4))])))
+            .map(|&(pid, pos)| {
+                (
+                    PyRep::Integer(pid),
+                    PyRep::keyval([
+                        (
+                            "pos",
+                            PyRep::Tuple(vec![
+                                PyRep::Real(pos[0]),
+                                PyRep::Real(pos[1]),
+                                PyRep::Real(pos[2]),
+                            ]),
+                        ),
+                        ("state", PyRep::Integer(4)),
+                    ]),
+                )
+            })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_scan_started_probes_dict_encodes_pos_tuple_and_scanning_state() {
+        let rep = probe_scan_started_probes_dict(&[(901, [12.5, -34.0, 56.25])]);
+        let PyRep::Dict(entries) = rep else {
+            panic!("expected Dict");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, PyRep::Integer(901));
+        assert_eq!(entries[0].1.dict_get("state"), Some(&PyRep::Integer(4)));
+        assert_eq!(
+            entries[0].1.dict_get("pos"),
+            Some(&PyRep::Tuple(vec![
+                PyRep::Real(12.5),
+                PyRep::Real(-34.0),
+                PyRep::Real(56.25),
+            ]))
+        );
+    }
 }

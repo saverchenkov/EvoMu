@@ -2236,8 +2236,24 @@ async fn pin_933_t3_migrated_rpc_and_notify_wire_shapes() {
         .expect("OnSystemScanStarted must arrive on wire");
     assert_eq!(scan_started.len(), 3);
     assert!(
-        matches!(&scan_started[2], PyRep::Dict(entries) if entries.len() == 8 && entries.iter().all(|(_, v)| v.dict_get("state") == Some(&PyRep::Integer(4)))),
-        "OnSystemScanStarted[2] must natively carry 8-entry Dict(state=4): {scan_started:?}"
+        matches!(
+            &scan_started[2],
+            PyRep::Dict(entries)
+                if entries.len() == 8
+                    && entries.iter().all(|(_, v)| {
+                        v.dict_get("state") == Some(&PyRep::Integer(4))
+                            && matches!(
+                                v.dict_get("pos"),
+                                Some(PyRep::Tuple(pos))
+                                    if matches!(
+                                        pos.as_slice(),
+                                        [PyRep::Real(x), PyRep::Real(y), PyRep::Real(z)]
+                                            if *x >= 500_000.0 && (*y - 2_000.0).abs() < 1e-6 && z.abs() < 1e-6
+                                    )
+                            )
+                    })
+        ),
+        "OnSystemScanStarted[2] must natively carry 8-entry Dict(pos=(x,y,z), state=4): {scan_started:?}"
     );
 
     let (_, _) = wire.drain_pending_frames();

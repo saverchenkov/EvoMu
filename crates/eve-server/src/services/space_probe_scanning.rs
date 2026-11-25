@@ -2275,6 +2275,7 @@ async fn handle_request_scans(
     }
 
     let scan_probe_ids: Vec<PyRep> = active_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
+    let scan_probe_positions: Vec<(i64, [f64; 3])> = active_probes.iter().map(|p| (p.probe_id, p.destination)).collect();
     let idle_probes: Vec<PyRep> = active_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
     let scan_ms = ctx.db.with_snapshot(|s| {
         let sk = s.skills.get(&char_id);
@@ -2308,7 +2309,7 @@ async fn handle_request_scans(
         crate::router::notify_registry::OnSystemScanStarted {
             start_time: max_warp_end_ft,
             duration_ms: scan_ms,
-            probes: probe_scan_started_probes_dict(&scan_probe_ids),
+            probes: probe_scan_started_probes_dict(&scan_probe_positions),
         },
     );
     let p_ids: Vec<i64> = active_probes.iter().map(|p| p.probe_id).collect();
