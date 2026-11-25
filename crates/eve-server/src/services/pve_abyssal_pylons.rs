@@ -1615,10 +1615,15 @@ pub(crate) fn on_abyssal_boundary_death_hook(
                         dock_id,
                         race_id,
                     );
-                    if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
-                        ch.active_ship_id = corvette_id;
-                        ch.version += 1;
-                    }
+                    let _ = crate::router::apply_character_transition_in_snap(
+                        snap,
+                        &ctx.sde,
+                        victim_char_id,
+                        crate::router::TransitionLocation::KeepCurrent,
+                        Some(corvette_id),
+                        false,
+                        false,
+                    );
                 }
             }
         }
