@@ -94,6 +94,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                     is_container: true,
                     loot_items: vec![(34, 500)],
                     spawned: false,
+                    ..Default::default()
                 }],
                 npc_groups: vec![
                     DungeonNpcGroup {
@@ -104,6 +105,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                         spawn_immediately: true,
                         spawned: false,
                         cleared: false,
+                        ..Default::default()
                     },
                     DungeonNpcGroup {
                         group_id: 2,
@@ -113,6 +115,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                         spawn_immediately: false,
                         spawned: false,
                         cleared: false,
+                        ..Default::default()
                     },
                 ],
                 triggers: vec![
@@ -131,6 +134,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                 ],
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
             DungeonRuntimeRoom {
                 room_index: 2,
@@ -151,6 +155,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                     spawn_immediately: true,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 }],
                 triggers: vec![
                     DungeonTrigger {
@@ -168,6 +173,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                 ],
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
             DungeonRuntimeRoom {
                 room_index: 3,
@@ -184,6 +190,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
         ],
         completed: false,
@@ -192,6 +199,7 @@ fn sample_instance(inst_id: i64, did: u32, sys_id: SolarSystemId, char_id: i64, 
         last_completed_task_id: None,
         completed_task_ids: Vec::new(),
         created_unix: 1_775_100_000,
+        ..Default::default()
     }
 }
 
@@ -389,6 +397,10 @@ async fn room_materialization_wave_triggers_gate_unlock_and_completion_despawn()
         .await
         .expect("materialize room 2");
     assert_eq!(r2_npcs.len(), 1);
+    on_dungeon_room_entered(&ctx, sys_id, 950_010, 1, char_id).await;
+    // Empty the Overseer Cache so completion performs immediate full despawn rather than loot-grace retention.
+    ctx.db
+        .with_mut_snapshot(|snap| snap.items.retain(|_, it| it.location_id != cont_id));
 
     on_dungeon_npc_killed(&ctx, sys_id, r2_npcs[0], char_id).await;
     with_dungeon_runtime_store(&ctx, |store| {
@@ -605,6 +617,7 @@ async fn on_dungeon_npc_killed_guards_unfired_triggers_and_owner_fallback_recipi
         materialize_dungeon_room_entities(&ctx, sys_id, 956_001, 0)
             .await
             .unwrap();
+    on_dungeon_room_entered(&ctx, sys_id, 956_001, 0, owner_cid).await;
     on_dungeon_npc_killed(&ctx, sys_id, npcs[0], owner_cid).await;
     with_dungeon_runtime_store(&ctx, |store| {
         let s = &store.instances[&956_001];
@@ -616,6 +629,7 @@ async fn on_dungeon_npc_killed_guards_unfired_triggers_and_owner_fallback_recipi
     let mut inst2 = sample_instance(956_002, 1, sys_id, owner_cid, false);
     inst2.rooms.truncate(1);
     inst2.rooms[0].npc_groups.truncate(1);
+    inst2.rooms[0].objects.clear();
     inst2.rooms[0].triggers.clear();
     with_dungeon_runtime_store(&ctx, |store| {
         store.instances.insert(956_002, inst2);
@@ -624,6 +638,7 @@ async fn on_dungeon_npc_killed_guards_unfired_triggers_and_owner_fallback_recipi
         materialize_dungeon_room_entities(&ctx, sys_id, 956_002, 0)
             .await
             .unwrap();
+    on_dungeon_room_entered(&ctx, sys_id, 956_002, 0, owner_cid).await;
     let _ = ctx.drain_notifications_for_char(owner_cid);
     on_dungeon_npc_killed(&ctx, sys_id, npcs2[0], 0).await;
     with_dungeon_runtime_store(&ctx, |store| {
@@ -1296,4 +1311,346 @@ async fn expired_escalation_epinstance_bookmark_and_runtime_instance_are_unwarpa
         .unwrap(),
         None
     );
+}
+
+async fn spawn_test_ship_ball(ctx: &ServerContext, sys_id: SolarSystemId, ship_id: i64, pos: [f64; 3]) -> crate::system_actor::SystemHandle {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::from_array(pos),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    sys_handle
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dungeon_unentered_room_is_inert_until_on_dungeon_room_entered() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_001;
+    let ship_id: i64 = 1_020_000_001;
+    let ctx = make_ctx(sys_id, char_id);
+    let safe_did = find_non_archetype51_dungeon(&ctx.sde);
+    let mut inst = sample_instance(965_001, safe_did, sys_id, char_id, false);
+    let beacon_pos = [inst.rooms[0].position[0] + 500.0, 0.0, 0.0];
+    inst.rooms.truncate(1);
+    inst.rooms[0].npc_groups.truncate(1);
+    inst.rooms[0].objects.push(DungeonRuntimeObject {
+        ball_id: 0, type_id: 23, name: "Beacon".into(), position: beacon_pos,
+        radius: 150.0, is_container: false, loot_items: Vec::new(), spawned: false, ..Default::default()
+    });
+    inst.rooms[0].triggers = vec![
+        DungeonTrigger {
+            trigger_id: 1,
+            kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: Some(1), anchor_pos: beacon_pos, radius_m: 5_000.0 },
+            action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 111 },
+            fired: false,
+        },
+        DungeonTrigger {
+            trigger_id: 2,
+            kind: DungeonTriggerKind::OnLoot { container_ball_id: None, target_object_index: Some(0), item_type_id: Some(34) },
+            action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 222 },
+            fired: false,
+        },
+        DungeonTrigger {
+            trigger_id: 3,
+            kind: DungeonTriggerKind::OnKill { target_npc_group: Some(1), target_ball_id: None },
+            action: DungeonTriggerAction::UnlockGate,
+            fired: false,
+        },
+    ];
+    with_dungeon_runtime_store(&ctx, |store| { store.instances.insert(965_001, inst); });
+
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, 965_001, 0).await.unwrap();
+    let _ = spawn_test_ship_ball(&ctx, sys_id, ship_id, beacon_pos).await;
+
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    on_dungeon_item_looted(&ctx, char_id, Some(sys_id), mat.object_ids[0], 34).await;
+    on_dungeon_npc_killed(&ctx, sys_id, mat.npc_ids[0], char_id).await;
+    read_dungeon_runtime_store(&ctx, |store| {
+        let r0 = &store.instances[&965_001].rooms[0];
+        assert!(r0.spawned && !r0.entered && r0.entered_unix.is_none() && r0.gate_locked && !r0.cleared);
+        assert_eq!(r0.npc_groups[0].npc_ball_ids, mat.npc_ids);
+        assert_eq!(r0.npc_groups[0].kills_recorded, 0);
+        assert!(r0.triggers.iter().all(|t| !t.fired));
+    });
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    on_dungeon_room_entered(&ctx, sys_id, 965_001, 0, char_id).await;
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    on_dungeon_item_looted(&ctx, char_id, Some(sys_id), mat.object_ids[0], 34).await;
+    on_dungeon_npc_killed(&ctx, sys_id, mat.npc_ids[0], char_id).await;
+    read_dungeon_runtime_store(&ctx, |store| {
+        let rt = &store.instances[&965_001];
+        let r0 = &rt.rooms[0];
+        assert!(r0.entered && r0.entered_unix.is_some() && !r0.gate_locked && r0.cleared);
+        assert_eq!(rt.last_actor_char_id, Some(char_id));
+        assert_eq!(r0.npc_groups[0].kills_recorded, 1);
+        assert!(r0.triggers.iter().all(|t| t.fired));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dungeon_finished_instances_are_inert_across_all_lifecycle_and_rpc_helpers() {
+    use crate::services::pve_dungeon_runtime_rpc::{
+        check_deadspace_mwd_disallowed, check_warp_target_blocked_by_gated_dungeon_room,
+        is_ship_in_mwd_disallowed_dungeon_pocket,
+    };
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use glam::DVec3;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_002;
+    let ship_id: i64 = 1_020_000_001;
+    let ctx = make_ctx(sys_id, char_id);
+    let safe_did = find_non_archetype51_dungeon(&ctx.sde);
+    let (r1_pos, r2_pos) = ([12_000_000.0, 0.0, 0.0], [13_000_000.0, 0.0, 0.0]);
+    let (gate_id, npc_id, cont_id) = (77_900_001_i64, 77_900_002_i64, 77_900_003_i64);
+    let sys_handle = spawn_test_ship_ball(&ctx, sys_id, ship_id, r1_pos).await;
+    let mut session = SessionState::new(902);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    for (idx, (completed, failed, despawned)) in
+        [(true, false, false), (false, true, false), (false, false, true)].into_iter().enumerate()
+    {
+        let inst_id = 966_001 + (idx as i64);
+        let inst = DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: safe_did, dungeon_name: "Finished".into(),
+            category: "Deadspace".into(), archetype: "Deadspace".into(), solar_system_id: sys_id,
+            owner_char_id: char_id, base_position: r1_pos, disallow_mwd: true,
+            current_room_index: 1, completed, failed, despawned,
+            rooms: vec![
+                DungeonRuntimeRoom {
+                    room_index: 1, room_id: 9661, room_name: "R1".into(), position: r1_pos,
+                    gate_destination_pos: r1_pos, gated: true, disallow_mwd: Some(true),
+                    gate_ball_id: Some(gate_id), spawned: true, entered: true,
+                    objects: vec![DungeonRuntimeObject {
+                        ball_id: cont_id, type_id: DEFAULT_CONTAINER_TYPE_ID, name: "Cont".into(),
+                        position: r1_pos, radius: 100.0, is_container: true,
+                        loot_items: vec![(34, 10)], spawned: true, ..Default::default()
+                    }],
+                    npc_groups: vec![DungeonNpcGroup {
+                        group_id: 1, wave: 1, npc_specs: vec![(48_090, 1)],
+                        npc_ball_ids: vec![npc_id], spawn_immediately: true, spawned: true,
+                        ..Default::default()
+                    }],
+                    triggers: vec![
+                        DungeonTrigger { trigger_id: 1, kind: DungeonTriggerKind::OnKill { target_npc_group: Some(1), target_ball_id: None }, action: DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 1 }, fired: false },
+                        DungeonTrigger { trigger_id: 2, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: Some(0), anchor_pos: r1_pos, radius_m: 5_000.0 }, action: DungeonTriggerAction::UnlockGate, fired: false },
+                        DungeonTrigger { trigger_id: 3, kind: DungeonTriggerKind::OnLoot { container_ball_id: Some(cont_id), target_object_index: Some(0), item_type_id: Some(34) }, action: DungeonTriggerAction::UnlockGate, fired: false },
+                    ],
+                    ..Default::default()
+                },
+                DungeonRuntimeRoom {
+                    room_index: 2, room_id: 9662, room_name: "R2".into(), position: r2_pos,
+                    gate_destination_pos: r2_pos, gated: true, disallow_mwd: Some(true), ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(instance_is_finished(&inst));
+        with_dungeon_runtime_store(&ctx, |store| { store.instances.clear(); store.instances.insert(inst_id, inst); });
+
+        on_dungeon_npc_killed(&ctx, sys_id, npc_id, char_id).await;
+        assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+        on_dungeon_item_looted(&ctx, char_id, Some(sys_id), cont_id, 34).await;
+        on_dungeon_room_entered(&ctx, sys_id, inst_id, 1, char_id).await;
+        assert!(materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 1).await.is_err());
+        assert!(try_activate_dungeon_runtime_gate(&ctx, &mut session, sys_id, &[PyRep::Integer(gate_id)]).await.is_none());
+        assert!(check_deadspace_mwd_allowed(&ctx, sys_id, r1_pos).is_ok());
+        assert!(!is_ship_in_mwd_disallowed_dungeon_pocket(&ctx, sys_id, DVec3::from_array(r1_pos)));
+        assert!(check_deadspace_mwd_disallowed(&ctx, &sys_handle, sys_id, ship_id).await.is_ok());
+        assert!(check_deadspace_warp_allowed(&ctx, sys_id, [0.0; 3], [0.0; 3], r1_pos).is_ok());
+        assert!(check_warp_target_blocked_by_gated_dungeon_room(&ctx, sys_id, DVec3::from_array(r1_pos), Some(gate_id)).is_ok());
+        assert_eq!(resolve_deadspace_or_escalation_warp_target(&ctx, char_id, sys_id, "dungeon", inst_id, None).unwrap(), None);
+        assert_eq!(find_active_dungeon_id_at_position(&ctx, sys_id, r1_pos), None);
+        read_dungeon_runtime_store(&ctx, |store| {
+            let rt = &store.instances[&inst_id];
+            assert!(!rt.rooms[1].entered && !rt.rooms[1].spawned);
+            assert_eq!(rt.rooms[0].npc_groups[0].npc_ball_ids, vec![npc_id]);
+            assert!(rt.rooms[0].triggers.iter().all(|t| !t.fired));
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dungeon_sqlite_container_position_persistence_and_restart_reconciliation() {
+    use glam::DVec3;
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_003;
+    let sde = shared_sde();
+    let tmp_db = std::env::temp_dir().join(format!(
+        "evomu_t2a1_reconcile_{}_{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp_db);
+
+    let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+    repo1.provision_gm_account("sqlite_pilot", "pw", char_id, "SqlitePilot");
+    let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+    ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_100_000)));
+    let safe_did = find_non_archetype51_dungeon(&sde);
+    let mut inst = sample_instance(968_001, safe_did, sys_id, char_id, false);
+    let expected_cont_pos = inst.rooms[0].objects[0].position;
+    inst.entry_gate_pos = Some([inst.base_position[0] - 5_000.0, 0.0, 0.0]);
+    with_dungeon_runtime_store(&ctx1, |store| { store.instances.insert(968_001, inst); });
+    let mat = materialize_dungeon_room_entities(&ctx1, sys_id, 968_001, 0).await.unwrap();
+    let (cont_id, r0_gate_id, npc_id) = (mat.object_ids[0], mat.next_gate_id.unwrap(), mat.npc_ids[0]);
+    let (entry_gate_id, items_len_before) = ctx1.db.with_snapshot(|snap| {
+        assert_eq!(snap.item_positions.get(&cont_id).copied(), Some(expected_cont_pos));
+        (snap.dungeon_runtime.instances[&968_001].entry_gate_ball_id.unwrap(), snap.items.len())
+    });
+    drop(ctx1);
+    drop(repo1);
+
+    let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+    let ctx2 = ServerContext::with_sde_and_repository(sde.clone(), repo2.clone());
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_100_050)));
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx2, sys_id, 968_001).await, 4);
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx2, sys_id, 968_001).await, 0);
+    let sys2 = ctx2.systems.get_or_spawn(sys_id);
+    assert!(sys2.get_ball_snapshot(entry_gate_id).await.unwrap().is_some());
+    assert!(sys2.get_ball_snapshot(r0_gate_id).await.unwrap().is_some());
+    assert!(sys2.get_ball_snapshot(npc_id).await.unwrap().is_some());
+    let (_, cont_ball) = sys2.get_ball_snapshot(cont_id).await.unwrap().expect("container restored");
+    assert!(cont_ball.position.distance(DVec3::from_array(expected_cont_pos)) < 1.0);
+    ctx2.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.len(), items_len_before);
+        assert_eq!(snap.item_positions.get(&cont_id).copied(), Some(expected_cont_pos));
+    });
+
+    complete_dungeon_instance_core(&ctx2.systems, &ctx2.db, Some(&ctx2.pending_notifications), Some(&ctx2.notify_tx), sys_id, 968_001, char_id, false).await;
+    drop(ctx2);
+    drop(repo2);
+
+    let repo3 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo3"));
+    let ctx3 = ServerContext::with_sde_and_repository(sde, repo3.clone());
+    ctx3.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_100_100)));
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx3, sys_id, 968_001).await, 1);
+    let sys3 = ctx3.systems.get_or_spawn(sys_id);
+    assert!(sys3.get_ball_snapshot(cont_id).await.unwrap().is_some());
+    assert!(sys3.get_ball_snapshot(r0_gate_id).await.unwrap().is_none());
+    assert!(sys3.get_ball_snapshot(npc_id).await.unwrap().is_none());
+    drop(ctx3);
+    drop(repo3);
+    let _ = std::fs::remove_file(&tmp_db);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dungeon_completion_loot_grace_and_stale_retention_cleanup() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_004;
+    let ctx = make_ctx(sys_id, char_id);
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_775_100_000));
+    ctx.set_clock(clock.clone());
+    let safe_did = find_non_archetype51_dungeon(&ctx.sde);
+    with_dungeon_runtime_store(&ctx, |store| { store.instances.insert(969_001, sample_instance(969_001, safe_did, sys_id, char_id, false)); });
+
+    let r0_mat = materialize_dungeon_room_entities(&ctx, sys_id, 969_001, 0).await.unwrap();
+    let cont_id = r0_mat.object_ids[0];
+    on_dungeon_room_entered(&ctx, sys_id, 969_001, 0, char_id).await;
+    let r1_mat = materialize_dungeon_room_entities(&ctx, sys_id, 969_001, 1).await.unwrap();
+    on_dungeon_room_entered(&ctx, sys_id, 969_001, 1, char_id).await;
+
+    on_dungeon_npc_killed(&ctx, sys_id, r1_mat.npc_ids[0], char_id).await;
+    read_dungeon_runtime_store(&ctx, |store| {
+        let rt = &store.instances[&969_001];
+        assert!(rt.completed && !rt.despawned);
+        assert_eq!(rt.loot_grace_until_unix, Some(1_775_100_000 + DUNGEON_COMPLETION_LOOT_GRACE_SECS));
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle.get_ball_snapshot(cont_id).await.unwrap().is_some());
+
+    clock.advance_secs(DUNGEON_COMPLETION_LOOT_GRACE_SECS - 1);
+    assert_eq!(expire_dungeon_loot_grace(&ctx, sys_id).await, 0);
+    assert!(sys_handle.get_ball_snapshot(cont_id).await.unwrap().is_some());
+
+    clock.advance_secs(2);
+    assert_eq!(expire_dungeon_loot_grace(&ctx, sys_id).await, 1);
+    assert!(sys_handle.get_ball_snapshot(cont_id).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        let rt = &snap.dungeon_runtime.instances[&969_001];
+        assert!(rt.despawned && rt.loot_grace_until_unix.is_none());
+        assert!(!snap.items.contains_key(&cont_id) && !snap.item_positions.contains_key(&cont_id));
+    });
+
+    clock.advance_secs(COMPLETED_INSTANCE_RETENTION_SECS + 1);
+    with_dungeon_runtime_store(&ctx, |store| {
+        prune_stale_despawned_instances(store, clock.now_unix_secs());
+        assert!(!store.instances.contains_key(&969_001));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_dungeon_instance_enforces_bounded_parser_limits_and_finite_coords() {
+    use eve_proto::PyRep;
+    use std::collections::HashMap;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_005;
+    let ctx = make_ctx(sys_id, char_id);
+    let safe_did = find_non_archetype51_dungeon(&ctx.sde);
+    let pair = |a: i64, b: i64| PyRep::List(vec![PyRep::Integer(a), PyRep::Integer(b)]);
+
+    let room0 = PyRep::keyval([
+        ("roomName", PyRep::String("Sanitized Room 0".into())),
+        ("objects", PyRep::List(vec![PyRep::keyval([
+            ("typeID", PyRep::Integer(23)), ("isContainer", PyRep::Bool(true)),
+            ("offset", PyRep::List(vec![PyRep::Real(f64::NAN), PyRep::Real(f64::INFINITY), PyRep::Real(1.0e20)])),
+            ("radius", PyRep::Real(f64::NAN)),
+            ("lootItems", PyRep::List(vec![pair(34, 0), pair(34, -5), pair(34, 7)])),
+        ])])),
+        ("npcGroups", PyRep::List(vec![PyRep::keyval([("npcs", PyRep::List(vec![pair(48_090, 1)]))])])),
+    ]);
+    let heavy_loot = PyRep::List((0..70).map(|_| pair(34, 1)).collect());
+    let big_objs = PyRep::List((0..70).map(|i| PyRep::keyval([
+        ("typeID", PyRep::Integer(23)), ("name", PyRep::String(format!("O{i}"))), ("lootItems", heavy_loot.clone()),
+    ])).collect());
+    let big_npcs = PyRep::List((0..40).map(|_| pair(48_090, 9_999)).collect());
+    let room1_heavy = PyRep::keyval([
+        ("roomName", PyRep::String("Bounded Room 1".into())),
+        ("objects", big_objs),
+        ("npcGroups", PyRep::List((0..40).map(|_| PyRep::keyval([("npcs", big_npcs.clone())])).collect())),
+        ("triggers", PyRep::List((0..70).map(|_| PyRep::keyval([("kind", PyRep::String("kill".into())), ("action", PyRep::String("UnlockGate".into()))])).collect())),
+        ("gateLinks", PyRep::List((0..20).map(|i| PyRep::keyval([("targetRoomIndex", PyRep::Integer(i + 1))])).collect())),
+    ]);
+    let mut rooms_vec = vec![room0, room1_heavy];
+    rooms_vec.extend((2..20).map(|idx| PyRep::keyval([("roomName", PyRep::String(format!("Extra {idx}")))])));
+    let mut kwargs = HashMap::from([
+        ("solarSystemID".into(), PyRep::Integer(i64::from(sys_id))),
+        ("dungeonID".into(), PyRep::Integer(i64::from(safe_did))),
+        ("hasEntryGate".into(), PyRep::Bool(false)),
+        ("position".into(), PyRep::List(vec![PyRep::Real(f64::NAN), PyRep::Real(f64::INFINITY), PyRep::Real(0.0)])),
+        ("rooms".into(), PyRep::List(rooms_vec)),
+    ]);
+    kwargs.shrink_to_fit();
+
+    let spawned = spawn_dungeon_instance(&ctx, char_id, Some(sys_id), &[], &kwargs).await.unwrap();
+    let inst_id = spawned.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    read_dungeon_runtime_store(&ctx, |store| {
+        let rt = &store.instances[&inst_id];
+        assert_eq!(rt.base_position, [0.0, 0.0, 0.0]);
+        assert_eq!(rt.rooms.len(), 16);
+        let obj0 = &rt.rooms[0].objects[0];
+        assert!(obj0.position.iter().all(|v| v.is_finite()));
+        assert_eq!(obj0.position[2], 1.0e15);
+        assert_eq!(obj0.radius, 300.0);
+        assert_eq!(obj0.loot_items, vec![(34, 7)]);
+        let r1 = &rt.rooms[1];
+        assert_eq!((r1.objects.len(), r1.objects[0].loot_items.len(), r1.npc_groups.len(), r1.npc_groups[0].npc_specs.len(), r1.triggers.len(), r1.gate_links.len()), (64, 64, 32, 32, 64, 16));
+        assert_eq!(r1.npc_groups[0].npc_specs[0], (48_090, 500));
+    });
 }

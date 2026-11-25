@@ -266,6 +266,8 @@ async fn custom_dungeon_spawn_gates_approach_loot_and_mwd_warp_rules() {
     let r2_cont_id = with_dungeon_runtime_store(&ctx, |store| {
         store.instances.get(&inst_id).unwrap().rooms[1].objects[0].ball_id
     });
+    ctx.db
+        .with_mut_snapshot(|snap| snap.items.retain(|_, item| item.location_id != r2_cont_id));
     on_dungeon_item_looted(&ctx, char_id, Some(sys_id), r2_cont_id, 34).await;
     with_dungeon_runtime_store(&ctx, |store| {
         let inst = store.instances.get(&inst_id).unwrap();
@@ -391,6 +393,7 @@ async fn on_dungeon_approach_is_read_pure_until_trigger_fires_and_allocates_mono
         .dict_get("instanceID")
         .and_then(|v| v.as_i64())
         .expect("instanceID 1");
+    on_dungeon_room_entered(&ctx, sys_id, inst_id_1, 0, char_id).await;
 
     // PVE-212: ship at DVec3::ZERO is 102 km from beacon (radius 5 km) -> zero DB commits.
     let commits_out_of_range = ctx.db.tx_commit_count();

@@ -213,6 +213,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                     gate_locked: false,
                     spawned: true,
                     cleared: false,
+                    entered: true,
                     objects: vec![DungeonRuntimeObject {
                         ball_id: 900_123,
                         type_id: 29624,
@@ -222,6 +223,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                         is_container: false,
                         loot_items: vec![],
                         spawned: true,
+                        ..Default::default()
                     }],
                     npc_groups: vec![],
                     triggers: vec![
@@ -271,7 +273,9 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                             fired: false,
                         },
                     ],
+                    ..Default::default()
                 }],
+                ..Default::default()
             },
         );
     });

@@ -1049,6 +1049,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                             is_container: true,
                             loot_items: Vec::new(),
                             spawned: false,
+                            ..Default::default()
                         });
                     }
                     ResolvedSpawn::Skipped => {
@@ -1093,6 +1094,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                 spawn_immediately,
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             });
             next_group_id = next_group_id.saturating_add(1);
 
@@ -1161,6 +1163,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                 is_container: false,
                 loot_items: Vec::new(),
                 spawned: false,
+                ..Default::default()
             });
         }
 
@@ -1205,6 +1208,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
             triggers,
             spawned: false,
             cleared: false,
+            ..Default::default()
         });
     }
 

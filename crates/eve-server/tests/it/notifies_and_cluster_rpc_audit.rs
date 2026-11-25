@@ -233,6 +233,7 @@ async fn test_dungeon_and_space_notifications() {
                     gate_locked: false,
                     spawned: true,
                     cleared: false,
+                    entered: true,
                     objects: vec![DungeonRuntimeObject {
                         ball_id: 900_777,
                         type_id: 29624,
@@ -242,6 +243,7 @@ async fn test_dungeon_and_space_notifications() {
                         is_container: false,
                         loot_items: vec![],
                         spawned: true,
+                        ..Default::default()
                     }],
                     npc_groups: vec![],
                     triggers: vec![
@@ -291,7 +293,9 @@ async fn test_dungeon_and_space_notifications() {
                             fired: false,
                         },
                     ],
+                    ..Default::default()
                 }],
+                ..Default::default()
             },
         );
     });

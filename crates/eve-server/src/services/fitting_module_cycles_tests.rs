@@ -3912,6 +3912,7 @@ async fn activate_online_cloak_targetless_weapon_and_deadspace_mwd_guards_zero_m
                     triggers: Vec::new(),
                     spawned: true,
                     cleared: false,
+                    ..Default::default()
                 }],
                 completed: false,
                 despawned: false,
@@ -3919,6 +3920,7 @@ async fn activate_online_cloak_targetless_weapon_and_deadspace_mwd_guards_zero_m
                 last_completed_task_id: None,
                 completed_task_ids: Vec::new(),
                 created_unix: ctx.now_unix(),
+                ..Default::default()
             },
         );
     });

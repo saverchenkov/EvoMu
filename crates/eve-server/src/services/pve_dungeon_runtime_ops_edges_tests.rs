@@ -334,6 +334,7 @@ fn find_active_dungeon_id_at_position_covers_entry_room_filters_and_exploration_
                 last_completed_task_id: None,
                 completed_task_ids: vec![],
                 created_unix: 1,
+                ..Default::default()
             },
         );
         // Active instance matching entry_gate_pos & room_pos
@@ -368,6 +369,7 @@ fn find_active_dungeon_id_at_position_covers_entry_room_filters_and_exploration_
                     triggers: vec![],
                     spawned: true,
                     cleared: false,
+                    ..Default::default()
                 }],
                 completed: false,
                 despawned: false,
@@ -375,6 +377,7 @@ fn find_active_dungeon_id_at_position_covers_entry_room_filters_and_exploration_
                 last_completed_task_id: None,
                 completed_task_ids: vec![],
                 created_unix: 1,
+                ..Default::default()
             },
         );
     });

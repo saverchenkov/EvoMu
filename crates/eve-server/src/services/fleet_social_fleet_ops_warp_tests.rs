@@ -1468,6 +1468,7 @@ async fn fleet_warp_runs_hooks_dungeon_exit_and_warp_bubble_interdiction() {
                     triggers: Vec::new(),
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 }],
                 completed: false,
                 despawned: false,
@@ -1475,6 +1476,7 @@ async fn fleet_warp_runs_hooks_dungeon_exit_and_warp_bubble_interdiction() {
                 last_completed_task_id: None,
                 completed_task_ids: Vec::new(),
                 created_unix: now,
+                ..Default::default()
             },
         );
     });

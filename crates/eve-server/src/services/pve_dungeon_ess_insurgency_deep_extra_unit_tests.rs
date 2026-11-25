@@ -267,6 +267,7 @@ async fn pve_dungeon_runtime_and_rpc_pocket_guards_triggers_and_despawn() {
                             is_container: true,
                             loot_items: vec![(34, 100)],
                             spawned: true,
+                            ..Default::default()
                         }],
                         npc_groups: vec![DungeonNpcGroup {
                             group_id: 1,
@@ -276,6 +277,7 @@ async fn pve_dungeon_runtime_and_rpc_pocket_guards_triggers_and_despawn() {
                             spawn_immediately: true,
                             spawned: true,
                             cleared: false,
+                            ..Default::default()
                         }],
                         triggers: vec![DungeonTrigger {
                             trigger_id: 1,
@@ -288,6 +290,7 @@ async fn pve_dungeon_runtime_and_rpc_pocket_guards_triggers_and_despawn() {
                         }],
                         spawned: true,
                         cleared: false,
+                        ..Default::default()
                     },
                     DungeonRuntimeRoom {
                         room_index: 1, room_id: 2, room_name: "Final Room".into(),
@@ -295,6 +298,7 @@ async fn pve_dungeon_runtime_and_rpc_pocket_guards_triggers_and_despawn() {
                         disallow_mwd: Some(false), gate_ball_id: None, gate_locked: false,
                         objects: Vec::new(), npc_groups: Vec::new(), triggers: Vec::new(),
                         spawned: true, cleared: true,
+                        ..Default::default()
                     },
                 ],
                 completed: false,
@@ -303,6 +307,7 @@ async fn pve_dungeon_runtime_and_rpc_pocket_guards_triggers_and_despawn() {
                 last_completed_task_id: None,
                 completed_task_ids: Vec::new(),
                 created_unix: base,
+                ..Default::default()
             },
         );
     });

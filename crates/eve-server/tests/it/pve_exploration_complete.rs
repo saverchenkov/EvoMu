@@ -84,6 +84,12 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
 
     // 1. Verify regional pirate faction anomalies across 4 empires
     for (sys, expected_kw) in [(30_000_142_u32, "Guristas"), (30_002_187, "Blood"), (30_002_659, "Serpentis"), (30_002_510, "Angel")] {
+        if sys != 30_000_142 {
+            // PVE-081: remote unseeded systems must return empty read-only without fabricating fake sites.
+            let unseeded_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[PyRep::Integer(sys as i64)], &kw, None).await.expect("GetCombatAnomalyInstances unseeded remote");
+            assert!(matches!(unseeded_rep, PyRep::List(ref l) if l.is_empty()), "Unseeded remote system {sys} must return empty anomalies");
+            eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, sys).await;
+        }
         let rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[PyRep::Integer(sys as i64)], &kw, None).await.expect("GetCombatAnomalyInstances");
         let PyRep::List(list) = &rep else { panic!("Expected List") };
         assert!(!list.is_empty(), "Must spawn anomalies for system {sys}");
@@ -92,11 +98,13 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
     }
 
     // 2. True-sec combat anomaly tiers: High-Sec (Hideaway), Low-Sec (Vigil/Haven), Null-Sec (Sanctum)
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, 30_002_813).await;
     let ls_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[PyRep::Integer(30_002_813)], &kw, None).await.expect("Low-sec combat anomalies");
     let PyRep::List(ls_list) = &ls_rep else { panic!("Expected List") };
     let ls_names: Vec<&str> = ls_list.iter().filter_map(|x| x.dict_get("dungeonName").and_then(|v| v.as_str())).collect();
     assert!(ls_names.iter().any(|n| n.contains("Vigil") || n.contains("Haven")), "Low-sec must spawn Vigil/Haven: {ls_names:?}");
 
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, 30_002_904).await;
     let ns_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[PyRep::Integer(30_002_904)], &kw, None).await.expect("Null-sec combat anomalies");
     let PyRep::List(ns_list) = &ns_rep else { panic!("Expected List") };
     let ns_names: Vec<&str> = ns_list.iter().filter_map(|x| x.dict_get("dungeonName").and_then(|v| v.as_str())).collect();

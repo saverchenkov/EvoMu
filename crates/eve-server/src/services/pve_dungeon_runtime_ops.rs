@@ -91,7 +91,7 @@ pub(super) fn find_active_dungeon_id_at_position(
 ) -> Option<u32> {
     let runtime_did = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
-            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                 return None;
             }
             let near_entry = inst
