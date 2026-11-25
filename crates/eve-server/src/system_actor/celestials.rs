@@ -1133,6 +1133,8 @@ impl SystemHandle {
                         scoop_claimed_drones,
                         active_drones_checkpoint_dirty,
                         active_drones_checkpoint_seq,
+                        active_drones_needs_sqlite_hydration,
+                        active_drones_removed_pre_hydration,
                         db_opt,
                         sde_opt,
                         ..
@@ -1153,6 +1155,9 @@ impl SystemHandle {
                     active_drone_miners.remove(&ball_id);
                     drone_next_ready_unix.remove(&ball_id);
                     scoop_claimed_drones.remove(&ball_id);
+                    if *active_drones_needs_sqlite_hydration && ball_id > 0 {
+                        active_drones_removed_pre_hydration.insert(ball_id);
+                    }
                     if active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
                         *active_drones_checkpoint_dirty = true;
                         *active_drones_checkpoint_seq =

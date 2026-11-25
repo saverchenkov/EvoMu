@@ -926,6 +926,8 @@ pub(crate) struct SystemActorState {
     pub(crate) scoop_claimed_drones: HashMap<BallId, Option<super::PendingScoopAbandon>>,
     pub(crate) active_drones_checkpoint_dirty: bool,
     pub(crate) active_drones_checkpoint_seq: u64,
+    pub(crate) active_drones_needs_sqlite_hydration: bool,
+    pub(crate) active_drones_removed_pre_hydration: std::collections::HashSet<BallId>,
     pub(crate) active_drones_flush_mutex: Arc<std::sync::Mutex<()>>,
 }
 
