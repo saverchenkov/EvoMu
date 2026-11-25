@@ -519,6 +519,7 @@ fn step_ext_deployables_in_ball_ops(
     mechanic_rng: &crate::rng::MechanicRng,
     now_unix: u64,
 ) -> Result<(), String> {
+    let next_pu_seq = ctx.actor_st.next_post_unlock_seq.saturating_add(1);
     crate::services::mobile_deployables_ext::step_ext_deployables_in_actor_collecting(
         ctx.ballpark,
         Some(&mut ctx.actor_st.active_module_cycles),
@@ -527,7 +528,7 @@ fn step_ext_deployables_in_ball_ops(
         Some(mechanic_rng),
         ctx.solar_system_id,
         now_unix,
-        Some(&mut ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at),
+        Some((&mut ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at, next_pu_seq)),
         Some(&mut ctx.actor_st.post_unlock_shadows.observatory_pings_done),
         ctx.post_unlock_ops,
     );

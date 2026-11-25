@@ -2247,6 +2247,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             .map(|db| db.clock().now_unix_secs())
             .unwrap_or(0);
         let _ = &deact_guard;
+        let next_pu_seq = exec_ctx.actor_st.next_post_unlock_seq.saturating_add(1);
         crate::services::mobile_deployables::step_mobile_deployables_in_actor_collecting(
             exec_ctx.ballpark,
             &mut exec_ctx.actor_st.active_module_cycles,
@@ -2257,7 +2258,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             exec_ctx.solar_system_id,
             dt_sim,
             step_now_unix,
-            Some(&mut exec_ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at),
+            Some((&mut exec_ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at, next_pu_seq)),
             Some(&mut exec_ctx.actor_st.post_unlock_shadows.observatory_pings_done),
             exec_ctx.post_unlock_ops,
         );

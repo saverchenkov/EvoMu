@@ -825,8 +825,8 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(
-        db_opt.as_deref(),
-        db_opt.as_ref(),
+        db_opt.map(|d| &**d),
+        db_opt,
         sde_opt,
         ops,
         Some(ballpark),
@@ -844,6 +844,7 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     destroyed
 }
 
+#[cfg(test)]
 pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick(
     ballpark: &mut eve_destiny::Ballpark,
     sde_opt: Option<&eve_sde::SdeRegistry>,
@@ -867,8 +868,8 @@ pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick(
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(
-        db_opt.as_deref(),
-        db_opt.as_ref(),
+        db_opt.map(|d| &**d),
+        db_opt,
         sde_opt,
         ops,
         Some(ballpark),

@@ -16,9 +16,9 @@ use crate::services::insurgency_services::{
     PIRATE_STRONGHOLD_ANGEL_TYPE, PIRATE_STRONGHOLD_GURISTAS_TYPE,
     PIRATE_STRONGHOLD_WRECK_TYPE,
 };
-use crate::system_actor::post_unlock::{
-    execute_post_unlock_ops_for_standalone, PostUnlockIntent, PostUnlockOps,
-};
+#[cfg(test)]
+use crate::system_actor::post_unlock::execute_post_unlock_ops_for_standalone;
+use crate::system_actor::post_unlock::{PostUnlockIntent, PostUnlockOps};
 use eve_db::WorldStateSnapshot;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -557,6 +557,7 @@ pub(crate) fn apply_fob_ball_damage_in_snap(
 }
 
 /// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
+#[cfg(test)]
 pub(crate) fn handle_fob_ball_damage_in_actor(
     db_opt: Option<&eve_db::WorldRepository>,
     solar_system_id: u32,

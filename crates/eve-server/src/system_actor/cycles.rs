@@ -1970,7 +1970,7 @@ impl SystemHandle {
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
             warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
-            post_unlock_shadows, ..
+            next_post_unlock_seq, post_unlock_shadows, ..
         } = &mut *st;
         let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
         let tidi = self.tidi_factor();
@@ -2080,7 +2080,7 @@ impl SystemHandle {
         crate::services::mobile_deployables::step_mobile_deployables_in_actor_collecting(
             &mut bp, active_module_cycles, rng_ref, sde_opt.as_deref(), db_opt.as_ref(),
             mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
-            Some(&mut post_unlock_shadows.mmju_spool_fired_at),
+            Some((&mut post_unlock_shadows.mmju_spool_fired_at, next_post_unlock_seq.saturating_add(1))),
             Some(&mut post_unlock_shadows.observatory_pings_done), &mut post_unlock_ops,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();

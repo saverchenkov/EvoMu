@@ -754,7 +754,7 @@ pub(crate) fn step_ext_deployables_in_actor_collecting(
     rng_opt: Option<&MechanicRng>,
     solar_system_id: u32,
     now_unix: u64,
-    mmju_shadow: Option<&mut std::collections::HashMap<i64, u64>>,
+    mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
     obs_ping_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
     post_unlock: &mut PostUnlockOps,
 ) {
@@ -790,33 +790,42 @@ fn step_mmju_spools_in_actor_collecting(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     solar_system_id: u32,
     now_unix: u64,
-    mut mmju_shadow: Option<&mut std::collections::HashMap<i64, u64>>,
+    mut mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) {
-    let completed: Vec<MmjuSpoolEntry> = db.with_snapshot(|snap| {
+    let (committed_seq, completed): (u64, Vec<MmjuSpoolEntry>) = db.with_snapshot(|snap| {
+        let cseq = snap
+            .sp6_lifecycle
+            .post_unlock_committed_seq
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(0);
         if snap.deployable_state.mmju_spools.is_empty() {
-            return Vec::new();
+            return (cseq, Vec::new());
         }
-        read_deployable_state_snap(snap)
+        let due = read_deployable_state_snap(snap)
             .mmju_spools
             .values()
             .filter(|e| {
-                e.solar_system_id == solar_system_id
-                    && now_unix >= e.complete_at_unix
-                    && mmju_shadow
-                        .as_deref()
-                        .and_then(|m| m.get(&e.ship_id).copied())
-                        != Some(e.complete_at_unix)
+                let pending_same = mmju_shadow
+                    .as_ref()
+                    .and_then(|(m, _)| m.get(&e.ship_id).copied())
+                    .is_some_and(|(at, seq)| at == e.complete_at_unix && seq > cseq);
+                e.solar_system_id == solar_system_id && now_unix >= e.complete_at_unix && !pending_same
             })
             .cloned()
-            .collect()
+            .collect();
+        (cseq, due)
     });
+    if let Some((m, _)) = mmju_shadow.as_mut() {
+        m.retain(|_, (_, seq)| *seq > committed_seq);
+    }
     if completed.is_empty() {
         return;
     }
-    if let Some(m) = mmju_shadow.as_deref_mut() {
+    if let Some((m, pending_seq)) = mmju_shadow.as_mut() {
         for e in &completed {
-            m.insert(e.ship_id, e.complete_at_unix);
+            m.insert(e.ship_id, (e.complete_at_unix, *pending_seq));
         }
     }
     let due_ship_ids: Vec<i64> = completed.iter().map(|e| e.ship_id).collect();

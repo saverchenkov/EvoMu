@@ -15,7 +15,7 @@ mod disruptors;
 pub(crate) use disruptors::*;
 mod missiles;
 pub(crate) use missiles::*;
-mod post_unlock;
+pub(crate) mod post_unlock;
 #[cfg(test)]
 mod post_unlock_test_shims;
 mod protection;
@@ -1992,7 +1992,7 @@ impl SystemRegistry {
                                                 target_ball_id,
                                             );
                                             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(
-                                                ballpark, db, solar_system_id, target_ball_id, &mut post_unlock_ops,
+                                                ballpark, db, solar_system_id, target_ball_id, &mut *post_unlock_ops,
                                             );
                                         }
                                     }

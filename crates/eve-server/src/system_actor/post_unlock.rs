@@ -1131,6 +1131,7 @@ pub(crate) fn execute_post_unlock_ops_for_standalone(
     );
 }
 
+#[cfg(test)]
 pub(crate) fn execute_post_unlock_ops_with_seq(
     db_opt: Option<&Arc<WorldRepository>>,
     sde_opt: Option<&Arc<SdeRegistry>>,
@@ -1235,7 +1236,13 @@ fn execute_post_unlock_ops_inner(
 
         for (sys_id, valid_entries, snap_written, written_out) in sqlite_checkpoints {
             let sqlite_written = if !valid_entries.is_empty() {
-                crate::sp6_lifecycle::persist_system_condition_checkpoints_sqlite(db, sys_id, &valid_entries)
+                db_arc_opt.map_or(0, |db_arc| {
+                    crate::sp6_lifecycle::persist_system_condition_checkpoints_sqlite(
+                        db_arc,
+                        sys_id,
+                        &valid_entries,
+                    )
+                })
             } else {
                 0
             };
@@ -1338,10 +1345,10 @@ fn execute_post_unlock_ops_inner(
                 }
             }
         }
-        if let Some(db) = db_opt {
+        if let Some(db_arc) = db_arc_opt {
             for pc in post_commit_arena {
                 crate::services::pvp_filament_arena::emit_proving_arena_post_commit(
-                    db,
+                    db_arc,
                     sde_opt,
                     None,
                     None,

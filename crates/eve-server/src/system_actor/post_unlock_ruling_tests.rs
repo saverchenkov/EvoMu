@@ -775,8 +775,7 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
         step_mobile_deployables_in_actor_collecting, GROUP_MOBILE_DEPOT,
     };
     use crate::services::mobile_deployables_ext::{
-        register_ext_deployable, step_ext_deployables_in_actor_collecting, GROUP_MOBILE_OBSERVATORY,
-        TYPE_MOBILE_OBSERVATORY,
+        step_ext_deployables_in_actor_collecting, GROUP_MOBILE_OBSERVATORY, TYPE_MOBILE_OBSERVATORY,
     };
     use crate::services::tactical_module_mechanics::{
         apply_overheat_rack_and_damage_on_cycle_collecting, step_rack_heat_per_tick_collecting,
@@ -813,6 +812,7 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(RACK_HEAT_ATTR_IDS[0], 0.99);
+        snap.items.get_mut(&mod_hi).unwrap().dynamic_attributes.insert(eve_sde::attr_ids::HP_STRUCT, 40.0);
         snap.items.insert(depot_id, make_item(depot_id, 33474, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
         snap.item_positions.insert(depot_id, [1_000.0, 0.0, 0.0]);
         snap.items.insert(loot_id, make_item(loot_id, 178, CHAR_ID, depot_id, InventoryFlag::Cargo, 5));
@@ -823,7 +823,7 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
         snap.module_active_states.insert(cloak_mod);
     });
     register_mobile_deployable(&ctx, depot_id, 33474, GROUP_MOBILE_DEPOT, CHAR_ID, SYS_ID, 0, DVec3::new(1_000.0, 0.0, 0.0));
-    register_ext_deployable(&ctx, obs_id, TYPE_MOBILE_OBSERVATORY, GROUP_MOBILE_OBSERVATORY, CHAR_ID, SYS_ID, 0, DVec3::new(2_000.0, 0.0, 0.0), 7_200);
+    register_mobile_deployable(&ctx, obs_id, TYPE_MOBILE_OBSERVATORY, GROUP_MOBILE_OBSERVATORY, CHAR_ID, SYS_ID, 0, DVec3::new(2_000.0, 0.0, 0.0));
     sys.spawn_ball_with_combat(make_ball(depot_id, 33474, DVec3::new(1_000.0, 0.0, 0.0)), make_combat_state(0.0, 0.0, 100.0, 0.0)).await.unwrap();
     let mut cloak_cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
     cloak_cs.is_cloaked = true;
@@ -836,8 +836,9 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
     let mut burned_out = false;
     let mut burned_others = Vec::new();
     {
-        let mut bp = sys.ballpark.write().unwrap();
-        let mut st = sys.actor_state.write().unwrap();
+        let mut bp_g = sys.ballpark.write().unwrap();
+        let mut st_g = sys.actor_state.write().unwrap();
+        let (bp, st) = (&mut *bp_g, &mut *st_g);
         let cyc = ActiveModuleCycle {
             ship_id,
             module_id: mod_hi,
@@ -845,22 +846,23 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
             owner_char_id: Some(CHAR_ID),
             rack_idx: 0,
             is_overloaded: true,
-            heat_damage_per_cycle: 10.0,
+            heat_damage_per_cycle: 20.0,
             ..Default::default()
         };
         st.active_module_cycles.push(cyc.clone());
         st.active_module_cycles.push(cloak_cyc(cloak_ship, cloak_mod, 5.0, 0.0, 1));
 
         step_rack_heat_per_tick_collecting(&mut st.ship_rack_heat, &st.active_module_cycles, &st.sde_opt, &st.db_opt, 1.0, &mut ops);
-        let rng = Some(Arc::clone(&ctx.mechanic_rng));
-        for _ in 0..8 {
+        let rng = Some(Arc::new(crate::rng::MechanicRng::seeded(7)));
+        for _ in 0..24 {
             apply_overheat_rack_and_damage_on_cycle_collecting(&cyc, &mut st.ship_rack_heat, &st.sde_opt, &st.db_opt, &rng, &mut burned_out, &mut burned_others, Some(&mut local_heat), &mut ops);
             if burned_out { break; }
         }
-        let dmg = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot_id, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), &mut bp, now + 100, &mut ops);
+        let dmg = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot_id, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), bp, now + 100, &mut ops);
         assert!(dmg.is_some_and(|(_, destroyed, _)| destroyed));
-        step_mobile_deployables_in_actor_collecting(&mut bp, &mut st.active_module_cycles, &ctx.mechanic_rng, Some(&ctx.sde), &st.db_opt, Some(&ctx.mechanic_rng), SYS_ID, 1.0, now + 5_000, Some(&mut st.post_unlock_shadows.mmju_spool_fired_at), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
-        step_ext_deployables_in_actor_collecting(&mut bp, Some(&mut st.active_module_cycles), &ctx.sde, &ctx.db, Some(&ctx.mechanic_rng), SYS_ID, now + 5_000, Some(&mut st.post_unlock_shadows.mmju_spool_fired_at), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
+        let next_seq = st.next_post_unlock_seq.saturating_add(1);
+        step_mobile_deployables_in_actor_collecting(bp, &mut st.active_module_cycles, &ctx.mechanic_rng, Some(&ctx.sde), st.db_opt.as_ref(), Some(&ctx.mechanic_rng), SYS_ID, 1.0, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
+        step_ext_deployables_in_actor_collecting(bp, Some(&mut st.active_module_cycles), &ctx.sde, &ctx.db, Some(&ctx.mechanic_rng), SYS_ID, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
     }
     assert!(burned_out);
     assert_eq!(deact_calls.load(Ordering::SeqCst), 0, "DeactivationHook must not run under actor locks");
@@ -896,7 +898,7 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
         on_abyssal_room_npc_destroyed_in_ballpark_collecting, AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
     };
     use crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting;
-    use crate::services::pvp_filament_mgr::{save_pvp_store, PvpArenaMatchInstance, PvpFilamentStore};
+    use crate::services::pvp_filament_mgr::{load_pvp_store, save_pvp_store, PvpArenaMatchInstance, PvpFilamentStore};
     use eve_db::{PersistedInsurgencyCampaign, UpwellStructureRecord};
 
     let ctx = test_ctx();
@@ -911,12 +913,18 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
         snap.items.insert(ab_ship, make_item(ab_ship, 587, CHAR_ID, i64::from(abyss_sys), InventoryFlag::None, 1));
         snap.abyssal_state.pockets.insert(CHAR_ID, AbyssalPocketSession {
             pocket_id: 1, character_id: CHAR_ID, ship_id: ab_ship, origin_solar_system_id: SYS_ID,
-            filament_type_id: 47762, weather: AbyssalWeatherKind::Electrical, tier: 1,
-            started_at_sec: now, deadline_sec: now + 1200, current_room: 1,
-            grid_offset: [0.0; 3], fleet_ship_ids: vec![ab_ship], ship_room: [(ab_ship, 1)].into_iter().collect(),
-            max_ships: 1,
-            rooms: vec![AbyssalRoomRecord { room_index: 1, cleared: false, npc_ball_ids: vec![npc_id], gate_unlocked_at_sec: None }],
+            abyssal_solar_system_id: abyss_sys, origin_position: [0.0; 3], grid_offset: [0.0; 3],
+            filament_type_id: 47762, tier: 1, weather: AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 0.0, weather_bonus_pct: 0.0, npc_difficulty_mult: 1.0,
+            current_room: 1,
+            rooms: [
+                AbyssalRoomRecord { room_index: 1, dungeon_id: 1, dungeon_name: "r1".into(), npc_ball_ids: vec![npc_id], cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+                AbyssalRoomRecord { room_index: 2, dungeon_id: 1, dungeon_name: "r2".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+                AbyssalRoomRecord { room_index: 3, dungeon_id: 1, dungeon_name: "r3".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+            ],
+            started_at_sec: now, collapse_at_sec: now + 1200,
             completed: false, collapsed_destroyed: false, trace_ball_id: 0,
+            fleet_ship_ids: vec![ab_ship], ship_room: [(ab_ship, 1)].into_iter().collect(), max_ships: 1,
         });
         snap.items.insert(arena_ship, make_item(arena_ship, 587, arena_char, i64::from(arena_sys), InventoryFlag::None, 1));
         if let Some(ch) = snap.characters.get_mut(&arena_char) {
@@ -924,8 +932,9 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
         }
         let mut pvp = PvpFilamentStore::default();
         pvp.active_matches.insert(91_001, PvpArenaMatchInstance {
-            match_id: 91_001, event_id: 1, filament_type_id: 56_001, arena_solar_system_id: arena_sys,
-            participants: vec![arena_char], started_unix: now, ..Default::default()
+            match_id: 91_001, event_id: 1, arena_solar_system_id: arena_sys,
+            team_a: vec![arena_char], origin_systems: [(arena_char, SYS_ID)].into_iter().collect(),
+            started_unix: now, active: true, ..Default::default()
         });
         save_pvp_store(snap, &pvp);
         snap.structures.insert(fob_id, UpwellStructureRecord {
@@ -936,19 +945,19 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
             campaign_id: fob_camp, pirate_faction_id: FACTION_GURISTAS, target_faction_id: 500_001,
             fob_solar_system_id: fob_sys, systems: vec![fob_sys], created_at_unix: now - 100,
             forecasting_end_unix: now - 50, active_end_unix: now + 5_000, winddown_end_unix: now + 10_000,
-            suppression_points: [(fob_sys, 1_000)].into_iter().collect(), ..Default::default()
+            suppression_points: (0..5).map(|i| (fob_sys + i, 1_000)).collect(), ..Default::default()
         });
     });
     mutate_superweapon_runtime(&ctx.db, |rt| {
         rt.active_cycles.push(PersistedSuperweaponCycle {
-            cycle_id: 1, sys_id: titan_sys, ship_id: titan_id, char_id: CHAR_ID, module_id: 779_200_299,
-            kind: SuperweaponCycleKind::Cone, origin: [0.0; 3], aim_dir: [1.0, 0.0, 0.0],
-            end_pos: [0.0; 3], started_at_unix: now - 20, next_tick_unix: now + 10, immobilize_until_unix: now - 1,
-            ticks_applied: 10, total_ticks: 10, per_tick_dmg: 0.0, beam_radius_m: 100.0, beam_length_m: 100.0,
-            range_m: 100.0, dmg_em: 0.0, dmg_therm: 0.0, dmg_kin: 0.0, dmg_exp: 0.0,
-            orig_max_velocity: 90.0, orig_warp_scramble_strength: 0, orig_disallow_assistance: false,
-            mobility_restored: false, pending_gtfo_targets: Vec::new(), pending_reaper_path: Vec::new(),
-            reaper_path_idx: 0,
+            sys_id: titan_sys, char_id: CHAR_ID, ship_id: titan_id, ship_type_id: 11_567, mod_type_id: 24550,
+            kind: SuperweaponCycleKind::Cone {
+                origin_pos: [0.0; 3], dir_vec: [1.0, 0.0, 0.0], cone_len_m: 100.0,
+                tick_dmg: [0.0; 4], sig_radius_m: 100.0,
+            },
+            started_at_unix: now - 20, warmup_secs: 5, total_ticks: 10, ticks_applied: 10,
+            immobilize_until_unix: now - 1, orig_max_velocity: 90.0,
+            orig_warp_scramble_strength: 0, orig_disallow_assistance: false, mobility_restored: false,
         });
         rt.warp_suppressions.push(PersistedWarpSuppression {
             sys_id: titan_sys, ship_id: supp_ship, orig_warp_scramble_strength: 1, suppressed_until_unix: now - 1,
@@ -972,13 +981,15 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
         PostUnlockOps::default(), PostUnlockOps::default(), PostUnlockOps::default(), PostUnlockOps::default(),
     );
     {
-        let (mut bp_ab, mut st_ab) = (sys_abyss.ballpark.write().unwrap(), sys_abyss.actor_state.write().unwrap());
-        assert!(on_abyssal_room_npc_destroyed_in_ballpark_collecting(&mut bp_ab, &ctx.db, abyss_sys, npc_id, &mut ops_ab));
-        let _ = step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(&mut bp_ab, Some(&ctx.sde), Some(&ctx.db), abyss_sys, Some(&mut st_ab.post_unlock_shadows.abyssal_boundary_ticks), Some(&mut st_ab.post_unlock_shadows.abyssal_active_clouds), &mut ops_ab);
+        let (mut bp_ab_g, mut st_ab_g) = (sys_abyss.ballpark.write().unwrap(), sys_abyss.actor_state.write().unwrap());
+        let (bp_ab, st_ab) = (&mut *bp_ab_g, &mut *st_ab_g);
+        assert!(on_abyssal_room_npc_destroyed_in_ballpark_collecting(bp_ab, &ctx.db, abyss_sys, npc_id, &mut ops_ab));
+        let _ = step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(bp_ab, Some(&ctx.sde), Some(&ctx.db), abyss_sys, Some(&mut st_ab.post_unlock_shadows.abyssal_boundary_ticks), Some(&mut st_ab.post_unlock_shadows.abyssal_active_clouds), &mut ops_ab);
     }
     {
-        let (mut bp_ar, mut st_ar) = (sys_arena.ballpark.write().unwrap(), sys_arena.actor_state.write().unwrap());
-        let _ = step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(&mut bp_ar, Some(&ctx.sde), Some(&ctx.db), arena_sys, st_ar.pending_notifications_opt.as_ref(), st_ar.notify_tx_opt.as_ref(), Some(&mut st_ar.post_unlock_shadows.arena_hazard_ticks), &mut ops_ar);
+        let (mut bp_ar_g, mut st_ar_g) = (sys_arena.ballpark.write().unwrap(), sys_arena.actor_state.write().unwrap());
+        let (bp_ar, st_ar) = (&mut *bp_ar_g, &mut *st_ar_g);
+        let _ = step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(bp_ar, Some(&ctx.sde), Some(&ctx.db), arena_sys, st_ar.pending_notifications_opt.as_ref(), st_ar.notify_tx_opt.as_ref(), Some(&mut st_ar.post_unlock_shadows.arena_hazard_ticks), &mut ops_ar);
     }
     {
         let (mut bp_ti, mut st_ti) = (sys_titan.ballpark.write().unwrap(), sys_titan.actor_state.write().unwrap());
@@ -999,38 +1010,40 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
             && s.structures[&fob_id].state == "ShieldVulnerable"
     }), "zero DB writes allowed while actor locks / db.writer were held");
 
+    assert!(!ops_ab.is_empty() && !ops_ar.is_empty() && !ops_ti.is_empty() && !ops_fb.is_empty());
     send_in_flight(&sys_abyss, &ctx, ops_ab);
     send_in_flight(&sys_arena, &ctx, ops_ar);
     send_in_flight(&sys_titan, &ctx, ops_ti);
     send_in_flight(&sys_fob, &ctx, ops_fb);
     release_writer(held);
 
-    wait_until("post-unlock drained abyssal, bosonic, arena, and insurgency ops", || {
-        ctx.db.with_snapshot(|s| {
-            s.abyssal_state.pockets[&CHAR_ID].rooms[0].cleared
-                && s.abyssal_state.boundary_ticks.get(&ab_ship) == Some(&1)
-                && s.superweapon_runtime.active_cycles.is_empty()
-                && s.superweapon_runtime.warp_suppressions.is_empty()
-                && s.structures[&fob_id].state == "ArmorVulnerable"
-        })
-    }).await;
+    assert!(sys_abyss.wait_for_post_unlock_barrier().await);
+    assert!(sys_arena.wait_for_post_unlock_barrier().await);
+    assert!(sys_titan.wait_for_post_unlock_barrier().await);
+    assert!(sys_fob.wait_for_post_unlock_barrier().await);
+    ctx.db.with_snapshot(|s| {
+        assert!(s.abyssal_state.pockets[&CHAR_ID].rooms[0].cleared, "abyssal room 0 not cleared");
+        assert_eq!(s.abyssal_state.boundary_ticks.get(&ab_ship).copied(), Some(1), "abyssal boundary_ticks missing/mismatch");
+        assert_eq!(load_pvp_store(s).hazard_ticks.get(&arena_ship).copied(), Some(1), "arena hazard_ticks missing/mismatch");
+        assert!(s.superweapon_runtime.active_cycles.is_empty(), "bosonic active_cycles not drained: {:?}", s.superweapon_runtime.active_cycles);
+        assert!(s.superweapon_runtime.warp_suppressions.is_empty(), "bosonic warp_suppressions not drained");
+        assert_eq!(s.structures[&fob_id].state, "ArmorVulnerable", "FOB structure state mismatch");
+    });
 }
 
 /// `#1170` Track 1D: holding `WorldRepository::writer` for `1.5s` does NOT block actor ticks,
 /// lock acquisitions, or external service stepping; DB catches up cleanly once writer is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn track_1d_writer_held_1500ms_does_not_block_actor_ticks_for_external_services() {
-    use crate::services::mobile_deployables_ext::{
-        register_ext_deployable, GROUP_MOBILE_OBSERVATORY, TYPE_MOBILE_OBSERVATORY,
-    };
+    use crate::services::mobile_deployables::{register_mobile_deployable, GROUP_MOBILE_OBSERVATORY};
+    use crate::services::mobile_deployables_ext::TYPE_MOBILE_OBSERVATORY;
 
     let (ship_id, mod_hi, obs_id) = (779_300_001_i64, 779_300_101, 779_300_201);
     let (ctx, sys) = boot_ship(ship_id, &[(mod_hi, 484, InventoryFlag::HiSlot0, 0.0)], None, Some(make_combat_state(100.0, 100.0, 100.0, 100.0))).await;
-    let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(obs_id, make_item(obs_id, TYPE_MOBILE_OBSERVATORY, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
     });
-    register_ext_deployable(&ctx, obs_id, TYPE_MOBILE_OBSERVATORY, GROUP_MOBILE_OBSERVATORY, CHAR_ID, SYS_ID, 0, DVec3::ZERO, 7_200);
+    register_mobile_deployable(&ctx, obs_id, TYPE_MOBILE_OBSERVATORY, GROUP_MOBILE_OBSERVATORY, CHAR_ID, SYS_ID, 0, DVec3::ZERO);
     sys.spawn_ball(make_ball(obs_id, TYPE_MOBILE_OBSERVATORY, DVec3::ZERO)).await.unwrap();
     {
         let mut st = sys.actor_state.write().unwrap();
@@ -1052,14 +1065,16 @@ async fn track_1d_writer_held_1500ms_does_not_block_actor_ticks_for_external_ser
 
     for _ in 0..4 {
         let t0 = std::time::Instant::now();
-        sys.step_manual_tick_only(1.0).await.unwrap();
+        let _ = sys.ask_step_tick_only(1.0).await.unwrap();
         assert!(t0.elapsed() < Duration::from_millis(250), "actor step blocked on held DB writer: {:?}", t0.elapsed());
         let t1 = std::time::Instant::now();
         let _bp = sys.ballpark.read().unwrap();
-        assert!(t1.elapsed() < Duration::from_millis(50), "ballpark lock blocked on held DB writer");
+        let _st = sys.actor_state.read().unwrap();
+        assert!(t1.elapsed() < Duration::from_millis(50), "ballpark/actor_state locks blocked on held DB writer");
     }
     assert!(!holder.is_finished(), "1.5s writer hold must still be active after non-blocking ticks");
     holder.join().unwrap();
+    let _ = sys.wait_for_post_unlock_barrier().await;
 
     wait_until("post-unlock persisted rack heat after 1.5s writer release", || {
         ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&ship_id).is_some_and(|tr| tr.contains_key(&1175)))

@@ -812,8 +812,8 @@ pub fn step_mobile_deployables_in_actor(
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(
-        db_opt.as_deref(),
-        db_opt.as_ref(),
+        db_opt.map(|d| &**d),
+        db_opt,
         sde_opt,
         ops,
         Some(ballpark),
@@ -832,7 +832,7 @@ pub(crate) fn step_mobile_deployables_in_actor_collecting(
     solar_system_id: u32,
     dt: f64,
     now_unix: u64,
-    mmju_shadow: Option<&mut std::collections::HashMap<i64, u64>>,
+    mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
     obs_ping_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
     post_unlock: &mut PostUnlockOps,
 ) {

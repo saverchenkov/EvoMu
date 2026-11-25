@@ -334,8 +334,8 @@ pub fn step_bosonic_doomsday_in_ballpark(
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(
-        db_opt.as_deref(),
-        db_opt.as_ref(),
+        db_opt.map(|d| &**d),
+        db_opt,
         None,
         ops,
         Some(ballpark),
