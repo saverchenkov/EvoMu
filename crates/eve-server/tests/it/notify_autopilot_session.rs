@@ -172,7 +172,7 @@ async fn test_agent_mission_change_notifications() {
 
     // Clean up active mission record and return to agent station
     ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.remove(&(P1, mission_id as u32));
+        eve_server::services::mission_fixture::remove(snap, P1, mission_id as u32);
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.solar_system_id = dist_sys_id;
             ch.station_id = Some(dist_station_id);

@@ -994,11 +994,16 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
     assert!((tax_no_mission - 0.0125).abs() < 1e-4, "Connections must not apply with 0 completed corp missions, got {tax_no_mission}");
 
     p.ctx.db.with_mut_snapshot(|s| {
-        s.active_missions.insert((CHAR_ID, agent_id as u32), eve_db::ActiveMissionRecord {
-            mission_id: 9_900_101, character_id: CHAR_ID, agent_id: i64::from(agent_id),
-            solar_system_id: JITA, state: "Completed".into(), current_room_id: 1, npcs_remaining: 0,
-            spawned_npc_ball_ids: Vec::new(), bookmark_id: None,
-        });
+        eve_server::services::mission_fixture::insert(
+            s,
+            eve_server::services::mission_fixture::MissionFixture::new(
+                CHAR_ID,
+                9_900_101,
+                i64::from(agent_id),
+                JITA,
+                "Completed",
+            ),
+        );
     });
     let q_with_mission = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
     let tax_with_mission = quote_tax(&q_with_mission);

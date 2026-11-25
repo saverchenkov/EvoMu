@@ -948,8 +948,8 @@ async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
         .await
         .expect("Accept courier mission 1");
     let (dest_sid, req_tid) = ctx.db.with_snapshot(|snap| {
-        let meta = eve_server::services::agents_missions::load_mission_meta(snap, PILOT_A, mid1 as u32)
-            .expect("mission meta");
+        let meta = eve_server::services::mission_fixture::get(snap, PILOT_A, mid1 as u32)
+            .expect("mission fixture");
         (
             meta.destination_station_id.unwrap_or(agent_station_id),
             meta.required_delivery_type_id.unwrap_or(3683),

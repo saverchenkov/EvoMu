@@ -112,16 +112,9 @@ async fn test_agent_missions_complete_reward_formula_and_storyline_e2e() {
     wait_for_warp_end(&ctx, site_sys, ship_id).await;
     for _pass in 0..5 {
         let npcs_to_clear: Vec<i64> = ctx.db.with_snapshot(|s| {
-            s.active_missions
-                .iter()
-                .filter_map(|((c, mid), m)| {
-                    if *c == char_id && *mid == mission_id && m.npcs_remaining > 0 {
-                        Some(m.spawned_npc_ball_ids.clone())
-                    } else {
-                        None
-                    }
-                })
-                .next()
+            eve_server::services::mission_fixture::get(s, char_id, mission_id)
+                .filter(|m| m.npcs_remaining > 0)
+                .map(|m| m.spawned_npc_ball_ids)
                 .unwrap_or_default()
         });
         if npcs_to_clear.is_empty() {

@@ -565,7 +565,7 @@ async fn test_security_status_gain_caps_tag_bands_and_transactions() {
         ctx.dispatch_rpc(&mut pilot_sess, "agentMgr", Some(a_oid), "DoAction", &[PyRep::Integer(3)], &HashMap::new(), None).await.unwrap();
         ctx.advance_secs(12);
         rpc(&ctx, &mut pilot_sess, "stationSvc", "Undock", &[]).await.unwrap();
-        let spawned = ctx.db.with_snapshot(|s| s.active_missions.get(&(pilot_id, mid)).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone())));
+        let spawned = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, pilot_id, mid).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids)));
         if let Some((mission_sys, spawned_ids)) = spawned {
             if let Some(&m_rat_id) = spawned_ids.first() {
                 if mission_sys != asys {

@@ -513,7 +513,7 @@ async fn test_live_crimewatch_sec_gain_caps_and_tag_tier_bands() {
         ctx.advance_secs(12);
         rpc(&ctx, &mut pilot, "stationSvc", "Undock", &[]).await.unwrap();
         pilot.ship_id = pilot.sess.ship_id.unwrap_or(pilot.ship_id);
-        let spawned = ctx.db.with_snapshot(|s| s.active_missions.get(&(pilot.char_id, mid)).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone())));
+        let spawned = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, pilot.char_id, mid).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids)));
         if let Some((mission_sys, rats)) = spawned {
             if let Some(&m_rat_id) = rats.first() {
                 slash_cmd(&ctx, &mut pilot.sess, &format!("/tr {mission_sys}")).await;

@@ -156,9 +156,8 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap();
         ok(&ctx, &mut pilot, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)]).await;
         let m_npcs: Vec<i64> = ctx.db.with_snapshot(|snap| {
-            snap.active_missions
-                .get(&(pilot.char_id, mid as u32))
-                .map(|m| m.spawned_npc_ball_ids.clone())
+            eve_server::services::mission_fixture::get(snap, pilot.char_id, mid as u32)
+                .map(|m| m.spawned_npc_ball_ids)
                 .unwrap_or_default()
         });
         for nid in m_npcs {
