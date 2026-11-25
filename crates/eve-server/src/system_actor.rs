@@ -1386,12 +1386,13 @@ impl SystemRegistry {
             );
         }
         let post_unlock_tx_handle = post_unlock_tx.clone();
-
+        // Wrap BEFORE `spawn` so `Runtime::drop()` before first poll still sends `PostUnlockMsg::Shutdown`.
+        let post_unlock_shutdown = post_unlock::PostUnlockShutdownGuard(Some(post_unlock_tx));
         rt_handle.spawn(async move {
             // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
+            let mut post_unlock_tx_opt = post_unlock_shutdown;
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
-            let mut post_unlock_tx_opt = post_unlock::PostUnlockShutdownGuard(Some(post_unlock_tx));
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();

@@ -829,6 +829,7 @@ async fn bf_1170_r6_02_empty_ops_flush_checkpoint_and_modify_combat_absent_wait_
     seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[], None);
     let sys = ctx.systems.get_or_spawn(sys_id);
     sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
+    let _ = sys.flush_condition_checkpoint().await.unwrap();
 
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     let pos_fut = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_id, p1).await } });
