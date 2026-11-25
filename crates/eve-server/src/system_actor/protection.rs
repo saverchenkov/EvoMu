@@ -29,6 +29,7 @@ pub(in crate::system_actor) fn sync_ball_protection_under_bp(
 ) {
     let mut st = handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
     sync_ball_protection_in_actor(bp, &mut st, ball_id);
+    handle.publish_view_from(bp, Some(&st));
 }
 
 /// Synchronizes `actor_st.protection_registry[ball_id]` from `ballpark.combat_states`,
@@ -1201,6 +1202,7 @@ impl SystemHandle {
                     );
                     if known {
                         sync_ball_protection_in_actor(&bp, &mut st, ball_id);
+                        self.publish_view_from(&bp, Some(&st));
                     }
                     return known;
                 }

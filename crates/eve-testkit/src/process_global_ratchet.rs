@@ -559,7 +559,7 @@ pub(crate) fn cfg_test_item_ranges(stripped_src: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-pub(crate) fn strip_cfg_test_items_depth_aware(stripped_src: &str) -> String {
+fn strip_cfg_test_items_depth_aware(stripped_src: &str) -> String {
     let mut bytes = stripped_src.as_bytes().to_vec();
     for (start, item_end) in cfg_test_item_ranges(stripped_src) {
         for b in &mut bytes[start..item_end] {

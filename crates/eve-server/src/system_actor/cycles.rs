@@ -2224,6 +2224,7 @@ impl SystemHandle {
         let ops_was_empty = post_unlock_ops.is_empty();
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
+        self.publish_view_from(&bp, Some(&st));
         let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
             self,
             &mut st,

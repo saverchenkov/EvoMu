@@ -651,4 +651,198 @@ mod tests {
             Some(3)
         );
     }
+
+    #[tokio::test]
+    async fn sync_stargate_and_step_mutators_refresh_system_view_rev_1342_02_03() {
+        let reg = SystemRegistry::with_sde(test_sde());
+        let sys = reg.get_or_spawn(30_000_142);
+        let gate_id = 930_010_i64;
+        let step_gate_id = 930_011_i64;
+        let ship_id = 930_001_i64;
+        let mod_nanite = 930_101_i64;
+
+        sys.test_with_ballpark_and_state_mut_async(move |bp, st| {
+            bp.init_stargate_activation_state(gate_id, 0);
+            bp.init_stargate_activation_state(step_gate_id, 0);
+            bp.add_ball(mk_ship(
+                ship_id,
+                DVec3::ZERO,
+                DVec3::new(150.0, 0.0, 0.0),
+                MovementMode::GotoDirection {
+                    direction: DVec3::X,
+                },
+            ));
+            bp.combat_states.insert(
+                ship_id,
+                CombatState {
+                    is_cloaked: true,
+                    ..Default::default()
+                },
+            );
+            st.active_nanite_repairs.push(ActiveNaniteRepair {
+                char_id: 90_000_001,
+                ship_id,
+                module_id: mod_nanite,
+                initial_damage_hp: 20.0,
+                paste_total_needed: 2,
+                paste_consumed_so_far: 2,
+                duration_s: 10.0,
+                elapsed_s: 9.5,
+            });
+        })
+        .await;
+
+        // REV-1342-02: sync stargate mutators immediately publish SystemView for stargate_activation_state.
+        assert_eq!(sys.stargate_activation_state(gate_id).map(|s| s.activation_state), Some(0));
+        assert!(sys.activate_stargate_transition(gate_id, 1_500, Some(10_000)));
+        assert_eq!(sys.stargate_activation_state(gate_id).map(|s| s.activation_state), Some(1));
+        assert_eq!(sys.settle_stargate_activation_states(12_000), vec![gate_id]);
+        assert_eq!(sys.stargate_activation_state(gate_id).map(|s| s.activation_state), Some(2));
+        assert!(sys.set_stargate_activation_state(gate_id, 0, 0, 0));
+        assert_eq!(sys.stargate_activation_state(gate_id).map(|s| s.activation_state), Some(0));
+
+        // Arm second gate to open during try_step_full_tick(1.0).
+        assert!(sys.set_stargate_activation_state(step_gate_id, 1, 500, 0));
+
+        // REV-1342-03: try_step_full_tick immediately publishes updated ballpark + actor_state view.
+        let tick = sys.try_step_full_tick(1.0);
+        let view = sys.view();
+        assert_eq!(view.current_tick, tick);
+        let (pos, _) = sys
+            .get_live_ball_kinematics_sync(ship_id)
+            .expect("moved ship kinematics published after try_step_full_tick");
+        assert!(pos.x > 0.0, "expected post-tick x > 0, got {pos:?}");
+        assert_eq!(
+            sys.stargate_activation_state(step_gate_id).map(|s| s.activation_state),
+            Some(2)
+        );
+        assert!(!sys.has_active_nanite_repair_sync(ship_id, mod_nanite));
+        assert!(sys.has_active_non_gate_cloak_sync(ship_id));
+    }
+
+    #[tokio::test]
+    async fn sync_ball_and_nanite_mutators_refresh_system_view_rev_1342_04() {
+        let reg = SystemRegistry::with_sde(test_sde());
+        let sys = reg.get_or_spawn(30_000_142);
+
+        let ship_meta = 940_001_i64;
+        let ship_combat = 940_002_i64;
+        let mod_a = 940_101_i64;
+        let mod_b = 940_102_i64;
+        let bubble_id = 940_201_i64;
+
+        // 1. try_spawn_ball_with_meta (unheld-lock path) publishes newly synced protection_registry.
+        sys.try_spawn_ball_with_meta(
+            mk_ship(ship_meta, DVec3::new(100.0, 0.0, 0.0), DVec3::ZERO, MovementMode::Stop),
+            CombatState {
+                is_cloaked: true,
+                ..Default::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                ..Default::default()
+            },
+        );
+        assert!(sys.has_active_non_gate_cloak_sync(ship_meta));
+        assert!(sys.has_active_modules_or_cloak_sync(ship_meta));
+        assert!(sys.view().protection_registry.get(&ship_meta).is_some_and(|p| p.snapshot.is_cloaked));
+
+        // 2. try_set_ball_position immediately updates get_live_ball_kinematics_sync.
+        let moved_pos = DVec3::new(1_234.0, -56.0, 78.0);
+        sys.try_set_ball_position(ship_meta, moved_pos);
+        assert_eq!(
+            sys.get_live_ball_kinematics_sync(ship_meta).map(|(p, _)| p),
+            Some(moved_pos)
+        );
+
+        // 3. try_spawn_ball_with_combat publishes newly synced protection_registry after sync_ball_protection.
+        sys.try_spawn_ball_with_combat(
+            mk_ship(ship_combat, DVec3::new(200.0, 0.0, 0.0), DVec3::ZERO, MovementMode::Stop),
+            CombatState {
+                is_cloaked: true,
+                base_max_velocity: 300.0,
+                ..Default::default()
+            },
+        );
+        assert!(sys.has_active_non_gate_cloak_sync(ship_combat));
+        assert!(sys.view().protection_registry.get(&ship_combat).is_some_and(|p| p.snapshot.is_cloaked));
+
+        // 4. try_update_combat_state & try_recompute_combat_attributes refresh view immediately.
+        assert!(sys.try_update_combat_state(ship_combat, |cs| cs.is_cloaked = false));
+        assert!(!sys.has_active_non_gate_cloak_sync(ship_combat));
+        assert!(!sys.has_active_modules_or_cloak_sync(ship_combat));
+        assert!(sys.try_recompute_combat_attributes(ship_combat, |cs| cs.is_cloaked = true));
+        assert!(sys.has_active_non_gate_cloak_sync(ship_combat));
+        assert!(sys.has_active_modules_or_cloak_sync(ship_combat));
+
+        // 5. try_sync_ship_ballpark_stats & mobile warp disruptor sync mutators refresh SystemView.
+        let fresh_stats = CombatState {
+            base_max_velocity: 450.0,
+            ..Default::default()
+        };
+        assert!(sys.try_sync_ship_ballpark_stats(ship_combat, &fresh_stats));
+        assert_eq!(sys.view().ball(ship_combat).map(|b| b.max_velocity), Some(450.0));
+        sys.try_add_mobile_warp_disruptor(bubble_id, DVec3::ZERO, 20_000.0);
+        assert!(sys.view().warp_bubble_mgr.is_scrambled_at(DVec3::ZERO));
+        sys.try_remove_warp_bubble(bubble_id);
+        assert!(!sys.view().warp_bubble_mgr.is_scrambled_at(DVec3::ZERO));
+
+        // 6. try_emit_destiny_event refreshes view immediately when known.
+        assert!(sys.try_emit_destiny_event(
+            ship_combat,
+            eve_destiny::DestinyEvent::SetBallFree {
+                ball_id: ship_combat,
+                is_free: false,
+            },
+        ));
+        assert!(sys.view().non_free_ball_ids.contains(&ship_combat));
+
+        // 7. cancel_ship_nanite_repairs_sync refreshes SystemView.active_nanite_repairs even under
+        // held >= RANK_BALLPARK / >= RANK_ACTOR_STATE locks where publish_view() returns early.
+        sys.test_with_actor_state_mut_async(move |st| {
+            st.active_nanite_repairs.push(ActiveNaniteRepair {
+                char_id: 90_000_001,
+                ship_id: ship_meta,
+                module_id: mod_a,
+                initial_damage_hp: 10.0,
+                paste_total_needed: 1,
+                paste_consumed_so_far: 1,
+                duration_s: 10.0,
+                elapsed_s: 0.0,
+            });
+            st.active_nanite_repairs.push(ActiveNaniteRepair {
+                char_id: 90_000_002,
+                ship_id: ship_combat,
+                module_id: mod_b,
+                initial_damage_hp: 10.0,
+                paste_total_needed: 1,
+                paste_consumed_so_far: 1,
+                duration_s: 10.0,
+                elapsed_s: 0.0,
+            });
+        })
+        .await;
+        assert!(sys.has_active_nanite_repair_sync(ship_meta, mod_a));
+        assert!(sys.has_active_nanite_repair_sync(ship_combat, mod_b));
+
+        {
+            let leaf_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_LEAF }> =
+                eve_db::lock_rank::RankedRwLock::new(());
+            let _leaf_guard = leaf_lock.write().unwrap();
+            sys.cancel_ship_nanite_repairs_sync(ship_meta, false);
+            assert!(!sys.has_active_nanite_repair_sync(ship_meta, mod_a));
+            assert!(!sys.has_any_active_nanite_repair_sync(ship_meta));
+            assert!(sys.has_any_active_nanite_repair_sync(ship_combat));
+        }
+
+        {
+            let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
+                eve_db::lock_rank::RankedRwLock::new(());
+            let _bp_guard = bp_lock.write().unwrap();
+            sys.cancel_ship_nanite_repairs_sync(ship_combat, false);
+            assert!(!sys.has_active_nanite_repair_sync(ship_combat, mod_b));
+            assert!(!sys.has_any_active_nanite_repair_sync(ship_combat));
+        }
+    }
 }
