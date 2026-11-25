@@ -345,8 +345,8 @@ async fn advance_secs_expires_jetcans_moon_extractions_and_delivers_moon_probes(
     assert_eq!(ctx.active_moon_probes.read().unwrap().len(), 1);
 }
 
-#[test]
-fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
+#[tokio::test]
+async fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 950_000_001_i64;
@@ -403,18 +403,23 @@ fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
     assert!(fit.drones.contains(&(drone_id, 2488)));
 
     // Cached lookup and recalculation when projected_ewar changes
+    let sys_h = ctx.systems.get_or_spawn(30_000_142);
     let ewar_mod = DogmaItemState::from_sde(888_888, 526, &ctx.sde);
-    ctx.projected_ewar.write().unwrap().insert(
-        ship_id,
-        vec![ProjectedEwarEffect {
-            source_module_id: 888_888,
-            source_module_type_id: 526,
-            charge_type_id: None,
-            distance: 5_000.0,
-            overloaded: false,
-            effective_module: ewar_mod,
-        }],
-    );
+    sys_h
+        .upsert_projected_ewar(
+            999_888_001,
+            ship_id,
+            ProjectedEwarEffect {
+                source_module_id: 888_888,
+                source_module_type_id: 526,
+                charge_type_id: None,
+                distance: 5_000.0,
+                overloaded: false,
+                effective_module: ewar_mod,
+            },
+        )
+        .await
+        .expect("upsert projected EWAR into system actor");
     let fit2 = ctx
         .get_or_rebuild_ship_fitting(char_id, ship_id)
         .expect("cached fitting recalculation must succeed");
@@ -1235,8 +1240,10 @@ async fn persisted_future_module_reactivation_cooldown_does_not_freeze_after_res
         ctx1.advance_secs_without_sim_clock_rebase(667_793);
         assert!(!ctx1.is_module_in_reactivation_delay(ship_id, mod_normal_id));
 
-        ctx1.module_reactivation_cooldowns.write().unwrap().insert(
-            (ship_id, mod_id, mod_type_id),
+        ctx1.seed_module_cooldown_entry_for_test(
+            ship_id,
+            mod_id,
+            mod_type_id,
             ModuleCooldownEntry {
                 recorded_unix_f64: 1_795_276_227.0,
                 delay_s: 2.76,
@@ -1257,18 +1264,20 @@ async fn persisted_future_module_reactivation_cooldown_does_not_freeze_after_res
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_normal_id));
-    assert!(ctx2.module_reactivation_cooldowns.read().unwrap().is_empty());
+    assert!(!ctx2.has_any_reactivation_delays_for_test());
 
     // Advancing wall clock later past the old future timestamp must not resurrect pruned entries.
     ctx2.clock().advance_secs(667_793);
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
 
-    // Even if a future-recorded entry is present in memory directly, lookup treats it as expired
+    // Even if a future-recorded entry is present directly, lookup treats it as expired
     // and re-recording replaces it cleanly with the new delay.
     let future_ts = (ctx2.now_unix_secs() + 3_600) as f64;
-    ctx2.module_reactivation_cooldowns.write().unwrap().insert(
-        (ship_id, mod_id, mod_type_id),
+    ctx2.seed_module_cooldown_entry_for_test(
+        ship_id,
+        mod_id,
+        mod_type_id,
         ModuleCooldownEntry {
             recorded_unix_f64: future_ts,
             delay_s: 10.0,
@@ -1622,6 +1631,10 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         "fighter_charge_state:",
         "active_fighters:",
         "fighter_tube_loads:",
+        "projected_ewar:",
+        "projected_ewar_sources:",
+        "active_ewar_starts:",
+        "module_reactivation_cooldowns:",
     ] {
         assert!(
             !ctx_body.contains(forbidden),
@@ -1670,7 +1683,7 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         .filter(|f| f.contains("Mutex<") || f.contains("RwLock<"))
         .count();
     assert!(
-        locked_fields <= 39,
-        "ServerContext lock-guarded field count regressed above 39: {locked_fields} (#1541)"
+        locked_fields <= 35,
+        "ServerContext lock-guarded field count regressed above 35: {locked_fields} (#1541)"
     );
 }

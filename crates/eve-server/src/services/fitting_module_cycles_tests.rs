@@ -2650,11 +2650,11 @@ async fn cycle0_turret_oor_and_ewar_surface_distance_on_titan_1247() {
     .unwrap()
     .expect("Target Painter at 4_000m surface distance must activate on Titan");
     let tp_dist = ctx
-        .projected_ewar
-        .read()
-        .unwrap()
-        .get(&mid_id)
-        .and_then(|v| v.iter().find(|e| e.source_module_id == tp_id).map(|e| e.distance))
+        .systems
+        .ship_ewar_projections(mid_id)
+        .into_iter()
+        .find(|e| e.source_module_id == tp_id)
+        .map(|e| e.distance)
         .expect("Target Painter projected EWAR recorded on target");
     assert!(
         (tp_dist - 4_000.0).abs() < 1e-6,
@@ -3095,7 +3095,7 @@ async fn handle_module_cycles_overload_thermo_cat5_delay_and_preoverload_guards(
             .code,
         "ModuleAlreadyActive"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
 
     // 5. Burned-out module returns ModuleBurnedOut before ModuleOffline
     ctx.db.with_mut_snapshot(|snap| {
@@ -4489,7 +4489,7 @@ async fn p2_rapid_launchers_is_weapon_and_targeted_ewar_assist_require_target() 
             .unwrap()
             .expect_err("rapid launcher in reactivation delay must reject as weapon");
         assert_eq!(delay_err.code, "ModuleAlreadyActive");
-        ctx.module_reactivation_cooldowns.write().unwrap().clear();
+        ctx.clear_all_reactivation_delays();
     }
 }
 
@@ -4819,12 +4819,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
         assert!((tgt_cs.shield_hp - 100.0).abs() < 1e-6, "{label} target shield changed");
         assert!(tgt_cs.tp_sig_multiplier.is_none(), "{label} target tp_sig_multiplier leaked");
         assert!((ctx.effective_target_painter_multiplier(victim_ship_id) - 1.0).abs() < 1e-9);
-        assert!(ctx
-            .projected_ewar
-            .read()
-            .unwrap()
-            .get(&victim_ship_id)
-            .is_none_or(|v| v.is_empty()));
+        assert!(ctx.systems.ship_ewar_projections(victim_ship_id).is_empty());
         let cw_st = ctx.crimewatch.read().unwrap().states.get(&char_id).cloned().unwrap_or_default();
         assert!(!cw_st.is_criminal(ctx.now_unix()) && !cw_st.is_suspect(ctx.now_unix()));
         assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
@@ -4913,12 +4908,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     let tgt_after_tp_err = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
     assert!(tgt_after_tp_err.tp_sig_multiplier.is_none());
     assert!((ctx.effective_target_painter_multiplier(victim_ship_id) - 1.0).abs() < 1e-9);
-    assert!(ctx
-        .projected_ewar
-        .read()
-        .unwrap()
-        .get(&victim_ship_id)
-        .is_none_or(|v| v.is_empty()));
+    assert!(ctx.systems.ship_ewar_projections(victim_ship_id).is_empty());
 
     // 4. Tractor Beam (650) pre-commit read-only validation rejects out-of-range and wrong-owner
     //    wrecks BEFORE actor commit with zero cap/invuln/gate-cloak mutation and zero break notices.
@@ -5051,7 +5041,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     assert_eq!(sb_notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
     assert_eq!(sb_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
 
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let _ = sys.set_capacitor(ship_id, 5.0).await;
     let sb_retrigger_err = handle_module_cycles(
         &ctx,
@@ -5094,7 +5084,7 @@ async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_
     assert!(sys.has_module_cycle(ship_id, mod_id).await);
     assert!((sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 480.0).abs() < 1e-6);
     assert!((sys.get_combat_state(victim_ship_id).await.unwrap().unwrap().capacitor - 210.0).abs() < 1e-6);
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let rct_dup_err = handle_module_cycles(
         &ctx,
         &mut sess,
@@ -5586,12 +5576,7 @@ async fn bf4_charge_skill_prerequisite_clears_projected_ewar_and_tp_sig_multipli
     let tgt_after = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
     assert!(tgt_after.tp_sig_multiplier.is_none());
     assert!((ctx.effective_target_painter_multiplier(victim_ship_id) - 1.0).abs() < 1e-9);
-    assert!(ctx
-        .projected_ewar
-        .read()
-        .unwrap()
-        .get(&victim_ship_id)
-        .is_none_or(|v| v.is_empty()));
+    assert!(ctx.systems.ship_ewar_projections(victim_ship_id).is_empty());
     let att_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(att_after.is_cloaked);
     assert_eq!(att_after.gate_cloak_remaining_ticks, 30);

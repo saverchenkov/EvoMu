@@ -1977,7 +1977,7 @@ impl SystemHandle {
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
             pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
             fit_projections, weapon_cycle_start_modules,
-            module_reload_sim_deadlines, module_reload_sim_remaining,
+            module_cooldowns, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
             warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
@@ -2098,7 +2098,7 @@ impl SystemHandle {
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         super::post_unlock::step_module_reloads_sim_clock_collecting(
             module_reload_sim_remaining,
-            Some(module_reload_sim_deadlines.as_ref()),
+            Some(&mut module_cooldowns.reload_sim_deadlines),
             db_opt,
             dt,
             tidi,
@@ -2138,23 +2138,21 @@ impl SystemHandle {
             next_missile_ball_id,
             sde_opt,
         );
-        {
-            let mut dead_guard = module_reload_sim_deadlines
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for action in pending_cycle_actions.iter() {
-                if let PendingCycleAction::AutoReloadStarted {
-                    module_ids,
-                    sim_deadline_s,
-                    ..
-                } = action
-                {
-                    for &mid in module_ids {
-                        dead_guard.insert(
-                            mid,
-                            (self.solar_system_id, *sim_elapsed_secs, *sim_deadline_s),
-                        );
-                    }
+        for action in pending_cycle_actions.iter() {
+            if let PendingCycleAction::AutoReloadStarted {
+                module_ids,
+                sim_deadline_s,
+                ..
+            } = action
+            {
+                for &mid in module_ids {
+                    module_cooldowns.reload_sim_deadlines.insert(
+                        mid,
+                        super::ModuleReloadSimDeadline {
+                            sim_start_s: *sim_elapsed_secs,
+                            sim_deadline_s: *sim_deadline_s,
+                        },
+                    );
                 }
             }
         }

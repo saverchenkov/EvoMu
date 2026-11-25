@@ -1149,6 +1149,9 @@ impl SystemRegistry {
             Arc::clone(&gate),
             handle,
         );
+        if let Some(ref handle) = cleanup.handle {
+            let _ = handle.flush_module_cooldown_checkpoint().await;
+        }
         let cmd_tx = cleanup
             .handle
             .as_ref()
@@ -1212,6 +1215,7 @@ impl SystemRegistry {
                 continue;
             }
             let _ = handle.flush_condition_checkpoint().await;
+            let _ = handle.flush_module_cooldown_checkpoint().await;
             if !self.is_handle_hibernated_safe(&handle) {
                 continue;
             }

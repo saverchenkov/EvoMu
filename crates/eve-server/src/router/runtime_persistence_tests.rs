@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use eve_db::{SystemDynamicState, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, SystemDynamicState, WorldRepository};
 use eve_machonet::{service_roles::ROLE_PLAYER, SessionState};
 use eve_proto::quasar::{EvePublicRequest, GoogleAny, TYPE_GOOGLEAPIS_PREFIX};
 use eve_sde::SdeRegistry;
@@ -115,6 +115,20 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                     solar_system_id: sys_id,
                     ..Default::default()
                 });
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
         });
         let mut ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
 
@@ -356,12 +370,8 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             fighter_test_helpers::loaded_fighter_in_tube(&ctx2, ship_id, 0),
             Some(fighter_id)
         );
-        assert!(ctx2
-            .module_reactivation_cooldowns
-            .read()
-            .unwrap()
-            .keys()
-            .any(|&(s, m, _)| s == ship_id && m == mod_id));
+        assert!(ctx2.has_any_reactivation_delays_for_test());
+        assert!(ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
         // Crash-lost runtime kinds must remain cleared across restart (`#920`, `#875`).
         assert!(ctx2.mining_cycles.read().unwrap().is_empty());
         assert!(crate::router::session_transition::get_session_change_timer(&ctx2, cid).is_some());
@@ -823,8 +833,8 @@ fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs()
     });
 }
 
-#[test]
-fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
+#[tokio::test]
+async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
     use crate::router::context::{ActiveMoonSurveyProbe, ModuleCooldownEntry};
     use crate::services::cluster_macho_misc_services::{
         LandingPadRecord, LauncherRecord, StarterLauncherRecord,
@@ -862,13 +872,11 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
         fighter_test_helpers::clear_all_fighter_charges(&ctx);
         fighter_test_helpers::clear_all_fighter_tubes(&ctx);
-        ctx.module_reactivation_cooldowns.write().unwrap().clear();
+        ctx.clear_all_reactivation_delays();
         ctx.mining_cycles.write().unwrap().clear();
         ctx.phased_asteroid_fields.write().unwrap().clear();
         crate::router::session_transition::clear_all_session_change_timers(&ctx);
-        ctx.projected_ewar.write().unwrap().clear();
-        ctx.projected_ewar_sources.write().unwrap().clear();
-        ctx.active_ewar_starts.write().unwrap().clear();
+        ctx.systems.clear_all_ewar_state_sync();
         ctx.map_landmarks.write().unwrap().clear();
         ctx.global_config_values.write().unwrap().clear();
         ctx.fw_idle_last_step_unix.write().unwrap().clear();
@@ -889,10 +897,14 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
     {
         let (db, ctx) = fresh_ctx("ewar_kinds.sqlite");
         assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
-        ctx.active_ewar_starts
-            .write()
-            .unwrap()
-            .insert((101, 202), vec![(303, "warpScramblerMWD")]);
+        let _ = ctx.systems.get_or_spawn(30_000_142);
+        ctx.record_active_ewar_start_for_test(
+            Some(30_000_142),
+            101,
+            202,
+            303,
+            "warpScramblerMWD",
+        );
         ctx.persist_server_runtime_to_db();
         assert!(db.with_snapshot(|s| s.cluster_and_runtime.server_runtime_json.is_none()));
         assert!(!db
@@ -902,7 +914,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             .with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
             .expect("check checkpoints"));
         ctx.hydrate_server_runtime_from_db();
-        assert!(ctx.active_ewar_starts.read().unwrap().is_empty());
+        assert_eq!(ctx.ewar_starts_count_for_test(), 0);
     }
 
     // 2. Durable vs Crash-lost fields of `TacticalModulesState` (foreign tag ignore + roundtrip)
@@ -1120,11 +1132,14 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             },
             &|c| c.character_scan_progress.write().unwrap().clear(),
         );
+        let _ = ctx.systems.get_or_spawn(30_000_142);
         check_one(
             "module_reactivation_cooldowns",
             &|c| {
-                c.module_reactivation_cooldowns.write().unwrap().insert(
-                    (1, 2, 0),
+                c.seed_module_cooldown_entry_for_test(
+                    1,
+                    2,
+                    0,
                     ModuleCooldownEntry {
                         recorded_unix_f64: 100.0,
                         delay_s: 10.0,
@@ -1133,7 +1148,7 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
                     },
                 );
             },
-            &|c| c.module_reactivation_cooldowns.write().unwrap().clear(),
+            &|c| c.clear_all_reactivation_delays(),
         );
         check_crash_lost(
             "mining_cycles",
@@ -1186,36 +1201,36 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
         check_crash_lost(
             "projected_ewar",
             &|c| {
-                c.projected_ewar.write().unwrap().insert(
-                    1,
-                    vec![ProjectedEwarEffect {
-                        source_module_id: 10,
-                        source_module_type_id: 527,
-                        charge_type_id: None,
-                        distance: 1000.0,
-                        overloaded: false,
-                        effective_module: DogmaItemState::from_sde(10, 587, &c.sde),
-                    }],
-                );
+                if let Some(h) = c.systems.get_handle(30_000_142) {
+                    let _ = h.upsert_projected_ewar_sync(
+                        20,
+                        1,
+                        ProjectedEwarEffect {
+                            source_module_id: 10,
+                            source_module_type_id: 527,
+                            charge_type_id: None,
+                            distance: 1000.0,
+                            overloaded: false,
+                            effective_module: DogmaItemState::from_sde(10, 587, &c.sde),
+                        },
+                    );
+                }
             },
-            &|c| c.projected_ewar.write().unwrap().clear(),
+            &|c| c.systems.clear_all_ewar_state_sync(),
         );
         check_crash_lost(
             "projected_ewar_sources",
             &|c| {
-                c.projected_ewar_sources.write().unwrap().insert(10, 20);
+                c.seed_ewar_source_for_test(Some(30_000_142), 10, 20);
             },
-            &|c| c.projected_ewar_sources.write().unwrap().clear(),
+            &|c| c.systems.clear_all_ewar_state_sync(),
         );
         check_crash_lost(
             "active_ewar_starts",
             &|c| {
-                c.active_ewar_starts
-                    .write()
-                    .unwrap()
-                    .insert((1, 2), vec![(3, "ecm")]);
+                c.record_active_ewar_start_for_test(Some(30_000_142), 1, 2, 3, "ecm");
             },
-            &|c| c.active_ewar_starts.write().unwrap().clear(),
+            &|c| c.systems.clear_all_ewar_state_sync(),
         );
         check_one(
             "map_landmarks",

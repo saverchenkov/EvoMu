@@ -30,7 +30,7 @@ use eve_db::sqlite_store::system_checkpoint::{
     current_unix_secs, ensure_system_checkpoint_schema, has_any_system_checkpoints,
     load_all_checkpoints_for_kind, purge_crash_lost_checkpoints, replace_checkpoint_kinds_batch,
     retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FLEET_EXTRAS, KIND_MAP_LANDMARKS,
-    KIND_MODULE_COOLDOWNS, KIND_MOON_PROBES, KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS,
+    KIND_MOON_PROBES, KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS,
     KIND_SCAN_SIGNATURES, KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
 };
 use eve_db::{FleetRole, SessionChangeTimerRecord, WorldStateSnapshot};
@@ -462,14 +462,6 @@ impl PersistedServerRuntimeState {
             .collect();
         character_scan_progress.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        let mut module_reactivation_cooldowns: Vec<_> = ctx
-            .module_reactivation_cooldowns
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
-        module_reactivation_cooldowns.sort_by_key(|(k, _)| *k);
         let active_moon_probes = ctx
             .active_moon_probes
             .read()
@@ -494,7 +486,7 @@ impl PersistedServerRuntimeState {
             fighter_cooldown_state: Vec::new(),
             fighter_charge_state: Vec::new(),
             fighter_tube_loads: Vec::new(),
-            module_reactivation_cooldowns,
+            module_reactivation_cooldowns: Vec::new(),
             phased_asteroid_fields,
             session_change_timers: HashMap::new(),
             map_landmarks,
@@ -513,7 +505,6 @@ impl PersistedServerRuntimeState {
             && self.fighter_cooldown_state.is_empty()
             && self.fighter_charge_state.is_empty()
             && self.fighter_tube_loads.is_empty()
-            && self.module_reactivation_cooldowns.is_empty()
             && self.phased_asteroid_fields.is_empty()
             && self.map_landmarks.is_empty()
             && self.tactical_state.is_empty()
@@ -548,10 +539,14 @@ impl PersistedServerRuntimeState {
                 self.fighter_tube_loads,
             );
         }
-        *ctx.module_reactivation_cooldowns
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) =
-            filter_remaining_module_cooldowns(ctx, self.module_reactivation_cooldowns);
+        crate::system_actor::import_legacy_monolith_module_cooldowns_in_db(
+            &ctx.db,
+            ctx.now_unix_secs() as f64,
+            |sid| ctx.resolve_sys_tidi_mode(Some(sid)),
+            self.module_reactivation_cooldowns,
+        );
+        ctx.systems
+            .rehydrate_active_system_cooldowns_from_db(|sid| ctx.resolve_sys_tidi_mode(Some(sid)));
         *ctx.phased_asteroid_fields
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.phased_asteroid_fields;
@@ -583,48 +578,12 @@ impl PersistedServerRuntimeState {
     }
 }
 
-fn filter_remaining_module_cooldowns(
-    ctx: &ServerContext,
-    entries: impl IntoIterator<Item = ((i64, i64, u32), ModuleCooldownEntry)>,
-) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
-    let now_unix_f64 = ctx.now_unix_secs() as f64;
-    entries
-        .into_iter()
-        .filter(|(_, entry)| {
-            let cur_sys_sim_s = entry
-                .solar_system_id
-                .map(|sid| ctx.systems.get_system_sim_elapsed(sid))
-                .unwrap_or(0.0);
-            let (tidi_factor, has_tidi_history) = ctx.resolve_sys_tidi_mode(entry.solar_system_id);
-            ServerContext::remaining_cooldown_secs_with_tidi(
-                entry,
-                now_unix_f64,
-                entry.solar_system_id,
-                cur_sys_sim_s,
-                tidi_factor,
-                has_tidi_history,
-            ) > 1e-6
-        })
-        .collect()
-}
-
 fn clear_crash_lost_runtime_maps(ctx: &ServerContext) {
     ctx.mining_cycles
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
-    ctx.projected_ewar
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    ctx.projected_ewar_sources
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    ctx.active_ewar_starts
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    ctx.systems.clear_all_ewar_state_sync();
     {
         let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
         tac.remote_assistance.clear();
@@ -722,31 +681,14 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         }
         (sim, dur)
     };
-    let mut module_cooldowns_raw: Vec<_> = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .map(|(&k, &v)| (k, v))
-        .collect();
-    module_cooldowns_raw.sort_by_key(|(k, _)| *k);
     let fleet_extras = PersistedFleetExtrasPayload::from_ctx(ctx);
     let social_extras = PersistedSocialExtrasRuntimePayload::from_ctx(ctx);
 
-    let (landmark_systems, module_cooldown_systems) = ctx.db.with_snapshot(|snap| {
-        let l_sys: Vec<u32> = landmarks_raw
+    let landmark_systems: Vec<u32> = ctx.db.with_snapshot(|snap| {
+        landmarks_raw
             .iter()
             .map(|(item_id, _, _, _, _)| resolve_entity_solar_system_id(snap, *item_id))
-            .collect();
-        let m_sys: Vec<u32> = module_cooldowns_raw
-            .iter()
-            .map(|((ship_id, _, _), entry)| {
-                entry
-                    .solar_system_id
-                    .unwrap_or_else(|| resolve_entity_solar_system_id(snap, *ship_id))
-            })
-            .collect();
-        (l_sys, m_sys)
+            .collect()
     });
 
     let mut moon_rows = Vec::with_capacity(moon_probes_raw.len());
@@ -804,19 +746,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         push_checked_row(&mut durable_tac_rows, CLUSTER_SYSTEM_ID, key.clone(), entry);
     }
 
-    let mut module_cooldown_rows = Vec::with_capacity(module_cooldowns_raw.len());
-    for (((ship_id, mod_id, mod_type_id), entry), &sys_id) in module_cooldowns_raw
-        .iter()
-        .zip(module_cooldown_systems.iter())
-    {
-        push_checked_row(
-            &mut module_cooldown_rows,
-            sys_id,
-            format!("{ship_id}|{mod_id}|{mod_type_id}"),
-            &((*ship_id, *mod_id, *mod_type_id), *entry),
-        );
-    }
-
     let mut fleet_rows = Vec::new();
     if !fleet_extras.is_empty() {
         push_checked_row(
@@ -845,7 +774,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         (KIND_MAP_LANDMARKS, landmark_rows),
         (KIND_SYSTEM_SIM_TIME, sim_rows),
         (KIND_TACTICAL_DURABLE, durable_tac_rows),
-        (KIND_MODULE_COOLDOWNS, module_cooldown_rows),
         (KIND_FLEET_EXTRAS, fleet_rows),
         (KIND_SOCIAL_EXTRAS, social_rows),
     ]
@@ -880,9 +808,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             load_all_checkpoints_for_kind::<((u8, u32), f64)>(conn, KIND_SYSTEM_SIM_TIME)?;
         let durable_tac =
             load_all_checkpoints_for_kind::<DurableTacticalEntry>(conn, KIND_TACTICAL_DURABLE)?;
-        let module_cooldowns = load_all_checkpoints_for_kind::<
-            ((i64, i64, u32), ModuleCooldownEntry),
-        >(conn, KIND_MODULE_COOLDOWNS)?;
         let fleet_extras =
             load_all_checkpoints_for_kind::<PersistedFleetExtrasPayload>(conn, KIND_FLEET_EXTRAS)?;
         let social_extras = load_all_checkpoints_for_kind::<PersistedSocialExtrasRuntimePayload>(
@@ -897,7 +822,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             landmarks,
             sim_times,
             durable_tac,
-            module_cooldowns,
             fleet_extras,
             social_extras,
         )))
@@ -911,7 +835,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         landmarks,
         sim_times,
         durable_tac,
-        module_cooldowns,
         fleet_extras,
         social_extras,
     ) = match loaded {
@@ -972,11 +895,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             }
         }
     }
-
-    *ctx.module_reactivation_cooldowns
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) =
-        filter_remaining_module_cooldowns(ctx, module_cooldowns.into_iter().map(|(_, _, entry)| entry));
 
     if let Some((_, _, payload)) = fleet_extras.into_iter().next() {
         payload.apply_to_ctx(ctx);
@@ -1094,6 +1012,13 @@ impl ServerContext {
                     &self.db,
                     Some(self.sde.as_ref()),
                 );
+                crate::system_actor::migrate_and_prune_module_cooldowns_in_db(
+                    &self.db,
+                    self.now_unix_secs() as f64,
+                    |sid| self.resolve_sys_tidi_mode(Some(sid)),
+                );
+                self.systems
+                    .rehydrate_active_system_cooldowns_from_db(|sid| self.resolve_sys_tidi_mode(Some(sid)));
                 self.retire_legacy_runtime_monolith_in_db();
                 return;
             }
@@ -1191,6 +1116,7 @@ impl ServerContext {
                 .collect();
             replace_checkpoint_kinds_batch(conn, &borrowed, now_unix)
         });
+        self.systems.flush_all_module_cooldown_checkpoints_to_db();
         self.retire_legacy_runtime_monolith_in_db();
     }
 
@@ -1642,17 +1568,15 @@ mod tests {
         assert!(spec.preserve_session_ship);
     }
 
-    #[test]
-    fn system_checkpoint_persists_checkpointed_kinds_by_system_and_drops_crash_lost_kinds() {
+    #[tokio::test]
+    async fn system_checkpoint_persists_checkpointed_kinds_by_system_and_drops_crash_lost_kinds() {
         let ctx = test_ctx();
+        let h_jita = ctx.systems.get_or_spawn(30_000_142);
         ctx.scanned_signatures
             .write()
             .unwrap()
             .insert((90_000_001, 30_000_142, 777));
-        ctx.projected_ewar_sources
-            .write()
-            .unwrap()
-            .insert(500_001, 600_001);
+        ctx.seed_ewar_source_for_test(Some(30_000_142), 500_001, 600_001);
 
         ctx.persist_server_runtime_to_db();
 
@@ -1674,7 +1598,7 @@ mod tests {
             .read()
             .unwrap()
             .contains(&(90_000_001, 30_000_142, 777)));
-        assert!(ctx.projected_ewar_sources.read().unwrap().is_empty());
+        assert!(h_jita.ewar_state_snapshot().projected_ewar_sources.is_empty());
         assert!(crate::system_actor::SystemView::default().active_warps.is_empty());
     }
 

@@ -522,10 +522,20 @@ async fn issue_500_jump_drive_capacitor_validation_deduction_and_pre_move_ewar()
     assert_eq!(ctx.db.get_item(982_101).unwrap().quantity, 50_000, "failed capacitor check must not consume fuel");
 
     // Seed unowned incoming EWAR entry so OnEwarEnd routes to origin SolarSystem notification target.
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((77_900_001, 77_900_002), vec![(ship_id, "electronic"), (77_900_003, "electronic")]);
+    ctx.record_active_ewar_start_for_test(
+        Some(jita),
+        77_900_001,
+        77_900_002,
+        ship_id,
+        "electronic",
+    );
+    ctx.record_active_ewar_start_for_test(
+        Some(jita),
+        77_900_001,
+        77_900_002,
+        77_900_003,
+        "electronic",
+    );
     cs.capacitor = full_cap;
     jita_handle.set_combat_state(ship_id, cs).await.unwrap();
     let _ = ctx.drain_notifications_for_char(obs_origin);

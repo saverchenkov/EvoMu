@@ -877,7 +877,9 @@ pub(crate) struct SystemActorState {
     pub sim_elapsed_secs: f64,
     pub pending_cycle_actions: Vec<PendingCycleAction>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
-    pub module_reload_sim_deadlines: Arc<RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, RANK_LEAF>>,
+    pub ewar_state: super::ActorEwarState,
+    pub module_cooldowns: super::ActorModuleCooldownState,
+    pub module_cooldown_checkpoint_dirty: bool,
     pub pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub ball_space_entry_epochs: HashMap<BallId, u64>,
@@ -1741,6 +1743,93 @@ pub enum SystemCommand {
         op: super::FighterTestHelperOp,
         reply: oneshot::Sender<super::FighterTestHelperOut>,
     },
+    UpsertProjectedEwar {
+        source_ship_id: i64,
+        target_ship_id: i64,
+        effect: eve_dogma::ProjectedEwarEffect,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RecordProjectedEwarSource {
+        source_module_id: i64,
+        source_ship_id: i64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveProjectedEwarByModule {
+        source_ship_id: i64,
+        source_module_id: i64,
+        allow_db_source_fallback: bool,
+        reply: oneshot::Sender<Result<Vec<i64>, String>>,
+    },
+    ClearProjectedEwarForTarget {
+        target_ship_id: i64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RecordActiveEwarStart {
+        source_ship_id: i64,
+        module_id: i64,
+        target_ship_id: i64,
+        jamming_type: &'static str,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ReplaceActiveEwarStarts {
+        source_ship_id: i64,
+        module_id: i64,
+        targets: Vec<(i64, &'static str)>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    FlushModuleEwar {
+        source_ship_id: i64,
+        source_module_id: i64,
+        allow_db_source_fallback: bool,
+        reply: oneshot::Sender<Result<super::ModuleEwarFlushSnapshot, String>>,
+    },
+    ClearEwarState {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RecordModuleCooldown {
+        ship_id: i64,
+        module_id: i64,
+        module_type_id: u32,
+        now_unix_f64: f64,
+        delay_s: f64,
+        tidi_factor: f64,
+        has_tidi_history: bool,
+        reply: oneshot::Sender<Result<super::ModuleCooldownPersistPayload, String>>,
+    },
+    SeedModuleCooldownEntry {
+        key: (i64, i64, u32),
+        entry: super::ModuleCooldownEntry,
+        reply: oneshot::Sender<Result<super::ModuleCooldownPersistPayload, String>>,
+    },
+    RemoveModuleCooldown {
+        key: (i64, i64, u32),
+        reply: oneshot::Sender<Result<Option<super::ModuleCooldownPersistPayload>, String>>,
+    },
+    ClearShipModuleCooldowns {
+        ship_id: i64,
+        reply: oneshot::Sender<Result<Option<super::ModuleCooldownPersistPayload>, String>>,
+    },
+    ClearAllModuleCooldowns {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ReplaceModuleCooldowns {
+        cooldowns: HashMap<(i64, i64, u32), super::ModuleCooldownEntry>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SnapshotModuleCooldownCheckpoint {
+        only_if_dirty: bool,
+        reply: oneshot::Sender<Result<Option<super::ModuleCooldownPersistPayload>, String>>,
+    },
+    RecordModuleReloadSimDeadlines {
+        module_ids: Vec<i64>,
+        sim_start_s: f64,
+        sim_deadline_s: f64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ClearModuleReloadSimDeadline {
+        module_id: i64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1802,6 +1891,7 @@ impl SystemCommand {
                 | Self::FlushConditionCheckpoint { .. }
                 | Self::FlushFighterCheckpoint { .. }
                 | Self::GetProtectionSnapshot { .. }
+                | Self::SnapshotModuleCooldownCheckpoint { .. }
                 | Self::ShutdownActor { .. }
         )
     }
@@ -1954,6 +2044,8 @@ pub struct SystemView {
     pub fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
     pub asteroids: HashMap<BallId, AsteroidState>,
     pub fighters: super::SystemFighterState,
+    pub ewar: super::ActorEwarState,
+    pub module_cooldowns: super::ActorModuleCooldownState,
 }
 
 impl Default for SystemView {
@@ -2002,6 +2094,8 @@ impl Default for SystemView {
             fit_projections: HashMap::new(),
             asteroids: HashMap::new(),
             fighters: super::SystemFighterState::default(),
+            ewar: super::ActorEwarState::default(),
+            module_cooldowns: super::ActorModuleCooldownState::default(),
         }
     }
 }
@@ -2030,6 +2124,8 @@ struct ViewActorSnapshot {
     fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
     asteroids: HashMap<BallId, AsteroidState>,
     fighters: super::SystemFighterState,
+    ewar: super::ActorEwarState,
+    module_cooldowns: super::ActorModuleCooldownState,
 }
 
 impl SystemView {
@@ -2128,6 +2224,8 @@ impl SystemView {
                 fit_projections: st.fit_projections.clone(),
                 asteroids: st.asteroids.clone(),
                 fighters: st.fighters.clone(),
+                ewar: st.ewar_state.clone(),
+                module_cooldowns: st.module_cooldowns.clone(),
             }
         } else if let Some(prev) = previous {
             ViewActorSnapshot {
@@ -2155,6 +2253,8 @@ impl SystemView {
                 fit_projections: prev.fit_projections.clone(),
                 asteroids: prev.asteroids.clone(),
                 fighters: prev.fighters.clone(),
+                ewar: prev.ewar.clone(),
+                module_cooldowns: prev.module_cooldowns.clone(),
             }
         } else {
             ViewActorSnapshot::default()
@@ -2212,6 +2312,8 @@ impl SystemView {
             fit_projections: actor.fit_projections,
             asteroids: actor.asteroids,
             fighters: actor.fighters,
+            ewar: actor.ewar,
+            module_cooldowns: actor.module_cooldowns,
         }
     }
 

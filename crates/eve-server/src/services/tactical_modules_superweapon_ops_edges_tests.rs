@@ -416,7 +416,7 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
             .code,
         "ModuleInReactivationDelay"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
 
     // 2. InvalidShipGroup (frigate 587)
     setup_ship_and_module(&ctx, null_sys, char_id, titan_id, 587, mod_id, dd_tid, DVec3::ZERO);
@@ -706,7 +706,7 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
 
     // 9. Slash mode: invalid direction vector -> InvalidDirectionVector, then valid slash fire!
     sys.step_manual(35.0).await.unwrap();
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     assert_eq!(
         activate_superweapon_with_args(
             &ctx,
@@ -1293,7 +1293,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert!(sys_null.has_module_cycle(titan_id, dd_mod).await);
     sys_null.step_manual(35.0).await.unwrap();
     assert!(!sys_null.has_module_cycle(titan_id, dd_mod).await);
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     {
         let mut bp = sys_null.ballpark.write().unwrap();
         let cs = bp.combat_states.get_mut(&titan_id).unwrap();

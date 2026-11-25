@@ -1819,7 +1819,7 @@ async fn combat_weapons_overload_and_preoverloaded_activate_emit_on_heat_added()
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ac2_id)], &kw, None)
         .await
         .expect("Deactivate ac2_id");
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
 
     let lml_id = 100_002_406i64;
     let lml_ammo_id = 100_002_407i64;
@@ -1864,7 +1864,7 @@ async fn combat_weapons_overload_and_preoverloaded_activate_emit_on_heat_added()
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(lml_id)], &kw, None)
         .await
         .expect("Deactivate missile");
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "OverloadRack", &[PyRep::Integer(lml_id)], &kw, None)
         .await
         .expect("Pre-overload missile");
@@ -2025,7 +2025,7 @@ async fn combat_weapons_overload_and_preoverloaded_activate_emit_on_heat_added()
         .code,
         "ModuleAlreadyActive"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
 
     // 6. Vorton Projector (54739, group 4060 -> is_special_target -> handle_weapons) Thermodynamics L0 vs L4,
     //    and non-overloadable Breacher Pod Launcher (85084, group 4807 -> handle_weapons) -> CannotOverloadModule

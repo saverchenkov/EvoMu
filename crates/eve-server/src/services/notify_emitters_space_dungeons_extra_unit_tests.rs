@@ -176,10 +176,11 @@ fn ess_bank_links_escalation_fleet_filter_and_dungeon_exit_distance_boundary() {
     assert_eq!(exit_notifs[0].args, vec![PyRep::Integer(4444)]);
 }
 
-#[test]
-fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback() {
+#[tokio::test]
+async fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback() {
     let (ctx, char1, char2) = make_ctx_with_two_online_pilots();
     let sys_id = 30_000_142_u32;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
     let ship1 = 100_000_001_i64;
     let ship2 = 100_000_002_i64;
     let scram_mod_id = 940_001_i64;
@@ -233,10 +234,7 @@ fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback()
 
     // 1b. flush_module_ewar_end emits OnEwarEnd WITHOUT OnGodmaFlushLocationProfile (GH #963),
     //     whereas flush_module_profile_and_ewar_end emits both when module_id != ship_id.
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship1, scram_mod_id), vec![(ship2, "warpScrambler")]);
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship1, scram_mod_id, ship2, "warpScrambler");
     let _ = flush_module_ewar_end(&ctx, char1, Some(sys_id), ship1, scram_mod_id);
     let ewar_only_notifs = ctx.drain_notifications_for_char(char1);
     assert!(ewar_only_notifs.iter().any(|n| n.event == "OnEwarEnd"));
@@ -244,10 +242,7 @@ fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback()
         !ewar_only_notifs.iter().any(|n| n.event == "OnGodmaFlushLocationProfile"),
         "flush_module_ewar_end must preserve still-fitted module in godma.invitems"
     );
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship1, scram_mod_id), vec![(ship2, "warpScrambler")]);
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship1, scram_mod_id, ship2, "warpScrambler");
     let _ = flush_module_profile_and_ewar_end(&ctx, char1, Some(sys_id), ship1, scram_mod_id);
     let unfit_notifs = ctx.drain_notifications_for_char(char1);
     let flush_notif = unfit_notifs
@@ -270,21 +265,21 @@ fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback()
     //    targeting ship2 (owned by char2), then call flush_ship_all_ewar_sync on victim ship2!
     let mut eff_mod = DogmaItemState::from_sde(scram_mod_id, 447, &ctx.sde);
     eff_mod.base_attributes.insert(103, 2.0); // warpScrambleStrength
-    ctx.projected_ewar_sources
-        .write()
-        .unwrap()
-        .insert(scram_mod_id, ship1);
-    ctx.projected_ewar.write().unwrap().insert(
-        ship2,
-        vec![ProjectedEwarEffect {
-            source_module_id: scram_mod_id,
-            source_module_type_id: 447,
-            charge_type_id: None,
-            distance: 5_000.0,
-            overloaded: false,
-            effective_module: eff_mod,
-        }],
-    );
+    sys_h
+        .upsert_projected_ewar(
+            ship1,
+            ship2,
+            ProjectedEwarEffect {
+                source_module_id: scram_mod_id,
+                source_module_type_id: 447,
+                charge_type_id: None,
+                distance: 5_000.0,
+                overloaded: false,
+                effective_module: eff_mod,
+            },
+        )
+        .await
+        .expect("upsert projected EWAR into system actor");
 
     let flushed_pairs = flush_ship_all_ewar_sync(&ctx, char2, Some(sys_id), ship2);
     assert_eq!(flushed_pairs, vec![(ship1, scram_mod_id)]);
@@ -297,10 +292,7 @@ fn projected_ewar_flush_fallback_victim_notification_and_solar_system_fallback()
     assert!(d2.iter().any(|n| n.event == "OnEwarEnd"));
 
     // 3. SolarSystem fallback when char_id == 0 and target_owner == 0 (NPC attacker -> NPC target)
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((800_001, 800_002), vec![(800_003, "webify")]);
+    ctx.record_active_ewar_start_for_test(Some(sys_id), 800_001, 800_002, 800_003, "webify");
     flush_module_profile_and_ewar_end(&ctx, 0, Some(sys_id), 800_001, 800_002);
     let sys_notifs = ctx.drain_notifications_for_char(char1);
     assert!(sys_notifs.iter().any(|n| n.event == "OnEwarEnd"));

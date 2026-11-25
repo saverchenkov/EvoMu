@@ -1437,11 +1437,8 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
             effective_module: DogmaItemState::from_sde(char_id, 995_091, &ctx.sde),
         },
     );
-    {
-        let mut active = ctx.active_ewar_starts.write().unwrap();
-        active.insert((ship_id, tp1_id), vec![(tp_target_id, "targetPainter")]);
-        active.insert((ship_id, tp2_id), vec![(tp_target_id, "targetPainter")]);
-    }
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship_id, tp1_id, tp_target_id, "targetPainter");
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship_id, tp2_id, tp_target_id, "targetPainter");
     let uid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map_or(1, |c| c.user_id));
     let _ = ctx.db.acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix());
     let mut sess = SessionState {
@@ -1471,10 +1468,7 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
             effective_module: DogmaItemState::from_sde(char_id, 995_092, &ctx.sde),
         },
     );
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship_id, dummy_id), vec![(tp_target_id, "targetPainter")]);
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship_id, dummy_id, tp_target_id, "targetPainter");
     assert_eq!(ctx.effective_target_painter_multiplier(tp_target_id), 1.0 + 1e-6);
     let _ = call_dogma(&ctx, &mut sess, "Deactivate", &[PyRep::Integer(dummy_id)]).await.unwrap();
     let cs_eps_tp = sys.get_combat_state(tp_target_id).await.unwrap().unwrap();

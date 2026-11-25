@@ -2075,7 +2075,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
     }
     super::post_unlock::step_module_reloads_sim_clock_collecting(
         &mut exec_ctx.actor_st.module_reload_sim_remaining,
-        Some(exec_ctx.actor_st.module_reload_sim_deadlines.as_ref()),
+        Some(&mut exec_ctx.actor_st.module_cooldowns.reload_sim_deadlines),
         &exec_ctx.actor_st.db_opt,
         dt_sim,
         tidi,
@@ -2142,29 +2142,25 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         &mut exec_ctx.actor_st.next_missile_ball_id,
         &exec_ctx.actor_st.sde_opt,
     );
-    {
-        let mut dead_guard = exec_ctx
-            .actor_st
-            .module_reload_sim_deadlines
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for action in exec_ctx.actor_st.pending_cycle_actions.iter() {
-            if let PendingCycleAction::AutoReloadStarted {
-                module_ids,
-                sim_deadline_s,
-                ..
-            } = action
-            {
-                for &mid in module_ids {
-                    dead_guard.insert(
+    for action in exec_ctx.actor_st.pending_cycle_actions.iter() {
+        if let PendingCycleAction::AutoReloadStarted {
+            module_ids,
+            sim_deadline_s,
+            ..
+        } = action
+        {
+            for &mid in module_ids {
+                exec_ctx
+                    .actor_st
+                    .module_cooldowns
+                    .reload_sim_deadlines
+                    .insert(
                         mid,
-                        (
-                            exec_ctx.solar_system_id,
-                            exec_ctx.actor_st.sim_elapsed_secs,
-                            *sim_deadline_s,
-                        ),
+                        super::ModuleReloadSimDeadline {
+                            sim_start_s: exec_ctx.actor_st.sim_elapsed_secs,
+                            sim_deadline_s: *sim_deadline_s,
+                        },
                     );
-                }
             }
         }
     }

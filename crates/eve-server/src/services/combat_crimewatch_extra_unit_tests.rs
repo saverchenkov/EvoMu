@@ -1498,22 +1498,26 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     assert!((sig_0 - 35.0).abs() < 1e-6, "sig_0={sig_0}");
 
     // Apply Target Painter (50% bonus -> tp_mult = 1.5) onto s149
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let tp_eff_mod = eve_dogma::DogmaItemState::from_sde(790_399, 998_311, &ctx.sde);
-    ctx.projected_ewar.write().unwrap().insert(
-        s149,
-        vec![eve_dogma::ProjectedEwarEffect {
-            source_module_id: 790_399,
-            source_module_type_id: 998_311,
-            charge_type_id: None,
-            distance: 0.0,
-            overloaded: false,
-            effective_module: tp_eff_mod,
-        }],
-    );
+    sys_handle
+        .upsert_projected_ewar(
+            790_399_001,
+            s149,
+            eve_dogma::ProjectedEwarEffect {
+                source_module_id: 790_399,
+                source_module_type_id: 998_311,
+                charge_type_id: None,
+                distance: 0.0,
+                overloaded: false,
+                effective_module: tp_eff_mod,
+            },
+        )
+        .await
+        .expect("upsert projected EWAR into system actor");
     let tp_m = ctx.effective_target_painter_multiplier(s149);
     assert!(tp_m > 1.2, "tp_m={tp_m}");
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let expected_unbloomed = 149.0;
     let expected_eff = expected_unbloomed * 2.0 * tp_m;
     let spawn_s149 = |radius: f64, cs: CombatState| {

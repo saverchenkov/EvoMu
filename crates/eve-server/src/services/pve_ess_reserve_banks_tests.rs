@@ -1772,10 +1772,7 @@ async fn ess_gate_auto_decloak_records_exact_attr_669_reactivation_delay_without
 
     // Exact 30.0s reactivation delay from SDE attr 669 (no +rem_cycle inflation to 31.0s).
     let recorded_delay_s = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .get(&(cruiser_id, cloak_id, cloak_type_id))
+        .module_cooldown_entry_for_test(cruiser_id, cloak_id, cloak_type_id)
         .map(|entry| entry.delay_s)
         .expect("cloak reactivation cooldown must be recorded");
     assert!(
@@ -1844,10 +1841,7 @@ async fn ess_gate_auto_decloak_records_exact_attr_669_reactivation_delay_without
         "non-cycle-gated cloak without attr 669 must not be placed on reactivation delay"
     );
     assert!(
-        ctx.module_reactivation_cooldowns
-            .read()
-            .unwrap()
-            .get(&(fb_cruiser_id, fb_cloak_id, fallback_cloak_type_id))
+        ctx.module_cooldown_entry_for_test(fb_cruiser_id, fb_cloak_id, fallback_cloak_type_id)
             .is_none(),
         "absent attr 669 must not inflate cooldown with +rem_cycle"
     );
@@ -2355,10 +2349,7 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
         .expect("cloaked Pilgrim activates ESS gate");
     assert!(!sys.has_module_cycle(recon_ship_id, recon_cloak_id).await);
     let recon_delay_s = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .get(&(recon_ship_id, recon_cloak_id, covert_cloak_type_id))
+        .module_cooldown_entry_for_test(recon_ship_id, recon_cloak_id, covert_cloak_type_id)
         .map(|entry| entry.delay_s)
         .expect("Pilgrim cloak reactivation cooldown must be recorded");
     assert!(
@@ -2387,10 +2378,7 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
         .unwrap()
         .expect("cloaked standard cruiser activates ESS gate");
     let std_delay_s = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .get(&(std_ship_id, std_cloak_id, improved_cloak_type_id))
+        .module_cooldown_entry_for_test(std_ship_id, std_cloak_id, improved_cloak_type_id)
         .map(|entry| entry.delay_s)
         .expect("standard cruiser cloak reactivation cooldown must be recorded");
     assert!(
@@ -2419,10 +2407,7 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
         .unwrap()
         .expect("cloaked dynamic-override cruiser activates ESS gate");
     let dyn_delay_s = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .get(&(dyn_ship_id, dyn_cloak_id, improved_cloak_type_id))
+        .module_cooldown_entry_for_test(dyn_ship_id, dyn_cloak_id, improved_cloak_type_id)
         .map(|entry| entry.delay_s)
         .expect("dynamic-override cloak reactivation cooldown must be recorded");
     assert!(
@@ -2440,10 +2425,7 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
         .unwrap()
         .expect("fallback-fit ship activates ESS gate and decloaks");
     let fb_delay_s = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .get(&(fb_ship_id, fb_cloak_id, improved_cloak_type_id))
+        .module_cooldown_entry_for_test(fb_ship_id, fb_cloak_id, improved_cloak_type_id)
         .map(|entry| entry.delay_s)
         .expect("raw SDE attr 669 fallback must record cooldown when fitting lookup fails");
     assert!(
@@ -2853,10 +2835,7 @@ async fn ess_gate_force_decloak_preserves_concurrent_shield_armor_cap_tackle_and
         post_cov_ball.max_velocity
     );
     let cov_delay_s = ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .get(&(cov_ship_id, cov_cloak_id, covert_cloak_tid))
+        .module_cooldown_entry_for_test(cov_ship_id, cov_cloak_id, covert_cloak_tid)
         .map(|entry| entry.delay_s)
         .expect("covert cloak reactivation cooldown recorded");
     assert!(

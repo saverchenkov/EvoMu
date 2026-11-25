@@ -1417,10 +1417,13 @@ async fn destroy_fitting_t3_struct_roles_and_target_lock_guards() {
     assert!(call_dogma_im(&ctx, &mut sess, None, "DestroyFitting", &[PyRep::Integer(99_999_998)]).await.is_ok());
 
     // DestroyFitting on hi3 with active ewar profile triggers tp_sig_multiplier update
-    ctx.active_ewar_starts
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert((ship_id, hi3_id), vec![(other_ship_id, "targetPainter")]);
+    ctx.record_active_ewar_start_for_test(
+        Some(sys_id),
+        ship_id,
+        hi3_id,
+        other_ship_id,
+        "targetPainter",
+    );
     assert!(call_dogma_im(&ctx, &mut sess, None, "DestroyFitting", &[PyRep::Integer(hi3_id)]).await.is_ok());
 
     // Undocked near a Mobile Depot: CannotRefitWithWeaponsTimer -> ItemNotOwnedByCharacter -> ItemNotFittedToActiveShip
@@ -1937,11 +1940,8 @@ async fn mutants_cov_item_get_info_triage_targeting_passive_and_weapon_banks() {
         overloaded: false,
         effective_module: tp2_state,
     });
-    {
-        let mut active = ctx.active_ewar_starts.write().unwrap();
-        active.insert((ship_id, tp1_id), vec![(tp_target_id, "targetPainter")]);
-        active.insert((ship_id, tp2_id), vec![(tp_target_id, "targetPainter")]);
-    }
+    ctx.record_active_ewar_start_for_test(None, ship_id, tp1_id, tp_target_id, "targetPainter");
+    ctx.record_active_ewar_start_for_test(None, ship_id, tp2_id, tp_target_id, "targetPainter");
     call_dogma_im(&ctx, &mut sess, None, "DestroyFitting", &[PyRep::Integer(tp1_id)]).await.unwrap();
     let cs_after_one = sys.get_combat_state(tp_target_id).await.unwrap().unwrap();
     assert!(cs_after_one.tp_sig_multiplier.is_some_and(|m| m > 1.0));

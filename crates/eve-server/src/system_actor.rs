@@ -28,6 +28,8 @@ pub use drones::*;
 mod test_seam;
 mod fighters; pub use fighters::*;
 mod fighters_persistence; pub(crate) use fighters_persistence::*;
+mod ewar_cooldowns;
+pub use ewar_cooldowns::*;
 #[cfg(test)]
 pub(crate) use activation_ops::{
     apply_fit_projection_in_actor, apply_fit_projection_with_cycles_in_actor,
@@ -361,7 +363,6 @@ pub struct SystemRegistry {
     /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
     hydrated_wh_ore_anomalies: RankedMutex<std::collections::HashSet<(SolarSystemId, String)>, RANK_LEAF>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
-    pub module_reload_sim_deadlines: Arc<RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, RANK_LEAF>>,
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
@@ -421,7 +422,6 @@ impl SystemRegistry {
             special_site_spawned_balls: Arc::new(RankedMutex::new(HashMap::new())),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
-            module_reload_sim_deadlines: Arc::new(RankedRwLock::new(HashMap::new())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
             cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
@@ -824,40 +824,6 @@ impl SystemRegistry {
             .unwrap_or(1.0)
     }
 
-    pub fn record_module_reload_sim_deadlines(
-        &self,
-        module_ids: &[i64],
-        solar_system_id: SolarSystemId,
-        sim_start_s: f64,
-        sim_deadline_s: f64,
-    ) {
-        let mut guard = self
-            .module_reload_sim_deadlines
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for &mid in module_ids {
-            guard.insert(mid, (solar_system_id, sim_start_s, sim_deadline_s));
-        }
-    }
-
-    pub fn clear_module_reload_sim_deadline(&self, module_id: i64) {
-        self.module_reload_sim_deadlines
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&module_id);
-    }
-
-    pub fn check_module_reload_sim_deadline(
-        &self,
-        module_id: i64,
-    ) -> Option<(SolarSystemId, f64, f64)> {
-        self.module_reload_sim_deadlines
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&module_id)
-            .copied()
-    }
-
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
         self.get_handle(solar_system_id)
             .map(|h| h.take_pending_cycle_actions())
@@ -1175,6 +1141,28 @@ impl SystemRegistry {
                 }
             }
         }
+        let initial_cooldowns = if db_read_safe {
+            if let Some(ref db) = db_opt {
+                let tidi = self.get_system_tidi_factor(solar_system_id);
+                let has_tidi_history = tidi < 0.999_999
+                    || self
+                        .cluster_nodes
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .sim_clock_anchoring
+                        .contains_key(&solar_system_id);
+                ewar_cooldowns::load_active_system_module_cooldowns_for_boot(
+                    db,
+                    solar_system_id,
+                    tidi,
+                    has_tidi_history,
+                )
+            } else {
+                HashMap::new()
+            }
+        } else {
+            HashMap::new()
+        };
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
@@ -1183,7 +1171,10 @@ impl SystemRegistry {
             db_opt,
             mechanic_rng_opt: Some(mechanic_rng.clone()),
             tactical_state: self.tactical_state.clone(),
-            module_reload_sim_deadlines: self.module_reload_sim_deadlines.clone(),
+            module_cooldowns: ActorModuleCooldownState {
+                reactivation_cooldowns: initial_cooldowns,
+                ..Default::default()
+            },
             pending_notifications_opt: self.pending_notifications_opt.clone(),
             notify_tx_opt: self.notify_tx_opt.clone(),
             hibernated: Arc::clone(&hibernated),
@@ -1499,6 +1490,7 @@ impl SystemRegistry {
                     .and_then(|c| ball_ops::handle_ball_ops_command(&mut exec_ctx, c))
                     .and_then(|c| drones::handle_drone_runtime_command(&mut exec_ctx, c))
                     .and_then(|c| fighters::handle_fighter_runtime_command(&mut exec_ctx, c))
+                    .and_then(|c| ewar_cooldowns::handle_ewar_and_cooldown_command(&mut exec_ctx, c))
                     .and_then(|c| {
                         #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, c) }
                         #[cfg(not(any(test, feature = "testkit")))] { Some(c) }
@@ -2229,6 +2221,7 @@ impl SystemRegistry {
                     }
                 }
                 }
+                flush_post_unlock_actions(&post_unlock_actions_actor);
                 if batch_view_dirty {
                     let next_view = {
                         let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());

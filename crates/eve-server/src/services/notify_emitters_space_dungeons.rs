@@ -5,6 +5,7 @@
 
 use crate::router::notify_registry::*;
 use crate::router::{NotificationTarget, ServerContext};
+use crate::system_actor::ModuleEwarFlushSnapshot;
 use eve_proto::PyRep;
 
 /// Builds the V24 `OnDamageStateChange` 3-tuple (`#990`):
@@ -577,91 +578,61 @@ pub fn emit_module_activation_godma_notifications(
     );
 }
 
-/// Removes active/projected EWAR state for `(ship_id, module_id)` and emits
-/// `OnEwarEnd(sourceBallID, moduleID, targetBallID, jammingType)` without purging
-/// a still-fitted module from `godma.StateManager.invitems`.
-pub fn flush_module_ewar_end(
+fn finish_flushed_module_ewar(
     ctx: &ServerContext,
     char_id: i64,
     solar_system_id: Option<u32>,
     ship_id: i64,
     module_id: i64,
+    snap: ModuleEwarFlushSnapshot,
 ) -> Vec<i64> {
-    let started_targets = ctx
-        .active_ewar_starts
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&(ship_id, module_id))
-        .unwrap_or_default();
-    let ewar_targets: Vec<(i64, &'static str)> = if !started_targets.is_empty() {
-        started_targets
+    let ewar_targets: Vec<(i64, &'static str)> = if !snap.started_targets.is_empty() {
+        snap.started_targets
     } else {
-        let cached_source = ctx
-            .projected_ewar_sources
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&module_id)
-            .copied();
-        let source_matches = cached_source
-            .map(|sid| sid == ship_id)
-            .unwrap_or_else(|| {
-                ctx.db
-                    .with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.location_id == ship_id))
-            });
-        let projected_targets: Vec<(i64, u32, Option<u32>, bool)> = if source_matches {
-            let guard = ctx
-                .projected_ewar
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            let mut out = Vec::new();
-            for (&target_sid, list) in guard.iter() {
-                for eff in list {
-                    if eff.source_module_id == module_id {
-                        let disables_mwd = ctx
-                            .sde
-                            .types
-                            .get(&eff.source_module_type_id)
-                            .is_some_and(|t| t.group_id == 52)
-                            && eve_dogma::eval_warp_scrambler_effects(
-                                &[&eff.effective_module],
-                                &[0.0],
-                                &ctx.sde,
-                            )
-                            .blocks_mwd;
-                        out.push((
-                            target_sid,
-                            eff.source_module_type_id,
-                            eff.charge_type_id,
-                            disables_mwd,
-                        ));
-                    }
-                }
-            }
-            out
-        } else {
-            Vec::new()
-        };
-        projected_targets
+        snap.projected_targets
             .into_iter()
-            .map(|(target_sid, mod_tid, charge_tid, disables_mwd)| {
+            .map(|target| {
+                let disables_mwd = ctx
+                    .sde
+                    .types
+                    .get(&target.source_module_type_id)
+                    .is_some_and(|t| t.group_id == 52)
+                    && eve_dogma::eval_warp_scrambler_effects(
+                        &[&target.effective_module],
+                        &[0.0],
+                        &ctx.sde,
+                    )
+                    .blocks_mwd;
                 let jamming_type = ctx
                     .sde
                     .types
-                    .get(&mod_tid)
+                    .get(&target.source_module_type_id)
                     .and_then(|mod_type| {
                         crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
                             mod_type,
-                            charge_tid,
+                            target.charge_type_id,
                             disables_mwd,
                             None,
                         )
                     })
                     .unwrap_or("electronic");
-                (target_sid, jamming_type)
+                (target.target_ship_id, jamming_type)
             })
             .collect()
     };
-    let affected_projected = ctx.remove_projected_ewar_by_module(ship_id, module_id);
+    if !snap.affected_ships.is_empty() {
+        {
+            let mut fit_guard = ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner());
+            for &sid in &snap.affected_ships {
+                if let Some(fit) = fit_guard.get_mut(&sid) {
+                    fit.remove_projected_ewar(module_id, &ctx.sde);
+                }
+            }
+        }
+        for &sid in &snap.affected_ships {
+            ctx.push_fit_projection_for_ship(sid);
+        }
+    }
     for (target_sid, jamming_type) in ewar_targets {
         let mut notified = false;
         if char_id > 0 {
@@ -678,7 +649,7 @@ pub fn flush_module_ewar_end(
         }
         let target_owner = ctx
             .db
-            .with_snapshot(|snap| snap.items.get(&target_sid).map(|i| i.owner_id))
+            .with_snapshot(|db_snap| db_snap.items.get(&target_sid).map(|i| i.owner_id))
             .unwrap_or(0);
         if target_owner > 0 && target_owner != char_id {
             ctx.emit_typed(
@@ -707,7 +678,86 @@ pub fn flush_module_ewar_end(
             }
         }
     }
-    affected_projected
+    snap.affected_ships
+}
+
+/// Removes active/projected EWAR state for `(ship_id, module_id)` and emits
+/// `OnEwarEnd(sourceBallID, moduleID, targetBallID, jammingType)` without purging
+/// a still-fitted module from `godma.StateManager.invitems`.
+pub fn flush_module_ewar_end(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    ship_id: i64,
+    module_id: i64,
+) -> Vec<i64> {
+    let allow_db_source_fallback = ctx.db.with_snapshot(|s| {
+        s.items
+            .get(&module_id)
+            .is_some_and(|i| i.location_id == ship_id)
+    });
+    let actor_locked = eve_db::lock_rank::held_lock_ranks().iter().any(|&r| {
+        r == eve_db::lock_rank::RANK_BALLPARK || r == eve_db::lock_rank::RANK_ACTOR_STATE
+    });
+    if actor_locked {
+        let handle_opt = solar_system_id
+            .and_then(|sid| ctx.systems.get_handle(sid))
+            .or_else(|| ctx.systems.find_ship_live_handle(ship_id));
+        if let Some(handle) = handle_opt {
+            let ctx_w = ctx.downgrade();
+            ctx.systems.enqueue_post_unlock_action(Box::new(move || {
+                let Some(c) = ctx_w.upgrade() else {
+                    return;
+                };
+                let snap = handle.flush_module_ewar_unlocked_direct(
+                    ship_id,
+                    module_id,
+                    allow_db_source_fallback,
+                );
+                let _ = finish_flushed_module_ewar(
+                    &c,
+                    char_id,
+                    solar_system_id,
+                    ship_id,
+                    module_id,
+                    snap,
+                );
+            }));
+        }
+        return Vec::new();
+    }
+
+    let mut merged = ModuleEwarFlushSnapshot::default();
+    for (sid, handle) in ctx.systems.active_system_handles() {
+        let view = handle.view();
+        let may_hold_state = solar_system_id == Some(sid)
+            || view.ewar.active_ewar_starts.contains_key(&(ship_id, module_id))
+            || view
+                .ewar
+                .projected_ewar_sources
+                .get(&module_id)
+                .copied()
+                .is_some_and(|src| src == ship_id)
+            || (allow_db_source_fallback
+                && view
+                    .ewar
+                    .projected_ewar
+                    .values()
+                    .any(|list| list.iter().any(|e| e.source_module_id == module_id)));
+        if !may_hold_state {
+            continue;
+        }
+        if let Ok(snap) = handle.flush_module_ewar_sync(ship_id, module_id, allow_db_source_fallback) {
+            merged.started_targets.extend(snap.started_targets);
+            merged.projected_targets.extend(snap.projected_targets);
+            for aff_sid in snap.affected_ships {
+                if !merged.affected_ships.contains(&aff_sid) {
+                    merged.affected_ships.push(aff_sid);
+                }
+            }
+        }
+    }
+    finish_flushed_module_ewar(ctx, char_id, solar_system_id, ship_id, module_id, merged)
 }
 
 /// Emits `OnGodmaFlushLocationProfile(shipID, ("effect", moduleID))` (only safe when
@@ -745,68 +795,44 @@ pub fn flush_ship_all_ewar_sync(
     ship_id: i64,
 ) -> Vec<(i64, i64)> {
     let mut pairs: Vec<(i64, i64)> = Vec::new();
-    {
-        let guard = ctx
-            .active_ewar_starts
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        for (&(src_sid, mod_id), targets) in guard.iter() {
-            if src_sid == ship_id || targets.iter().any(|&(tid, _)| tid == ship_id) {
-                if !pairs.contains(&(src_sid, mod_id)) {
-                    pairs.push((src_sid, mod_id));
-                }
+    let mut unresolved: Vec<i64> = Vec::new();
+    for (_, handle) in ctx.systems.active_system_handles() {
+        let view = handle.view();
+        for (&(src_sid, mod_id), targets) in &view.ewar.active_ewar_starts {
+            if (src_sid == ship_id || targets.iter().any(|&(tid, _)| tid == ship_id))
+                && !pairs.contains(&(src_sid, mod_id))
+            {
+                pairs.push((src_sid, mod_id));
             }
         }
-    }
-    {
-        let mut target_mod_ids = Vec::new();
-        {
-            let src_guard = ctx
-                .projected_ewar_sources
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            for (&mod_id, &src_sid) in src_guard.iter() {
-                if src_sid == ship_id && !pairs.contains(&(src_sid, mod_id)) {
-                    pairs.push((src_sid, mod_id));
-                }
+        for (&mod_id, &src_sid) in &view.ewar.projected_ewar_sources {
+            if src_sid == ship_id && !pairs.contains(&(src_sid, mod_id)) {
+                pairs.push((src_sid, mod_id));
             }
         }
-        {
-            let pe_guard = ctx
-                .projected_ewar
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(list) = pe_guard.get(&ship_id) {
-                for eff in list {
-                    target_mod_ids.push(eff.source_module_id);
-                }
-            }
-        }
-        let mut unresolved = Vec::new();
-        if !target_mod_ids.is_empty() {
-            let src_guard = ctx
-                .projected_ewar_sources
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            for mod_id in target_mod_ids {
-                if let Some(&src_sid) = src_guard.get(&mod_id) {
+        if let Some(list) = view.ewar.projected_ewar.get(&ship_id) {
+            for eff in list {
+                let mod_id = eff.source_module_id;
+                if let Some(&src_sid) = view.ewar.projected_ewar_sources.get(&mod_id) {
                     if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
                         pairs.push((src_sid, mod_id));
                     }
-                } else {
+                } else if !unresolved.contains(&mod_id) {
                     unresolved.push(mod_id);
                 }
             }
         }
-        for mod_id in unresolved {
-            let src_sid = ctx
-                .db
-                .with_snapshot(|s| s.items.get(&mod_id).map(|i| i.location_id))
-                .unwrap_or(0);
-            if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
-                pairs.push((src_sid, mod_id));
+    }
+    if !unresolved.is_empty() {
+        ctx.db.with_snapshot(|s| {
+            for mod_id in unresolved {
+                if let Some(src_sid) = s.items.get(&mod_id).map(|i| i.location_id).filter(|&sid| sid > 0) {
+                    if !pairs.contains(&(src_sid, mod_id)) {
+                        pairs.push((src_sid, mod_id));
+                    }
+                }
             }
-        }
+        });
     }
     for &(src_sid, mod_id) in &pairs {
         let src_char = if src_sid == ship_id && char_id > 0 {

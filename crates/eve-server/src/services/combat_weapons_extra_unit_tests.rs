@@ -521,7 +521,7 @@ async fn t1_and_stacked_crystal_volatility_vorton_arc_and_already_active_checks(
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&crystal_id).unwrap().type_id = 86_011;
     });
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let shatter_stack = handle_weapons(
         &ctx,
         &mut session,
@@ -835,7 +835,7 @@ async fn entropic_disintegrator_spool_already_active_and_target_switch_reset() {
     // Switching target to t2 resets spool back to cycle 0 and 1.0x.
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.remove_module_cycle(ship_id, ent_id).await;
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&ent_id);
         if let Some(m) = s.items.get_mut(&ent_id) {
@@ -1174,7 +1174,7 @@ async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp
     assert!(ok_drone.is_ok(), "pilot drone must not be shielded: {ok_drone:?}");
     assert!(sys_handle.get_combat_state(pilot_drone).await.unwrap().unwrap().shield_hp < 5_000.0);
 
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let ok_corp_gun = handle_weapons(
         &ctx,
         &mut session,
@@ -1204,7 +1204,7 @@ async fn weapon_ewar_and_vorton_protect_invuln_ship_only_not_pilot_drone_or_corp
     for bid in [pilot_drone, corp_ship, broken_jump_cloak_ship] {
         let _ = sys_handle.modify_combat_state(bid, |cs| cs.shield_hp = 5_000.0).await;
     }
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let vorton_res = handle_weapons(
         &ctx,
         &mut session,

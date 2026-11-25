@@ -419,8 +419,8 @@ async fn test_sqlite_context_charges_skill_queue_and_dispatch_edges() {
     super::dispatch::tick_sov_prospecting_deposit_respawn(&ctx, null_sys).await;
 }
 
-#[test]
-fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey() {
+#[tokio::test]
+async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey() {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
@@ -448,10 +448,14 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     let probe_neg_state = 700_000_002_i64;
 
     // 1. Write-lock deadlock guard: persist inside with_mut_snapshot returns safely without deadlocking.
-    ctx1.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship_a, ship_b), vec![(1, "warpScramblerMWD")]);
+    let _ = ctx1.systems.get_or_spawn(30_000_142);
+    ctx1.record_active_ewar_start_for_test(
+        Some(30_000_142),
+        ship_a,
+        ship_b,
+        1,
+        "warpScramblerMWD",
+    );
     ctx1.db.with_mut_snapshot(|snap| {
         snap.service_state_blobs
             .insert("stale".into(), "keep".into());
@@ -663,7 +667,7 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
     ctx2.hydrate_server_runtime_from_db();
 
     // Verify crash-lost active_ewar_starts remains empty and legacy monolith blob was retired
-    assert!(ctx2.active_ewar_starts.read().unwrap().is_empty());
+    assert_eq!(ctx2.ewar_starts_count_for_test(), 0);
     assert!(ctx2
         .db
         .with_snapshot(|snap| !snap.service_state_blobs.contains_key(SERVER_RUNTIME_STATE_BLOB_KEY)));
@@ -757,7 +761,7 @@ fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical_rekey
         snap.cluster_and_runtime.server_runtime_json = Some("{invalid_json".into());
     });
     ctx2.hydrate_server_runtime_from_db();
-    assert!(ctx2.active_ewar_starts.read().unwrap().is_empty());
+    assert_eq!(ctx2.ewar_starts_count_for_test(), 0);
 
     // 6. Diff sync of removed scanner probe & clearing empty server_runtime_json + legacy keys
     ctx2.active_scanner_probes.write().unwrap().clear();

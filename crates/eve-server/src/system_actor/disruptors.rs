@@ -287,6 +287,13 @@ pub(in crate::system_actor) fn apply_destiny_event_in_actor(
                             is_interactive,
                         },
                     );
+                    ballpark.emit_event(
+                        scope,
+                        DestinyEvent::SetBallInteractive {
+                            ball_id: id,
+                            is_interactive,
+                        },
+                    );
                 }
             }
             DestinyEvent::SetBallRadius {

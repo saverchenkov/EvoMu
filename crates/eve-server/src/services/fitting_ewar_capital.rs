@@ -2065,12 +2065,9 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
         target_ball_id: target_id,
         jamming_type: jam_type.into(),
     };
-    ctx.active_ewar_starts
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry((ship_id, module_id))
-        .or_default()
-        .push((target_id, jam_type));
+    if let Some(handle) = ctx.systems.get_handle(sys_id) {
+        let _ = handle.record_active_ewar_start_sync(ship_id, module_id, target_id, jam_type);
+    }
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         ewar_notif.clone(),

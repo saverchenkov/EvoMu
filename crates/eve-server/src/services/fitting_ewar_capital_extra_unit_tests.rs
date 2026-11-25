@@ -716,7 +716,7 @@ async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
     );
 
     // Clear projected EWAR and test tp_mult == 1.0 (bonus=0.0 -> None, kills 1.0 - 1e-6 and 1.0 * 1e-6)
-    ctx.projected_ewar.write().unwrap().remove(&target_id);
+    ctx.clear_target_ewar_for_test(target_id);
     let (_, tp_st_0) = synth_module_and_state(mod_id, 99_881, 19, None, &[(54, 50_000.0), (2044, 20_000.0), (554, 0.0)]);
     let _ = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &tp_fm, &tp_type, &tp_st_0, &fit, Some(target_id), false, false, false)
         .await
@@ -724,7 +724,7 @@ async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
     assert_eq!(sys.get_combat_state(target_id).await.unwrap().unwrap().tp_sig_multiplier, None);
 
     // Exact boundary tp_mult == 1.0 + 1e-6 (bonus = 1e-4%) -> strictly `>` must yield None (kills `>` -> `>=`)
-    ctx.projected_ewar.write().unwrap().remove(&target_id);
+    ctx.clear_target_ewar_for_test(target_id);
     let (_, tp_st_edge) = synth_module_and_state(mod_id, 99_881, 19, None, &[(54, 50_000.0), (2044, 20_000.0), (554, 1e-4)]);
     let _ = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &tp_fm, &tp_type, &tp_st_edge, &fit, Some(target_id), false, false, false)
         .await

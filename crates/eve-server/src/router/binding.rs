@@ -1687,19 +1687,39 @@ impl ServerContext {
                         .unwrap_or(0.0)
                 };
                 if reactiv_delay_s > 0.0 {
-                    let now_s = db.clock().now_unix_secs() as f64;
-                    let sys_sim_s = solar_system_id
-                        .map(|sid| step_ctx.systems.get_system_sim_elapsed(sid))
-                        .unwrap_or(0.0);
-                    step_ctx.module_reactivation_cooldowns.write().unwrap_or_else(|e| e.into_inner()).insert(
-                        (cycle.ship_id, cycle.module_id, cycle.module_type_id),
-                        super::context::ModuleCooldownEntry {
-                            recorded_unix_f64: now_s,
-                            delay_s: reactiv_delay_s,
-                            solar_system_id,
-                            recorded_sys_sim_s: sys_sim_s,
-                        },
-                    );
+                    if let Some(sys_id) = solar_system_id {
+                        let sid = cycle.ship_id;
+                        let mid = cycle.module_id;
+                        let mtid = cycle.module_type_id;
+                        let actor_locked = eve_db::lock_rank::held_lock_ranks().iter().any(|&r| {
+                            r == eve_db::lock_rank::RANK_BALLPARK
+                                || r == eve_db::lock_rank::RANK_ACTOR_STATE
+                        });
+                        if !actor_locked {
+                            step_ctx.record_module_reactivation_delay_for_system(
+                                Some(sys_id),
+                                sid,
+                                mid,
+                                mtid,
+                                reactiv_delay_s,
+                            );
+                        } else if let Some(handle) = step_ctx.systems.get_handle(sys_id) {
+                            let now_s = db.clock().now_unix_secs() as f64;
+                            let (tidi_factor, has_tidi_history) =
+                                step_ctx.resolve_sys_tidi_mode(Some(sys_id));
+                            step_ctx.systems.enqueue_post_unlock_action(Box::new(move || {
+                                handle.record_module_cooldown_unlocked_direct(
+                                    sid,
+                                    mid,
+                                    mtid,
+                                    now_s,
+                                    reactiv_delay_s,
+                                    tidi_factor,
+                                    has_tidi_history,
+                                );
+                            }));
+                        }
+                    }
                 }
             }
 
@@ -1988,21 +2008,21 @@ impl ServerContext {
         target_ship_id: i64,
         effect: eve_dogma::ProjectedEwarEffect,
     ) {
-        self.projected_ewar_sources
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(effect.source_module_id, source_ship_id);
-        {
-            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
-            let list = guard.entry(target_ship_id).or_default();
-            if let Some(existing) = list
-                .iter_mut()
-                .find(|e| e.source_module_id == effect.source_module_id)
-            {
-                *existing = effect.clone();
-            } else {
-                list.push(effect.clone());
-            }
+        let handle_opt = self
+            .systems
+            .find_ship_live_handle(target_ship_id)
+            .or_else(|| self.systems.find_ship_live_handle(source_ship_id))
+            .or_else(|| {
+                self.resolve_ship_system_opt(target_ship_id)
+                    .or_else(|| self.resolve_ship_system_opt(source_ship_id))
+                    .and_then(|sid| self.systems.get_handle(sid))
+            });
+        if let Some(handle) = handle_opt {
+            let _ = handle.upsert_projected_ewar_sync(
+                source_ship_id,
+                target_ship_id,
+                effect.clone(),
+            );
         }
         {
             let mut fit_guard = self
@@ -2017,38 +2037,36 @@ impl ServerContext {
     }
 
     pub fn remove_projected_ewar_by_module(&self, source_ship_id: i64, source_module_id: i64) -> Vec<i64> {
-        let recorded = self
-            .projected_ewar_sources
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&source_module_id)
-            .copied();
-        match recorded {
-            Some(recorded_ship) if recorded_ship != source_ship_id => return Vec::new(),
-            Some(_) => {
-                self.projected_ewar_sources
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&source_module_id);
-            }
-            None => {
-                if !self.db.with_snapshot(|s| {
-                    s.items
-                        .get(&source_module_id)
-                        .is_some_and(|i| i.location_id == source_ship_id)
-                }) {
-                    return Vec::new();
-                }
-            }
-        }
+        let allow_db_source_fallback = self.db.with_snapshot(|s| {
+            s.items
+                .get(&source_module_id)
+                .is_some_and(|i| i.location_id == source_ship_id)
+        });
         let mut affected_ships = Vec::new();
-        {
-            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
-            for (&ship_id, list) in guard.iter_mut() {
-                let before = list.len();
-                list.retain(|e| e.source_module_id != source_module_id);
-                if list.len() < before {
-                    affected_ships.push(ship_id);
+        for (_, handle) in self.systems.active_system_handles() {
+            let view = handle.view();
+            let may_match = match view.ewar.projected_ewar_sources.get(&source_module_id).copied() {
+                Some(recorded_ship) => recorded_ship == source_ship_id,
+                None => {
+                    allow_db_source_fallback
+                        && view
+                            .ewar
+                            .projected_ewar
+                            .values()
+                            .any(|list| list.iter().any(|e| e.source_module_id == source_module_id))
+                }
+            };
+            if may_match {
+                if let Ok(ships) = handle.remove_projected_ewar_by_module_sync(
+                    source_ship_id,
+                    source_module_id,
+                    allow_db_source_fallback,
+                ) {
+                    for sid in ships {
+                        if !affected_ships.contains(&sid) {
+                            affected_ships.push(sid);
+                        }
+                    }
                 }
             }
         }
@@ -2094,20 +2112,25 @@ impl ServerContext {
         }
         let base_sig = item_base_sig_opt.unwrap_or_else(|| fallback_base_sig.max(1.0));
         let tp_resist = tp_resist_opt.unwrap_or(1.0).clamp(0.0, 1.0);
-        let bonuses: Vec<f64> = self.projected_ewar.read().unwrap_or_else(|e| e.into_inner())
-            .get(&target_ball_id)
-            .map(|list| {
-                list.iter()
-                    .filter(|proj| self.sde.types.get(&proj.source_module_type_id).is_some_and(|t| t.group_id == 379) || proj.effective_module.base_attributes.contains_key(&554))
-                    .map(|proj| {
-                        let opt = proj.effective_module.get_attribute(eve_sde::attr_ids::MAX_RANGE, &self.sde);
-                        let fall = eve_dogma::get_module_falloff(&proj.effective_module, &self.sde);
-                        let att = eve_dogma::compute_falloff_attenuation(proj.distance, opt, fall);
-                        proj.effective_module.get_attribute(554, &self.sde) * att * tp_resist
-                    })
-                    .collect()
+        let projected = self.systems.ship_ewar_projections(target_ball_id);
+        let bonuses: Vec<f64> = projected
+            .iter()
+            .filter(|proj| {
+                self.sde
+                    .types
+                    .get(&proj.source_module_type_id)
+                    .is_some_and(|t| t.group_id == 379)
+                    || proj.effective_module.base_attributes.contains_key(&554)
             })
-            .unwrap_or_default();
+            .map(|proj| {
+                let opt = proj
+                    .effective_module
+                    .get_attribute(eve_sde::attr_ids::MAX_RANGE, &self.sde);
+                let fall = eve_dogma::get_module_falloff(&proj.effective_module, &self.sde);
+                let att = eve_dogma::compute_falloff_attenuation(proj.distance, opt, fall);
+                proj.effective_module.get_attribute(554, &self.sde) * att * tp_resist
+            })
+            .collect();
         eve_dogma::eval_target_painters_sig_radius(base_sig, &bonuses)
     }
 
@@ -2120,32 +2143,26 @@ impl ServerContext {
                 .and_then(|i| self.sde.types.get(&i.type_id))
                 .and_then(|t| t.default_attributes.get(&2114).copied())
         }).unwrap_or(1.0).clamp(0.0, 1.0);
-        let bonuses: Vec<f64> = self
-            .projected_ewar
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&target_ball_id)
-            .map(|list| {
-                list.iter()
-                    .filter(|proj| {
-                        self.sde
-                            .types
-                            .get(&proj.source_module_type_id)
-                            .is_some_and(|t| t.group_id == 379)
-                            || proj.effective_module.base_attributes.contains_key(&554)
-                    })
-                    .map(|proj| {
-                        let opt = proj
-                            .effective_module
-                            .get_attribute(eve_sde::attr_ids::MAX_RANGE, &self.sde);
-                        let fall = eve_dogma::get_module_falloff(&proj.effective_module, &self.sde);
-                        let att =
-                            eve_dogma::compute_falloff_attenuation(proj.distance, opt, fall);
-                        proj.effective_module.get_attribute(554, &self.sde) * att * tp_resist
-                    })
-                    .collect()
+        let projected = self.systems.ship_ewar_projections(target_ball_id);
+        let bonuses: Vec<f64> = projected
+            .iter()
+            .filter(|proj| {
+                self.sde
+                    .types
+                    .get(&proj.source_module_type_id)
+                    .is_some_and(|t| t.group_id == 379)
+                    || proj.effective_module.base_attributes.contains_key(&554)
             })
-            .unwrap_or_default();
+            .map(|proj| {
+                let opt = proj
+                    .effective_module
+                    .get_attribute(eve_sde::attr_ids::MAX_RANGE, &self.sde);
+                let fall = eve_dogma::get_module_falloff(&proj.effective_module, &self.sde);
+                let att =
+                    eve_dogma::compute_falloff_attenuation(proj.distance, opt, fall);
+                proj.effective_module.get_attribute(554, &self.sde) * att * tp_resist
+            })
+            .collect();
         if bonuses.is_empty() {
             1.0
         } else {

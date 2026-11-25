@@ -38,7 +38,6 @@
 60	60	crates/eve-server/src/router/cache_notifications.rs::notify_inner::pending_notifications
 60	60	crates/eve-server/src/router/cache_notifications.rs::put_cached_object::object_cache_timestamps
 60	60	crates/eve-server/src/router/context.rs::fit::active_scanner_probes
-60	60	crates/eve-server/src/router/context.rs::fit::projected_ewar
 60	60	crates/eve-server/src/router/context.rs::fit::ship_fittings
 60	60	crates/eve-server/src/services/fleet_social_notify.rs::tick_fleet_lifecycle::fleet_extras
 60	60	crates/eve-server/src/system_actor/disruptors.rs::try_remove_module_cycle::module_deactivation_hook
