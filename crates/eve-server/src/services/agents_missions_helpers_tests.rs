@@ -529,10 +529,18 @@ fn cosmos_and_data_center_agents_grant_zero_lp_on_real_sde_missions() {
         .sde
         .missions
         .values()
-        .filter(|m| m.lp_omega == 0 && !m.title.trim().is_empty())
-        .take(2)
+        .filter(|m| {
+            m.lp_omega == 0
+                && !m.title.trim().is_empty()
+                && !m
+                    .content_template
+                    .as_deref()
+                    .is_some_and(|ct| ct.contains("Research"))
+        })
         .map(|m| m.mission_id)
         .collect();
+    non_lp_mids.sort_unstable();
+    non_lp_mids.truncate(2);
     non_lp_mids.push(13_777); // Wiki Security mission that pays LP for Basic agents
 
     for (label, agent) in [("DataCenter(5)", &dc_agent), ("COSMOS(8)", &cosmos_agent)] {

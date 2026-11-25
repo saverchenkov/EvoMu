@@ -78,21 +78,40 @@ pub async fn try_activate_dungeon_runtime_gate(
             }
             if let Some(s) = arg_str {
                 if s == format!("DNG-INST-{}", inst.instance_id) {
-                    let next_idx = inst.current_room_index.min(inst.rooms.len().saturating_sub(1));
-                    let cur_room = inst.rooms.get(inst.current_room_index.saturating_sub(1));
-                    if let Some(gl) = cur_room.and_then(|r| r.gate_links.first()) {
-                        let target = gl.target_room_index.min(inst.rooms.len().saturating_sub(1));
+                    if inst.current_room_index == 0
+                        && (inst.entry_gate_pos.is_some() || inst.entry_gate_ball_id.is_some())
+                    {
                         return Some((
                             inst.instance_id,
-                            target,
+                            0usize,
+                            inst.entry_gate_pos,
+                            inst.entry_gate_locked,
+                            inst.entry_gate_ball_id.unwrap_or(0),
+                            None,
+                        ));
+                    }
+                    let cur_room = inst
+                        .current_room_index
+                        .checked_sub(1)
+                        .and_then(|idx| inst.rooms.get(idx));
+                    if let Some(gl) = cur_room.and_then(|r| {
+                        r.gate_links
+                            .iter()
+                            .find(|gl| gl.target_room_index < inst.rooms.len())
+                    }) {
+                        return Some((
+                            inst.instance_id,
+                            gl.target_room_index,
                             Some(gl.gate_position),
                             gl.locked,
                             gl.gate_ball_id.unwrap_or(0),
                             Some(gl.destination_pos),
                         ));
                     }
+                    let next_idx = inst.current_room_index.min(inst.rooms.len().saturating_sub(1));
                     let gate_id = cur_room.and_then(|r| r.gate_ball_id).unwrap_or(0);
-                    let gate_pos = cur_room.map(|r| [r.position[0] + 5_000.0, r.position[1], r.position[2]]);
+                    let gate_pos =
+                        cur_room.map(|r| [r.position[0] + 5_000.0, r.position[1], r.position[2]]);
                     let locked = cur_room.is_some_and(|r| r.gate_locked);
                     return Some((inst.instance_id, next_idx, gate_pos, locked, gate_id, None));
                 }
@@ -1245,7 +1264,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
         id
     });
     materialize_dungeon_room_entities(ctx, sys_id, inst_id, 0).await?;
-    if !has_entry_gate {
+    if !has_entry_gate && !matches!(category, "Expedition" | "Escalation") {
         on_dungeon_room_entered(ctx, sys_id, inst_id, 0, owner_char_id).await;
     }
     Ok(inst_id)
@@ -1565,9 +1584,8 @@ pub async fn on_dungeon_item_looted(
                 }) {
                     trigger_match = true;
                 }
-            } else if inst.completed
+            } else if (inst.completed || inst.failed)
                 && !inst.despawned
-                && !inst.failed
                 && inst.loot_grace_until_unix.is_some()
                 && inst.rooms.iter().any(|r| {
                     r.objects
@@ -1697,10 +1715,19 @@ pub fn dispatch_dungeon_notify_actions(
     }
 }
 
-fn room_contains_ship_pos(room: &DungeonRuntimeRoom, ship_pos: DVec3) -> bool {
-    let room_pos = DVec3::from_array(room.position);
-    let gate_dest = DVec3::from_array(room.gate_destination_pos);
-    ship_pos.distance(room_pos) <= 250_000.0 || ship_pos.distance(gate_dest) <= 250_000.0
+fn room_contains_ship_pos(
+    inst: &DungeonRuntimeInstance,
+    r_idx: usize,
+    room: &DungeonRuntimeRoom,
+    ship_pos: DVec3,
+) -> bool {
+    super::pve_dungeon_runtime::room_contains_pocket_pos(
+        inst,
+        r_idx,
+        room,
+        [ship_pos.x, ship_pos.y, ship_pos.z],
+        250_000.0,
+    )
 }
 
 fn resolve_current_pocket_room_at_pos(
@@ -1712,11 +1739,16 @@ fn resolve_current_pocket_room_at_pos(
     }
     inst.rooms
         .iter()
-        .find(|r| r.room_index == inst.current_room_index && room_contains_ship_pos(r, ship_pos))
+        .enumerate()
+        .find(|(r_idx, r)| {
+            r.room_index == inst.current_room_index && room_contains_ship_pos(inst, *r_idx, r, ship_pos)
+        })
+        .map(|(_, r)| r)
         .or_else(|| {
+            let idx = inst.current_room_index - 1;
             inst.rooms
-                .get(inst.current_room_index - 1)
-                .filter(|r| room_contains_ship_pos(r, ship_pos))
+                .get(idx)
+                .filter(|r| room_contains_ship_pos(inst, idx, r, ship_pos))
         })
 }
 
@@ -1766,10 +1798,13 @@ pub fn check_warp_target_blocked_by_gated_dungeon_room(
                         || room.gate_ball_id == Some(tid)
                         || room.gate_links.iter().any(|gl| gl.gate_ball_id == Some(tid))
                 });
-                let room_pos = DVec3::from_array(room.position);
-                let gate_dest = DVec3::from_array(room.gate_destination_pos);
-                let matches_pos = target_pos.distance(room_pos) <= 150_000.0
-                    || target_pos.distance(gate_dest) <= 150_000.0;
+                let matches_pos = super::pve_dungeon_runtime::room_contains_pocket_pos(
+                    inst,
+                    r_idx,
+                    room,
+                    [target_pos.x, target_pos.y, target_pos.z],
+                    150_000.0,
+                );
                 if matches_ball || matches_pos {
                     return true;
                 }
@@ -1846,7 +1881,7 @@ pub fn register_sde_operation_dungeon_instance(
         .map(|d| d.name.trim().to_string())
         .unwrap_or_else(|| format!("Operation Dungeon {dungeon_id}"));
     let disallow_mwd = sde_dungeon.is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
-    let rooms = resolve_rooms_with_content_fallback(
+    let mut rooms = resolve_rooms_with_content_fallback(
         ctx,
         sys_id,
         dungeon_id,
@@ -1854,9 +1889,13 @@ pub fn register_sde_operation_dungeon_instance(
         base_pos,
         false,
     );
+    let now = ctx.now_unix();
+    if let Some(r0) = rooms.first_mut() {
+        r0.entered = true;
+        r0.entered_unix = Some(now);
+    }
     let total_rooms = rooms.len().max(1) as u8;
     let room_id = rooms.first().map(|r| r.room_id).unwrap_or(i64::from(dungeon_id) * 100 + 1);
-    let now = ctx.now_unix();
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
         prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);

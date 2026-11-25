@@ -730,6 +730,8 @@ pub struct DungeonNpcGroup {
     #[serde(default)]
     pub npc_ball_meta: BTreeMap<i64, DungeonSpawnedNpcMeta>,
     #[serde(default)]
+    pub dead_npc_ball_ids: Vec<i64>,
+    #[serde(default)]
     pub kills_recorded: u32,
 }
 

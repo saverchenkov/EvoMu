@@ -141,6 +141,37 @@ fn is_pocket_mwd_disallowed(
         .is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)))
 }
 
+/// Returns `true` if `pos` is within `radius_m` of `room`'s primary position, default
+/// `gate_destination_pos`, or any incoming `gate_links.destination_pos` targeting `r_idx`.
+pub(crate) fn room_contains_pocket_pos(
+    inst: &DungeonRuntimeInstance,
+    r_idx: usize,
+    room: &DungeonRuntimeRoom,
+    pos: [f64; 3],
+    radius_m: f64,
+) -> bool {
+    if dist3(pos, room.position) <= radius_m {
+        return true;
+    }
+    if room.gate_destination_pos != [0.0, 0.0, 0.0]
+        && !inst
+            .rooms
+            .iter()
+            .enumerate()
+            .any(|(oi, o)| oi != r_idx && dist3(room.gate_destination_pos, o.position) <= radius_m)
+        && dist3(pos, room.gate_destination_pos) <= radius_m
+    {
+        return true;
+    }
+    inst.rooms.iter().any(|src| {
+        src.gate_links.iter().any(|gl| {
+            gl.target_room_index == r_idx
+                && gl.destination_pos != [0.0, 0.0, 0.0]
+                && dist3(pos, gl.destination_pos) <= radius_m
+        })
+    })
+}
+
 /// Returns `true` if `ship_pos` lies inside an active k-space `DungeonRuntimeInstance` pocket.
 pub fn is_ship_in_deadspace_pocket(
     ctx: &ServerContext,
@@ -154,7 +185,11 @@ pub fn is_ship_in_deadspace_pocket(
         store.instances.values().any(|inst| {
             !instance_is_finished(inst)
                 && inst.solar_system_id == sys_id
-                && inst.rooms.iter().any(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
+                && inst
+                    .rooms
+                    .iter()
+                    .enumerate()
+                    .any(|(r_idx, r)| room_contains_pocket_pos(inst, r_idx, r, ship_pos, POCKET_RADIUS_M))
         })
     })
 }
@@ -175,8 +210,11 @@ pub fn check_deadspace_mwd_allowed(
                 }
                 inst.rooms
                     .iter()
-                    .find(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
-                    .map(|r| (inst.clone(), r.clone()))
+                    .enumerate()
+                    .find(|(r_idx, r)| {
+                        room_contains_pocket_pos(inst, *r_idx, r, ship_pos, POCKET_RADIUS_M)
+                    })
+                    .map(|(_, r)| (inst.clone(), r.clone()))
             })
         });
         if let Some((inst, r)) = matched_room {
@@ -258,11 +296,15 @@ pub fn check_deadspace_warp_allowed(
                 let src_room_idx = inst
                     .rooms
                     .iter()
-                    .find(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
-                    .map(|r| r.room_index);
-                for r in &inst.rooms {
-                    let targets_room = dist3(anchor_pos, r.position) <= POCKET_RADIUS_M
-                        || dist3(dest_pos, r.position) <= POCKET_RADIUS_M;
+                    .enumerate()
+                    .find(|(r_idx, r)| {
+                        room_contains_pocket_pos(inst, *r_idx, r, ship_pos, POCKET_RADIUS_M)
+                    })
+                    .map(|(_, r)| r.room_index);
+                for (r_idx, r) in inst.rooms.iter().enumerate() {
+                    let targets_room =
+                        room_contains_pocket_pos(inst, r_idx, r, anchor_pos, POCKET_RADIUS_M)
+                            || room_contains_pocket_pos(inst, r_idx, r, dest_pos, POCKET_RADIUS_M);
                     if !targets_room {
                         continue;
                     }
@@ -779,11 +821,18 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
                 .rooms
                 .iter()
                 .enumerate()
-                .find(|(_, r)| dist3(landed_pos, r.position) <= 150_000.0)?;
-            let behind_unentered_gate = (room_vec_idx == 0
-                && inst.entry_gate_ball_id.is_some()
-                && inst.current_room_index == 0)
-                || (room.gated && room_vec_idx + 1 > inst.current_room_index);
+                .find(|(r_idx, r)| {
+                    room_contains_pocket_pos(inst, *r_idx, r, landed_pos, 150_000.0)
+                        || (*r_idx == 0
+                            && inst
+                                .entry_gate_pos
+                                .is_some_and(|ep| dist3(landed_pos, ep) <= 150_000.0))
+                })?;
+            let behind_unentered_gate = !room.entered
+                && (room.gated
+                    || (room_vec_idx == 0
+                        && (inst.entry_gate_pos.is_some()
+                            || inst.entry_gate_ball_id.is_some())));
             Some((
                 inst.instance_id,
                 inst.dungeon_id,
@@ -814,6 +863,9 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
         behind_unentered_gate,
     )) = runtime_entry
     {
+        if room_vec_idx > 0 && behind_unentered_gate {
+            return;
+        }
         let mut esc_instance_id = None;
         if matches!(category.as_str(), "Expedition" | "Escalation") {
             with_pve_exploration_reg(ctx, |reg| {
@@ -1178,6 +1230,7 @@ pub(crate) fn cleanup_instance_containers_in_snap(
         .retain(|item_id, rec| !id_set.contains(item_id) && !id_set.contains(&rec.location_id));
     for bid in &id_set {
         snap.item_positions.remove(bid);
+        snap.sp6_lifecycle.space_object_meta.remove(bid);
     }
 }
 
@@ -1457,7 +1510,12 @@ pub async fn on_dungeon_room_entered(
             room.entered = true;
             room.entered_unix.get_or_insert(now_unix);
 
-            if !was_entered && room.npc_groups.iter().any(|g| g.kills_recorded > 0) {
+            if !was_entered
+                && room
+                    .npc_groups
+                    .iter()
+                    .any(|g| g.kills_recorded > 0 || !g.dead_npc_ball_ids.is_empty())
+            {
                 let cleared_group_ids: Vec<u8> = room
                     .npc_groups
                     .iter()
@@ -1723,137 +1781,31 @@ pub(crate) async fn complete_dungeon_instance_core(
 ) {
     let now_unix = db.clock().now_unix_secs();
     let cleanup = db.with_mut_snapshot(|snap| {
-        let was_despawned = snap
-            .dungeon_runtime
-            .instances
-            .get(&instance_id)
-            .is_none_or(|i| i.despawned);
-        if was_despawned {
-            return None;
-        }
-        let has_loot = !force_full_despawn
-            && snap
-                .dungeon_runtime
-                .instances
-                .get(&instance_id)
-                .is_some_and(|i| has_unlooted_containers_in_snap(snap, i));
-
-        let mut balls_to_remove = Vec::new();
-        let mut container_cleanup_ids = Vec::new();
-        let mut result = None;
-
-        if let Some(inst) = snap.dungeon_runtime.instances.get_mut(&instance_id) {
-            let was_completed = inst.completed;
-            let was_failed = inst.failed;
-            record_dungeon_actor(inst, char_id);
-            if !was_failed {
-                inst.completed = true;
-                inst.completed_unix.get_or_insert(now_unix);
-            }
-            for obj in &mut inst.objectives {
-                if !was_failed && obj.status != DungeonObjectiveStatus::Completed {
-                    obj.status = DungeonObjectiveStatus::Completed;
-                }
-            }
-            if let Some(eg) = inst.entry_gate_ball_id.take() {
-                balls_to_remove.push(eg);
-            }
-            for r in &mut inst.rooms {
-                balls_to_remove.extend(collect_all_room_gate_ids(r));
-                r.gate_ball_id = None;
-                for gl in &mut r.gate_links {
-                    gl.gate_ball_id = None;
-                }
-                for grp in &mut r.npc_groups {
-                    balls_to_remove.extend(grp.npc_ball_ids.drain(..));
-                    grp.npc_ball_meta.clear();
-                    grp.npc_ball_tags.clear();
-                    grp.npc_ball_names.clear();
-                    grp.npc_ball_bounties.clear();
-                    grp.cleared = true;
-                }
-                r.cleared = true;
-                for obj in &mut r.objects {
-                    let keep_for_loot =
-                        has_loot && obj.is_container && obj.spawned && !obj.destroyed;
-                    if !keep_for_loot && obj.ball_id > 0 {
-                        if obj.is_container {
-                            container_cleanup_ids.push(obj.ball_id);
-                        }
-                        balls_to_remove.push(obj.ball_id);
-                        obj.ball_id = 0;
-                        obj.spawned = false;
-                    }
-                }
-            }
-            if has_loot {
-                inst.despawned = false;
-                let grace_until = now_unix.saturating_add(DUNGEON_COMPLETION_LOOT_GRACE_SECS);
-                inst.loot_grace_until_unix.get_or_insert(grace_until);
-                inst.despawn_after_unix.get_or_insert(grace_until);
-            } else {
-                inst.despawned = true;
-                inst.loot_grace_until_unix = None;
-                inst.despawn_after_unix = Some(now_unix);
-            }
-            let recipient = resolve_dungeon_recipient(inst, char_id);
-            let emit_completed = !was_completed && !was_failed;
-            result = Some((inst.dungeon_id, recipient, balls_to_remove, emit_completed));
-        }
-
-        cleanup_instance_containers_in_snap(snap, &container_cleanup_ids);
-        result
+        ops::apply_complete_dungeon_instance_snap(
+            snap,
+            instance_id,
+            char_id,
+            force_full_despawn,
+            now_unix,
+        )
     });
 
-    if let Some((dungeon_id, recipient_char_id, balls, emit_completed)) = cleanup {
+    if let Some(done) = cleanup {
         if let Some(sys_handle) = systems.get_handle(sys_id) {
-            for bid in balls {
+            for bid in done.balls_to_remove {
                 let _ = sys_handle.remove_ball(bid).await;
             }
         }
-        if emit_completed {
-            let mut cleared_sig_ids = Vec::new();
-            crate::services::pve_exploration::with_pve_exploration_reg_db(db, now_unix, |reg| {
-                if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
-                    for s in sites.iter_mut() {
-                        if !s.cleared && s.dungeon_id == dungeon_id && s.site_category == "Deadspace" {
-                            s.cleared = true;
-                            cleared_sig_ids.push(s.site_id.clone());
-                        }
-                    }
-                }
-            });
-            if !cleared_sig_ids.is_empty() {
-                let mut collapsed_now = Vec::new();
-                db.with_mut_snapshot(|snap| {
-                    if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
-                        for sig in sigs.iter_mut() {
-                            if !sig.collapsed && cleared_sig_ids.contains(&sig.signature_id) {
-                                sig.collapsed = true;
-                                collapsed_now.push(sig.signature_id.clone());
-                            }
-                        }
-                    }
-                });
-                if let (Some(pend), Some(tx)) = (pending_notifications, notify_tx) {
-                    for sig_id in &collapsed_now {
-                        crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
-                            db, pend, tx, sig_id,
-                        );
-                    }
-                }
-            }
-            if recipient_char_id > 0 {
-                crate::services::notify_emitters_ess_bounties::push_char_notification_with_db(
-                    db,
-                    pending_notifications,
-                    notify_tx,
-                    recipient_char_id,
-                    "OnDungeonCompleted",
-                    vec![PyRep::Integer(i64::from(dungeon_id))],
-                );
-            }
-        }
+        ops::finalize_completed_dungeon_effects_sync(
+            db,
+            pending_notifications,
+            notify_tx,
+            sys_id,
+            done.dungeon_id,
+            done.recipient_char_id,
+            done.emit_completed,
+            now_unix,
+        );
     }
 }
 
@@ -2084,9 +2036,9 @@ fn evaluate_room_kill_triggers_and_clear(
             let matches = if let Some(tbid) = target_ball_id {
                 killed_npc_ball_id.map_or_else(
                     || {
-                        all_spawned_dead
-                            && all_groups_spawned
-                            && !room.npc_groups.iter().any(|g| g.npc_ball_ids.contains(tbid))
+                        room.npc_groups
+                            .iter()
+                            .any(|g| g.dead_npc_ball_ids.contains(tbid))
                     },
                     |kid| *tbid == kid,
                 )
@@ -2239,6 +2191,9 @@ pub async fn on_dungeon_npc_killed_core(
                 for grp in &mut room.npc_groups {
                     if let Some(pos) = grp.npc_ball_ids.iter().position(|&id| id == npc_ball_id) {
                         grp.npc_ball_ids.remove(pos);
+                        if !grp.dead_npc_ball_ids.contains(&npc_ball_id) {
+                            grp.dead_npc_ball_ids.push(npc_ball_id);
+                        }
                         grp.kills_recorded = grp.kills_recorded.saturating_add(1);
                         grp.npc_ball_meta.remove(&npc_ball_id);
                         grp.npc_ball_tags.remove(&npc_ball_id);
@@ -2311,6 +2266,9 @@ pub async fn on_dungeon_npc_killed_core(
 pub use crate::services::pve_dungeon_runtime_rpc::{
     check_dungeon_triggers, get_dungeon_instance_state, on_dungeon_approach,
     spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
+};
+pub(crate) use ops::{
+    expire_all_due_dungeon_loot_grace, expire_due_dungeon_loot_grace_sync,
 };
 
 /// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons.
