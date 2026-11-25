@@ -1324,7 +1324,7 @@ async fn handle_activate_acceleration_gate(
         Some(PyRep::Integer(v)) => Some(*v),
         _ => None,
     };
-    if method == "ActivateAccelerationGate" {
+    if matches!(method, "ActivateAccelerationGate" | "EnterNextDungeonRoom") {
         if let (Ok(pre_sys), Some(gate_id)) = (
             resolve_session_system_id(ctx, session),
             gate_ball_arg,
@@ -1350,12 +1350,21 @@ async fn handle_activate_acceleration_gate(
     let has_runtime_gate = ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime.instances.values().any(|i| {
             !i.completed
+                && !i.failed
                 && !i.despawned
+                && i.category != "Flashpoint"
                 && i.solar_system_id == sys_id
                 && (gate_ball_arg.is_some_and(|gate_id| {
                     i.entry_gate_ball_id == Some(gate_id)
                         || i.rooms.iter().enumerate().any(|(r_idx, r)| {
-                            r.gate_ball_id == Some(gate_id) && r_idx + 1 < i.rooms.len()
+                            if !r.gate_links.is_empty() {
+                                r.gate_links.iter().any(|gl| {
+                                    gl.gate_ball_id == Some(gate_id)
+                                        && gl.target_room_index < i.rooms.len()
+                                })
+                            } else {
+                                r.gate_ball_id == Some(gate_id) && r_idx + 1 < i.rooms.len()
+                            }
                         })
                 }) || gate_str_arg.is_some_and(|s| s == format!("DNG-INST-{}", i.instance_id)))
         }) || gate_ball_arg.is_some_and(|gate_id| {

@@ -551,6 +551,7 @@ pub async fn spawn_observatory_flashpoint(
         is_container: false,
         loot_items: Vec::new(),
         spawned: true,
+        ..Default::default()
     }];
     for (idx, &wtid) in wave_types.iter().enumerate() {
         let wid = site_id + 10 + (idx as i64);
@@ -571,6 +572,7 @@ pub async fn spawn_observatory_flashpoint(
             is_container: false,
             loot_items: Vec::new(),
             spawned: true,
+            ..Default::default()
         });
     }
 
@@ -614,6 +616,7 @@ pub async fn spawn_observatory_flashpoint(
                         triggers: Vec::new(),
                         spawned: true,
                         cleared: false,
+                        ..Default::default()
                     },
                     DungeonRuntimeRoom {
                         room_index: 1,
@@ -630,11 +633,13 @@ pub async fn spawn_observatory_flashpoint(
                         triggers: Vec::new(),
                         spawned: true,
                         cleared: false,
+                        ..Default::default()
                     },
                 ],
                 completed: false,
                 despawned: false,
                 created_unix: now_unix,
+                ..Default::default()
             },
         );
         inst_id

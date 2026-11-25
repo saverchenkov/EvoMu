@@ -12,8 +12,9 @@ use crate::services::operations_manager::{
 };
 use eve_proto::BridgeRpcError;
 use crate::services::pve_dungeon_runtime::{
-    with_dungeon_runtime_store, DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject,
-    DungeonRuntimeRoom, DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind,
+    instance_is_finished, with_dungeon_runtime_store, DungeonNpcGroup, DungeonRuntimeInstance,
+    DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTrigger, DungeonTriggerAction,
+    DungeonTriggerKind,
 };
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_special_sites::make_site_npc_ball;
@@ -37,8 +38,7 @@ pub(crate) fn spawn_or_get_npe_pocket(
 ) -> (i64, Vec<i64>, Vec<i64>) {
     let existing = with_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
-            (!inst.completed
-                && !inst.despawned
+            (!instance_is_finished(inst)
                 && inst.owner_char_id == char_id
                 && inst.solar_system_id == sys_id
                 && inst.dungeon_id == dungeon_id)
@@ -91,6 +91,7 @@ pub(crate) fn spawn_or_get_npe_pocket(
         spawn_immediately: true,
         spawned: true,
         cleared: false,
+        ..Default::default()
     };
     let room_obj = DungeonRuntimeObject {
         ball_id: beacon_id,
@@ -101,6 +102,7 @@ pub(crate) fn spawn_or_get_npe_pocket(
         is_container: false,
         loot_items: Vec::new(),
         spawned: true,
+        ..Default::default()
     };
     let trigger = DungeonTrigger {
         trigger_id: 1,
@@ -130,6 +132,9 @@ pub(crate) fn spawn_or_get_npe_pocket(
         triggers: vec![trigger],
         spawned: true,
         cleared: false,
+        entered: true,
+        entered_unix: Some(now),
+        ..Default::default()
     };
 
     let inst_id = with_dungeon_runtime_store(ctx, |store| {
@@ -158,6 +163,7 @@ pub(crate) fn spawn_or_get_npe_pocket(
                 active_objective_id: 12,
                 completed_task_ids: Vec::new(),
                 last_completed_task_id: None,
+                ..Default::default()
             },
         );
         id

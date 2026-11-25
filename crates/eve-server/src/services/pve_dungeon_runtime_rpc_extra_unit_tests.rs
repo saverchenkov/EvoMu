@@ -318,6 +318,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                                 is_container: false,
                                 loot_items: vec![],
                                 spawned: true,
+                                ..Default::default()
                             },
                             DungeonRuntimeObject {
                                 ball_id: box_ball_id,
@@ -328,6 +329,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                                 is_container: true,
                                 loot_items: vec![],
                                 spawned: true,
+                                ..Default::default()
                             },
                         ],
                         npc_groups: vec![DungeonNpcGroup {
@@ -338,6 +340,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                             spawn_immediately: true,
                             spawned: true,
                             cleared: true,
+                            ..Default::default()
                         }],
                         triggers: vec![
                             DungeonTrigger {
@@ -364,6 +367,8 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                         ],
                         spawned: true,
                         cleared: false,
+                        entered: true,
+                        ..Default::default()
                     },
                     DungeonRuntimeRoom {
                         room_index: 2,
@@ -384,11 +389,13 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                             is_container: false,
                             loot_items: vec![],
                             spawned: false,
+                            ..Default::default()
                         }],
                         npc_groups: vec![],
                         triggers: vec![],
                         spawned: false,
                         cleared: false,
+                        ..Default::default()
                     },
                 ],
                 completed: false,
@@ -397,6 +404,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                 last_completed_task_id: None,
                 completed_task_ids: vec![],
                 created_unix: 1_785_000_000,
+                ..Default::default()
             },
         );
     });

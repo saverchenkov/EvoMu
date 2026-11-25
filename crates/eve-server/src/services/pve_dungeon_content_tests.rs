@@ -4,8 +4,9 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::pve_dungeon_runtime::{
-    materialize_dungeon_room_entities, on_dungeon_npc_killed, read_dungeon_runtime_store,
-    resolve_deadspace_or_escalation_warp_target, DungeonTriggerAction, DungeonTriggerKind,
+    materialize_dungeon_room_entities, on_dungeon_npc_killed, on_dungeon_room_entered,
+    read_dungeon_runtime_store, resolve_deadspace_or_escalation_warp_target, DungeonTriggerAction,
+    DungeonTriggerKind,
 };
 use crate::services::pve_dungeon_runtime_rpc::{
     resolve_rooms_with_content_fallback, spawn_sde_dungeon_runtime_instance,
@@ -903,6 +904,7 @@ async fn multi_wave_dungeon_without_unlocks_gate_spawns_wave2_before_gate_unlock
         rt.rooms[0].npc_groups[0].npc_ball_ids[0]
     });
 
+    on_dungeon_room_entered(&ctx, sys_id, inst_id, 0, char_id).await;
     // Clear Room 0 Wave 1: Wave 2 must spawn, and gate must REMAIN LOCKED until Wave 2 dies.
     on_dungeon_npc_killed(&ctx, sys_id, r0_w1_npc, char_id).await;
     let r0_w2_npc = read_dungeon_runtime_store(&ctx, |store| {
@@ -928,6 +930,7 @@ async fn multi_wave_dungeon_without_unlocks_gate_spawns_wave2_before_gate_unlock
     materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 1)
         .await
         .expect("materialize room 1");
+    on_dungeon_room_entered(&ctx, sys_id, inst_id, 1, char_id).await;
     let r1_w1_npc = read_dungeon_runtime_store(&ctx, |store| {
         let r1 = &store.instances.get(&inst_id).unwrap().rooms[1];
         assert!(r1.npc_groups[0].spawned);

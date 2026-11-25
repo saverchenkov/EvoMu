@@ -2099,6 +2099,7 @@ async fn v24_warp_to_location_ordinal_bookmark_referring_agent_fleet_and_p2_fixe
                     triggers: Vec::new(),
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 }],
                 completed: false,
                 despawned: false,
@@ -2106,6 +2107,7 @@ async fn v24_warp_to_location_ordinal_bookmark_referring_agent_fleet_and_p2_fixe
                 last_completed_task_id: None,
                 completed_task_ids: Vec::new(),
                 created_unix: ctx.now_unix(),
+                ..Default::default()
             },
         );
     });
@@ -2442,6 +2444,7 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
                         triggers: Vec::new(),
                         spawned: false,
                         cleared: false,
+                        ..Default::default()
                     }],
                     completed: false,
                     despawned: false,
@@ -2449,6 +2452,7 @@ async fn agent_fleet_warp_zero_warped_skips_wave_and_partial_warped_runs_hooks_o
                     last_completed_task_id: None,
                     completed_task_ids: Vec::new(),
                     created_unix: ctx.now_unix(),
+                    ..Default::default()
                 },
             );
         }
@@ -3214,6 +3218,7 @@ async fn agent_fleet_warp_deduplicates_invuln_cancel_and_enforces_destination_bu
                         triggers: Vec::new(),
                         spawned: false,
                         cleared: false,
+                        ..Default::default()
                     }],
                     completed: false,
                     despawned: false,
@@ -3221,6 +3226,7 @@ async fn agent_fleet_warp_deduplicates_invuln_cancel_and_enforces_destination_bu
                     last_completed_task_id: None,
                     completed_task_ids: Vec::new(),
                     created_unix: ctx.now_unix(),
+                    ..Default::default()
                 },
             );
         }

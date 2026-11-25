@@ -93,6 +93,7 @@ fn mwd_override_precedence_intra_pocket_warp_and_escalation_fw_warp_targets() {
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
             DungeonRuntimeRoom {
                 room_index: 2,
@@ -109,6 +110,7 @@ fn mwd_override_precedence_intra_pocket_warp_and_escalation_fw_warp_targets() {
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
         ],
         completed: false,
@@ -117,6 +119,7 @@ fn mwd_override_precedence_intra_pocket_warp_and_escalation_fw_warp_targets() {
         last_completed_task_id: None,
         completed_task_ids: Vec::new(),
         created_unix: 1_780_000_000,
+        ..Default::default()
     };
 
     with_dungeon_runtime_store(&ctx, |store| {
@@ -290,6 +293,7 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
                 is_container: true,
                 loot_items: vec![(34, 100)],
                 spawned: false,
+                ..Default::default()
             }],
             npc_groups: vec![DungeonNpcGroup {
                 group_id: 1,
@@ -299,10 +303,12 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
                 spawn_immediately: true,
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             }],
             triggers: Vec::new(), // no explicit triggers -> tests auto-clear & auto-complete on last NPC killed!
             spawned: false,
             cleared: false,
+            ..Default::default()
         }],
         completed: false,
         despawned: false,
@@ -310,6 +316,7 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
         last_completed_task_id: None,
         completed_task_ids: Vec::new(),
         created_unix: 1_780_000_000,
+        ..Default::default()
     };
 
     with_dungeon_runtime_store(&ctx, |store| {
@@ -339,6 +346,7 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
     with_dungeon_runtime_store(&ctx, |store| {
         assert!(store.instances[&960_010].entry_gate_ball_id.is_some());
     });
+    on_dungeon_room_entered(&ctx, sys_id, 960_010, 0, char_id).await;
 
     // 3. Test apply_dungeon_trigger_actions with all presentation trigger actions:
     //    CameraInterest, TriggerAmbientSound, TriggerAudio, TriggerMessage, TriggerMusic
@@ -410,6 +418,11 @@ async fn materialize_errors_entry_gate_all_trigger_actions_and_boss_kill_auto_cl
         assert!(!inst.rooms[0].gate_locked, "killing target_ball_id should unlock gate");
         assert!(!inst.completed, "1 NPC still alive");
     });
+
+    // Loot container before final NPC kill so completion triggers immediate full despawn rather
+    // than entering loot-grace retention (`PVE-207`).
+    ctx.db
+        .with_mut_snapshot(|snap| snap.items.retain(|_, item| item.location_id != obj_ids[0]));
 
     // Kill final NPC -> all spawned dead, all triggers fired, final room -> auto-completes and despawns!
     on_dungeon_npc_killed(&ctx, sys_id, npc_ids[1], char_id).await;
@@ -499,6 +512,7 @@ fn warp_guards_leave_suppression_bookmarks_and_exploration_site_targets() {
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
             DungeonRuntimeRoom {
                 room_index: 2,
@@ -515,6 +529,7 @@ fn warp_guards_leave_suppression_bookmarks_and_exploration_site_targets() {
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
         ],
         completed: false,
@@ -523,6 +538,7 @@ fn warp_guards_leave_suppression_bookmarks_and_exploration_site_targets() {
         last_completed_task_id: None,
         completed_task_ids: Vec::new(),
         created_unix: 1_780_100_000,
+        ..Default::default()
     };
     with_dungeon_runtime_store(&ctx, |store| {
         store.instances.insert(970_001, inst);
@@ -706,6 +722,7 @@ async fn materialize_idempotency_static_objects_and_despawn_cleanup_guards() {
                         is_container: false, // NOT a container -> ball only, no snap.items!
                         loot_items: Vec::new(),
                         spawned: false,
+                        ..Default::default()
                     },
                     DungeonRuntimeObject {
                         ball_id: 0,
@@ -716,6 +733,7 @@ async fn materialize_idempotency_static_objects_and_despawn_cleanup_guards() {
                         is_container: true,
                         loot_items: vec![(34, 250)],
                         spawned: false,
+                        ..Default::default()
                     },
                 ],
                 npc_groups: vec![DungeonNpcGroup {
@@ -726,10 +744,12 @@ async fn materialize_idempotency_static_objects_and_despawn_cleanup_guards() {
                     spawn_immediately: true,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 }],
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
             DungeonRuntimeRoom {
                 room_index: 2,
@@ -746,6 +766,7 @@ async fn materialize_idempotency_static_objects_and_despawn_cleanup_guards() {
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
         ],
         completed: false,
@@ -754,6 +775,7 @@ async fn materialize_idempotency_static_objects_and_despawn_cleanup_guards() {
         last_completed_task_id: None,
         completed_task_ids: Vec::new(),
         created_unix: 1_780_100_000,
+        ..Default::default()
     };
     with_dungeon_runtime_store(&ctx, |store| {
         store.instances.insert(970_010, inst);
@@ -907,6 +929,7 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
                         is_container: false,
                         loot_items: Vec::new(),
                         spawned: false,
+                        ..Default::default()
                     },
                     DungeonRuntimeObject {
                         ball_id: 0,
@@ -917,6 +940,7 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
                         is_container: true,
                         loot_items: vec![(34, 100), (35, 50)],
                         spawned: false,
+                        ..Default::default()
                     },
                 ],
                 npc_groups: vec![DungeonNpcGroup {
@@ -927,10 +951,12 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
                     spawn_immediately: true,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 }],
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
             DungeonRuntimeRoom {
                 room_index: 2,
@@ -947,6 +973,7 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
                 triggers: Vec::new(),
                 spawned: false,
                 cleared: false,
+                ..Default::default()
             },
         ],
         completed: false,
@@ -955,6 +982,7 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
         last_completed_task_id: None,
         completed_task_ids: Vec::new(),
         created_unix: 1_780_100_000,
+        ..Default::default()
     };
     with_dungeon_runtime_store(&ctx, |store| {
         store.instances.insert(970_020, inst);

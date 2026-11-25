@@ -595,6 +595,83 @@ pub struct DungeonTrigger {
     pub fired: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DungeonNpcSpawnEntry {
+    pub type_id: u32,
+    pub count: usize,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub custom_name: Option<String>,
+    #[serde(default)]
+    pub relative_offsets_m: Vec<[i64; 3]>,
+    #[serde(default)]
+    pub bounty_isk_override: Option<i64>,
+    #[serde(default)]
+    pub custom_loot: Option<(u32, i64)>,
+    #[serde(default)]
+    pub destructible: Option<bool>,
+}
+
+impl DungeonNpcSpawnEntry {
+    pub fn offset_m_at(&self, index: usize) -> Option<[f64; 3]> {
+        self.relative_offsets_m
+            .get(index)
+            .map(|&[x, y, z]| [x as f64, y as f64, z as f64])
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DungeonGateLink {
+    #[serde(default)]
+    pub gate_ball_id: Option<i64>,
+    #[serde(default)]
+    pub gate_position: [f64; 3],
+    pub target_room_index: usize,
+    #[serde(default)]
+    pub destination_pos: [f64; 3],
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub gate_type_id: Option<u32>,
+    #[serde(default)]
+    pub spawned: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DungeonObjectiveStatus {
+    #[default]
+    Active,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DungeonObjective {
+    pub objective_id: i64,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub room_index: Option<usize>,
+    #[serde(default)]
+    pub target_type_id: Option<u32>,
+    #[serde(default)]
+    pub target_count: u32,
+    #[serde(default)]
+    pub progress_count: u32,
+    #[serde(default)]
+    pub status: DungeonObjectiveStatus,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DungeonRuntimeObject {
@@ -610,6 +687,22 @@ pub struct DungeonRuntimeObject {
     pub loot_items: Vec<(u32, i32)>,
     #[serde(default)]
     pub spawned: bool,
+    #[serde(default)]
+    pub destructible: bool,
+    #[serde(default)]
+    pub destroyed: bool,
+}
+
+/// Per-NPC spawn metadata persisted by `npc_ball_id` so live kills and restart
+/// reconciliation restore the exact NPC type, offset, and attributes without vector-index shift.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DungeonSpawnedNpcMeta {
+    pub type_id: u32,
+    pub offset_m: Option<[i64; 3]>,
+    pub custom_loot: Option<(u32, i64)>,
+    pub destructible: bool,
+    pub spawn_index: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +719,58 @@ pub struct DungeonNpcGroup {
     pub spawned: bool,
     #[serde(default)]
     pub cleared: bool,
+    #[serde(default)]
+    pub npc_entries: Vec<DungeonNpcSpawnEntry>,
+    #[serde(default)]
+    pub npc_ball_tags: BTreeMap<i64, String>,
+    #[serde(default)]
+    pub npc_ball_names: BTreeMap<i64, String>,
+    #[serde(default)]
+    pub npc_ball_bounties: BTreeMap<i64, i64>,
+    #[serde(default)]
+    pub npc_ball_meta: BTreeMap<i64, DungeonSpawnedNpcMeta>,
+    #[serde(default)]
+    pub dead_npc_ball_ids: Vec<i64>,
+    #[serde(default)]
+    pub kills_recorded: u32,
+}
+
+impl DungeonNpcGroup {
+    pub fn effective_entries(&self) -> Vec<DungeonNpcSpawnEntry> {
+        if !self.npc_entries.is_empty() {
+            return self
+                .npc_entries
+                .iter()
+                .filter(|e| e.type_id > 0 && e.count > 0)
+                .cloned()
+                .collect();
+        }
+        self.npc_specs
+            .iter()
+            .filter(|&&(tid, cnt)| tid > 0 && cnt > 0)
+            .map(|&(type_id, count)| DungeonNpcSpawnEntry {
+                type_id,
+                count,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    pub fn total_npc_count(&self) -> usize {
+        if !self.npc_entries.is_empty() {
+            self.npc_entries
+                .iter()
+                .filter(|e| e.type_id > 0 && e.count > 0)
+                .map(|e| e.count)
+                .sum()
+        } else {
+            self.npc_specs
+                .iter()
+                .filter(|&&(tid, cnt)| tid > 0 && cnt > 0)
+                .map(|&(_, c)| c)
+                .sum()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -653,6 +798,12 @@ pub struct DungeonRuntimeRoom {
     pub spawned: bool,
     #[serde(default)]
     pub cleared: bool,
+    #[serde(default)]
+    pub gate_links: Vec<DungeonGateLink>,
+    #[serde(default)]
+    pub entered: bool,
+    #[serde(default)]
+    pub entered_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -665,6 +816,8 @@ pub struct DungeonRuntimeInstance {
     pub archetype: String,
     pub solar_system_id: SolarSystemId,
     pub owner_char_id: i64,
+    #[serde(default)]
+    pub last_actor_char_id: i64,
     pub base_position: [f64; 3],
     #[serde(default)]
     pub disallow_mwd: bool,
@@ -681,6 +834,8 @@ pub struct DungeonRuntimeInstance {
     #[serde(default)]
     pub completed: bool,
     #[serde(default)]
+    pub failed: bool,
+    #[serde(default)]
     pub despawned: bool,
     #[serde(default)]
     pub active_objective_id: i64,
@@ -689,6 +844,14 @@ pub struct DungeonRuntimeInstance {
     #[serde(default)]
     pub completed_task_ids: Vec<i64>,
     pub created_unix: u64,
+    #[serde(default)]
+    pub objectives: Vec<DungeonObjective>,
+    #[serde(default)]
+    pub completed_unix: Option<u64>,
+    #[serde(default)]
+    pub loot_grace_until_unix: Option<u64>,
+    #[serde(default)]
+    pub despawn_after_unix: Option<u64>,
 }
 
 impl DungeonRuntimeInstance {
@@ -698,6 +861,22 @@ impl DungeonRuntimeInstance {
 
     pub const fn typed_template_id(&self) -> DungeonTemplateId {
         DungeonTemplateId(self.dungeon_id)
+    }
+
+    pub fn room_vec_index_by_room_index(&self, room_index: usize) -> Option<usize> {
+        self.rooms.iter().position(|r| r.room_index == room_index)
+    }
+
+    pub fn current_objective_id(&self) -> i64 {
+        if self.active_objective_id > 0 {
+            return self.active_objective_id;
+        }
+        self.objectives
+            .iter()
+            .find(|o| o.status == DungeonObjectiveStatus::Active)
+            .or_else(|| self.objectives.last())
+            .map(|o| o.objective_id)
+            .unwrap_or(0)
     }
 }
 

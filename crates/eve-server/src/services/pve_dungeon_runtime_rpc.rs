@@ -6,11 +6,13 @@
 use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
 use crate::services::pve_dungeon_runtime::{
-    apply_dungeon_trigger_actions, dist3, materialize_dungeon_room_entities,
-    read_dungeon_runtime_store, unix_to_filetime_ticks, with_dungeon_runtime_store,
-    DungeonInstanceId, DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject,
-    DungeonRuntimeRoom, DungeonRuntimeStore, DungeonTemplateId, DungeonTrigger,
-    DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities,
+    apply_dungeon_trigger_actions, complete_dungeon_instance_core, dist3,
+    has_unlooted_containers_in_snap, instance_is_finished, materialize_dungeon_room_entities,
+    on_dungeon_room_entered, prune_stale_despawned_instances, read_dungeon_runtime_store,
+    record_dungeon_actor, room_is_entered, unix_to_filetime_ticks, with_dungeon_runtime_store,
+    DungeonGateLink, DungeonInstanceId, DungeonNpcGroup, DungeonObjectiveStatus,
+    DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId,
+    DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities,
     DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
 };
 use eve_db::lock_rank::AnyRwLock;
@@ -29,11 +31,14 @@ pub async fn try_activate_dungeon_runtime_gate(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let arg_int = args.first().and_then(|a| a.as_i64());
-    let arg_str = args.first().and_then(|a| a.as_str());
+    let arg_str = args.first().and_then(|a| a.as_str()).map(str::trim);
 
     let match_info = ctx.db.with_snapshot(|snap| {
         for inst in snap.dungeon_runtime.instances.values() {
-            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+            if instance_is_finished(inst)
+                || inst.solar_system_id != sys_id
+                || inst.category == "Flashpoint"
+            {
                 continue;
             }
             if let Some(gate_id) = arg_int {
@@ -44,10 +49,25 @@ pub async fn try_activate_dungeon_runtime_gate(
                         inst.entry_gate_pos,
                         inst.entry_gate_locked,
                         gate_id,
+                        None,
                     ));
                 }
                 for (r_idx, r) in inst.rooms.iter().enumerate() {
-                    if r.gate_ball_id == Some(gate_id) && r_idx + 1 < inst.rooms.len() {
+                    if !r.gate_links.is_empty() {
+                        if let Some(gl) = r.gate_links.iter().find(|gl| gl.gate_ball_id == Some(gate_id)) {
+                            if gl.target_room_index < inst.rooms.len() {
+                                return Some((
+                                    inst.instance_id,
+                                    gl.target_room_index,
+                                    Some(gl.gate_position),
+                                    gl.locked,
+                                    gate_id,
+                                    (gl.destination_pos != [0.0, 0.0, 0.0])
+                                        .then_some(gl.destination_pos),
+                                ));
+                            }
+                        }
+                    } else if r.gate_ball_id == Some(gate_id) && r_idx + 1 < inst.rooms.len() {
                         let gate_pos = Some([r.position[0] + 5_000.0, r.position[1], r.position[2]]);
                         return Some((
                             inst.instance_id,
@@ -55,25 +75,87 @@ pub async fn try_activate_dungeon_runtime_gate(
                             gate_pos,
                             r.gate_locked,
                             gate_id,
+                            None,
                         ));
                     }
                 }
             }
             if let Some(s) = arg_str {
                 if s == format!("DNG-INST-{}", inst.instance_id) {
-                    let next_idx = inst.current_room_index.min(inst.rooms.len().saturating_sub(1));
-                    let cur_room = inst.rooms.get(inst.current_room_index.saturating_sub(1));
-                    let gate_id = cur_room.and_then(|r| r.gate_ball_id).unwrap_or(0);
-                    let gate_pos = cur_room.map(|r| [r.position[0] + 5_000.0, r.position[1], r.position[2]]);
-                    let locked = cur_room.is_some_and(|r| r.gate_locked);
-                    return Some((inst.instance_id, next_idx, gate_pos, locked, gate_id));
+                    if inst.current_room_index == 0
+                        && (inst.entry_gate_pos.is_some() || inst.entry_gate_ball_id.is_some())
+                        && inst.rooms.first().is_some_and(|r| !r.entered)
+                    {
+                        return Some((
+                            inst.instance_id,
+                            0usize,
+                            inst.entry_gate_pos,
+                            inst.entry_gate_locked,
+                            inst.entry_gate_ball_id.unwrap_or(0),
+                            None,
+                        ));
+                    }
+                    let cur_pair = if inst.current_room_index == 0 {
+                        inst.rooms
+                            .first()
+                            .filter(|r| {
+                                r.room_index == 0
+                                    && (r.gate_ball_id.is_some()
+                                        || !r.gate_links.is_empty()
+                                        || (r.entered && inst.rooms.len() > 1))
+                            })
+                            .map(|r| (0usize, r))
+                    } else {
+                        let idx = inst
+                            .room_vec_index_by_room_index(inst.current_room_index)
+                            .unwrap_or(inst.current_room_index - 1);
+                        inst.rooms.get(idx).map(|r| (idx, r))
+                    };
+                    let Some((cur_idx, cur_room)) = cur_pair else {
+                        continue;
+                    };
+                    if !cur_room.gate_links.is_empty() {
+                        if let Some(gl) = cur_room
+                            .gate_links
+                            .iter()
+                            .find(|gl| gl.target_room_index < inst.rooms.len())
+                        {
+                            return Some((
+                                inst.instance_id,
+                                gl.target_room_index,
+                                Some(gl.gate_position),
+                                gl.locked,
+                                gl.gate_ball_id.unwrap_or(0),
+                                (gl.destination_pos != [0.0, 0.0, 0.0])
+                                    .then_some(gl.destination_pos),
+                            ));
+                        }
+                        continue;
+                    }
+                    if cur_idx + 1 < inst.rooms.len() {
+                        let gate_id = cur_room.gate_ball_id.unwrap_or(0);
+                        let gate_pos = Some([
+                            cur_room.position[0] + 5_000.0,
+                            cur_room.position[1],
+                            cur_room.position[2],
+                        ]);
+                        return Some((
+                            inst.instance_id,
+                            cur_idx + 1,
+                            gate_pos,
+                            cur_room.gate_locked,
+                            gate_id,
+                            None,
+                        ));
+                    }
+                    continue;
                 }
             }
         }
         None
     });
 
-    let (instance_id, target_room_idx, gate_pos_opt, gate_locked, gate_id) = match_info?;
+    let (instance_id, target_room_idx, gate_pos_opt, gate_locked, gate_id, dest_override) = match_info?;
 
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
@@ -104,7 +186,7 @@ pub async fn try_activate_dungeon_runtime_gate(
         return Some(Err(e));
     }
 
-    // Verify proximity <= 2,500m to the acceleration gate
+    // Verify proximity <= 2,500m to the acceleration gate; fail closed if no physical gate exists.
     let gate_pos = if gate_id > 0 {
         sys_handle
             .get_ball_snapshot(gate_id)
@@ -116,15 +198,21 @@ pub async fn try_activate_dungeon_runtime_gate(
     } else {
         gate_pos_opt.map(DVec3::from_array)
     };
-    if let Some(gp) = gate_pos {
-        let dist = ship_ball.position.distance(gp);
-        if dist > GATE_ACTIVATION_RANGE_M {
-            return Some(Err(BridgeRpcError {
-                code: "OutsideGateActivationRange".into(),
-                message: format!("Ship is {dist:.1} m from gate (must be <= 2500 m)"),
-                client_error: None,
-            }));
-        }
+    let Some(gp) = gate_pos else {
+        let msg = "Acceleration gate is not present in space".to_string();
+        return Some(Err(BridgeRpcError::with_client_error(
+            "GateNotFound",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )));
+    };
+    let dist = ship_ball.position.distance(gp);
+    if dist > GATE_ACTIVATION_RANGE_M {
+        return Some(Err(BridgeRpcError {
+            code: "OutsideGateActivationRange".into(),
+            message: format!("Ship is {dist:.1} m from gate (must be <= 2500 m)"),
+            client_error: None,
+        }));
     }
 
     if gate_locked {
@@ -173,8 +261,23 @@ pub async fn try_activate_dungeon_runtime_gate(
     // Update current_room_index and get landing destination
     let room_info = with_dungeon_runtime_store(ctx, |store| {
         let inst = store.instances.get_mut(&instance_id)?;
-        inst.current_room_index = target_room_idx + 1;
-        let room = inst.rooms.get(target_room_idx)?;
+        if instance_is_finished(inst) {
+            return None;
+        }
+        record_dungeon_actor(inst, char_id);
+        let room = inst.rooms.get(target_room_idx)?.clone();
+        inst.current_room_index = if room.room_index > 0 {
+            room.room_index
+        } else if inst
+            .rooms
+            .iter()
+            .enumerate()
+            .any(|(i, r)| i != target_room_idx && r.room_index == target_room_idx + 1)
+        {
+            room.room_index
+        } else {
+            target_room_idx + 1
+        };
         let room_obj_id = room.room_id * 10 + 1;
         inst.active_objective_id = room_obj_id;
         Some((
@@ -183,7 +286,7 @@ pub async fn try_activate_dungeon_runtime_gate(
             inst.dungeon_name.clone(),
             room.room_id,
             room.room_index,
-            room.gate_destination_pos,
+            dest_override.unwrap_or(room.gate_destination_pos),
             inst.rooms.len(),
             inst.created_unix,
             room.disallow_mwd.unwrap_or(inst.disallow_mwd),
@@ -242,6 +345,7 @@ pub async fn try_activate_dungeon_runtime_gate(
             );
         }
     }
+    on_dungeon_room_entered(ctx, sys_id, instance_id, target_room_idx, char_id).await;
 
     Some(Ok(PyRep::keyval([
         ("success", PyRep::Bool(true)),
@@ -270,6 +374,29 @@ pub async fn try_activate_dungeon_runtime_gate(
     ])))
 }
 
+const MAX_DUNGEON_COORD_M: f64 = 1.0e15;
+
+fn finite_f64(rep: &PyRep) -> Option<f64> {
+    rep.as_f64().filter(|v| v.is_finite())
+}
+
+fn parse_finite_vec3(rep: Option<&PyRep>, default: [f64; 3]) -> [f64; 3] {
+    match rep {
+        Some(PyRep::List(v) | PyRep::Tuple(v)) if v.len() >= 3 => [
+            finite_f64(&v[0])
+                .unwrap_or(default[0])
+                .clamp(-MAX_DUNGEON_COORD_M, MAX_DUNGEON_COORD_M),
+            finite_f64(&v[1])
+                .unwrap_or(default[1])
+                .clamp(-MAX_DUNGEON_COORD_M, MAX_DUNGEON_COORD_M),
+            finite_f64(&v[2])
+                .unwrap_or(default[2])
+                .clamp(-MAX_DUNGEON_COORD_M, MAX_DUNGEON_COORD_M),
+        ],
+        _ => default,
+    }
+}
+
 fn parse_rooms_from_pyrep(
     ctx: &ServerContext,
     sys_id: u32,
@@ -281,7 +408,7 @@ fn parse_rooms_from_pyrep(
 ) -> Vec<DungeonRuntimeRoom> {
     if let Some(PyRep::List(room_list) | PyRep::Tuple(room_list)) = rooms_arg {
         let mut parsed = Vec::new();
-        for (idx, r_rep) in room_list.iter().enumerate() {
+        for (idx, r_rep) in room_list.iter().take(16).enumerate() {
             let r_idx = idx + 1;
             let room_pos = [
                 base_pos[0] + (idx as f64) * 500_000.0,
@@ -302,7 +429,7 @@ fn parse_rooms_from_pyrep(
 
             let mut objects = Vec::new();
             if let Some(PyRep::List(objs) | PyRep::Tuple(objs)) = r_rep.dict_get("objects") {
-                for (o_i, o_rep) in objs.iter().enumerate() {
+                for (o_i, o_rep) in objs.iter().take(64).enumerate() {
                     let tid = o_rep
                         .dict_get("typeID")
                         .and_then(|v| v.as_i64())
@@ -314,17 +441,14 @@ fn parse_rooms_from_pyrep(
                         .map(|s| s.to_string())
                         .or_else(|| ctx.sde.types.get(&tid).map(|t| t.name.clone()))
                         .unwrap_or_else(|| format!("Dungeon Object {}", o_i + 1));
-                    let offset = match o_rep.dict_get("offset") {
-                        Some(PyRep::List(v) | PyRep::Tuple(v)) if v.len() >= 3 => [
-                            v[0].as_f64().unwrap_or(0.0),
-                            v[1].as_f64().unwrap_or(0.0),
-                            v[2].as_f64().unwrap_or(0.0),
-                        ],
-                        _ => [(o_i as f64 + 1.0) * 3_500.0, 0.0, 2_000.0],
-                    };
+                    let offset = parse_finite_vec3(
+                        o_rep.dict_get("offset"),
+                        [(o_i as f64 + 1.0) * 3_500.0, 0.0, 2_000.0],
+                    );
                     let radius = o_rep
                         .dict_get("radius")
-                        .and_then(|v| v.as_f64())
+                        .and_then(finite_f64)
+                        .map(|v| v.clamp(0.0, 1_000_000.0))
                         .unwrap_or(300.0);
                     let is_container = o_rep
                         .dict_get("isContainer")
@@ -332,12 +456,15 @@ fn parse_rooms_from_pyrep(
                         .unwrap_or(false);
                     let mut loot_items = Vec::new();
                     if let Some(PyRep::List(loots) | PyRep::Tuple(loots)) = o_rep.dict_get("lootItems") {
-                        for l_rep in loots {
+                        for l_rep in loots.iter().take(64) {
                             if let PyRep::List(pair) | PyRep::Tuple(pair) = l_rep {
                                 if pair.len() >= 2 {
                                     if let (Some(ltid), Some(lqty)) = (
                                         pair[0].as_i64().and_then(|v| u32::try_from(v).ok()),
-                                        pair[1].as_i64().map(|v| v as i32),
+                                        pair[1]
+                                            .as_i64()
+                                            .and_then(|v| i32::try_from(v).ok())
+                                            .filter(|&q| q > 0),
                                     ) {
                                         loot_items.push((ltid, lqty));
                                     }
@@ -358,33 +485,43 @@ fn parse_rooms_from_pyrep(
                         is_container,
                         loot_items,
                         spawned: false,
+                        destructible: o_rep
+                            .dict_get("destructible")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        ..Default::default()
                     });
                 }
             }
 
             let mut npc_groups = Vec::new();
             if let Some(PyRep::List(grps) | PyRep::Tuple(grps)) = r_rep.dict_get("npcGroups") {
-                for (g_i, g_rep) in grps.iter().enumerate() {
+                for (g_i, g_rep) in grps.iter().take(32).enumerate() {
                     let group_id = g_rep
                         .dict_get("groupID")
                         .and_then(|v| v.as_i64())
-                        .unwrap_or((g_i + 1) as i64) as u8;
+                        .and_then(|v| u8::try_from(v).ok())
+                        .unwrap_or_else(|| u8::try_from(g_i + 1).unwrap_or(u8::MAX));
                     let wave = g_rep
                         .dict_get("wave")
                         .and_then(|v| v.as_i64())
-                        .unwrap_or(1) as u8;
+                        .and_then(|v| u8::try_from(v).ok())
+                        .unwrap_or(1);
                     let spawn_immediately = g_rep
                         .dict_get("spawnImmediately")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(wave == 1);
                     let mut npc_specs = Vec::new();
                     if let Some(PyRep::List(npcs) | PyRep::Tuple(npcs)) = g_rep.dict_get("npcs") {
-                        for n_rep in npcs {
+                        for n_rep in npcs.iter().take(32) {
                             if let PyRep::List(pair) | PyRep::Tuple(pair) = n_rep {
                                 if pair.len() >= 2 {
                                     if let (Some(ntid), Some(ncnt)) = (
                                         pair[0].as_i64().and_then(|v| u32::try_from(v).ok()),
-                                        pair[1].as_i64().map(|v| v.max(1) as usize),
+                                        pair[1]
+                                            .as_i64()
+                                            .and_then(|v| usize::try_from(v).ok())
+                                            .map(|c| c.clamp(1, 500)),
                                     ) {
                                         npc_specs.push((ntid, ncnt));
                                     }
@@ -403,13 +540,14 @@ fn parse_rooms_from_pyrep(
                         spawn_immediately,
                         spawned: false,
                         cleared: false,
+                        ..Default::default()
                     });
                 }
             }
 
             let mut triggers = Vec::new();
             if let Some(PyRep::List(trigs) | PyRep::Tuple(trigs)) = r_rep.dict_get("triggers") {
-                for (t_i, t_rep) in trigs.iter().enumerate() {
+                for (t_i, t_rep) in trigs.iter().take(64).enumerate() {
                     let kind_str = t_rep
                         .dict_get("kind")
                         .and_then(|v| v.as_str())
@@ -422,12 +560,8 @@ fn parse_rooms_from_pyrep(
                     let action_grp = t_rep
                         .dict_get("actionGroup")
                         .and_then(|v| v.as_i64())
-                        .unwrap_or(2) as u8;
-                    let _obj_idx = t_rep
-                        .dict_get("targetObjectIndex")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0)
-                        .max(0) as usize;
+                        .and_then(|v| u8::try_from(v).ok())
+                        .unwrap_or(2);
                     let action = match action_str {
                         "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
                         "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
@@ -438,10 +572,12 @@ fn parse_rooms_from_pyrep(
                             let target_obj_idx = t_rep
                                 .dict_get("targetObjectIndex")
                                 .and_then(|v| v.as_i64())
-                                .map(|v| v as usize);
+                                .and_then(|v| usize::try_from(v).ok());
                             let radius_m = t_rep
                                 .dict_get("radius")
-                                .and_then(|v| v.as_f64())
+                                .and_then(finite_f64)
+                                .filter(|&v| v >= 0.0)
+                                .map(|v| v.clamp(0.0, 1_000_000.0))
                                 .unwrap_or(5_000.0);
                             let anchor = target_obj_idx
                                 .and_then(|oi| objects.get(oi))
@@ -458,7 +594,7 @@ fn parse_rooms_from_pyrep(
                             let target_obj_idx = t_rep
                                 .dict_get("targetObjectIndex")
                                 .and_then(|v| v.as_i64())
-                                .map(|v| v as usize);
+                                .and_then(|v| usize::try_from(v).ok());
                             let item_tid = t_rep
                                 .dict_get("itemTypeID")
                                 .and_then(|v| v.as_i64())
@@ -473,7 +609,7 @@ fn parse_rooms_from_pyrep(
                             let target_grp = t_rep
                                 .dict_get("targetGroup")
                                 .and_then(|v| v.as_i64())
-                                .map(|v| v as u8);
+                                .and_then(|v| u8::try_from(v).ok());
                             DungeonTriggerKind::OnKill {
                                 target_npc_group: target_grp,
                                 target_ball_id: None,
@@ -481,11 +617,50 @@ fn parse_rooms_from_pyrep(
                         }
                     };
                     triggers.push(DungeonTrigger {
-                        trigger_id: (t_i + 1) as u32,
+                        trigger_id: u32::try_from(t_i + 1).unwrap_or(u32::MAX),
                         kind,
                         action,
                         fired: false,
                     });
+                }
+            }
+
+            let mut gate_links = Vec::new();
+            if let Some(PyRep::List(links) | PyRep::Tuple(links)) = r_rep.dict_get("gateLinks") {
+                for l_rep in links.iter().take(16) {
+                    if let Some(target_room_index) = l_rep
+                        .dict_get("targetRoomIndex")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|v| usize::try_from(v).ok())
+                    {
+                        let gpos = parse_finite_vec3(
+                            l_rep.dict_get("gatePosition"),
+                            [room_pos[0] + 5_000.0, room_pos[1], room_pos[2]],
+                        );
+                        let dpos = parse_finite_vec3(
+                            l_rep.dict_get("destinationPos"),
+                            [
+                                base_pos[0] + (target_room_index as f64) * 500_000.0 - 10_000.0,
+                                base_pos[1],
+                                base_pos[2],
+                            ],
+                        );
+                        gate_links.push(DungeonGateLink {
+                            target_room_index,
+                            gate_position: gpos,
+                            destination_pos: dpos,
+                            locked: l_rep
+                                .dict_get("locked")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(gate_locked),
+                            label: l_rep
+                                .dict_get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            ..Default::default()
+                        });
+                    }
                 }
             }
 
@@ -504,9 +679,15 @@ fn parse_rooms_from_pyrep(
                 triggers,
                 spawned: false,
                 cleared: false,
+                gate_links,
+                ..Default::default()
             });
         }
         if !parsed.is_empty() {
+            let room_count = parsed.len();
+            for room in &mut parsed {
+                room.gate_links.retain(|gl| gl.target_room_index < room_count);
+            }
             return parsed;
         }
     }
@@ -541,14 +722,6 @@ pub(crate) fn resolve_rooms_with_content_fallback(
         "Using synthetic SDE 2-room deadspace dungeon template"
     );
     build_sde_deadspace_rooms(ctx, sys_id, dungeon_id, dungeon_name, base_pos, has_entry_gate)
-}
-
-const COMPLETED_INSTANCE_RETENTION_SECS: u64 = 3_600;
-
-fn prune_stale_despawned_instances(store: &mut DungeonRuntimeStore, now_unix: u64) {
-    store.instances.retain(|_, inst| {
-        !inst.despawned || now_unix < inst.created_unix.saturating_add(COMPLETED_INSTANCE_RETENTION_SECS)
-    });
 }
 
 /// Resolves faction Deadspace NPC ship `TypeId`s (`(frigate_tid, cruiser_tid, commander_tid)`) from
@@ -648,6 +821,7 @@ fn append_sde_dungeon_environmental_objects(
                     is_container: false,
                     loot_items: Vec::new(),
                     spawned: false,
+                    ..Default::default()
                 });
             }
         }
@@ -675,6 +849,7 @@ fn append_sde_dungeon_environmental_objects(
                 is_container: false,
                 loot_items: Vec::new(),
                 spawned: false,
+                ..Default::default()
             });
         }
     }
@@ -726,6 +901,7 @@ pub(crate) fn build_sde_deadspace_rooms(
         is_container: false,
         loot_items: Vec::new(),
         spawned: false,
+        ..Default::default()
     }];
     let mut r2_objects = vec![DungeonRuntimeObject {
         ball_id: 0,
@@ -736,6 +912,7 @@ pub(crate) fn build_sde_deadspace_rooms(
         is_container: true,
         loot_items: vec![(loot_tid, 1)],
         spawned: false,
+        ..Default::default()
     }];
     append_sde_dungeon_environmental_objects(
         &ctx.sde,
@@ -766,6 +943,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     spawn_immediately: true,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 },
                 DungeonNpcGroup {
                     group_id: 2,
@@ -775,6 +953,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     spawn_immediately: false,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 },
             ],
             triggers: vec![
@@ -801,6 +980,7 @@ pub(crate) fn build_sde_deadspace_rooms(
             ],
             spawned: false,
             cleared: false,
+            ..Default::default()
         },
         DungeonRuntimeRoom {
             room_index: 2,
@@ -822,6 +1002,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     spawn_immediately: true,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 },
                 DungeonNpcGroup {
                     group_id: 2,
@@ -831,6 +1012,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     spawn_immediately: false,
                     spawned: false,
                     cleared: false,
+                    ..Default::default()
                 },
             ],
             triggers: vec![
@@ -856,6 +1038,7 @@ pub(crate) fn build_sde_deadspace_rooms(
             ],
             spawned: false,
             cleared: false,
+            ..Default::default()
         },
     ]
 }
@@ -883,6 +1066,7 @@ fn instance_to_pyrep(
                 ("gated", PyRep::Bool(r.gated)),
                 ("gateLocked", PyRep::Bool(r.gate_locked)),
                 ("spawned", PyRep::Bool(r.spawned)),
+                ("entered", PyRep::Bool(r.entered)),
                 ("cleared", PyRep::Bool(r.cleared)),
                 (
                     "disallowMWD",
@@ -942,6 +1126,47 @@ fn instance_to_pyrep(
                     "triggersFired",
                     PyRep::Integer(r.triggers.iter().filter(|t| t.fired).count() as i64),
                 ),
+                (
+                    "gateLinks",
+                    PyRep::List(
+                        r.gate_links
+                            .iter()
+                            .map(|gl| {
+                                PyRep::keyval([
+                                    (
+                                        "gateBallID",
+                                        gl.gate_ball_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                    ),
+                                    (
+                                        "targetRoomIndex",
+                                        PyRep::Integer(gl.target_room_index as i64),
+                                    ),
+                                    ("locked", PyRep::Bool(gl.locked)),
+                                    ("label", PyRep::String(gl.label.clone())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ])
+        })
+        .collect();
+
+    let objectives_py: Vec<PyRep> = inst
+        .objectives
+        .iter()
+        .map(|o| {
+            let status_str = match o.status {
+                DungeonObjectiveStatus::Active => "active",
+                DungeonObjectiveStatus::Completed => "completed",
+                DungeonObjectiveStatus::Failed => "failed",
+            };
+            PyRep::keyval([
+                ("objectiveID", PyRep::Integer(o.objective_id)),
+                ("key", PyRep::String(o.key.clone())),
+                ("title", PyRep::String(o.title.clone())),
+                ("kind", PyRep::String(o.kind.clone())),
+                ("status", PyRep::String(status_str.to_string())),
             ])
         })
         .collect();
@@ -994,7 +1219,21 @@ fn instance_to_pyrep(
             PyRep::List(inst.completed_task_ids.iter().copied().map(PyRep::Integer).collect()),
         ),
         ("completed", PyRep::Bool(inst.completed)),
+        ("failed", PyRep::Bool(inst.failed)),
         ("despawned", PyRep::Bool(inst.despawned)),
+        (
+            "lootGraceUntilUnix",
+            inst.loot_grace_until_unix
+                .map(|v| PyRep::Integer(v as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "despawnAfterUnix",
+            inst.despawn_after_unix
+                .map(|v| PyRep::Integer(v as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        ("objectives", PyRep::List(objectives_py)),
         ("rooms", PyRep::List(rooms_py)),
     ])
 }
@@ -1010,8 +1249,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
 ) -> Result<i64, BridgeRpcError> {
     let existing = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
-            (!inst.completed
-                && !inst.despawned
+            (!instance_is_finished(inst)
                 && inst.solar_system_id == sys_id
                 && inst.dungeon_id == dungeon_id
                 && inst.base_position == base_pos)
@@ -1069,10 +1307,14 @@ pub async fn spawn_sde_dungeon_runtime_instance(
             last_completed_task_id: None,
             completed_task_ids: Vec::new(),
             created_unix: now,
+            ..Default::default()
         });
         id
     });
     materialize_dungeon_room_entities(ctx, sys_id, inst_id, 0).await?;
+    if !has_entry_gate && !matches!(category, "Expedition" | "Escalation") {
+        on_dungeon_room_entered(ctx, sys_id, inst_id, 0, owner_char_id).await;
+    }
     Ok(inst_id)
 }
 
@@ -1107,14 +1349,7 @@ pub async fn spawn_dungeon_instance(
         .and_then(|v| v.as_str())
         .unwrap_or("Deadspace")
         .to_string();
-    let base_pos = match kwargs.get("position") {
-        Some(PyRep::List(v) | PyRep::Tuple(v)) if v.len() >= 3 => [
-            v[0].as_f64().unwrap_or(120_000_000.0),
-            v[1].as_f64().unwrap_or(0.0),
-            v[2].as_f64().unwrap_or(80_000_000.0),
-        ],
-        _ => [120_000_000.0, 0.0, 80_000_000.0],
-    };
+    let base_pos = parse_finite_vec3(kwargs.get("position"), [120_000_000.0, 0.0, 80_000_000.0]);
     let has_entry_gate = kwargs
         .get("hasEntryGate")
         .and_then(|v| v.as_bool())
@@ -1170,11 +1405,15 @@ pub async fn spawn_dungeon_instance(
             last_completed_task_id: None,
             completed_task_ids: Vec::new(),
             created_unix: now,
+            ..Default::default()
         });
         id
     });
 
     materialize_dungeon_room_entities(ctx, sys_id, inst_id, 0).await?;
+    if !has_entry_gate {
+        on_dungeon_room_entered(ctx, sys_id, inst_id, 0, char_id).await;
+    }
 
     let rep = read_dungeon_runtime_store(ctx, |store| {
         store
@@ -1278,11 +1517,11 @@ pub async fn on_dungeon_approach(
 ) -> usize {
     let has_pending_approach = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().any(|inst| {
-            !inst.completed
-                && !inst.despawned
+            !instance_is_finished(inst)
                 && inst.solar_system_id == sys_id
                 && inst.rooms.iter().any(|room| {
                     room.spawned
+                        && room_is_entered(room)
                         && room.triggers.iter().any(|trig| {
                             !trig.fired
                                 && matches!(trig.kind, DungeonTriggerKind::OnApproach { .. })
@@ -1304,11 +1543,11 @@ pub async fn on_dungeon_approach(
 
     let approach_ready = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().any(|inst| {
-            !inst.completed
-                && !inst.despawned
+            !instance_is_finished(inst)
                 && inst.solar_system_id == sys_id
                 && inst.rooms.iter().any(|room| {
                     room.spawned
+                        && room_is_entered(room)
                         && room.triggers.iter().any(|trig| {
                             matches_approach_trigger_parts(
                                 &room.objects,
@@ -1327,11 +1566,12 @@ pub async fn on_dungeon_approach(
     let mut pending_actions = Vec::new();
     with_dungeon_runtime_store(ctx, |store| {
         for inst in store.instances.values_mut() {
-            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                 continue;
             }
+            let mut any_fired = false;
             for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
-                if !room.spawned {
+                if !room.spawned || !room_is_entered(room) {
                     continue;
                 }
                 let room_objs = &room.objects;
@@ -1339,12 +1579,16 @@ pub async fn on_dungeon_approach(
                 for trig in &mut room.triggers {
                     if matches_approach_trigger_parts(room_objs, trig, ship_pos, target_id_opt) {
                         trig.fired = true;
+                        any_fired = true;
                         room_actions.push((trig.trigger_id, trig.action.clone()));
                     }
                 }
                 if !room_actions.is_empty() {
                     pending_actions.push((inst.instance_id, r_idx, room_actions));
                 }
+            }
+            if any_fired {
+                record_dungeon_actor(inst, char_id);
             }
         }
     });
@@ -1357,7 +1601,8 @@ pub async fn on_dungeon_approach(
     total_fired
 }
 
-/// Evaluates `OnLoot` triggers when an item is looted from a container/wreck in space.
+/// Evaluates `OnLoot` triggers when an item is looted from a container/wreck in space,
+/// and finalizes post-completion loot-grace despawn once the last container is emptied (`PVE-207`).
 pub async fn on_dungeon_item_looted(
     ctx: &ServerContext,
     char_id: i64,
@@ -1365,13 +1610,17 @@ pub async fn on_dungeon_item_looted(
     container_ball_id: i64,
     item_type_id: TypeId,
 ) {
-    let has_matching_loot = read_dungeon_runtime_store(ctx, |store| {
-        store.instances.values().any(|inst| {
-            !inst.completed
-                && !inst.despawned
-                && sys_id_opt.is_none_or(|sid| inst.solar_system_id == sid)
-                && inst.rooms.iter().any(|room| {
+    let (has_matching_loot, loot_grace_finished) = ctx.db.with_snapshot(|snap| {
+        let mut trigger_match = false;
+        let mut grace_done = Vec::new();
+        for inst in snap.dungeon_runtime.instances.values() {
+            if sys_id_opt.is_some_and(|sid| inst.solar_system_id != sid) {
+                continue;
+            }
+            if !instance_is_finished(inst) {
+                if inst.rooms.iter().any(|room| {
                     room.spawned
+                        && room_is_entered(room)
                         && room.triggers.iter().any(|trig| {
                             matches_loot_trigger_parts(
                                 &room.objects,
@@ -1380,46 +1629,92 @@ pub async fn on_dungeon_item_looted(
                                 item_type_id,
                             )
                         })
+                }) {
+                    trigger_match = true;
+                }
+            } else if (inst.completed || inst.failed)
+                && !inst.despawned
+                && inst.loot_grace_until_unix.or(inst.despawn_after_unix).is_some()
+                && inst.rooms.iter().any(|r| {
+                    r.objects.iter().any(|o| {
+                        o.is_container
+                            && o.spawned
+                            && !o.destroyed
+                            && o.ball_id == container_ball_id
+                    })
                 })
-        })
-    });
-    if !has_matching_loot {
-        return;
-    }
-    let mut pending_actions = Vec::new();
-
-    with_dungeon_runtime_store(ctx, |store| {
-        for inst in store.instances.values_mut() {
-            if inst.completed || inst.despawned {
-                continue;
-            }
-            if let Some(sys_id) = sys_id_opt {
-                if inst.solar_system_id != sys_id {
-                    continue;
-                }
-            }
-            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
-                if !room.spawned {
-                    continue;
-                }
-                let room_objs = &room.objects;
-                let mut room_actions = Vec::new();
-                for trig in &mut room.triggers {
-                    if matches_loot_trigger_parts(room_objs, trig, container_ball_id, item_type_id)
-                    {
-                        trig.fired = true;
-                        room_actions.push((trig.trigger_id, trig.action.clone()));
-                    }
-                }
-                if !room_actions.is_empty() {
-                    pending_actions.push((inst.solar_system_id, inst.instance_id, r_idx, room_actions));
-                }
+                && !has_unlooted_containers_in_snap(snap, inst)
+            {
+                grace_done.push((inst.solar_system_id, inst.instance_id));
             }
         }
+        (trigger_match, grace_done)
     });
+    if has_matching_loot {
+        let mut pending_actions = Vec::new();
 
-    for (sys_id, inst_id, r_idx, actions) in pending_actions {
-        let _ = apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
+        with_dungeon_runtime_store(ctx, |store| {
+            for inst in store.instances.values_mut() {
+                if instance_is_finished(inst) {
+                    continue;
+                }
+                if let Some(sys_id) = sys_id_opt {
+                    if inst.solar_system_id != sys_id {
+                        continue;
+                    }
+                }
+                let mut any_fired = false;
+                for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
+                    if !room.spawned || !room_is_entered(room) {
+                        continue;
+                    }
+                    let room_objs = &room.objects;
+                    let mut room_actions = Vec::new();
+                    for trig in &mut room.triggers {
+                        if matches_loot_trigger_parts(
+                            room_objs,
+                            trig,
+                            container_ball_id,
+                            item_type_id,
+                        ) {
+                            trig.fired = true;
+                            any_fired = true;
+                            room_actions.push((trig.trigger_id, trig.action.clone()));
+                        }
+                    }
+                    if !room_actions.is_empty() {
+                        pending_actions.push((
+                            inst.solar_system_id,
+                            inst.instance_id,
+                            r_idx,
+                            room_actions,
+                        ));
+                    }
+                }
+                if any_fired {
+                    record_dungeon_actor(inst, char_id);
+                }
+            }
+        });
+
+        for (sys_id, inst_id, r_idx, actions) in pending_actions {
+            let _ =
+                apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
+        }
+    }
+
+    for (sys_id, inst_id) in loot_grace_finished {
+        complete_dungeon_instance_core(
+            &ctx.systems,
+            &ctx.db,
+            Some(&ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+            sys_id,
+            inst_id,
+            char_id,
+            true,
+        )
+        .await;
     }
 }
 
@@ -1471,6 +1766,44 @@ pub fn dispatch_dungeon_notify_actions(
     }
 }
 
+fn room_contains_ship_pos(
+    inst: &DungeonRuntimeInstance,
+    r_idx: usize,
+    room: &DungeonRuntimeRoom,
+    ship_pos: DVec3,
+) -> bool {
+    super::pve_dungeon_runtime::room_contains_pocket_pos(
+        inst,
+        r_idx,
+        room,
+        [ship_pos.x, ship_pos.y, ship_pos.z],
+        250_000.0,
+    )
+}
+
+fn resolve_current_pocket_room_at_pos(
+    inst: &DungeonRuntimeInstance,
+    ship_pos: DVec3,
+) -> Option<&DungeonRuntimeRoom> {
+    if inst.current_room_index == 0 {
+        return inst.rooms.first().filter(|r| {
+            r.room_index == 0 && r.entered && room_contains_ship_pos(inst, 0, r, ship_pos)
+        });
+    }
+    inst.room_vec_index_by_room_index(inst.current_room_index)
+        .and_then(|idx| {
+            inst.rooms
+                .get(idx)
+                .filter(|r| room_contains_ship_pos(inst, idx, r, ship_pos))
+        })
+        .or_else(|| {
+            let idx = inst.current_room_index - 1;
+            inst.rooms
+                .get(idx)
+                .filter(|r| room_contains_ship_pos(inst, idx, r, ship_pos))
+        })
+}
+
 /// Returns `true` if `ship_pos` in `sys_id` is inside an active deadspace dungeon pocket whose
 /// dungeon or room data disallows Microwarpdrive activation (`feat:pve.deadspace-pocket-rules`).
 pub fn is_ship_in_mwd_disallowed_dungeon_pocket(
@@ -1478,19 +1811,13 @@ pub fn is_ship_in_mwd_disallowed_dungeon_pocket(
     sys_id: u32,
     ship_pos: DVec3,
 ) -> bool {
-    with_dungeon_runtime_store(ctx, |store| {
+    read_dungeon_runtime_store(ctx, |store| {
         for inst in store.instances.values() {
-            if inst.solar_system_id != sys_id || inst.current_room_index == 0 {
+            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                 continue;
             }
-            if let Some(room) = inst.rooms.get(inst.current_room_index - 1) {
-                let room_pos = DVec3::from_array(room.position);
-                let gate_dest = DVec3::from_array(room.gate_destination_pos);
-                if ship_pos.distance(room_pos) <= 250_000.0
-                    || ship_pos.distance(gate_dest) <= 250_000.0
-                {
-                    return room.disallow_mwd.unwrap_or(inst.disallow_mwd);
-                }
+            if let Some(room) = resolve_current_pocket_room_at_pos(inst, ship_pos) {
+                return room.disallow_mwd.unwrap_or(inst.disallow_mwd);
             }
         }
         false
@@ -1505,9 +1832,9 @@ pub fn check_warp_target_blocked_by_gated_dungeon_room(
     target_pos: DVec3,
     target_ball_id: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
-    let blocked = with_dungeon_runtime_store(ctx, |store| {
+    let blocked = read_dungeon_runtime_store(ctx, |store| {
         for inst in store.instances.values() {
-            if inst.solar_system_id != sys_id {
+            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                 continue;
             }
             for (r_idx, room) in inst.rooms.iter().enumerate() {
@@ -1518,11 +1845,15 @@ pub fn check_warp_target_blocked_by_gated_dungeon_room(
                 let matches_ball = target_ball_id.is_some_and(|tid| {
                     room.objects.iter().any(|o| o.ball_id == tid)
                         || room.gate_ball_id == Some(tid)
+                        || room.gate_links.iter().any(|gl| gl.gate_ball_id == Some(tid))
                 });
-                let room_pos = DVec3::from_array(room.position);
-                let gate_dest = DVec3::from_array(room.gate_destination_pos);
-                let matches_pos = target_pos.distance(room_pos) <= 150_000.0
-                    || target_pos.distance(gate_dest) <= 150_000.0;
+                let matches_pos = super::pve_dungeon_runtime::room_contains_pocket_pos(
+                    inst,
+                    r_idx,
+                    room,
+                    [target_pos.x, target_pos.y, target_pos.z],
+                    150_000.0,
+                );
                 if matches_ball || matches_pos {
                     return true;
                 }
@@ -1556,11 +1887,12 @@ pub async fn check_deadspace_mwd_disallowed(
         .map(|(_, b)| b.position)
         .unwrap_or(DVec3::ZERO);
     if is_ship_in_mwd_disallowed_dungeon_pocket(ctx, sys_id, ship_pos) {
-        let has_explicit_room_flag = with_dungeon_runtime_store(ctx, |st| {
+        let has_explicit_room_flag = read_dungeon_runtime_store(ctx, |st| {
             st.instances.values().any(|i| {
-                i.solar_system_id == sys_id
-                    && i.current_room_index > 0
-                    && i.rooms.get(i.current_room_index - 1).is_some_and(|r| r.disallow_mwd == Some(true))
+                !instance_is_finished(i)
+                    && i.solar_system_id == sys_id
+                    && resolve_current_pocket_room_at_pos(i, ship_pos)
+                        .is_some_and(|r| r.disallow_mwd == Some(true))
             })
         });
         if !has_explicit_room_flag {
@@ -1584,8 +1916,7 @@ pub fn register_sde_operation_dungeon_instance(
     let base_pos = [0.0, 0.0, 0.0];
     let existing = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
-            (!inst.completed
-                && !inst.despawned
+            (!instance_is_finished(inst)
                 && inst.solar_system_id == sys_id
                 && inst.dungeon_id == dungeon_id)
                 .then_some(inst.instance_id)
@@ -1599,7 +1930,7 @@ pub fn register_sde_operation_dungeon_instance(
         .map(|d| d.name.trim().to_string())
         .unwrap_or_else(|| format!("Operation Dungeon {dungeon_id}"));
     let disallow_mwd = sde_dungeon.is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
-    let rooms = resolve_rooms_with_content_fallback(
+    let mut rooms = resolve_rooms_with_content_fallback(
         ctx,
         sys_id,
         dungeon_id,
@@ -1607,9 +1938,13 @@ pub fn register_sde_operation_dungeon_instance(
         base_pos,
         false,
     );
+    let now = ctx.now_unix();
+    if let Some(r0) = rooms.first_mut() {
+        r0.entered = true;
+        r0.entered_unix = Some(now);
+    }
     let total_rooms = rooms.len().max(1) as u8;
     let room_id = rooms.first().map(|r| r.room_id).unwrap_or(i64::from(dungeon_id) * 100 + 1);
-    let now = ctx.now_unix();
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
         prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
@@ -1634,6 +1969,7 @@ pub fn register_sde_operation_dungeon_instance(
             active_objective_id: 0,
             completed_task_ids: Vec::new(),
             last_completed_task_id: None,
+            ..Default::default()
         });
         id
     });

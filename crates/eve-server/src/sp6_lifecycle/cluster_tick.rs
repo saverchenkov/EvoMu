@@ -1892,6 +1892,7 @@ pub fn on_advance_secs_internal(
         ctx,
         now_unix,
     );
+    crate::services::pve_dungeon_runtime::expire_due_dungeon_loot_grace_sync(ctx);
 
     // 7. Decay expired wrecks (2h = 7200s), corpses (2h = 7200s), jetcans (1h = 3600s),
     //    and Mobile Warp Disruptors (SDE decay = 48h), and complete anchoring Mobile Warp Disruptors
@@ -2665,6 +2666,7 @@ async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_s
     if has_long_idle_candidate {
         let _ = ctx.systems.evict_idle_systems_with_min_ticks(300, 60).await;
     }
+    let _ = crate::services::pve_dungeon_runtime::expire_all_due_dungeon_loot_grace(ctx).await;
 }
 
 /// Maximum physics steps replayed per ticker wake when the runtime falls behind (`#870`).

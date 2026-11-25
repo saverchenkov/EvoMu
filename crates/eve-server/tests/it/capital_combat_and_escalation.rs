@@ -2226,6 +2226,7 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
                         npc_groups: Vec::new(),
                         objects: Vec::new(),
                         triggers: Vec::new(),
+                        ..Default::default()
                     },
                     DungeonRuntimeRoom {
                         room_index: 2,
@@ -2249,10 +2250,13 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
                             is_container: true,
                             spawned: true,
                             loot_items: Vec::new(),
+                            ..Default::default()
                         }],
                         triggers: Vec::new(),
+                        ..Default::default()
                     },
                 ],
+                ..Default::default()
             },
         );
     });

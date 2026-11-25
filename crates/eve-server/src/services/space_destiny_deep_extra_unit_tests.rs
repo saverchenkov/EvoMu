@@ -598,6 +598,8 @@ async fn update_state_request_dungeon_trigger_unmatched_rpc_and_main_bank_unlink
                     }],
                     spawned: true,
                     cleared: false,
+                    entered: true,
+                    ..Default::default()
                 }],
                 completed: false,
                 despawned: false,
@@ -605,6 +607,7 @@ async fn update_state_request_dungeon_trigger_unmatched_rpc_and_main_bank_unlink
                 last_completed_task_id: None,
                 completed_task_ids: Vec::new(),
                 created_unix: 1_700_000_000,
+                ..Default::default()
             },
         );
     });

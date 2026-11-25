@@ -14,20 +14,23 @@ use crate::services::pve_exploration::{read_pve_exploration_reg, with_pve_explor
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_special_sites::make_site_npc_ball;
 use eve_db::lock_rank::AnyRwLock;
-use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const POCKET_RADIUS_M: f64 = 200_000.0;
 pub(crate) const GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
 const ACCELERATION_GATE_TYPE_ID: u32 = 17831;
 pub(crate) const DEFAULT_CONTAINER_TYPE_ID: u32 = 23;
+pub(crate) const DUNGEON_COMPLETION_LOOT_GRACE_SECS: u64 = 1_800;
+pub(crate) const COMPLETED_INSTANCE_RETENTION_SECS: u64 = 3_600;
 
 pub use eve_db::{
-    DungeonInstanceId, DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject,
-    DungeonRuntimeRoom, DungeonRuntimeStore, DungeonTemplateId, DungeonTrigger,
+    DungeonGateLink, DungeonInstanceId, DungeonNpcGroup, DungeonNpcSpawnEntry, DungeonObjective,
+    DungeonObjectiveStatus, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
+    DungeonRuntimeStore, DungeonSpawnedNpcMeta, DungeonTemplateId, DungeonTrigger,
     DungeonTriggerAction, DungeonTriggerKind, EscalationInstanceId, ExplorationSiteId,
 };
 
@@ -75,6 +78,45 @@ pub(crate) fn unix_to_filetime_ticks(u: u64) -> i64 {
     ((u as i64) + 11_644_473_600) * 10_000_000
 }
 
+#[inline]
+pub(crate) fn instance_is_finished(inst: &DungeonRuntimeInstance) -> bool {
+    inst.completed || inst.failed || inst.despawned
+}
+
+#[inline]
+pub(crate) fn room_is_entered(room: &DungeonRuntimeRoom) -> bool {
+    room.spawned && room.entered
+}
+
+pub(crate) fn record_dungeon_actor(inst: &mut DungeonRuntimeInstance, char_id: i64) {
+    if char_id > 0 {
+        inst.last_actor_char_id = char_id;
+    }
+}
+
+pub(crate) fn resolve_dungeon_recipient(inst: &DungeonRuntimeInstance, actor_char_id: i64) -> i64 {
+    if actor_char_id > 0 {
+        actor_char_id
+    } else if inst.owner_char_id > 0 {
+        inst.owner_char_id
+    } else {
+        inst.last_actor_char_id
+    }
+}
+
+pub(crate) fn prune_stale_despawned_instances(store: &mut DungeonRuntimeStore, now_unix: u64) {
+    store.instances.retain(|_, inst| {
+        if !inst.despawned {
+            return true;
+        }
+        let anchor = inst
+            .despawn_after_unix
+            .or(inst.completed_unix)
+            .unwrap_or(inst.created_unix);
+        now_unix < anchor.saturating_add(COMPLETED_INSTANCE_RETENTION_SECS)
+    });
+}
+
 fn is_pocket_mwd_disallowed(
     ctx: &ServerContext,
     inst: &DungeonRuntimeInstance,
@@ -99,6 +141,37 @@ fn is_pocket_mwd_disallowed(
         .is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)))
 }
 
+/// Returns `true` if `pos` is within `radius_m` of `room`'s primary position, default
+/// `gate_destination_pos`, or any incoming `gate_links.destination_pos` targeting `r_idx`.
+pub(crate) fn room_contains_pocket_pos(
+    inst: &DungeonRuntimeInstance,
+    r_idx: usize,
+    room: &DungeonRuntimeRoom,
+    pos: [f64; 3],
+    radius_m: f64,
+) -> bool {
+    if dist3(pos, room.position) <= radius_m {
+        return true;
+    }
+    if room.gate_destination_pos != [0.0, 0.0, 0.0]
+        && !inst
+            .rooms
+            .iter()
+            .enumerate()
+            .any(|(oi, o)| oi != r_idx && dist3(room.gate_destination_pos, o.position) <= radius_m)
+        && dist3(pos, room.gate_destination_pos) <= radius_m
+    {
+        return true;
+    }
+    inst.rooms.iter().any(|src| {
+        src.gate_links.iter().any(|gl| {
+            gl.target_room_index == r_idx
+                && gl.destination_pos != [0.0, 0.0, 0.0]
+                && dist3(pos, gl.destination_pos) <= radius_m
+        })
+    })
+}
+
 /// Returns `true` if `ship_pos` lies inside an active k-space `DungeonRuntimeInstance` pocket.
 pub fn is_ship_in_deadspace_pocket(
     ctx: &ServerContext,
@@ -110,10 +183,13 @@ pub fn is_ship_in_deadspace_pocket(
     }
     read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().any(|inst| {
-            !inst.completed
-                && !inst.despawned
+            !instance_is_finished(inst)
                 && inst.solar_system_id == sys_id
-                && inst.rooms.iter().any(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
+                && inst
+                    .rooms
+                    .iter()
+                    .enumerate()
+                    .any(|(r_idx, r)| room_contains_pocket_pos(inst, r_idx, r, ship_pos, POCKET_RADIUS_M))
         })
     })
 }
@@ -129,13 +205,16 @@ pub fn check_deadspace_mwd_allowed(
     if has_dungeon_runtime_store(ctx) {
         let matched_room = read_dungeon_runtime_store(ctx, |store| {
             store.instances.values().find_map(|inst| {
-                if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+                if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                     return None;
                 }
                 inst.rooms
                     .iter()
-                    .find(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
-                    .map(|r| (inst.clone(), r.clone()))
+                    .enumerate()
+                    .find(|(r_idx, r)| {
+                        room_contains_pocket_pos(inst, *r_idx, r, ship_pos, POCKET_RADIUS_M)
+                    })
+                    .map(|(_, r)| (inst.clone(), r.clone()))
             })
         });
         if let Some((inst, r)) = matched_room {
@@ -211,17 +290,21 @@ pub fn check_deadspace_warp_allowed(
     let blocked = has_dungeon_runtime_store(ctx)
         && read_dungeon_runtime_store(ctx, |store| {
             for inst in store.instances.values() {
-                if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+                if instance_is_finished(inst) || inst.solar_system_id != sys_id {
                     continue;
                 }
                 let src_room_idx = inst
                     .rooms
                     .iter()
-                    .find(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
-                    .map(|r| r.room_index);
-                for r in &inst.rooms {
-                    let targets_room = dist3(anchor_pos, r.position) <= POCKET_RADIUS_M
-                        || dist3(dest_pos, r.position) <= POCKET_RADIUS_M;
+                    .enumerate()
+                    .find(|(r_idx, r)| {
+                        room_contains_pocket_pos(inst, *r_idx, r, ship_pos, POCKET_RADIUS_M)
+                    })
+                    .map(|(_, r)| r.room_index);
+                for (r_idx, r) in inst.rooms.iter().enumerate() {
+                    let targets_room =
+                        room_contains_pocket_pos(inst, r_idx, r, anchor_pos, POCKET_RADIUS_M)
+                            || room_contains_pocket_pos(inst, r_idx, r, dest_pos, POCKET_RADIUS_M);
                     if !targets_room {
                         continue;
                     }
@@ -427,8 +510,7 @@ pub fn resolve_deadspace_or_escalation_warp_target(
                 let mut candidates = Vec::new();
                 let mut seen_ids = std::collections::HashSet::new();
                 let is_eligible = |inst: &DungeonRuntimeInstance| {
-                    !inst.completed
-                        && !inst.despawned
+                    !instance_is_finished(inst)
                         && inst.solar_system_id == sys_id
                         && (inst.owner_char_id <= 0 || inst.owner_char_id == char_id)
                 };
@@ -732,30 +814,61 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
     // Check if landing in a DungeonRuntimeInstance room
     let runtime_entry = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
-            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+            if instance_is_finished(inst)
+                || inst.solar_system_id != sys_id
+                || inst.category == "Flashpoint"
+            {
                 return None;
             }
-            let room = inst
+            let (room_vec_idx, room) = inst
                 .rooms
                 .iter()
-                .find(|r| dist3(landed_pos, r.position) <= 150_000.0)?;
+                .enumerate()
+                .find(|(r_idx, r)| {
+                    room_contains_pocket_pos(inst, *r_idx, r, landed_pos, 150_000.0)
+                        || (*r_idx == 0
+                            && inst
+                                .entry_gate_pos
+                                .is_some_and(|ep| dist3(landed_pos, ep) <= 150_000.0))
+                })?;
+            let behind_unentered_gate = !room.entered
+                && (room.gated
+                    || (room_vec_idx == 0
+                        && (inst.entry_gate_pos.is_some()
+                            || inst.entry_gate_ball_id.is_some())));
             Some((
                 inst.instance_id,
                 inst.dungeon_id,
                 inst.category.clone(),
                 inst.dungeon_name.clone(),
                 room.room_index,
+                room_vec_idx,
                 room.room_id,
                 room.position,
                 inst.rooms.len(),
                 inst.created_unix,
+                behind_unentered_gate,
             ))
         })
     });
 
-    if let Some((inst_id, dungeon_id, category, dungeon_name, room_idx, room_id, room_pos, total_rooms, created_unix)) =
-        runtime_entry
+    if let Some((
+        inst_id,
+        dungeon_id,
+        category,
+        dungeon_name,
+        room_idx,
+        room_vec_idx,
+        room_id,
+        room_pos,
+        total_rooms,
+        created_unix,
+        behind_unentered_gate,
+    )) = runtime_entry
     {
+        if room_vec_idx > 0 && behind_unentered_gate {
+            return;
+        }
         let mut esc_instance_id = None;
         if matches!(category.as_str(), "Expedition" | "Escalation") {
             with_pve_exploration_reg(ctx, |reg| {
@@ -773,7 +886,13 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
                 }
             });
         }
-        let _ = materialize_dungeon_room_entities(ctx, sys_id, inst_id, room_idx.saturating_sub(1)).await;
+        if materialize_dungeon_room_entities(ctx, sys_id, inst_id, room_vec_idx)
+            .await
+            .is_ok()
+            && !behind_unentered_gate
+        {
+            on_dungeon_room_entered(ctx, sys_id, inst_id, room_vec_idx, char_id).await;
+        }
         let expiry_ft = unix_to_filetime_ticks(created_unix.saturating_add(86_400));
         emit_dungeon_progression_notifications(
             ctx,
@@ -892,295 +1011,459 @@ pub(crate) struct MaterializedDungeonRoomEntities {
     pub next_gate_id: Option<i64>,
 }
 
+#[derive(Clone, Debug)]
+struct NpcSpawnOrder {
+    ball_id: i64,
+    type_id: u32,
+    pos: [f64; 3],
+    custom_name: Option<String>,
+    destructible: bool,
+}
+
+fn npc_spawn_position(
+    room_pos: [f64; 3],
+    grp_idx: usize,
+    spawn_index: usize,
+    offset_m: Option<[i64; 3]>,
+) -> [f64; 3] {
+    if let Some([x, y, z]) = offset_m {
+        [
+            room_pos[0] + x as f64,
+            room_pos[1] + y as f64,
+            room_pos[2] + z as f64,
+        ]
+    } else {
+        let angle = ((grp_idx as f64) * 1.1) + ((spawn_index as f64) * 0.9);
+        let dist = 8_000.0 + ((spawn_index as f64) * 1_500.0);
+        [
+            room_pos[0] + angle.cos() * dist,
+            room_pos[1],
+            room_pos[2] + angle.sin() * dist,
+        ]
+    }
+}
+
+fn plan_npc_group_spawns_in_snap(
+    snap: &mut WorldStateSnapshot,
+    room: &mut DungeonRuntimeRoom,
+    grp_idx: usize,
+    out_orders: &mut Vec<NpcSpawnOrder>,
+) {
+    let entries = room.npc_groups[grp_idx].effective_entries();
+    if entries.is_empty() {
+        let g = &mut room.npc_groups[grp_idx];
+        g.spawned = true;
+        g.cleared = true;
+        return;
+    }
+    let total_npcs: usize = entries.iter().map(|e| e.count.max(1)).sum();
+    let alloc_ids: Vec<i64> = (0..total_npcs).map(|_| snap.alloc_entity_id()).collect();
+    let room_pos = room.position;
+    let grp = &mut room.npc_groups[grp_idx];
+    grp.spawned = true;
+    grp.cleared = false;
+
+    let base_spawn_idx = usize::try_from(grp.kills_recorded)
+        .unwrap_or(0)
+        .saturating_add(grp.npc_ball_ids.len());
+    let mut id_iter = alloc_ids.into_iter();
+    let mut spawn_idx = 0usize;
+    for entry in entries {
+        let count = entry.count.max(1);
+        for sub_idx in 0..count {
+            let Some(npc_id) = id_iter.next() else {
+                break;
+            };
+            let offset_m = entry.relative_offsets_m.get(sub_idx).copied();
+            let cur_spawn_idx = base_spawn_idx + spawn_idx;
+            let pos = npc_spawn_position(room_pos, grp_idx, cur_spawn_idx, offset_m);
+            let destructible = entry.destructible.unwrap_or(true);
+            spawn_idx += 1;
+            grp.npc_ball_ids.push(npc_id);
+            grp.npc_ball_meta.insert(
+                npc_id,
+                DungeonSpawnedNpcMeta {
+                    type_id: entry.type_id,
+                    offset_m,
+                    custom_loot: entry.custom_loot,
+                    destructible,
+                    spawn_index: cur_spawn_idx,
+                },
+            );
+            if let Some(ref tag) = entry.tag {
+                grp.npc_ball_tags.insert(npc_id, tag.clone());
+            }
+            if let Some(ref name) = entry.custom_name {
+                grp.npc_ball_names.insert(npc_id, name.clone());
+            }
+            if let Some(bounty) = entry.bounty_isk_override {
+                grp.npc_ball_bounties.insert(npc_id, bounty);
+            }
+            out_orders.push(NpcSpawnOrder {
+                ball_id: npc_id,
+                type_id: entry.type_id,
+                pos,
+                custom_name: entry.custom_name.clone(),
+                destructible,
+            });
+        }
+    }
+}
+
+async fn spawn_object_ball(
+    sys_handle: &crate::system_actor::SystemHandle,
+    sde: &eve_sde::SdeRegistry,
+    ball_id: i64,
+    type_id: u32,
+    pos: [f64; 3],
+    radius: f64,
+    destructible: bool,
+) {
+    let tid = if type_id > 0 {
+        type_id
+    } else {
+        DEFAULT_CONTAINER_TYPE_ID
+    };
+    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
+    ball.radius = radius.max(100.0);
+    if destructible {
+        let cs = build_type_combat_state_from_sde(sde, tid);
+        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+    } else {
+        let _ = sys_handle.spawn_ball(ball).await;
+    }
+}
+
+async fn spawn_gate_ball(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ball_id: i64,
+    pos: [f64; 3],
+    gate_type_id: Option<u32>,
+) {
+    let tid = gate_type_id
+        .filter(|&id| id > 0)
+        .unwrap_or(ACCELERATION_GATE_TYPE_ID);
+    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
+    ball.radius = 1_500.0;
+    let _ = sys_handle.spawn_ball(ball).await;
+}
+
+async fn spawn_npc_orders(
+    sys_handle: &crate::system_actor::SystemHandle,
+    sde: &eve_sde::SdeRegistry,
+    orders: Vec<NpcSpawnOrder>,
+) {
+    for order in orders {
+        let ball = make_site_npc_ball(order.ball_id, order.type_id, DVec3::from_array(order.pos));
+        let mut cs = build_type_combat_state_from_sde(sde, order.type_id);
+        if !order.destructible {
+            cs.is_tethered = true;
+        }
+        if let Some(custom_name) = order.custom_name {
+            let mut meta = eve_destiny::SlimItemMeta::default();
+            if let Some(t) = sde.types.get(&order.type_id) {
+                meta.group_id = t.group_id;
+                meta.category_id = t.category_id;
+            }
+            meta.name = Some(custom_name);
+            let _ = sys_handle.spawn_ball_with_meta(ball, cs, meta).await;
+        } else {
+            let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+        }
+    }
+}
+
+pub(crate) fn insert_container_and_loot_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sys_id: SolarSystemId,
+    container_ball_id: i64,
+    container_type_id: u32,
+    position: [f64; 3],
+    loot_items: &[(u32, i32)],
+    owner_char_id: i64,
+) {
+    let cont_owner = if owner_char_id > 0 {
+        owner_char_id
+    } else {
+        500_010
+    };
+    let tid = if container_type_id > 0 {
+        container_type_id
+    } else {
+        DEFAULT_CONTAINER_TYPE_ID
+    };
+    snap.item_positions.insert(container_ball_id, position);
+    snap.items
+        .entry(container_ball_id)
+        .or_insert_with(|| InventoryItemRecord {
+            item_id: container_ball_id,
+            type_id: tid,
+            owner_id: cont_owner,
+            location_id: i64::from(sys_id),
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        });
+    for &(loot_tid, loot_qty) in loot_items {
+        let lid = snap.alloc_entity_id();
+        snap.items.insert(
+            lid,
+            InventoryItemRecord {
+                item_id: lid,
+                type_id: loot_tid,
+                owner_id: cont_owner,
+                location_id: container_ball_id,
+                flag: InventoryFlag::Cargo,
+                quantity: loot_qty.max(1),
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    }
+}
+
+pub(crate) fn cleanup_instance_containers_in_snap(
+    snap: &mut WorldStateSnapshot,
+    ball_ids: &[i64],
+) {
+    if ball_ids.is_empty() {
+        return;
+    }
+    let id_set: HashSet<i64> = ball_ids.iter().copied().collect();
+    snap.items
+        .retain(|item_id, rec| !id_set.contains(item_id) && !id_set.contains(&rec.location_id));
+    for bid in &id_set {
+        snap.item_positions.remove(bid);
+        snap.sp6_lifecycle.space_object_meta.remove(bid);
+    }
+}
+
+pub(crate) fn has_unlooted_containers_in_snap(
+    snap: &WorldStateSnapshot,
+    inst: &DungeonRuntimeInstance,
+) -> bool {
+    let live_containers: HashSet<i64> = inst
+        .rooms
+        .iter()
+        .flat_map(|r| r.objects.iter())
+        .filter(|o| o.is_container && o.spawned && !o.destroyed && o.ball_id > 0)
+        .map(|o| o.ball_id)
+        .collect();
+    if live_containers.is_empty() {
+        return false;
+    }
+    snap.items
+        .values()
+        .any(|it| it.quantity > 0 && live_containers.contains(&it.location_id))
+}
+
+fn collect_all_room_gate_ids(room: &DungeonRuntimeRoom) -> Vec<i64> {
+    let mut out = Vec::new();
+    if let Some(gid) = room.gate_ball_id {
+        out.push(gid);
+    }
+    for link in &room.gate_links {
+        if let Some(gid) = link.gate_ball_id {
+            if !out.contains(&gid) {
+                out.push(gid);
+            }
+        }
+    }
+    out
+}
+
 /// Materializes a room's objects, acceleration gate, and immediate NPC groups into the system ballpark.
+/// Leaves `room.entered = false` (`I1`) until `on_dungeon_room_entered` marks pilot arrival.
 pub(crate) async fn materialize_dungeon_room_entities(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     instance_id: i64,
     room_vec_idx: usize,
 ) -> Result<MaterializedDungeonRoomEntities, BridgeRpcError> {
-    enum SpawnPlan {
-        Object {
-            ball_id: i64,
-            type_id: u32,
-            pos: [f64; 3],
-            radius: f64,
-        },
-        Gate {
-            ball_id: i64,
-            pos: [f64; 3],
-        },
-        Npc {
-            ball_id: i64,
-            type_id: u32,
-            pos: [f64; 3],
-        },
-    }
-
-    let (plans, obj_ids, npc_ids, gate_id_opt) = ctx.db.try_with_mut_snapshot(|snap| {
-        let typed_inst_id = DungeonInstanceId::new(instance_id);
-        let (
-            total_rooms,
-            entry_gate_pos_opt,
-            existing_entry_gate,
-            owner_char_id,
-            obj_plan,
-            need_gate,
-            grp_counts,
-        ) = {
-            let inst = snap
+    let (gate_plans, obj_plans, npc_plans, obj_ids, npc_ids, gate_id_opt, already_spawned) =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let mut inst = snap
                 .dungeon_runtime
-                .get_instance(typed_inst_id)
+                .instances
+                .remove(&instance_id)
                 .ok_or_else(|| BridgeRpcError::user_error("DungeonInstanceNotFound"))?;
-            if inst.completed || inst.despawned {
+            if instance_is_finished(&inst) {
+                snap.dungeon_runtime.instances.insert(instance_id, inst);
                 return Err(BridgeRpcError::user_error("DungeonAlreadyCompleted"));
             }
-            let Some(room) = inst.rooms.get(room_vec_idx) else {
+            if inst.rooms.get(room_vec_idx).is_none() {
+                snap.dungeon_runtime.instances.insert(instance_id, inst);
                 return Err(BridgeRpcError::user_error("DungeonRoomNotFound"));
-            };
-            let obj_plan: Vec<(bool, bool, usize)> = room
-                .objects
-                .iter()
-                .map(|o| {
-                    let needs_ball = o.ball_id <= 0;
-                    let needs_container = !o.spawned
-                        && o.is_container
-                        && (o.ball_id <= 0 || !snap.items.contains_key(&o.ball_id));
-                    let loot_len = if needs_container { o.loot_items.len() } else { 0 };
-                    (needs_ball, needs_container, loot_len)
-                })
-                .collect();
-            let need_gate = room_vec_idx + 1 < inst.rooms.len() && room.gate_ball_id.is_none();
-            let grp_counts: Vec<usize> = room
-                .npc_groups
-                .iter()
-                .map(|g| {
-                    if g.spawn_immediately && !g.spawned && !g.cleared {
-                        g.npc_specs.iter().map(|(_, c)| *c).sum()
-                    } else {
-                        0
-                    }
-                })
-                .collect();
-            (
-                inst.rooms.len(),
-                inst.entry_gate_pos,
-                inst.entry_gate_ball_id,
-                inst.owner_char_id,
-                obj_plan,
-                need_gate,
-                grp_counts,
-            )
-        };
+            }
+            let was_room_spawned = inst.rooms[room_vec_idx].spawned;
+            let total_rooms = inst.rooms.len();
+            let owner_char_id = inst.owner_char_id;
 
-        let alloc_eg = (room_vec_idx == 0
-            && entry_gate_pos_opt.is_some()
-            && existing_entry_gate.is_none())
-        .then(|| snap.alloc_entity_id());
-        let alloc_objs: Vec<(Option<i64>, bool, Vec<i64>)> = obj_plan
-            .into_iter()
-            .map(|(needs_ball, needs_cont, loot_len)| {
-                let b = needs_ball.then(|| snap.alloc_entity_id());
-                let l = (0..loot_len).map(|_| snap.alloc_entity_id()).collect();
-                (b, needs_cont, l)
-            })
-            .collect();
-        let alloc_gate = need_gate.then(|| snap.alloc_entity_id());
-        let alloc_npcs: Vec<Vec<i64>> = grp_counts
-            .into_iter()
-            .map(|cnt| (0..cnt).map(|_| snap.alloc_entity_id()).collect())
-            .collect();
-
-        let mut plans = Vec::new();
-        let mut obj_ids = Vec::new();
-        let mut npc_ids = Vec::new();
-        let mut pending_items: Vec<(i64, InventoryItemRecord)> = Vec::new();
-
-        let gate_id_opt = {
-            let inst = snap
-                .dungeon_runtime
-                .get_instance_mut(typed_inst_id)
-                .ok_or_else(|| {
-                    BridgeRpcError::with_client_error(
-                        "DungeonInstanceNotFound",
-                        "Dungeon instance not found",
-                        eve_proto::ClientError::CustomInfo("Dungeon instance not found".into()),
-                    )
-                })?;
+            let mut gate_plans: Vec<(i64, [f64; 3], Option<u32>)> = Vec::new();
+            let mut obj_plans: Vec<(i64, u32, [f64; 3], f64, bool)> = Vec::new();
+            let mut npc_plans: Vec<NpcSpawnOrder> = Vec::new();
+            let mut obj_ids: Vec<i64> = Vec::new();
+            let mut npc_ids: Vec<i64> = Vec::new();
 
             if room_vec_idx == 0 {
-                if let Some(ep) = entry_gate_pos_opt {
-                    if let Some(eg_id) = existing_entry_gate.or(alloc_eg) {
-                        inst.entry_gate_ball_id = Some(eg_id);
-                        plans.push(SpawnPlan::Gate {
-                            ball_id: eg_id,
-                            pos: ep,
-                        });
+                if let Some(ep) = inst.entry_gate_pos {
+                    let first_eg = inst.entry_gate_ball_id.is_none() || !was_room_spawned;
+                    let eg_id = inst
+                        .entry_gate_ball_id
+                        .unwrap_or_else(|| snap.alloc_entity_id());
+                    inst.entry_gate_ball_id = Some(eg_id);
+                    if first_eg {
+                        gate_plans.push((eg_id, ep, None));
                     }
                 }
             }
 
-            let Some(room) = inst.rooms.get_mut(room_vec_idx) else {
-                return Err(BridgeRpcError::with_client_error(
-                    "DungeonRoomNotFound",
-                    "Dungeon room not found",
-                    eve_proto::ClientError::CustomInfo("Dungeon room not found".into()),
-                ));
-            };
-
-            for (obj, (ball_opt, needs_cont, loot_ids)) in
-                room.objects.iter_mut().zip(alloc_objs)
-            {
-                if obj.ball_id <= 0 {
-                    if let Some(bid) = ball_opt {
-                        obj.ball_id = bid;
-                    }
-                }
-                obj_ids.push(obj.ball_id);
-                if !obj.spawned {
-                    obj.spawned = true;
-                    plans.push(SpawnPlan::Object {
-                        ball_id: obj.ball_id,
-                        type_id: obj.type_id,
-                        pos: obj.position,
-                        radius: obj.radius,
-                    });
-                    if needs_cont {
-                        let cont_owner = if owner_char_id > 0 { owner_char_id } else { 500_010 };
-                        pending_items.push((
+            let obj_len = inst.rooms[room_vec_idx].objects.len();
+            for oi in 0..obj_len {
+                let (skip_obj, needs_cont, bid, tid, pos, radius, destructible, loot_items) = {
+                    let obj = &mut inst.rooms[room_vec_idx].objects[oi];
+                    if obj.destroyed {
+                        (true, false, obj.ball_id, 0, [0.0; 3], 0.0, false, Vec::new())
+                    } else {
+                        if obj.ball_id <= 0 {
+                            obj.ball_id = snap.alloc_entity_id();
+                        }
+                        let newly_spawned = !obj.spawned;
+                        if newly_spawned {
+                            obj.spawned = true;
+                        }
+                        (
+                            false,
+                            newly_spawned && obj.is_container,
                             obj.ball_id,
-                            InventoryItemRecord {
-                                item_id: obj.ball_id,
-                                type_id: if obj.type_id > 0 {
-                                    obj.type_id
-                                } else {
-                                    DEFAULT_CONTAINER_TYPE_ID
-                                },
-                                owner_id: cont_owner,
-                                location_id: i64::from(sys_id),
-                                flag: InventoryFlag::Hangar,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                dynamic_attributes: HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
+                            obj.type_id,
+                            obj.position,
+                            obj.radius,
+                            obj.destructible,
+                            if newly_spawned && obj.is_container {
+                                obj.loot_items.clone()
+                            } else {
+                                Vec::new()
                             },
-                        ));
-                        for (&(loot_tid, loot_qty), lid) in
-                            obj.loot_items.iter().zip(loot_ids)
-                        {
-                            pending_items.push((
-                                lid,
-                                InventoryItemRecord {
-                                    item_id: lid,
-                                    type_id: loot_tid,
-                                    owner_id: cont_owner,
-                                    location_id: obj.ball_id,
-                                    flag: InventoryFlag::Cargo,
-                                    quantity: loot_qty.max(1),
-                                    singleton: false,
-                                    version: 1,
-                                    dynamic_attributes: HashMap::new(),
-                                    source_mutaplasmid_id: None,
-                                    insured_payout_isk: 0.0,
-                                    is_blueprint_copy: false,
-                                    blueprint_runs_remaining: None,
-                                },
-                            ));
+                        )
+                    }
+                };
+                if skip_obj {
+                    continue;
+                }
+                obj_ids.push(bid);
+                if needs_cont && !snap.items.contains_key(&bid) {
+                    insert_container_and_loot_in_snap(
+                        snap,
+                        sys_id,
+                        bid,
+                        tid,
+                        pos,
+                        &loot_items,
+                        owner_char_id,
+                    );
+                }
+                if !was_room_spawned || needs_cont {
+                    obj_plans.push((bid, tid, pos, radius, destructible));
+                }
+            }
+
+            let has_gate_links = !inst.rooms[room_vec_idx].gate_links.is_empty();
+            if has_gate_links {
+                let gl_len = inst.rooms[room_vec_idx].gate_links.len();
+                for gi in 0..gl_len {
+                    let need_id = inst.rooms[room_vec_idx].gate_links[gi]
+                        .gate_ball_id
+                        .is_none();
+                    let allocated = need_id.then(|| snap.alloc_entity_id());
+                    let room = &mut inst.rooms[room_vec_idx];
+                    let gl = &mut room.gate_links[gi];
+                    if let Some(new_gid) = allocated {
+                        gl.gate_ball_id = Some(new_gid);
+                    }
+                    let newly_spawned = !gl.spawned;
+                    if newly_spawned {
+                        gl.spawned = true;
+                    }
+                    if room.gate_ball_id.is_none() {
+                        room.gate_ball_id = gl.gate_ball_id;
+                    }
+                    if newly_spawned || !was_room_spawned {
+                        if let Some(gid) = gl.gate_ball_id {
+                            gate_plans.push((gid, gl.gate_position, gl.gate_type_id));
                         }
                     }
                 }
-            }
-
-            if room_vec_idx + 1 < total_rooms {
-                if let Some(gid) = room.gate_ball_id.or(alloc_gate) {
-                    let first_spawn = room.gate_ball_id.is_none() || !room.spawned;
-                    room.gate_ball_id = Some(gid);
-                    if first_spawn {
+            } else if room_vec_idx + 1 < total_rooms {
+                let need_id = inst.rooms[room_vec_idx].gate_ball_id.is_none();
+                let allocated = need_id.then(|| snap.alloc_entity_id());
+                let room = &mut inst.rooms[room_vec_idx];
+                if let Some(new_gid) = allocated {
+                    room.gate_ball_id = Some(new_gid);
+                }
+                if let Some(gid) = room.gate_ball_id {
+                    if allocated.is_some() || !was_room_spawned {
                         let gate_pos = [
                             room.position[0] + 5_000.0,
                             room.position[1],
                             room.position[2],
                         ];
-                        plans.push(SpawnPlan::Gate {
-                            ball_id: gid,
-                            pos: gate_pos,
-                        });
+                        gate_plans.push((gid, gate_pos, None));
                     }
                 }
             }
 
-            for (grp, grp_npc_ids) in room.npc_groups.iter_mut().zip(alloc_npcs) {
-                if grp.spawn_immediately && !grp.spawned && !grp.cleared {
-                    grp.spawned = true;
-                    let mut id_iter = grp_npc_ids.into_iter();
-                    let mut offset_idx = 0usize;
-                    for &(npc_tid, count) in &grp.npc_specs {
-                        for _ in 0..count {
-                            if let Some(nid) = id_iter.next() {
-                                let angle = (offset_idx as f64) * 0.85;
-                                let npc_pos = [
-                                    room.position[0] + angle.cos() * 8_000.0,
-                                    room.position[1],
-                                    room.position[2] + angle.sin() * 8_000.0,
-                                ];
-                                offset_idx += 1;
-                                grp.npc_ball_ids.push(nid);
-                                plans.push(SpawnPlan::Npc {
-                                    ball_id: nid,
-                                    type_id: npc_tid,
-                                    pos: npc_pos,
-                                });
-                            }
-                        }
-                    }
+            let grp_len = inst.rooms[room_vec_idx].npc_groups.len();
+            for g_idx in 0..grp_len {
+                let should_spawn = {
+                    let g = &inst.rooms[room_vec_idx].npc_groups[g_idx];
+                    g.spawn_immediately && !g.spawned && !g.cleared
+                };
+                if should_spawn {
+                    plan_npc_group_spawns_in_snap(
+                        snap,
+                        &mut inst.rooms[room_vec_idx],
+                        g_idx,
+                        &mut npc_plans,
+                    );
                 }
-                npc_ids.extend(grp.npc_ball_ids.iter().copied());
+                npc_ids.extend(inst.rooms[room_vec_idx].npc_groups[g_idx].npc_ball_ids.iter().copied());
             }
 
+            let room = &mut inst.rooms[room_vec_idx];
             room.spawned = true;
-            room.gate_ball_id
-        };
+            let gate_id_opt = room
+                .gate_ball_id
+                .or_else(|| room.gate_links.first().and_then(|gl| gl.gate_ball_id));
 
-        for (item_id, item_rec) in pending_items {
-            snap.items.insert(item_id, item_rec);
-        }
+            snap.dungeon_runtime.instances.insert(instance_id, inst);
 
-        Ok((plans, obj_ids, npc_ids, gate_id_opt))
-    })?;
+            Ok((
+                gate_plans,
+                obj_plans,
+                npc_plans,
+                obj_ids,
+                npc_ids,
+                gate_id_opt,
+                was_room_spawned,
+            ))
+        })?;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for plan in plans {
-        match plan {
-            SpawnPlan::Object {
-                ball_id,
-                type_id,
-                pos,
-                radius,
-            } => {
-                let mut ball = make_site_npc_ball(ball_id, type_id, DVec3::from_array(pos));
-                ball.radius = radius.max(100.0);
-                let _ = sys_handle.spawn_ball(ball).await;
-            }
-            SpawnPlan::Gate { ball_id, pos } => {
-                let mut ball =
-                    make_site_npc_ball(ball_id, ACCELERATION_GATE_TYPE_ID, DVec3::from_array(pos));
-                ball.radius = 1_500.0;
-                let _ = sys_handle.spawn_ball(ball).await;
-            }
-            SpawnPlan::Npc {
-                ball_id,
-                type_id,
-                pos,
-            } => {
-                let ball = make_site_npc_ball(ball_id, type_id, DVec3::from_array(pos));
-                let cs = build_type_combat_state_from_sde(&ctx.sde, type_id);
-                let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
-            }
-        }
+    for (ball_id, pos, gate_type_id) in gate_plans {
+        spawn_gate_ball(&sys_handle, ball_id, pos, gate_type_id).await;
+    }
+    for (ball_id, type_id, pos, radius, destructible) in obj_plans {
+        spawn_object_ball(&sys_handle, &ctx.sde, ball_id, type_id, pos, radius, destructible).await;
+    }
+    if !npc_plans.is_empty() {
+        spawn_npc_orders(&sys_handle, &ctx.sde, npc_plans).await;
+    }
+    if already_spawned {
+        let _ = reconcile_and_rematerialize_dungeon_instance(ctx, sys_id, instance_id).await;
     }
 
     Ok(MaterializedDungeonRoomEntities {
@@ -1188,6 +1471,244 @@ pub(crate) async fn materialize_dungeon_room_entities(
         npc_ids,
         next_gate_id: gate_id_opt,
     })
+}
+
+/// Marks a dungeon room as entered (`I1`), records pilot attribution (`last_actor_char_id`),
+/// and retroactively evaluates any `OnKill`/room-clear progression for NPCs destroyed prior to entry.
+pub async fn on_dungeon_room_entered(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+    room_vec_idx: usize,
+    char_id: i64,
+) {
+    let now_unix = ctx.db.clock().now_unix_secs();
+    let needs_write = read_dungeon_runtime_store(ctx, |store| {
+        let Some(inst) = store.instances.get(&instance_id) else {
+            return false;
+        };
+        if instance_is_finished(inst) || inst.solar_system_id != sys_id {
+            return false;
+        }
+        let Some(room) = inst.rooms.get(room_vec_idx) else {
+            return false;
+        };
+        !room.entered || (char_id > 0 && inst.last_actor_char_id != char_id)
+    });
+    if !needs_write {
+        return;
+    }
+    let mut pending_actions = Vec::new();
+    let mut auto_complete_insts = Vec::new();
+    let mut auto_clear_notifies = Vec::new();
+    with_dungeon_runtime_store(ctx, |store| {
+        let Some(inst) = store.instances.get_mut(&instance_id) else {
+            return;
+        };
+        if instance_is_finished(inst) || inst.solar_system_id != sys_id {
+            return;
+        }
+        let total_rooms = inst.rooms.len();
+        let (room_actions, extra_clear_event, auto_complete) = {
+            let Some(room) = inst.rooms.get_mut(room_vec_idx) else {
+                return;
+            };
+            let was_entered = room.entered;
+            room.entered = true;
+            room.entered_unix.get_or_insert(now_unix);
+
+            if !was_entered
+                && room
+                    .npc_groups
+                    .iter()
+                    .any(|g| g.kills_recorded > 0 || !g.dead_npc_ball_ids.is_empty())
+            {
+                let cleared_group_ids: Vec<u8> = room
+                    .npc_groups
+                    .iter()
+                    .filter(|g| g.spawned && g.cleared && g.npc_ball_ids.is_empty())
+                    .map(|g| g.group_id)
+                    .collect();
+                evaluate_room_kill_triggers_and_clear(
+                    room,
+                    room_vec_idx,
+                    total_rooms,
+                    None,
+                    &cleared_group_ids,
+                )
+            } else {
+                (Vec::new(), None, false)
+            }
+        };
+        record_dungeon_actor(inst, char_id);
+        if !room_actions.is_empty() {
+            pending_actions.push((inst.instance_id, room_vec_idx, room_actions));
+        }
+        if auto_complete {
+            auto_complete_insts.push(inst.instance_id);
+        }
+        if let Some((tid, oid)) = extra_clear_event {
+            let evs = vec![(tid, oid)];
+            crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
+                inst, &evs,
+            );
+            let recip = resolve_dungeon_recipient(inst, char_id);
+            if recip > 0 {
+                auto_clear_notifies.push((recip, evs));
+            }
+        }
+    });
+    flush_room_kill_progression_effects(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        Some(&ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+        sys_id,
+        char_id,
+        auto_clear_notifies,
+        pending_actions,
+        auto_complete_insts,
+    )
+    .await;
+}
+
+/// Reconciles persisted `spawned` state with the live ballpark after restart or unload
+/// and re-materializes missing gates, containers/objects (at persisted `snap.item_positions`),
+/// and live NPCs without duplicating loot (`PVE-210`).
+pub async fn reconcile_and_rematerialize_dungeon_instance(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+) -> usize {
+    let active_in_sys = read_dungeon_runtime_store(ctx, |store| {
+        store.instances.get(&instance_id).is_some_and(|inst| {
+            !inst.despawned && inst.solar_system_id == sys_id && inst.category != "Flashpoint"
+        })
+    });
+    if !active_in_sys {
+        return 0;
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let view = sys_handle.view();
+
+    let (gates_to_spawn, objects_to_spawn, npcs_to_spawn) = ctx.db.with_snapshot(|snap| {
+        let Some(inst) = snap.dungeon_runtime.instances.get(&instance_id) else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+        if inst.despawned || inst.solar_system_id != sys_id || inst.category == "Flashpoint" {
+            return (Vec::new(), Vec::new(), Vec::new());
+        }
+        let mut gates: Vec<(i64, [f64; 3], Option<u32>)> = Vec::new();
+        let mut objs = Vec::new();
+        let mut npcs = Vec::new();
+
+        if !instance_is_finished(inst) {
+            if let (Some(eg_id), Some(eg_pos)) = (inst.entry_gate_ball_id, inst.entry_gate_pos) {
+                if !view.contains_ball(eg_id) {
+                    gates.push((eg_id, eg_pos, None));
+                }
+            }
+        }
+
+        for r in &inst.rooms {
+            if !r.spawned {
+                continue;
+            }
+            if !instance_is_finished(inst) {
+                if !r.gate_links.is_empty() {
+                    for gl in &r.gate_links {
+                        if gl.spawned {
+                            if let Some(gid) = gl.gate_ball_id {
+                                if !view.contains_ball(gid) {
+                                    gates.push((gid, gl.gate_position, gl.gate_type_id));
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(gid) = r.gate_ball_id {
+                    if !view.contains_ball(gid) {
+                        gates.push((gid, [r.position[0] + 5_000.0, r.position[1], r.position[2]], None));
+                    }
+                }
+            }
+
+            for o in &r.objects {
+                let pos = snap.item_positions.get(&o.ball_id).copied().unwrap_or(o.position);
+                let needs_ball = o.spawned
+                    && !o.destroyed
+                    && o.ball_id > 0
+                    && (!instance_is_finished(inst) || o.is_container)
+                    && !view.contains_ball(o.ball_id);
+                if needs_ball {
+                    objs.push((o.ball_id, o.type_id, pos, o.radius, o.destructible));
+                }
+            }
+
+            if !instance_is_finished(inst) {
+                for (g_idx, g) in r.npc_groups.iter().enumerate() {
+                    if !g.spawned || g.cleared {
+                        continue;
+                    }
+                    let entries = g.effective_entries();
+                    let expanded: Vec<(&DungeonNpcSpawnEntry, usize)> = entries
+                        .iter()
+                        .flat_map(|e| (0..e.count.max(1)).map(move |sub_i| (e, sub_i)))
+                        .collect();
+                    for (idx, &npc_id) in g.npc_ball_ids.iter().enumerate() {
+                        if npc_id <= 0 || view.contains_ball(npc_id) {
+                            continue;
+                        }
+                        let meta_opt = g.npc_ball_meta.get(&npc_id);
+                        let pair = meta_opt
+                            .is_none()
+                            .then(|| expanded.get(idx).or_else(|| expanded.first()).copied())
+                            .flatten();
+                        let type_id = meta_opt
+                            .map(|m| m.type_id)
+                            .or_else(|| pair.map(|(e, _)| e.type_id))
+                            .unwrap_or(16_981);
+                        let (spawn_idx, offset_m, destructible) = if let Some(m) = meta_opt {
+                            (m.spawn_index, m.offset_m, m.destructible)
+                        } else {
+                            (
+                                idx,
+                                pair.and_then(|(e, sub_i)| e.relative_offsets_m.get(sub_i).copied()),
+                                pair.is_none_or(|(e, _)| e.destructible.unwrap_or(true)),
+                            )
+                        };
+                        let pos = npc_spawn_position(r.position, g_idx, spawn_idx, offset_m);
+                        npcs.push(NpcSpawnOrder {
+                            ball_id: npc_id,
+                            type_id,
+                            pos,
+                            custom_name: g
+                                .npc_ball_names
+                                .get(&npc_id)
+                                .cloned()
+                                .or_else(|| pair.and_then(|(e, _)| e.custom_name.clone())),
+                            destructible,
+                        });
+                    }
+                }
+            }
+        }
+        (gates, objs, npcs)
+    });
+    drop(view);
+
+    let count = gates_to_spawn.len() + objects_to_spawn.len() + npcs_to_spawn.len();
+    for (gid, gpos, gate_type_id) in gates_to_spawn {
+        spawn_gate_ball(&sys_handle, gid, gpos, gate_type_id).await;
+    }
+    for (bid, tid, pos, radius, destructible) in objects_to_spawn {
+        spawn_object_ball(&sys_handle, &ctx.sde, bid, tid, pos, radius, destructible).await;
+    }
+    if !npcs_to_spawn.is_empty() {
+        spawn_npc_orders(&sys_handle, &ctx.sde, npcs_to_spawn).await;
+    }
+    count
 }
 
 /// Despawns all remaining dungeon objects, gates, and NPCs when a dungeon completes and emits `OnDungeonCompleted`.
@@ -1228,85 +1749,102 @@ pub async fn despawn_completed_dungeon_core(
     instance_id: i64,
     char_id: i64,
 ) {
-    let cleanup = with_dungeon_runtime_store_db(db, |store| {
-        let Some(inst) = store.instances.get_mut(&instance_id) else {
-            return None;
-        };
-        if inst.despawned {
-            return None;
-        }
-        let mut balls_to_remove = Vec::new();
-        if let Some(eg) = inst.entry_gate_ball_id.take() {
-            balls_to_remove.push(eg);
-        }
-        for r in &mut inst.rooms {
-            if let Some(g) = r.gate_ball_id.take() {
-                balls_to_remove.push(g);
-            }
-            for obj in &mut r.objects {
-                if obj.spawned && obj.ball_id > 0 {
-                    balls_to_remove.push(obj.ball_id);
-                    obj.spawned = false;
-                }
-            }
-            for grp in &mut r.npc_groups {
-                balls_to_remove.extend(grp.npc_ball_ids.drain(..));
-                grp.cleared = true;
-            }
-            r.cleared = true;
-        }
-        inst.completed = true;
-        inst.despawned = true;
-        let recipient = if char_id > 0 { char_id } else { inst.owner_char_id };
-        Some((inst.dungeon_id, recipient, balls_to_remove))
+    complete_dungeon_instance_core(
+        systems,
+        db,
+        pending_notifications,
+        notify_tx,
+        sys_id,
+        instance_id,
+        char_id,
+        true,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn complete_dungeon_instance_core(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    pending_notifications: Option<
+        &dyn AnyRwLock<
+            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+        >,
+    >,
+    notify_tx: Option<
+        &tokio::sync::broadcast::Sender<(
+            i64,
+            crate::router::cache_notifications::PendingMachoNotification,
+        )>,
+    >,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+    char_id: i64,
+    force_full_despawn: bool,
+) {
+    let now_unix = db.clock().now_unix_secs();
+    let cleanup = db.with_mut_snapshot(|snap| {
+        ops::apply_complete_dungeon_instance_snap(
+            snap,
+            instance_id,
+            char_id,
+            force_full_despawn,
+            now_unix,
+        )
     });
 
-    if let Some((dungeon_id, recipient_char_id, balls)) = cleanup {
-        let sys_handle = systems.get_or_spawn(sys_id);
-        for bid in balls {
-            let _ = sys_handle.remove_ball(bid).await;
-        }
-        let now_unix = db.clock().now_unix_secs();
-        let mut cleared_sig_ids = Vec::new();
-        crate::services::pve_exploration::with_pve_exploration_reg_db(db, now_unix, |reg| {
-            if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
-                for s in sites.iter_mut() {
-                    if !s.cleared && s.dungeon_id == dungeon_id && s.site_category == "Deadspace" {
-                        s.cleared = true;
-                        cleared_sig_ids.push(s.site_id.clone());
-                    }
-                }
-            }
-        });
-        if !cleared_sig_ids.is_empty() {
-            let mut collapsed_now = Vec::new();
-            db.with_mut_snapshot(|snap| {
-                if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
-                    for sig in sigs.iter_mut() {
-                        if !sig.collapsed && cleared_sig_ids.contains(&sig.signature_id) {
-                            sig.collapsed = true;
-                            collapsed_now.push(sig.signature_id.clone());
-                        }
-                    }
-                }
-            });
-            if let (Some(pend), Some(tx)) = (pending_notifications, notify_tx) {
-                for sig_id in &collapsed_now {
-                    crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
-                        db, pend, tx, sig_id,
-                    );
-                }
+    if let Some(done) = cleanup {
+        if let Some(sys_handle) = systems.get_handle(sys_id) {
+            for bid in done.balls_to_remove {
+                let _ = sys_handle.remove_ball(bid).await;
             }
         }
-        crate::services::notify_emitters_ess_bounties::push_char_notification_with_db(
+        ops::finalize_completed_dungeon_effects_sync(
             db,
             pending_notifications,
             notify_tx,
-            recipient_char_id,
-            "OnDungeonCompleted",
-            vec![PyRep::Integer(i64::from(dungeon_id))],
+            sys_id,
+            done.dungeon_id,
+            done.recipient_char_id,
+            done.emit_completed,
+            now_unix,
         );
     }
+}
+
+/// Finalizes any completed or failed dungeon instances whose `loot_grace_until_unix` has elapsed.
+pub async fn expire_dungeon_loot_grace(ctx: &ServerContext, sys_id: SolarSystemId) -> usize {
+    let now_unix = ctx.db.clock().now_unix_secs();
+    let expired_ids: Vec<i64> = read_dungeon_runtime_store(ctx, |store| {
+        store
+            .instances
+            .values()
+            .filter(|inst| {
+                inst.solar_system_id == sys_id
+                    && (inst.completed || inst.failed)
+                    && !inst.despawned
+                    && inst
+                        .loot_grace_until_unix
+                        .or(inst.despawn_after_unix)
+                        .is_some_and(|due| now_unix >= due)
+            })
+            .map(|inst| inst.instance_id)
+            .collect()
+    });
+    for &inst_id in &expired_ids {
+        complete_dungeon_instance_core(
+            &ctx.systems,
+            &ctx.db,
+            Some(&ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+            sys_id,
+            inst_id,
+            0,
+            true,
+        )
+        .await;
+    }
+    expired_ids.len()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1342,12 +1880,11 @@ async fn apply_dungeon_trigger_actions_core(
         let Some(inst) = store.instances.get_mut(&instance_id) else {
             return;
         };
-        if inst.completed || inst.despawned {
+        if instance_is_finished(inst) {
             return;
         }
-        if recipient_char <= 0 {
-            recipient_char = inst.owner_char_id;
-        }
+        record_dungeon_actor(inst, char_id);
+        recipient_char = resolve_dungeon_recipient(inst, char_id);
         if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
             let room_id = room.room_id;
             let obj_ids: Vec<i64> = room.objects.iter().map(|o| o.ball_id).collect();
@@ -1358,6 +1895,9 @@ async fn apply_dungeon_trigger_actions_core(
                 let next_obj_id = match act {
                     DungeonTriggerAction::UnlockGate => {
                         room.gate_locked = false;
+                        for gl in &mut room.gate_links {
+                            gl.locked = false;
+                        }
                         room_id * 10 + 9
                     }
                     DungeonTriggerAction::SpawnNpcGroup(grp_id) => {
@@ -1385,77 +1925,53 @@ async fn apply_dungeon_trigger_actions_core(
             &progression_events,
         );
     });
-    if !progression_events.is_empty() {
+    if !progression_events.is_empty() && recipient_char > 0 {
         crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(db, pending_notifications, notify_tx, recipient_char, &progression_events);
     }
     if let Some((did, obj_ids, n_acts)) = notify_batch {
-        crate::services::notify_emitters_channel_events::dispatch_dungeon_trigger_notify_actions(db, pending_notifications, notify_tx, recipient_char, did, &obj_ids, n_acts);
+        if recipient_char > 0 {
+            crate::services::notify_emitters_channel_events::dispatch_dungeon_trigger_notify_actions(db, pending_notifications, notify_tx, recipient_char, did, &obj_ids, n_acts);
+        }
     }
 
     if !groups_to_spawn.is_empty() {
-        let typed_inst_id = DungeonInstanceId::new(instance_id);
         let spawn_list = db.with_mut_snapshot(|snap| {
-            let needed: usize = snap
-                .dungeon_runtime
-                .get_instance(typed_inst_id)
-                .and_then(|inst| inst.rooms.get(room_vec_idx))
-                .map(|room| {
-                    groups_to_spawn
-                        .iter()
-                        .filter_map(|gid| {
-                            room.npc_groups
+            let mut to_spawn = Vec::new();
+            if let Some(mut inst) = snap.dungeon_runtime.instances.remove(&instance_id) {
+                if !instance_is_finished(&inst) {
+                    if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
+                        for grp_id in &groups_to_spawn {
+                            if let Some(g_idx) = room
+                                .npc_groups
                                 .iter()
-                                .find(|g| g.group_id == *gid && !g.spawned)
-                        })
-                        .map(|g| g.npc_specs.iter().map(|(_, c)| *c).sum::<usize>())
-                        .sum()
-                })
-                .unwrap_or(0);
-            let alloc_ids: Vec<i64> = (0..needed).map(|_| snap.alloc_entity_id()).collect();
-            let mut id_iter = alloc_ids.into_iter();
-            let mut to_spawn = Vec::with_capacity(needed);
-            if let Some(inst) = snap.dungeon_runtime.get_instance_mut(typed_inst_id) {
-                if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
-                    for grp_id in &groups_to_spawn {
-                        if let Some(grp) = room
-                            .npc_groups
-                            .iter_mut()
-                            .find(|g| g.group_id == *grp_id && !g.spawned)
-                        {
-                            grp.spawned = true;
-                            let mut offset_idx = 0usize;
-                            for &(npc_tid, count) in &grp.npc_specs {
-                                for _ in 0..count {
-                                    if let Some(nid) = id_iter.next() {
-                                        let angle = (offset_idx as f64) * 0.9 + 0.4;
-                                        let npc_pos = [
-                                            room.position[0] + angle.cos() * 9_500.0,
-                                            room.position[1],
-                                            room.position[2] + angle.sin() * 9_500.0,
-                                        ];
-                                        offset_idx += 1;
-                                        grp.npc_ball_ids.push(nid);
-                                        to_spawn.push((nid, npc_tid, npc_pos));
-                                    }
-                                }
+                                .position(|g| g.group_id == *grp_id && !g.spawned)
+                            {
+                                plan_npc_group_spawns_in_snap(snap, room, g_idx, &mut to_spawn);
                             }
                         }
                     }
                 }
+                snap.dungeon_runtime.instances.insert(instance_id, inst);
             }
             to_spawn
         });
 
         let sys_handle = systems.get_or_spawn(sys_id);
-        for (nid, npc_tid, npc_pos) in spawn_list {
-            let ball = make_site_npc_ball(nid, npc_tid, DVec3::from_array(npc_pos));
-            let cs = build_type_combat_state_from_sde(sde, npc_tid);
-            let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
-        }
+        spawn_npc_orders(&sys_handle, sde, spawn_list).await;
     }
 
     if complete_now {
-        despawn_completed_dungeon_core(systems, db, pending_notifications, notify_tx, sys_id, instance_id, char_id).await;
+        complete_dungeon_instance_core(
+            systems,
+            db,
+            pending_notifications,
+            notify_tx,
+            sys_id,
+            instance_id,
+            char_id,
+            false,
+        )
+        .await;
     }
 
     fired_count
@@ -1492,115 +2008,112 @@ pub async fn on_dungeon_npc_killed(ctx: &ServerContext, sys_id: SolarSystemId, n
     on_dungeon_npc_killed_core(&ctx.systems, &ctx.db, &ctx.sde, Some(&ctx.pending_notifications), Some(&ctx.notify_tx), sys_id, npc_ball_id, killer_char_id).await;
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn on_dungeon_npc_killed_core(
-    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>, db: &std::sync::Arc<eve_db::WorldRepository>, sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
-    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
-    sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
+fn evaluate_room_kill_triggers_and_clear(
+    room: &mut DungeonRuntimeRoom,
+    r_idx: usize,
+    total_rooms: usize,
+    killed_npc_ball_id: Option<i64>,
+    matched_group_ids: &[u8],
+) -> (
+    Vec<(u32, DungeonTriggerAction)>,
+    Option<(i64, i64)>,
+    bool,
 ) {
-    if !has_dungeon_runtime_store_db(db) {
-        return;
-    }
-    let mut pending_actions = Vec::new();
-    let mut auto_complete_insts = Vec::new();
-    let mut auto_clear_notifies = Vec::new();
+    let all_spawned_dead = room
+        .npc_groups
+        .iter()
+        .filter(|g| g.spawned)
+        .all(|g| g.npc_ball_ids.is_empty());
+    let all_groups_spawned = room.npc_groups.iter().all(|g| g.spawned);
 
-    with_dungeon_runtime_store_db(db, |store| {
-        for inst in store.instances.values_mut() {
-            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
-                continue;
-            }
-            let total_rooms = inst.rooms.len();
-            let owner_cid = inst.owner_char_id;
-            let mut extra_clear_event = None;
-            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
-                let mut matched_group_ids = Vec::new();
-                let mut any_removed = false;
-                for grp in &mut room.npc_groups {
-                    if let Some(pos) = grp.npc_ball_ids.iter().position(|&id| id == npc_ball_id) {
-                        grp.npc_ball_ids.remove(pos);
-                        any_removed = true;
-                        if grp.npc_ball_ids.is_empty() {
-                            grp.cleared = true;
-                            matched_group_ids.push(grp.group_id);
-                        }
-                    }
-                }
-                if !any_removed {
-                    continue;
-                }
-                let all_spawned_dead = room
-                    .npc_groups
-                    .iter()
-                    .filter(|g| g.spawned)
-                    .all(|g| g.npc_ball_ids.is_empty());
-                let all_groups_spawned = room.npc_groups.iter().all(|g| g.spawned);
-
-                let mut room_actions = Vec::new();
-                for trig in &mut room.triggers {
-                    if trig.fired {
-                        continue;
-                    }
-                    if let DungeonTriggerKind::OnKill {
-                        target_npc_group,
-                        target_ball_id,
-                    } = &trig.kind
-                    {
-                        let matches = if let Some(tbid) = target_ball_id {
-                            *tbid == npc_ball_id
-                        } else if let Some(tgrp) = target_npc_group {
-                            matched_group_ids.contains(tgrp)
-                        } else {
-                            all_spawned_dead && all_groups_spawned
-                        };
-                        if matches {
-                            trig.fired = true;
-                            room_actions.push((trig.trigger_id, trig.action.clone()));
-                        }
-                    }
-                }
-                let spawns_more_npcs = room_actions
-                    .iter()
-                    .any(|(_, a)| matches!(a, DungeonTriggerAction::SpawnNpcGroup(_)));
-                let explicit_complete = room_actions
-                    .iter()
-                    .any(|(_, a)| matches!(a, DungeonTriggerAction::CompleteDungeon));
-                let had_room_actions = !room_actions.is_empty();
-                if had_room_actions {
-                    pending_actions.push((inst.instance_id, r_idx, room_actions));
-                }
-
-                let any_unspawned_groups = room.npc_groups.iter().any(|g| !g.spawned);
-                let any_unfired_triggers = room.triggers.iter().any(|t| !t.fired);
-                if all_spawned_dead && !spawns_more_npcs && !any_unspawned_groups && !any_unfired_triggers {
-                    let was_cleared = room.cleared;
-                    room.cleared = true;
-                    room.gate_locked = false;
-                    if !was_cleared && !had_room_actions {
-                        let tid = room.room_id * 100 + 99;
-                        let oid = if r_idx + 1 < total_rooms {
-                            room.room_id * 10 + 9
-                        } else {
-                            room.room_id * 10 + 99
-                        };
-                        extra_clear_event = Some((tid, oid));
-                    }
-                    if r_idx + 1 == total_rooms && !explicit_complete {
-                        auto_complete_insts.push(inst.instance_id);
-                    }
-                }
-            }
-            if let Some((tid, oid)) = extra_clear_event {
-                let evs = vec![(tid, oid)];
-                crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
-                    inst, &evs,
-                );
-                let recip = if killer_char_id > 0 { killer_char_id } else { owner_cid };
-                auto_clear_notifies.push((recip, evs));
+    let mut room_actions = Vec::new();
+    for trig in &mut room.triggers {
+        if trig.fired {
+            continue;
+        }
+        if let DungeonTriggerKind::OnKill {
+            target_npc_group,
+            target_ball_id,
+        } = &trig.kind
+        {
+            let matches = if let Some(tbid) = target_ball_id {
+                killed_npc_ball_id.map_or_else(
+                    || {
+                        room.npc_groups
+                            .iter()
+                            .any(|g| g.dead_npc_ball_ids.contains(tbid))
+                    },
+                    |kid| *tbid == kid,
+                )
+            } else if let Some(tgrp) = target_npc_group {
+                matched_group_ids.contains(tgrp)
+            } else {
+                all_spawned_dead && all_groups_spawned
+            };
+            if matches {
+                trig.fired = true;
+                room_actions.push((trig.trigger_id, trig.action.clone()));
             }
         }
-    });
+    }
+
+    let spawns_more_npcs = room_actions
+        .iter()
+        .any(|(_, a)| matches!(a, DungeonTriggerAction::SpawnNpcGroup(_)));
+    let explicit_complete = room_actions
+        .iter()
+        .any(|(_, a)| matches!(a, DungeonTriggerAction::CompleteDungeon));
+    let had_room_actions = !room_actions.is_empty();
+
+    let any_unspawned_groups = room.npc_groups.iter().any(|g| !g.spawned);
+    let any_unfired_triggers = room.triggers.iter().any(|t| !t.fired);
+    let mut extra_clear_event = None;
+    let mut auto_complete = false;
+    if all_spawned_dead && !spawns_more_npcs && !any_unspawned_groups && !any_unfired_triggers {
+        let was_cleared = room.cleared;
+        room.cleared = true;
+        room.gate_locked = false;
+        for gl in &mut room.gate_links {
+            gl.locked = false;
+        }
+        if !was_cleared && !had_room_actions {
+            let tid = room.room_id * 100 + 99;
+            let oid = if r_idx + 1 < total_rooms {
+                room.room_id * 10 + 9
+            } else {
+                room.room_id * 10 + 99
+            };
+            extra_clear_event = Some((tid, oid));
+        }
+        if r_idx + 1 == total_rooms && !explicit_complete {
+            auto_complete = true;
+        }
+    }
+    (room_actions, extra_clear_event, auto_complete)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn flush_room_kill_progression_effects(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    sde: &eve_sde::SdeRegistry,
+    pending_notifications: Option<
+        &dyn AnyRwLock<
+            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+        >,
+    >,
+    notify_tx: Option<
+        &tokio::sync::broadcast::Sender<(
+            i64,
+            crate::router::cache_notifications::PendingMachoNotification,
+        )>,
+    >,
+    sys_id: SolarSystemId,
+    actor_char_id: i64,
+    auto_clear_notifies: Vec<(i64, Vec<(i64, i64)>)>,
+    pending_actions: Vec<(i64, usize, Vec<(u32, DungeonTriggerAction)>)>,
+    auto_complete_insts: Vec<i64>,
+) {
     for (recip, evs) in auto_clear_notifies {
         crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(
             db,
@@ -1622,7 +2135,7 @@ pub async fn on_dungeon_npc_killed_core(
             inst_id,
             r_idx,
             actions,
-            killer_char_id,
+            actor_char_id,
         )
         .await;
     }
@@ -1630,8 +2143,7 @@ pub async fn on_dungeon_npc_killed_core(
     for inst_id in auto_complete_insts {
         let still_clear = with_dungeon_runtime_store_db(db, |store| {
             store.instances.get(&inst_id).is_some_and(|inst| {
-                !inst.completed
-                    && !inst.despawned
+                !instance_is_finished(inst)
                     && inst.rooms.last().is_some_and(|r| {
                         r.npc_groups.iter().all(|g| g.spawned && g.npc_ball_ids.is_empty())
                             && r.triggers.iter().all(|t| t.fired)
@@ -1639,23 +2151,127 @@ pub async fn on_dungeon_npc_killed_core(
             })
         });
         if still_clear {
-            despawn_completed_dungeon_core(
+            complete_dungeon_instance_core(
                 systems,
                 db,
                 pending_notifications,
                 notify_tx,
                 sys_id,
                 inst_id,
-                killer_char_id,
+                actor_char_id,
+                false,
             )
             .await;
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn on_dungeon_npc_killed_core(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>, db: &std::sync::Arc<eve_db::WorldRepository>, sde: &eve_sde::SdeRegistry,
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
+    sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
+) {
+    if !has_dungeon_runtime_store_db(db) {
+        return;
+    }
+    let mut pending_actions = Vec::new();
+    let mut auto_complete_insts = Vec::new();
+    let mut auto_clear_notifies = Vec::new();
+
+    with_dungeon_runtime_store_db(db, |store| {
+        for inst in store.instances.values_mut() {
+            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
+                continue;
+            }
+            let total_rooms = inst.rooms.len();
+            let mut extra_clear_event = None;
+            let mut matched_entered = false;
+            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
+                let mut matched_group_ids = Vec::new();
+                let mut any_removed = false;
+                for grp in &mut room.npc_groups {
+                    if let Some(pos) = grp.npc_ball_ids.iter().position(|&id| id == npc_ball_id) {
+                        grp.npc_ball_ids.remove(pos);
+                        if !grp.dead_npc_ball_ids.contains(&npc_ball_id) {
+                            grp.dead_npc_ball_ids.push(npc_ball_id);
+                        }
+                        grp.kills_recorded = grp.kills_recorded.saturating_add(1);
+                        grp.npc_ball_meta.remove(&npc_ball_id);
+                        grp.npc_ball_tags.remove(&npc_ball_id);
+                        grp.npc_ball_names.remove(&npc_ball_id);
+                        grp.npc_ball_bounties.remove(&npc_ball_id);
+                        any_removed = true;
+                        if grp.npc_ball_ids.is_empty() {
+                            grp.cleared = true;
+                            matched_group_ids.push(grp.group_id);
+                        }
+                    }
+                }
+                if !any_removed {
+                    continue;
+                }
+                if !room_is_entered(room) {
+                    // Invariant I1: remove the dead NPC ID so reconcile never resurrects it or
+                    // soft-locks future entry, but keep trigger/clear/completion effects inert.
+                    continue;
+                }
+                matched_entered = true;
+                let (room_actions, clear_evt, auto_complete) =
+                    evaluate_room_kill_triggers_and_clear(
+                        room,
+                        r_idx,
+                        total_rooms,
+                        Some(npc_ball_id),
+                        &matched_group_ids,
+                    );
+                if !room_actions.is_empty() {
+                    pending_actions.push((inst.instance_id, r_idx, room_actions));
+                }
+                if let Some(evt) = clear_evt {
+                    extra_clear_event = Some(evt);
+                }
+                if auto_complete {
+                    auto_complete_insts.push(inst.instance_id);
+                }
+            }
+            if matched_entered {
+                record_dungeon_actor(inst, killer_char_id);
+            }
+            if let Some((tid, oid)) = extra_clear_event {
+                let evs = vec![(tid, oid)];
+                crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
+                    inst, &evs,
+                );
+                let recip = resolve_dungeon_recipient(inst, killer_char_id);
+                if recip > 0 {
+                    auto_clear_notifies.push((recip, evs));
+                }
+            }
+        }
+    });
+    flush_room_kill_progression_effects(
+        systems,
+        db,
+        sde,
+        pending_notifications,
+        notify_tx,
+        sys_id,
+        killer_char_id,
+        auto_clear_notifies,
+        pending_actions,
+        auto_complete_insts,
+    )
+    .await;
+}
+
 pub use crate::services::pve_dungeon_runtime_rpc::{
     check_dungeon_triggers, get_dungeon_instance_state, on_dungeon_approach,
     spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
+};
+pub(crate) use ops::{
+    expire_all_due_dungeon_loot_grace, expire_due_dungeon_loot_grace_sync,
 };
 
 /// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons.

@@ -187,6 +187,7 @@ async fn r7_tc_p1_455_dungeon_gate_hull_restrictions_and_unconditional_gated_war
                         triggers: Vec::new(),
                         spawned: true,
                         cleared: true,
+                        ..Default::default()
                     },
                     DungeonRuntimeRoom {
                         room_id: 2,
@@ -203,6 +204,7 @@ async fn r7_tc_p1_455_dungeon_gate_hull_restrictions_and_unconditional_gated_war
                         triggers: Vec::new(),
                         spawned: true,
                         cleared: true,
+                        ..Default::default()
                     },
                 ],
                 completed: false,
@@ -211,6 +213,7 @@ async fn r7_tc_p1_455_dungeon_gate_hull_restrictions_and_unconditional_gated_war
                 last_completed_task_id: None,
                 completed_task_ids: Vec::new(),
                 created_unix: 1_000,
+                ..Default::default()
             },
         );
     });
