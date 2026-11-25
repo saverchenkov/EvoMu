@@ -807,7 +807,7 @@ async fn bf_1170_r8_02_cross_tick_charge_reservations_and_rpc_unload_barrier() {
     use eve_proto::PyRep;
     let (ship_id, m_tur2, m_tur, m_mis, m_asb, m_aar, m_cap) = (778_220_001_i64, 778_220_101, 778_220_102, 778_220_103, 778_220_104, 778_220_105, 778_220_106);
     let mods = [(m_tur2, 484, InventoryFlag::HiSlot0, 0.0), (m_tur, 484, InventoryFlag::HiSlot1, 0.0), (m_mis, 2410, InventoryFlag::HiSlot2, 0.0), (m_asb, 32772, InventoryFlag::MedSlot0, 0.0), (m_aar, 33076, InventoryFlag::LoSlot0, 0.0), (m_cap, 2022, InventoryFlag::LoSlot1, 0.0)];
-    let mut cs = make_combat_state(100.0, 100.0, 100.0, 200.0); cs.capacitor = 0.0;
+    let mut cs = make_combat_state(100.0, 100.0, 100.0, 200.0); cs.capacitor = 0.0; cs.capacitor_recharge_time_ms = 0.0;
     let (ctx, sys) = boot_ship(ship_id, &mods, None, Some(cs)).await;
     ctx.db.with_mut_snapshot(|s| {
         for (cid, tid, flag, q) in [(778_220_201, 178, InventoryFlag::HiSlot0, 1), (778_220_202, 178, InventoryFlag::HiSlot1, 2), (778_220_203, 178, InventoryFlag::Cargo, 1), (778_220_204, 209, InventoryFlag::HiSlot2, 1), (778_220_205, 11289, InventoryFlag::MedSlot0, 1), (778_220_206, 28668, InventoryFlag::LoSlot0, 1), (778_220_207, 11289, InventoryFlag::LoSlot1, 1)] {
@@ -821,19 +821,18 @@ async fn bf_1170_r8_02_cross_tick_charge_reservations_and_rpc_unload_barrier() {
         ActiveModuleCycle { ship_id, owner_char_id: Some(CHAR_ID), module_id: m_mis, module_type_id: 2410, effect_name: "missileLaunching".into(), target_id: Some(778_220_999), duration_s: 5.0, repeat: 1, linked_turrets: vec![m_mis], weapon_is_guided_missile: true, missile_charge_type_id: Some(209), ammo_type_id: Some(209), crystal_volatility_chance: -1.0, reload_remaining_sim_s: 0.0005, damage_vector: eve_destiny::DamageVector::new(50.0, 0.0, 0.0, 0.0), ..Default::default() },
         ActiveModuleCycle { ship_id, owner_char_id: Some(CHAR_ID), module_id: m_asb, module_type_id: 32772, effect_name: "shieldBoosting".into(), duration_s: 5.0, repeat: 1, is_asb: true, asb_fallback_cap_need: 50.0, ..Default::default() },
         ActiveModuleCycle { ship_id, owner_char_id: Some(CHAR_ID), module_id: m_aar, module_type_id: 33076, effect_name: "armorRepair".into(), duration_s: 5.0, repeat: 1, is_aar: true, aar_base_armor_repair: 20.0, aar_paste_rate: 1, armor_repair_amount: 60.0, ..Default::default() },
-        ActiveModuleCycle { ship_id, owner_char_id: Some(CHAR_ID), module_id: m_cap, module_type_id: 2022, effect_name: "capacitorInject".into(), duration_s: 5.0, repeat: 1, cap_booster_inject_amount: 100.0, ..Default::default() },
+        ActiveModuleCycle { ship_id, owner_char_id: Some(CHAR_ID), module_id: m_cap, module_type_id: 2022, effect_name: "capacitorInject".into(), duration_s: 5.0, repeat: 1, cap_booster_inject_amount: 50.0, ..Default::default() },
     ] { sys.add_module_cycle(cyc).await.unwrap(); }
 
     let held = hold_db_writer(&ctx.db);
     let _out1 = sys.ask_step_tick_only(5.0).await.unwrap();
     let _out2 = sys.ask_step_tick_only(5.0).await.unwrap();
-    let (st_cap, st_missiles, cyc_len, aar_rep) = (
-        sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor,
-        sys.actor_state.read().unwrap().active_guided_missiles.len(),
-        sys.actor_state.read().unwrap().active_module_cycles.len(),
-        sys.actor_state.read().unwrap().active_module_cycles.iter().find(|c| c.module_id == m_aar).map(|c| c.armor_repair_amount),
-    );
-    assert!((st_cap - 50.0).abs() < 1e-6 && st_missiles == 1 && aar_rep == Some(20.0), "cap={st_cap}, mis={st_missiles}, aar={aar_rep:?}, cyc={cyc_len}");
+    let st_cap = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    let (st_missiles, cyc_len, aar_rep) = {
+        let st = sys.actor_state.read().unwrap();
+        (st.active_guided_missiles.len(), st.active_module_cycles.len(), st.active_module_cycles.iter().find(|c| c.module_id == m_aar).map(|c| c.armor_repair_amount))
+    };
+    assert!((st_cap - 50.0).abs() < 1e-6 && st_missiles == 1 && aar_rep == Some(20.0) && cyc_len == 2, "cap={st_cap}, mis={st_missiles}, aar={aar_rep:?}, cyc={cyc_len}");
 
     let uid = ctx.db.with_snapshot(|s| s.characters.get(&CHAR_ID).map(|c| c.user_id));
     let mk_sess = || eve_machonet::SessionState { user_id: uid, character_id: Some(CHAR_ID), solar_system_id: Some(SYS_ID), ship_id: Some(ship_id), ..Default::default() };
