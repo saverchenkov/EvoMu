@@ -1817,7 +1817,14 @@ pub enum SystemCommand {
     },
     ReplaceModuleCooldowns {
         cooldowns: HashMap<(i64, i64, u32), super::ModuleCooldownEntry>,
+        expected_gate_token: Option<(u64, Option<(u64, u64)>)>,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    PruneExpiredModuleCooldowns {
+        now_unix_f64: f64,
+        tidi_factor: f64,
+        has_tidi_history: bool,
+        reply: oneshot::Sender<Result<Option<super::ModuleCooldownPersistPayload>, String>>,
     },
     SnapshotModuleCooldownCheckpoint {
         only_if_dirty: bool,

@@ -1689,79 +1689,30 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
     );
 }
 
-fn singleton_item(
-    item_id: i64,
-    type_id: u32,
-    owner_id: i64,
-    location_id: i64,
-    flag: InventoryFlag,
-) -> InventoryItemRecord {
-    InventoryItemRecord {
-        item_id,
-        type_id,
-        owner_id,
-        location_id,
-        flag,
-        quantity: 1,
-        singleton: true,
-        ..Default::default()
-    }
+fn singleton_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag) -> InventoryItemRecord {
+    InventoryItemRecord { item_id, type_id, owner_id, location_id, flag, quantity: 1, singleton: true, ..Default::default() }
 }
 
 fn cd_entry(now: f64, delay_s: f64, sys_id: u32) -> crate::system_actor::ModuleCooldownEntry {
-    crate::system_actor::ModuleCooldownEntry {
-        recorded_unix_f64: now,
-        delay_s,
-        solar_system_id: Some(sys_id),
-        recorded_sys_sim_s: 0.0,
-    }
+    crate::system_actor::ModuleCooldownEntry { recorded_unix_f64: now, delay_s, solar_system_id: Some(sys_id), recorded_sys_sim_s: 0.0 }
 }
 
-fn cloak_cycle(
-    ship_id: i64,
-    module_id: i64,
-    module_type_id: u32,
-    owner: i64,
-    delay_s: f64,
-) -> crate::system_actor::ActiveModuleCycle {
+fn cloak_cycle(ship_id: i64, module_id: i64, module_type_id: u32, owner: i64, delay_s: f64) -> crate::system_actor::ActiveModuleCycle {
     crate::system_actor::ActiveModuleCycle {
-        ship_id,
-        module_id,
-        module_type_id,
-        owner_char_id: Some(owner),
-        effect_name: "cloaking".into(),
-        repeat: 1,
-        duration_s: 5.0,
-        reactivation_delay_s: delay_s,
-        ..Default::default()
+        ship_id, module_id, module_type_id, owner_char_id: Some(owner),
+        effect_name: "cloaking".into(), repeat: 1, duration_s: 5.0, reactivation_delay_s: delay_s, ..Default::default()
     }
 }
 
 async fn spawn_ship_ball(h: &crate::system_actor::SystemHandle, id: i64, owner: i64) {
     h.spawn_ball_with_meta(
         eve_destiny::Ball {
-            id,
-            type_id: 587,
-            position: glam::DVec3::ZERO,
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 300.0,
-            inertia: 2.0,
-            mass: 1_000_000.0,
-            radius: 40.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
+            id, type_id: 587, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
         },
         eve_destiny::CombatState::default(),
-        eve_destiny::SlimItemMeta {
-            group_id: 25,
-            category_id: 6,
-            owner_id: owner,
-            char_id: Some(owner),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+        eve_destiny::SlimItemMeta { group_id: 25, category_id: 6, owner_id: owner, char_id: Some(owner), ..Default::default() },
+    ).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2049,4 +2000,90 @@ async fn stopping_transition_hook_journals_record_remove_clear_ship_and_cross_sy
     for k in [(s_rm, m2, cloak_tid), (s_purge, m3, cloak_tid), (s_clear, m4, cloak_tid)] {
         assert!(!cold.contains_key(&k));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn early_loading_transitions_before_prepare_survive_publish_and_abort_flush() {
+    use eve_db::sqlite_store::system_checkpoint::{
+        ensure_system_checkpoint_schema, replace_system_checkpoints_for_kind, CLUSTER_SYSTEM_ID,
+        KIND_MODULE_COOLDOWNS,
+    };
+    let ctx = test_ctx();
+    let now = ctx.now_unix_secs() as f64;
+    let (sys_a, sys_b, cloak_tid) = (30_000_142_u32, 30_002_187_u32, 11_370_u32);
+    let (s_keep, s_new, s_abort, s_u) = (100_995_001_i64, 100_995_002_i64, 100_995_003_i64, 100_995_004_i64);
+    let (m_keep, m_new, m_abort, m_u) = (100_995_101_i64, 100_995_102_i64, 100_995_103_i64, 100_995_104_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (s, sys) in [(s_keep, sys_a), (s_new, sys_a), (s_abort, sys_b)] {
+            snap.items.insert(s, singleton_item(s, 587, 90_000_001, sys as i64, InventoryFlag::None));
+        }
+        for (m, s) in [(m_keep, s_keep), (m_new, s_new), (m_abort, s_abort)] {
+            snap.items.insert(m, singleton_item(m, cloak_tid, 90_000_001, s, InventoryFlag::HiSlot0));
+        }
+    });
+    ctx.seed_module_cooldown_entry_for_test(s_keep, m_keep, cloak_tid, cd_entry(now, 25.0, sys_a));
+    ctx.db.with_sqlite_conn(|c| {
+        ensure_system_checkpoint_schema(c)?;
+        replace_system_checkpoints_for_kind(c, CLUSTER_SYSTEM_ID, KIND_MODULE_COOLDOWNS, &[(
+            crate::system_actor::module_cooldown_checkpoint_key(s_u, m_u, cloak_tid),
+            ((s_u, m_u, cloak_tid), ModuleCooldownEntry { recorded_unix_f64: now, delay_s: 20.0, solar_system_id: None, recorded_sys_sim_s: 0.0 }),
+        )], now as u64)
+    }).unwrap();
+
+    let (ran_claim, saw_pub) = (Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let (c1, c2, r_c, s_c) = (ctx.clone(), ctx.clone(), Arc::clone(&ran_claim), Arc::clone(&saw_pub));
+    ctx.systems.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == sys_a {
+            r_c.store(true, std::sync::atomic::Ordering::SeqCst);
+            c1.record_module_reactivation_delay_for_system(Some(sys_a), s_new, m_new, cloak_tid, 45.0);
+            assert!(c1.remove_module_reactivation_delay(s_keep, m_keep, cloak_tid));
+        } else if sid == sys_b {
+            c1.record_module_reactivation_delay_for_system(Some(sys_b), s_abort, m_abort, cloak_tid, 35.0);
+            c1.systems.set_force_publish_wouldblock_for_test(true);
+        }
+    })));
+    ctx.systems.set_before_publish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == sys_a {
+            s_c.store(c2.is_module_in_reactivation_delay(s_new, m_new) && !c2.is_module_in_reactivation_delay(s_keep, m_keep), std::sync::atomic::Ordering::SeqCst);
+        }
+    })));
+
+    let h_a = ctx.systems.wake_for_session_arrival_async(sys_a, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    assert!(ran_claim.load(std::sync::atomic::Ordering::SeqCst) && saw_pub.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(h_a.module_reactivation_cooldown(&(s_new, m_new, cloak_tid)).is_some_and(|e| e.delay_s >= 44.0));
+    assert!(h_a.module_reactivation_cooldown(&(s_keep, m_keep, cloak_tid)).is_none());
+    let db_a = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_a);
+    assert!(db_a.contains_key(&(s_new, m_new, cloak_tid)) && !db_a.contains_key(&(s_keep, m_keep, cloak_tid)));
+
+    assert!(ctx.systems.wake_for_session_arrival_async(sys_b, crate::system_actor::SessionArrivalWakeReason::Undock).await.is_err());
+    ctx.systems.set_force_publish_wouldblock_for_test(false);
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_b).contains_key(&(s_abort, m_abort, cloak_tid)));
+
+    let sys_c = 30_000_144_u32;
+    let (s_pre, m_pre) = (100_995_005_i64, 100_995_105_i64);
+    let hit_notify = Arc::new(tokio::sync::Notify::new());
+    let (go_tx, go_rx_raw) = std::sync::mpsc::channel::<()>();
+    let go_rx = Arc::new(std::sync::Mutex::new(Some(go_rx_raw)));
+    let (c3, hn_c) = (ctx.clone(), Arc::clone(&hit_notify));
+    ctx.systems.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid != sys_c { return; }
+        c3.record_module_reactivation_delay_for_system(Some(sys_c), s_pre, m_pre, cloak_tid, 50.0);
+        hn_c.notify_one();
+        if let Some(rx) = go_rx.lock().unwrap().take() {
+            let _ = tokio::task::block_in_place(|| rx.recv_timeout(std::time::Duration::from_secs(3)));
+        }
+    })));
+    let ctx_w = ctx.clone();
+    let wake_pre = tokio::spawn(async move {
+        ctx_w.systems.wake_for_session_arrival_async(sys_c, crate::system_actor::SessionArrivalWakeReason::Undock).await
+    });
+    hit_notify.notified().await;
+    assert!(ctx.systems.stop_system(sys_c).await);
+    let _ = go_tx.send(());
+    assert!(wake_pre.await.unwrap().is_err());
+    ctx.systems.set_after_claim_loading_hook_for_test(None);
+    ctx.systems.set_before_publish_hook_for_test(None);
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_c).contains_key(&(s_pre, m_pre, cloak_tid)));
+    ctx.purge_module_cooldown_other_systems(sys_a, s_u, m_u, cloak_tid);
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, CLUSTER_SYSTEM_ID).is_empty());
 }

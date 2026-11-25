@@ -1987,6 +1987,9 @@ impl SystemHandle {
         } = &mut *st;
         let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
         if tidi < 0.999_999 {
+            self.cooldown_persist_gate.mark_tidi_history();
+            *has_tidi_history = true;
+        } else if self.cooldown_persist_gate.has_tidi_history() {
             *has_tidi_history = true;
         }
         let dt_sim = if dt > 0.0 && dt.is_finite() {

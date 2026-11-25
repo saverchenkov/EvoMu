@@ -12,7 +12,7 @@
 
 use super::{
     celestials, defer_barrier_cmd_reply, defer_cmd_reply, defer_reply, protection, ActorExecCtx,
-    CharacterId, ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput,
+    CharacterId, CooldownPersistGate, ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput,
     ExtendedNpcAttackActorOutput, LogiSoakCycleActorInput, ModuleDeactivationHook,
     ReconnectLiveShipRequest, SpawnReconnectedShipRequest, SystemActorState, SystemCommand,
     SystemHandle, WarpProvenance,
@@ -42,6 +42,7 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
     removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
     pub(in crate::system_actor) post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
+    pub(in crate::system_actor) cooldown_persist_gate: Option<&'a Arc<CooldownPersistGate>>,
     pub(in crate::system_actor) tidi_factor: f64,
 }
 
@@ -59,6 +60,7 @@ impl<'a> BallOpsCtx<'a> {
             ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
             post_unlock_ops: exec_ctx.post_unlock_ops,
+            cooldown_persist_gate: Some(exec_ctx.cooldown_persist_gate_actor),
             tidi_factor: celestials::clamp_tidi_factor_bits(exec_ctx.tidi_factor_bits_actor),
         }
     }
@@ -157,12 +159,16 @@ fn run_direct_ball_op_on_current_thread<R>(
             ball_spawn_tokens: None,
             removed_checkpoint_ball: None,
             post_unlock_ops: &mut ops,
+            cooldown_persist_gate: Some(&handle.cooldown_persist_gate),
             tidi_factor: tidi,
         };
         if tidi < 0.999_999 || handle.cooldown_persist_gate.has_tidi_history() {
             ctx.actor_st.has_tidi_history = true;
         }
         let out = op(&mut ctx);
+        actor_st.has_tidi_history = actor_st.has_tidi_history
+            || handle.cooldown_persist_gate.has_tidi_history()
+            || tidi < 0.999_999;
         protection::sync_active_module_ships_cache(
             &actor_st.active_module_cycles,
             &actor_st.external_active_modules,

@@ -77,6 +77,8 @@ pub(crate) struct PreparedSystemActivation {
 pub(crate) struct LifecycleTestHooks {
     pub(in crate::system_actor) after_read_probe_hook:
         RankedMutex<Option<Arc<dyn Fn(SolarSystemId) + Send + Sync>>, RANK_LEAF>,
+    pub(in crate::system_actor) after_claim_loading_hook:
+        RankedMutex<Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>, RANK_LEAF>,
     pub(in crate::system_actor) before_publish_hook:
         RankedMutex<Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>, RANK_LEAF>,
     pub(in crate::system_actor) before_evict_commit_hook:
@@ -92,6 +94,7 @@ impl Default for LifecycleTestHooks {
     fn default() -> Self {
         Self {
             after_read_probe_hook: RankedMutex::new(None),
+            after_claim_loading_hook: RankedMutex::new(None),
             before_publish_hook: RankedMutex::new(None),
             before_evict_commit_hook: RankedMutex::new(None),
             before_stop_finish_hook: RankedMutex::new(None),
@@ -1542,6 +1545,9 @@ impl SystemRegistry {
             persist_gate,
         );
 
+        #[cfg(test)]
+        self.run_after_claim_loading_hook_for_test(solar_system_id, generation);
+
         let mut prepared =
             self.prepare_system_activation(solar_system_id, generation, &wake_reason)?;
         let staged_claims = std::mem::take(&mut prepared.staged_claims);
@@ -1693,7 +1699,7 @@ impl SystemRegistry {
                 eff_hist,
                 drained,
             );
-            let payload_opt = (applied && st.module_cooldown_checkpoint_dirty).then(|| {
+            let payload_opt = st.module_cooldown_checkpoint_dirty.then(|| {
                 let final_hist = eff_hist || st.has_tidi_history;
                 build_persist_payload_from_actor_state(&st, tidi, final_hist)
             });
@@ -1729,9 +1735,14 @@ impl SystemRegistry {
         persist_gate: &CooldownPersistGate,
     ) -> Vec<PendingCooldownTransition> {
         let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_phase = cg.phase;
         let pending = std::mem::take(&mut cg.pending_transitions);
         persist_gate.clear_pending_transitions_flag();
         cg.phase = CooldownGatePhase::Cold;
+        if prev_phase == CooldownGatePhase::Live {
+            let next_epoch = persist_gate.bump_epoch();
+            cg.last_persisted = Some((next_epoch, 0));
+        }
         pending
     }
 
@@ -1992,7 +2003,7 @@ impl SystemRegistry {
                 let pending = std::mem::take(&mut cg.pending_transitions);
                 persist_gate.clear_pending_transitions_flag();
                 cg.phase = CooldownGatePhase::Cold;
-                if !pending.is_empty() {
+                let flushed = if !pending.is_empty() {
                     if let Some(ref db) = self.db {
                         flush_cold_transitions_under_gate(
                             db,
@@ -2002,8 +2013,16 @@ impl SystemRegistry {
                             tidi,
                             hist,
                             &pending,
-                        );
+                        )
+                    } else {
+                        false
                     }
+                } else {
+                    false
+                };
+                if !flushed {
+                    let next_epoch = persist_gate.bump_epoch();
+                    cg.last_persisted = Some((next_epoch, 0));
                 }
                 drop(cg);
                 if remove_matching_stopping_slot(
@@ -2154,6 +2173,23 @@ impl SystemRegistry {
     }
 
     #[cfg(test)]
+    fn run_after_claim_loading_hook_for_test(
+        &self,
+        solar_system_id: SolarSystemId,
+        generation: u64,
+    ) {
+        let hook = self
+            .lifecycle_test_hooks
+            .after_claim_loading_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(solar_system_id, generation);
+        }
+    }
+
+    #[cfg(test)]
     fn run_before_publish_hook_for_test(&self, solar_system_id: SolarSystemId, generation: u64) {
         let hook = self
             .lifecycle_test_hooks
@@ -2208,6 +2244,18 @@ impl SystemRegistry {
         *self
             .lifecycle_test_hooks
             .after_read_probe_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_after_claim_loading_hook_for_test(
+        &self,
+        hook: Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>,
+    ) {
+        *self
+            .lifecycle_test_hooks
+            .after_claim_loading_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hook;
     }

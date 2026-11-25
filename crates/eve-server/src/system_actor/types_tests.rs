@@ -530,6 +530,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ClearShipModuleCooldowns { .. } => "ClearShipModuleCooldowns",
             SystemCommand::ClearAllModuleCooldowns { .. } => "ClearAllModuleCooldowns",
             SystemCommand::ReplaceModuleCooldowns { .. } => "ReplaceModuleCooldowns",
+            SystemCommand::PruneExpiredModuleCooldowns { .. } => "PruneExpiredModuleCooldowns",
             SystemCommand::SnapshotModuleCooldownCheckpoint { .. } => {
                 "SnapshotModuleCooldownCheckpoint"
             }
@@ -1011,6 +1012,13 @@ fn system_command_all_variants_construct_and_match() {
         },
         SystemCommand::ReplaceModuleCooldowns {
             cooldowns: HashMap::new(),
+            expected_gate_token: None,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::PruneExpiredModuleCooldowns {
+            now_unix_f64: 1.0,
+            tidi_factor: 1.0,
+            has_tidi_history: false,
             reply: oneshot::channel().0,
         },
         SystemCommand::SnapshotModuleCooldownCheckpoint {

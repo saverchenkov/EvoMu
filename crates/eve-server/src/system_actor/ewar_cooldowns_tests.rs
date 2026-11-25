@@ -338,3 +338,95 @@ async fn live_set_tidi_factor_raw_stop_rebase_at_zero_and_nonzero_sim_clock() {
     let r2 = load_cold_system_module_cooldowns_from_db(&db, amarr)[&k_cleared];
     assert!((r2.delay_s - 25.0).abs() < 1e-6 && r2.recorded_sys_sim_s.abs() < 1e-6);
 }
+
+#[test]
+fn resolve_effective_tidi_mode_under_held_svc_and_world_ranks() {
+    let (reg, db, _clk) = test_tidi_reg(1_750_300_000, Some((30_000_142, 0.25)));
+    reg.cooldown_persist_gate(30_000_142).mark_tidi_history();
+    let _svc_guard = reg.cluster_nodes.read().unwrap();
+    let (tf, hist) = db.with_snapshot(|_| reg.resolve_effective_tidi_mode(30_000_142, false));
+    assert!((tf - 0.25).abs() < 1e-6 && hist);
+}
+
+#[tokio::test]
+async fn tidi_history_synced_from_gate_before_step_prune_after_reset_to_one() {
+    let (jita, key) = (30_000_142_u32, (541_001_i64, 641_001_i64, 11_370_u32));
+    let (reg, _db, clock) = test_tidi_reg(1_750_310_000, None);
+    let h = reg.get_or_spawn(jita);
+    let _ = h.set_tidi_factor_raw(0.25);
+    h.record_module_cooldown(key.0, key.1, key.2, clock.now_unix_secs() as f64, 30.0, 0.25, false).await.unwrap();
+    clock.advance_secs(40); // If gate tidi history weren't synced prior to step prune, wall=40>30 deletes `key`.
+    let _ = h.set_tidi_factor_raw(1.0);
+    step_n(&h, 1).await;
+    assert!(h.module_reactivation_cooldown(&key).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rehydrate_active_cooldowns_on_ticked_actor_and_migration_max_merge_prune() {
+    let (jita, amarr, cloak_tid) = (30_000_142_u32, 30_002_187_u32, 11_370_u32);
+    let (s_live, s_cold, s_exp, m_live, m_cold, m_exp) = (542_001, 542_002, 542_003, 642_001, 642_002, 642_003);
+    let (reg, db, clock) = test_tidi_reg(1_750_320_000, None);
+    let now = clock.now_unix_secs() as f64;
+    db.with_mut_snapshot(|snap| {
+        for (s, sys) in [(s_live, jita), (s_cold, amarr), (s_exp, jita)] {
+            snap.items.insert(s, InventoryItemRecord {
+                item_id: s, type_id: 587, owner_id: 90_000_001, location_id: sys as i64,
+                flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+            });
+        }
+    });
+    let h = reg.get_or_spawn(jita);
+    step_n(&h, 25).await;
+    assert!((h.sim_elapsed_secs() - 25.0).abs() < 1e-6);
+    reg.seed_cold_system_module_cooldown_in_db(&db, jita, (s_live, m_live, cloak_tid), cd_entry(now, 12.0, jita, 0.0));
+    reg.rehydrate_active_system_cooldowns_from_db();
+    let rehyd = h.module_reactivation_cooldown(&(s_live, m_live, cloak_tid)).expect("anchored at live sim clock");
+    assert!((rehyd.recorded_sys_sim_s - 25.0).abs() < 1e-6 && (rehyd.delay_s - 12.0).abs() < 1e-6);
+
+    h.record_module_cooldown(s_live, m_live, cloak_tid, now, 35.0, 1.0, false).await.unwrap();
+    reg.seed_cold_system_module_cooldown_in_db(&db, amarr, (s_cold, m_cold, cloak_tid), cd_entry(now, 40.0, amarr, 0.0));
+    let cluster_rows = [
+        (module_cooldown_checkpoint_key(s_live, m_live, cloak_tid), ((s_live, m_live, cloak_tid), cd_entry(now, 10.0, CLUSTER_SYSTEM_ID, 0.0))),
+        (module_cooldown_checkpoint_key(s_cold, m_cold, cloak_tid), ((s_cold, m_cold, cloak_tid), cd_entry(now, 10.0, CLUSTER_SYSTEM_ID, 0.0))),
+        (module_cooldown_checkpoint_key(s_exp, m_exp, cloak_tid), ((s_exp, m_exp, cloak_tid), cd_entry(now - 50.0, 5.0, jita, 0.0))),
+    ];
+    db.with_sqlite_conn(|c| {
+        ensure_system_checkpoint_schema(c)?;
+        replace_system_checkpoints_for_kind(c, CLUSTER_SYSTEM_ID, KIND_MODULE_COOLDOWNS, &cluster_rows[..2], now as u64)?;
+        replace_system_checkpoints_for_kind(c, jita, KIND_MODULE_COOLDOWNS, &cluster_rows[2..], now as u64)
+    }).unwrap();
+    migrate_and_prune_module_cooldowns_in_db(&reg, &db, now);
+    assert!(h.module_reactivation_cooldown(&(s_live, m_live, cloak_tid)).is_some_and(|e| e.delay_s >= 34.0));
+    assert!(load_cold_system_module_cooldowns_from_db(&db, amarr)[&(s_cold, m_cold, cloak_tid)].delay_s >= 39.0);
+    assert!(!load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&(s_exp, m_exp, cloak_tid)));
+}
+
+#[test]
+fn unresolved_cluster_cooldown_rows_are_removed_cleared_and_purged() {
+    let (reg, db, _sde) = test_registry_with_db();
+    let now = db.clock().now_unix_secs() as f64;
+    let (k1, k2, k3) = ((543_001, 643_001, 11_370), (543_001, 643_002, 11_370), (543_002, 643_003, 11_370));
+    let rows: Vec<_> = [k1, k2, k3].into_iter()
+        .map(|k| (module_cooldown_checkpoint_key(k.0, k.1, k.2), (k, ModuleCooldownEntry { recorded_unix_f64: now, delay_s: 30.0, solar_system_id: None, recorded_sys_sim_s: 0.0 })))
+        .collect();
+    db.with_sqlite_conn(|c| { ensure_system_checkpoint_schema(c)?; replace_system_checkpoints_for_kind(c, CLUSTER_SYSTEM_ID, KIND_MODULE_COOLDOWNS, &rows, now as u64) }).unwrap();
+    assert!(reg.remove_cold_module_cooldown_key_across_systems(&db, None, k1));
+    assert_eq!(load_cold_system_module_cooldowns_from_db(&db, CLUSTER_SYSTEM_ID).len(), 2);
+    reg.clear_cold_ship_module_cooldowns_in_db(&db, k2.0);
+    assert_eq!(load_cold_system_module_cooldowns_from_db(&db, CLUSTER_SYSTEM_ID).len(), 1);
+    reg.clear_all_cold_module_cooldowns_in_db(&db);
+    assert!(load_cold_system_module_cooldowns_from_db(&db, CLUSTER_SYSTEM_ID).is_empty());
+}
+
+#[tokio::test]
+async fn stopping_to_cold_with_empty_pending_bumps_epoch_and_rejects_stale_persist() {
+    let (reg, db, _sde) = test_registry_with_db();
+    let (jita, now, k) = (30_000_142_u32, db.clock().now_unix_secs() as f64, (544_001, 644_001, 11_370));
+    let h = reg.get_or_spawn(jita);
+    let stale_payload = send_rec(&h, k, now, 30.0).await;
+    h.replace_module_cooldowns_sync(HashMap::new()).unwrap();
+    drop(h);
+    assert!(reg.stop_system(jita).await);
+    assert!(!persist_cooldown_payload_with_gate(jita, &reg.cooldown_persist_gate(jita), None, None, stale_payload));
+    assert!(load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
+}

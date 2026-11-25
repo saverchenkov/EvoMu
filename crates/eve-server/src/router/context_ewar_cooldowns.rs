@@ -70,66 +70,27 @@ impl ServerContext {
         )
     }
 
-    fn resolve_best_active_cooldown(
-        &self,
-        ship_id: i64,
-        module_id: i64,
-        type_id: u32,
-        now_unix_f64: f64,
-    ) -> Option<(Option<u32>, ModuleCooldownEntry, f64, f64, bool)> {
+    fn resolve_best_active_cooldown(&self, ship_id: i64, module_id: i64, type_id: u32, now_unix_f64: f64) -> Option<(Option<u32>, ModuleCooldownEntry, f64, f64, bool)> {
         let key = (ship_id, module_id, type_id);
         let mut best: Option<(Option<u32>, ModuleCooldownEntry, f64, f64, bool)> = None;
-        let mut consider =
-            |sys_opt: Option<u32>,
-             entry: ModuleCooldownEntry,
-             cur_sys_sim_s: f64,
-             tidi_factor: f64,
-             has_tidi_history: bool| {
-                let rem = Self::remaining_cooldown_secs_with_tidi(
-                    &entry,
-                    now_unix_f64,
-                    sys_opt,
-                    cur_sys_sim_s,
-                    tidi_factor,
-                    has_tidi_history,
-                );
-                if rem <= 1e-6 {
-                    return;
-                }
-                let replace = best
-                    .as_ref()
-                    .is_none_or(|(_, _, best_rem, _, _)| rem > *best_rem);
-                if replace {
-                    best = Some((sys_opt, entry, rem, tidi_factor, has_tidi_history));
-                }
-            };
+        let mut consider = |sys_opt: Option<u32>, entry: ModuleCooldownEntry, cur_sys_sim_s: f64, tidi_factor: f64, has_tidi_history: bool| {
+            let rem = Self::remaining_cooldown_secs_with_tidi(&entry, now_unix_f64, sys_opt, cur_sys_sim_s, tidi_factor, has_tidi_history);
+            if rem > 1e-6 && best.as_ref().is_none_or(|(_, _, best_rem, _, _)| rem > *best_rem) {
+                best = Some((sys_opt, entry, rem, tidi_factor, has_tidi_history));
+            }
+        };
 
         for (sid, handle) in self.systems.active_system_handles() {
             if let Some(entry) = handle.module_reactivation_cooldown(&key) {
-                let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(Some(sid));
-                consider(
-                    Some(sid),
-                    entry,
-                    handle.sim_elapsed_secs(),
-                    tidi_factor,
-                    has_tidi_history,
-                );
+                let (tf, hist) = self.resolve_sys_tidi_mode(Some(sid));
+                consider(Some(sid), entry, handle.sim_elapsed_secs(), tf, hist);
             }
         }
         let mut seen_non_live = std::collections::HashSet::new();
-        for (cold_sid, entry) in
-            crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key)
-        {
+        for (cold_sid, entry) in crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key) {
             if let Some(live_h) = self.systems.get_handle(cold_sid) {
-                let view = live_h.view();
-                if !view.module_cooldowns.boot_db_pending_merge
-                    || view.module_cooldowns.pending_db_clear_all
-                    || view
-                        .module_cooldowns
-                        .pending_db_cleared_ships
-                        .contains(&ship_id)
-                    || view.module_cooldowns.pending_db_removed_keys.contains(&key)
-                {
+                let v = &live_h.view().module_cooldowns;
+                if !v.boot_db_pending_merge || v.pending_db_clear_all || v.pending_db_cleared_ships.contains(&ship_id) || v.pending_db_removed_keys.contains(&key) {
                     continue;
                 }
             } else {
@@ -137,26 +98,20 @@ impl ServerContext {
             }
             let cand_sys = (cold_sid > 0).then_some(cold_sid);
             let effective = if cold_sid > 0 && self.systems.get_handle(cold_sid).is_none() {
-                self.systems
-                    .overlay_transition_cooldown_for_system(cold_sid, key, Some(entry))
+                self.systems.overlay_transition_cooldown_for_system(cold_sid, key, Some(entry))
             } else {
                 Some(entry)
             };
             if let Some(entry) = effective {
-                let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(cand_sys);
-                consider(cand_sys, entry, 0.0, tidi_factor, has_tidi_history);
+                let (tf, hist) = self.resolve_sys_tidi_mode(cand_sys);
+                consider(cand_sys, entry, 0.0, tf, hist);
             }
         }
         for trans_sid in self.systems.transitioning_system_ids(None) {
-            if seen_non_live.contains(&trans_sid) || self.systems.get_handle(trans_sid).is_some() {
-                continue;
-            }
-            if let Some(entry) = self
-                .systems
-                .overlay_transition_cooldown_for_system(trans_sid, key, None)
-            {
-                let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(Some(trans_sid));
-                consider(Some(trans_sid), entry, 0.0, tidi_factor, has_tidi_history);
+            if seen_non_live.contains(&trans_sid) || self.systems.get_handle(trans_sid).is_some() { continue; }
+            if let Some(entry) = self.systems.overlay_transition_cooldown_for_system(trans_sid, key, None) {
+                let (tf, hist) = self.resolve_sys_tidi_mode(Some(trans_sid));
+                consider(Some(trans_sid), entry, 0.0, tf, hist);
             }
         }
         best
@@ -241,80 +196,40 @@ impl ServerContext {
         let mut max_other_rem = 0.0_f64;
         let mut retry_non_live = self.systems.transitioning_system_ids(Some(keep_sys_id));
         for (other_sid, handle) in self.systems.active_system_handles() {
-            if other_sid == keep_sys_id {
-                continue;
-            }
+            if other_sid == keep_sys_id { continue; }
             let view = handle.view();
             if let Some(entry) = view.module_cooldowns.reactivation_cooldowns.get(&key) {
                 if measure_remaining {
                     let (tidi, has_tidi) = self.resolve_sys_tidi_mode(Some(other_sid));
-                    let rem = Self::remaining_cooldown_secs_with_tidi(
-                        entry,
-                        now_unix_f64,
-                        Some(other_sid),
-                        handle.sim_elapsed_secs(),
-                        tidi,
-                        has_tidi,
-                    );
+                    let rem = Self::remaining_cooldown_secs_with_tidi(entry, now_unix_f64, Some(other_sid), handle.sim_elapsed_secs(), tidi, has_tidi);
                     max_other_rem = max_other_rem.max(rem);
                 }
-                if handle.remove_module_cooldown_sync(key).is_err() {
-                    retry_non_live.push(other_sid);
-                }
-            } else if view.module_cooldowns.boot_db_pending_merge
-                && handle.remove_module_cooldown_sync(key).is_err()
-            {
+                if handle.remove_module_cooldown_sync(key).is_err() { retry_non_live.push(other_sid); }
+            } else if view.module_cooldowns.boot_db_pending_merge && handle.remove_module_cooldown_sync(key).is_err() {
                 retry_non_live.push(other_sid);
             }
         }
         if measure_remaining {
             let mut seen_non_live = std::collections::HashSet::new();
-            for (cold_sid, entry) in
-                crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key)
-            {
-                if cold_sid == keep_sys_id || self.systems.get_handle(cold_sid).is_some() {
-                    continue;
-                }
+            for (cold_sid, entry) in crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key) {
+                if cold_sid == keep_sys_id || self.systems.get_handle(cold_sid).is_some() { continue; }
                 seen_non_live.insert(cold_sid);
                 let cand_sys = (cold_sid > 0).then_some(cold_sid);
                 let eff_entry = if cold_sid > 0 {
-                    self.systems
-                        .overlay_transition_cooldown_for_system(cold_sid, key, Some(entry))
+                    self.systems.overlay_transition_cooldown_for_system(cold_sid, key, Some(entry))
                 } else {
                     Some(entry)
                 };
                 if let Some(entry) = eff_entry {
                     let (tidi, has_tidi) = self.resolve_sys_tidi_mode(cand_sys);
-                    let rem = Self::remaining_cooldown_secs_with_tidi(
-                        &entry,
-                        now_unix_f64,
-                        cand_sys,
-                        0.0,
-                        tidi,
-                        has_tidi,
-                    );
-                    max_other_rem = max_other_rem.max(rem);
+                    max_other_rem = max_other_rem.max(Self::remaining_cooldown_secs_with_tidi(&entry, now_unix_f64, cand_sys, 0.0, tidi, has_tidi));
                 }
             }
             for trans_sid in self.systems.transitioning_system_ids(Some(keep_sys_id)) {
-                if seen_non_live.contains(&trans_sid) || self.systems.get_handle(trans_sid).is_some()
-                {
-                    continue;
-                }
-                if let Some(entry) = self
-                    .systems
-                    .overlay_transition_cooldown_for_system(trans_sid, key, None)
-                {
+                if seen_non_live.contains(&trans_sid) || self.systems.get_handle(trans_sid).is_some() { continue; }
+                if let Some(entry) = self.systems.overlay_transition_cooldown_for_system(trans_sid, key, None) {
                     let (tidi, has_tidi) = self.resolve_sys_tidi_mode(Some(trans_sid));
-                    let rem = Self::remaining_cooldown_secs_with_tidi(
-                        &entry,
-                        now_unix_f64,
-                        Some(trans_sid),
-                        0.0,
-                        tidi,
-                        has_tidi,
-                    );
-                    max_other_rem = max_other_rem.max(rem);
+                    max_other_rem = max_other_rem.max(Self::remaining_cooldown_secs_with_tidi(&entry, now_unix_f64, Some(trans_sid), 0.0, tidi, has_tidi));
                 }
             }
         }
@@ -485,100 +400,45 @@ impl ServerContext {
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub fn seed_module_cooldown_entry_for_test(
-        &self,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        entry: ModuleCooldownEntry,
-    ) {
-        let Some(sys_id) = entry
-            .solar_system_id
-            .filter(|&s| s > 0)
-            .or_else(|| self.resolve_ship_system_opt(ship_id))
-        else {
-            return;
-        };
-        self.systems.seed_cold_system_module_cooldown_in_db(
-            &self.db,
-            sys_id,
-            (ship_id, module_id, module_type_id),
-            entry,
-        );
+    pub fn seed_module_cooldown_entry_for_test(&self, ship_id: i64, module_id: i64, module_type_id: u32, entry: ModuleCooldownEntry) {
+        let Some(sys_id) = entry.solar_system_id.filter(|&s| s > 0).or_else(|| self.resolve_ship_system_opt(ship_id)) else { return };
+        self.systems.seed_cold_system_module_cooldown_in_db(&self.db, sys_id, (ship_id, module_id, module_type_id), entry);
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub fn module_cooldown_entry_for_test(
-        &self,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-    ) -> Option<ModuleCooldownEntry> {
+    pub fn module_cooldown_entry_for_test(&self, ship_id: i64, module_id: i64, module_type_id: u32) -> Option<ModuleCooldownEntry> {
         let sys_opt = self.resolve_ship_system_opt(ship_id);
         self.resolve_module_cooldown_entry(ship_id, module_id, module_type_id, sys_opt)
     }
 
     #[cfg(any(test, feature = "testkit"))]
     pub fn has_any_reactivation_delays_for_test(&self) -> bool {
-        if self
-            .systems
-            .active_system_handles()
-            .into_iter()
-            .any(|(_, h)| !h.view().module_cooldowns.reactivation_cooldowns.is_empty())
-        {
+        if self.systems.active_system_handles().into_iter().any(|(_, h)| !h.view().module_cooldowns.reactivation_cooldowns.is_empty()) {
             return true;
         }
-        self.db
-            .with_sqlite_conn(|conn| {
-                let _ = eve_db::sqlite_store::system_checkpoint::ensure_system_checkpoint_schema(conn);
-                eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<
-                    ((i64, i64, u32), ModuleCooldownEntry),
-                >(
-                    conn,
-                    eve_db::sqlite_store::system_checkpoint::KIND_MODULE_COOLDOWNS,
-                )
-            })
-            .is_ok_and(|rows| !rows.is_empty())
+        self.db.with_sqlite_conn(|conn| {
+            let _ = eve_db::sqlite_store::system_checkpoint::ensure_system_checkpoint_schema(conn);
+            eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<((i64, i64, u32), ModuleCooldownEntry)>(
+                conn, eve_db::sqlite_store::system_checkpoint::KIND_MODULE_COOLDOWNS,
+            )
+        }).is_ok_and(|rows| !rows.is_empty())
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub fn record_active_ewar_start_for_test(
-        &self,
-        sys_opt: Option<u32>,
-        source_ship_id: i64,
-        module_id: i64,
-        target_ship_id: i64,
-        jamming_type: &'static str,
-    ) {
-        let handle_opt = sys_opt
-            .and_then(|sid| self.systems.get_handle(sid))
+    pub fn record_active_ewar_start_for_test(&self, sys_opt: Option<u32>, source_ship_id: i64, module_id: i64, target_ship_id: i64, jamming_type: &'static str) {
+        let handle_opt = sys_opt.and_then(|sid| self.systems.get_handle(sid))
             .or_else(|| self.systems.find_ship_live_handle(source_ship_id))
             .or_else(|| self.systems.find_ship_live_handle(target_ship_id))
-            .or_else(|| {
-                self.resolve_ship_system_opt(source_ship_id)
-                    .or_else(|| self.resolve_ship_system_opt(target_ship_id))
-                    .and_then(|sid| self.systems.get_handle(sid))
-            });
+            .or_else(|| self.resolve_ship_system_opt(source_ship_id).or_else(|| self.resolve_ship_system_opt(target_ship_id)).and_then(|sid| self.systems.get_handle(sid)));
         if let Some(handle) = handle_opt {
-            let _ = handle.record_active_ewar_start_sync(
-                source_ship_id,
-                module_id,
-                target_ship_id,
-                jamming_type,
-            );
+            let _ = handle.record_active_ewar_start_sync(source_ship_id, module_id, target_ship_id, jamming_type);
         }
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub fn seed_ewar_source_for_test(
-        &self,
-        sys_opt: Option<u32>,
-        source_module_id: i64,
-        source_ship_id: i64,
-    ) {
+    pub fn seed_ewar_source_for_test(&self, sys_opt: Option<u32>, source_module_id: i64, source_ship_id: i64) {
         let resolved_sys = sys_opt.or_else(|| self.resolve_ship_system_opt(source_ship_id));
-        self.systems
-            .seed_ewar_source_for_test_sync(resolved_sys, source_module_id, source_ship_id);
+        self.systems.seed_ewar_source_for_test_sync(resolved_sys, source_module_id, source_ship_id);
     }
 
     #[cfg(any(test, feature = "testkit"))]
@@ -587,7 +447,5 @@ impl ServerContext {
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub fn ewar_starts_count_for_test(&self) -> usize {
-        self.systems.ewar_starts_count()
-    }
+    pub fn ewar_starts_count_for_test(&self) -> usize { self.systems.ewar_starts_count() }
 }

@@ -287,6 +287,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) unrebased_clock_offset_secs_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) explicit_update_state_guards_actor:
         &'a Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
+    pub(in crate::system_actor) cooldown_persist_gate_actor: &'a Arc<CooldownPersistGate>,
     pub(in crate::system_actor) mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
     pub(in crate::system_actor) post_unlock_in_flight_actor: &'a std::sync::atomic::AtomicUsize,
     pub(in crate::system_actor) completed_post_unlock_seq_actor: &'a std::sync::atomic::AtomicU64,
@@ -358,7 +359,8 @@ pub struct SystemRegistry {
         Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
-    cooldown_persist_gates: RankedMutex<HashMap<SolarSystemId, Arc<CooldownPersistGate>>, RANK_SERVICE_STATE>,
+    cooldown_persist_gates:
+        RankedRwLock<HashMap<SolarSystemId, Arc<CooldownPersistGate>>, RANK_SERVICE_STATE>,
     /// PvE special-site balls (system, ball id) in-flight or already spawned into this registry's
     /// ballparks. Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed.
     special_site_spawned_balls: SpecialSiteBallSpawnMap,
@@ -422,7 +424,7 @@ impl SystemRegistry {
             module_deactivation_post_unlock_hook: Arc::new(RankedRwLock::new(None)),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
-            cooldown_persist_gates: RankedMutex::new(HashMap::new()),
+            cooldown_persist_gates: RankedRwLock::new(HashMap::new()),
             special_site_spawned_balls: Arc::new(RankedMutex::new(HashMap::new())),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
@@ -887,19 +889,9 @@ impl SystemRegistry {
             .filter(|v| v.is_finite())
             .unwrap_or(1.0)
             .clamp(0.10, 1.0);
-        let gate_tidi_hist = if held_svc {
-            self.cooldown_persist_gates
-                .try_lock()
-                .ok()
-                .and_then(|g| g.get(&solar_system_id).map(|gate| gate.has_tidi_history()))
-                .unwrap_or(false)
-        } else {
-            self.cooldown_persist_gates
-                .lock()
-                .ok()
-                .and_then(|g| g.get(&solar_system_id).map(|gate| gate.has_tidi_history()))
-                .unwrap_or(false)
-        };
+        let gate_tidi_hist = self
+            .get_existing_cooldown_persist_gate(solar_system_id)
+            .is_some_and(|gate| gate.has_tidi_history());
         let has_tidi_history = tidi < 0.999_999 || cn_tidi_hist || gate_tidi_hist;
         (tidi, has_tidi_history)
     }
@@ -1250,8 +1242,8 @@ impl SystemRegistry {
         let (initial_tidi, mut has_tidi_history) =
             self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
         let persist_gate = self.cooldown_persist_gate(solar_system_id);
-        let (persist_epoch, initial_cooldowns, drained_transitions) = {
-            let mut gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (persist_epoch, initial_cooldowns) = {
+            let _gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
             let persist_epoch = persist_gate.bump_epoch();
             if has_tidi_history {
                 persist_gate.mark_tidi_history();
@@ -1266,6 +1258,7 @@ impl SystemRegistry {
                         initial_tidi,
                         has_tidi_history,
                         0.0,
+                        0.0,
                     )
                 } else {
                     HashMap::new()
@@ -1273,9 +1266,7 @@ impl SystemRegistry {
             } else {
                 HashMap::new()
             };
-            let drained = std::mem::take(&mut gate_guard.pending_transitions);
-            persist_gate.clear_pending_transitions_flag();
-            (persist_epoch, initial_cooldowns, drained)
+            (persist_epoch, initial_cooldowns)
         };
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
@@ -1304,13 +1295,6 @@ impl SystemRegistry {
             fighters: initial_fighters, fighters_lifecycle_gen: generation, fighters_needs_sqlite_hydration: initial_fighters_needs_hydration, fighters_persist: Arc::clone(&self.fighter_persist),
             ..Default::default()
         };
-        let _ = module_cooldowns::apply_pending_transitions_to_actor_state(
-            solar_system_id,
-            &mut initial_actor_state,
-            initial_tidi,
-            has_tidi_history,
-            drained_transitions,
-        );
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
         if db_read_safe {
             let dyn_ids: Vec<BallId> = initial_ballpark
@@ -1576,6 +1560,12 @@ impl SystemRegistry {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 post_unlock::prune_actor_shadows_for_cmd(solar_system_id, &mut actor_st, &completed_post_unlock_seq_actor);
+                if cur_tidi_cmd < 0.999_999 {
+                    cooldown_persist_gate_actor.mark_tidi_history();
+                    actor_st.has_tidi_history = true;
+                } else if cooldown_persist_gate_actor.has_tidi_history() {
+                    actor_st.has_tidi_history = true;
+                }
                 let out = (|| -> Option<PendingActorDelivery> {
                 let mut pending_step: Option<(f64, StepReply)> = None;
                 let mut pending_volley: Option<(
@@ -1613,6 +1603,7 @@ impl SystemRegistry {
                     pending_destroyed_actor: &pending_destroyed_actor,
                     unrebased_clock_offset_secs_actor: &unrebased_clock_offset_secs_actor,
                     explicit_update_state_guards_actor: &explicit_update_state_guards_actor,
+                    cooldown_persist_gate_actor: &cooldown_persist_gate_actor,
                     mechanic_rng: &mechanic_rng,
                     post_unlock_in_flight_actor: &post_unlock_in_flight_actor,
                     completed_post_unlock_seq_actor: &completed_post_unlock_seq_actor,
@@ -2305,7 +2296,8 @@ impl SystemRegistry {
                     })
                 }
                 })();
-                if cur_tidi_cmd < 0.999_999 {
+                let post_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
+                if post_tidi_cmd < 0.999_999 {
                     cooldown_persist_gate_actor.mark_tidi_history();
                     actor_st.has_tidi_history = true;
                 } else if cooldown_persist_gate_actor.has_tidi_history() {

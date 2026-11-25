@@ -242,7 +242,12 @@ pub(in crate::system_actor) fn finalize_removed_ball_deactivations_in_actor(
     if collected.is_empty() {
         return false;
     }
-    let has_tidi = st.has_tidi_history || tidi_cur < 0.999_999;
+    if tidi_cur < 0.999_999 {
+        handle.cooldown_persist_gate.mark_tidi_history();
+    }
+    let has_tidi =
+        st.has_tidi_history || handle.cooldown_persist_gate.has_tidi_history() || tidi_cur < 0.999_999;
+    st.has_tidi_history = has_tidi;
     finalize_collected_deactivations_in_actor(
         handle.solar_system_id,
         st,
@@ -430,106 +435,57 @@ pub(in crate::system_actor) fn finalize_collected_deactivations_in_actor(
     }
     let mut mutated_actor = false;
     if let Some(post_hook) = post_unlock_hook {
-        let now_unix_f64 = actor_st
-            .db_opt
-            .as_ref()
-            .map(|db| db.clock().now_unix_secs() as f64)
-            .unwrap_or(0.0);
-        let rank_blocks_snapshot = held_lock_ranks()
-            .iter()
-            .any(|&r| r >= RANK_WORLD_INNER);
+        let now_unix_f64 = actor_st.db_opt.as_ref().map(|db| db.clock().now_unix_secs() as f64).unwrap_or(0.0);
+        let rank_blocks_snapshot = held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER);
         let mut actions_to_push: Vec<PostUnlockHookAction> = Vec::with_capacity(items.len());
         for (deact_sys_id, char_id, cycle) in items {
             let allow_db_fallback = !rank_blocks_snapshot
                 && actor_st.db_opt.as_ref().is_some_and(|db| {
-                    db.with_snapshot(|s| {
-                        s.items
-                            .get(&cycle.module_id)
-                            .is_some_and(|i| i.location_id == cycle.ship_id)
-                    })
+                    db.with_snapshot(|s| s.items.get(&cycle.module_id).is_some_and(|i| i.location_id == cycle.ship_id))
                 });
-            let ewar_snap = flush_module_ewar_in_state(
-                &mut actor_st.ewar_state,
-                cycle.ship_id,
-                cycle.module_id,
-                allow_db_fallback,
-            );
-            if !ewar_snap.started_targets.is_empty()
+            let ewar_snap = flush_module_ewar_in_state(&mut actor_st.ewar_state, cycle.ship_id, cycle.module_id, allow_db_fallback);
+            mutated_actor |= !ewar_snap.started_targets.is_empty()
                 || !ewar_snap.projected_targets.is_empty()
-                || !ewar_snap.affected_ships.is_empty()
-            {
-                mutated_actor = true;
-            }
-            let payload_opt = if deact_sys_id > 0 && deact_sys_id == solar_system_id {
-                if let Some(delay_s) = cloak_reactivation_delay_for_cycle(&actor_st.sde_opt, &cycle)
-                {
+                || !ewar_snap.affected_ships.is_empty();
+            let payload_opt = (deact_sys_id > 0 && deact_sys_id == solar_system_id)
+                .then(|| cloak_reactivation_delay_for_cycle(&actor_st.sde_opt, &cycle))
+                .flatten()
+                .and_then(|delay_s| {
                     mutated_actor = true;
                     record_module_cooldown_in_actor_state(
-                        solar_system_id,
-                        actor_st,
-                        cycle.ship_id,
-                        cycle.module_id,
-                        cycle.module_type_id,
-                        now_unix_f64,
-                        delay_s,
-                        tidi_factor,
-                        has_tidi_history,
+                        solar_system_id, actor_st, cycle.ship_id, cycle.module_id, cycle.module_type_id,
+                        now_unix_f64, delay_s, tidi_factor, has_tidi_history,
                     )
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+                });
             let post_hook_c = Arc::clone(post_hook);
             let gate_c = Arc::clone(cooldown_persist_gate);
             let ballpark_w = ballpark_shared.map(Arc::downgrade);
             let actor_state_w = actor_state_shared.map(Arc::downgrade);
             actions_to_push.push(Box::new(move || {
                 if let Some(payload) = payload_opt {
-                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                        let _ = rt.spawn_blocking(move || {
-                            let bp_up = ballpark_w.and_then(|w| w.upgrade());
-                            let st_up = actor_state_w.and_then(|w| w.upgrade());
-                            let _ = persist_cooldown_payload_with_gate(
-                                deact_sys_id,
-                                &gate_c,
-                                bp_up.as_deref(),
-                                st_up.as_deref(),
-                                payload,
-                            );
-                        });
-                    } else {
+                    let do_persist = move || {
                         let bp_up = ballpark_w.and_then(|w| w.upgrade());
                         let st_up = actor_state_w.and_then(|w| w.upgrade());
                         let _ = persist_cooldown_payload_with_gate(
-                            deact_sys_id,
-                            &gate_c,
-                            bp_up.as_deref(),
-                            st_up.as_deref(),
-                            payload,
+                            deact_sys_id, &gate_c, bp_up.as_deref(), st_up.as_deref(), payload,
                         );
+                    };
+                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                        let _ = rt.spawn_blocking(do_persist);
+                    } else {
+                        do_persist();
                     }
                 }
                 post_hook_c(deact_sys_id, char_id, cycle, ewar_snap);
             }));
         }
-        post_unlock_actions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(actions_to_push);
+        post_unlock_actions.lock().unwrap_or_else(|e| e.into_inner()).extend(actions_to_push);
     } else if let Some(hook) = raw_hook {
-        let mut actions_to_push: Vec<PostUnlockHookAction> = Vec::with_capacity(items.len());
-        for (deact_sys_id, char_id, cycle) in items {
+        let actions: Vec<PostUnlockHookAction> = items.into_iter().map(|(deact_sys_id, char_id, cycle)| {
             let hook_c = Arc::clone(hook);
-            actions_to_push.push(Box::new(move || {
-                hook_c(deact_sys_id, char_id, &cycle);
-            }));
-        }
-        post_unlock_actions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(actions_to_push);
+            Box::new(move || hook_c(deact_sys_id, char_id, &cycle)) as PostUnlockHookAction
+        }).collect();
+        post_unlock_actions.lock().unwrap_or_else(|e| e.into_inner()).extend(actions);
     }
     mutated_actor
 }
@@ -541,113 +497,45 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
     cmd: SystemCommand,
 ) -> Option<SystemCommand> {
     match cmd {
-        SystemCommand::UpsertProjectedEwar {
-            source_ship_id,
-            target_ship_id,
-            effect,
-            reply,
-        } => {
-            upsert_projected_ewar_in_state(
-                &mut exec_ctx.actor_st.ewar_state,
-                source_ship_id,
-                target_ship_id,
-                effect,
-            );
+        SystemCommand::UpsertProjectedEwar { source_ship_id, target_ship_id, effect, reply } => {
+            upsert_projected_ewar_in_state(&mut exec_ctx.actor_st.ewar_state, source_ship_id, target_ship_id, effect);
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
-        SystemCommand::RecordProjectedEwarSource {
-            source_module_id,
-            source_ship_id,
-            reply,
-        } => {
-            exec_ctx
-                .actor_st
-                .ewar_state
-                .projected_ewar_sources
-                .insert(source_module_id, source_ship_id);
+        SystemCommand::RecordProjectedEwarSource { source_module_id, source_ship_id, reply } => {
+            exec_ctx.actor_st.ewar_state.projected_ewar_sources.insert(source_module_id, source_ship_id);
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
-        SystemCommand::RemoveProjectedEwarByModule {
-            source_ship_id,
-            source_module_id,
-            allow_db_source_fallback,
-            reply,
-        } => {
+        SystemCommand::RemoveProjectedEwarByModule { source_ship_id, source_module_id, allow_db_source_fallback, reply } => {
             let affected = remove_projected_ewar_by_module_in_state(
-                &mut exec_ctx.actor_st.ewar_state,
-                source_ship_id,
-                source_module_id,
-                allow_db_source_fallback,
+                &mut exec_ctx.actor_st.ewar_state, source_ship_id, source_module_id, allow_db_source_fallback,
             );
             defer_reply(exec_ctx.deferred_replies, reply, Ok(affected));
             None
         }
-        SystemCommand::ClearProjectedEwarForTarget {
-            target_ship_id,
-            reply,
-        } => {
-            exec_ctx
-                .actor_st
-                .ewar_state
-                .projected_ewar
-                .remove(&target_ship_id);
+        SystemCommand::ClearProjectedEwarForTarget { target_ship_id, reply } => {
+            exec_ctx.actor_st.ewar_state.projected_ewar.remove(&target_ship_id);
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
-        SystemCommand::RecordActiveEwarStart {
-            source_ship_id,
-            module_id,
-            target_ship_id,
-            jamming_type,
-            reply,
-        } => {
-            exec_ctx
-                .actor_st
-                .ewar_state
-                .active_ewar_starts
-                .entry((source_ship_id, module_id))
-                .or_default()
-                .push((target_ship_id, jamming_type));
+        SystemCommand::RecordActiveEwarStart { source_ship_id, module_id, target_ship_id, jamming_type, reply } => {
+            exec_ctx.actor_st.ewar_state.active_ewar_starts.entry((source_ship_id, module_id)).or_default().push((target_ship_id, jamming_type));
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
-        SystemCommand::ReplaceActiveEwarStarts {
-            source_ship_id,
-            module_id,
-            targets,
-            reply,
-        } => {
+        SystemCommand::ReplaceActiveEwarStarts { source_ship_id, module_id, targets, reply } => {
             if targets.is_empty() {
-                exec_ctx
-                    .actor_st
-                    .ewar_state
-                    .active_ewar_starts
-                    .remove(&(source_ship_id, module_id));
+                exec_ctx.actor_st.ewar_state.active_ewar_starts.remove(&(source_ship_id, module_id));
             } else {
-                exec_ctx
-                    .actor_st
-                    .ewar_state
-                    .active_ewar_starts
-                    .insert((source_ship_id, module_id), targets);
+                exec_ctx.actor_st.ewar_state.active_ewar_starts.insert((source_ship_id, module_id), targets);
             }
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
-        SystemCommand::FlushModuleEwar {
-            source_ship_id,
-            source_module_id,
-            allow_db_source_fallback,
-            reply,
-        } => {
+        SystemCommand::FlushModuleEwar { source_ship_id, source_module_id, allow_db_source_fallback, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
-            let res = flush_module_ewar_in_actor(
-                &mut ctx,
-                source_ship_id,
-                source_module_id,
-                allow_db_source_fallback,
-            );
+            let res = flush_module_ewar_in_actor(&mut ctx, source_ship_id, source_module_id, allow_db_source_fallback);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -656,29 +544,11 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
-        SystemCommand::RecordModuleCooldown {
-            ship_id,
-            module_id,
-            module_type_id,
-            now_unix_f64,
-            delay_s,
-            tidi_factor,
-            has_tidi_history,
-            reply,
-        } => {
+        SystemCommand::RecordModuleCooldown { ship_id, module_id, module_type_id, now_unix_f64, delay_s, tidi_factor, has_tidi_history, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
-            let res = record_module_cooldown_in_actor(
-                &mut ctx,
-                RecordModuleCooldownReq {
-                    ship_id,
-                    module_id,
-                    module_type_id,
-                    now_unix_f64,
-                    delay_s,
-                    tidi_factor,
-                    has_tidi_history,
-                },
-            );
+            let res = record_module_cooldown_in_actor(&mut ctx, RecordModuleCooldownReq {
+                ship_id, module_id, module_type_id, now_unix_f64, delay_s, tidi_factor, has_tidi_history,
+            });
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -706,9 +576,29 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
-        SystemCommand::ReplaceModuleCooldowns { cooldowns, reply } => {
+        SystemCommand::ReplaceModuleCooldowns {
+            cooldowns,
+            expected_gate_token,
+            reply,
+        } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
-            let res = replace_module_cooldowns_in_actor(&mut ctx, cooldowns);
+            let res = replace_module_cooldowns_in_actor(&mut ctx, cooldowns, expected_gate_token);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::PruneExpiredModuleCooldowns {
+            now_unix_f64,
+            tidi_factor,
+            has_tidi_history,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = prune_expired_module_cooldowns_in_actor(
+                &mut ctx,
+                now_unix_f64,
+                tidi_factor,
+                has_tidi_history,
+            );
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -1057,109 +947,53 @@ impl SystemHandle {
             .push(action);
     }
 
-    pub(in crate::system_actor) fn persist_cooldown_payload(
-        &self,
-        mut payload: ModuleCooldownPersistPayload,
-    ) -> bool {
+    pub(in crate::system_actor) fn persist_cooldown_payload(&self, mut payload: ModuleCooldownPersistPayload) -> bool {
         payload.tidi_factor = self.tidi_factor();
         if payload.tidi_factor < 0.999_999 || self.cooldown_persist_gate.has_tidi_history() {
             payload.has_tidi_history = true;
         }
         persist_cooldown_payload_with_gate(
-            self.solar_system_id,
-            &self.cooldown_persist_gate,
-            Some(&self.ballpark),
-            Some(&self.actor_state),
-            payload,
+            self.solar_system_id, &self.cooldown_persist_gate, Some(&self.ballpark), Some(&self.actor_state), payload,
         )
     }
 
     async fn persist_cooldown_payload_async(&self, payload: ModuleCooldownPersistPayload) -> bool {
         let h = self.clone();
-        tokio::task::spawn_blocking(move || h.persist_cooldown_payload(payload))
-            .await
-            .unwrap_or(false)
+        tokio::task::spawn_blocking(move || h.persist_cooldown_payload(payload)).await.unwrap_or(false)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn record_module_cooldown(
-        &self,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        now_unix_f64: f64,
-        delay_s: f64,
-        tidi_factor: f64,
-        has_tidi_history: bool,
+        &self, ship_id: i64, module_id: i64, module_type_id: u32,
+        now_unix_f64: f64, delay_s: f64, tidi_factor: f64, has_tidi_history: bool,
     ) -> Result<(), String> {
-        let payload = call_actor_result_with_deadline(
-            self,
-            "RecordModuleCooldown",
-            ACTOR_CMD_TIMEOUT,
-            |reply| SystemCommand::RecordModuleCooldown {
-                ship_id,
-                module_id,
-                module_type_id,
-                now_unix_f64,
-                delay_s,
-                tidi_factor,
-                has_tidi_history,
-                reply,
-            },
-        )
-        .await?;
+        let payload = call_actor_result_with_deadline(self, "RecordModuleCooldown", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::RecordModuleCooldown { ship_id, module_id, module_type_id, now_unix_f64, delay_s, tidi_factor, has_tidi_history, reply }
+        }).await?;
         self.persist_cooldown_payload_async(payload).await;
         Ok(())
     }
 
     pub async fn remove_module_cooldown(&self, key: (i64, i64, u32)) -> Result<bool, String> {
-        let payload_opt = call_actor_result_with_deadline(
-            self,
-            "RemoveModuleCooldown",
-            ACTOR_CMD_TIMEOUT,
-            |reply| SystemCommand::RemoveModuleCooldown { key, reply },
-        )
-        .await?;
+        let payload_opt = call_actor_result_with_deadline(self, "RemoveModuleCooldown", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::RemoveModuleCooldown { key, reply }
+        }).await?;
         let removed = payload_opt.is_some();
-        if let Some(payload) = payload_opt {
-            self.persist_cooldown_payload_async(payload).await;
-        }
+        if let Some(payload) = payload_opt { self.persist_cooldown_payload_async(payload).await; }
         Ok(removed)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn record_module_cooldown_sync(
-        &self,
-        ship_id: i64,
-        module_id: i64,
-        module_type_id: u32,
-        now_unix_f64: f64,
-        delay_s: f64,
-        tidi_factor: f64,
-        has_tidi_history: bool,
+        &self, ship_id: i64, module_id: i64, module_type_id: u32,
+        now_unix_f64: f64, delay_s: f64, tidi_factor: f64, has_tidi_history: bool,
     ) -> Result<(), String> {
         let payload = dispatch_actor_sync_with_deadline(
-            self,
-            "RecordModuleCooldown",
-            ACTOR_CMD_TIMEOUT,
-            RecordModuleCooldownReq {
-                ship_id,
-                module_id,
-                module_type_id,
-                now_unix_f64,
-                delay_s,
-                tidi_factor,
-                has_tidi_history,
-            },
-            |req, reply| SystemCommand::RecordModuleCooldown {
-                ship_id: req.ship_id,
-                module_id: req.module_id,
-                module_type_id: req.module_type_id,
-                now_unix_f64: req.now_unix_f64,
-                delay_s: req.delay_s,
-                tidi_factor: req.tidi_factor,
-                has_tidi_history: req.has_tidi_history,
-                reply,
+            self, "RecordModuleCooldown", ACTOR_CMD_TIMEOUT,
+            RecordModuleCooldownReq { ship_id, module_id, module_type_id, now_unix_f64, delay_s, tidi_factor, has_tidi_history },
+            |r, reply| SystemCommand::RecordModuleCooldown {
+                ship_id: r.ship_id, module_id: r.module_id, module_type_id: r.module_type_id,
+                now_unix_f64: r.now_unix_f64, delay_s: r.delay_s, tidi_factor: r.tidi_factor, has_tidi_history: r.has_tidi_history, reply,
             },
             record_module_cooldown_in_actor,
         )?;
@@ -1167,16 +1001,9 @@ impl SystemHandle {
         Ok(())
     }
 
-    pub fn seed_module_cooldown_entry_sync(
-        &self,
-        key: (i64, i64, u32),
-        entry: ModuleCooldownEntry,
-    ) -> Result<(), String> {
+    pub fn seed_module_cooldown_entry_sync(&self, key: (i64, i64, u32), entry: ModuleCooldownEntry) -> Result<(), String> {
         let payload = dispatch_actor_sync_with_deadline(
-            self,
-            "SeedModuleCooldownEntry",
-            ACTOR_CMD_TIMEOUT,
-            (key, entry),
+            self, "SeedModuleCooldownEntry", ACTOR_CMD_TIMEOUT, (key, entry),
             |(key, entry), reply| SystemCommand::SeedModuleCooldownEntry { key, entry, reply },
             |ctx, (key, entry)| seed_module_cooldown_in_actor(ctx, key, entry),
         )?;
@@ -1186,42 +1013,27 @@ impl SystemHandle {
 
     pub fn remove_module_cooldown_sync(&self, key: (i64, i64, u32)) -> Result<bool, String> {
         let payload_opt = dispatch_actor_sync_with_deadline(
-            self,
-            "RemoveModuleCooldown",
-            ACTOR_CMD_TIMEOUT,
-            key,
-            |key, reply| SystemCommand::RemoveModuleCooldown { key, reply },
-            remove_module_cooldown_in_actor,
+            self, "RemoveModuleCooldown", ACTOR_CMD_TIMEOUT, key,
+            |key, reply| SystemCommand::RemoveModuleCooldown { key, reply }, remove_module_cooldown_in_actor,
         )?;
         let removed = payload_opt.is_some();
-        if let Some(payload) = payload_opt {
-            self.persist_cooldown_payload(payload);
-        }
+        if let Some(payload) = payload_opt { self.persist_cooldown_payload(payload); }
         Ok(removed)
     }
 
     pub fn clear_ship_module_cooldowns_sync(&self, ship_id: i64) -> Result<bool, String> {
         let payload_opt = dispatch_actor_sync_with_deadline(
-            self,
-            "ClearShipModuleCooldowns",
-            ACTOR_CMD_TIMEOUT,
-            ship_id,
-            |ship_id, reply| SystemCommand::ClearShipModuleCooldowns { ship_id, reply },
-            clear_ship_module_cooldowns_in_actor,
+            self, "ClearShipModuleCooldowns", ACTOR_CMD_TIMEOUT, ship_id,
+            |ship_id, reply| SystemCommand::ClearShipModuleCooldowns { ship_id, reply }, clear_ship_module_cooldowns_in_actor,
         )?;
         let removed = payload_opt.is_some();
-        if let Some(payload) = payload_opt {
-            self.persist_cooldown_payload(payload);
-        }
+        if let Some(payload) = payload_opt { self.persist_cooldown_payload(payload); }
         Ok(removed)
     }
 
     pub fn clear_all_module_cooldowns_sync(&self) -> Result<(), String> {
         let payload = dispatch_actor_sync_with_deadline(
-            self,
-            "ClearAllModuleCooldowns",
-            ACTOR_CMD_TIMEOUT,
-            (),
+            self, "ClearAllModuleCooldowns", ACTOR_CMD_TIMEOUT, (),
             |(), reply| SystemCommand::ClearAllModuleCooldowns { reply },
             |ctx, ()| clear_all_module_cooldowns_in_actor(ctx),
         )?;
@@ -1229,18 +1041,67 @@ impl SystemHandle {
         Ok(())
     }
 
-    pub fn replace_module_cooldowns_sync(
+    pub fn replace_module_cooldowns_checked_sync(
         &self,
         cooldowns: HashMap<(i64, i64, u32), ModuleCooldownEntry>,
+        expected_gate_token: Option<(u64, Option<(u64, u64)>)>,
     ) -> Result<(), String> {
         dispatch_actor_sync_with_deadline(
             self,
             "ReplaceModuleCooldowns",
             ACTOR_CMD_TIMEOUT,
-            cooldowns,
-            |cooldowns, reply| SystemCommand::ReplaceModuleCooldowns { cooldowns, reply },
-            replace_module_cooldowns_in_actor,
+            (cooldowns, expected_gate_token),
+            |(cooldowns, expected_gate_token), reply| SystemCommand::ReplaceModuleCooldowns {
+                cooldowns,
+                expected_gate_token,
+                reply,
+            },
+            |ctx, (cooldowns, expected_gate_token)| {
+                replace_module_cooldowns_in_actor(ctx, cooldowns, expected_gate_token)
+            },
         )
+    }
+
+    pub fn replace_module_cooldowns_sync(
+        &self,
+        cooldowns: HashMap<(i64, i64, u32), ModuleCooldownEntry>,
+    ) -> Result<(), String> {
+        self.replace_module_cooldowns_checked_sync(cooldowns, None)
+    }
+
+    pub fn prune_expired_module_cooldowns_sync(
+        &self,
+        now_unix_f64: f64,
+        tidi_factor: f64,
+        has_tidi_history: bool,
+    ) -> Result<bool, String> {
+        let payload_opt = dispatch_actor_sync_with_deadline(
+            self,
+            "PruneExpiredModuleCooldowns",
+            ACTOR_CMD_TIMEOUT,
+            (now_unix_f64, tidi_factor, has_tidi_history),
+            |(now_unix_f64, tidi_factor, has_tidi_history), reply| {
+                SystemCommand::PruneExpiredModuleCooldowns {
+                    now_unix_f64,
+                    tidi_factor,
+                    has_tidi_history,
+                    reply,
+                }
+            },
+            |ctx, (now_unix_f64, tidi_factor, has_tidi_history)| {
+                prune_expired_module_cooldowns_in_actor(
+                    ctx,
+                    now_unix_f64,
+                    tidi_factor,
+                    has_tidi_history,
+                )
+            },
+        )?;
+        let pruned = payload_opt.is_some();
+        if let Some(payload) = payload_opt {
+            self.persist_cooldown_payload(payload);
+        }
+        Ok(pruned)
     }
 
     /// Flushes this system actor's module cooldowns to per-system SQLite checkpoints
