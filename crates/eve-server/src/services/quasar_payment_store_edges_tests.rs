@@ -537,3 +537,48 @@ fn fulfillment_and_purchase_nested_order_omega_and_raw_fallback_edges() {
     });
     assert_eq!(receipts_count, 2);
 }
+
+#[test]
+fn auto_store_seed_suppression_and_item_notifier_are_isolated_per_repository() {
+    use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+
+    let db_a = Arc::new(WorldRepository::with_demo_seed());
+    let db_b = Arc::new(WorldRepository::with_demo_seed());
+    suppress_auto_store_seed_for_db(&*db_a, true, |dba| {
+        assert!(is_auto_store_seed_suppressed_for(dba));
+        assert!(!is_auto_store_seed_suppressed_for(&db_b));
+    });
+    assert!(!is_auto_store_seed_suppressed_for(&db_a));
+
+    let ctx_a = Arc::new(crate::router::ServerContext::new());
+    let ctx_b = Arc::new(crate::router::ServerContext::new());
+    let char_id = 90_000_001i64;
+    ctx_a
+        .db
+        .acquire_online_lock(1, 71_001, Some(char_id), false, ctx_a.now_unix())
+        .unwrap();
+    ctx_b
+        .db
+        .acquire_online_lock(1, 71_002, Some(char_id), false, ctx_b.now_unix())
+        .unwrap();
+    let _ = ctx_a.drain_notifications_for_char(char_id);
+    let _ = ctx_b.drain_notifications_for_char(char_id);
+
+    let item = eve_db::InventoryItemRecord {
+        item_id: 910_001,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: 60_003_760,
+        flag: eve_db::InventoryFlag::Hangar,
+        quantity: 5,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    let dummy_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>> =
+        Arc::new(RankedRwLock::new(None));
+    emit_store_item_mutations(&ctx_a.db, &ctx_a.sde, &dummy_sink, &[(char_id, None, Some(item))]);
+
+    assert!(!ctx_a.drain_notifications_for_char(char_id).is_empty());
+    assert!(ctx_b.drain_notifications_for_char(char_id).is_empty());
+}

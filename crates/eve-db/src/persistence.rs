@@ -755,6 +755,37 @@ impl WorldRepository {
         guard.remove(key);
     }
 
+    /// Returns the ephemeral per-repository runtime slot for `key`, initializing it on first use.
+    pub fn get_or_init_transient_runtime_slot<T: Send + Sync + 'static>(
+        &self,
+        key: &'static str,
+        init: impl FnOnce() -> T,
+    ) -> std::sync::Arc<T> {
+        if let Some(Some(existing)) = self.get_transient_runtime_slot::<T>(key) {
+            return existing;
+        }
+        let candidate = std::sync::Arc::new(init());
+        let any_arc: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+            std::sync::Arc::clone(&candidate) as std::sync::Arc<dyn std::any::Any + Send + Sync>;
+        let mut guard = self
+            .transient_runtime_slots
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(Some(existing_any)) = guard.get(key) {
+            match std::sync::Arc::clone(existing_any).downcast::<T>() {
+                Ok(existing) => return existing,
+                Err(_) => {
+                    debug_assert!(
+                        false,
+                        "transient runtime slot '{key}' downcast failed: mismatched value type"
+                    );
+                }
+            }
+        }
+        guard.insert(key, Some(any_arc));
+        candidate
+    }
+
     /// Allocates a monotonically increasing, non-zero lifecycle generation scoped to this repository.
     pub fn allocate_system_lifecycle_generation(&self) -> u64 {
         self.next_system_lifecycle_generation

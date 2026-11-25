@@ -470,7 +470,7 @@ fn skin_escrow_isolated_across_concurrent_db_entitlement_syncs() {
     }
     crate::services::quasar_entitlement_ledger::sync_live_skinr_states(&db_b);
     assert_eq!(
-        crate::services::quasar_entitlement_ledger::redeemed_skin_generation(db_a.instance_id()),
+        crate::services::quasar_entitlement_ledger::redeemed_skin_generation(&db_a),
         0,
         "entitlement sync on db_b must not advance db_a generation"
     );
@@ -678,4 +678,124 @@ fn blend_mode_2_and_3_exclude_secondary_pattern_material_slot_8() {
     let (pts_exclusion, _) = state.catalog.compute_points_and_tier_for_design(587, 3, &slots);
     assert_eq!(pts_subtract, pts_exclusion);
     assert!(pts_subtract < pts_overlay, "blend mode 2/3 must skip slot 8 component points");
+}
+
+#[test]
+fn skinr_runtime_sink_strip_and_job_settle_are_isolated_per_repository() {
+    use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+    use eve_db::WorldRepository;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let sde = shared_sde();
+    let db_a = Arc::new(WorldRepository::with_demo_seed());
+    let db_b = Arc::new(WorldRepository::with_demo_seed());
+    let state_a = SkinrCosmeticsState::load(Arc::clone(&db_a), Arc::clone(&sde));
+    let state_b = SkinrCosmeticsState::load(Arc::clone(&db_b), Arc::clone(&sde));
+
+    let count_a = Arc::new(AtomicUsize::new(0));
+    let count_b = Arc::new(AtomicUsize::new(0));
+    let count_a_ref = Arc::clone(&count_a);
+    let count_b_ref = Arc::clone(&count_b);
+    let sink_a: crate::quasar_gateway::MachoNotifySink = Arc::new(move |_, _, _, _| {
+        count_a_ref.fetch_add(1, Ordering::Relaxed);
+    });
+    let sink_b: crate::quasar_gateway::MachoNotifySink = Arc::new(move |_, _, _, _| {
+        count_b_ref.fetch_add(1, Ordering::Relaxed);
+    });
+    let lock_a: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>> =
+        Arc::new(RankedRwLock::new(Some(sink_a)));
+    let lock_b: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>> =
+        Arc::new(RankedRwLock::new(Some(sink_b)));
+    register_macho_notify_sink(&db_a, &lock_a);
+    register_macho_notify_sink(&db_b, &lock_b);
+
+    let item = InventoryItemRecord {
+        item_id: 700_001,
+        type_id: 34,
+        owner_id: 90_000_001,
+        location_id: 60_003_760,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+    emit_item_changes(
+        &db_a,
+        &sde,
+        90_000_001,
+        &[ItemChangeEvent {
+            old: None,
+            new: Some(item),
+            custom_name: String::new(),
+        }],
+    );
+    assert_eq!(count_a.load(Ordering::Relaxed), 1);
+    assert_eq!(count_b.load(Ordering::Relaxed), 0);
+
+    state_a
+        .data
+        .write()
+        .unwrap()
+        .applied_thirdparty_skins
+        .insert(98_000_001, "hex_a".into());
+    state_b
+        .data
+        .write()
+        .unwrap()
+        .applied_thirdparty_skins
+        .insert(98_000_001, "hex_b".into());
+    strip_applied_thirdparty_skins_in_memory(&db_a, &[98_000_001]);
+    assert!(
+        !state_a
+            .data
+            .read()
+            .unwrap()
+            .applied_thirdparty_skins
+            .contains_key(&98_000_001)
+    );
+    assert_eq!(
+        state_b
+            .data
+            .read()
+            .unwrap()
+            .applied_thirdparty_skins
+            .get(&98_000_001)
+            .map(String::as_str),
+        Some("hex_b")
+    );
+
+    let job_key = "44444444444444444444444444444444";
+    let job = SequencingJobRecord {
+        job_uuid: [0x44; 16],
+        skin_hex: "hex_job".into(),
+        quantity: 1,
+        sequencer_id: 90_000_001,
+        initiated_unix: 100,
+        planned_duration_secs: 50,
+        completed_unix: None,
+        failed_reason: None,
+    };
+    state_a
+        .data
+        .write()
+        .unwrap()
+        .sequencing_jobs
+        .insert(job_key.into(), job.clone());
+    state_b
+        .data
+        .write()
+        .unwrap()
+        .sequencing_jobs
+        .insert(job_key.into(), job);
+
+    settle_completed_skinr_jobs_for_db(&db_a, 200);
+    assert_eq!(
+        state_a.data.read().unwrap().sequencing_jobs[job_key].completed_unix,
+        Some(150)
+    );
+    assert_eq!(
+        state_b.data.read().unwrap().sequencing_jobs[job_key].completed_unix,
+        None
+    );
 }

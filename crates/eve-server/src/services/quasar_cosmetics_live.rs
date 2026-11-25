@@ -79,14 +79,19 @@ pub struct CosmeticsLiveData {
     pub next_license_seq: u64,
 }
 
-static REVOKED_LOGO_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const LIVE_COSMETICS_SLOT_KEY: &str = "quasar_cosmetics_live_runtime";
 
-fn db_live_cosmetics_map(
-) -> &'static std::sync::Mutex<HashMap<u64, Vec<std::sync::Weak<CosmeticsLiveState>>>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<u64, Vec<std::sync::Weak<CosmeticsLiveState>>>>,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+#[derive(Default)]
+struct CosmeticsLiveRepoRuntime {
+    revoked_logo_gen: std::sync::atomic::AtomicU64,
+    live_states: std::sync::Mutex<Vec<std::sync::Weak<CosmeticsLiveState>>>,
+}
+
+fn live_cosmetics_runtime(db: &WorldRepository) -> Arc<CosmeticsLiveRepoRuntime> {
+    db.get_or_init_transient_runtime_slot(
+        LIVE_COSMETICS_SLOT_KEY,
+        CosmeticsLiveRepoRuntime::default,
+    )
 }
 
 pub struct CosmeticsLiveState {
@@ -94,6 +99,7 @@ pub struct CosmeticsLiveState {
     sde: Arc<SdeRegistry>,
     macho_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pub data: RwLock<CosmeticsLiveData>,
+    repo_runtime: Arc<CosmeticsLiveRepoRuntime>,
     last_logo_gen: std::sync::atomic::AtomicU64,
 }
 
@@ -110,33 +116,34 @@ impl CosmeticsLiveState {
         let data = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
         });
-        let db_id = db.instance_id();
+        let repo_runtime = live_cosmetics_runtime(&db);
+        let cur_gen = repo_runtime
+            .revoked_logo_gen
+            .load(std::sync::atomic::Ordering::Acquire);
         let state = Arc::new(Self {
             db,
             sde,
             macho_sink,
             data: RwLock::new(data),
-            last_logo_gen: std::sync::atomic::AtomicU64::new(
-                REVOKED_LOGO_GEN.load(std::sync::atomic::Ordering::Acquire),
-            ),
+            repo_runtime: Arc::clone(&repo_runtime),
+            last_logo_gen: std::sync::atomic::AtomicU64::new(cur_gen),
         });
         {
-            let mut map = db_live_cosmetics_map().lock().unwrap_or_else(|e| e.into_inner());
-            if map.len() > 256 {
-                map.retain(|_, list| {
-                    list.retain(|w| w.strong_count() > 0);
-                    !list.is_empty()
-                });
-            }
-            let entry = map.entry(db_id).or_default();
-            entry.retain(|w| w.strong_count() > 0);
-            entry.push(Arc::downgrade(&state));
+            let mut list = repo_runtime
+                .live_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            list.retain(|w| w.strong_count() > 0);
+            list.push(Arc::downgrade(&state));
         }
         state
     }
 
     fn reload_ship_logos_from_db(&self) {
-        let cur_gen = REVOKED_LOGO_GEN.load(std::sync::atomic::Ordering::Acquire);
+        let cur_gen = self
+            .repo_runtime
+            .revoked_logo_gen
+            .load(std::sync::atomic::Ordering::Acquire);
         if let Some(saved) = self.db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str::<CosmeticsLiveData>(j).ok())
         }) {
@@ -147,7 +154,10 @@ impl CosmeticsLiveState {
     }
 
     fn sync_ship_logos_if_revoked(&self) {
-        let cur_gen = REVOKED_LOGO_GEN.load(std::sync::atomic::Ordering::Acquire);
+        let cur_gen = self
+            .repo_runtime
+            .revoked_logo_gen
+            .load(std::sync::atomic::Ordering::Acquire);
         if self.last_logo_gen.load(std::sync::atomic::Ordering::Acquire) != cur_gen {
             self.reload_ship_logos_from_db();
         }
@@ -175,7 +185,9 @@ impl CosmeticsLiveState {
         });
         *self.data.write().unwrap_or_else(|e| e.into_inner()) = data;
         self.last_logo_gen.store(
-            REVOKED_LOGO_GEN.load(std::sync::atomic::Ordering::Acquire),
+            self.repo_runtime
+                .revoked_logo_gen
+                .load(std::sync::atomic::Ordering::Acquire),
             std::sync::atomic::Ordering::Release,
         );
     }
@@ -383,15 +395,17 @@ pub fn prune_revoked_logo_entitlement(
         removed
     });
     if !cleared_slots.is_empty() {
-        REVOKED_LOGO_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+        let runtime = live_cosmetics_runtime(db);
+        runtime
+            .revoked_logo_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         let live_states: Vec<Arc<CosmeticsLiveState>> = {
-            let mut map = db_live_cosmetics_map().lock().unwrap_or_else(|e| e.into_inner());
-            map.get_mut(&db.instance_id())
-                .map(|list| {
-                    list.retain(|w| w.strong_count() > 0);
-                    list.iter().filter_map(|w| w.upgrade()).collect()
-                })
-                .unwrap_or_default()
+            let mut list = runtime
+                .live_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            list.retain(|w| w.strong_count() > 0);
+            list.iter().filter_map(|w| w.upgrade()).collect()
         };
         for st in live_states {
             st.reload_ship_logos_from_db();
@@ -506,13 +520,13 @@ pub fn strip_ship_cosmetics_for_ships(db: &WorldRepository, ship_ids: &[i64]) {
         return;
     }
     let live_states: Vec<Arc<CosmeticsLiveState>> = {
-        let mut map = db_live_cosmetics_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.get_mut(&db.instance_id())
-            .map(|list| {
-                list.retain(|w| w.strong_count() > 0);
-                list.iter().filter_map(|w| w.upgrade()).collect()
-            })
-            .unwrap_or_default()
+        let runtime = live_cosmetics_runtime(db);
+        let mut list = runtime
+            .live_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        list.retain(|w| w.strong_count() > 0);
+        list.iter().filter_map(|w| w.upgrade()).collect()
     };
     for st in live_states {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -520,10 +534,7 @@ pub fn strip_ship_cosmetics_for_ships(db: &WorldRepository, ship_ids: &[i64]) {
             data.ship_logos.remove(&u);
         }
     }
-    super::quasar_cosmetics_skinr::strip_applied_thirdparty_skins_in_memory(
-        db.instance_id(),
-        &u64_ids,
-    );
+    super::quasar_cosmetics_skinr::strip_applied_thirdparty_skins_in_memory(db, &u64_ids);
 }
 
 /// Builds `eve_public.cosmetic.ship.State` for a ship item, or `None` if it isn't a ship.
@@ -1216,8 +1227,8 @@ fn license_get_catalogue(_st: &CosmeticsLiveState, _ctx: &AuthoritativeContext, 
 /// Resolves `(ship_type_id, fsd_cosmetic_type)` (`1 = Corp Emblem`, `2 = Alliance Emblem`) for a
 /// category-`2118` Ship Cosmetic License item from `res:/staticdata/shipcosmeticlicenses.fsdbinary`.
 pub fn ship_emblem_license_spec(sde: &SdeRegistry, license_type_id: u32) -> Option<(u32, u8)> {
-    static EMBLEM_LICS: std::sync::OnceLock<HashMap<u32, (u32, u8)>> = std::sync::OnceLock::new();
-    let table = EMBLEM_LICS.get_or_init(|| {
+    struct EmblemLicenseTable(HashMap<u32, (u32, u8)>);
+    let table: Arc<EmblemLicenseTable> = sde.get_or_init_derived(|| {
         let mut map = HashMap::new();
         if let Ok(rows) = sde.load_cfsd_table("res:/staticdata/shipcosmeticlicenses.fsdbinary") {
             for rec in rows.values() {
@@ -1238,9 +1249,9 @@ pub fn ship_emblem_license_spec(sde: &SdeRegistry, license_type_id: u32) -> Opti
                 }
             }
         }
-        map
+        EmblemLicenseTable(map)
     });
-    if let Some(&spec) = table.get(&license_type_id) {
+    if let Some(&spec) = table.0.get(&license_type_id) {
         return Some(spec);
     }
     let t = sde.types.get(&license_type_id).filter(|t| t.category_id == 2118)?;

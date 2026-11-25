@@ -20,19 +20,75 @@ struct ErrorLimitWindow {
     errors_used: u32,
 }
 
+#[derive(Debug)]
+pub struct EsiRouterSharedState {
+    started_at_unix: AtomicU64,
+    error_windows: RwLock<HashMap<String, ErrorLimitWindow>>,
+    request_seq: AtomicU64,
+}
+
+impl Default for EsiRouterSharedState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EsiRouterSharedState {
+    pub fn new() -> Self {
+        Self {
+            started_at_unix: AtomicU64::new(u64::MAX),
+            error_windows: RwLock::new(HashMap::new()),
+            request_seq: AtomicU64::new(1),
+        }
+    }
+
+    fn with_started_at(started_at_unix: u64) -> Self {
+        Self {
+            started_at_unix: AtomicU64::new(started_at_unix),
+            error_windows: RwLock::new(HashMap::new()),
+            request_seq: AtomicU64::new(1),
+        }
+    }
+
+    fn get_or_init_started_at(&self, now: u64) -> u64 {
+        match self.started_at_unix.compare_exchange(
+            u64::MAX,
+            now,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => now,
+            Err(existing) => existing,
+        }
+    }
+}
+
 pub struct EsiRouter {
     pub ctx: Arc<ServerContext>,
     pub started_at_unix: u64,
     pub error_limit_max: u32,
     pub error_limit_window_secs: u64,
-    error_windows: RwLock<HashMap<String, ErrorLimitWindow>>,
-    request_seq: AtomicU64,
+    shared: Arc<EsiRouterSharedState>,
 }
 
 impl EsiRouter {
     /// Creates a new `EsiRouter` with the standard ESI error limit (`100` errors per `60`s window).
     pub fn new(ctx: Arc<ServerContext>) -> Self {
         Self::with_error_limit(ctx, 100, 60)
+    }
+
+    /// Creates an `EsiRouter` handle backed by `ctx.esi_state.sso_router_state` so HTTP SSO-delegated
+    /// requests share per-context error-limit windows and monotonic request IDs without global state.
+    pub fn for_sso(ctx: Arc<ServerContext>) -> Self {
+        let shared = Arc::clone(&ctx.esi_state.sso_router_state);
+        let started_at_unix = shared.get_or_init_started_at(ctx.now_unix());
+        Self {
+            ctx,
+            started_at_unix,
+            error_limit_max: 100,
+            error_limit_window_secs: 60,
+            shared,
+        }
     }
 
     /// Creates a new `EsiRouter` with a custom error-limit budget and window duration.
@@ -47,8 +103,7 @@ impl EsiRouter {
             started_at_unix: now,
             error_limit_max: error_limit_max.max(1),
             error_limit_window_secs: error_limit_window_secs.max(1),
-            error_windows: RwLock::new(HashMap::new()),
-            request_seq: AtomicU64::new(1),
+            shared: Arc::new(EsiRouterSharedState::with_started_at(now)),
         }
     }
 
@@ -82,7 +137,11 @@ impl EsiRouter {
     }
 
     fn current_error_window_snapshot(&self, client_key: &str, now: u64) -> (u32, u64, bool) {
-        let mut map = self.error_windows.write().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .shared
+            .error_windows
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if !map.contains_key(client_key) {
             Self::prune_error_windows_if_full(&mut map, now, self.error_limit_window_secs);
         }
@@ -107,7 +166,11 @@ impl EsiRouter {
     }
 
     fn record_error_and_snapshot(&self, client_key: &str, now: u64) -> (u32, u64) {
-        let mut map = self.error_windows.write().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .shared
+            .error_windows
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if !map.contains_key(client_key) {
             Self::prune_error_windows_if_full(&mut map, now, self.error_limit_window_secs);
         }
@@ -187,7 +250,7 @@ impl EsiRouter {
     /// Processes an incoming `EsiHttpRequest` and returns an OpenAPI-conformant `EsiHttpResponse`.
     pub fn handle_request(&self, req: &EsiHttpRequest) -> EsiHttpResponse {
         let now = self.ctx.now_unix();
-        let req_id = self.request_seq.fetch_add(1, Ordering::Relaxed);
+        let req_id = self.shared.request_seq.fetch_add(1, Ordering::Relaxed);
         let client_key = Self::client_bucket_key(req);
         let (raw_path, query_params) = split_path_and_query(&req.raw_target);
 

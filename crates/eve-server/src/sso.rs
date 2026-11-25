@@ -16,7 +16,7 @@ use anyhow::Result;
 use eve_db::{DbError, SsoTokenClaims};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -84,34 +84,6 @@ impl HttpResponse {
 }
 
 const HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-#[derive(Default)]
-struct BugAttachmentSemaphoreRegistry {
-    entries: HashMap<usize, (std::sync::Weak<ServerContext>, Arc<tokio::sync::Semaphore>)>,
-}
-
-static BUG_ATTACHMENT_SEMAPHORES: OnceLock<Mutex<BugAttachmentSemaphoreRegistry>> =
-    OnceLock::new();
-
-fn bug_attachment_semaphore_for(ctx: &Arc<ServerContext>) -> Arc<tokio::sync::Semaphore> {
-    let registry = BUG_ATTACHMENT_SEMAPHORES
-        .get_or_init(|| Mutex::new(BugAttachmentSemaphoreRegistry::default()));
-    let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .entries
-        .retain(|_, (weak, _)| weak.strong_count() > 0);
-    let key = Arc::as_ptr(ctx) as usize;
-    if let Some((weak, sem)) = guard.entries.get(&key) {
-        if weak.upgrade().is_some_and(|strong| Arc::ptr_eq(&strong, ctx)) {
-            return Arc::clone(sem);
-        }
-    }
-    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BUG_ATTACHMENTS));
-    guard
-        .entries
-        .insert(key, (Arc::downgrade(ctx), Arc::clone(&sem)));
-    sem
-}
 
 fn is_safe_bug_report_key(key: &str) -> bool {
     !key.is_empty()
@@ -335,7 +307,7 @@ pub(crate) async fn handle_http_connection_with_deadlines(
             stream.flush().await?;
             return Ok(());
         }
-        match bug_attachment_semaphore_for(&ctx).try_acquire_owned() {
+        match ctx.bug_reporting.attachment_semaphore().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
                 let busy = HttpResponse::json(
@@ -634,7 +606,6 @@ fn delegate_to_esi_router(
     headers: &HashMap<String, String>,
     body: &[u8],
 ) -> HttpResponse {
-    static ESI_ROUTER_CACHE: OnceLock<Mutex<(usize, Arc<EsiRouter>)>> = OnceLock::new();
     let Some(shared_ctx) = arc_ctx else {
         return HttpResponse::json(
             404,
@@ -645,17 +616,7 @@ fn delegate_to_esi_router(
             }),
         );
     };
-    let db_key = Arc::as_ptr(&shared_ctx.db) as usize;
-    let router = {
-        let lock = ESI_ROUTER_CACHE.get_or_init(|| {
-            Mutex::new((db_key, Arc::new(EsiRouter::new(Arc::clone(&shared_ctx)))))
-        });
-        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.0 != db_key {
-            *guard = (db_key, Arc::new(EsiRouter::new(Arc::clone(&shared_ctx))));
-        }
-        Arc::clone(&guard.1)
-    };
+    let router = EsiRouter::for_sso(shared_ctx);
 
     let mut esi_req = EsiHttpRequest::new(method, target).with_body(body.to_vec());
     for (k, v) in headers {

@@ -91,6 +91,7 @@ pub struct EsiRuntimeState {
     pub war_allies: RankedRwLock<HashMap<i64, Vec<Value>>, RANK_LEAF>,
     pub custom_item_names: RankedRwLock<HashMap<i64, String>, RANK_LEAF>,
     pub next_custom_id: AtomicI64,
+    pub sso_router_state: std::sync::Arc<super::router::EsiRouterSharedState>,
 }
 
 impl Default for EsiRuntimeState {
@@ -124,6 +125,7 @@ impl EsiRuntimeState {
             war_allies: RankedRwLock::new(HashMap::new()),
             custom_item_names: RankedRwLock::new(HashMap::new()),
             next_custom_id: AtomicI64::new(16),
+            sso_router_state: std::sync::Arc::new(super::router::EsiRouterSharedState::new()),
         }
     }
 

@@ -438,31 +438,26 @@ pub struct SkinrCosmeticsState {
     pub last_redeemed_gen: std::sync::atomic::AtomicU64,
 }
 
-fn db_skinr_state_map(
-) -> &'static std::sync::Mutex<HashMap<u64, Vec<std::sync::Weak<SkinrCosmeticsState>>>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<u64, Vec<std::sync::Weak<SkinrCosmeticsState>>>>,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
+const SKINR_RUNTIME_SLOT_KEY: &str = "quasar_cosmetics_skinr_runtime";
 
 type WeakMachoSinkLock = std::sync::Weak<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>;
 
-fn db_macho_sink_map() -> &'static std::sync::Mutex<HashMap<u64, WeakMachoSinkLock>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, WeakMachoSinkLock>>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+#[derive(Default)]
+struct SkinrRepoRuntime {
+    live_states: std::sync::Mutex<Vec<std::sync::Weak<SkinrCosmeticsState>>>,
+    macho_sink: std::sync::Mutex<Option<WeakMachoSinkLock>>,
+}
+
+fn skinr_runtime(db: &WorldRepository) -> Arc<SkinrRepoRuntime> {
+    db.get_or_init_transient_runtime_slot(SKINR_RUNTIME_SLOT_KEY, SkinrRepoRuntime::default)
 }
 
 pub(super) fn register_macho_notify_sink(
-    db_id: u64,
+    db: &WorldRepository,
     sink: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
 ) {
-    let mut map = db_macho_sink_map().lock().unwrap_or_else(|e| e.into_inner());
-    if map.len() > 256 {
-        map.retain(|_, w| w.strong_count() > 0);
-    }
-    map.insert(db_id, Arc::downgrade(sink));
+    let runtime = skinr_runtime(db);
+    *runtime.macho_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(sink));
 }
 
 #[derive(Debug, Clone)]
@@ -516,7 +511,7 @@ pub(super) fn emit_item_changes_with_sink(
 }
 
 pub(super) fn emit_item_changes(
-    db_id: u64,
+    db: &WorldRepository,
     sde: &SdeRegistry,
     char_id: i64,
     events: &[ItemChangeEvent],
@@ -525,10 +520,11 @@ pub(super) fn emit_item_changes(
         return;
     }
     let sink_lock = {
-        let mut map = db_macho_sink_map().lock().unwrap_or_else(|e| e.into_inner());
-        let lock = map.get(&db_id).and_then(std::sync::Weak::upgrade);
+        let runtime = skinr_runtime(db);
+        let mut slot = runtime.macho_sink.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = slot.as_ref().and_then(std::sync::Weak::upgrade);
         if lock.is_none() {
-            map.remove(&db_id);
+            *slot = None;
         }
         lock
     };
@@ -538,33 +534,29 @@ pub(super) fn emit_item_changes(
 
 pub(super) fn register_live_skinr_state(state: &Arc<SkinrCosmeticsState>) {
     let weak = Arc::downgrade(state);
-    let db_id = state.db.instance_id();
-    let mut map = db_skinr_state_map().lock().unwrap_or_else(|e| e.into_inner());
-    if map.len() > 256 {
-        map.retain(|_, list| {
-            list.retain(|w| w.strong_count() > 0);
-            !list.is_empty()
-        });
-    }
-    let entry = map.entry(db_id).or_default();
+    let runtime = skinr_runtime(&state.db);
+    let mut entry = runtime
+        .live_states
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     entry.retain(|w| w.strong_count() > 0);
     if !entry.iter().any(|w| std::sync::Weak::ptr_eq(w, &weak)) {
         entry.push(weak);
     }
 }
 
-pub(crate) fn strip_applied_thirdparty_skins_in_memory(db_id: u64, ship_ids: &[u64]) {
+pub(crate) fn strip_applied_thirdparty_skins_in_memory(db: &WorldRepository, ship_ids: &[u64]) {
     if ship_ids.is_empty() {
         return;
     }
     let live_states: Vec<Arc<SkinrCosmeticsState>> = {
-        let mut map = db_skinr_state_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.get_mut(&db_id)
-            .map(|list| {
-                list.retain(|w| w.strong_count() > 0);
-                list.iter().filter_map(|w| w.upgrade()).collect()
-            })
-            .unwrap_or_default()
+        let runtime = skinr_runtime(db);
+        let mut list = runtime
+            .live_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        list.retain(|w| w.strong_count() > 0);
+        list.iter().filter_map(|w| w.upgrade()).collect()
     };
     for st in live_states {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -577,13 +569,13 @@ pub(crate) fn strip_applied_thirdparty_skins_in_memory(db_id: u64, ship_ids: &[u
 /// Periodically settles completed SKINR sequencing jobs for the given world repository (`#545`).
 pub fn settle_completed_skinr_jobs_for_db(db: &Arc<WorldRepository>, now: u64) {
     let state_opt: Option<Arc<SkinrCosmeticsState>> = {
-        let mut map = db_skinr_state_map().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(list) = map.get_mut(&db.instance_id()) {
-            list.retain(|w| w.strong_count() > 0);
-            list.iter().find_map(|w| w.upgrade())
-        } else {
-            None
-        }
+        let runtime = skinr_runtime(db);
+        let mut list = runtime
+            .live_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        list.retain(|w| w.strong_count() > 0);
+        list.iter().find_map(|w| w.upgrade())
     };
     if let Some(state) = state_opt {
         state.settle_completed_jobs(now);
@@ -605,15 +597,13 @@ impl SkinrCosmeticsState {
                 .unwrap_or_default()
         });
         let catalog = SkinrStaticCatalog::load(&sde);
-        let db_id = db.instance_id();
+        let initial_redeemed_gen = super::quasar_entitlement_ledger::redeemed_skin_generation(&db);
         let st = Arc::new(Self {
             db,
             sde,
             catalog,
             data: RwLock::new(data),
-            last_redeemed_gen: std::sync::atomic::AtomicU64::new(
-                super::quasar_entitlement_ledger::redeemed_skin_generation(db_id),
-            ),
+            last_redeemed_gen: std::sync::atomic::AtomicU64::new(initial_redeemed_gen),
         });
         st
     }
@@ -623,9 +613,7 @@ impl SkinrCosmeticsState {
     }
 
     pub fn sync_redeemed_skins_if_needed(&self) {
-        let cur_gen = super::quasar_entitlement_ledger::redeemed_skin_generation(
-            self.db.instance_id(),
-        );
+        let cur_gen = super::quasar_entitlement_ledger::redeemed_skin_generation(&self.db);
         let prev = self
             .last_redeemed_gen
             .swap(cur_gen, std::sync::atomic::Ordering::AcqRel);
@@ -688,7 +676,7 @@ impl SkinrCosmeticsState {
         });
         *self.data.write().unwrap_or_else(|e| e.into_inner()) = data;
         self.last_redeemed_gen.store(
-            super::quasar_entitlement_ledger::redeemed_skin_generation(self.db.instance_id()),
+            super::quasar_entitlement_ledger::redeemed_skin_generation(&self.db),
             std::sync::atomic::Ordering::Release,
         );
     }
@@ -1108,7 +1096,7 @@ fn handle_item_consume(
         })
         .map_err(|e| (e.code.parse::<u32>().unwrap_or(500), e.message))?;
 
-    emit_item_changes(state.db.instance_id(), &state.sde, cid as i64, &[item_change]);
+    emit_item_changes(&state.db, &state.sde, cid as i64, &[item_change]);
     let now = ctx.now_unix();
     grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
 
@@ -1430,7 +1418,7 @@ fn handle_title_version_get_default(state: &SkinrCosmeticsState) -> HandlerResul
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
     register_live_skinr_state(&state);
-    register_macho_notify_sink(state.db.instance_id(), &router.macho_notify_sink);
+    register_macho_notify_sink(&state.db, &router.macho_notify_sink);
     let st_rehydrate = Arc::clone(&state);
     let st_sync = Arc::clone(&state);
     router.register_persistence_hooks(
