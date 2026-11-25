@@ -1361,6 +1361,82 @@ fn are_corps_at_war_in_snap_honors_ally_expiry_and_alliance_allies() {
     });
 }
 
+#[test]
+fn consume_structure_fuel_blocks_rejects_non_commodity_bay_stacks() {
+    let mut ctx = test_ctx();
+    let st_tid = 35_832_u32;
+    let fuel_tid = 4247_u32;
+    clone_type_with(&mut ctx.sde, 35_832, st_tid, 1657, 65, &[]);
+    clone_type_with(&mut ctx.sde, 34, fuel_tid, 1136, 4, &[]);
+    seed_char_and_corp(&ctx, 7491, 98_749, 30_000_142, true);
+    let sid = 10_000_995_999_i64;
+    let bad_fuel_id = 81_991_i64;
+    let good_fuel_id = 81_992_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: st_tid,
+                owner_corp_id: 98_749,
+                solar_system_id: 30_000_142,
+                name: "Fuel Policy Citadel".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 30,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bad_fuel_id,
+            InventoryItemRecord {
+                item_id: bad_fuel_id,
+                type_id: fuel_tid,
+                owner_id: 98_749,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 30,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 10));
+        assert_eq!(snap.items[&bad_fuel_id].quantity, 30);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 30);
+
+        snap.items.get_mut(&bad_fuel_id).unwrap().is_blueprint_copy = false;
+        snap.items.get_mut(&bad_fuel_id).unwrap().singleton = true;
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 10));
+        assert_eq!(snap.structures[&sid].fuel_blocks, 30);
+
+        snap.items.insert(
+            good_fuel_id,
+            InventoryItemRecord {
+                item_id: good_fuel_id,
+                type_id: fuel_tid,
+                owner_id: 98_749,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 15));
+        assert!(consume_structure_fuel_blocks(&ctx, snap, sid, 10));
+        assert!(!snap.items.contains_key(&good_fuel_id));
+        assert_eq!(snap.items[&bad_fuel_id].quantity, 30);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 0);
+    });
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;

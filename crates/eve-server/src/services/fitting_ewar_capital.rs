@@ -362,9 +362,17 @@ fn collect_ship_fuel_stacks(
                 && i.type_id == fuel_type_id
                 && matches!(i.flag as u16, 5 | 133)
                 && i.flag != eve_db::InventoryFlag::Locked
-                && !i.singleton
                 && i.quantity > 0
-                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                && snap
+                    .validate_item_for_consumption(
+                        i,
+                        &eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            i.owner_id,
+                            eve_db::ItemClassPolicy::StackableCommodity,
+                        ),
+                    )
+                    .is_ok()
         })
         .map(|i| (if (i.flag as u16) == 133 { 0 } else { 1 }, i.item_id, i.quantity))
         .collect();
@@ -1763,6 +1771,15 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                                 remaining -= take;
                                 diffs.push((pre, post));
                             }
+                        }
+                        if remaining > 0 {
+                            return Err(BridgeRpcError {
+                                code: "InsufficientFuel".into(),
+                                message: format!(
+                                    "Insufficient fuel (type {fuel_type_id}): needed {fuel_qty_needed}, remaining {remaining}"
+                                ),
+                                client_error: None,
+                            });
                         }
                     }
                 }

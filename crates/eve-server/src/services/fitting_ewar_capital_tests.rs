@@ -1294,6 +1294,101 @@ async fn phenomena_generator_uses_destiny_dbuffs_and_clears_across_lifecycle_tra
     assert!(!emit_system_wide_effect_start(&ctx, sys_id, Some(char_id), 6753, module_id, 43658));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capital_module_fuel_rejects_non_commodity_stacks() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 96_100_990_i64;
+    let ship_id = 96_100_991_i64;
+    let module_id = 96_100_992_i64;
+    let fuel_item_id = 96_100_993_i64;
+    let fuel_tid = 16_273_u32;
+
+    let mut siege_t = synth_mod_type(20_280, 515, "Siege Module II", vec![]);
+    siege_t.default_attributes.insert(713, f64::from(fuel_tid));
+    siege_t.default_attributes.insert(714, 250.0);
+    let fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 11_567, &ctx.sde);
+    let fm = eve_dogma::FittedModule {
+        item_id: module_id,
+        type_id: 20_280,
+        flag_id: InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: None,
+        charge_quantity: 0,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let mod_state = eve_dogma::DogmaItemState::from_sde(char_id, 20_280, &ctx.sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_item_id,
+            InventoryItemRecord {
+                item_id: fuel_item_id,
+                type_id: fuel_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mutators: [fn(&mut InventoryItemRecord); 4] = [
+        |it| it.is_blueprint_copy = true,
+        |it| {
+            it.is_blueprint_copy = false;
+            it.singleton = true;
+        },
+        |it| {
+            it.singleton = false;
+            it.dynamic_attributes.insert(9, 10.0);
+            it.source_mutaplasmid_id = Some(47_812);
+        },
+        |it| {
+            it.dynamic_attributes.clear();
+            it.source_mutaplasmid_id = None;
+            it.insured_payout_isk = 500.0;
+        },
+    ];
+    for modify in mutators {
+        ctx.db.with_mut_snapshot(|snap| {
+            modify(snap.items.get_mut(&fuel_item_id).unwrap());
+            assert!(collect_ship_fuel_stacks(snap, ship_id, fuel_tid).is_empty());
+        });
+        let err = prepare_ewar_and_capital_module(
+            &ctx, &sys, sys_id, char_id, ship_id, 485, module_id, &fm, &siege_t, &mod_state,
+            &fit, None, false, false, false, &HashMap::new(),
+        )
+        .await
+        .expect("Some")
+        .err()
+        .expect("non-commodity fuel must fail Siege prep");
+        assert_eq!(err.code, "InsufficientFuel");
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let it = snap.items.get_mut(&fuel_item_id).unwrap();
+        it.insured_payout_isk = 0.0;
+        assert_eq!(collect_ship_fuel_stacks(snap, ship_id, fuel_tid).len(), 1);
+    });
+    let ok_prep = prepare_ewar_and_capital_module(
+        &ctx, &sys, sys_id, char_id, ship_id, 485, module_id, &fm, &siege_t, &mod_state, &fit,
+        None, false, false, false, &HashMap::new(),
+    )
+    .await
+    .expect("Some")
+    .expect("valid commodity fuel allows Siege prep");
+    assert_eq!(ok_prep.deferred_post_cycle.fuel_to_deduct, Some((fuel_tid, 250)));
+}
+
 #[cfg(test)]
 #[path = "fitting_ewar_capital_extra_unit_tests.rs"]
 mod extra_unit_tests;

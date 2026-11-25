@@ -732,9 +732,9 @@ fn mutant_kill_upgrade_definition_item_at_hub_boundaries_and_consume_items() {
                 ..Default::default()
             },
         );
-        consume_items(snap, 91_001, 4);
+        consume_items(snap, 91_001, 4).unwrap();
         assert_eq!(snap.items[&91_001].quantity, 6);
-        consume_items(snap, 91_007, 1);
+        consume_items(snap, 91_007, 1).unwrap();
         assert!(!snap.items.contains_key(&91_007));
     });
 }

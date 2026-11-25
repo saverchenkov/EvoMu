@@ -153,8 +153,23 @@ pub async fn handle_jettison_structure_fuel(
                     s.fuel_blocks = s.fuel_blocks.saturating_sub(moved_blocks);
                 }
             } else {
+                let is_eligible_fuel = |snap_ref: &eve_db::WorldStateSnapshot, i: &eve_db::InventoryItemRecord| -> bool {
+                    i.location_id == structure_id
+                        && rules::is_structure_fuel_flag(i.flag)
+                        && i.quantity > 0
+                        && snap_ref
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions::for_owner_exact(
+                                    None,
+                                    i.owner_id,
+                                    eve_db::ItemClassPolicy::StackableCommodity,
+                                ),
+                            )
+                            .is_ok()
+                };
                 let default_tid = snap.items.values()
-                    .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
+                    .filter(|i| is_eligible_fuel(snap, i) && rules::is_fuel_block_type(ctx, i.type_id))
                     .min_by_key(|i| i.item_id).map(|i| i64::from(i.type_id)).unwrap_or(4247);
                 let rpc = crate::router::RpcArgs::positional(args);
                 let (fuel_tid, req_qty) = if args.len() >= 3 {
@@ -186,7 +201,7 @@ pub async fn handle_jettison_structure_fuel(
                     (qty_u32, qty_i32)
                 };
                 let mut bay_matching: Vec<i64> = snap.items.values()
-                    .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.type_id == fuel_tid_u32 && i.quantity > 0)
+                    .filter(|i| is_eligible_fuel(snap, i) && i.type_id == fuel_tid_u32)
                     .map(|i| i.item_id).collect();
                 bay_matching.sort_unstable();
                 let matching_qty: u32 = bay_matching
@@ -195,11 +210,16 @@ pub async fn handle_jettison_structure_fuel(
                     .filter_map(|i| u32::try_from(i.quantity).ok())
                     .fold(0, u32::saturating_add);
                 let is_block = rules::is_fuel_block_type(ctx, fuel_tid_u32);
-                let avail_for_tid = if is_block {
-                    let backed_all: u32 = snap.items.values()
+                let all_bay_blocks: u32 = if is_block {
+                    snap.items.values()
                         .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
-                        .filter_map(|i| u32::try_from(i.quantity).ok()).fold(0, u32::saturating_add);
-                    matching_qty.saturating_add(st.fuel_blocks.saturating_sub(backed_all)).min(st.fuel_blocks)
+                        .filter_map(|i| u32::try_from(i.quantity).ok()).fold(0, u32::saturating_add)
+                } else {
+                    0
+                };
+                let unbacked_blocks = st.fuel_blocks.saturating_sub(all_bay_blocks);
+                let avail_for_tid = if is_block {
+                    matching_qty.saturating_add(unbacked_blocks).min(st.fuel_blocks)
                 } else {
                     matching_qty
                 };
@@ -230,6 +250,9 @@ pub async fn handle_jettison_structure_fuel(
                     if snap.consume_exact_item_quantity(iid, take_i32, opts).is_ok() {
                         rem -= take;
                     }
+                }
+                if (!is_block && rem > 0) || (is_block && rem > unbacked_blocks) {
+                    return Err(err("InsufficientStructureFuel", format!("Cannot jettison {req_qty} of type {fuel_tid_u32} from structure {structure_id} (unconsumed remainder: {rem})")));
                 }
                 if is_block {
                     if let Some(s) = snap.structures.get_mut(&structure_id) {

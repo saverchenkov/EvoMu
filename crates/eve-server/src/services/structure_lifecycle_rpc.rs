@@ -1241,7 +1241,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 eve_db::ConsumeExactOptions::for_owner_exact(
                     fit_actor,
                     src.owner_id,
-                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                    eve_db::ItemClassPolicy::StackableCommodity,
                 ),
             )
             .map_err(|e| err("InventoryError", e.to_string()))?;

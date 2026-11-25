@@ -917,6 +917,15 @@ fn process_configuration(
         if !item_at_hub(snap, caller, it, hub_id, sys) {
             return Err((STATUS_BAD_REQUEST, format!("Upgrade item {item_id} is not inside the hub or your ship at the hub")));
         }
+        snap.validate_item_for_consumption(
+            it,
+            &eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                it.owner_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
+        )
+        .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
         let def = upgrade_definition(sde, it.type_id)
             .ok_or((STATUS_BAD_REQUEST, format!("Item type {} is not a sovereignty hub upgrade", it.type_id)))?;
         if hub.upgrades.iter().filter_map(|u| upgrade_definition(sde, u.type_id)).any(|d| d.exclusive_group == def.exclusive_group) {
@@ -991,12 +1000,12 @@ fn process_configuration(
     if hub.last_updated_unix == 0 {
         hub.last_updated_unix = now;
     }
+    for item_id in consumed {
+        consume_items(snap, item_id, 1)?;
+    }
     snap.sov_runtime.sov_hubs.insert(hub_id, hub);
     clamp_hub_export_to_max(snap, sde, hub_id);
     enforce_hub_power_overload(snap, sde, hub_id);
-    for item_id in consumed {
-        consume_items(snap, item_id, 1);
-    }
     Ok(sys)
 }
 
@@ -1071,15 +1080,24 @@ pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &Inven
 }
 
 /// Removes `qty` units from an inventory stack via the centralized snapshot consumer, deleting it when empty.
-pub(crate) fn consume_items(snap: &mut WorldStateSnapshot, item_id: i64, qty: i32) {
-    if let Some(owner_id) = snap.items.get(&item_id).map(|it| it.owner_id) {
-        let opts = eve_db::ConsumeExactOptions::for_owner_exact(
-            None,
-            owner_id,
-            eve_db::ItemClassPolicy::ExactAssembledItem,
-        );
-        let _ = snap.consume_exact_item_quantity(item_id, qty, opts);
-    }
+pub(crate) fn consume_items(
+    snap: &mut WorldStateSnapshot,
+    item_id: i64,
+    qty: i32,
+) -> Result<(), RpcError> {
+    let owner_id = snap
+        .items
+        .get(&item_id)
+        .map(|it| it.owner_id)
+        .ok_or((STATUS_NOT_FOUND, format!("Item {item_id} not found")))?;
+    let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+        None,
+        owner_id,
+        eve_db::ItemClassPolicy::ExactAssembledItem,
+    );
+    snap.consume_exact_item_quantity(item_id, qty, opts)
+        .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+    Ok(())
 }
 
 /// Extension used to clone (or default) the runtime record of a hub.

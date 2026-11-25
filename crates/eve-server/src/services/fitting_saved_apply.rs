@@ -1808,7 +1808,7 @@ fn validate_and_apply_fitting_with_options(
                                 eve_db::ConsumeExactOptions::for_owner_exact(
                                     Some(char_id),
                                     char_id,
-                                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    eve_db::ItemClassPolicy::StackableCommodity,
                                 ),
                             )
                             .is_err()

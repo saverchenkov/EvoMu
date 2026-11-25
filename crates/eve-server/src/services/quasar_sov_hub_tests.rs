@@ -429,3 +429,67 @@ fn destroyed_sov_hub_rejects_queries_and_mutations_without_consuming_items() {
         assert!(!snap.sov_runtime.sov_hubs.contains_key(&hub_id));
     });
 }
+
+#[test]
+fn process_configuration_rejects_non_commodity_upgrade_without_installing() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let cid = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let hub_id = 77_200_001_i64;
+    let sys_id = 30_000_142_u32;
+    let bpc_upg_id = 88_200_001_i64;
+
+    let caller = super::Caller {
+        cid,
+        corp: corp_id,
+        alliance: None,
+        roles: corp_roles::ROLE_DIRECTOR,
+    };
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+        }
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = cid;
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Atomic Upgrade Hub".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_upg_id,
+            InventoryItemRecord {
+                item_id: bpc_upg_id,
+                type_id: 82_499,
+                owner_id: cid,
+                location_id: hub_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                is_blueprint_copy: true,
+                blueprint_runs_remaining: Some(2),
+                ..Default::default()
+            },
+        );
+
+        let err = process_configuration(snap, &sde, &caller, hub_id, &[bpc_upg_id], &[], 1_000)
+            .unwrap_err();
+        assert_eq!(err.0, STATUS_BAD_REQUEST);
+        assert_eq!(consume_items(snap, bpc_upg_id, 1).unwrap_err().0, STATUS_BAD_REQUEST);
+        assert_eq!(snap.items.get(&bpc_upg_id).map(|i| i.quantity), Some(1));
+        assert!(!snap.sov_runtime.sov_hubs.contains_key(&hub_id));
+    });
+}

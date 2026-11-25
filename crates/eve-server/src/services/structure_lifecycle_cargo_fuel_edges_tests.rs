@@ -1085,3 +1085,112 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         "expected OnItemChange notification after structureDeliveries.Deliver"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
+    let ctx = test_ctx();
+    let (char_id, uid, corp_id) = ctx.db.with_snapshot(|s| {
+        let (&cid, ch) = s.characters.iter().next().unwrap();
+        (cid, ch.user_id, ch.corporation_id)
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 11, Some(char_id), false, ctx.now_unix());
+
+    let st_id = 1_030_000_000_099_i64;
+    let valid_fuel_id = 900_910_i64;
+    let bpc_fuel_id = 900_911_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(st_id);
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+        snap.structures.insert(
+            st_id,
+            UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: CITADEL_TYPE,
+                name: "Fuel Jettison Policy".into(),
+                solar_system_id: 30_000_142,
+                owner_corp_id: corp_id,
+                state: life::STATE_SHIELD_VULNERABLE.into(),
+                quantum_core_installed: true,
+                fuel_blocks: 30,
+                shield_hp: 180_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_fuel_id,
+            InventoryItemRecord {
+                item_id: valid_fuel_id,
+                type_id: FUEL_BLOCK_TYPE,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_fuel_id,
+            InventoryItemRecord {
+                item_id: bpc_fuel_id,
+                type_id: FUEL_BLOCK_TYPE,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 20,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut s_dir = make_session(uid, char_id, corp_id, 0, 0);
+    s_dir.structure_id = Some(st_id);
+    assert_eq!(
+        handle_jettison_structure_fuel(
+            &ctx,
+            &mut s_dir,
+            &[PyRep::Integer(st_id), PyRep::Integer(i64::from(FUEL_BLOCK_TYPE)), PyRep::Integer(15)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InsufficientStructureFuel"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&st_id].fuel_blocks, 30);
+        assert_eq!(snap.items[&valid_fuel_id].quantity, 10);
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 20);
+    });
+
+    handle_jettison_structure_fuel(
+        &ctx,
+        &mut s_dir,
+        &[PyRep::Integer(st_id), PyRep::Integer(i64::from(FUEL_BLOCK_TYPE)), PyRep::Integer(10)],
+    )
+    .await
+    .expect("exact eligible fuel quantity jettisons cleanly");
+    assert_eq!(
+        handle_jettison_structure_fuel(
+            &ctx,
+            &mut s_dir,
+            &[PyRep::Integer(st_id), PyRep::Integer(i64::from(FUEL_BLOCK_TYPE)), PyRep::Integer(10)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InsufficientStructureFuel"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&valid_fuel_id));
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 20);
+        assert_eq!(snap.structures[&st_id].fuel_blocks, 20);
+    });
+}
