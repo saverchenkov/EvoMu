@@ -1785,14 +1785,14 @@ impl ServerContext {
             return (1.0, false);
         };
         let tidi = self.systems.get_system_tidi_factor(sid);
-        let has_anchor = self
+        let has_tidi_history = self
             .systems
             .cluster_nodes
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .sim_clock_anchoring
-            .contains_key(&sid);
-        (tidi, has_anchor || tidi < 0.999_999)
+            .tidi_history_systems
+            .contains(&sid);
+        (tidi, has_tidi_history || tidi < 0.999_999)
     }
 
     pub(crate) fn remaining_cooldown_secs_with_tidi(

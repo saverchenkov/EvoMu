@@ -980,3 +980,203 @@ async fn unanchored_and_anchored_invuln_notifications_track_virtual_server_clock
         Some(sim_b1.as_ticks() + 200_000_000)
     );
 }
+
+#[tokio::test]
+async fn pure_1x_offset_anchor_does_not_freeze_reactivation_cooldowns_after_step_manual() {
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 910_196_101_i64;
+    let mod_id = 910_196_102_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None),
+        );
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, 90001, char_id, ship_id, InventoryFlag::HiSlot0),
+        );
+    });
+
+    // Anchor default ScenarioBuilder -300_000 ms offset at 1.0x and advance physics once (`step_manual`)
+    // so `cur_sys_sim_s > 0.0`, then record a 10s reactivation delay.
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 1.0);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(
+        ctx.resolve_sys_tidi_mode(Some(sys_id)),
+        (1.0, false),
+        "pure 1.0x offset anchor must not mark tidi_history_systems"
+    );
+
+    ctx.record_module_reactivation_delay(ship_id, mod_id, 10.0);
+    assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+
+    // Advance virtual time via ctx.advance_secs (without stepping physics): remaining cooldown must shrink
+    // and expire after 11s instead of freezing or pushing expiry forward.
+    let exp_initial = ctx
+        .resolve_active_reactivation_cooldown(ship_id, mod_id)
+        .expect("initial active cooldown");
+    ctx.advance_secs(5);
+    assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+    let exp_after_5s = ctx
+        .resolve_active_reactivation_cooldown(ship_id, mod_id)
+        .expect("remaining cooldown at +5s");
+    assert!(
+        (exp_after_5s - exp_initial).abs() < 1e-6,
+        "expiry timestamp must stay constant across ctx.advance_secs instead of drifting forward"
+    );
+    ctx.advance_secs(6);
+    assert!(
+        !ctx.is_module_in_reactivation_delay(ship_id, mod_id),
+        "reactivation cooldown must expire across ctx.advance_secs on a 1.0x offset-anchored system"
+    );
+
+    // Genuine TiDi (< 1.0) followed by clearing back to 1.0x STILL records tidi_history_systems = true.
+    crate::services::serverops_cluster::set_system_tidi_factor(&ctx, sys_id, 0.50);
+    assert_eq!(ctx.resolve_sys_tidi_mode(Some(sys_id)), (0.50, true));
+    crate::services::serverops_cluster::clear_manual_system_tidi_override(&ctx, sys_id);
+    assert_eq!(ctx.resolve_sys_tidi_mode(Some(sys_id)), (1.0, true));
+}
+
+#[tokio::test]
+async fn anchor_tidi_on_occupied_system_preserves_pre_anchor_delta_pins_autoscaler_and_entry_reemits_timers() {
+    use crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
+    use crate::services::serverops_cluster::{
+        emit_sim_clock_rebase_on_entry_if_needed, set_system_tidi_factor,
+    };
+    use eve_db::clock::FILETIME_TICKS_PER_MS;
+    use eve_db::clock::FILETIME_TICKS_PER_SEC;
+    use eve_proto::PyRep;
+
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_a = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let user_a = ctx.db.with_snapshot(|s| s.characters[&char_a].user_id);
+    ctx.db
+        .acquire_online_lock(user_a, 9_301, Some(char_a), true, base)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_a;
+        }
+    });
+
+    let pvp_exp = base + 900;
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_a).pvp_timer_until_unix = pvp_exp;
+    }
+    emit_crimewatch_timer_notifications(&ctx, char_a, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    ctx.advance_secs(5);
+    let pre_sim_ft = ctx.now_machonet_wallclock_filetime_ticks();
+
+    // Anchor occupied system with -300_000 ms offset + 0.25 TiDi:
+    // must emit true non-zero DoSimClockRebase((pre_sim_ft, pre_sim_ft - 300s)), pin autoscaler,
+    // and re-emit scaled OnPvpTimerUpdate.
+    let offset_ms = -300_000_i64;
+    let sim_clock = ctx.anchor_system_sim_clock_with_offset_ms(sys_a, offset_ms, 0.25);
+    assert_eq!(sim_clock.sim_filetime().as_ticks(), pre_sim_ft + offset_ms * FILETIME_TICKS_PER_MS);
+    {
+        let cn = ctx.systems.cluster_nodes.read().unwrap();
+        let auto = cn
+            .system_tidi_autoscalers
+            .get(&sys_a)
+            .expect("autoscaler entry must be pinned");
+        assert_eq!(auto.pinned_factor, Some(0.25));
+    }
+    let notifs_a = ctx.drain_notifications_for_char(char_a);
+    let rebase_pos = notifs_a
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase when anchoring occupied system");
+    let pvp_pos = notifs_a
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("re-emitted OnPvpTimerUpdate after anchor rebase");
+    assert!(rebase_pos < pvp_pos);
+    let PyRep::Tuple(times) = &notifs_a[rebase_pos].args[0] else {
+        panic!("DoSimClockRebase tuple");
+    };
+    assert_eq!(times[0].as_i64(), Some(pre_sim_ft));
+    assert_eq!(
+        times[1].as_i64(),
+        Some(pre_sim_ft + offset_ms * FILETIME_TICKS_PER_MS)
+    );
+    let expected_pvp_a =
+        sim_clock.sim_filetime().as_ticks() + ((895 * FILETIME_TICKS_PER_SEC) / 4);
+    assert_eq!(notifs_a[pvp_pos].args[1].as_i64(), Some(expected_pvp_a));
+
+    // Entry rebase into a dilated 0.25x system also re-emits scaled active CrimeWatch timers.
+    let sys_b = 30_000_144_u32;
+    let char_b = 90_000_888_i64;
+    set_system_tidi_factor(&ctx, sys_b, 0.25);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == user_a)
+            .expect("user_a account")
+            .clone();
+        acc.user_id = char_b as u64;
+        acc.username = format!("entry_{char_b}");
+        snap.accounts.insert(acc.username.clone(), acc);
+
+        let mut ch = snap.characters[&char_a].clone();
+        ch.character_id = char_b;
+        ch.user_id = char_b as u64;
+        ch.name = "Entry TiDi Pilot".into();
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+        ch.solar_system_id = sys_b;
+        snap.characters.insert(char_b, ch);
+    });
+    ctx.db
+        .acquire_online_lock(char_b as u64, 9_302, Some(char_b), true, ctx.now_unix())
+        .unwrap();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_b).pvp_timer_until_unix = ctx.now_unix_secs() + 400;
+    }
+    emit_crimewatch_timer_notifications(&ctx, char_b, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    // Move char_b into space in dilated `sys_b` and trigger entry rebase.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_b) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_b;
+        }
+    });
+    assert!(emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_b, sys_b));
+    let entry_notifs = ctx.drain_notifications_for_char(char_b);
+    let r_pos = entry_notifs
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("entry DoSimClockRebase");
+    let p_pos = entry_notifs
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("entry OnPvpTimerUpdate re-emitted after entry DoSimClockRebase");
+    assert!(r_pos < p_pos);
+    let sim_b = ctx.peek_system_sim_filetime(sys_b).unwrap();
+    assert_eq!(
+        entry_notifs[p_pos].args[1].as_i64(),
+        Some(sim_b.as_ticks() + 100 * FILETIME_TICKS_PER_SEC)
+    );
+}

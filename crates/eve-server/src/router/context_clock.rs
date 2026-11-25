@@ -120,59 +120,13 @@ impl ServerContext {
             .unwrap_or(now_wall_ft)
             .as_ticks();
         let anchor_sim_ft = sim_clock.sim_filetime().as_ticks();
-        let has_tidi_override = (clamped_tidi - 1.0).abs()
-            >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
-        let had_existing_override = {
-            let mut cn = self
-                .systems
-                .cluster_nodes
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            cn.sim_clock_anchoring
-                .insert(solar_system_id, (anchor_wall_ft, anchor_sim_ft, clamped_tidi));
-            let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
-            *gen = (*gen).max(1);
-            let prev_act = cn
-                .last_sim_activation_ft_by_system
-                .get(&solar_system_id)
-                .copied()
-                .unwrap_or(0);
-            cn.last_sim_activation_ft_by_system
-                .insert(solar_system_id, anchor_sim_ft.max(prev_act));
-            if has_tidi_override {
-                false
-            } else {
-                cn.manual_tidi_overrides.contains_key(&solar_system_id)
-                    || self.systems.get_handle(solar_system_id).is_some_and(|h| {
-                        (h.tidi_factor() - 1.0).abs()
-                            >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
-                    })
-            }
-        };
-        if has_tidi_override {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                let _ = crate::services::serverops_cluster::set_system_tidi_factor(
-                    self,
-                    solar_system_id,
-                    clamped_tidi,
-                );
-            } else {
-                let mut cn = self
-                    .systems
-                    .cluster_nodes
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                cn.manual_tidi_overrides.insert(solar_system_id, clamped_tidi);
-                if let Some(handle) = self.systems.get_handle(solar_system_id) {
-                    let _ = handle.set_tidi_factor_raw(clamped_tidi);
-                }
-            }
-        } else if had_existing_override {
-            let _ = crate::services::serverops_cluster::clear_manual_system_tidi_override(
-                self,
-                solar_system_id,
-            );
-        }
+        crate::services::serverops_cluster::sync_anchored_system_tidi(
+            self,
+            solar_system_id,
+            clamped_tidi,
+            anchor_wall_ft,
+            anchor_sim_ft,
+        );
         sim_clock
     }
 

@@ -5732,3 +5732,148 @@ async fn test_stargate_post_spawn_rollback_preserves_origin_modules_charges_and_
         assert!(!snap.module_active_charges.contains_key(&neg_slave_id));
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_between_tidi_systems_reemits_rescaled_crimewatch_timers() {
+    use eve_db::clock::FILETIME_TICKS_PER_SEC;
+    use eve_server::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
+    use eve_server::services::serverops_cluster::set_system_tidi_factor;
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_196_001_i64;
+    let ship_id = 101_196_001_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let src_beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+
+    // Source system runs at 0.25x TiDi; destination system runs at 1.0x TiDi.
+    set_system_tidi_factor(&ctx, gate.from_solar_system_id, 0.25);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let t0 = ctx.now_unix();
+    let timer_exp = t0 + 900;
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        st.pvp_timer_until_unix = timer_exp;
+        st.suspect_flag_until_unix = timer_exp;
+    }
+    let sim_from_0 = ctx
+        .peek_system_sim_filetime(gate.from_solar_system_id)
+        .expect("0.25x source sim clock");
+    emit_crimewatch_timer_notifications(&ctx, char_id, t0);
+    let init_notifs = ctx.drain_notifications_for_char(char_id);
+    let init_pvp = init_notifs
+        .iter()
+        .find(|n| n.event == "OnPvpTimerUpdate")
+        .expect("initial 0.25x OnPvpTimerUpdate");
+    assert_eq!(init_pvp.args[0].as_i64(), Some(201));
+    assert_eq!(
+        init_pvp.args[1].as_i64(),
+        Some(sim_from_0.as_ticks() + 225 * FILETIME_TICKS_PER_SEC)
+    );
+
+    // Advance 20s wall (880s remaining) and emit cooldown transition before jumping out to 1.0x.
+    ctx.advance_secs(20);
+    emit_crimewatch_timer_notifications(&ctx, char_id, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let res_out = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(src_beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdStargateJump from 0.25x into 1.0x");
+    let PyRep::KeyVal(kv_out) = res_out else {
+        panic!("expected KeyVal from CmdStargateJump");
+    };
+    let dest_beyonce_id = kv_out.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+
+    let out_notifs = ctx.drain_notifications_for_char(char_id);
+    let rebase_out_pos = out_notifs
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase on 0.25x -> 1.0x jump");
+    let pvp_out_pos = out_notifs
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("re-emitted OnPvpTimerUpdate on 0.25x -> 1.0x jump");
+    let crim_out_pos = out_notifs
+        .iter()
+        .position(|n| n.event == "OnCriminalTimerUpdate")
+        .expect("re-emitted OnCriminalTimerUpdate (Suspect) on 0.25x -> 1.0x jump");
+    assert!(rebase_out_pos < pvp_out_pos && rebase_out_pos < crim_out_pos);
+    let expected_1x_exp = ctx.now_machonet_wallclock_filetime_ticks() + 880 * FILETIME_TICKS_PER_SEC;
+    assert_eq!(out_notifs[pvp_out_pos].args[0].as_i64(), Some(202));
+    assert_eq!(out_notifs[pvp_out_pos].args[1].as_i64(), Some(expected_1x_exp));
+    assert_eq!(out_notifs[crim_out_pos].args[0].as_i64(), Some(304));
+    assert_eq!(out_notifs[crim_out_pos].args[1].as_i64(), Some(expected_1x_exp));
+
+    // Wait past 7s jump session change cooldown (868s left -> 868 * 0.25 = 217s sim) and jump back into 0.25x.
+    ctx.advance_secs(12);
+    let dest_gate = ctx.sde.jumps[&gate.destination_stargate_id].clone();
+    let dest_gate_radius = stargate_radius(&ctx, &dest_gate);
+    let dest_h = ctx.systems.get_handle(gate.to_solar_system_id).unwrap();
+    assert!(
+        dest_h
+            .set_ball_position(
+                ship_id,
+                dest_gate.position + DVec3::new(dest_gate_radius + 800.0, 0.0, 0.0),
+            )
+            .await
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(dest_beyonce_id),
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.destination_stargate_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdStargateJump from 1.0x back into 0.25x");
+
+    let back_notifs = ctx.drain_notifications_for_char(char_id);
+    let rebase_back_pos = back_notifs
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase on 1.0x -> 0.25x jump");
+    let pvp_back_pos = back_notifs
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("re-emitted OnPvpTimerUpdate on 1.0x -> 0.25x jump");
+    let crim_back_pos = back_notifs
+        .iter()
+        .position(|n| n.event == "OnCriminalTimerUpdate")
+        .expect("re-emitted OnCriminalTimerUpdate (Suspect) on 1.0x -> 0.25x jump");
+    assert!(rebase_back_pos < pvp_back_pos && rebase_back_pos < crim_back_pos);
+    let sim_from_back = ctx
+        .peek_system_sim_filetime(gate.from_solar_system_id)
+        .expect("0.25x source sim clock on return");
+    let expected_025x_exp = sim_from_back.as_ticks() + 217 * FILETIME_TICKS_PER_SEC;
+    assert_eq!(back_notifs[pvp_back_pos].args[0].as_i64(), Some(202));
+    assert_eq!(back_notifs[pvp_back_pos].args[1].as_i64(), Some(expected_025x_exp));
+    assert_eq!(back_notifs[crim_back_pos].args[0].as_i64(), Some(304));
+    assert_eq!(back_notifs[crim_back_pos].args[1].as_i64(), Some(expected_025x_exp));
+}
