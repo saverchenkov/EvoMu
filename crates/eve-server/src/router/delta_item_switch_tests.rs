@@ -6,11 +6,10 @@
 use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
 };
-use super::delta_item_compare::{
-    flush_item_compare_summary, item_compare_summary, normalize_dispatch_method_label,
-    push_dispatch_rpc_method_guard, set_item_compare_override_for_test,
-};
 use super::delta_item_switch::*;
+use super::delta_item_switch_report::{
+    normalize_dispatch_method_label, push_dispatch_rpc_method_guard,
+};
 use super::ServerContext;
 use crate::services::notify_emitters_character_services::{
     save_industry_material_monitors, IndustryMaterialMonitorSub,
@@ -32,7 +31,6 @@ pub(super) fn setup_online_pilot_in_station(
     ship_id: i64,
 ) {
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
-    set_item_compare_override_for_test(ctx, Some(false), Some(None));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&pilot_id) {
             ch.station_id = Some(station_id);
@@ -58,7 +56,6 @@ pub(super) fn setup_online_pilot_in_station(
     ctx.db
         .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_500)
         .expect("acquire online lock");
-    set_item_compare_override_for_test(ctx, None, None);
     let _ = ctx.drain_notifications_for_char(pilot_id);
 }
 
@@ -374,146 +371,6 @@ async fn disabled_switches_preserve_handwritten_only_item_delivery() {
         !projected_item_switch_summary(&ctx).has_activity(),
         "disabled switches must not emit switch telemetry"
     );
-}
-
-#[tokio::test]
-async fn mutation_switch_projects_once_dedupes_helpers_and_keeps_blueprints_compare_only() {
-    let ctx = test_ctx();
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_200_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-        char_same_scene_item_mutation: true,
-        char_same_scene_item_deleted: false,
-        char_same_scene_item_outside_rpc: false,
-        char_same_scene_item_fitted: false,
-        char_all_items: false,
-        corp_all_items: false,
-    });
-
-    let mut shadow = ShadowClient::from_world(pilot_id, &ctx.db, Some(&ctx.sde));
-    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-
-    let trit_id = 992_200_020_i64;
-    let trit = InventoryItemRecord {
-        item_id: trit_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 500,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
-
-    // 1. Create inside dispatch: commit projection emits OnItemChange; notify_item_mutation skips duplicate.
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("proj_create", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(trit_id, trit.clone());
-                Ok(())
-            })
-            .expect("create tx");
-        ctx.notify_item_mutation(pilot_id, None, Some(&trit));
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let create_notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(
-        create_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        1,
-        "mutation switch must emit OnItemChange once on commit and suppress duplicate helper"
-    );
-    assert_eq!(
-        create_notifs
-            .iter()
-            .filter(|n| n.event == "OnMultipleItemChange")
-            .count(),
-        1
-    );
-    for n in &create_notifs {
-        shadow.apply_notification(&n.event, &n.args);
-    }
-    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-
-    // 2. Same-scene move + stack update into active ship cargo + notify_item_record_change dedupe.
-    let mut moved = trit.clone();
-    moved.location_id = ship_id;
-    moved.flag = InventoryFlag::Cargo;
-    moved.quantity = 300;
-    moved.version = 2;
-    let mut dup_record = Vec::new();
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("proj_move", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(trit_id, moved.clone());
-                Ok(())
-            })
-            .expect("move tx");
-        dup_record = ctx.notify_item_record_change(
-            pilot_id,
-            &moved,
-            vec![
-                (3, PyRep::Integer(station_id)),
-                (4, PyRep::Integer(InventoryFlag::Hangar as i64)),
-            ],
-        );
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    assert!(dup_record.is_empty(), "notify_item_record_change must consume dedupe token");
-    let proj_move = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(proj_move.iter().filter(|n| n.event == "OnItemChange").count(), 1);
-    for n in &proj_move {
-        shadow.apply_notification(&n.event, &n.args);
-    }
-    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
-
-    // 3. Blueprint creation: OnItemChange projects on commit, OnBlueprintsUpdated stays compare-only
-    //    until notify_item_mutation emits it.
-    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type in sde");
-    let bp_id = 992_200_030_i64;
-    let bp = InventoryItemRecord {
-        item_id: bp_id,
-        type_id: bp_type_id,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 1,
-        singleton: true,
-        is_blueprint_copy: true,
-        blueprint_runs_remaining: Some(5),
-        version: 1,
-        ..Default::default()
-    };
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("proj_bp_create", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(bp_id, bp.clone());
-                Ok(())
-            })
-            .expect("bp tx");
-        ctx.notify_item_mutation(pilot_id, None, Some(&bp));
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let bp_notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(bp_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 1);
-    assert_eq!(
-        bp_notifs
-            .iter()
-            .filter(|n| n.event == "OnBlueprintsUpdated")
-            .count(),
-        1
-    );
-
-    let summary = flush_item_compare_summary(&ctx);
-    assert_eq!(summary.item_change.projected_only, 0, "summary={summary:#?}");
-    assert_eq!(summary.item_change.hand_written_only, 0, "summary={summary:#?}");
-    assert_eq!(summary.blueprints_updated.matched, 1, "summary={summary:#?}");
-    assert_eq!(summary.blueprints_updated.projected_only, 0, "summary={summary:#?}");
 }
 
 #[tokio::test]
@@ -1083,8 +940,6 @@ async fn guardrail4a_in_tx_fitted_trashed_keeps_loc10_flag147_and_first_set_hold
         992_700_022_i64,
     );
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    // Explicitly verify compare OFF + deleted switch ON still suppresses conflicting tombstone.
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
         char_same_scene_item_mutation: false,
         char_same_scene_item_deleted: true,
@@ -1194,7 +1049,6 @@ async fn guardrail4a_in_tx_fitted_trashed_keeps_loc10_flag147_and_first_set_hold
         .collect();
     assert_eq!(charge_notifs.len(), 1, "held HiSlot0 charge still emitted once by hand-written helper");
     assert_eq!(charge_notifs[0].args[0].dbrow_get("locationID"), Some(&PyRep::Integer(6)));
-    assert_eq!(item_compare_summary(&ctx).explicit_in_tx_effects, 0, "compare remains off");
 }
 
 #[tokio::test]
@@ -3223,7 +3077,6 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_990_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
 
     let mod_a_id = 992_990_021_i64;
@@ -3994,8 +3847,6 @@ async fn track5b_s1_blueprints_created_in_place_locked_dedupe_exclusions_and_com
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled());
-    set_item_compare_override_for_test(&ctx, Some(true), Some(None));
-    let _ = flush_item_compare_summary(&ctx);
 
     let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type");
     let bpo_id = 993_920_021_i64;
@@ -4070,10 +3921,6 @@ async fn track5b_s1_blueprints_created_in_place_locked_dedupe_exclusions_and_com
         .collect();
     assert_eq!(bp_edits.len(), 1, "in-place ME/TE edit must project exactly 1 OnBlueprintsUpdated");
     assert_eq!(bp_edits[0].args, vec![PyRep::Integer(pilot_id)]);
-
-    let cmp = flush_item_compare_summary(&ctx);
-    assert_eq!(cmp.blueprints_updated.projected_only, 0);
-    assert_eq!(cmp.blueprints_updated.hand_written_only, 0);
 
     // 2b. Corp-owner OnBlueprintsUpdated addressed to pilot (owner_id != char_id) must NOT be swallowed.
     ctx.notify(

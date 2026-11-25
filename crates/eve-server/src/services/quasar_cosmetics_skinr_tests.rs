@@ -682,9 +682,7 @@ fn blend_mode_2_and_3_exclude_secondary_pattern_material_slot_8() {
 
 #[test]
 fn skinr_runtime_sink_strip_and_job_settle_are_isolated_per_repository() {
-    use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
     use eve_db::WorldRepository;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let sde = shared_sde();
     let db_a = Arc::new(WorldRepository::with_demo_seed());
@@ -692,22 +690,24 @@ fn skinr_runtime_sink_strip_and_job_settle_are_isolated_per_repository() {
     let state_a = SkinrCosmeticsState::load(Arc::clone(&db_a), Arc::clone(&sde));
     let state_b = SkinrCosmeticsState::load(Arc::clone(&db_b), Arc::clone(&sde));
 
-    let count_a = Arc::new(AtomicUsize::new(0));
-    let count_b = Arc::new(AtomicUsize::new(0));
-    let count_a_ref = Arc::clone(&count_a);
-    let count_b_ref = Arc::clone(&count_b);
-    let sink_a: crate::quasar_gateway::MachoNotifySink = Arc::new(move |_, _, _, _| {
-        count_a_ref.fetch_add(1, Ordering::Relaxed);
-    });
-    let sink_b: crate::quasar_gateway::MachoNotifySink = Arc::new(move |_, _, _, _| {
-        count_b_ref.fetch_add(1, Ordering::Relaxed);
-    });
-    let lock_a: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>> =
-        Arc::new(RankedRwLock::new(Some(sink_a)));
-    let lock_b: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>> =
-        Arc::new(RankedRwLock::new(Some(sink_b)));
-    register_macho_notify_sink(&db_a, &lock_a);
-    register_macho_notify_sink(&db_b, &lock_b);
+    let ctx_a = Arc::new(crate::router::ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::clone(&db_a),
+    ));
+    let ctx_b = Arc::new(crate::router::ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::clone(&db_b),
+    ));
+    ctx_a
+        .db
+        .acquire_online_lock(1, 901_001, Some(90_000_001), true, ctx_a.now_unix())
+        .unwrap();
+    ctx_b
+        .db
+        .acquire_online_lock(1, 901_002, Some(90_000_001), true, ctx_b.now_unix())
+        .unwrap();
+    let _ = ctx_a.drain_notifications_for_char(90_000_001);
+    let _ = ctx_b.drain_notifications_for_char(90_000_001);
 
     let item = InventoryItemRecord {
         item_id: 700_001,
@@ -720,18 +720,14 @@ fn skinr_runtime_sink_strip_and_job_settle_are_isolated_per_repository() {
         version: 1,
         ..Default::default()
     };
-    emit_item_changes(
-        &db_a,
-        &sde,
-        90_000_001,
-        &[ItemChangeEvent {
-            old: None,
-            new: Some(item),
-            custom_name: String::new(),
-        }],
-    );
-    assert_eq!(count_a.load(Ordering::Relaxed), 1);
-    assert_eq!(count_b.load(Ordering::Relaxed), 0);
+    db_a.with_mut_snapshot(|s| {
+        s.items.insert(700_001, item);
+    });
+    assert!(ctx_a
+        .drain_notifications_for_char(90_000_001)
+        .iter()
+        .any(|n| n.event == "OnItemChange"));
+    assert!(ctx_b.drain_notifications_for_char(90_000_001).is_empty());
 
     state_a
         .data

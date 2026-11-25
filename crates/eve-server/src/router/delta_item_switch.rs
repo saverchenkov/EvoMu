@@ -37,7 +37,8 @@ use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 
 use super::cache_notifications::register_dispatch_switch_handle;
-use super::delta_item_compare::{CompareOriginScope, TxItemEffectKeys};
+use super::delta_commit_listener::TxItemEffectKeys;
+use super::delta_item_switch_report::{CompareOriginScope, SwitchTelemetryState};
 use super::delta_item_corp::{
     collect_switched_item_recipients_for_change, is_corp_blueprint_owner_eligible,
     resolve_online_non_transitioned_corp_recipients,
@@ -47,7 +48,6 @@ use super::delta_item_outside_rpc::{
     invalidate_covered_monitors_for_types, merge_covered_industry_monitors,
     outside_rpc_method_label, retain_monitors_excluding_chars, OutsideRpcLedgerState,
 };
-use super::delta_item_switch_report::SwitchTelemetryState;
 use super::delta_projection::{
     build_projected_item_change_args, compute_item_change_entries, is_blueprint_type,
     OnlineCharacterLookup,
@@ -62,18 +62,13 @@ pub use super::delta_item_outside_rpc::SwitchScopeOutcomeCounts;
 pub(crate) use super::delta_item_outside_rpc::{
     classify_hand_written_not_covered_reason_in_snap,
     classify_hand_written_not_covered_reason_with_fitted_in_snap,
-    evaluate_hand_written_covered_class_in_snap, evaluate_hand_written_first_set_and_next_in_snap,
-    evaluate_hand_written_outside_first_set_in_snap,
+    evaluate_hand_written_covered_class_in_snap, evaluate_hand_written_outside_first_set_in_snap,
 };
-#[cfg(test)]
-pub(crate) use super::delta_item_outside_rpc::evaluate_hand_written_first_set_in_snap;
 pub use super::delta_item_switch_report::{
     AccountSwitchCallSiteCounts, AccountSwitchSummary, ProjectedItemSwitchSummary,
-    SwitchCallSiteCounts, SwitchTelemetryCounts, WouldQualifyClassCounts,
+    SwitchCallSiteCounts, SwitchTelemetryCounts,
 };
-pub(crate) use super::delta_item_switch_report::{
-    format_item_compare_markdown_report, NotCoveredReason, WouldQualifyFlags,
-};
+pub(crate) use super::delta_item_switch_report::NotCoveredReason;
 
 const MAX_CONTAINER_WALK_DEPTH: usize = 8;
 
@@ -1018,12 +1013,6 @@ impl ProjectedItemDedupeLedger {
         }
     }
 
-    fn has_transitioned_char(&self, scope_id: u64, char_id: i64) -> bool {
-        self.dispatch_buckets
-            .get(&scope_id)
-            .is_some_and(|b| b.transitioned_chars.contains(&char_id))
-    }
-
     fn is_item_transition_suppressed_in_scope(
         &self,
         scope_id: u64,
@@ -1156,35 +1145,6 @@ impl ProjectedItemSwitchHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn apply_commit_dedupe_updates(
-        &self,
-        scope_id: Option<u64>,
-        changes: &ChangeSet,
-        transitioned_chars: &[i64],
-        tokens: Vec<CommitProjectedToken>,
-    ) {
-        let origin_scope = if scope_id.is_some() {
-            CompareOriginScope::Dispatch
-        } else {
-            CompareOriginScope::Neither
-        };
-        let outside_rpc = self.config().char_same_scene_item_outside_rpc;
-        let empty_bp = HashSet::new();
-        self.apply_commit_dedupe_updates_with_mode(
-            scope_id,
-            origin_scope,
-            outside_rpc,
-            changes,
-            transitioned_chars,
-            tokens,
-            &empty_bp,
-            &[],
-            &[],
-            &[],
-        );
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_commit_dedupe_updates_with_mode(
         &self,
@@ -1291,11 +1251,6 @@ impl ProjectedItemSwitchHandle {
         }
         let mut guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear_outside_dispatch_chars(char_ids);
-    }
-
-    pub(crate) fn has_transitioned_char(&self, scope_id: u64, char_id: i64) -> bool {
-        let guard = self.dedupe.lock().unwrap_or_else(|e| e.into_inner());
-        guard.has_transitioned_char(scope_id, char_id)
     }
 
     pub(crate) fn is_item_transition_suppressed_in_scope(
@@ -1855,100 +1810,6 @@ pub(crate) fn online_non_transitioned_owner<'a>(
     online.is_character_online(owner_id, ch.user_id).then_some(ch)
 }
 
-/// Shared marker-free direct-slot first-set qualification check (`#931`): online human owner
-/// with no cross-owner transfer or scene/ship transition where both endpoints sit directly inside
-/// the pilot's docked hangar (`flag 4`) or active ship cargo (`flag 5`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn is_first_set_direct_slot_pair(
-    recipient_char_id: i64,
-    before_opt: Option<&InventoryItemRecord>,
-    after_opt: Option<&InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot,
-    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> Option<ProjectedItemOpKind> {
-    let (owner_id, op_kind) = pair_owner_and_op_kind(before_opt, after_opt)?;
-    let ch = online_non_transitioned_owner(
-        owner_id,
-        recipient_char_id,
-        snap_after,
-        changed_chars,
-        online,
-        sde,
-    )?;
-    (before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
-        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch)))
-    .then_some(op_kind)
-}
-
-/// Shared first-set qualification check (`#931` Check #28–#30) scoped to in-dispatch for compare
-/// baseline while sharing the marker-free direct-slot predicate.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn is_first_set_item_change_pair(
-    in_dispatch: bool,
-    recipient_char_id: i64,
-    before_opt: Option<&InventoryItemRecord>,
-    after_opt: Option<&InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot,
-    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> Option<ProjectedItemOpKind> {
-    if !in_dispatch {
-        return None;
-    }
-    is_first_set_direct_slot_pair(
-        recipient_char_id,
-        before_opt,
-        after_opt,
-        snap_after,
-        changed_chars,
-        online,
-        sde,
-    )
-}
-
-/// Evaluates Track 3C-2 telemetry-only `would_qualify` flags (`"fitted"` and `"tick"`) on a
-/// committed item pair (`#931` Section 4). Class `"tick"` is marker-free (`!in_dispatch`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_projected_next_classes(
-    in_dispatch: bool,
-    in_tick: bool,
-    recipient_char_id: i64,
-    before_opt: Option<&InventoryItemRecord>,
-    after_opt: Option<&InventoryItemRecord>,
-    snap_after: &WorldStateSnapshot,
-    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> WouldQualifyFlags {
-    let Some((owner_id, _)) = pair_owner_and_op_kind(before_opt, after_opt) else {
-        return WouldQualifyFlags::default();
-    };
-    let Some(ch) = online_non_transitioned_owner(
-        owner_id,
-        recipient_char_id,
-        snap_after,
-        changed_chars,
-        online,
-        sde,
-    ) else {
-        return WouldQualifyFlags::default();
-    };
-    let direct_slot = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
-        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
-    WouldQualifyFlags {
-        fitted: (in_dispatch || in_tick)
-            && evaluate_fitted_coords_pair(
-                before_opt.map(|r| (r.location_id, r.flag as i64)),
-                after_opt.map(|r| (r.location_id, r.flag as i64)),
-                ch,
-            ),
-        tick: !in_dispatch && direct_slot,
-    }
-}
-
 /// Evaluates `changes.items` under active [`ProjectedItemSwitchConfig`], updating dispatch/outside
 /// item & blueprint facts and per-scope telemetry and returning `OnItemChange` and
 /// `OnBlueprintsUpdated` specs.
@@ -2271,7 +2132,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                         recipient_char_id,
                         recipient_user_id: recip.character.user_id,
                         id_type: recip.id_type,
-                        item_id: change.key,
                         args: item_payload,
                         industry_scopes,
                     });
@@ -2281,7 +2141,6 @@ pub(crate) fn collect_switched_char_same_scene_item_specs(
                     recipient_char_id,
                     recipient_user_id: recip.character.user_id,
                     id_type: recip.id_type,
-                    item_id: change.key,
                     args: item_payload.clone(),
                     industry_scopes: industry_scopes.clone(),
                 });

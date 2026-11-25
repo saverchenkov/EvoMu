@@ -475,20 +475,14 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
     use std::sync::atomic::Ordering;
 
     let router = new_router();
+    let ctx = Arc::new(crate::router::ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::clone(&router.db),
+    ));
     let now = 1_820_000_000_u64;
     let uid = 99_401_u64;
     let cid = 94_400_001_i64;
     let station_id = 60_003_760_i64;
-
-    let captured_notifs: Arc<std::sync::Mutex<Vec<(i64, String, Vec<PyRep>)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink_log = Arc::clone(&captured_notifs);
-    *router.macho_notify_sink.write().unwrap() =
-        Some(Arc::new(move |target, event, _service, args| {
-            if let crate::router::NotificationTarget::Character(c) = target {
-                sink_log.lock().unwrap().push((c, event.to_string(), args));
-            }
-        }));
 
     let mut sess = make_sess(Some(uid), Some(cid), 0);
     sess.station_id = Some(station_id);
@@ -527,6 +521,20 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
         snap.characters.insert(ch_alt.character_id, ch_alt);
 
         snap.account_plex_vault.insert(uid, 2_000);
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let username = format!("test_{uid}");
+            snap.accounts.insert(
+                username.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
         snap.quasar_commerce.payment_tokens = vec![
             PaymentTokenRecord {
                 id: 9401,
@@ -741,6 +749,10 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
     });
 
     // 3. OnItemChange emits key `9` (`ixStackSize`), NEVER key `6` (`ixGroupID`), when stacking.
+    ctx.db
+        .acquire_online_lock(uid, 944_001, Some(cid), true, now)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(cid);
     let stack_purch = WireMessage {
         fields: vec![
             WireField {
@@ -766,13 +778,13 @@ fn store_purchase_consolidation_qty_overflow_virtual_reject_idempotency_and_on_i
         STATUS_OK
     );
     {
-        let logs = captured_notifs.lock().unwrap();
-        let (_, _, args) = logs
+        let logs = ctx.drain_notifications_for_char(cid);
+        let n = logs
             .iter()
-            .find(|(c, ev, _)| *c == cid && ev == "OnItemChange")
+            .find(|n| n.event == "OnItemChange")
             .expect("expected OnItemChange notification");
-        let PyRep::Dict(entries) = &args[1] else {
-            panic!("expected OnItemChange change dict, got {:?}", args[1]);
+        let PyRep::Dict(entries) = &n.args[1] else {
+            panic!("expected OnItemChange change dict, got {:?}", n.args[1]);
         };
         assert!(
             entries

@@ -1133,7 +1133,6 @@ impl ServerContext {
                 .write()
                 .unwrap_or_else(|e| e.into_inner()) = Some(sink);
         }
-        crate::services::quasar_payment_store_types::register_item_mutation_notifier(&ctx);
         super::startup_seeds::run_startup_global_seeds(&ctx);
         ctx.install_tx_post_commit_listener(); ctx.wire_module_deactivation_hook();
         ctx
@@ -2019,7 +2018,6 @@ impl ServerContext {
         if secs == 0 {
             return;
         }
-        let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&self.db));
         crate::sp6_lifecycle::on_advance_secs_internal(
             self,
             prev_unix,

@@ -829,7 +829,6 @@ pub(crate) fn step_zarzakh_gravity_hazard_with_notifications(
     if sys_id != 30_100_000 {
         return Vec::new();
     }
-    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(db_opt.map(|d| &**d));
     let cfg = sde
         .map(eve_sde::SdeRegistry::zarzakh_deathzone_config)
         .unwrap_or_default();

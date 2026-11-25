@@ -13,9 +13,7 @@ use eve_db::{
 use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
 };
-use super::delta_item_compare::{
-    push_dispatch_rpc_method_guard, set_item_compare_override_for_test, with_compare_tick_scope,
-};
+use super::delta_item_switch_report::{push_dispatch_rpc_method_guard, with_compare_tick_scope};
 use super::delta_item_recipients::{
     resolve_item_holder, ItemHolderKind, RULE_CORPORATION, RULE_FORMER_MEMBER,
     RULE_HOLDER_ACTING_PILOT, RULE_HOLDER_OWNER, RULE_OWNER, RULE_OWNERLESS,
@@ -395,7 +393,6 @@ async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_z
 
     // Pre-seed an ownerless item outside RPC, then mutate it outside RPC.
     let loose_ownerless = 995_932_010_i64;
-    set_item_compare_override_for_test(&ctx, Some(false), Some(None));
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             loose_ownerless,
@@ -411,7 +408,6 @@ async fn step3a_outside_rpc_ownerless_and_same_commit_ownerless_container_emit_z
             },
         );
     });
-    set_item_compare_override_for_test(&ctx, None, None);
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
     ctx.db

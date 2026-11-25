@@ -438,15 +438,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "router/delta_item_compare.rs",
-      "symbol": "COMPARE_TICK_SCOPE",
-      "kind": "task_local",
-      "group": "G_process_wide_allowlist",
-      "max_count": 1,
-      "rationale": "Diagnostic task-local flag tagging async server ticks for #931 item-compare shadow telemetry."
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "router/dispatch.rs",
       "symbol": "ACTIVE_RPC_CALL_ID",
       "kind": "task_local",

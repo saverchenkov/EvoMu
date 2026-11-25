@@ -48,7 +48,6 @@ pub struct CosmeticsMarketState {
     db: Arc<WorldRepository>,
     pub data: RwLock<CosmeticsMarketData>,
     pub skinr: Arc<SkinrCosmeticsState>,
-    macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
 }
 
 const MARKET_COSMETICS_SLOT_KEY: &str = "quasar_cosmetics_market_runtime";
@@ -120,12 +119,12 @@ impl CosmeticsMarketState {
         db: Arc<WorldRepository>,
         _sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
-        macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
+        _macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
     ) -> Arc<Self> {
         let data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
         });
-        let state = Arc::new(Self { db, data: RwLock::new(data), skinr, macho_notify_sink });
+        let state = Arc::new(Self { db, data: RwLock::new(data), skinr });
         register_live_market_state(&state);
         state
     }
@@ -715,7 +714,6 @@ fn component_initiate_purchase(
         .map_err(|_| (STATUS_BAD_REQUEST, "Component delivery quantity exceeds i32::MAX".to_string()))?;
     let mut debited_bal: Option<IskCents> = None;
     let mut plex_notice: Option<(u64, u64, i64, i64)> = None;
-    let mut delivered_item: Option<InventoryItemRecord> = None;
     let succeeded = st.db.with_mut_snapshot(|s| {
         let Some((ch_station, ch_struct, ch_home)) = s
             .characters
@@ -759,8 +757,7 @@ fn component_initiate_purchase(
                 version: 1,
                 ..Default::default()
             };
-            s.items.insert(item_id, rec.clone());
-            delivered_item = Some(rec);
+            s.items.insert(item_id, rec);
         }
         true
     });
@@ -772,19 +769,6 @@ fn component_initiate_purchase(
             listing.component_item_type_id,
             activate_qty,
             now,
-        );
-    }
-    if let Some(rec) = delivered_item {
-        let sink = st.macho_notify_sink.read().unwrap_or_else(|e| e.into_inner()).clone();
-        super::quasar_cosmetics_skinr::emit_item_changes_with_sink(
-            sink.as_ref(),
-            &st.skinr.sde,
-            cid as i64,
-            &[super::quasar_cosmetics_skinr::ItemChangeEvent {
-                old: None,
-                new: Some(rec),
-                custom_name: String::new(),
-            }],
         );
     }
     let _ = debited_bal;

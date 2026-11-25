@@ -540,8 +540,6 @@ fn fulfillment_and_purchase_nested_order_omega_and_raw_fallback_edges() {
 
 #[test]
 fn auto_store_seed_suppression_and_item_notifier_are_isolated_per_repository() {
-    use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
-
     let db_a = Arc::new(WorldRepository::with_demo_seed());
     let db_b = Arc::new(WorldRepository::with_demo_seed());
     suppress_auto_store_seed_for_db(&*db_a, true, |dba| {
@@ -575,10 +573,13 @@ fn auto_store_seed_suppression_and_item_notifier_are_isolated_per_repository() {
         version: 1,
         ..Default::default()
     };
-    let dummy_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>> =
-        Arc::new(RankedRwLock::new(None));
-    emit_store_item_mutations(&ctx_a.db, &ctx_a.sde, &dummy_sink, &[(char_id, None, Some(item))]);
+    ctx_a.db.with_mut_snapshot(|s| {
+        s.items.insert(910_001, item);
+    });
 
-    assert!(!ctx_a.drain_notifications_for_char(char_id).is_empty());
+    assert!(ctx_a
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnItemChange"));
     assert!(ctx_b.drain_notifications_for_char(char_id).is_empty());
 }

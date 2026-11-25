@@ -1440,18 +1440,14 @@ fn targeted_offer_audience_and_non_1001_omega_delivery_parity() {
 fn targeted_fail_closed_string_offer_id_multi_month_omega_and_item_notifications() {
     let router = new_router();
     let db = Arc::clone(&router.db);
+    let ctx = Arc::new(crate::router::ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::clone(&db),
+    ));
     let uid = 42_001u64;
     let cid = 94_200_001i64;
     let station_id = 60_003_760i64;
     let now = 1_700_000_000u64;
-
-    let emitted_items: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink_log = Arc::clone(&emitted_items);
-    *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _service, _args| {
-        if let crate::router::NotificationTarget::Character(c) = target {
-            sink_log.lock().unwrap().push((c, event.to_string()));
-        }
-    }));
 
     let mut sess = make_sess(Some(uid), Some(cid), 0);
     sess.station_id = Some(station_id);
@@ -1459,6 +1455,20 @@ fn targeted_fail_closed_string_offer_id_multi_month_omega_and_item_notifications
     sess_nostation.station_id = None;
 
     db.with_mut_snapshot(|snap| {
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let username = format!("test_{uid}");
+            snap.accounts.insert(
+                username.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
         snap.account_plex_vault.insert(uid, 5_000);
         let mut ch = snap.characters.get(&90_000_001).cloned().expect("template char");
         ch.character_id = cid;
@@ -1619,13 +1629,19 @@ fn targeted_fail_closed_string_offer_id_multi_month_omega_and_item_notifications
     assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid).copied()), Some(5_000));
     assert!(db.with_snapshot(|s| !s.quasar_commerce.payment_tokens[0].consumed));
 
-    // 3. Valid physical PurchaseRequest & TokenRequest emit OnItemChange via macho_notify_sink.
+    // 3. Valid physical PurchaseRequest & TokenRequest emit OnItemChange via commit-driven projection.
+    ctx.db
+        .acquire_online_lock(uid, 942_001, Some(cid), true, now)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(cid);
     assert_eq!(call(&router, &sess, "eve_public.plex.vault.api.PurchaseRequest", purch_8201, now).status_code, STATUS_OK);
     assert_eq!(call(&router, &sess, "eve_public.payment.purchase.api.TokenRequest", tok_8201_nostat, now).status_code, STATUS_OK);
-    let item_notifs = emitted_items.lock().unwrap();
-    let on_item_count = item_notifs.iter().filter(|(c, ev)| *c == cid && ev == "OnItemChange").count();
+    let on_item_count = ctx
+        .drain_notifications_for_char(cid)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
+        .count();
     assert!(on_item_count >= 2, "expected OnItemChange for both PurchaseRequest and TokenRequest, got {on_item_count}");
-    drop(item_notifs);
 
     // 4. BF-05: 3-month Omega (product.quantity = 3) grants 90 days (90 * 86_400s) and sets schedule interval_days = 90.
     let tok_8202 = WireMessage {

@@ -3,8 +3,7 @@
 //! Wires [`DeltaStateCache`] + [`DefaultDeltaProjection::wallets_only`] into
 //! `WorldRepository::register_post_commit_listener` so committed `ChangeSet` deltas on
 //! personal ISK (`"cash"`), corp divisions `1..=7` (`"cash"` / `"cash2".."cash7"`), and PLEX
-//! (`"plex"`) materialize `OnAccountChange` notifications, while forwarding committed item
-//! changes to [`delta_item_compare::ItemCompareBridge`].
+//! (`"plex"`) materialize `OnAccountChange` notifications alongside switched item projection.
 
 #![forbid(unsafe_code)]
 
@@ -17,7 +16,6 @@ use crate::router::cache_notifications::{
     MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
-use crate::router::delta_item_compare::{ItemCompareBridge, TxItemEffectKeys};
 use crate::router::delta_projection::{
     materialize_pending_notifications, resolve_all_notifications, DefaultDeltaProjection,
     DeltaProjectionHook, DeltaSink, DeltaStateCache, OnlineCharacterLookup, PlexDelta,
@@ -112,11 +110,61 @@ impl EpochLedger {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct TxItemEffectKeys {
+    item_keys: HashSet<(i64, i64)>,
+    blueprint_keys: HashSet<(i64, i64)>,
+}
+
+impl TxItemEffectKeys {
+    fn observe_item_rows(&mut self, char_id: i64, rows: &[PyRep]) {
+        for entry in rows {
+            let row = match entry {
+                PyRep::Tuple(pair) | PyRep::List(pair) => pair.first(),
+                other => Some(other),
+            };
+            if let Some(PyRep::Integer(item_id)) = row.and_then(|r| r.dbrow_get("itemID")) {
+                self.item_keys.insert((char_id, *item_id));
+            }
+        }
+    }
+
+    fn observe(&mut self, char_id: i64, event: &str, payload: &[PyRep]) {
+        match event {
+            "OnItemChange" => {
+                if let Some(PyRep::Integer(item_id)) =
+                    payload.first().and_then(|r| r.dbrow_get("itemID"))
+                {
+                    self.item_keys.insert((char_id, *item_id));
+                }
+            }
+            "OnMultipleItemChange" | "OnItemsChanged" => {
+                if let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload.first() {
+                    self.observe_item_rows(char_id, rows);
+                }
+            }
+            "OnBlueprintsUpdated" => {
+                if let [PyRep::Integer(owner_id), ..] = payload {
+                    self.blueprint_keys.insert((char_id, *owner_id));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn contains_item(&self, char_id: i64, item_id: i64) -> bool {
+        self.item_keys.contains(&(char_id, item_id))
+    }
+
+    pub(crate) fn contains_blueprint(&self, char_id: i64, owner_id: i64) -> bool {
+        self.blueprint_keys.contains(&(char_id, owner_id))
+    }
+}
+
 const COMMIT_BRIDGES_SLOT_KEY: &str = "router_delta_commit_bridges";
 
 struct DeltaCommitBridgeState {
     recent_epoch: Mutex<EpochLedger>,
-    item_compare: Arc<ItemCompareBridge>,
 }
 
 struct CommitBridgesRepoSlot {
@@ -332,7 +380,8 @@ fn project_wallet_notifs_for_commit(
 
 /// Registers the authoritative DB post-commit listener on `ctx.db`, dispatching explicit
 /// `TxNotificationEffect`s, projecting committed wallet / corp-division / PLEX Vault deltas
-/// (`OnAccountChange`), and wiring compare-only item/blueprint parity telemetry (`#931` Tracks 1–2).
+/// Registers the post-commit delta listener projecting wallet/corp/PLEX changes (`OnAccountChange`)
+/// and switched item/blueprint deltas (`#931`).
 pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
     let slot = commit_bridges_slot(&ctx.db);
@@ -344,10 +393,6 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
         }
         let state = Arc::new(DeltaCommitBridgeState {
             recent_epoch: Mutex::new(EpochLedger::default()),
-            item_compare: Arc::new(ItemCompareBridge::new_with_switches(
-                ctx.db.instance_id(),
-                Arc::clone(&ctx.projected_item_switches),
-            )),
         });
         map.insert(pend_ptr, Arc::downgrade(&state));
         state
@@ -464,11 +509,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 }
             }
 
-            let mut switched_projected_keys = HashSet::new();
-            let mut switched_bp_keys = HashSet::new();
             if !changes.items.is_empty() || !changes.characters.is_empty() {
                 let origin_scope =
-                    bridge.item_compare.origin_scope_telemetry(staging_scope_info.is_some());
+                    crate::router::delta_item_switch_report::origin_scope_telemetry_for_commit(
+                        staging_scope_info.is_some(),
+                    );
                 let batch = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
                     &switches,
                     &*pend,
@@ -504,25 +549,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                         staging_scope_id,
                         &built.covered_industry_monitors,
                     );
-                    switched_projected_keys = built.switched_keys;
-                    switched_bp_keys = built.switched_bp_keys;
                     if !built.notifs.is_empty() {
                         enqueue_or_stage_pending_batch(&*pend, &notify_tx, &built.notifs);
                     }
                 }
             }
-
-            bridge.item_compare.on_commit_with_switched(
-                snap,
-                changes,
-                &sde,
-                now_unix,
-                &*db,
-                &emitted_effects.item_effects,
-                staging_scope_info,
-                &switched_projected_keys,
-                &switched_bp_keys,
-            );
 
             if !committed_records.is_empty() {
                 bridge
@@ -654,13 +685,13 @@ fn lookup_commit_bridge(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeStat
     guard.get(&pend_ptr).and_then(Weak::upgrade)
 }
 
-pub(crate) fn item_compare_bridge(ctx: &ServerContext) -> Option<Arc<ItemCompareBridge>> {
-    lookup_commit_bridge(ctx).map(|b| Arc::clone(&b.item_compare))
+#[cfg(test)]
+fn commit_bridge_state(ctx: &ServerContext) -> Option<Arc<DeltaCommitBridgeState>> {
+    lookup_commit_bridge(ctx)
 }
 
-pub(crate) fn item_compare_bridges_for_db(
-    db: &eve_db::WorldRepository,
-) -> Vec<Arc<ItemCompareBridge>> {
+#[cfg(test)]
+fn commit_bridges_for_db(db: &eve_db::WorldRepository) -> Vec<Arc<DeltaCommitBridgeState>> {
     let Some(slot) = db
         .get_transient_runtime_slot::<CommitBridgesRepoSlot>(COMMIT_BRIDGES_SLOT_KEY)
         .flatten()
@@ -670,7 +701,7 @@ pub(crate) fn item_compare_bridges_for_db(
     let guard = slot.bridges.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .values()
-        .filter_map(|w| w.upgrade().map(|b| Arc::clone(&b.item_compare)))
+        .filter_map(|w| w.upgrade())
         .collect()
 }
 
@@ -1045,12 +1076,12 @@ mod t3c2_tests {
         let left = pair.left();
         let right = pair.right();
 
-        let left_bridge = super::item_compare_bridge(left).expect("left bridge installed");
-        let right_bridge = super::item_compare_bridge(right).expect("right bridge installed");
+        let left_bridge = super::commit_bridge_state(left).expect("left bridge installed");
+        let right_bridge = super::commit_bridge_state(right).expect("right bridge installed");
         assert!(!std::sync::Arc::ptr_eq(&left_bridge, &right_bridge));
 
-        let left_db_bridges = super::item_compare_bridges_for_db(&left.db);
-        let right_db_bridges = super::item_compare_bridges_for_db(&right.db);
+        let left_db_bridges = super::commit_bridges_for_db(&left.db);
+        let right_db_bridges = super::commit_bridges_for_db(&right.db);
         assert_eq!(left_db_bridges.len(), 1);
         assert_eq!(right_db_bridges.len(), 1);
         assert!(std::sync::Arc::ptr_eq(&left_db_bridges[0], &left_bridge));
@@ -1060,7 +1091,7 @@ mod t3c2_tests {
         // and dropping an independent ServerContext + WorldRepository frees both the slot and bridge.
         let standalone = ServerContext::new();
         let standalone_bridge =
-            super::item_compare_bridge(&standalone).expect("standalone bridge installed");
+            super::commit_bridge_state(&standalone).expect("standalone bridge installed");
         let weak_bridge = std::sync::Arc::downgrade(&standalone_bridge);
         let weak_slot = standalone
             .db
@@ -1076,9 +1107,9 @@ mod t3c2_tests {
             shared_db,
         );
         let shared_ctx_bridge =
-            super::item_compare_bridge(&shared_ctx).expect("shared_ctx bridge installed");
+            super::commit_bridge_state(&shared_ctx).expect("shared_ctx bridge installed");
         assert!(!std::sync::Arc::ptr_eq(&shared_ctx_bridge, &left_bridge));
-        assert_eq!(super::item_compare_bridges_for_db(&left.db).len(), 2);
+        assert_eq!(super::commit_bridges_for_db(&left.db).len(), 2);
 
         drop(shared_ctx_bridge);
         drop(shared_ctx);
@@ -1090,7 +1121,7 @@ mod t3c2_tests {
         );
         assert!(
             weak_bridge.upgrade().is_none(),
-            "dropping standalone WorldRepository must drop ItemCompareBridge"
+            "dropping standalone WorldRepository must drop DeltaCommitBridgeState"
         );
     }
 

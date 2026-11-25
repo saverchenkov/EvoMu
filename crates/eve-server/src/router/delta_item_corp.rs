@@ -36,7 +36,6 @@ pub(crate) struct SwitchedProjectedItemSpec {
     pub recipient_char_id: i64,
     pub recipient_user_id: u64,
     pub id_type: &'static str,
-    pub item_id: i64,
     pub args: Vec<PyRep>,
     pub industry_scopes: Vec<(i64, i64, i64, u32)>,
 }
@@ -57,8 +56,6 @@ pub(crate) struct SwitchedCommitBatch {
 /// transaction (`#931` Track 3C-1 / 5B / 5C).
 pub(crate) struct SwitchedCommitNotifications {
     pub notifs: Vec<PendingMachoNotification>,
-    pub switched_keys: HashSet<(i64, i64, bool)>,
-    pub switched_bp_keys: HashSet<(i64, i64)>,
     pub covered_industry_monitors: HashMap<i64, (i64, i64, Vec<u32>)>,
 }
 
@@ -402,14 +399,11 @@ pub(crate) fn build_switched_item_commit_notifications(
     let mut corp_auth_cache: HashMap<i64, bool> = HashMap::new();
     let mut notifs =
         Vec::with_capacity(specs.len() * 2 + monitors.len() + blueprint_specs.len());
-    let mut switched_keys = HashSet::with_capacity(specs.len());
-    let mut switched_bp_keys = HashSet::with_capacity(blueprint_specs.len());
     let mut coalesced_monitors: BTreeMap<i64, (u64, &IndustryMaterialMonitorSub, BTreeSet<u32>)> =
         BTreeMap::new();
     let mut last_spec_idx_by_char: HashMap<i64, usize> = HashMap::new();
 
     for (idx, spec) in specs.iter().enumerate() {
-        switched_keys.insert((spec.recipient_char_id, spec.item_id, spec.id_type == "corpid"));
         last_spec_idx_by_char.insert(spec.recipient_char_id, idx);
 
         if !monitors.is_empty() && !spec.industry_scopes.is_empty() {
@@ -525,7 +519,6 @@ pub(crate) fn build_switched_item_commit_notifications(
     }
 
     for bp_spec in blueprint_specs {
-        switched_bp_keys.insert((bp_spec.recipient_char_id, bp_spec.owner_id));
         notifs.push(assemble_pending_notification(
             bp_spec.recipient_char_id,
             Some(bp_spec.recipient_user_id),
@@ -538,8 +531,6 @@ pub(crate) fn build_switched_item_commit_notifications(
 
     SwitchedCommitNotifications {
         notifs,
-        switched_keys,
-        switched_bp_keys,
         covered_industry_monitors,
     }
 }

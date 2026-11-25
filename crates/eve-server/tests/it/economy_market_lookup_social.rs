@@ -883,6 +883,13 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
             60_003_760,
             false,
         );
+        let _ = ctx.db.acquire_online_lock(
+            sess.user_id.expect("station pilot user_id"),
+            sess.session_id,
+            sess.character_id,
+            true,
+            ctx.now_unix(),
+        );
         let dup_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id), PyRep::Integer(stack_item_id)]))]);
         assert_eq!(rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), dup_doll, PyRep::None]).await.unwrap_err().code, "InvalidApparelItem");
         let same_grp_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id), PyRep::Integer(990_000_778)]))]);

@@ -436,7 +436,6 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
     let Some(db) = db_opt else {
         return destroyed_balls;
     };
-    let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&**db));
     if !db.with_snapshot(|snap| !load_pvp_store(snap).active_matches.is_empty()) {
         return destroyed_balls;
     }

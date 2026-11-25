@@ -17,14 +17,14 @@ use std::collections::{HashMap, HashSet};
 use eve_db::{ChangeSet, CharacterRecord, InventoryItemRecord, RowChange, WorldStateSnapshot};
 use eve_sde::SdeRegistry;
 
-use super::delta_item_compare::CompareOriginScope;
+use super::delta_item_switch_report::CompareOriginScope;
 use super::delta_item_switch::{
     classify_item_row_kind_key, entry_matches_wire_fp, evaluate_fitted_coords_pair,
     is_first_set_direct_slot, is_first_set_direct_slot_coords, is_first_set_direct_slot_location,
     online_non_transitioned_owner, pair_owner_and_op_kind, remove_item_from_facts,
     remove_items_from_facts, CanonicalChangeDict, CanonicalDictKey, CommitProjectedToken,
     DedupeLookupOutcome, ItemWireFingerprint, NotCoveredReason, ProjectedDedupeEntry,
-    ProjectedItemOpKind, ProjectedItemSwitchConfig, WouldQualifyFlags,
+    ProjectedItemOpKind, ProjectedItemSwitchConfig,
 };
 use super::delta_item_switch_report::SwitchTelemetryState;
 use super::delta_projection::OnlineCharacterLookup;
@@ -680,54 +680,6 @@ pub(crate) fn evaluate_hand_written_row_details(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_hand_written_first_set_and_next_in_snap(
-    in_dispatch: bool,
-    in_tick: bool,
-    char_id: i64,
-    recipient_count: usize,
-    kind: ProjectedItemOpKind,
-    fp: ItemWireFingerprint,
-    change_dict: Option<&CanonicalChangeDict>,
-    pre_loc_flag: Option<(i64, i64)>,
-    snap: &WorldStateSnapshot,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> (Option<String>, WouldQualifyFlags) {
-    let Some((direct_slot_ok, fitted_ok, before_coords, (after_loc, after_flag, after_qty))) =
-        evaluate_hand_written_row_details(
-            char_id,
-            recipient_count,
-            kind,
-            fp,
-            change_dict,
-            pre_loc_flag,
-            snap,
-            online,
-            sde,
-        )
-    else {
-        return (None, WouldQualifyFlags::default());
-    };
-    let fitted = (in_dispatch || in_tick) && fitted_ok;
-    let tick = !in_dispatch && direct_slot_ok;
-    let first_set = (in_dispatch && direct_slot_ok).then(|| {
-        classify_item_row_kind_key(
-            before_coords.map(|(l, _)| l),
-            before_coords.map(|(_, f)| f),
-            fp.owner_id,
-            after_loc,
-            after_flag,
-            after_qty,
-            snap,
-            &ChangeSet::default(),
-            &HashMap::new(),
-            sde,
-        )
-    });
-    (first_set, WouldQualifyFlags { fitted, tick })
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_hand_written_covered_class_in_snap(
     direct_enabled: bool,
     fitted_enabled: bool,
@@ -808,36 +760,6 @@ pub(crate) fn evaluate_hand_written_covered_class_in_snap(
             sde,
         )
     })
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_hand_written_first_set_in_snap(
-    in_dispatch: bool,
-    char_id: i64,
-    recipient_count: usize,
-    kind: ProjectedItemOpKind,
-    fp: ItemWireFingerprint,
-    change_dict: Option<&CanonicalChangeDict>,
-    pre_loc_flag: Option<(i64, i64)>,
-    snap: &WorldStateSnapshot,
-    online: &impl OnlineCharacterLookup,
-    sde: &SdeRegistry,
-) -> Option<String> {
-    evaluate_hand_written_first_set_and_next_in_snap(
-        in_dispatch,
-        false,
-        char_id,
-        recipient_count,
-        kind,
-        fp,
-        change_dict,
-        pre_loc_flag,
-        snap,
-        online,
-        sde,
-    )
-    .0
 }
 
 #[allow(clippy::too_many_arguments)]

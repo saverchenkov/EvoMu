@@ -732,8 +732,6 @@ pub(super) async fn step_system_ai_and_combat_bounded(
     match tokio::time::timeout(
         deadline,
         tokio::task::spawn_blocking(move || {
-            let _tick_scope =
-                crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&ctx_ai.db));
             crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
                 &ctx_ai, sys_id,
             );

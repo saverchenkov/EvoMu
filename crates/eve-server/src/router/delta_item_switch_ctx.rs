@@ -7,7 +7,7 @@ use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 
 use super::cache_notifications::{current_dispatch_staging_scope_info, NotificationTarget};
-use super::delta_item_compare::{current_origin_scope_telemetry, CompareOriginScope};
+use super::delta_item_switch_report::{current_origin_scope_telemetry, CompareOriginScope};
 use super::delta_item_corp::is_corp_item_eligible_coords;
 use super::delta_item_recipients::classify_item_holder_kind_in_snap;
 use super::delta_item_switch::{

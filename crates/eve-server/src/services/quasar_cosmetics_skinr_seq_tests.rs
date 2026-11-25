@@ -551,6 +551,10 @@ async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices(
 #[test]
 fn sequencing_consume_binders_uses_consume_owner_items_and_emits_on_item_change() {
     let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = Arc::new(crate::router::ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::clone(&db),
+    ));
     let router = PublicGatewayRouter::new(
         QuasarDescriptorRegistry::open_default_or_empty(),
         Arc::clone(&db),
@@ -560,18 +564,12 @@ fn sequencing_consume_binders_uses_consume_owner_items_and_emits_on_item_change(
     crate::services::quasar_cosmetics_skinr::register(&router, Arc::clone(&skinr));
     register(&router, Arc::clone(&skinr));
 
-    let captured: Arc<std::sync::Mutex<Vec<(i64, String, Vec<eve_proto::PyRep>)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    {
-        let cap = Arc::clone(&captured);
-        *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _id, args| {
-            let crate::router::NotificationTarget::Character(c) = target else { return; };
-            cap.lock().unwrap().push((c, event.to_string(), args));
-        }));
-    }
-
     let now = 1_760_000_000u64;
     let cid = 90_000_001i64;
+    ctx.db
+        .acquire_online_lock(1, 911_001, Some(cid), true, now)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(cid);
     let player = sess(Some(1), Some(cid), service_roles::ROLE_PLAYER_DEFAULT);
     let slot1_allowed = skinr.catalog.slot_allowed_categories.get(&1);
     let coat = skinr
@@ -688,6 +686,7 @@ fn sequencing_consume_binders_uses_consume_owner_items_and_emits_on_item_change(
         (id1, id2)
     });
 
+    let _ = ctx.drain_notifications_for_char(cid);
     assert_eq!(
         call(
             &router,
@@ -705,16 +704,14 @@ fn sequencing_consume_binders_uses_consume_owner_items_and_emits_on_item_change(
             assert_eq!(s.items[&id2].quantity, (bcnt + 5) - 1);
         }
     });
-    let item_changes: Vec<_> = captured
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(_, ev, _)| ev == "OnItemChange")
-        .cloned()
+    let item_changes: Vec<_> = ctx
+        .drain_notifications_for_char(cid)
+        .into_iter()
+        .filter(|n| n.event == "OnItemChange")
         .collect();
     assert!(!item_changes.is_empty(), "binder consumption must emit OnItemChange");
-    for (_, _, args) in &item_changes {
-        if let eve_proto::PyRep::Dict(entries) = &args[1] {
+    for n in &item_changes {
+        if let eve_proto::PyRep::Dict(entries) = &n.args[1] {
             assert!(
                 entries.iter().any(|(k, _)| matches!(k, eve_proto::PyRep::Integer(9))),
                 "OnItemChange must use ixStackSize=9, got {entries:?}"

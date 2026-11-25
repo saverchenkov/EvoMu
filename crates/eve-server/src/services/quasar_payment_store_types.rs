@@ -4,15 +4,14 @@ use crate::quasar_gateway::{
     require_admin_role, MachoNotifySink, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
     STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
-use crate::router::NotificationTarget;
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{WorldRepository, WorldStateSnapshot};
-use eve_proto::{pb, PyRep};
+use eve_proto::pb;
 use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 fn try_encode_plex_balance_changed_notice(
     tx_id: u64,
@@ -914,20 +913,6 @@ pub fn save_store_offer_tags(
     snap.quasar_commerce.nes_store_offer_tags = tags.clone();
 }
 
-const STORE_CTX_NOTIFIER_SLOT_KEY: &str = "quasar_payment_store_ctx_notifier";
-
-#[derive(Default)]
-struct StoreCtxNotifierSlot(Mutex<Option<crate::router::context::ServerContextWeak>>);
-
-pub(crate) fn register_item_mutation_notifier(ctx: &crate::router::ServerContext) {
-    let slot = ctx.db.get_or_init_transient_runtime_slot(
-        STORE_CTX_NOTIFIER_SLOT_KEY,
-        StoreCtxNotifierSlot::default,
-    );
-    let weak = ctx.downgrade();
-    *slot.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(weak);
-}
-
 pub(crate) fn deliver_store_hangar_items_in_snapshot(
     snap: &mut WorldStateSnapshot,
     cid: i64,
@@ -975,75 +960,12 @@ pub(crate) fn deliver_store_hangar_items_in_snapshot(
     mutations
 }
 
-pub(crate) fn emit_store_item_mutations(
-    db: &WorldRepository,
-    sde: &SdeRegistry,
-    macho_sink_lock: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
-    mutations: &[(
-        i64,
-        Option<eve_db::InventoryItemRecord>,
-        Option<eve_db::InventoryItemRecord>,
-    )],
-) {
-    if mutations.is_empty() {
-        return;
-    }
-    let ctx_opt = db
-        .get_transient_runtime_slot::<StoreCtxNotifierSlot>(STORE_CTX_NOTIFIER_SLOT_KEY)
-        .flatten()
-        .and_then(|s| {
-            let mut guard = s.0.lock().unwrap_or_else(|e| e.into_inner());
-            let ctx = guard
-                .as_ref()
-                .and_then(crate::router::context::ServerContextWeak::upgrade);
-            if ctx.is_none() {
-                *guard = None;
-            }
-            ctx
-        });
-    if let Some(ctx) = ctx_opt {
-        for (cid, pre, post) in mutations {
-            ctx.notify_item_mutation(*cid, pre.as_ref(), post.as_ref());
-        }
-        return;
-    }
-    let Some(sink) = macho_sink_lock
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    else {
-        return;
-    };
-    for (cid, pre, post) in mutations {
-        if let Some(new_item) = post {
-            let changes = match pre {
-                None => vec![(3, PyRep::Integer(0))],
-                // Stack size deltas use `ixStackSize` (`9`), never `ixGroupID` (`6`).
-                Some(old) => vec![(9, PyRep::Integer(old.quantity as i64))],
-            };
-            let row = crate::router::delta_projection::build_inv_item_dbrow(new_item, sde, "");
-            let change_dict = PyRep::Dict(
-                changes
-                    .into_iter()
-                    .map(|(ix, old)| (PyRep::Integer(ix), old))
-                    .collect(),
-            );
-            sink(
-                NotificationTarget::Character(*cid),
-                "OnItemChange",
-                "charid",
-                vec![row, change_dict],
-            );
-        }
-    }
-}
-
 pub(crate) use super::store_purchase_engine::*;
 
 pub(crate) fn emit_store_purchase_notices(
-    db: &WorldRepository,
-    sde: &SdeRegistry,
-    macho_sink_lock: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
+    _db: &WorldRepository,
+    _sde: &SdeRegistry,
+    _macho_sink_lock: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pending_notices: &Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
     outcome: &StorePurchaseOutcome,
     emit_balance_notice: bool,
@@ -1052,7 +974,6 @@ pub(crate) fn emit_store_purchase_notices(
     if outcome.idempotent_replay {
         return;
     }
-    emit_store_item_mutations(db, sde, macho_sink_lock, &outcome.delivered_mutations);
     if emit_balance_notice {
         emit_balance_changed_notice(
             pending_notices,
