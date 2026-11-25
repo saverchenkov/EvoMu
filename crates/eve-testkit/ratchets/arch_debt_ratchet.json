@@ -1278,13 +1278,7 @@
       "regex": "\\beffective_corp_member_roles\\s*\\(",
       "description": "Shrink-only ratchet on remaining effective_corp_member_roles(...) call sites taking session_roles before #1194 Track 3B-3 deletes the helper.",
       "files": {
-        "domain/corp_governance.rs": 1,
-        "services/corp_registry_ops.rs": 1,
-        "services/fleet_social.rs": 1,
-        "services/fw_enlistment.rs": 1,
-        "services/social_wars.rs": 1,
-        "services/sov_gameplay.rs": 1,
-        "services/sov_services.rs": 1
+        "domain/corp_governance.rs": 1
       }
     },
     "request_corp_role_mask_reads": {

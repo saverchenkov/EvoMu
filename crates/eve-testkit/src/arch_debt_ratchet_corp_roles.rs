@@ -242,9 +242,9 @@ mod tests {
     fn arch_debt_ratchet_1194_effective_corp_member_roles_call_sites() {
         let tmp = make_temp_dir("1194_t3b2_member_roles");
         let src = tmp.join("src");
-        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+        std::fs::create_dir_all(src.join("domain")).expect("create domain dir");
         std::fs::write(
-            src.join("services/corp_registry_ops.rs"),
+            src.join("domain/corp_governance.rs"),
             r#"
 // effective_corp_member_roles(snap, corp_id, char_id, 0, now)
 const LIT: &str = "effective_corp_member_roles(snap, corp_id, char_id, 0, now)";
@@ -260,18 +260,18 @@ mod tests {
 }
 "#,
         )
-        .expect("write services/corp_registry_ops.rs");
+        .expect("write domain/corp_governance.rs");
 
         let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
         let rule = &ratchet.patterns["effective_corp_member_roles_call_sites"];
         assert!(!rule.zero_required);
         assert_eq!(rule.owning_issue, Some(1194));
-        assert_eq!(rule.files.get("services/corp_registry_ops.rs"), Some(&1));
+        assert_eq!(rule.files.get("domain/corp_governance.rs"), Some(&1));
 
         let report = scan_arch_debt_in_dir(&src).expect("scan effective_corp_member_roles");
         let entry = &report.patterns["effective_corp_member_roles_call_sites"];
         assert_eq!(entry.occurrences, 2);
-        assert_eq!(entry.per_file.get("services/corp_registry_ops.rs"), Some(&2));
+        assert_eq!(entry.per_file.get("domain/corp_governance.rs"), Some(&2));
 
         let err = ratchet
             .assert_ratchet(&report)
@@ -282,12 +282,12 @@ mod tests {
         );
 
         let clean_src = tmp.join("clean_src");
-        std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
+        std::fs::create_dir_all(clean_src.join("domain")).expect("create clean domain dir");
         std::fs::write(
-            clean_src.join("services/corp_registry_ops.rs"),
+            clean_src.join("domain/corp_governance.rs"),
             "pub fn check(snap: &S, cid: i64, char_id: i64, now: u64) -> (bool, u64) {\n    snap.effective_corp_roles_at_db(cid, char_id, None, now)\n}\n",
         )
-        .expect("write clean corp_registry_ops.rs");
+        .expect("write clean corp_governance.rs");
         let clean_report = ratchet
             .verify_dir(&clean_src)
             .expect("shrunk source using effective_corp_roles_at_db must pass");
