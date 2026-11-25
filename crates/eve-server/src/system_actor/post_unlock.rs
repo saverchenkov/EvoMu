@@ -1023,6 +1023,7 @@ fn apply_intent_in_snap(
 
 /// Executes collected [`PostUnlockOps`] against `WorldRepository` and runtime hooks
 /// strictly after `ballpark` and `actor_state` locks have been released (`#1170`).
+#[cfg(test)]
 pub(crate) fn execute_post_unlock_ops(
     db_opt: Option<&Arc<WorldRepository>>,
     sde_opt: Option<&Arc<SdeRegistry>>,
