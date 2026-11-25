@@ -285,6 +285,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) explicit_update_state_guards_actor:
         &'a Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
     pub(in crate::system_actor) mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
+    pub(in crate::system_actor) post_unlock_in_flight_actor: &'a std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone, Debug)]
@@ -1506,6 +1507,7 @@ impl SystemRegistry {
                     unrebased_clock_offset_secs_actor: &unrebased_clock_offset_secs_actor,
                     explicit_update_state_guards_actor: &explicit_update_state_guards_actor,
                     mechanic_rng: &mechanic_rng,
+                    post_unlock_in_flight_actor: &post_unlock_in_flight_actor,
                 };
                 if let Some(cmd) = protection::handle_protection_or_lifecycle_command(&mut exec_ctx, cmd) {
                     if let Some(cmd) = activation_ops::handle_activation_and_movement_command(&mut exec_ctx, cmd) {

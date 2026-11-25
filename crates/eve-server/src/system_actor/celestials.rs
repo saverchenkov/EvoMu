@@ -620,26 +620,16 @@ impl SystemHandle {
             let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let ok = bp.set_ball_position(ball_id, position);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            let mut ops = super::post_unlock::PostUnlockOps::default();
+            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
             if ok {
-                let mut ops = super::post_unlock::PostUnlockOps::default();
-                let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
                 celestials_helpers::collect_ball_positions_for_post_unlock(
-                    &bp,
-                    &[ball_id],
-                    &st.db_opt,
-                    &st.ball_space_entry_epochs,
-                    &mut ops,
+                    &bp, &[ball_id], &st.db_opt, &st.ball_space_entry_epochs, &mut ops,
                 );
-                super::post_unlock::enqueue_post_unlock_under_locks(
-                    self,
-                    st.db_opt.as_ref(),
-                    None,
-                    ops,
-                    caller_can_wait,
-                )
-            } else {
-                super::post_unlock::PostUnlockWaitTicket::None
             }
+            super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                self, st.db_opt.as_ref(), None, ops, caller_can_wait,
+            )
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
     }
@@ -1886,11 +1876,12 @@ impl SystemHandle {
             }
             let events = bp.step(dt_sim);
             let mut ops = super::post_unlock::PostUnlockOps::default();
-            celestials_helpers::collect_landed_warps_for_post_unlock(
+            celestials_helpers::collect_landed_warps_for_post_unlock_with_in_flight(
                 &bp,
                 &events,
                 &st.db_opt,
                 &st.ball_space_entry_epochs,
+                self.has_in_flight_post_unlock(),
                 &mut ops,
             );
             clear_landed_warp_tracking_from_events(&bp, &events, &mut st.warp_state);
@@ -3184,6 +3175,7 @@ pub(crate) use celestials_helpers::{
     collect_dirty_condition_checkpoint_entries,
     collect_immediate_armor_hull_checkpoint_entries,
     collect_landed_warp_positions, collect_landed_warps_for_post_unlock,
+    collect_landed_warps_for_post_unlock_with_in_flight,
     fast_forward_clock_in_actor_collecting,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
     register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,

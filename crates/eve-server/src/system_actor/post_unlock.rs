@@ -7,16 +7,11 @@
 
 #![forbid(unsafe_code)]
 
-use eve_db::lock_rank::{
-    held_lock_ranks, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
-    RANK_WORLD_INNER,
-};
+use eve_db::lock_rank::{held_lock_ranks, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF, RANK_WORLD_INNER};
 use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord, TxError, WorldRepository};
 use eve_destiny::BallId;
 use eve_sde::{attr_ids, SdeRegistry, SolarSystemId, TypeId};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::{collections::HashMap, sync::{atomic::{AtomicUsize, Ordering}, Arc, OnceLock}};
 
 use super::types::{
     ActiveModuleCycle, CharacterId, ConditionCheckpointEntry, ItemId, ModuleDeactivationHook,
@@ -24,71 +19,38 @@ use super::types::{
 };
 
 #[derive(Debug, Clone)]
-pub(crate) struct MineAsteroidDbUpdate {
-    pub asteroid_id: BallId,
-    pub belt_id: BallId,
-    pub remaining_units: u64,
-    pub belt_due_unix: Option<u64>,
-}
+pub(crate) struct MineAsteroidDbUpdate { pub asteroid_id: BallId, pub belt_id: BallId, pub remaining_units: u64, pub belt_due_unix: Option<u64> }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CombatHpDbUpdate {
-    pub ball_id: BallId,
-    pub combat_state: eve_destiny::CombatState,
-    pub expected_system: Option<SolarSystemId>,
-    pub require_persisted_entity: bool,
-}
+pub(crate) struct CombatHpDbUpdate { pub ball_id: BallId, pub combat_state: eve_destiny::CombatState, pub expected_system: Option<SolarSystemId>, pub require_persisted_entity: bool }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModuleCycleCleanupDbOp {
-    pub ship_id: BallId,
-    pub module_id: ItemId,
-    pub linked_turrets: Vec<ItemId>,
-    pub clear_adc_ehe_attrs: bool,
-    pub clear_mutadaptive_spool: bool,
-    pub clear_rah_attrs: bool,
+    pub ship_id: BallId, pub module_id: ItemId, pub linked_turrets: Vec<ItemId>,
+    pub clear_adc_ehe_attrs: bool, pub clear_mutadaptive_spool: bool, pub clear_rah_attrs: bool,
 }
 
 impl ModuleCycleCleanupDbOp {
     pub(crate) fn from_cycle(removed: &ActiveModuleCycle) -> Self {
         Self {
-            ship_id: removed.ship_id,
-            module_id: removed.module_id,
-            linked_turrets: removed.linked_turrets.clone(),
+            ship_id: removed.ship_id, module_id: removed.module_id, linked_turrets: removed.linked_turrets.clone(),
             clear_adc_ehe_attrs: removed.is_adc || removed.ehe_hull_resists.is_some(),
-            clear_mutadaptive_spool: removed.mutadaptive_spool_step > 0.0,
-            clear_rah_attrs: removed.is_rah,
+            clear_mutadaptive_spool: removed.mutadaptive_spool_step > 0.0, clear_rah_attrs: removed.is_rah,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct NaniteRepairTickDbOp {
-    pub char_id: CharacterId,
-    pub ship_id: BallId,
-    pub module_id: ItemId,
-    pub paste_delta: i32,
-    pub initial_damage_hp: f64,
-    pub paste_total_needed: i32,
-    pub rem_dmg: f64,
-    pub done_now: bool,
+    pub char_id: CharacterId, pub ship_id: BallId, pub module_id: ItemId, pub paste_delta: i32,
+    pub initial_damage_hp: f64, pub paste_total_needed: i32, pub rem_dmg: f64, pub done_now: bool, pub halted_for_paste: bool,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct NaniteRepairCancelDbOp {
-    pub char_id: CharacterId,
-    pub ship_id: BallId,
-    pub module_id: ItemId,
-    pub rem_dmg: f64,
-    pub refund_paste: bool,
-    pub refund: i32,
-}
+pub(crate) struct NaniteRepairCancelDbOp { pub char_id: CharacterId, pub ship_id: BallId, pub module_id: ItemId, pub rem_dmg: f64, pub refund_paste: bool, pub refund: i32 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ModuleReloadDbOp {
-    pub finished: Vec<ItemId>,
-    pub desired_updates: Vec<(ItemId, u64, bool)>,
-}
+pub(crate) struct ModuleReloadDbOp { pub finished: Vec<ItemId>, pub desired_updates: Vec<(ItemId, u64, bool)> }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LauncherConsumeDbOp {
@@ -220,66 +182,27 @@ impl PostUnlockOps {
 }
 
 fn assert_no_actor_locks_before_db_tx() {
-    eve_db::lock_rank::assert_locks_disallowed(
-        &[RANK_BALLPARK, RANK_ACTOR_STATE],
-        RANK_WORLD_INNER,
-        "system_actor post-unlock DB flush invoked while holding RANK_BALLPARK or RANK_ACTOR_STATE",
-    );
+    eve_db::lock_rank::assert_locks_disallowed(&[RANK_BALLPARK, RANK_ACTOR_STATE], RANK_WORLD_INNER, "system_actor post-unlock DB flush invoked while holding RANK_BALLPARK or RANK_ACTOR_STATE");
 }
 
 fn set_module_damage_in_snap(snap: &mut eve_db::WorldStateSnapshot, module_id: ItemId, dmg: f64) {
     if let Some(m_item) = snap.get_any_item_mut(module_id) {
-        if dmg <= 1e-6 {
-            m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-        } else {
-            m_item.dynamic_attributes.insert(attr_ids::DAMAGE, dmg);
-        }
+        if dmg <= 1e-6 { m_item.dynamic_attributes.remove(&attr_ids::DAMAGE); } else { m_item.dynamic_attributes.insert(attr_ids::DAMAGE, dmg); }
     }
 }
 
-fn push_charge_diff_action(
-    out_actions: &mut Vec<PendingCycleAction>,
-    char_hint: Option<CharacterId>,
-    ship_id: BallId,
-    diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>,
-) {
-    if diffs.is_empty() {
-        return;
-    }
-    let eff_char_id = char_hint.filter(|&c| c > 0).or_else(|| {
-        diffs.iter().find_map(|(pre, post)| pre.as_ref().or(post.as_ref()).map(|r| r.owner_id)).filter(|&c| c > 0)
-    });
-    if let Some(cid) = eff_char_id {
-        out_actions.push(PendingCycleAction::CycleChargeItemMutations { char_id: cid, ship_id, diffs });
-    }
+fn push_charge_diff_action(out_actions: &mut Vec<PendingCycleAction>, char_hint: Option<CharacterId>, ship_id: BallId, diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>) {
+    if diffs.is_empty() { return; }
+    let eff_char_id = char_hint.filter(|&c| c > 0).or_else(|| diffs.iter().find_map(|(pre, post)| pre.as_ref().or(post.as_ref()).map(|r| r.owner_id)).filter(|&c| c > 0));
+    if let Some(cid) = eff_char_id { out_actions.push(PendingCycleAction::CycleChargeItemMutations { char_id: cid, ship_id, diffs }); }
 }
 
 fn apply_module_cycle_cleanup_in_snap(snap: &mut eve_db::WorldStateSnapshot, op: &ModuleCycleCleanupDbOp) {
-    if op.clear_adc_ehe_attrs {
-        if let Some(tr) = snap.transient_item_attributes.get_mut(&op.ship_id) {
-            for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
-                tr.remove(&aid);
-            }
-        }
-    }
-    if op.clear_mutadaptive_spool {
-        if let Some(tr) = snap.transient_item_attributes.get_mut(&op.module_id) {
-            tr.remove(&84);
-        }
-    }
-    if op.clear_rah_attrs {
-        for id in [op.module_id, op.ship_id] {
-            if let Some(tr) = snap.transient_item_attributes.get_mut(&id) {
-                for aid in 267..=270 {
-                    tr.remove(&aid);
-                }
-            }
-        }
-    }
+    if op.clear_adc_ehe_attrs { if let Some(tr) = snap.transient_item_attributes.get_mut(&op.ship_id) { for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] { tr.remove(&aid); } } }
+    if op.clear_mutadaptive_spool { if let Some(tr) = snap.transient_item_attributes.get_mut(&op.module_id) { tr.remove(&84); } }
+    if op.clear_rah_attrs { for id in [op.module_id, op.ship_id] { if let Some(tr) = snap.transient_item_attributes.get_mut(&id) { for aid in 267..=270 { tr.remove(&aid); } } } }
     snap.clear_module_active_state(op.module_id);
-    for &tid in &op.linked_turrets {
-        snap.module_active_charges.remove(&tid);
-    }
+    for &tid in &op.linked_turrets { snap.module_active_charges.remove(&tid); }
 }
 
 fn apply_nanite_repair_tick_in_snap(snap: &mut eve_db::WorldStateSnapshot, tick: &NaniteRepairTickDbOp) {
@@ -298,7 +221,7 @@ fn apply_nanite_repair_tick_in_snap(snap: &mut eve_db::WorldStateSnapshot, tick:
         snap.sp6_lifecycle.nanite_paste_shortfall.remove(&key);
         set_module_damage_in_snap(snap, tick.module_id, tick.rem_dmg);
     } else {
-        if tick.done_now {
+        if tick.done_now || tick.halted_for_paste {
             snap.sp6_lifecycle.nanite_paste_shortfall.remove(&key);
         } else {
             snap.sp6_lifecycle.nanite_paste_shortfall.insert(key, rem_shortfall);
@@ -542,6 +465,7 @@ pub(crate) fn collect_nanite_repair_tick(
         paste_total_needed: total_needed,
         rem_dmg,
         done_now,
+        halted_for_paste,
     }));
     NaniteTickCollect::Applied { halted_for_paste, effective_progress }
 }
@@ -866,15 +790,6 @@ pub(crate) fn step_module_reloads_sim_clock_collecting(
                     }
                 })
                 .collect();
-            let should_write = !finished.is_empty()
-                || db.try_with_snapshot(|snap| {
-                    desired_updates.iter().any(|&(mod_id, new_until, is_dilated)| {
-                        match snap.cluster_and_runtime.module_reload_until_unix.get(&mod_id).copied() {
-                            Some(cur) => cur != new_until && (is_dilated || cur > new_until),
-                            None => is_dilated,
-                        }
-                    })
-                }).unwrap_or(!desired_updates.is_empty());
             if tidi >= 0.995 {
                 for &(mod_id, _, _) in &desired_updates {
                     if let Some(entry) = reload_sim_remaining.get_mut(&mod_id) {
@@ -882,7 +797,7 @@ pub(crate) fn step_module_reloads_sim_clock_collecting(
                     }
                 }
             }
-            if should_write {
+            if !finished.is_empty() || !desired_updates.is_empty() {
                 post_unlock.push(PostUnlockIntent::ModuleReload(ModuleReloadDbOp {
                     finished: finished.clone(), desired_updates,
                 }));
@@ -901,12 +816,20 @@ type CheckpointBatch = Vec<(SolarSystemId, Vec<ConditionCheckpointEntry>, usize,
 
 fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) -> (bool, CheckpointBatch) {
     let mut has_unconditional_write = false;
-    let mut check_combat_hps: Vec<&CombatHpDbUpdate> = Vec::new();
-    let mut check_checkpoints: Vec<(SolarSystemId, &[ConditionCheckpointEntry], &Option<Arc<AtomicUsize>>)> = Vec::new();
+    let mut check_positions = Vec::new();
+    let mut check_combat_hps = Vec::new();
+    let mut check_reloads = Vec::new();
+    let mut check_ship_clears = Vec::new();
+    let mut check_checkpoints = Vec::new();
 
     for intent in intents {
         match intent {
+            PostUnlockIntent::ItemPosition { ball_id, pos, solar_system_id, space_entry_epoch } => {
+                check_positions.push((*ball_id, *pos, *solar_system_id, *space_entry_epoch));
+            }
             PostUnlockIntent::ShipCombatHp(u) => check_combat_hps.push(u),
+            PostUnlockIntent::ModuleReload(op) => check_reloads.push(op),
+            PostUnlockIntent::ShipCycleClearAll(sid) => check_ship_clears.push(*sid),
             PostUnlockIntent::ConditionCheckpoint { solar_system_id, entries, written_out } => {
                 check_checkpoints.push((*solar_system_id, entries.as_slice(), written_out));
             }
@@ -916,13 +839,32 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
     }
 
     if has_unconditional_write { return (true, Vec::new()); }
-    if check_combat_hps.is_empty() && check_checkpoints.is_empty() { return (false, Vec::new()); }
+    if check_positions.is_empty() && check_combat_hps.is_empty() && check_reloads.is_empty()
+        && check_ship_clears.is_empty() && check_checkpoints.is_empty()
+    {
+        return (false, Vec::new());
+    }
 
     let (any_change, skipped_checkpoints) = db.with_snapshot(|snap| {
-        let mut changed = check_combat_hps.iter().any(|u| {
+        let mut changed = check_positions.iter().any(|&(bid, pos, sys_id, ep)| {
+            snap.items.contains_key(&bid)
+                && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(snap, bid, Some(sys_id), ep)
+                && snap.item_positions.get(&bid).is_none_or(|&prev| (glam::DVec3::from_array(prev) - glam::DVec3::from_array(pos)).length_squared() > 1e-6)
+        }) || check_combat_hps.iter().any(|u| {
             crate::sp6_lifecycle::has_ship_combat_hp_change_in_snap(
                 snap, u.ball_id, &u.combat_state, u.expected_system, u.require_persisted_entity,
             )
+        }) || check_reloads.iter().any(|op| {
+            op.finished.iter().any(|id| snap.cluster_and_runtime.module_reload_until_unix.contains_key(id))
+                || op.desired_updates.iter().any(|&(mid, nu, dil)| {
+                    match snap.cluster_and_runtime.module_reload_until_unix.get(&mid).copied() {
+                        Some(cur) => cur != nu && (dil || cur > nu),
+                        None => dil,
+                    }
+                })
+        }) || check_ship_clears.iter().any(|&sid| {
+            (!snap.module_active_states.is_empty() || !snap.module_active_charges.is_empty())
+                && snap.items.values().any(|it| it.location_id == sid && (snap.module_active_states.contains(&it.item_id) || snap.module_active_charges.contains_key(&it.item_id)))
         });
         let mut valid_only = Vec::new();
         for &(sys_id, entries, out_opt) in &check_checkpoints {
@@ -984,6 +926,9 @@ fn apply_intent_in_snap(
                 && !crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
                     snap, ball_id, Some(solar_system_id), space_entry_epoch,
                 )
+                && snap.item_positions.get(&ball_id).is_none_or(|&prev| {
+                    (glam::DVec3::from_array(prev) - glam::DVec3::from_array(pos)).length_squared() > 1e-6
+                })
             {
                 snap.item_positions.insert(ball_id, pos);
             }
@@ -1228,6 +1173,12 @@ pub(in crate::system_actor) enum PostUnlockWaitTicket {
     RunDirectAfterUnlock(Box<PostUnlockWorkItem>),
 }
 
+impl PostUnlockWaitTicket {
+    pub(in crate::system_actor) fn is_wait_worker(&self) -> bool {
+        matches!(self, Self::WaitWorker(_))
+    }
+}
+
 fn enqueue_work_ticket(
     handle: &super::SystemHandle,
     db_opt: Option<&Arc<WorldRepository>>,
@@ -1266,16 +1217,17 @@ fn enqueue_work_ticket(
     }
 }
 
-/// Enqueues `ops` onto `handle.post_unlock_tx` non-blockingly **while actor locks are held** (`W1`).
-pub(in crate::system_actor) fn enqueue_post_unlock_under_locks(
-    handle: &super::SystemHandle,
-    db_opt: Option<&Arc<WorldRepository>>,
-    sde_opt: Option<&Arc<SdeRegistry>>,
-    ops: PostUnlockOps,
-    caller_can_wait: bool,
-) -> PostUnlockWaitTicket {
+/// Enqueues `ops` onto `handle.post_unlock_tx` under actor locks, or an empty-ops FIFO barrier when requested (`W1`, `W4`).
+pub(in crate::system_actor) fn enqueue_post_unlock_under_locks(handle: &super::SystemHandle, db_opt: Option<&Arc<WorldRepository>>, sde_opt: Option<&Arc<SdeRegistry>>, ops: PostUnlockOps, caller_can_wait: bool) -> PostUnlockWaitTicket {
     if ops.is_empty() { return PostUnlockWaitTicket::None; }
     enqueue_work_ticket(handle, db_opt, sde_opt, ops, caller_can_wait)
+}
+
+/// Like [`enqueue_post_unlock_under_locks`], also enqueues a FIFO barrier when `ops` is empty and work is in flight (`W4`).
+pub(in crate::system_actor) fn enqueue_post_unlock_or_barrier_under_locks(handle: &super::SystemHandle, db_opt: Option<&Arc<WorldRepository>>, sde_opt: Option<&Arc<SdeRegistry>>, ops: PostUnlockOps, caller_can_wait: bool) -> PostUnlockWaitTicket {
+    if !ops.is_empty() { enqueue_work_ticket(handle, db_opt, sde_opt, ops, caller_can_wait) }
+    else if caller_can_wait && handle.has_in_flight_post_unlock() { enqueue_barrier_under_locks(handle) }
+    else { PostUnlockWaitTicket::None }
 }
 
 /// Enqueues an empty-ops FIFO barrier onto `handle.post_unlock_tx` while actor locks are held (`W4`, `BF-3`).
@@ -1284,43 +1236,21 @@ pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::Syste
 }
 
 /// Finishes waiting or fallback execution strictly **after** all actor locks are dropped (`W2`, `W3`).
-pub(in crate::system_actor) fn finish_post_unlock_after_unlock(
-    handle: &super::SystemHandle,
-    deact_guard: Option<&ModuleDeactivationHook>,
-    lock_guard: Option<&TargetLockCompletedHook>,
-    ticket: PostUnlockWaitTicket,
-) {
-    let safe_sync = can_run_post_unlock_sync_now()
-        && handle.post_unlock_worker_thread_id.get() != Some(&std::thread::current().id());
+pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::SystemHandle, deact_guard: Option<&ModuleDeactivationHook>, lock_guard: Option<&TargetLockCompletedHook>, ticket: PostUnlockWaitTicket) {
+    let safe_sync = can_run_post_unlock_sync_now() && handle.post_unlock_worker_thread_id.get() != Some(&std::thread::current().id());
     match ticket {
-        PostUnlockWaitTicket::None => {
-            if safe_sync {
-                super::flush_post_unlock_actions(&handle.post_unlock_actions);
-            }
-        }
-        PostUnlockWaitTicket::WaitWorker(rx) => {
-            let _ = rx.recv();
-        }
+        PostUnlockWaitTicket::None => if safe_sync { super::flush_post_unlock_actions(&handle.post_unlock_actions); },
+        PostUnlockWaitTicket::WaitWorker(rx) => { let _ = rx.recv(); }
         PostUnlockWaitTicket::RunDirectAfterUnlock(unsent) => {
             let unsent = *unsent;
             if safe_sync {
-                let extra_actions = execute_post_unlock_ops(
-                    unsent.db_opt.as_ref(), unsent.sde_opt.as_ref(), unsent.ops, deact_guard, lock_guard,
-                );
-                if !extra_actions.is_empty() {
-                    handle.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
-                }
+                let extra_actions = execute_post_unlock_ops(unsent.db_opt.as_ref(), unsent.sde_opt.as_ref(), unsent.ops, deact_guard, lock_guard);
+                if !extra_actions.is_empty() { handle.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions); }
                 super::flush_post_unlock_actions(&handle.post_unlock_actions);
             } else {
-                tracing::warn!(
-                    solar_system_id = handle.solar_system_id,
-                    intents = unsent.ops.intents.len(),
-                    "skipping RunDirectAfterUnlock after worker shutdown under held ranked locks or worker reentrancy"
-                );
+                tracing::warn!(solar_system_id = handle.solar_system_id, intents = unsent.ops.intents.len(), "skipping RunDirectAfterUnlock after worker shutdown under held ranked locks or worker reentrancy");
             }
-            for send_reply in unsent.replies {
-                send_reply();
-            }
+            for send_reply in unsent.replies { send_reply(); }
         }
     }
 }
@@ -1351,11 +1281,7 @@ impl PostUnlockShutdownGuard {
     }
 }
 
-impl Drop for PostUnlockShutdownGuard {
-    fn drop(&mut self) {
-        self.send_shutdown();
-    }
-}
+impl Drop for PostUnlockShutdownGuard { fn drop(&mut self) { self.send_shutdown(); } }
 
 /// Spawns the ordered FIFO post-unlock persistence and hook worker for one `SystemActor` (`W2`, `#1170`).
 ///
@@ -1371,54 +1297,36 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
 ) -> (tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>, tokio::sync::oneshot::Receiver<()>) {
     let (post_unlock_tx, mut post_unlock_rx) = tokio::sync::mpsc::unbounded_channel::<PostUnlockMsg>();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-    std::thread::Builder::new()
-        .name(format!("post-unlock-{solar_system_id}"))
-        .spawn(move || {
-            struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
-            impl Drop for WorkerDoneGuard {
-                fn drop(&mut self) {
-                    if let Some(tx) = self.0.take() { let _ = tx.send(()); }
-                }
+    std::thread::Builder::new().name(format!("post-unlock-{solar_system_id}")).spawn(move || {
+        struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for WorkerDoneGuard { fn drop(&mut self) { if let Some(tx) = self.0.take() { let _ = tx.send(()); } } }
+        let _done_guard = WorkerDoneGuard(Some(done_tx));
+        let _ = worker_thread_id.set(std::thread::current().id());
+        let process_item = |item: PostUnlockWorkItem| {
+            let (deact_hook, lock_hook) = (deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone(), lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone());
+            let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard } = item;
+            let extra_actions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_post_unlock_ops(db_opt.as_ref(), sde_opt.as_ref(), ops, deact_hook.as_ref(), lock_hook.as_ref())
+            })).unwrap_or_else(|_| { tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker"); Vec::new() });
+            if !extra_actions.is_empty() {
+                actor_state_worker.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
             }
-            let _done_guard = WorkerDoneGuard(Some(done_tx));
-            let _ = worker_thread_id.set(std::thread::current().id());
-            let process_item = |item: PostUnlockWorkItem| {
-                let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
-                let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
-                let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard } = item;
-                let extra_actions = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute_post_unlock_ops(db_opt.as_ref(), sde_opt.as_ref(), ops, deact_hook.as_ref(), lock_hook.as_ref())
-                })) {
-                    Ok(actions) => actions,
-                    Err(_) => {
-                        tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker");
-                        Vec::new()
-                    }
-                };
-                if !extra_actions.is_empty() {
-                    actor_state_worker.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
-                }
-                super::flush_post_unlock_actions(&post_unlock_actions_worker);
-                drop(in_flight_guard);
-                for send_reply in replies {
-                    send_reply();
-                }
-            };
+            super::flush_post_unlock_actions(&post_unlock_actions_worker);
+            drop(in_flight_guard);
+            for send_reply in replies { send_reply(); }
+        };
 
-            while let Some(msg) = post_unlock_rx.blocking_recv() {
-                match msg {
-                    PostUnlockMsg::Work(item) => process_item(item),
-                    PostUnlockMsg::Shutdown => {
-                        post_unlock_rx.close();
-                        while let Ok(rem) = post_unlock_rx.try_recv() {
-                            if let PostUnlockMsg::Work(item) = rem { process_item(item); }
-                        }
-                        break;
-                    }
+        while let Some(msg) = post_unlock_rx.blocking_recv() {
+            match msg {
+                PostUnlockMsg::Work(item) => process_item(item),
+                PostUnlockMsg::Shutdown => {
+                    post_unlock_rx.close();
+                    while let Ok(rem) = post_unlock_rx.try_recv() { if let PostUnlockMsg::Work(item) = rem { process_item(item); } }
+                    break;
                 }
             }
-        })
-        .expect("spawn post_unlock worker thread");
+        }
+    }).expect("spawn post_unlock worker thread");
     (post_unlock_tx, done_rx)
 }
 

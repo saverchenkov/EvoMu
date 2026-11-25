@@ -1752,7 +1752,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
             } else {
                 None
             };
-            defer_cmd_reply(exec_ctx, reply, out);
+            defer_barrier_cmd_reply(exec_ctx, reply, out);
             None
         }
         SystemCommand::ApplyTrueDamage { ball_id, amount, reply } => {
@@ -1763,7 +1763,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
             } else {
                 None
             };
-            defer_cmd_reply(exec_ctx, reply, out);
+            defer_barrier_cmd_reply(exec_ctx, reply, out);
             None
         }
         SystemCommand::SetInterdictionNullified { ball_id, nullified, reply } => {
@@ -1996,11 +1996,13 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         &mut exec_ctx.actor_st.pending_missile_deploy_fx,
     );
     let landed_warps = celestials::collect_landed_warp_positions(exec_ctx.ballpark, &events);
-    collect_landed_warps_for_post_unlock(
+    collect_landed_warps_for_post_unlock_with_in_flight(
         exec_ctx.ballpark,
         &events,
         &exec_ctx.actor_st.db_opt,
         &exec_ctx.actor_st.ball_space_entry_epochs,
+        exec_ctx.post_unlock_in_flight_actor.load(std::sync::atomic::Ordering::Acquire) > 0
+            || !exec_ctx.post_unlock_ops.is_empty(),
         exec_ctx.post_unlock_ops,
     );
     celestials::clear_landed_warp_tracking_from_events(

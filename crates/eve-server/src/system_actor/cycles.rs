@@ -893,26 +893,24 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
                     .remove(&cycle.ship_id)
                     .unwrap_or([1.0, 0.0, 0.0, 0.0]);
                 if let Some(db_ref) = db_opt {
-                    let fallback_cur = ballpark
+                    let cur = ballpark
                         .combat_states
                         .get(&cycle.ship_id)
                         .and_then(|cs| cs.rah_armor_resonance)
                         .map(|r| [r[0], r[3], r[2], r[1]])
-                        .unwrap_or([0.85, 0.85, 0.85, 0.85]);
-                    let cur = db_ref
-                        .try_with_snapshot(|snap| {
-                            if let Some(tr) = snap.transient_item_attributes.get(&cycle.module_id) {
-                                [
-                                    tr.get(&267).copied().unwrap_or(0.85),
-                                    tr.get(&268).copied().unwrap_or(0.85),
-                                    tr.get(&269).copied().unwrap_or(0.85),
-                                    tr.get(&270).copied().unwrap_or(0.85),
-                                ]
-                            } else {
-                                fallback_cur
-                            }
-                        })
-                        .unwrap_or(fallback_cur);
+                        .unwrap_or_else(|| {
+                            db_ref
+                                .try_with_snapshot(|snap| {
+                                    snap.transient_item_attributes.get(&cycle.module_id).map(|tr| [
+                                        tr.get(&267).copied().unwrap_or(0.85),
+                                        tr.get(&268).copied().unwrap_or(0.85),
+                                        tr.get(&269).copied().unwrap_or(0.85),
+                                        tr.get(&270).copied().unwrap_or(0.85),
+                                    ])
+                                })
+                                .flatten()
+                                .unwrap_or([0.85, 0.85, 0.85, 0.85])
+                        });
                     let new_resonances =
                         step_rah_resonances(cur, inc_dmg, cycle.rah_shift_amount);
                     post_unlock.push(super::post_unlock::PostUnlockIntent::RahResonances {
@@ -1735,22 +1733,8 @@ pub(crate) fn remove_all_ship_module_cycles_preserving_own_db_collecting(
             removed_cycles.push((removed, char_id));
         }
     }
-    if !preserve_own_db_active_states {
-        if let Some(db_ref) = db_opt {
-            let maybe_dirty = db_ref
-                .try_with_snapshot(|s| {
-                    (!s.module_active_states.is_empty() || !s.module_active_charges.is_empty())
-                        && s.items.values().any(|it| {
-                            it.location_id == ship_id
-                                && (s.module_active_states.contains(&it.item_id)
-                                    || s.module_active_charges.contains_key(&it.item_id))
-                        })
-                })
-                .unwrap_or(true);
-            if maybe_dirty {
-                post_unlock.push(super::post_unlock::PostUnlockIntent::ShipCycleClearAll(ship_id));
-            }
-        }
+    if !preserve_own_db_active_states && db_opt.is_some() {
+        post_unlock.push(super::post_unlock::PostUnlockIntent::ShipCycleClearAll(ship_id));
     }
     if !removed_cycles.is_empty() {
         super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
@@ -1990,11 +1974,12 @@ impl SystemHandle {
             super::missiles::snapshot_missile_positions(&bp, active_guided_missiles);
         let events = bp.step(dt);
         super::missiles::flush_pending_missile_deploy_fx(&mut bp, pending_missile_deploy_fx);
-        super::collect_landed_warps_for_post_unlock(
+        super::collect_landed_warps_for_post_unlock_with_in_flight(
             &bp,
             &events,
             db_opt,
             ball_space_entry_epochs,
+            self.has_in_flight_post_unlock() || !post_unlock_ops.is_empty(),
             &mut post_unlock_ops,
         );
         super::clear_landed_warp_tracking_from_events(&bp, &events, warp_state);
@@ -2211,13 +2196,16 @@ impl SystemHandle {
         let tick = bp.current_tick;
         let db_opt_cloned = db_opt.clone();
         let sde_opt_cloned = sde_opt.clone();
-        let wait_ticket = super::post_unlock::enqueue_post_unlock_under_locks(
+        let ops_was_empty = post_unlock_ops.is_empty();
+        let has_destroyed = !drained_destroyed.is_empty();
+        let wait_ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
             self,
             db_opt_cloned.as_ref(),
             sde_opt_cloned.as_ref(),
             post_unlock_ops,
             caller_can_wait,
         );
+        let waited_sync = wait_ticket.is_wait_worker();
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         drop(st);
@@ -2238,7 +2226,12 @@ impl SystemHandle {
         self.record_warp_stops_from_events(&warp_events);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             if !death_futs.is_empty() || step_fut.is_some() || destroyed_lease.is_some() {
+                let barrier_h = (!waited_sync && (!ops_was_empty || has_destroyed || self.has_in_flight_post_unlock()))
+                    .then(|| self.clone());
                 let _ = handle.spawn(async move {
+                    if let Some(h) = barrier_h {
+                        let _ = h.wait_for_post_unlock_barrier().await;
+                    }
                     for fut in death_futs {
                         fut.await;
                     }

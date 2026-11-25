@@ -893,7 +893,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         }
         SystemCommand::SetCombatState { ball_id, combat_state, reply } => {
             commit_combat_state_update(exec_ctx, ball_id, combat_state);
-            defer_cmd_reply(exec_ctx, reply, Ok(()));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(()));
             None
         }
         SystemCommand::GetCombatState { ball_id, reply } => {
@@ -902,7 +902,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
         }
         SystemCommand::ModifyCombatState { ball_id, f, reply } => {
             let Some(mut cs) = exec_ctx.ballpark.balls.contains_key(&ball_id).then(|| exec_ctx.ballpark.combat_states.get(&ball_id).cloned()).flatten() else {
-                defer_reply(exec_ctx.deferred_replies, reply, None);
+                defer_barrier_cmd_reply(exec_ctx, reply, None);
                 return None;
             };
             f(&mut cs);

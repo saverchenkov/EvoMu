@@ -155,7 +155,7 @@ fn run_direct_ball_op_on_current_thread<R>(
             handle.event_tx.receiver_count(),
         );
         handle.publish_view_from(&ballpark, Some(&actor_st));
-        let ticket = super::post_unlock::enqueue_post_unlock_under_locks(
+        let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
             handle,
             actor_st.db_opt.as_ref(),
             actor_st.sde_opt.as_ref(),

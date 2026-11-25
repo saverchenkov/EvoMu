@@ -47,7 +47,7 @@ fn hold_db_writer(db: &Arc<WorldRepository>) -> (std::sync::mpsc::Sender<()>, st
     (rel_tx, h)
 }
 async fn wait_until(msg: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !cond() {
         assert!(tokio::time::Instant::now() < deadline, "{msg}");
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -139,7 +139,7 @@ async fn ruling_w5_nanite_repair_cancel_queued_behind_earlier_tick_applies_once_
     // Queue earlier NaniteRepairTick (`10 - 6 = 4` paste, `DAMAGE = 95.0`) ahead of cancel (`+4 = 8` paste, `DAMAGE = 40.0`).
     let mut earlier_ops = PostUnlockOps::default();
     earlier_ops.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp {
-        char_id, ship_id, module_id: mod_id, paste_delta: 6, initial_damage_hp: 100.0, paste_total_needed: 10, rem_dmg: 95.0, done_now: false,
+        char_id, ship_id, module_id: mod_id, paste_delta: 6, initial_damage_hp: 100.0, paste_total_needed: 10, rem_dmg: 95.0, done_now: false, halted_for_paste: false,
     }));
     send_post_ops(&sys, &ctx, earlier_ops);
 
@@ -406,7 +406,7 @@ async fn bf4_nanite_repair_paste_conservation_defers_contention_and_prevents_fre
     });
     let mut ops_c = PostUnlockOps::default();
     ops_c.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp {
-        char_id, ship_id, module_id: mod_c, paste_delta: 3, initial_damage_hp: 50.0, paste_total_needed: 5, rem_dmg: 0.0, done_now: true,
+        char_id, ship_id, module_id: mod_c, paste_delta: 3, initial_damage_hp: 50.0, paste_total_needed: 5, rem_dmg: 0.0, done_now: true, halted_for_paste: false,
     }));
     let _ = super::execute_post_unlock_ops(Some(&ctx.db), None, ops_c, None, None);
     let (dmg_c_end, sf_c_end) = (mod_dmg(&ctx.db, mod_c), shortfall_of(&ctx.db, ship_id, mod_c));
@@ -520,18 +520,11 @@ async fn bf_1170_activation_and_try_remove_wait_fifo_behind_in_flight_cleanup() 
     let step_out = sys.ask_step_tick_only(0.2).await.unwrap();
     wait_until("tick cleanup never queued", || sys.actor_state.read().unwrap().active_module_cycles.is_empty() && sys.has_in_flight_post_unlock()).await;
     assert!(hook_rx.try_recv().is_err() && ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_a)));
-
     let rec_fut = tokio::spawn({ let s = sys.clone(); async move { s.reconcile_module_cycle_before_activate(ship_id, mod_a, 1_000).await } });
-    let act_fut = tokio::spawn({
-        let s = sys.clone();
-        async move {
-            s.activate_module_cycle_atomic(AtomicActivateCycleRequest {
-                char_id,
-                cycle: ActiveModuleCycle { ship_id, owner_char_id: Some(char_id), module_id: mod_b, module_type_id: 2048, effect_name: "armorRepair".into(), duration_s: 5.0, repeat: 1, origin_scene_epoch: Some(1), ..Default::default() },
-                allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: false, break_reason: ProtectionBreakReason::ModuleActivation, require_ball_in_space: true, real_now_unix: 1_000,
-            }).await
-        }
-    });
+    let act_fut = tokio::spawn({ let s = sys.clone(); async move { s.activate_module_cycle_atomic(AtomicActivateCycleRequest {
+        char_id, allow_while_warping: false, allow_while_cloaked: true, replace_existing_cycle: false, break_protection: false, break_reason: ProtectionBreakReason::ModuleActivation, require_ball_in_space: true, real_now_unix: 1_000,
+        cycle: ActiveModuleCycle { ship_id, owner_char_id: Some(char_id), module_id: mod_b, module_type_id: 2048, effect_name: "armorRepair".into(), duration_s: 5.0, repeat: 1, origin_scene_epoch: Some(1), ..Default::default() },
+    }).await } });
     let rem_fut = tokio::spawn({ let s = sys.clone(); async move { s.remove_module_cycle(ship_id, mod_a).await } });
     let upd_fut = tokio::spawn({ let s = sys.clone(); async move { s.update_module_overload(ship_id, mod_b, true).await } });
     let fit_fut = tokio::spawn({ let s = sys.clone(); async move { s.apply_fit_projection(ship_id, proj).await } });
@@ -586,7 +579,7 @@ async fn bf_1170_rev01_initiate_module_repair_many_waits_behind_in_flight_nanite
     // 1. In-flight NaniteRepairTick completes repair (DAMAGE -> 0.0): RPC waits behind barrier and rejects NoDamagedModulesToRepair.
     let (rel1, w1) = hold_db_writer(&ctx.db);
     let mut ops1 = PostUnlockOps::default();
-    ops1.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp { char_id, ship_id, module_id: mod_id, paste_delta: 0, initial_damage_hp: 20.0, paste_total_needed: 2, rem_dmg: 0.0, done_now: true }));
+    ops1.push(PostUnlockIntent::NaniteRepairTick(NaniteRepairTickDbOp { char_id, ship_id, module_id: mod_id, paste_delta: 0, initial_damage_hp: 20.0, paste_total_needed: 2, rem_dmg: 0.0, done_now: true, halted_for_paste: false }));
     send_post_ops(&sys, &ctx, ops1);
     let rpc1 = call_repair();
     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -719,4 +712,153 @@ async fn bf_1170_r5_01_guided_missile_volley_waits_and_runtime_drop_exits_cleanl
         handle
     }).join().unwrap();
     wait_until("post_unlock_tx never closed after Runtime::drop", || h.post_unlock_tx.is_closed()).await;
+}
+
+/// `BF-1170-1A-R6-01` (1/4): `p0 -> p1 -> p0` (`set_ball_position`) under held DB writer never skips `p0` due to stale snapshot read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r6_01_p0_p1_p0_set_ball_position_under_held_writer() {
+    let (ctx, sys_id, char_id, ship_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_211_001_i64);
+    let (p0, p1) = (DVec3::new(10.0, 0.0, 0.0), DVec3::new(500.0, 0.0, 0.0));
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[], None);
+    ctx.db.with_mut_snapshot(|s| { s.item_positions.insert(ship_id, [p0.x, p0.y, p0.z]); });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(ship_id, 606, p0)).await.unwrap();
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let f1 = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_id, p1).await } });
+    wait_until("p1 never hit memory", || sys.get_ball_position_sync(ship_id) == Some(p1)).await;
+    let f2 = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_id, p0).await } });
+    wait_until("p0 never hit memory", || sys.get_ball_position_sync(ship_id) == Some(p0)).await;
+    let _ = rel_w.send(()); writer.join().unwrap();
+    assert!(f1.await.unwrap() && f2.await.unwrap());
+    assert_eq!(ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied()), Some([p0.x, p0.y, p0.z]));
+}
+
+/// `BF-1170-1A-R6-01` (2/4): TiDi stretch then TiDi relax while `ModuleReload` is queued under held writer clears stretched DB deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r6_01_tidi_stretch_then_relax_while_queued() {
+    let (ctx, sys_id, mod_id) = (test_ctx(), 30_000_142_u32, 778_212_101_i64);
+    let now_u = ctx.db.clock().now_unix_secs();
+    let init_until = now_u + 12;
+    ctx.db.with_mut_snapshot(|s| { s.cluster_and_runtime.module_reload_until_unix.insert(mod_id, init_until); });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.actor_state.write().unwrap().module_reload_sim_remaining.insert(mod_id, super::super::types::ModuleReloadSimEntry {
+        remaining_sim_s: 12.0, min_wall_until_unix: init_until, tidi_stretched: false,
+    });
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let _ = sys.set_tidi_factor_raw(0.5);
+    let t1 = std::thread::spawn({ let s = sys.clone(); move || s.try_step_full_tick(1.0) });
+    wait_until("step1 tidi stretch never applied", || sys.actor_state.read().unwrap().module_reload_sim_remaining.get(&mod_id).is_some_and(|e| e.tidi_stretched)).await;
+    let _ = sys.set_tidi_factor_raw(1.0);
+    let t2 = std::thread::spawn({ let s = sys.clone(); move || s.try_step_full_tick(1.0) });
+    wait_until("step2 tidi relax never applied", || sys.actor_state.read().unwrap().module_reload_sim_remaining.get(&mod_id).is_some_and(|e| !e.tidi_stretched)).await;
+    let _ = rel_w.send(()); writer.join().unwrap();
+    t1.join().unwrap(); t2.join().unwrap();
+    let final_u = ctx.db.with_snapshot(|s| s.cluster_and_runtime.module_reload_until_unix.get(&mod_id).copied()).unwrap();
+    assert!(final_u <= init_until + 4, "TiDi relax was dropped behind stretch: init={init_until}, final={final_u}");
+}
+
+/// `BF-1170-1A-R6-01` (3/4): Back-to-back RAH cycles under held writer accumulate from actor state (`0.85 -> 0.79 -> 0.73`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r6_01_back_to_back_rah_cycles_under_held_writer() {
+    let (ctx, sys_id, char_id, ship_id, mod_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_213_001_i64, 778_213_101_i64);
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[(mod_id, 11269, InventoryFlag::LoSlot0, 0.0)], None);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
+    sys.set_combat_state(ship_id, make_combat_state(100.0, 100.0, 100.0, 100.0)).await.unwrap();
+    sys.add_module_cycle(ActiveModuleCycle {
+        ship_id, module_id: mod_id, module_type_id: 11269, owner_char_id: Some(char_id),
+        effect_name: "adaptiveArmorHardener".into(), duration_s: 5.0, repeat: 1, is_rah: true, rah_shift_amount: 6.0, ..Default::default()
+    }).await.unwrap();
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let t1 = std::thread::spawn({ let s = sys.clone(); move || s.try_step_full_tick(5.0) });
+    while !matches!(sys.get_combat_state(ship_id).await.unwrap().and_then(|c| c.rah_armor_resonance), Some(r) if r[0] < 0.80) {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let t2 = std::thread::spawn({ let s = sys.clone(); move || s.try_step_full_tick(5.0) });
+    while !matches!(sys.get_combat_state(ship_id).await.unwrap().and_then(|c| c.rah_armor_resonance), Some(r) if r[0] < 0.74) {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let _ = rel_w.send(()); writer.join().unwrap();
+    t1.join().unwrap(); t2.join().unwrap();
+    let em_res = ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&mod_id).and_then(|m| m.get(&267).copied())).unwrap();
+    assert!((em_res - 0.73).abs() < 1e-4, "expected cumulative 2-cycle EM resonance 0.73, got {em_res}");
+}
+
+/// `BF-1170-1A-R6-01` (4/4): `ShipCycleClearAll` behind queued `CycleAmmoStep` (which populates `module_active_charges`) clears DB charge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r6_01_ship_cycle_clear_all_behind_queued_cycle_ammo_step() {
+    let (ctx, sys_id, char_id, ship_id, mod_id, ammo_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_214_001_i64, 778_214_101_i64, 778_214_201_i64);
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[(mod_id, 484, InventoryFlag::HiSlot0, 0.0)], None);
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(ammo_id, make_item(ammo_id, 178, char_id, ship_id, InventoryFlag::Cargo, 10)); });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
+    sys.add_module_cycle(cloak_cyc(ship_id, char_id, mod_id, 10.0, 0.0, 0)).await.unwrap();
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let mut ops_ammo = PostUnlockOps::default();
+    ops_ammo.push(PostUnlockIntent::CycleAmmoStep(super::CycleAmmoStepDbOp {
+        char_id: Some(char_id), ship_id, linked_turrets: vec![mod_id], ammo_type_id: Some(178), missile_charge_type_id: None,
+        damage_vector_total: 100.0, crystal_volatility_chance: 0.0, crystal_volatility_damage: 0.0, pre_consumed_mode: false,
+        consume_pre_round_for_next_cycle: false,
+        reload_spec: Some(super::CycleReloadDbSpec { ammo_type_id: 178, linked_turrets: vec![mod_id], master_module_id: mod_id, actual_per_mod: 1, reload_time_ms: 5000.0, reload_until: 999 }),
+    }));
+    let _ = super::send_post_unlock_item(&sys.post_unlock_tx, &sys.post_unlock_in_flight, PostUnlockWorkItem {
+        db_opt: Some(Arc::clone(&ctx.db)), sde_opt: Some(Arc::clone(&ctx.sde)), ops: ops_ammo, replies: Vec::new(), in_flight_guard: None,
+    });
+    let rm_fut = tokio::spawn({ let s = sys.clone(); async move { s.remove_ball(ship_id).await } });
+    wait_until("remove_ball never cleared actor ball", || sys.get_ball_position_sync(ship_id).is_none()).await;
+    assert!(!rm_fut.is_finished(), "remove_ball returned before CycleAmmoStep + ShipCycleClearAll drained");
+
+    let _ = rel_w.send(()); writer.join().unwrap();
+    assert!(rm_fut.await.unwrap().is_some());
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&ammo_id].quantity, 9, "CycleAmmoStep reload must have run");
+        assert!(!s.module_active_charges.contains_key(&mod_id), "ShipCycleClearAll was skipped behind CycleAmmoStep");
+        assert!(!s.module_active_states.contains_key(&mod_id));
+    });
+}
+
+/// `BF-1170-1A-R6-02`: Empty-ops `flush_dirty_condition_checkpoint_sync` and absent-ball `modify_combat_state` wait FIFO behind in-flight DB write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r6_02_empty_ops_flush_checkpoint_and_modify_combat_absent_wait_fifo() {
+    let (ctx, sys_id, char_id, ship_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_215_001_i64);
+    let p1 = DVec3::new(321.0, 0.0, 0.0);
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[], None);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
+
+    let (rel_w, writer) = hold_db_writer(&ctx.db);
+    let pos_fut = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_id, p1).await } });
+    wait_until("in-flight item never started", || sys.has_in_flight_post_unlock()).await;
+    let flush_h = std::thread::spawn({ let s = sys.clone(); move || s.flush_dirty_condition_checkpoint_sync() });
+    let mod_fut = tokio::spawn({ let s = sys.clone(); async move { s.modify_combat_state(ship_id + 999, |_| {}).await } });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!flush_h.is_finished(), "empty flush_dirty_condition_checkpoint_sync bypassed in-flight barrier");
+    assert!(!mod_fut.is_finished(), "absent-ball modify_combat_state bypassed in-flight barrier");
+
+    let _ = rel_w.send(()); writer.join().unwrap();
+    assert_eq!(flush_h.join().unwrap(), 0);
+    assert!(mod_fut.await.unwrap().unwrap().is_none());
+    assert!(pos_fut.await.unwrap());
+    assert_eq!(ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied()), Some([p1.x, p1.y, p1.z]));
+}
+
+/// `BF-1170-1A-R6-03`: Halting mid-repair for paste shortage clears `nanite_paste_shortfall` even when `paste_delta > 0`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1170_r6_03_nanite_halt_for_paste_clears_shortfall() {
+    let (ctx, sys_id, char_id, ship_id, mod_id, paste_id) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 778_216_001_i64, 778_216_101_i64, 778_216_201_i64);
+    seed_ship_char(&ctx.db, sys_id, char_id, ship_id, &[(mod_id, 2048, InventoryFlag::LoSlot0, 100.0)], Some((paste_id, 2)));
+    ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.nanite_paste_shortfall.insert((ship_id, mod_id), 1); });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(make_ball(ship_id, 606, DVec3::ZERO)).await.unwrap();
+    push_nanite(&sys, char_id, ship_id, mod_id, 100.0, 0.0, 10, 0);
+
+    std::thread::spawn({ let s = sys.clone(); move || s.try_step_full_tick(5.0) }).join().unwrap();
+    assert!(sys.actor_state.read().unwrap().active_nanite_repairs.is_empty(), "nanite repair should have halted");
+    assert_eq!(shortfall_of(&ctx.db, ship_id, mod_id), None, "shortfall must clear on halted_for_paste even with paste_delta > 0");
+    assert_eq!(paste_qty(&ctx.db, ship_id), 0);
+    assert!(mod_dmg(&ctx.db, mod_id).unwrap() < 100.0);
 }

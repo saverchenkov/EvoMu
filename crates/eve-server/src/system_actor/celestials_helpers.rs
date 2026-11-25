@@ -409,79 +409,22 @@ pub(crate) fn collect_ball_positions_for_post_unlock(
     ball_space_entry_epochs: &HashMap<BallId, u64>,
     post_unlock: &mut post_unlock::PostUnlockOps,
 ) {
-    let Some(db) = db_opt.as_ref() else {
-        return;
-    };
-    if ball_ids.is_empty() {
+    if db_opt.is_none() || ball_ids.is_empty() {
         return;
     }
     let solar_system_id = ballpark.solar_system_id;
-    let collect_unfiltered = || {
-        let mut out = Vec::new();
-        for &bid in ball_ids {
-            if ballpark.is_static_ball(bid)
-                || ballpark
-                    .ball_slim_meta
-                    .get(&bid)
-                    .is_some_and(|m| m.category_id == 11)
-            {
-                continue;
-            }
-            let Some(b) = ballpark.balls.get(&bid) else {
-                continue;
-            };
-            if !b.position.is_finite() {
-                continue;
-            }
-            let epoch_opt = ball_space_entry_epochs.get(&bid).copied();
-            out.push((bid, b.position.to_array(), solar_system_id, epoch_opt));
+    let mut updates = Vec::new();
+    for &bid in ball_ids {
+        if ballpark.is_static_ball(bid)
+            || ballpark.ball_slim_meta.get(&bid).is_some_and(|m| m.category_id == 11)
+        {
+            continue;
         }
-        out
-    };
-    let updates: Vec<(BallId, [f64; 3], SolarSystemId, Option<u64>)> =
-        if db.is_write_locked_by_current_thread() {
-            collect_unfiltered()
-        } else if let Some(filtered) = db.try_with_snapshot(|snap| {
-            let mut out = Vec::new();
-            for &bid in ball_ids {
-                if ballpark.is_static_ball(bid)
-                    || ballpark
-                        .ball_slim_meta
-                        .get(&bid)
-                        .is_some_and(|m| m.category_id == 11)
-                {
-                    continue;
-                }
-                let Some(b) = ballpark.balls.get(&bid) else {
-                    continue;
-                };
-                if !b.position.is_finite() {
-                    continue;
-                }
-                let changed = match snap.item_positions.get(&bid) {
-                    None => true,
-                    Some(&prev) => (DVec3::from_array(prev) - b.position).length_squared() > 1e-6,
-                };
-                let epoch_opt = ball_space_entry_epochs.get(&bid).copied();
-                if !changed
-                    || !snap.items.contains_key(&bid)
-                    || crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                        snap,
-                        bid,
-                        Some(solar_system_id),
-                        epoch_opt,
-                    )
-                {
-                    continue;
-                }
-                out.push((bid, b.position.to_array(), solar_system_id, epoch_opt));
-            }
-            out
-        }) {
-            filtered
-        } else {
-            collect_unfiltered()
+        let Some(b) = ballpark.balls.get(&bid).filter(|b| b.position.is_finite()) else {
+            continue;
         };
+        updates.push((bid, b.position.to_array(), solar_system_id, ball_space_entry_epochs.get(&bid).copied()));
+    }
     post_unlock.push_item_positions(updates);
 }
 
@@ -514,6 +457,19 @@ pub(crate) fn collect_landed_warps_for_post_unlock(
     events: &[eve_destiny::DestinyEvent],
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
+    post_unlock: &mut post_unlock::PostUnlockOps,
+) {
+    collect_landed_warps_for_post_unlock_with_in_flight(
+        ballpark, events, db_opt, ball_space_entry_epochs, false, post_unlock,
+    );
+}
+
+pub(crate) fn collect_landed_warps_for_post_unlock_with_in_flight(
+    ballpark: &Ballpark,
+    events: &[eve_destiny::DestinyEvent],
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    has_in_flight: bool,
     post_unlock: &mut post_unlock::PostUnlockOps,
 ) {
     let Some(db) = db_opt.as_ref() else {
@@ -567,7 +523,7 @@ pub(crate) fn collect_landed_warps_for_post_unlock(
         out
     };
     let updates: Vec<(BallId, [f64; 3], SolarSystemId, Option<u64>)> =
-        if db.is_write_locked_by_current_thread() {
+        if db.is_write_locked_by_current_thread() || has_in_flight {
             collect_unfiltered()
         } else if let Some(filtered) = db.try_with_snapshot(|snap| {
             let mut out = Vec::new();
@@ -1476,15 +1432,13 @@ impl SystemHandle {
                     entries,
                     written_out: Some(std::sync::Arc::clone(&written)),
                 });
-                post_unlock::enqueue_post_unlock_under_locks(
-                    self,
-                    st.db_opt.as_ref(),
-                    st.sde_opt.as_ref(),
-                    ops,
-                    caller_can_wait,
+                post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                    self, st.db_opt.as_ref(), st.sde_opt.as_ref(), ops, caller_can_wait,
                 )
             } else {
-                post_unlock::PostUnlockWaitTicket::None
+                post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                    self, st.db_opt.as_ref(), st.sde_opt.as_ref(), post_unlock::PostUnlockOps::default(), caller_can_wait,
+                )
             }
         };
         post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
