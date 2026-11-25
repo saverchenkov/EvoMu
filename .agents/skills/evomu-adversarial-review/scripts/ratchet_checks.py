@@ -3333,8 +3333,20 @@ def scan_arch_debt_per_file(root, doc, rel_path="crates/eve-testkit/ratchets/arc
     if not compiled or not os.path.isdir(src_dir):
         return per_file, compiled, violations, False, False
 
+    depth_aware_rules = frozenset({
+        "system_handle_sync_lock_helpers",
+        "actor_state_locks_outside_system_actor",
+    })
+    needs_depth_aware = any(
+        (not kl) and (n in depth_aware_rules)
+        for n, _, _, _, _, kl, _, _, _, _ in compiled
+    )
+
     rules_sig_raw = json.dumps(
-        [(n, kl, pi, pe, rks) for n, _, _, _, _, kl, pi, pe, rks, _ in compiled],
+        [
+            (n, kl, pi, pe, rks, (not kl) and (n in depth_aware_rules))
+            for n, _, _, _, _, kl, pi, pe, rks, _ in compiled
+        ],
         sort_keys=True,
     )
     rules_sig = hashlib.sha1(rules_sig_raw.encode("utf-8")).hexdigest()[:16]
@@ -3369,6 +3381,11 @@ def scan_arch_debt_per_file(root, doc, rel_path="crates/eve-testkit/ratchets/arc
                 raw = raw_bytes.decode("utf-8", errors="replace")
                 fully = strip_rust_comments_and_literals(raw)
                 prod = strip_cfg_test_items(fully)
+                prod_depth_aware = (
+                    strip_cfg_test_items_depth_aware(fully)
+                    if needs_depth_aware
+                    else None
+                )
                 prod_keep = (
                     strip_comments_and_cfg_tests_keep_literals(raw, fully, prod)
                     if needs_keep_literals
@@ -3380,7 +3397,12 @@ def scan_arch_debt_per_file(root, doc, rel_path="crates/eve-testkit/ratchets/arc
                         continue
                     if path_exc is not None and path_exc in rel:
                         continue
-                    target_txt = prod_keep if keep_literals else prod
+                    if keep_literals:
+                        target_txt = prod_keep
+                    elif name in depth_aware_rules:
+                        target_txt = prod_depth_aware
+                    else:
+                        target_txt = prod
                     c = counter(target_txt)
                     if c > 0:
                         file_counts[name] = c
