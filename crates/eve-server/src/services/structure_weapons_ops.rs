@@ -285,7 +285,11 @@ pub async fn trigger_structure_auto_defense_on_grid(
                     continue;
                 };
                 if let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        c_owner,
+                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                    );
                     opts.reject_fitted = false;
                     let _ = snap.consume_exact_item_quantity(charge_iid, 1, opts);
                 }
@@ -682,7 +686,11 @@ fn consume_structure_charge_in_snap(
         ));
     };
     if let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) {
-        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+            None,
+            c_owner,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        );
         opts.reject_fitted = false;
         let _ = snap.consume_exact_item_quantity(charge_iid, 1, opts);
     }

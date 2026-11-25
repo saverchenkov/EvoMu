@@ -1805,7 +1805,11 @@ fn validate_and_apply_fitting_with_options(
                             .consume_exact_item_quantity(
                                 cid,
                                 take,
-                                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+                                eve_db::ConsumeExactOptions::for_owner_exact(
+                                    Some(char_id),
+                                    char_id,
+                                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                                ),
                             )
                             .is_err()
                         {

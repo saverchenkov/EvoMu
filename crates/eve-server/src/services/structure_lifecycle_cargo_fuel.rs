@@ -222,8 +222,11 @@ pub async fn handle_jettison_structure_fuel(
                     else {
                         continue;
                     };
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
-                    opts.reject_singleton = true;
+                    let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        it_owner,
+                        eve_db::ItemClassPolicy::StackableCommodity,
+                    );
                     if snap.consume_exact_item_quantity(iid, take_i32, opts).is_ok() {
                         rem -= take;
                     }

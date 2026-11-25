@@ -1085,7 +1085,11 @@ fn handle_inner(
                         1,
                         eve_db::ConsumeExactOptions {
                             active_ship_id: effective_ship,
-                            ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                Some(char_id),
+                                char_id,
+                                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                            )
                         },
                     )
                     .map_err(|_| BridgeRpcError {
@@ -1167,7 +1171,11 @@ fn handle_inner(
                     1,
                     eve_db::ConsumeExactOptions {
                         active_ship_id: effective_ship,
-                        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(
+                            Some(char_id),
+                            char_id,
+                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                        )
                     },
                 )
                 .map_err(|_| BridgeRpcError {

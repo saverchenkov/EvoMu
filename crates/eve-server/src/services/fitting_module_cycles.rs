@@ -771,7 +771,11 @@ async fn activate_survey_probe_launcher(
                 touched_pre.entry(charge_item_id).or_insert(Some(cur_slot_it));
             }
             let c_owner = snap.items.get(&charge_item_id).map(|ci| ci.owner_id)?;
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                c_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.reject_fitted = false;
             opts.active_ship_id = Some(ship_id);
             let mut rem = match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {

@@ -485,7 +485,11 @@ pub async fn handle(
                     crate::services::encounter_surveillance_system::select_ess_reserve_key_in_cargo(
                         &ctx.sde, snap.items.values(), char_id, ship_id, sys_id, key_item_id_arg,
                     )?;
-                let key_opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id);
+                let key_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                );
                 snap.consume_exact_item_quantity(key_item_id, 1, key_opts).map_err(|e| BridgeRpcError {
                     code: "InventoryError".into(),
                     message: e.to_string(),

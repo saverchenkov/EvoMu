@@ -330,6 +330,7 @@ pub fn register_item_delivery_and_definitions(
                     let take = ((avail_qty.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
                     if take > 0 {
                         let opts = eve_db::ConsumeExactOptions {
+                            policy: eve_db::ItemClassPolicy::StackableCommodity,
                             required_location_id: Some(char_loc),
                             required_flag: Some(eve_db::InventoryFlag::Hangar),
                             ..eve_db::ConsumeExactOptions::for_character_stack(cid as i64)

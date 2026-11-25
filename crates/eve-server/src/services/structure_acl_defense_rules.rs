@@ -1062,8 +1062,11 @@ pub fn consume_structure_fuel_blocks(
         let Ok(take_i32) = ItemQty::try_from_u32(take).and_then(ItemQty::try_into_stack_i32) else {
             continue;
         };
-        let mut fuel_opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
-        fuel_opts.reject_singleton = true;
+        let fuel_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+            None,
+            it_owner,
+            eve_db::ItemClassPolicy::StackableCommodity,
+        );
         if snap.consume_exact_item_quantity(iid, take_i32, fuel_opts).is_ok() {
             rem -= take;
         }

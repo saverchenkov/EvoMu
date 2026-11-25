@@ -1073,8 +1073,11 @@ pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &Inven
 /// Removes `qty` units from an inventory stack via the centralized snapshot consumer, deleting it when empty.
 pub(crate) fn consume_items(snap: &mut WorldStateSnapshot, item_id: i64, qty: i32) {
     if let Some(owner_id) = snap.items.get(&item_id).map(|it| it.owner_id) {
-        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
-        opts.reject_singleton = false;
+        let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+            None,
+            owner_id,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        );
         let _ = snap.consume_exact_item_quantity(item_id, qty, opts);
     }
 }
@@ -1234,8 +1237,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                                 .unwrap_or(0)
                                 .checked_add(amount_u32)
                                 .ok_or((STATUS_BAD_REQUEST, "Hub fuel bay capacity exceeded".to_string()))?;
+                            let fuel_owner = snap.items.get(&item_id).map(|it| it.owner_id).unwrap_or(c.cid);
+                            snap.consume_exact_item_quantity(
+                                item_id,
+                                amount_i32,
+                                eve_db::ConsumeExactOptions::for_owner_exact(
+                                    None,
+                                    fuel_owner,
+                                    eve_db::ItemClassPolicy::StackableCommodity,
+                                ),
+                            )
+                            .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
                             hub.fuel.insert(fuel_type, total);
-                            consume_items(snap, item_id, amount_i32);
                             let now_ts = ctx.now_unix();
                             let is_hacked = snap
                                 .sov_runtime

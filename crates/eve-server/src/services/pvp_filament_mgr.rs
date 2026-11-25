@@ -1057,7 +1057,11 @@ pub async fn handle(
                     snap.consume_exact_item_quantity(
                         item_id,
                         1,
-                        eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), fil_owner),
+                        eve_db::ConsumeExactOptions::for_owner_exact(
+                            Some(char_id),
+                            fil_owner,
+                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                        ),
                     )
                     .map_err(|e| BridgeRpcError {
                         code: "FilamentLocked".into(),

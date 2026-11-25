@@ -274,7 +274,11 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     if plan.consume_one_round_per_slot {
         for (tid, cid) in created_slot_charges {
             if let Some(pre) = snap.items.get(&cid).cloned() {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    pre.owner_id,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                );
                 opts.reject_fitted = false;
                 if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
                     if post.is_none() {
@@ -1750,8 +1754,11 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                             if take <= 0 {
                                 continue;
                             }
-                            let opts =
-                                eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                            let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                                None,
+                                pre.owner_id,
+                                eve_db::ItemClassPolicy::StackableCommodity,
+                            );
                             if let Ok(post) = snap.consume_exact_item_quantity(fid, take, opts) {
                                 remaining -= take;
                                 diffs.push((pre, post));
@@ -1761,8 +1768,11 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                 }
                 if let Some(cid) = deferred.cap_booster_charge_id {
                     if let Some(pre) = snap.items.get(&cid).cloned() {
-                        let mut opts =
-                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            pre.owner_id,
+                            eve_db::ItemClassPolicy::ExactAssembledItem,
+                        );
                         opts.reject_fitted = false;
                         if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
                             diffs.push((pre, post));
@@ -1771,8 +1781,11 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                 }
                 if let Some((cid, qty)) = deferred.ancillary_charge_to_consume {
                     if let Some(pre) = snap.items.get(&cid).cloned() {
-                        let mut opts =
-                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            pre.owner_id,
+                            eve_db::ItemClassPolicy::ExactAssembledItem,
+                        );
                         opts.reject_fitted = false;
                         if let Ok(post) = snap.consume_exact_item_quantity(cid, qty, opts) {
                             diffs.push((pre, post));
@@ -1781,8 +1794,11 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                 }
                 for (turret_id, charge_id) in deferred.turret_charge_consumptions {
                     if let Some(pre) = snap.items.get(&charge_id).cloned() {
-                        let mut opts =
-                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            pre.owner_id,
+                            eve_db::ItemClassPolicy::ExactAssembledItem,
+                        );
                         opts.reject_fitted = false;
                         if let Ok(post) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
                             if post.is_none() {

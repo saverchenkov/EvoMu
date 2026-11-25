@@ -230,7 +230,11 @@ pub fn prepare_ancillary_module(
     if let Some((cid, qty)) = prep.pending_charge_consume.take() {
         let consumed = ctx.db.with_mut_snapshot(|snap| {
             let pre = snap.items.get(&cid).cloned()?;
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                pre.owner_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.reject_fitted = false;
             let post = snap.consume_exact_item_quantity(cid, qty, opts).ok()?;
             Some((pre, post))

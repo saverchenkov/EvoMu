@@ -975,7 +975,11 @@ pub(crate) fn handle_load_ammo(
         snap.consume_exact_item_quantity(
             first_charge_id,
             total_needed,
-            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), charge_owner),
+            eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                charge_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
         )
         .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
         let post_source = snap.items.get(&first_charge_id).cloned();

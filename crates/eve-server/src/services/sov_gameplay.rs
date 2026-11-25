@@ -455,7 +455,11 @@ pub async fn handle_anchor_mercenary_den_rpc(
         snap.consume_exact_item_quantity(
             item_id,
             1,
-            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+            eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                char_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
         )
         .map_err(|e| BridgeRpcError {
             code: "InventoryError".into(),
@@ -1284,7 +1288,11 @@ pub async fn dispatch_special_structure_attack(
             if let Some(owner_id) = snap.items.get(cid).map(|ch| ch.owner_id) {
                 let opts = eve_db::ConsumeExactOptions {
                     reject_fitted: false,
-                    ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        owner_id,
+                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                    )
                 };
                 let _ = snap.consume_exact_item_quantity(*cid, 1, opts);
             }
@@ -1556,7 +1564,11 @@ pub async fn handle_anchor_sov_hub_rpc(
                 .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into(), client_error: None })?
         };
         if let Some(hub_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), hub_owner);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                hub_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.active_ship_id = Some(ship_id);
             snap.consume_exact_item_quantity(item_id, 1, opts).map_err(|e| BridgeRpcError {
                 code: "ItemLockedInContractOrJob".into(),

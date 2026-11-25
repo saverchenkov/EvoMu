@@ -217,7 +217,11 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &SessionState, args: &[
             1,
             eve_db::ConsumeExactOptions {
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -307,7 +311,11 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args:
             1,
             eve_db::ConsumeExactOptions {
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -386,7 +394,11 @@ where
             actual_to_open,
             eve_db::ConsumeExactOptions {
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -452,7 +464,11 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
             1,
             eve_db::ConsumeExactOptions {
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;

@@ -268,7 +268,11 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?
         };
         if let Some(pre_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), pre_owner);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                pre_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.active_ship_id = Some(ship_id);
             let _ = snap.consume_exact_item_quantity(item_id, 1, opts)
                 .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -1234,7 +1238,11 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             snap.consume_exact_item_quantity(
                 item_id,
                 1,
-                eve_db::ConsumeExactOptions::for_owner_exact(fit_actor, src.owner_id),
+                eve_db::ConsumeExactOptions::for_owner_exact(
+                    fit_actor,
+                    src.owner_id,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                ),
             )
             .map_err(|e| err("InventoryError", e.to_string()))?;
             snap.next_entity_id += 1;

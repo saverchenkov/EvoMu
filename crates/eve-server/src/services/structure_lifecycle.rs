@@ -1560,7 +1560,11 @@ pub(crate) fn sync_structure_with_released(
                         let owner_id = snap.items.get(&core_item).map(|it| it.owner_id)?;
                         let opts = eve_db::ConsumeExactOptions {
                             reject_fitted: false,
-                            ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
+                            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                None,
+                                owner_id,
+                                eve_db::ItemClassPolicy::ExactAssembledItem,
+                            )
                         };
                         snap.consume_exact_item_quantity(core_item, 1, opts).ok()?;
                         if let Some(s) = snap.structures.get_mut(&structure_id) {

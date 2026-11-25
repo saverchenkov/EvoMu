@@ -458,7 +458,11 @@ pub(crate) async fn handle_ships_and_services(
                     });
                 };
 
-                let mut muta_opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id);
+                let mut muta_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                );
                 muta_opts.active_ship_id = current_ship;
                 snap.consume_exact_item_quantity(mid, 1, muta_opts).map_err(|e| BridgeRpcError {
                     code: "MutaplasmidItemNotFound".into(),

@@ -569,7 +569,7 @@ fn centralized_consumption_and_transfer_enforce_all_six_invariants() {
             snap.consume_exact_item_quantity(
                 war_hq_id,
                 1,
-                ConsumeExactOptions::for_owner_exact(Some(cid), cid)
+                ConsumeExactOptions::for_owner_exact(Some(cid), cid, ItemClassPolicy::ExactAssembledItem)
             ),
             Err(DbError::ItemLocked(_))
         ));
@@ -581,7 +581,11 @@ fn centralized_consumption_and_transfer_enforce_all_six_invariants() {
                 1,
                 ConsumeExactOptions {
                     active_ship_id: Some(ship_id),
-                    ..ConsumeExactOptions::for_owner_exact(Some(cid), cid)
+                    ..ConsumeExactOptions::for_owner_exact(
+                        Some(cid),
+                        cid,
+                        ItemClassPolicy::ExactAssembledItem,
+                    )
                 }
             )
             .is_err());
@@ -658,7 +662,11 @@ fn centralized_consumption_and_transfer_enforce_all_six_invariants() {
             version: 1,
             ..InventoryItemRecord::default()
         });
-        let mut container_opts = ConsumeExactOptions::for_owner_exact(Some(cid), cid);
+        let mut container_opts = ConsumeExactOptions::for_owner_exact(
+            Some(cid),
+            cid,
+            ItemClassPolicy::ExactAssembledItem,
+        );
         container_opts.reject_non_empty_container = true;
         assert!(snap.consume_exact_item_quantity(empty_box, 1, container_opts).is_err());
         let mut transfer_box = TransferItemSpec::move_whole(
@@ -733,6 +741,7 @@ fn centralized_consumption_and_transfer_enforce_all_six_invariants() {
         });
 
         let corp_opts = ConsumeExactOptions {
+            policy: ItemClassPolicy::StackableCommodity,
             actor_char_id: Some(member_id),
             expected_owner_id: corp_id,
             ..ConsumeExactOptions::for_character_stack(member_id)
@@ -2001,7 +2010,7 @@ fn root_location_constraint_consumption_and_system_cleanup() {
     assert!(snap.is_clean_stackable_item(&leaf_rec));
     assert!(!snap.is_clean_stackable_item(&run_bounded_item));
 
-    assert!(snap.validate_item_for_consumption(&snap.items[&c1], &ConsumeExactOptions::for_owner_exact(Some(owner_id), owner_id)).is_err());
+    assert!(snap.validate_item_for_consumption(&snap.items[&c1], &ConsumeExactOptions::for_owner_exact(Some(owner_id), owner_id, ItemClassPolicy::ExactAssembledItem)).is_err());
 
     let mut boarded_opts = ok_opts;
     boarded_opts.active_ship_id = Some(leaf);
@@ -2016,7 +2025,11 @@ fn root_location_constraint_consumption_and_system_cleanup() {
     snap.structure_docking_acl_denied.remove(&struct_id);
 
     // Non-corp actor != owner rejected when item owned by expected_owner_id != actor
-    let diff_actor = ConsumeExactOptions::for_owner_exact(Some(other_id), owner_id);
+    let diff_actor = ConsumeExactOptions::for_owner_exact(
+        Some(other_id),
+        owner_id,
+        ItemClassPolicy::ExactBlueprintOrSingleton,
+    );
     assert_eq!(
         snap.validate_item_for_consumption(&leaf_rec, &diff_actor),
         Err(DbError::ItemOwnershipViolation {
@@ -2025,7 +2038,11 @@ fn root_location_constraint_consumption_and_system_cleanup() {
         })
     );
     // System maintenance path actor_char_id: None succeeds
-    let sys_actor = ConsumeExactOptions::for_owner_exact(None, owner_id);
+    let sys_actor = ConsumeExactOptions::for_owner_exact(
+        None,
+        owner_id,
+        ItemClassPolicy::ExactBlueprintOrSingleton,
+    );
     assert!(snap.validate_item_for_consumption(&leaf_rec, &sys_actor).is_ok());
 
     // War HQ designation rejects consumption with ItemLocked
@@ -2298,7 +2315,11 @@ fn transfer_and_consume_inventory_edge_paths() {
     assert!(snap
         .validate_item_for_consumption(
             &snap.items[&ctrl_ship],
-            &ConsumeExactOptions::for_owner_exact(Some(owner_id), owner_id)
+            &ConsumeExactOptions::for_owner_exact(
+                Some(owner_id),
+                owner_id,
+                ItemClassPolicy::ExactAssembledItem,
+            )
         )
         .is_err());
     assert!(snap
@@ -4044,5 +4065,185 @@ fn rollback_resurrection_monotonic_version_and_locked_pre_no_fallback_r8() {
             "locked/wrap deleted rollback must not mint an unlocked fallback stack"
         );
     });
+}
+
+#[test]
+fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
+    let mut snap = WorldStateSnapshot::default();
+    let owner_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+
+    let clean_stack_id = 995_001_i64;
+    let bpc_non_singleton_id = 995_002_i64;
+    let run_bounded_bp_id = 995_003_i64;
+    let dynamic_attr_id = 995_004_i64;
+    let mutaplasmid_id = 995_005_i64;
+    let insured_id = 995_006_i64;
+    let nan_insured_id = 995_007_i64;
+    let singleton_id = 995_008_i64;
+    let courier_id = 995_009_i64;
+
+    let base_item = |item_id: i64, quantity: i32| InventoryItemRecord {
+        item_id,
+        type_id: 587,
+        owner_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity,
+        singleton: false,
+        version: 1,
+        ..Default::default()
+    };
+
+    snap.items.insert(clean_stack_id, base_item(clean_stack_id, 5));
+
+    let mut bpc = base_item(bpc_non_singleton_id, 10);
+    bpc.is_blueprint_copy = true;
+    bpc.singleton = false;
+    snap.items.insert(bpc_non_singleton_id, bpc);
+
+    let mut run_bp = base_item(run_bounded_bp_id, 10);
+    run_bp.blueprint_runs_remaining = Some(5);
+    run_bp.singleton = false;
+    snap.items.insert(run_bounded_bp_id, run_bp);
+
+    let mut dyn_item = base_item(dynamic_attr_id, 10);
+    dyn_item.dynamic_attributes.insert(3, 12.5);
+    dyn_item.singleton = false;
+    snap.items.insert(dynamic_attr_id, dyn_item);
+
+    let mut muta_item = base_item(mutaplasmid_id, 10);
+    muta_item.source_mutaplasmid_id = Some(47_740);
+    muta_item.singleton = false;
+    snap.items.insert(mutaplasmid_id, muta_item);
+
+    let mut insured_item = base_item(insured_id, 10);
+    insured_item.insured_payout_isk = 500_000.0;
+    insured_item.singleton = false;
+    snap.items.insert(insured_id, insured_item);
+
+    let mut nan_insured_item = base_item(nan_insured_id, 10);
+    nan_insured_item.insured_payout_isk = f64::NAN;
+    nan_insured_item.singleton = false;
+    snap.items.insert(nan_insured_id, nan_insured_item);
+
+    let mut singleton_item = base_item(singleton_id, 1);
+    singleton_item.singleton = true;
+    snap.items.insert(singleton_id, singleton_item);
+
+    snap.items.insert(courier_id, base_item(courier_id, 10));
+    snap.item_custom_names
+        .insert(courier_id, "courier_cargo:90000001:42".to_string());
+
+    let stack_opts = ConsumeExactOptions::for_character_stack(owner_id);
+    assert_eq!(stack_opts.policy, ItemClassPolicy::StackableCommodity);
+    assert!(stack_opts.reject_singleton);
+    assert!(stack_opts.reject_blueprint_copy);
+    assert_eq!(
+        ConsumeExactOptions::for_character_commodity(owner_id).policy,
+        ItemClassPolicy::StackableCommodity
+    );
+
+    // 1. `for_character_stack` rejects BPC (`is_blueprint_copy: true, singleton: false`),
+    //    limited-run BP, non-empty `dynamic_attributes`, `source_mutaplasmid_id`,
+    //    `insured_payout_isk > 0.0` (and NaN), `singleton: true`, and `courier_cargo:`
+    for &bad_id in &[
+        bpc_non_singleton_id,
+        run_bounded_bp_id,
+        dynamic_attr_id,
+        mutaplasmid_id,
+        insured_id,
+        nan_insured_id,
+        singleton_id,
+        courier_id,
+    ] {
+        let err = snap
+            .consume_exact_item_quantity(bad_id, 1, stack_opts)
+            .expect_err("for_character_stack must reject non-commodity item");
+        assert!(
+            matches!(err, DbError::ValidationError(_)),
+            "expected ValidationError for item {bad_id}, got {err:?}"
+        );
+        assert!(
+            snap.items.contains_key(&bad_id),
+            "rejected item {bad_id} must remain intact"
+        );
+    }
+
+    // Even if a caller mutates reject flags to false on `StackableCommodity`, policy still enforces them.
+    let mut bypassed_flags = stack_opts;
+    bypassed_flags.reject_singleton = false;
+    bypassed_flags.reject_blueprint_copy = false;
+    for &bad_id in &[bpc_non_singleton_id, dynamic_attr_id, insured_id, singleton_id] {
+        assert!(
+            snap.validate_item_for_consumption(&snap.items[&bad_id], &bypassed_flags)
+                .is_err(),
+            "StackableCommodity policy must reject item {bad_id} regardless of bool overrides"
+        );
+    }
+
+    // 2. `consume_owner_items` with `for_character_stack` skips all invalid stacks and consumes only clean_stack_id.
+    assert!(snap.consume_owner_items(587, 6, stack_opts).is_err());
+    assert_eq!(snap.items[&clean_stack_id].quantity, 5);
+    let touched = snap.consume_owner_items(587, 3, stack_opts).unwrap();
+    assert_eq!(touched, vec![clean_stack_id]);
+    assert_eq!(snap.items[&clean_stack_id].quantity, 2);
+
+    // 3. `ExactBlueprintOrSingleton` allows BPC/singleton per flags, but rejects insured items.
+    let bp_allow = ConsumeExactOptions::for_owner_exact(
+        Some(owner_id),
+        owner_id,
+        ItemClassPolicy::ExactBlueprintOrSingleton,
+    );
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&bpc_non_singleton_id], &bp_allow)
+        .is_ok());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&singleton_id], &bp_allow)
+        .is_ok());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&insured_id], &bp_allow)
+        .is_err());
+
+    let mut bp_reject_bpc = bp_allow;
+    bp_reject_bpc.reject_blueprint_copy = true;
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&bpc_non_singleton_id], &bp_reject_bpc)
+        .is_err());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&singleton_id], &bp_reject_bpc)
+        .is_ok());
+
+    // 4. `ExactAssembledItem` allows singleton, dynamic_attributes, and insured_payout_isk > 0.0,
+    //    while rejecting blueprint copies unconditionally.
+    let assembled_opts = ConsumeExactOptions::for_owner_exact(
+        Some(owner_id),
+        owner_id,
+        ItemClassPolicy::ExactAssembledItem,
+    );
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&singleton_id], &assembled_opts)
+        .is_ok());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&dynamic_attr_id], &assembled_opts)
+        .is_ok());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&mutaplasmid_id], &assembled_opts)
+        .is_ok());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&insured_id], &assembled_opts)
+        .is_ok());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&bpc_non_singleton_id], &assembled_opts)
+        .is_err());
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&run_bounded_bp_id], &assembled_opts)
+        .is_err());
+
+    let mut assembled_bypass = assembled_opts;
+    assembled_bypass.reject_blueprint_copy = false;
+    assert!(snap
+        .validate_item_for_consumption(&snap.items[&bpc_non_singleton_id], &assembled_bypass)
+        .is_err());
 }
 

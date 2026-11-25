@@ -293,7 +293,11 @@ pub async fn deploy_fw_beacon_constructor(
             snap.consume_exact_item_quantity(
                 constructor_item_id,
                 1,
-                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), con_owner),
+                eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    con_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                ),
             )
             .map_err(|e| BridgeRpcError {
                 code: "ConstructorLocked".into(),

@@ -1256,7 +1256,11 @@ fn resolve_structure_weapon_tick(
                 continue;
             }
             if let Some(c_owner) = snap.items.get(&charge_item_id).map(|c| c.owner_id) {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    c_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                );
                 opts.reject_fitted = false;
                 let _ = snap.consume_exact_item_quantity(charge_item_id, capped as i32, opts);
             }

@@ -493,7 +493,7 @@ pub async fn activate_scan_probe_launcher(
                 client_error: None,
             });
         }
-        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), ci.owner_id);
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), ci.owner_id, eve_db::ItemClassPolicy::ExactAssembledItem);
         opts.reject_fitted = false;
         opts.active_ship_id = Some(ship_id);
         let rem = match snap.consume_exact_item_quantity(charge_item_id, actual_launch, opts) {

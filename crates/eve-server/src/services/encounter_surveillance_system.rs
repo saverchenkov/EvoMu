@@ -433,7 +433,11 @@ pub async fn handle_ess_link(
                     None,
                 )?;
                 if let Some(key_owner) = snap.items.get(&key_id).map(|i| i.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), key_owner);
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        key_owner,
+                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                    );
                     opts.active_ship_id = Some(ship_id);
                     snap.consume_exact_item_quantity(key_id, 1, opts)
                         .map_err(|e| BridgeRpcError {

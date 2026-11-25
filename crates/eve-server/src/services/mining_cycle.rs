@@ -498,7 +498,11 @@ fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: Cryst
         let (id, owner_id) = (item.item_id, item.owner_id);
         let opts = eve_db::ConsumeExactOptions {
             reject_fitted: false,
-            ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
+            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                owner_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            )
         };
         if snap.consume_exact_item_quantity(id, 1, opts).is_err() {
             return false;

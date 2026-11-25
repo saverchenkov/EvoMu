@@ -210,7 +210,11 @@ fn deduct_superweapon_fuel_with_diffs(
                 if took <= 0 {
                     continue;
                 }
-                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    pre.owner_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                );
                 snap.validate_item_for_consumption(&pre, &opts)
                     .map_err(|e| e.to_string())?;
                 let Some((pre_rec, taken)) = snap.reserve_consume_stack_for_rollback(fid, took)

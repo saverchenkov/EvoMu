@@ -1003,7 +1003,11 @@ fn handle_item_consume(
                 quantity as i32,
                 eve_db::ConsumeExactOptions {
                     active_ship_id: current_ship,
-                    ..eve_db::ConsumeExactOptions::for_owner_exact(Some(cid as i64), cid as i64)
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(cid as i64),
+                        cid as i64,
+                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                    )
                 },
             )
             .map_err(|e| eve_proto::BridgeRpcError {

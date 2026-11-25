@@ -412,7 +412,11 @@ pub async fn handle(
                     1,
                     eve_db::ConsumeExactOptions {
                         active_ship_id: current_ship,
-                        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(
+                            Some(char_id),
+                            char_id,
+                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                        )
                     },
                 )
                 .map_err(|e| BridgeRpcError {

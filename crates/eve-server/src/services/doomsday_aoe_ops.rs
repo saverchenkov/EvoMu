@@ -475,7 +475,11 @@ where
                 if take <= 0 {
                     continue;
                 }
-                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
+                let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    owner_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                );
                 snap.consume_exact_item_quantity(fid, take, opts)
                     .map_err(|e| e.to_string())?;
                 remaining -= take;

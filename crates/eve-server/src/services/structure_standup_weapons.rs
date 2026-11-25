@@ -177,7 +177,11 @@ fn consume_structure_charge(
         let Some(c_owner) = snap.items.get(&cid).map(|it| it.owner_id) else {
             return false;
         };
-        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+            None,
+            c_owner,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        );
         opts.reject_fitted = false;
         snap.consume_exact_item_quantity(cid, qty_needed, opts).is_ok()
     })

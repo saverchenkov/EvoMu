@@ -1513,7 +1513,11 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         else {
                             continue;
                         };
-                        let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
+                        let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            owner_id,
+                            eve_db::ItemClassPolicy::StackableCommodity,
+                        );
                         if snap.consume_exact_item_quantity(iid, take_i32, opts).is_ok() {
                             *rem_ref -= take;
                         }

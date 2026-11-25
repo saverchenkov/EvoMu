@@ -916,7 +916,11 @@ fn handle_split_skill_injector(
             qty_i32,
             eve_db::ConsumeExactOptions {
                 active_ship_id: current_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -998,7 +1002,11 @@ fn handle_combine_skill_injector(
             small_to_consume,
             eve_db::ConsumeExactOptions {
                 active_ship_id: current_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;

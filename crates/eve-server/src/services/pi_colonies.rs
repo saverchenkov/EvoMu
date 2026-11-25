@@ -658,7 +658,11 @@ pub fn handle_pi_colonies(
                                         snap.consume_exact_item_quantity(
                                             cc_item_id,
                                             1,
-                                            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), cc_item.owner_id),
+                                            eve_db::ConsumeExactOptions::for_owner_exact(
+                                                Some(char_id),
+                                                cc_item.owner_id,
+                                                eve_db::ItemClassPolicy::ExactAssembledItem,
+                                            ),
                                         )
                                         .map_err(|e| BridgeRpcError {
                                             code: "CommandCenterItemLocked".into(),

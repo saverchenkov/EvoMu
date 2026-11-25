@@ -523,7 +523,11 @@ pub async fn handle_anchor_skyhook_rpc(
         snap.consume_exact_item_quantity(
             item_id,
             1,
-            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), item_owner),
+            eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                item_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
         )
         .map_err(|e| BridgeRpcError {
             code: "InventoryError".into(),

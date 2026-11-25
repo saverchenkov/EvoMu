@@ -662,7 +662,11 @@ fn handle_take_offer(
                     continue;
                 }
                 let actor = if it_owner == char_id { Some(char_id) } else { None };
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(actor, it_owner);
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    actor,
+                    it_owner,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                );
                 opts.reject_blueprint_copy = true;
                 opts.active_ship_id = Some(ch.active_ship_id);
                 if snap.consume_exact_item_quantity(iid, take, opts).is_ok() {

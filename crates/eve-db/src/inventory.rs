@@ -29,10 +29,31 @@ pub struct MintItemSpec {
     pub merge_existing_stack: bool,
 }
 
+/// Explicit item-class policy enforced by [`WorldStateSnapshot::validate_item_for_consumption`]
+/// so stackable commodity paths cannot accept blueprint copies, assembled singletons,
+/// mutated/dynamic items, or insured hulls by default (`#1186` `EP-02`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemClassPolicy {
+    /// Bulk/stackable commodities: unconditionally rejects `singleton`, blueprint copies
+    /// (`is_blueprint_copy` / `blueprint_runs_remaining`), non-empty `dynamic_attributes` /
+    /// `source_mutaplasmid_id`, insured items (`insured_payout_isk > 0.0`), and `courier_cargo:` stacks.
+    StackableCommodity,
+    /// Exact `item_id` lookup for blueprint copies, skillbooks, crates, implants, licenses, or
+    /// singleton-capable items whose BPC/singleton eligibility is governed by `reject_singleton`
+    /// and `reject_blueprint_copy`. Rejects insured items (`insured_payout_isk > 0.0`).
+    ExactBlueprintOrSingleton,
+    /// Exact `item_id` lookup for assembled, fitted, damaged, or insured items (e.g., ships,
+    /// fitted charges/crystals, structure quantum cores, deployed structures/hubs). Rejects BPCs.
+    ExactAssembledItem,
+}
+
 /// Options controlling centralized inventory consumption via [`WorldStateSnapshot::consume_exact_item_quantity`]
 /// and [`WorldStateSnapshot::consume_owner_items`].
 #[derive(Debug, Clone, Copy)]
 pub struct ConsumeExactOptions {
+    /// Explicit item-class policy preventing commodity paths from consuming singletons, BPCs,
+    /// mutated items, or insured items.
+    pub policy: ItemClassPolicy,
     /// Acting character ID for active-ship, corp-hangar role, and structure ACL checks.
     /// `None` is intended for system/maintenance consumption paths (e.g. structure fuel burn).
     pub actor_char_id: Option<i64>,
@@ -44,11 +65,11 @@ pub struct ConsumeExactOptions {
     pub required_flag: Option<InventoryFlag>,
     /// Allow candidate items nested inside a container located at `(required_location_id, required_flag)`.
     pub allow_nested_in_location: bool,
-    /// Reject assembled/packaged singletons (`item.singleton == true`). Default `true` for stackable commodities.
+    /// Reject assembled/packaged singletons (`item.singleton == true`). Forced `true` for [`ItemClassPolicy::StackableCommodity`].
     pub reject_singleton: bool,
     /// Reject items containing nested child items (`is_container_non_empty`).
     pub reject_non_empty_container: bool,
-    /// Reject blueprint copies (`item.is_blueprint_copy`).
+    /// Reject blueprint copies (`item.is_blueprint_copy`). Forced `true` for [`ItemClassPolicy::StackableCommodity`] and [`ItemClassPolicy::ExactAssembledItem`].
     pub reject_blueprint_copy: bool,
     /// Reject items fitted to a ship or structure slot (`is_fitted_slot_flag`).
     pub reject_fitted: bool,
@@ -59,9 +80,12 @@ pub struct ConsumeExactOptions {
 }
 
 impl ConsumeExactOptions {
-    /// Preset for stackable commodity consumption owned by `char_id` (rejects singletons, fitted items, non-empty containers).
+    /// Preset for stackable commodity consumption owned by `char_id`
+    /// (`ItemClassPolicy::StackableCommodity`: rejects singletons, BPCs, mutated/dynamic items,
+    /// insured items, courier cargo, fitted items, and non-empty containers).
     pub fn for_character_stack(char_id: i64) -> Self {
         Self {
+            policy: ItemClassPolicy::StackableCommodity,
             actor_char_id: Some(char_id),
             expected_owner_id: char_id,
             required_location_id: None,
@@ -69,32 +93,40 @@ impl ConsumeExactOptions {
             allow_nested_in_location: false,
             reject_singleton: true,
             reject_non_empty_container: true,
-            reject_blueprint_copy: false,
+            reject_blueprint_copy: true,
             reject_fitted: true,
             exclude_trade_lock_id: None,
             active_ship_id: None,
         }
     }
 
-    /// Preset for unmodifiable stackable commodity consumption (e.g. PI commodities): rejects singletons, BPCs, fitted items, non-empty containers, and dynamic/mutated items.
+    /// Preset for unmodifiable stackable commodity consumption (e.g. PI commodities, sequence binders):
+    /// enforces [`ItemClassPolicy::StackableCommodity`].
     pub fn for_character_commodity(char_id: i64) -> Self {
-        Self {
-            reject_blueprint_copy: true,
-            ..Self::for_character_stack(char_id)
-        }
+        Self::for_character_stack(char_id)
     }
 
-    /// Preset for consuming specific singleton-capable items (e.g., skillbooks, implants, crates, BPCs) by exact `item_id`.
-    pub fn for_owner_exact(actor_char_id: Option<i64>, expected_owner_id: i64) -> Self {
+    /// Preset for consuming items owned by `expected_owner_id` under an explicit [`ItemClassPolicy`].
+    pub fn for_owner_exact(
+        actor_char_id: Option<i64>,
+        expected_owner_id: i64,
+        policy: ItemClassPolicy,
+    ) -> Self {
+        let (reject_singleton, reject_blueprint_copy) = match policy {
+            ItemClassPolicy::StackableCommodity => (true, true),
+            ItemClassPolicy::ExactBlueprintOrSingleton => (false, false),
+            ItemClassPolicy::ExactAssembledItem => (false, true),
+        };
         Self {
+            policy,
             actor_char_id,
             expected_owner_id,
             required_location_id: None,
             required_flag: None,
             allow_nested_in_location: false,
-            reject_singleton: false,
+            reject_singleton,
             reject_non_empty_container: true,
-            reject_blueprint_copy: false,
+            reject_blueprint_copy,
             reject_fitted: true,
             exclude_trade_lock_id: None,
             active_ship_id: None,
@@ -1500,13 +1532,24 @@ impl WorldStateSnapshot {
                 item.item_id, item.flag
             )));
         }
-        if opts.reject_singleton && item.singleton {
+        let enforce_commodity = matches!(opts.policy, ItemClassPolicy::StackableCommodity);
+        let reject_singleton = opts.reject_singleton || enforce_commodity;
+        let reject_blueprint_copy = opts.reject_blueprint_copy
+            || matches!(
+                opts.policy,
+                ItemClassPolicy::StackableCommodity | ItemClassPolicy::ExactAssembledItem
+            );
+        let reject_mutated = enforce_commodity
+            || (reject_singleton && !matches!(opts.policy, ItemClassPolicy::ExactAssembledItem));
+        let reject_insured = !matches!(opts.policy, ItemClassPolicy::ExactAssembledItem);
+
+        if reject_singleton && item.singleton {
             return Err(DbError::ValidationError(format!(
                 "Cannot consume assembled singleton item {}",
                 item.item_id
             )));
         }
-        if opts.reject_singleton
+        if reject_mutated
             && (!item.dynamic_attributes.is_empty() || item.source_mutaplasmid_id.is_some())
         {
             return Err(DbError::ValidationError(format!(
@@ -1514,7 +1557,15 @@ impl WorldStateSnapshot {
                 item.item_id
             )));
         }
-        if opts.reject_singleton
+        if reject_insured
+            && (!item.insured_payout_isk.is_finite() || item.insured_payout_isk > 0.0)
+        {
+            return Err(DbError::ValidationError(format!(
+                "Cannot consume insured item {} (policy {:?})",
+                item.item_id, opts.policy
+            )));
+        }
+        if reject_singleton
             && self
                 .item_custom_names
                 .get(&item.item_id)
@@ -1525,7 +1576,7 @@ impl WorldStateSnapshot {
                 item.item_id
             )));
         }
-        if opts.reject_blueprint_copy
+        if reject_blueprint_copy
             && (item.is_blueprint_copy || item.blueprint_runs_remaining.is_some())
         {
             return Err(DbError::ValidationError(format!(

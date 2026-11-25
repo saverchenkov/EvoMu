@@ -9,9 +9,14 @@ fn mission_delivery_consume_opts(
     require_packaged: bool,
 ) -> eve_db::ConsumeExactOptions {
     eve_db::ConsumeExactOptions {
-        active_ship_id,
+        reject_blueprint_copy: true,
         reject_singleton: require_packaged,
-        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+        active_ship_id,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+        )
     }
 }
 
@@ -159,7 +164,11 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
             if take <= 0 {
                 continue;
             }
-            let opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id);
+            let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                char_id,
+                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+            );
             snap.consume_exact_item_quantity(iid, take, opts)
                 .map_err(|e| BridgeRpcError {
                     code: "InventoryError".into(),

@@ -851,7 +851,11 @@ pub(crate) async fn handle_void_space_player_jump(
             snap.consume_exact_item_quantity(
                 iid,
                 1,
-                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+                eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                ),
             )
             .map_err(|e| BridgeRpcError {
                 code: "ItemLocked".into(),

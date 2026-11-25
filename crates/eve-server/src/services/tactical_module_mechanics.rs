@@ -355,7 +355,11 @@ pub async fn activate_interdiction_sphere_launcher(
                 }
             }
             let mut rem = if let Some(c_owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    c_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                );
                 opts.reject_fitted = false;
                 opts.active_ship_id = Some(ship_id);
                 match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {
@@ -415,7 +419,11 @@ pub async fn activate_interdiction_sphere_launcher(
                     let take = if let Some((c_owner, c_avail)) = snap.items.get(&cargo_id).map(|c| (c.owner_id, c.quantity)) {
                         let req = c_avail.min(r_cap);
                         if req > 0 {
-                            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    c_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                );
                             opts.active_ship_id = Some(ship_id);
                             if snap.consume_exact_item_quantity(cargo_id, req, opts).is_ok() {
                                 req

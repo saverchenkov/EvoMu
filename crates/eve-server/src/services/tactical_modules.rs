@@ -956,6 +956,7 @@ pub async fn handle_entosis_link_activation(
                 stront_item_id,
                 1,
                 eve_db::ConsumeExactOptions {
+                    policy: eve_db::ItemClassPolicy::StackableCommodity,
                     active_ship_id: Some(ship_id),
                     ..eve_db::ConsumeExactOptions::for_character_stack(char_id)
                 },
@@ -1300,7 +1301,11 @@ pub async fn activate_command_burst(
             let Some(owner) = snap.items.get(&cid).map(|ci| ci.owner_id) else {
                 return true;
             };
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), owner);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.reject_fitted = false;
             opts.active_ship_id = Some(ship_id);
             matches!(snap.consume_exact_item_quantity(cid, 1, opts), Ok(None))
