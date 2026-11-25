@@ -437,7 +437,7 @@ pub fn dispatch_corp_alliance_route(
                 member_ids.sort_unstable();
                 let mut out = Vec::new();
                 for cid in member_ids {
-                    let eff = super::router::effective_esi_corp_role_breakdown(
+                    let eff = eve_db::corp_role_breakdown(
                         snap, corp_id, cid, now,
                     );
                     let roles =

@@ -85,7 +85,7 @@ fn uuid_helpers_contributor_sync_wallet_sync_and_role_maturation_boundaries() {
         assert_eq!(c.division_balance(1), IskCents::from_isk(exp_isk));
     }
 
-    // 3. sync_corp_project_contributors & effective_corp_member_roles exact maturation & title bitmask 1..=64
+    // 3. sync_corp_project_contributors & corp_role_breakdown exact maturation & title bitmask via title_id_to_bit
     let (ctx, _, ceo_id, corp_id) = build_projects_world(2_000);
     let mem_id = 91_000_001_i64;
     let delayed_bit = 1u64 << 14;
@@ -106,8 +106,12 @@ fn uuid_helpers_contributor_sync_wallet_sync_and_role_maturation_boundaries() {
             .collect();
         assert_eq!(synced, vec![(200, 5), (300, 10)]);
 
-        assert_eq!(effective_corp_member_roles(snap, 404_404, mem_id, 77, 2_000), (false, 77));
-        assert!(effective_corp_member_roles(snap, corp_id, ceo_id, 0, 2_000).0);
+        assert_eq!(
+            eve_db::corp_role_breakdown(snap, 404_404, mem_id, 2_000),
+            eve_db::CorpRoleBreakdown::default()
+        );
+        assert_eq!(snap.effective_corp_roles_at_db(404_404, mem_id, None, 2_000), (false, 0));
+        assert!(eve_db::corp_role_breakdown(snap, corp_id, ceo_id, 2_000).is_ceo);
 
         snap.corp_role_assignments
             .entry((corp_id, mem_id))
@@ -116,15 +120,17 @@ fn uuid_helpers_contributor_sync_wallet_sync_and_role_maturation_boundaries() {
         let gov = snap.corp_governance.entry(corp_id).or_default();
         gov.pending_role_grants.insert(mem_id, (pm_bit, 2_000));
         gov.pending_title_role_grants.insert(mem_id, (delayed_bit, 2_000));
-        gov.member_titles.insert(mem_id, 1 | (1u64 << 63)); // titles 1 and 64
+        gov.member_titles
+            .insert(mem_id, 1 | eve_db::snapshot_ext::title_id_to_bit(64)); // titles 1 and 64
         gov.titles.insert(0, ("OutLow".into(), 1u64 << 10)); // tid 0 ignored
         gov.titles.insert(65, ("OutHigh".into(), 1u64 << 11)); // tid 65 ignored
         gov.titles.insert(1, ("T1".into(), delayed_bit | (1u64 << 4)));
         gov.titles.insert(64, ("T64".into(), hi_title_bit));
 
         // t = 1_999 (< 2_000): pending grant excluded, unmatured title bit masked out, tid 1 & 64 non-pending bits kept
-        let (is_c, r_pre) = effective_corp_member_roles(snap, corp_id, mem_id, 0, 1_999);
-        assert!(!is_c);
+        let bd_pre = eve_db::corp_role_breakdown(snap, corp_id, mem_id, 1_999);
+        assert!(!bd_pre.is_ceo);
+        let r_pre = bd_pre.roles;
         assert_eq!(r_pre & pm_bit, 0);
         assert_eq!(r_pre & delayed_bit, 0);
         assert_eq!(r_pre & ((1u64 << 10) | (1u64 << 11)), 0);
@@ -133,7 +139,7 @@ fn uuid_helpers_contributor_sync_wallet_sync_and_role_maturation_boundaries() {
         assert_ne!(r_pre & hi_title_bit, 0);
 
         // t = 2_000 (== matured_at): both pending grants and title delayed bits mature!
-        let (_, r_mat) = effective_corp_member_roles(snap, corp_id, mem_id, 0, 2_000);
+        let r_mat = eve_db::corp_role_breakdown(snap, corp_id, mem_id, 2_000).roles;
         assert_ne!(r_mat & pm_bit, 0);
         assert_ne!(r_mat & delayed_bit, 0);
     });

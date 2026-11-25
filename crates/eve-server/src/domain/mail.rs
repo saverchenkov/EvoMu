@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::domain::corp_governance::{can_send_corp_mail, effective_corp_role_breakdown, ALLOWED_CORP_MAIL_ROLES};
+use crate::domain::corp_governance::{can_send_corp_mail, corp_role_breakdown, ALLOWED_CORP_MAIL_ROLES};
 use crate::domain::DomainError;
 use crate::router::ServerContext;
 use crate::services::character_contacts::is_blocked_by;
@@ -437,7 +437,7 @@ pub fn send_mail(ctx: &ServerContext, input: SendMailInput) -> Result<SendMailRe
                     .get(&sender.corporation_id)
                     .is_some_and(|g| g.restrict_corp_mails);
             if al_restrict {
-                let eff = effective_corp_role_breakdown(snap, sender.corporation_id, input.sender_id, now);
+                let eff = corp_role_breakdown(snap, sender.corporation_id, input.sender_id, now);
                 if !eff.is_ceo && (eff.any_active_roles() & ALLOWED_CORP_MAIL_ROLES) == 0 {
                     return Err(DomainError::forbidden(
                         "CorpMailRestricted",

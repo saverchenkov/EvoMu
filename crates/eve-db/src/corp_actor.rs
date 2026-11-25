@@ -104,59 +104,68 @@ fn resolve_loc_station_id(
     loc_station_id
 }
 
-pub(crate) fn evaluate_corp_roles_for_record(
+/// Complete effective corporation role breakdown across DB `member_roles`,
+/// `corp_role_assignments`, legacy governance titles, ESI `corp_titles`, and 24-hour
+/// `pending_role_grants`, `pending_title_role_grants`, and `pending_scoped_role_grants`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CorpRoleBreakdown {
+    pub is_ceo: bool,
+    pub roles: u64,
+    pub roles_at_hq: u64,
+    pub roles_at_base: u64,
+    pub roles_at_other: u64,
+    pub grantable_roles: u64,
+    pub grantable_roles_at_hq: u64,
+    pub grantable_roles_at_base: u64,
+    pub grantable_roles_at_other: u64,
+    pub unmatured_mask: u64,
+}
+
+impl CorpRoleBreakdown {
+    pub fn any_active_roles(&self) -> u64 {
+        self.roles | self.roles_at_hq | self.roles_at_base | self.roles_at_other
+    }
+
+    pub fn any_grantable_roles(&self) -> u64 {
+        self.grantable_roles
+            | self.grantable_roles_at_hq
+            | self.grantable_roles_at_base
+            | self.grantable_roles_at_other
+    }
+}
+
+fn corp_role_breakdown_for_record(
     snap: &WorldStateSnapshot,
     corp_id: i64,
     corp: &CorporationRecord,
     char_id: i64,
-    location_id: Option<i64>,
-    fallback_to_char_location: bool,
     now_unix: Option<u64>,
-) -> (bool, u64) {
-    if corp.ceo_id == char_id {
-        return (true, u64::MAX);
-    }
-    let mut roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-
-    let char_home = snap
-        .characters
-        .get(&char_id)
-        .and_then(|ch| {
-            ch.station_id
-                .or(ch.structure_id)
-                .or(Some(ch.home_station_id))
-                .filter(|&id| id > 0)
-        })
-        .unwrap_or(0);
-    let hq_station_id = corp.hq_station_id.unwrap_or(char_home);
-    let loc_station_id =
-        resolve_loc_station_id(snap, char_id, location_id, fallback_to_char_location);
-    let gov_opt = snap.corp_governance.get(&corp_id);
-    let base_id = gov_opt
-        .and_then(|g| g.member_bases.get(&char_id).copied())
-        .unwrap_or(0);
+) -> (CorpRoleBreakdown, [u64; 3]) {
+    let mut out = CorpRoleBreakdown {
+        is_ceo: corp.ceo_id == char_id,
+        roles: corp.member_base_roles(char_id),
+        ..Default::default()
+    };
 
     if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        roles |= ra.roles;
-        if loc_station_id > 0 {
-            if loc_station_id == hq_station_id {
-                roles |= ra.roles_at_hq;
-            }
-            if base_id > 0 && loc_station_id == base_id {
-                roles |= ra.roles_at_base;
-            }
-            if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
-                roles |= ra.roles_at_other;
-            }
-        }
+        out.roles |= ra.roles;
+        out.roles_at_hq |= ra.roles_at_hq;
+        out.roles_at_base |= ra.roles_at_base;
+        out.roles_at_other |= ra.roles_at_other;
+        out.grantable_roles |= ra.grantable_roles;
+        out.grantable_roles_at_hq |= ra.grantable_roles_at_hq;
+        out.grantable_roles_at_base |= ra.grantable_roles_at_base;
+        out.grantable_roles_at_other |= ra.grantable_roles_at_other;
     }
 
     let mut unmatured_role_bits = 0u64;
     let mut unmatured_title_bits = 0u64;
+    let mut unmatured_scoped_bits = [0u64; 3];
+    let gov_opt = snap.corp_governance.get(&corp_id);
     if let Some(gov) = gov_opt {
         if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
             if now_unix.is_some_and(|now| now >= matured_at) {
-                roles |= p_mask;
+                out.roles |= p_mask;
             } else {
                 // Only roles subject to 24h stasis (`CORP_DELAYED_DIVISION_ROLE_MASK`, Director,
                 // and Container Take bits) are suppressed while pending; `UpdateMember` also packs
@@ -170,27 +179,19 @@ pub(crate) fn evaluate_corp_roles_for_record(
         if let Some(&(hq_p, base_p, other_p, matured_at)) =
             gov.pending_scoped_role_grants.get(&char_id)
         {
-            if loc_station_id > 0 {
-                let mut scoped_p = 0u64;
-                if loc_station_id == hq_station_id {
-                    scoped_p |= hq_p;
-                }
-                if base_id > 0 && loc_station_id == base_id {
-                    scoped_p |= base_p;
-                }
-                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
-                    scoped_p |= other_p;
-                }
-                if now_unix.is_some_and(|now| now >= matured_at) {
-                    roles |= scoped_p;
-                } else {
-                    unmatured_role_bits |= scoped_p;
-                }
+            if now_unix.is_some_and(|now| now >= matured_at) {
+                out.roles_at_hq |= hq_p;
+                out.roles_at_base |= base_p;
+                out.roles_at_other |= other_p;
+            } else {
+                unmatured_scoped_bits[0] |= hq_p;
+                unmatured_scoped_bits[1] |= base_p;
+                unmatured_scoped_bits[2] |= other_p;
             }
         }
         if let Some(&(t_mask, matured_at)) = gov.pending_title_role_grants.get(&char_id) {
             if now_unix.is_some_and(|now| now >= matured_at) {
-                roles |= t_mask;
+                out.roles |= t_mask;
             } else {
                 unmatured_title_bits |= t_mask;
             }
@@ -199,7 +200,7 @@ pub(crate) fn evaluate_corp_roles_for_record(
             for (&tid, &(_, troles)) in &gov.titles {
                 let bit = title_id_to_bit(tid);
                 if (tmask & bit) != 0 {
-                    roles |= troles & !unmatured_title_bits;
+                    out.roles |= troles & !unmatured_title_bits;
                 }
             }
         }
@@ -214,25 +215,106 @@ pub(crate) fn evaluate_corp_roles_for_record(
             tids_opt.is_some_and(|tids| tids.contains(&t.title_id))
                 || (member_tmask & title_id_to_bit(t.title_id)) != 0
         }) {
-            roles |= corp_roles::encode_corp_role_names(&t.roles) & !unmatured_title_bits;
-            if loc_station_id > 0 {
-                if loc_station_id == hq_station_id {
-                    roles |= corp_roles::encode_corp_role_names(&t.roles_at_hq)
-                        & !unmatured_title_bits;
-                }
-                if base_id > 0 && loc_station_id == base_id {
-                    roles |= corp_roles::encode_corp_role_names(&t.roles_at_base)
-                        & !unmatured_title_bits;
-                }
-                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
-                    roles |= corp_roles::encode_corp_role_names(&t.roles_at_other)
-                        & !unmatured_title_bits;
-                }
-            }
+            out.roles |= corp_roles::encode_corp_role_names(&t.roles) & !unmatured_title_bits;
+            out.roles_at_hq |=
+                corp_roles::encode_corp_role_names(&t.roles_at_hq) & !unmatured_title_bits;
+            out.roles_at_base |=
+                corp_roles::encode_corp_role_names(&t.roles_at_base) & !unmatured_title_bits;
+            out.roles_at_other |=
+                corp_roles::encode_corp_role_names(&t.roles_at_other) & !unmatured_title_bits;
+            out.grantable_roles |= corp_roles::encode_corp_role_names(&t.grantable_roles);
+            out.grantable_roles_at_hq |=
+                corp_roles::encode_corp_role_names(&t.grantable_roles_at_hq);
+            out.grantable_roles_at_base |=
+                corp_roles::encode_corp_role_names(&t.grantable_roles_at_base);
+            out.grantable_roles_at_other |=
+                corp_roles::encode_corp_role_names(&t.grantable_roles_at_other);
         }
     }
 
-    roles &= !(unmatured_role_bits | unmatured_title_bits);
+    out.unmatured_mask = unmatured_role_bits | unmatured_title_bits;
+    out.roles &= !out.unmatured_mask;
+    out.roles_at_hq &= !(out.unmatured_mask | unmatured_scoped_bits[0]);
+    out.roles_at_base &= !(out.unmatured_mask | unmatured_scoped_bits[1]);
+    out.roles_at_other &= !(out.unmatured_mask | unmatured_scoped_bits[2]);
+    (out, unmatured_scoped_bits)
+}
+
+/// Evaluates the full [`CorpRoleBreakdown`] for `char_id` in `corp_id` purely from `snap`.
+/// When `now_unix` is `None`, pending grants are treated as unpromoted (adding nothing while
+/// still suppressing delayed/title/scoped bits).
+pub fn corp_role_breakdown_at(
+    snap: &WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    now_unix: Option<u64>,
+) -> CorpRoleBreakdown {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return CorpRoleBreakdown::default();
+    };
+    corp_role_breakdown_for_record(snap, corp_id, corp, char_id, now_unix).0
+}
+
+/// Evaluates the full [`CorpRoleBreakdown`] for `char_id` in `corp_id` purely from `snap` at `now_unix`.
+pub fn corp_role_breakdown(
+    snap: &WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    now_unix: u64,
+) -> CorpRoleBreakdown {
+    corp_role_breakdown_at(snap, corp_id, char_id, Some(now_unix))
+}
+
+pub(crate) fn evaluate_corp_roles_for_record(
+    snap: &WorldStateSnapshot,
+    corp_id: i64,
+    corp: &CorporationRecord,
+    char_id: i64,
+    location_id: Option<i64>,
+    fallback_to_char_location: bool,
+    now_unix: Option<u64>,
+) -> (bool, u64) {
+    let (bd, unmatured_scoped) =
+        corp_role_breakdown_for_record(snap, corp_id, corp, char_id, now_unix);
+    if bd.is_ceo {
+        return (true, u64::MAX);
+    }
+    let mut roles = bd.roles;
+    let loc_station_id =
+        resolve_loc_station_id(snap, char_id, location_id, fallback_to_char_location);
+    if loc_station_id > 0 {
+        let char_home = snap
+            .characters
+            .get(&char_id)
+            .and_then(|ch| {
+                ch.station_id
+                    .or(ch.structure_id)
+                    .or(Some(ch.home_station_id))
+                    .filter(|&id| id > 0)
+            })
+            .unwrap_or(0);
+        let hq_station_id = corp.hq_station_id.unwrap_or(char_home);
+        let base_id = snap
+            .corp_governance
+            .get(&corp_id)
+            .and_then(|g| g.member_bases.get(&char_id).copied())
+            .unwrap_or(0);
+
+        let mut scoped_unmatured = 0u64;
+        if loc_station_id == hq_station_id {
+            roles |= bd.roles_at_hq;
+            scoped_unmatured |= unmatured_scoped[0];
+        }
+        if base_id > 0 && loc_station_id == base_id {
+            roles |= bd.roles_at_base;
+            scoped_unmatured |= unmatured_scoped[1];
+        }
+        if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
+            roles |= bd.roles_at_other;
+            scoped_unmatured |= unmatured_scoped[2];
+        }
+        roles &= !scoped_unmatured;
+    }
     (false, roles)
 }
 
@@ -263,34 +345,16 @@ pub fn effective_corp_roles_promoted_only(
     evaluate_corp_roles_for_record(snap, corp_id, corp, char_id, location_id, true, None)
 }
 
-/// Computes `(roles_at_hq, roles_at_base, roles_at_other)` purely from `snap` at `now_unix`,
-/// folding matured `pending_scoped_role_grants` (`now_unix >= matured_at`) and suppressing
-/// unmatured pending scoped role bits (`now_unix < matured_at`).
+/// Computes `(roles_at_hq, roles_at_base, roles_at_other)` purely from `snap` at `now_unix`
+/// via the canonical [`corp_role_breakdown`] evaluator.
 pub fn effective_scoped_corp_roles_db(
     snap: &WorldStateSnapshot,
     corp_id: i64,
     char_id: i64,
     now_unix: u64,
 ) -> (u64, u64, u64) {
-    let ra = snap.corp_role_assignments.get(&(corp_id, char_id));
-    let (mut hq, mut base, mut other) =
-        ra.map_or((0, 0, 0), |r| (r.roles_at_hq, r.roles_at_base, r.roles_at_other));
-    if let Some(&(hq_p, base_p, other_p, matured_at)) = snap
-        .corp_governance
-        .get(&corp_id)
-        .and_then(|g| g.pending_scoped_role_grants.get(&char_id))
-    {
-        if now_unix >= matured_at {
-            hq |= hq_p;
-            base |= base_p;
-            other |= other_p;
-        } else {
-            hq &= !hq_p;
-            base &= !base_p;
-            other &= !other_p;
-        }
-    }
-    (hq, base, other)
+    let bd = corp_role_breakdown(snap, corp_id, char_id, now_unix);
+    (bd.roles_at_hq, bd.roles_at_base, bd.roles_at_other)
 }
 
 impl CorpActor {

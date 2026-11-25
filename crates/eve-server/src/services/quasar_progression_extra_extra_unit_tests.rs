@@ -844,7 +844,7 @@ fn generic_goal_auth_escrow_state_precedence_and_wire_payload_fidelity() {
         STATUS_FORBIDDEN
     );
 
-    // Give PM ROLE_ACCOUNT_CAN_TAKE[2] in DB roles too so effective_corp_member_roles merges it
+    // Give PM ROLE_ACCOUNT_CAN_TAKE[2] in DB roles too so corp_role_breakdown / effective_corp_roles_at_db merges it
     db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.corporations.get_mut(&(corp_a as i64)) {
             c1.member_roles.insert(pm_id as i64, corp_roles::ROLE_PROJECT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[2]);

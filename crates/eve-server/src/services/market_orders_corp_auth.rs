@@ -23,8 +23,7 @@ pub(crate) fn effective_corp_roles_at_station_in_snap(
     station_id: i64,
     now_unix: u64,
 ) -> (bool, u64) {
-    let eff =
-        crate::esi::router::effective_esi_corp_role_breakdown(snap, corp_id, char_id, now_unix);
+    let eff = eve_db::corp_role_breakdown(snap, corp_id, char_id, now_unix);
     if eff.is_ceo {
         return (true, !0u64);
     }

@@ -3,7 +3,8 @@
 #![forbid(unsafe_code)]
 
 use crate::domain::corp_governance::{
-    effective_corp_role_breakdown, EffectiveCorpRoles,
+    can_send_corp_mail, corp_role_breakdown, decode_corp_roles, encode_esi_corp_roles,
+    CorpRoleBreakdown, CORP_ROLE_DEFINITIONS,
 };
 use eve_db::{
     corp_roles, CorpMemberRoleAssignment, CorpTitleEntry, CorporationRecord, WorldStateSnapshot,
@@ -40,7 +41,7 @@ struct CharacterizationCase {
     expected_eval_hq: (bool, u64),
     expected_eval_base: (bool, u64),
     expected_eval_other: (bool, u64),
-    expected_bd: EffectiveCorpRoles,
+    expected_bd: CorpRoleBreakdown,
 }
 
 fn bd_with(
@@ -51,8 +52,8 @@ fn bd_with(
     roles_at_other: u64,
     grantable_roles: u64,
     unmatured_mask: u64,
-) -> EffectiveCorpRoles {
-    EffectiveCorpRoles {
+) -> CorpRoleBreakdown {
+    CorpRoleBreakdown {
         is_ceo,
         roles,
         roles_at_hq,
@@ -88,7 +89,7 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
             expected_eval_hq: (false, 0),
             expected_eval_base: (false, 0),
             expected_eval_other: (false, 0),
-            expected_bd: EffectiveCorpRoles::default(),
+            expected_bd: CorpRoleBreakdown::default(),
         },
         CharacterizationCase {
             name: "plain_stored_roles",
@@ -224,10 +225,13 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
                     | corp_roles::ROLE_STATION_MANAGER
                     | corp_roles::ROLE_AUDITOR,
             ),
-            // Disagreement #1 (pre-unification): old breakdown reads 1 << (tid - 1), missing title IDs 4 and 8.
+            // Rule 1: title IDs map through title_id_to_bit (title IDs 4 and 8 now match evaluator).
             expected_bd: bd_with(
                 false,
-                corp_roles::ROLE_SECURITY_OFFICER | corp_roles::ROLE_FACTORY_MANAGER,
+                corp_roles::ROLE_SECURITY_OFFICER
+                    | corp_roles::ROLE_FACTORY_MANAGER
+                    | corp_roles::ROLE_STATION_MANAGER
+                    | corp_roles::ROLE_AUDITOR,
                 0,
                 0,
                 0,
@@ -262,15 +266,15 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
             expected_eval_hq: (false, corp_roles::ROLE_ACCOUNTANT),
             expected_eval_base: (false, corp_roles::ROLE_ACCOUNTANT),
             expected_eval_other: (false, corp_roles::ROLE_ACCOUNTANT),
-            // Disagreement #2 (pre-unification): old breakdown hides immediate ROLE_ACCOUNTANT before maturity.
+            // Rule 2: immediate ROLE_ACCOUNTANT is no longer hidden before maturity; only DELAYED_STASIS_MASK is suppressed.
             expected_bd: bd_with(
                 false,
+                corp_roles::ROLE_ACCOUNTANT,
                 0,
                 0,
                 0,
                 0,
-                0,
-                corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT,
+                corp_roles::ROLE_DIRECTOR,
             ),
         },
         CharacterizationCase {
@@ -355,8 +359,8 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
             expected_eval_hq: (false, 0),
             expected_eval_base: (false, 0),
             expected_eval_other: (false, 0),
-            // Disagreement #3a (pre-unification): old breakdown ignores pending_scoped_role_grants, keeping unmatured HQ role.
-            expected_bd: bd_with(false, 0, corp_roles::ROLE_HANGAR_CAN_TAKE[0], 0, 0, 0, 0),
+            // Rule 3: unmatured scoped pending grant is removed from its location mask.
+            expected_bd: bd_with(false, 0, 0, 0, 0, 0, 0),
         },
         CharacterizationCase {
             name: "pending_scoped_role_grant_after_maturity",
@@ -394,8 +398,16 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
             ),
             expected_eval_base: (false, corp_roles::ROLE_HANGAR_CAN_TAKE[2]),
             expected_eval_other: (false, corp_roles::ROLE_HANGAR_CAN_TAKE[3]),
-            // Disagreement #3b (pre-unification): old breakdown ignores matured pending_scoped_role_grants.
-            expected_bd: bd_with(false, 0, corp_roles::ROLE_HANGAR_CAN_TAKE[0], 0, 0, 0, 0),
+            // Rule 3: matured scoped pending grants count in their breakdown location masks.
+            expected_bd: bd_with(
+                false,
+                0,
+                corp_roles::ROLE_HANGAR_CAN_TAKE[0] | corp_roles::ROLE_HANGAR_CAN_TAKE[1],
+                corp_roles::ROLE_HANGAR_CAN_TAKE[2],
+                corp_roles::ROLE_HANGAR_CAN_TAKE[3],
+                0,
+                0,
+            ),
         },
         CharacterizationCase {
             name: "corp_titles_via_member_title_mask_only",
@@ -424,8 +436,16 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
             expected_eval_hq: (false, corp_roles::ROLE_TRADER | corp_roles::ROLE_DIPLOMAT),
             expected_eval_base: (false, corp_roles::ROLE_TRADER),
             expected_eval_other: (false, corp_roles::ROLE_TRADER),
-            // Disagreement #4 (pre-unification): old breakdown requires snap.corp_member_titles, ignoring gov.member_titles.
-            expected_bd: bd_with(false, 0, 0, 0, 0, 0, 0),
+            // Rule 4: a title held only through member's title_mask counts in the breakdown.
+            expected_bd: bd_with(
+                false,
+                corp_roles::ROLE_TRADER,
+                corp_roles::ROLE_DIPLOMAT,
+                0,
+                0,
+                corp_roles::ROLE_AUDITOR,
+                0,
+            ),
         },
         CharacterizationCase {
             name: "ceo_contract",
@@ -488,10 +508,71 @@ fn corp_role_evaluator_vs_breakdown_characterization() {
             case.name
         );
         assert_eq!(
-            effective_corp_role_breakdown(&snap, CORP_ID, case.char_id, case.now_unix),
+            corp_role_breakdown(&snap, CORP_ID, case.char_id, case.now_unix),
             case.expected_bd,
             "{}: breakdown",
             case.name
         );
     }
+}
+
+#[test]
+fn corp_role_definitions_matches_corp_role_names_and_encoders() {
+    assert_eq!(CORP_ROLE_DEFINITIONS.len(), corp_roles::CORP_ROLE_NAMES.len());
+    assert_eq!(CORP_ROLE_DEFINITIONS, corp_roles::CORP_ROLE_NAMES);
+    assert_eq!(encode_esi_corp_roles(&[]), 0);
+    assert_eq!(corp_roles::encode_corp_role_names(&[]), 0);
+
+    for &(bit, client_name, esi_name) in CORP_ROLE_DEFINITIONS {
+        let client_inputs = [
+            client_name.to_string(),
+            client_name.to_ascii_lowercase(),
+            client_name.to_ascii_uppercase(),
+        ];
+        assert_eq!(encode_esi_corp_roles(&client_inputs), bit);
+        assert_eq!(corp_roles::encode_corp_role_names(&client_inputs), bit);
+
+        if !esi_name.is_empty() {
+            let esi_inputs = [
+                esi_name.to_string(),
+                esi_name.to_ascii_lowercase(),
+                esi_name.to_ascii_uppercase(),
+            ];
+            assert_eq!(encode_esi_corp_roles(&esi_inputs), bit);
+            assert_eq!(corp_roles::encode_corp_role_names(&esi_inputs), bit);
+        }
+    }
+
+    let empty_and_unknown = vec![String::new(), "UnknownCorpRole".to_string()];
+    assert_eq!(encode_esi_corp_roles(&empty_and_unknown), 0);
+    assert_eq!(corp_roles::encode_corp_role_names(&empty_and_unknown), 0);
+    assert_eq!(decode_corp_roles(0), Vec::<&str>::new());
+}
+
+#[test]
+fn can_send_corp_mail_honors_scoped_pending_grant_maturity() {
+    let mut snap = WorldStateSnapshot::default();
+    seed_corp(&mut snap);
+    snap.corp_role_assignments.insert(
+        (CORP_ID, MEM_ID),
+        CorpMemberRoleAssignment {
+            character_id: MEM_ID,
+            roles_at_hq: corp_roles::ROLE_CHAT_MANAGER,
+            ..Default::default()
+        },
+    );
+    let gov = snap.corp_governance.entry(CORP_ID).or_default();
+    gov.restrict_corp_mails = true;
+    gov.pending_scoped_role_grants.insert(
+        MEM_ID,
+        (
+            corp_roles::ROLE_CHAT_MANAGER,
+            corp_roles::ROLE_DIPLOMAT,
+            0,
+            MATURED_AT,
+        ),
+    );
+
+    assert!(!can_send_corp_mail(&snap, CORP_ID, MEM_ID, MATURED_AT - 1));
+    assert!(can_send_corp_mail(&snap, CORP_ID, MEM_ID, MATURED_AT));
 }

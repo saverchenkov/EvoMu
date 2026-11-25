@@ -181,7 +181,7 @@ fn can_view_event_attendees(
         "corporation" => {
             ev.owner_id == corp_id
                 && (ev.creator_id == char_id || {
-                    let eff = super::router::effective_esi_corp_role_breakdown(
+                    let eff = eve_db::corp_role_breakdown(
                         snap,
                         corp_id,
                         char_id,
@@ -193,7 +193,7 @@ fn can_view_event_attendees(
         "alliance" => {
             corp_alliance_id == Some(ev.owner_id)
                 && (ev.creator_id == char_id || {
-                    let eff = super::router::effective_esi_corp_role_breakdown(
+                    let eff = eve_db::corp_role_breakdown(
                         snap,
                         corp_id,
                         char_id,

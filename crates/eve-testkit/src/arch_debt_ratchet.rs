@@ -401,6 +401,7 @@ enum PatternKind {
     HandlerCorpGrantPromotion,
     CorpGrantFoldCallSites,
     EffectiveCorpMemberRolesCallSites,
+    CorpRoleTableReads,
     RequestCorpRoleMaskReads,
 }
 
@@ -437,6 +438,7 @@ impl PatternKind {
         Self::HandlerCorpGrantPromotion,
         Self::CorpGrantFoldCallSites,
         Self::EffectiveCorpMemberRolesCallSites,
+        Self::CorpRoleTableReads,
         Self::RequestCorpRoleMaskReads,
     ];
 
@@ -479,6 +481,7 @@ impl PatternKind {
             Self::EffectiveCorpMemberRolesCallSites => {
                 "effective_corp_member_roles_call_sites"
             }
+            Self::CorpRoleTableReads => "corp_role_table_reads",
             Self::RequestCorpRoleMaskReads => "request_corp_role_mask_reads",
         }
     }
@@ -557,6 +560,9 @@ impl PatternKind {
             Self::EffectiveCorpMemberRolesCallSites => {
                 Some(r"\beffective_corp_member_roles\s*\(")
             }
+            Self::CorpRoleTableReads => Some(
+                r"\.\s*(?:corp_role_assignments|pending_role_grants|pending_title_role_grants|pending_scoped_role_grants|member_titles)\b",
+            ),
             Self::RequestCorpRoleMaskReads => {
                 Some(r"\bcorp_role_mask\b|\.\s*bitmask\b")
             }
@@ -659,6 +665,9 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
             crate::arch_debt_ratchet_corp_roles::count_effective_corp_member_roles_call_sites(
                 text,
             )
+        }
+        PatternKind::CorpRoleTableReads => {
+            crate::arch_debt_ratchet_corp_roles::count_corp_role_table_reads(text)
         }
         PatternKind::RequestCorpRoleMaskReads => {
             crate::arch_debt_ratchet_corp_roles::count_request_corp_role_mask_reads(text)

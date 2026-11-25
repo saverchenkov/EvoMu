@@ -42,6 +42,7 @@ fn ensure_pilot(ctx: &ServerContext, char_id: i64, corp_id: i64, corp_role: u64)
             }
         }
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(char_id);
             if corp_role != 0 {
                 corp.member_roles.insert(char_id, corp_role);
             }
