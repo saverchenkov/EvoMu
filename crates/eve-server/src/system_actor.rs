@@ -2204,7 +2204,7 @@ impl SystemRegistry {
                         replies: Vec::new(),
                         in_flight_guard: None,
                     };
-                    if let Some(ref tx) = post_unlock_tx_opt {
+                    if let Some(ref tx) = post_unlock_tx_opt.0 {
                         let _ = post_unlock::send_post_unlock_item(
                             tx,
                             &post_unlock_in_flight_actor,
@@ -2279,7 +2279,7 @@ impl SystemRegistry {
                         replies: batch_deferred_db_replies,
                         in_flight_guard: None,
                     };
-                    if let Some(ref tx) = post_unlock_tx_opt {
+                    if let Some(ref tx) = post_unlock_tx_opt.0 {
                         if let Err(unsent) = post_unlock::send_post_unlock_item(
                             tx,
                             &post_unlock_in_flight_actor,
