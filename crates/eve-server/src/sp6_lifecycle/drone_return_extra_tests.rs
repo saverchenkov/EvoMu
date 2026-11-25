@@ -1838,12 +1838,22 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
     {
         let d_ret_full = 777_990_005i64;
         let d_warp_rej = 777_990_006i64;
+        let bay_filler = 777_990_099i64;
         ctx.db.with_mut_snapshot(|snap| {
-            snap.items
-                .get_mut(&ship_id)
-                .unwrap()
-                .dynamic_attributes
-                .insert(283, 0.0);
+            snap.items.insert(
+                bay_filler,
+                InventoryItemRecord {
+                    item_id: bay_filler,
+                    type_id: 2_454,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::DroneBay,
+                    quantity: 100,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
             for did in [d_ret_full, d_warp_rej] {
                 snap.items.insert(
                     did,
@@ -1902,10 +1912,20 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         let _ = ctx.drain_notifications_for_char(char_id);
         super::disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
         super::abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
+        assert!(
+            !drone_test_helpers::active_drone(&ctx, d_ret_full).unwrap().is_abandoned,
+            "deferred disconnect->abandon must wait for BayFull ReleaseClaim"
+        );
+        assert!(
+            ctx.drain_notifications_for_char(char_id)
+                .iter()
+                .all(|n| n.event != "OnDroneControlLost"),
+            "deferred disconnect->abandon must not emit premature OnDroneControlLost"
+        );
 
         let _ = release_tx.send(());
         holder.await.unwrap();
-        assert!(!ret_scoop.await.unwrap(), "zero-capacity bay must fail return scoop");
+        assert!(!ret_scoop.await.unwrap(), "full drone bay must fail return scoop");
         let after_ret = drone_test_helpers::active_drone(&ctx, d_ret_full).unwrap();
         assert!(
             after_ret.is_abandoned && after_ret.owner_char_id == 0 && after_ret.parent_ship_id == 0,
@@ -1914,8 +1934,9 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         let ret_notifs = ctx.drain_notifications_for_char(char_id);
         assert!(ret_notifs.iter().any(|n| n.event == "OnDroneControlLost" && matches!(n.args.first(), Some(PyRep::Integer(id)) if *id == d_ret_full)));
 
-        // Expand capacity so capacity is NOT the reason for warp/disconnected rejection.
+        // Clear filler and restore capacity so capacity is NOT the reason for warp/disconnected rejection.
         ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&bay_filler);
             snap.items
                 .get_mut(&ship_id)
                 .unwrap()
@@ -1935,6 +1956,10 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
                 },
             )
             .await;
+        assert!(
+            !super::try_atomic_scoop_drone(&ctx, &sys_handle, &warp_rej_state, ship_id).await,
+            "return scoop must reject ship in MovementMode::Warp"
+        );
         let warp_err = handle_npcs_drones(
             &ctx,
             &mut owner_sess.clone(),
