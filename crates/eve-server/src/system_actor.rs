@@ -246,6 +246,17 @@ pub(in crate::system_actor) fn defer_cmd_reply<T: Send + 'static>(
     defer_reply(target, reply, value);
 }
 
+/// Routes barrier / state-transition replies unconditionally through `deferred_db_replies`
+/// so they flush through `post_unlock_tx` in FIFO order even when `post_unlock_ops` is empty (`W4`, `BF-3`).
+#[inline]
+pub(in crate::system_actor) fn defer_barrier_cmd_reply<T: Send + 'static>(
+    exec_ctx: &mut ActorExecCtx<'_>,
+    reply: tokio::sync::oneshot::Sender<T>,
+    value: T,
+) {
+    defer_reply(exec_ctx.deferred_db_replies, reply, value);
+}
+
 pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) solar_system_id: SolarSystemId,
     pub(in crate::system_actor) ballpark: &'a mut Ballpark,
@@ -1350,6 +1361,8 @@ impl SystemRegistry {
         }
 
         let post_unlock_worker_thread_id = Arc::new(std::sync::OnceLock::new());
+        let post_unlock_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
         let (post_unlock_tx, post_unlock_worker_join) = post_unlock::spawn_post_unlock_worker(
             rt_handle,
             solar_system_id,
@@ -1360,14 +1373,17 @@ impl SystemRegistry {
             post_unlock_actions_actor.clone(),
         );
         if !initial_post_unlock_ops.is_empty() {
-            let _ = post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(
+            let _ = post_unlock::send_post_unlock_item(
+                &post_unlock_tx,
+                &post_unlock_in_flight_actor,
                 post_unlock::PostUnlockWorkItem {
                     db_opt: self.db.clone(),
                     sde_opt: self.sde.clone(),
                     ops: initial_post_unlock_ops,
                     replies: Vec::new(),
+                    in_flight_guard: None,
                 },
-            ));
+            );
         }
         let post_unlock_tx_handle = post_unlock_tx.clone();
 
@@ -1422,7 +1438,7 @@ impl SystemRegistry {
 
                 let mut batch_view_dirty = false;
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
-                let mut batch_sent_post_unlock = false;
+                let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_delivery: Option<PendingActorDelivery> = None;
 
                 for cmd in cmd_batch {
@@ -1449,7 +1465,6 @@ impl SystemRegistry {
                 let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut cmd_post_unlock_ops = post_unlock::PostUnlockOps::default();
-                let mut cmd_sent_post_unlock = false;
                 let mut cmd_slim_changed = false;
                 let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
@@ -1978,12 +1993,14 @@ impl SystemRegistry {
                                 }
                                 let (checked_out_destroyed, destroyed_lease) =
                                     pending_destroyed_actor.checkout_entries(&volley_destroyed);
+                                let has_post_unlock_work = !post_unlock_ops.is_empty();
                                 pending_volley = Some((
                                     reply,
                                     WeaponVolleyOutput {
                                         destroyed: checked_out_destroyed,
                                         destroyed_lease,
                                         actions: volley_actions,
+                                        has_post_unlock_work,
                                     },
                                 ));
                             }
@@ -2009,7 +2026,15 @@ impl SystemRegistry {
                                     let paste_refund = r.paste_consumed_so_far.saturating_sub(used_units);
                                     rem = Some((rem_dmg, paste_refund));
                                 }
-                                defer_reply(deferred_replies, reply, rem);
+                                defer_reply(deferred_db_replies, reply, rem);
+                            }
+                            SystemCommand::CancelShipNaniteRepairs { ship_id, refund_paste } => {
+                                SystemHandle::drain_ship_nanite_repairs_collecting(
+                                    active_nanite_repairs,
+                                    ship_id,
+                                    refund_paste,
+                                    post_unlock_ops,
+                                );
                             }
                             SystemCommand::RecordIncomingArmorDamage { ship_id, damage, reply } => {
                                 let entry = rah_incoming_damage.entry(ship_id).or_insert([0.0; 4]);
@@ -2157,7 +2182,7 @@ impl SystemRegistry {
                                     .send(written_reply.load(std::sync::atomic::Ordering::Acquire));
                             }));
                         } else {
-                            defer_reply(exec_ctx.deferred_replies, reply, 0);
+                            defer_reply(exec_ctx.deferred_db_replies, reply, 0);
                         }
                     }
                     if cmd_may_mutate_view {
@@ -2172,29 +2197,20 @@ impl SystemRegistry {
                     })
                 }
                 })();
-                if !cmd_post_unlock_ops.is_empty() || !deferred_db_replies.is_empty() {
+                if !cmd_post_unlock_ops.is_empty() {
                     let item = post_unlock::PostUnlockWorkItem {
                         db_opt: actor_st.db_opt.clone(),
                         sde_opt: actor_st.sde_opt.clone(),
                         ops: cmd_post_unlock_ops,
-                        replies: deferred_db_replies,
+                        replies: Vec::new(),
+                        in_flight_guard: None,
                     };
                     if let Some(ref tx) = post_unlock_tx_opt {
-                        match tx.send(post_unlock::PostUnlockMsg::Work(item)) {
-                            Ok(()) => {
-                                cmd_sent_post_unlock = true;
-                            }
-                            Err(tokio::sync::mpsc::error::SendError(
-                                post_unlock::PostUnlockMsg::Work(unsent),
-                            )) => {
-                                deferred_replies.extend(unsent.replies);
-                            }
-                            Err(tokio::sync::mpsc::error::SendError(
-                                post_unlock::PostUnlockMsg::Shutdown,
-                            )) => {}
-                        }
-                    } else {
-                        deferred_replies.extend(item.replies);
+                        let _ = post_unlock::send_post_unlock_item(
+                            tx,
+                            &post_unlock_in_flight_actor,
+                            item,
+                        );
                     }
                 }
                 out
@@ -2202,7 +2218,7 @@ impl SystemRegistry {
                 (
                     cmd_slim_changed,
                     deferred_replies,
-                    cmd_sent_post_unlock,
+                    deferred_db_replies,
                     actor_delivery_out,
                 )
                 }));
@@ -2210,14 +2226,14 @@ impl SystemRegistry {
                     Ok((
                         cmd_slim_changed,
                         deferred_replies,
-                        cmd_sent_post_unlock,
+                        deferred_db_replies,
                         actor_delivery_out,
                     )) => {
                         if cmd_may_mutate_view || cmd_slim_changed {
                             batch_view_dirty = true;
                         }
                         batch_deferred_replies.extend(deferred_replies);
-                        batch_sent_post_unlock |= cmd_sent_post_unlock;
+                        batch_deferred_db_replies.extend(deferred_db_replies);
                         if let Some(delivery) = actor_delivery_out {
                             batch_delivery = Some(delivery);
                         }
@@ -2255,6 +2271,30 @@ impl SystemRegistry {
                 }
                 for send_reply in batch_deferred_replies {
                     send_reply();
+                }
+                if !batch_deferred_db_replies.is_empty() {
+                    let barrier_item = post_unlock::PostUnlockWorkItem {
+                        db_opt: None,
+                        sde_opt: None,
+                        ops: post_unlock::PostUnlockOps::default(),
+                        replies: batch_deferred_db_replies,
+                        in_flight_guard: None,
+                    };
+                    if let Some(ref tx) = post_unlock_tx_opt {
+                        if let Err(unsent) = post_unlock::send_post_unlock_item(
+                            tx,
+                            &post_unlock_in_flight_actor,
+                            barrier_item,
+                        ) {
+                            for send_reply in unsent.replies {
+                                send_reply();
+                            }
+                        }
+                    } else {
+                        for send_reply in barrier_item.replies {
+                            send_reply();
+                        }
+                    }
                 }
                 if let Some(actor_delivery) = batch_delivery {
                     let delivery_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2322,9 +2362,7 @@ impl SystemRegistry {
                         );
                     }
                 }
-                if !batch_sent_post_unlock {
-                    flush_post_unlock_actions(&post_unlock_actions_actor);
-                }
+                flush_post_unlock_actions(&post_unlock_actions_actor);
                 if shutdown_requested {
                     break;
                 }
@@ -2352,6 +2390,7 @@ impl SystemRegistry {
             cmd_tx,
             post_unlock_tx: post_unlock_tx_handle,
             post_unlock_worker_thread_id,
+            post_unlock_in_flight,
             event_tx,
             ball_positions,
             scrambled_balls,

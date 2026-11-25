@@ -924,6 +924,7 @@ pub(crate) async fn handle_dogma_ops(
                         ship_id,
                         initial_paste,
                     );
+                    snap.sp6_lifecycle.nanite_paste_shortfall.remove(&(ship_id, module_id));
                     Ok(())
                 });
 

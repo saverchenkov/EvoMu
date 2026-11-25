@@ -1893,6 +1893,44 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
     }
 }
 
+pub(in crate::system_actor) fn emit_target_lock_completed_collecting(
+    bp: &Ballpark,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    source_id: BallId,
+    target_id: BallId,
+    lock_hook_enabled: bool,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
+) -> Option<CharacterId> {
+    let char_id_opt = bp
+        .ball_slim_meta
+        .get(&source_id)
+        .and_then(|m| m.char_id)
+        .or_else(|| {
+            db_opt.as_ref().and_then(|db| {
+                db.try_with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .find(|c| c.active_ship_id == source_id)
+                        .map(|c| c.character_id)
+                        .or_else(|| {
+                            crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
+                                .active_pilot_by_structure
+                                .get(&source_id)
+                                .copied()
+                        })
+                })
+                .flatten()
+            })
+        });
+    let cid = char_id_opt.filter(|&c| c > 0)?;
+    if lock_hook_enabled {
+        post_unlock.push(super::post_unlock::PostUnlockIntent::TargetLockHook(
+            super::post_unlock::DeferredTargetLockHookOp { char_id: cid, target_id },
+        ));
+    }
+    Some(cid)
+}
+
 pub(in crate::system_actor) fn execute_pending_step_in_actor(
     exec_ctx: &mut ActorExecCtx<'_>,
     dt: f64,
@@ -2014,34 +2052,16 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
                 );
             }
             if mode == "locked" || mode == "lost" {
-                let char_id_opt = exec_ctx
-                    .ballpark
-                    .ball_slim_meta
-                    .get(source_id)
-                    .and_then(|m| m.char_id)
-                    .or_else(|| {
-                        exec_ctx.actor_st.db_opt.as_ref().and_then(|db| {
-                            db.try_with_snapshot(|s| {
-                                s.characters
-                                    .values()
-                                    .find(|c| c.active_ship_id == *source_id)
-                                    .map(|c| c.character_id)
-                                    .or_else(|| {
-                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
-                                            .active_pilot_by_structure
-                                            .get(source_id)
-                                            .copied()
-                                    })
-                            })
-                            .flatten()
-                        })
-                    });
-                if let Some(cid) = char_id_opt.filter(|&c| c > 0) {
+                if let Some(cid) = emit_target_lock_completed_collecting(
+                    exec_ctx.ballpark,
+                    &exec_ctx.actor_st.db_opt,
+                    *source_id,
+                    *target_id,
+                    mode == "locked" && lock_hook_opt.is_some(),
+                    exec_ctx.post_unlock_ops,
+                ) {
                     if mode == "locked" {
                         lock_completed_events.push((cid, *target_id));
-                        if let Some(ref lock_hook) = lock_hook_opt {
-                            lock_hook(cid, *target_id);
-                        }
                     } else {
                         target_lost_events.push((cid, *target_id));
                     }

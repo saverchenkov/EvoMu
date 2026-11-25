@@ -598,6 +598,58 @@ async fn celestials_gate_cloak_wormhole_group_velocity_and_fast_forward_boundari
     assert!((sim_elapsed - before - 120.0).abs() < 1e-9);
 }
 
+fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) -> SystemHandle {
+    let (event_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
+    let (view_tx, view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
+    let view_tx = Arc::new(view_tx);
+    let tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
+    let h = SystemHandle {
+        solar_system_id: 30_000_142,
+        cmd_tx,
+        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
+        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
+        post_unlock_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        event_tx,
+        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
+        ballpark: Arc::new(super::BallparkHandle::new(
+            Ballpark::new(30_000_142),
+            Arc::clone(&view_tx),
+            Arc::clone(&tidi_bits),
+        )),
+        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx,
+        view_rx,
+        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        tidi_factor_bits: tidi_bits,
+        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
+        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
+        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
+        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
+    };
+    h.ballpark.attach_actor_state(&h.actor_state);
+    h
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     let ctx = test_ctx();
@@ -689,53 +741,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     // Closed-channel SystemHandle covers every "Solar system actor stopped" error branch
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<SystemCommand>(1);
     drop(cmd_rx);
-    let (event_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
-    let (dead_view_tx, dead_view_rx) =
-        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
-    let dead_view_tx = Arc::new(dead_view_tx);
-    let dead_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
-    let dead = SystemHandle {
-        solar_system_id: 30_000_142,
-        cmd_tx,
-        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
-        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
-        event_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(super::BallparkHandle::new(
-            Ballpark::new(30_000_142),
-            Arc::clone(&dead_view_tx),
-            Arc::clone(&dead_tidi_bits),
-        )),
-        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        view_tx: dead_view_tx,
-        view_rx: dead_view_rx,
-        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: dead_tidi_bits,
-        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
-        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
-        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
-        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-    };
-    dead.ballpark.attach_actor_state(&dead.actor_state);
+    let dead = make_dummy_system_handle(cmd_tx);
 
     assert!(dead.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(dead.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -895,53 +901,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
             drop(cmd);
         }
     });
-    let (drop_evt_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
-    let (drop_view_tx, drop_view_rx) =
-        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
-    let drop_view_tx = Arc::new(drop_view_tx);
-    let drop_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
-    let drop_h = SystemHandle {
-        solar_system_id: 30_000_142,
-        cmd_tx: drop_tx,
-        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
-        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
-        event_tx: drop_evt_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(super::BallparkHandle::new(
-            Ballpark::new(30_000_142),
-            Arc::clone(&drop_view_tx),
-            Arc::clone(&drop_tidi_bits),
-        )),
-        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        view_tx: drop_view_tx,
-        view_rx: drop_view_rx,
-        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: drop_tidi_bits,
-        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
-        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
-        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
-        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-    };
-    drop_h.ballpark.attach_actor_state(&drop_h.actor_state);
+    let drop_h = make_dummy_system_handle(drop_tx);
     assert!(drop_h.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(drop_h.set_ball_max_velocity(1, 100.0).await.is_err());
     assert!(drop_h.spawn_ball_with_combat(make_ball(1, 606, DVec3::ZERO), CombatState::default()).await.is_err());
@@ -1387,53 +1347,7 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
 async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
     drop(cmd_rx);
-    let (event_tx, _) = tokio::sync::broadcast::channel(4);
-    let (handle_view_tx, handle_view_rx) =
-        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
-    let handle_view_tx = Arc::new(handle_view_tx);
-    let handle_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
-    let handle = SystemHandle {
-        solar_system_id: 30_000_142,
-        cmd_tx,
-        post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
-        post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
-        event_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
-        active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(super::BallparkHandle::new(
-            eve_destiny::Ballpark::new(30_000_142),
-            Arc::clone(&handle_view_tx),
-            Arc::clone(&handle_tidi_bits),
-        )),
-        actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
-        view_tx: handle_view_tx,
-        view_rx: handle_view_rx,
-        last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: handle_tidi_bits,
-        sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
-        last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        hibernated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hibernated_since_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        idle_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        dynamic_ball_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        command_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pending_destroyed_balls: super::super::PendingDestroyedOutbox::default(),
-        panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
-        npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
-        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-    };
-    handle.ballpark.attach_actor_state(&handle.actor_state);
+    let handle = make_dummy_system_handle(cmd_tx);
 
     assert!(handle.spawn_ball(make_ball(1, 587, DVec3::ZERO)).await.is_err());
     assert!(handle.set_ball_max_velocity(1, 100.0).await.is_err());

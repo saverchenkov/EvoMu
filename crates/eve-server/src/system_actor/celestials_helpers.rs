@@ -1491,13 +1491,14 @@ impl SystemHandle {
         written.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub(super) async fn wait_for_post_unlock_barrier(&self) -> bool {
+    pub(in crate::system_actor) async fn wait_for_post_unlock_barrier(&self) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let item = post_unlock::PostUnlockWorkItem {
             db_opt: None,
             sde_opt: None,
             ops: post_unlock::PostUnlockOps::default(),
             replies: vec![Box::new(move || { let _ = tx.send(()); })],
+            in_flight_guard: None,
         };
         if self.post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(item)).is_err() {
             return false;

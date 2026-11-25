@@ -883,6 +883,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     ship_id,
                     initial_deduct,
                 );
+                snap.sp6_lifecycle.nanite_paste_shortfall.remove(&(ship_id, module_id));
                 Ok(taken)
             });
             let initial_consumed = match deduct_res {
@@ -962,23 +963,32 @@ pub(crate) async fn handle_mining_and_deactivate(
                     .flatten()
                 {
                     stopped = true;
-                    rem_dmg_out = rem_dmg;
-                    paste_refunded = ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(m_item) = snap.items.get_mut(&module_id) {
-                            if rem_dmg <= 1e-6 {
+                    let (actual_rem_dmg, refunded) = ctx.db.with_mut_snapshot(|snap| {
+                        let shortfall = snap.sp6_lifecycle.nanite_paste_shortfall.remove(&(ship_id, module_id)).unwrap_or(0);
+                        let safe_refund = (refund - shortfall).max(0);
+                        let applied_dmg = if let Some(m_item) = snap.items.get_mut(&module_id) {
+                            let cur_dmg = m_item.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0);
+                            let next_dmg = if shortfall > 0 { cur_dmg.max(rem_dmg) } else { rem_dmg };
+                            if next_dmg <= 1e-6 {
                                 m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
                             } else {
-                                m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
+                                m_item.dynamic_attributes.insert(attr_ids::DAMAGE, next_dmg);
                             }
-                        }
-                        crate::services::tactical_module_mechanics::refund_paste_to_cargo_capped_in_snap(
+                            next_dmg
+                        } else {
+                            rem_dmg
+                        };
+                        let refunded = crate::services::tactical_module_mechanics::refund_paste_to_cargo_capped_in_snap(
                             snap,
                             &ctx.sde,
                             char_id,
                             ship_id,
-                            refund,
-                        )
+                            safe_refund,
+                        );
+                        (applied_dmg, refunded)
                     });
+                    rem_dmg_out = actual_rem_dmg;
+                    paste_refunded = refunded;
                     ctx.invalidate_and_push_fit(ship_id);
                 }
             }

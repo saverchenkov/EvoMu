@@ -645,8 +645,8 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
         let target_consumed = ((total_needed as f64) * next_progress - 1e-9)
             .ceil()
             .clamp(1.0, total_needed as f64) as i32;
-        let (halted_for_paste, effective_progress) = if let Some(db_ref) = db_opt.as_ref() {
-            super::post_unlock::collect_nanite_repair_tick(
+        if let Some(db_ref) = db_opt.as_ref() {
+            match super::post_unlock::collect_nanite_repair_tick(
                 db_ref,
                 nr,
                 next_elapsed,
@@ -654,13 +654,18 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
                 target_consumed,
                 &mut virtual_paste_used,
                 post_unlock,
-            )
-        } else {
-            (false, next_progress)
-        };
-        if halted_for_paste {
-            nr.elapsed_s = nr.duration_s * effective_progress;
-            return false;
+            ) {
+                super::post_unlock::NaniteTickCollect::Defer => return true,
+                super::post_unlock::NaniteTickCollect::Applied {
+                    halted_for_paste,
+                    effective_progress,
+                } => {
+                    if halted_for_paste {
+                        nr.elapsed_s = nr.duration_s * effective_progress;
+                        return false;
+                    }
+                }
+            }
         }
         nr.elapsed_s = next_elapsed;
         nr.elapsed_s + 1e-6 < nr.duration_s
@@ -843,7 +848,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
                     db_ref,
                     eff_char_id,
                     cycle.ship_id,
-                    launchers,
+                    &launchers,
                     cycle.ammo_type_id,
                     &mut virtual_item_qty,
                     post_unlock,
@@ -2005,25 +2010,18 @@ impl SystemHandle {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if let Some(ref lock_hook) = lock_hook_opt {
+        if lock_hook_opt.is_some() {
             for ev in &events {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                     if mode == "locked" {
-                        let char_id_opt = bp.ball_slim_meta.get(source_id).and_then(|m| m.char_id).or_else(|| {
-                            db_opt.as_ref().and_then(|db| db.try_with_snapshot(|s| {
-                                s.characters
-                                    .values()
-                                    .find(|c| c.active_ship_id == *source_id)
-                                    .map(|c| c.character_id)
-                                    .or_else(|| {
-                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
-                                            .active_pilot_by_structure
-                                            .get(source_id)
-                                            .copied()
-                                    })
-                            }).flatten())
-                        });
-                        if let Some(cid) = char_id_opt.filter(|&c| c > 0) { lock_hook(cid, *target_id); }
+                        let _ = super::cycles_tackle::emit_target_lock_completed_collecting(
+                            &bp,
+                            db_opt,
+                            *source_id,
+                            *target_id,
+                            true,
+                            &mut post_unlock_ops,
+                        );
                     }
                 }
             }

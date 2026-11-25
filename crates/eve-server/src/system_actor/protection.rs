@@ -738,7 +738,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 real_now_unix,
                 None,
             );
-            defer_cmd_reply(exec_ctx, reply, Ok(events));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(events));
             None
         }
         SystemCommand::ForceDecloak {
@@ -755,7 +755,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 reason,
                 real_now_unix,
             );
-            defer_cmd_reply(exec_ctx, reply, Ok(events));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(events));
             None
         }
         SystemCommand::GetProtectionSnapshot { ball_id, reply } => {
@@ -781,7 +781,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.actor_st.protection_registry.remove(&ball_id);
                 super::drones::clear_drone_runtime_in_state(exec_ctx.actor_st, ball_id);
                 exec_ctx.actor_st.warp_state.clear_ball(ball_id, true);
-                defer_reply(exec_ctx.deferred_replies, reply, None);
+                defer_barrier_cmd_reply(exec_ctx, reply, None);
                 return None;
             }
             let tick = exec_ctx.ballpark.current_tick;
@@ -876,7 +876,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                 exec_ctx.ballpark.remove_ball(ball_id)
             };
             sync_positions_and_active_ships(exec_ctx);
-            defer_cmd_reply(
+            defer_barrier_cmd_reply(
                 exec_ctx,
                 reply,
                 removed.map(|ball| TakenBall {
@@ -900,11 +900,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             };
             let ball_id = taken.ball.id;
             if only_if_absent && exec_ctx.ballpark.balls.contains_key(&ball_id) {
-                defer_reply(
-                    exec_ctx.deferred_replies,
-                    reply,
-                    Ok(exec_ctx.ballpark.current_tick),
-                );
+                defer_barrier_cmd_reply(exec_ctx, reply, Ok(exec_ctx.ballpark.current_tick));
                 return None;
             }
             let removed_own_cycles = std::mem::take(&mut taken.removed_own_cycles);
@@ -952,7 +948,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
             *exec_ctx.spawned_checkpoint_ball = Some(ball_id);
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ball_id);
             sync_positions_and_active_ships(exec_ctx);
-            defer_cmd_reply(exec_ctx, reply, Ok(tick));
+            defer_barrier_cmd_reply(exec_ctx, reply, Ok(tick));
             None
         }
         SystemCommand::GetTargetLocks { ball_id, reply } => {
@@ -1015,7 +1011,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     exec_ctx.post_unlock_ops,
                 );
             }
-            defer_cmd_reply(exec_ctx, reply, removed);
+            defer_barrier_cmd_reply(exec_ctx, reply, removed);
             None
         }
         cmd @ (SystemCommand::ClearTargetLocks { .. }
@@ -1047,7 +1043,7 @@ pub(in crate::system_actor) fn handle_protection_or_lifecycle_command(
                     exec_ctx.post_unlock_ops,
                 );
             }
-            defer_cmd_reply(exec_ctx, reply, count);
+            defer_barrier_cmd_reply(exec_ctx, reply, count);
             None
         }
         SystemCommand::FastForwardClock {

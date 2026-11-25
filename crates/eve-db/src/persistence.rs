@@ -1868,6 +1868,14 @@ impl WorldRepository {
         self.bump_combat_runtime_epoch();
         Ok(())
     }
+
+    /// Holds `published.write()` to deterministically test non-blocking `try_with_snapshot` contention (`#1170`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn hold_published_write_for_test(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, std::sync::Arc<WorldStateSnapshot>> {
+        self.published.write().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// Captured snapshot of every domain table in [`WorldRepository`] for negative-test diffing and

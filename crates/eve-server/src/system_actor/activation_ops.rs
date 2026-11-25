@@ -908,7 +908,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             f(&mut cs);
             commit_combat_state_update(exec_ctx, ball_id, cs);
             let updated = exec_ctx.ballpark.combat_states.get(&ball_id).cloned();
-            defer_cmd_reply(exec_ctx, reply, updated);
+            defer_barrier_cmd_reply(exec_ctx, reply, updated);
             None
         }
         SystemCommand::AddModuleCycle { mut cycle, reply } => {
@@ -1068,7 +1068,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
             exec_ctx.actor_st.weapon_cycle_start_modules.retain(|&(s_id, m_id)| cycles.iter().any(|c| c.ship_id == s_id && c.module_id == m_id));
             sync_ball_protection_in_actor(exec_ctx.ballpark, exec_ctx.actor_st, ship_id);
             super::protection::sync_positions_and_active_ships(exec_ctx);
-            defer_cmd_reply(exec_ctx, reply, ());
+            defer_barrier_cmd_reply(exec_ctx, reply, ());
             None
         }
         SystemCommand::ApplyFitProjection { ship_id, projection, reply } => {

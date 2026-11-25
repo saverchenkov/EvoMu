@@ -678,6 +678,7 @@ pub struct WeaponVolleyOutput {
     pub destroyed: Vec<(BallId, Option<CharacterId>)>,
     pub(crate) destroyed_lease: Option<Arc<PendingDestroyedDeliveryGuard>>,
     pub actions: Vec<PendingCycleAction>,
+    pub(crate) has_post_unlock_work: bool,
 }
 
 /// Per-session `beyonce.UpdateStateRequest` cooldown state stored per `ServerContext` on `SystemRegistry` (`#1169`).
@@ -1406,6 +1407,10 @@ pub enum SystemCommand {
         ship_id: BallId,
         module_id: i64,
         reply: oneshot::Sender<Option<(f64, i32)>>,
+    },
+    CancelShipNaniteRepairs {
+        ship_id: BallId,
+        refund_paste: bool,
     },
     RecordIncomingArmorDamage {
         ship_id: BallId,

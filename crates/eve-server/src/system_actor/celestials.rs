@@ -321,6 +321,7 @@ pub struct SystemHandle {
     pub(crate) cmd_tx: mpsc::Sender<SystemCommand>,
     pub(in crate::system_actor) post_unlock_tx: tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockMsg>,
     pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
+    pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
     pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
@@ -365,6 +366,12 @@ impl SystemHandle {
     /// Returns the latest lock-free published [`super::SystemView`] snapshot.
     pub fn view(&self) -> Arc<super::SystemView> {
         self.view_rx.borrow().clone()
+    }
+
+    pub(in crate::system_actor) fn has_in_flight_post_unlock(&self) -> bool {
+        self.post_unlock_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
 
     /// Publishes a fresh [`super::SystemView`] by reading `ballpark` (and `actor_state`
@@ -1305,33 +1312,47 @@ impl SystemHandle {
             .any(|c| c.ship_id == ship_id && c.module_id == module_id && c.mjd_jump_distance_m.is_some())
     }
 
+    pub(in crate::system_actor) fn drain_ship_nanite_repairs_collecting(
+        active_nanite_repairs: &mut Vec<super::ActiveNaniteRepair>,
+        ship_id: BallId,
+        refund_paste: bool,
+        ops: &mut super::post_unlock::PostUnlockOps,
+    ) {
+        active_nanite_repairs.retain(|r| {
+            if r.ship_id == ship_id {
+                let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
+                let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
+                let paste_used = ((r.paste_total_needed as f64) * frac).ceil() as i32;
+                let refund = (r.paste_consumed_so_far
+                    - paste_used.clamp(0, r.paste_consumed_so_far))
+                .max(0);
+                ops.push(super::post_unlock::PostUnlockIntent::NaniteRepairCancel(
+                    super::post_unlock::NaniteRepairCancelDbOp {
+                        char_id: r.char_id,
+                        ship_id,
+                        module_id: r.module_id,
+                        rem_dmg,
+                        refund_paste,
+                        refund,
+                    },
+                ));
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
         let drain_fn = |st: &mut super::SystemActorState| {
             let mut ops = super::post_unlock::PostUnlockOps::default();
-            st.active_nanite_repairs.retain(|r| {
-                if r.ship_id == ship_id {
-                    let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
-                    let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
-                    let paste_used = ((r.paste_total_needed as f64) * frac).ceil() as i32;
-                    let refund = (r.paste_consumed_so_far
-                        - paste_used.clamp(0, r.paste_consumed_so_far))
-                    .max(0);
-                    ops.push(super::post_unlock::PostUnlockIntent::NaniteRepairCancel(
-                        super::post_unlock::NaniteRepairCancelDbOp {
-                            char_id: r.char_id,
-                            ship_id,
-                            module_id: r.module_id,
-                            rem_dmg,
-                            refund_paste,
-                            refund,
-                        },
-                    ));
-                    false
-                } else {
-                    true
-                }
-            });
+            Self::drain_ship_nanite_repairs_collecting(
+                &mut st.active_nanite_repairs,
+                ship_id,
+                refund_paste,
+                &mut ops,
+            );
             super::post_unlock::enqueue_post_unlock_under_locks(
                 self,
                 st.db_opt.as_ref(),
@@ -1347,7 +1368,20 @@ impl SystemHandle {
             match self.actor_state.try_write_unranked() {
                 Ok(mut st) => drain_fn(&mut st),
                 Err(std::sync::TryLockError::Poisoned(e)) => drain_fn(&mut e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => return,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if let Err(err) = self.cmd_tx.try_send(SystemCommand::CancelShipNaniteRepairs {
+                        ship_id,
+                        refund_paste,
+                    }) {
+                        tracing::warn!(
+                            solar_system_id = self.solar_system_id,
+                            ship_id,
+                            error = %err,
+                            "Failed to enqueue CancelShipNaniteRepairs on actor_state WouldBlock"
+                        );
+                    }
+                    return;
+                }
             }
         } else {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
@@ -2486,7 +2520,8 @@ impl SystemHandle {
                 .condition_checkpoint
                 .as_ref()
                 .is_some_and(|entries| !entries.is_empty())
-            || !output.destroyed_balls.is_empty();
+            || !output.destroyed_balls.is_empty()
+            || self.has_in_flight_post_unlock();
         let worker_alive = if need_barrier {
             self.wait_for_post_unlock_barrier().await
         } else {
@@ -2768,6 +2803,9 @@ impl SystemHandle {
     ) -> Result<(Vec<(BallId, Option<CharacterId>)>, Vec<super::PendingCycleAction>), String> {
         let rx = self.start_fire_weapon_cycle_volley(ship_id, module_id).await?;
         let volley_out = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        if !volley_out.destroyed.is_empty() || volley_out.has_post_unlock_work {
+            let _ = self.wait_for_post_unlock_barrier().await;
+        }
         self.commit_destroyed_ball_hooks(
             0.0,
             &volley_out.destroyed,

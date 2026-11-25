@@ -454,6 +454,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::UpdateModuleOverload { .. } => "UpdateModuleOverload",
             SystemCommand::StartNaniteRepair { .. } => "StartNaniteRepair",
             SystemCommand::StopNaniteRepair { .. } => "StopNaniteRepair",
+            SystemCommand::CancelShipNaniteRepairs { .. } => "CancelShipNaniteRepairs",
             SystemCommand::RecordIncomingArmorDamage { .. } => "RecordIncomingArmorDamage",
             SystemCommand::StopNonWarpModuleCycles { .. } => "StopNonWarpModuleCycles",
             SystemCommand::FlushPeerObserverUpdates { .. } => "FlushPeerObserverUpdates",
@@ -856,12 +857,16 @@ fn system_command_all_variants_construct_and_match() {
             clear_timers: true,
             reply: oneshot::channel().0,
         },
+        SystemCommand::CancelShipNaniteRepairs {
+            ship_id: 1,
+            refund_paste: true,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 100);
+    assert_eq!(tags.len(), 101);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -884,7 +889,8 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[96], "RescheduleDroneMiner");
     assert_eq!(tags[97], "SetDroneNextReadyUnix");
     assert_eq!(tags[98], "ClearDroneRuntime");
-    assert_eq!(tags[99], "ShutdownActor");
+    assert_eq!(tags[99], "CancelShipNaniteRepairs");
+    assert_eq!(tags[100], "ShutdownActor");
 }
 
 #[test]

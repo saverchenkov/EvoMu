@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    celestials, defer_cmd_reply, defer_reply, protection, ActorExecCtx,
+    celestials, defer_barrier_cmd_reply, defer_cmd_reply, defer_reply, protection, ActorExecCtx,
     CharacterId, ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput,
     ExtendedNpcAttackActorOutput, LogiSoakCycleActorInput, ModuleDeactivationHook,
     ReconnectLiveShipRequest, SpawnReconnectedShipRequest, SystemActorState, SystemCommand,
@@ -1101,13 +1101,13 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
             };
             if let Some(tok) = required_token {
                 if exec_ctx.ball_spawn_tokens.get(&ball_id).copied() != Some(tok) {
-                    defer_reply(exec_ctx.deferred_replies, reply, None);
+                    defer_barrier_cmd_reply(exec_ctx, reply, None);
                     return None;
                 }
             }
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let removed = remove_ball_in_actor(&mut ctx, ball_id, required_token.is_some());
-            defer_cmd_reply(exec_ctx, reply, removed);
+            defer_barrier_cmd_reply(exec_ctx, reply, removed);
             None
         }
         SystemCommand::AcceptDocking {
@@ -1118,7 +1118,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let removed = accept_docking_in_actor(&mut ctx, ship_id, station_id, station_pos);
-            defer_cmd_reply(exec_ctx, reply, removed);
+            defer_barrier_cmd_reply(exec_ctx, reply, removed);
             None
         }
         SystemCommand::EmitPackagedActions {
@@ -1152,7 +1152,7 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
         } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let updated = set_ball_position_in_actor(&mut ctx, ball_id, position);
-            defer_cmd_reply(exec_ctx, reply, updated);
+            defer_barrier_cmd_reply(exec_ctx, reply, updated);
             None
         }
         SystemCommand::EmitDestinyEvent {
@@ -1759,6 +1759,7 @@ mod tests {
             cmd_tx,
             post_unlock_tx: mpsc::unbounded_channel().0,
             post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
+            post_unlock_in_flight: Arc::new(AtomicUsize::new(0)),
             event_tx,
             ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
             scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),
