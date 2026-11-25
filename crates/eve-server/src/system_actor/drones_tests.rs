@@ -332,6 +332,10 @@ async fn legacy_extended_runtime_json_fallback_is_one_way_and_system_scoped() {
     });
 
     let ctx = crate::router::ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
+    assert!(
+        ctx.systems.get_handle(perim_sys).is_none(),
+        "upfront legacy migration must not wake cold system {perim_sys}"
+    );
     let sys_jita = ctx.systems.get_or_spawn(jita_sys);
     assert!(sys_jita.active_drone(880_101).is_some());
     assert!(sys_jita.active_drone(880_102).is_none());
@@ -346,7 +350,7 @@ async fn legacy_extended_runtime_json_fallback_is_one_way_and_system_scoped() {
         "flush_combat_runtime_to_db must not persist active_drones_in_space: {ext_after_flush}"
     );
 
-    // Stopping Jita flushes the migrated entry into SQLite `system_checkpoint` (`KIND_ACTIVE_DRONES`).
+    // Stopping Jita leaves the migrated entry in SQLite `system_checkpoint` (`KIND_ACTIVE_DRONES`).
     assert!(ctx.systems.stop_system(jita_sys).await);
     let persisted = db
         .with_sqlite_conn(|conn| {
@@ -359,6 +363,15 @@ async fn legacy_extended_runtime_json_fallback_is_one_way_and_system_scoped() {
         .expect("load migrated jita checkpoint");
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].1.ball_id, 880_101);
+
+    // Waking previously cold `perim_sys` *after* `flush_combat_runtime_to_db` must still restore `880_102`.
+    let sys_perim = ctx.systems.get_or_spawn(perim_sys);
+    let restored_perim = sys_perim
+        .active_drone(880_102)
+        .expect("cold perim_sys must restore migrated legacy drone 880_102 after legacy JSON flush");
+    assert_eq!(restored_perim.solar_system_id, perim_sys);
+    assert!(restored_perim.is_abandoned);
+    assert!(ctx.systems.stop_system(perim_sys).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -2005,6 +2005,9 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
         snap.items.remove(&d.drone_item_id);
         snap.item_positions.remove(&d.ball_id);
         snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+        if d.drone_item_id != d.ball_id {
+            snap.sp6_lifecycle.space_object_meta.remove(&d.drone_item_id);
+        }
     });
     let _ = sys_handle.clear_drone_runtime_sync(ball_id);
     sys_handle.try_remove_ball(ball_id);

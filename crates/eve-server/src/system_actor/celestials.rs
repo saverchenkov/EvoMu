@@ -1130,6 +1130,7 @@ impl SystemHandle {
                         active_drone_miners,
                         drone_next_ready_unix,
                         active_drones_in_space,
+                        scoop_claimed_drones,
                         active_drones_checkpoint_dirty,
                         active_drones_checkpoint_seq,
                         db_opt,
@@ -1151,6 +1152,7 @@ impl SystemHandle {
                     protection_registry.remove(&ball_id);
                     active_drone_miners.remove(&ball_id);
                     drone_next_ready_unix.remove(&ball_id);
+                    scoop_claimed_drones.remove(&ball_id);
                     if active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
                         *active_drones_checkpoint_dirty = true;
                         *active_drones_checkpoint_seq =

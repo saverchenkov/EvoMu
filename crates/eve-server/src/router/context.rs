@@ -919,6 +919,7 @@ impl ServerContext {
         crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(&ctx);
         ctx.hydrate_server_runtime_from_db();
         crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
+        crate::system_actor::migrate_legacy_active_drones_at_startup(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
         {
@@ -2662,7 +2663,15 @@ impl ServerContext {
     /// `FitProjection` to the system actor when the ship is in space (`#834`, `#922`).
     pub(crate) fn invalidate_and_push_fit(&self, ship_id: i64) -> Option<eve_dogma::FitRev> {
         self.invalidate_ship_fitting_cache_only(ship_id);
-        self.push_fit_projection_for_ship(ship_id)
+        let rev = self.push_fit_projection_for_ship(ship_id);
+        // `push_fit_projection_for_ship` computes and caches the fit via `self.fit` when the
+        // ship's system actor is awake; drop it from `ship_fittings` afterward without bumping
+        // `FitRev` again so `invalidate_ship_fitting` preserves its cache-invalidation contract.
+        self.ship_fittings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+        rev
     }
 
     /// Resolves the owner/pilot for `ship_id` and invokes [`Self::push_fit_projection`].

@@ -83,6 +83,45 @@ pub(crate) type ActiveDroneMutOp = Box<
         + Send,
 >;
 
+/// Transient in-actor scoop coordination command operating on `scoop_claimed_drones` (`D2B-P1-04`).
+#[derive(Debug, Clone)]
+pub enum DroneScoopClaimAction {
+    /// Non-destructive claim for `ship.ScoopToDroneBay`; rejects when already claimed or controlled by another pilot.
+    ClaimPlayerScoop { char_id: i64 },
+    /// Non-destructive claim for automatic return scoop (`try_atomic_scoop_drone`).
+    ClaimReturnScoop {
+        expected_owner: i64,
+        target_ship_id: i64,
+    },
+    /// Releases a transient scoop claim without touching `active_drones_in_space` or checkpoint dirty flags.
+    ReleaseClaim,
+    /// Removes `ball_id` from both `scoop_claimed_drones` and `active_drones_in_space` (marking checkpoint dirty if `ball_id > 0`).
+    ConsumeScoop,
+    /// Releases `scoop_claimed_drones` and removes/returns live `DroneSpaceState` ONLY if it still needs abandonment.
+    ReleaseOrTakeForAbandon {
+        char_id_opt: Option<i64>,
+        ship_id: i64,
+    },
+    /// Takes an unclaimed returning controlled drone belonging to `target_ship_id` for abandonment when ship became unavailable.
+    TakeUnclaimedForAbandon {
+        expected_owner: i64,
+        target_ship_id: i64,
+        require_returning: bool,
+    },
+}
+
+/// Outcome of [`DroneScoopClaimAction`] executed inside [`SystemActor`].
+#[derive(Debug, Clone)]
+pub enum DroneScoopClaimOutcome {
+    Claimed(Option<DroneSpaceState>),
+    AlreadyClaimed,
+    OwnedByOther,
+    NotEligible,
+    Released,
+    Consumed(Option<DroneSpaceState>),
+    TakeForAbandon(Option<DroneSpaceState>),
+}
+
 #[derive(Default, serde::Deserialize)]
 struct LegacyActiveDronesPayload {
     #[serde(default)]
@@ -199,6 +238,7 @@ pub(in crate::system_actor) fn clear_removed_ball_drones_in_state(
     ball_id: BallId,
 ) {
     clear_drone_runtime_in_state(actor_st, ball_id);
+    actor_st.scoop_claimed_drones.remove(&ball_id);
     if actor_st.active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
         mark_active_drones_dirty_in_state(actor_st);
     }
@@ -319,6 +359,70 @@ pub(crate) fn flush_actor_active_drones_checkpoint_post_unlock(
         actor_state_lock,
         true,
     );
+}
+
+/// Migrates all `active_drones_in_space` entries from legacy `extended_runtime_json` directly into
+/// SQLite `system_checkpoint` (`KIND_ACTIVE_DRONES`) across all solar systems at startup before any
+/// `flush_combat_runtime_to_db` clears the legacy JSON, without waking cold systems.
+pub(crate) fn migrate_legacy_active_drones_at_startup(ctx: &crate::router::ServerContext) {
+    let ext_json = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state.extended_runtime_json.clone()
+    });
+    if ext_json.is_empty() || !ext_json.contains("active_drones_in_space") {
+        return;
+    }
+    let Ok(legacy) = serde_json::from_str::<LegacyActiveDronesPayload>(&ext_json) else {
+        return;
+    };
+    if legacy.active_drones_in_space.is_empty() {
+        return;
+    }
+    let mut by_sys: std::collections::BTreeMap<SolarSystemId, Vec<(BallId, DroneSpaceState)>> =
+        std::collections::BTreeMap::new();
+    for (bid, mut d) in legacy.active_drones_in_space {
+        if d.solar_system_id == 0 || bid <= 0 {
+            continue;
+        }
+        d.ball_id = bid;
+        by_sys.entry(d.solar_system_id).or_default().push((bid, d));
+    }
+    if by_sys.is_empty() {
+        return;
+    }
+    let now_unix = ctx.db.clock().now_unix_secs();
+    let _ = ctx.db.with_sqlite_conn(|conn| {
+        for (&sys_id, entries) in &by_sys {
+            let existing =
+                eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+                    conn,
+                    sys_id,
+                    eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                )?;
+            if !existing.is_empty() {
+                continue;
+            }
+            let mut sorted = entries.clone();
+            sorted.sort_by_key(|(bid, _)| *bid);
+            let rows: Vec<(String, &DroneSpaceState)> =
+                sorted.iter().map(|(bid, d)| (bid.to_string(), d)).collect();
+            eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+                conn,
+                sys_id,
+                eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+                &rows,
+                now_unix,
+            )?;
+        }
+        Ok::<(), String>(())
+    });
+    let mut guard = ctx
+        .systems
+        .migrated_legacy_drone_systems
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for sys_id in by_sys.keys() {
+        guard.insert(*sys_id);
+    }
 }
 
 /// Loads `active_drones_in_space` for `solar_system_id` from SQLite `system_checkpoint`,
@@ -531,6 +635,117 @@ fn finalize_drone_launches_in_actor(
     Ok(updated)
 }
 
+fn execute_drone_scoop_claim_op_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ball_id: BallId,
+    action: DroneScoopClaimAction,
+) -> Result<DroneScoopClaimOutcome, String> {
+    let is_returning_for_ship = |st: &DroneSpaceState, expected_owner: i64, target_ship_id: i64| {
+        !st.is_abandoned
+            && st.solar_system_id == ctx.solar_system_id
+            && st.owner_char_id == expected_owner
+            && (st.parent_ship_id == target_ship_id
+                || (st.parent_ship_id == 0 && expected_owner > 0))
+    };
+    match action {
+        DroneScoopClaimAction::ClaimPlayerScoop { char_id } => {
+            if ctx.actor_st.scoop_claimed_drones.contains(&ball_id) {
+                return Ok(DroneScoopClaimOutcome::AlreadyClaimed);
+            }
+            if let Some(st) = ctx.actor_st.active_drones_in_space.get(&ball_id) {
+                if !st.is_abandoned && st.owner_char_id != char_id {
+                    return Ok(DroneScoopClaimOutcome::OwnedByOther);
+                }
+            }
+            ctx.actor_st.scoop_claimed_drones.insert(ball_id);
+            Ok(DroneScoopClaimOutcome::Claimed(
+                ctx.actor_st.active_drones_in_space.get(&ball_id).cloned(),
+            ))
+        }
+        DroneScoopClaimAction::ClaimReturnScoop {
+            expected_owner,
+            target_ship_id,
+        } => {
+            if ctx.actor_st.scoop_claimed_drones.contains(&ball_id) {
+                return Ok(DroneScoopClaimOutcome::AlreadyClaimed);
+            }
+            let Some(existing) = ctx.actor_st.active_drones_in_space.get(&ball_id).cloned() else {
+                return Ok(DroneScoopClaimOutcome::NotEligible);
+            };
+            if !is_returning_for_ship(&existing, expected_owner, target_ship_id) {
+                return Ok(DroneScoopClaimOutcome::NotEligible);
+            }
+            ctx.actor_st.scoop_claimed_drones.insert(ball_id);
+            Ok(DroneScoopClaimOutcome::Claimed(Some(existing)))
+        }
+        DroneScoopClaimAction::ReleaseClaim => {
+            ctx.actor_st.scoop_claimed_drones.remove(&ball_id);
+            Ok(DroneScoopClaimOutcome::Released)
+        }
+        DroneScoopClaimAction::ConsumeScoop => {
+            ctx.actor_st.scoop_claimed_drones.remove(&ball_id);
+            let removed = ctx.actor_st.active_drones_in_space.remove(&ball_id);
+            if removed.is_some() && ball_id > 0 {
+                mark_active_drones_dirty_in_state(ctx.actor_st);
+            }
+            Ok(DroneScoopClaimOutcome::Consumed(removed))
+        }
+        DroneScoopClaimAction::ReleaseOrTakeForAbandon {
+            char_id_opt,
+            ship_id,
+        } => {
+            ctx.actor_st.scoop_claimed_drones.remove(&ball_id);
+            let can_abandon = ctx
+                .actor_st
+                .active_drones_in_space
+                .get(&ball_id)
+                .is_some_and(|st| {
+                    !st.is_abandoned
+                        && st.solar_system_id == ctx.solar_system_id
+                        && match char_id_opt {
+                            Some(cid) => st.owner_char_id == cid || st.parent_ship_id == ship_id,
+                            None => st.parent_ship_id == ship_id || st.owner_char_id > 0,
+                        }
+                });
+            if can_abandon {
+                let removed = ctx.actor_st.active_drones_in_space.remove(&ball_id);
+                if removed.is_some() && ball_id > 0 {
+                    mark_active_drones_dirty_in_state(ctx.actor_st);
+                }
+                Ok(DroneScoopClaimOutcome::TakeForAbandon(removed))
+            } else {
+                Ok(DroneScoopClaimOutcome::TakeForAbandon(None))
+            }
+        }
+        DroneScoopClaimAction::TakeUnclaimedForAbandon {
+            expected_owner,
+            target_ship_id,
+            require_returning,
+        } => {
+            if ctx.actor_st.scoop_claimed_drones.contains(&ball_id) {
+                return Ok(DroneScoopClaimOutcome::TakeForAbandon(None));
+            }
+            let can_take = ctx
+                .actor_st
+                .active_drones_in_space
+                .get(&ball_id)
+                .is_some_and(|st| {
+                    (!require_returning || st.activity_state == 4)
+                        && is_returning_for_ship(st, expected_owner, target_ship_id)
+                });
+            if can_take {
+                let removed = ctx.actor_st.active_drones_in_space.remove(&ball_id);
+                if removed.is_some() && ball_id > 0 {
+                    mark_active_drones_dirty_in_state(ctx.actor_st);
+                }
+                Ok(DroneScoopClaimOutcome::TakeForAbandon(removed))
+            } else {
+                Ok(DroneScoopClaimOutcome::TakeForAbandon(None))
+            }
+        }
+    }
+}
+
 fn mutate_active_drones_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     op: ActiveDroneMutOp,
@@ -630,6 +845,16 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
         SystemCommand::MutateActiveDrones { op, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = mutate_active_drones_in_actor(&mut ctx, op);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::ScoopDroneClaimOp {
+            ball_id,
+            action,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = execute_drone_scoop_claim_op_in_actor(&mut ctx, ball_id, action);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -1094,6 +1319,22 @@ impl SystemHandle {
             let removed = drones.remove(&ball_id);
             (removed.as_ref().is_some_and(|d| d.ball_id > 0), removed)
         })
+    }
+
+    /// Executes a non-destructive transient scoop claim operation inside this system actor (`D2B-P1-04`).
+    pub async fn drone_scoop_claim_op(
+        &self,
+        ball_id: BallId,
+        action: DroneScoopClaimAction,
+    ) -> Result<DroneScoopClaimOutcome, String> {
+        call_actor_result_with_deadline(self, "ScoopDroneClaimOp", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::ScoopDroneClaimOp {
+                ball_id,
+                action,
+                reply,
+            }
+        })
+        .await
     }
 }
 

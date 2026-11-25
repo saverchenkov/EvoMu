@@ -427,7 +427,7 @@ pub async fn step_engaged_drones_in_system(
                 !d.is_abandoned
                     && d.activity_state == 1
                     && d.target_id.is_some()
-                    && now_unix >= sys_handle.drone_next_ready_unix(d.ball_id).unwrap_or(0)
+                    && now_unix >= view.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
             })
             .cloned()
             .collect()
@@ -819,7 +819,12 @@ async fn reject_destroyed_drone_scoop(
     if purge_db {
         cleanup_destroyed_drone_db_item(ctx, drone_ball_id, item_id_opt);
     }
-    let _ = sys_handle.remove_active_drone(drone_ball_id).await;
+    let _ = sys_handle
+        .drone_scoop_claim_op(
+            drone_ball_id,
+            crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
+        )
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state
             .record_destroyed_item_id(drone_ball_id);
@@ -884,27 +889,34 @@ pub(crate) async fn handle_scoop_to_drone_bay(
         .await);
     }
 
-    enum PreClaimScoop {
-        Claimed(Option<DroneSpaceState>),
-        OwnedByOther,
-    }
     let pre_claim = sys_handle
-        .mutate_active_drones(move |drones, _, _| {
-            if let Some(st) = drones.get(&drone_ball_id) {
-                if !st.is_abandoned && st.owner_char_id != char_id {
-                    return (false, PreClaimScoop::OwnedByOther);
-                }
-                return (true, PreClaimScoop::Claimed(drones.remove(&drone_ball_id)));
-            }
-            (false, PreClaimScoop::Claimed(None))
-        })
+        .drone_scoop_claim_op(
+            drone_ball_id,
+            crate::system_actor::DroneScoopClaimAction::ClaimPlayerScoop { char_id },
+        )
         .await;
     let active_drone = match pre_claim {
-        Ok(PreClaimScoop::Claimed(d)) => d,
-        Ok(PreClaimScoop::OwnedByOther) => {
+        Ok(crate::system_actor::DroneScoopClaimOutcome::Claimed(d)) => d,
+        Ok(crate::system_actor::DroneScoopClaimOutcome::AlreadyClaimed) => {
+            let msg = format!("Drone ball {drone_ball_id} is already being scooped");
+            return Err(BridgeRpcError::with_client_error(
+                "DroneNotInSpace",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        Ok(crate::system_actor::DroneScoopClaimOutcome::OwnedByOther) => {
             let msg = "Cannot scoop an active drone controlled by another pilot".to_string();
             return Err(BridgeRpcError::with_client_error(
                 "DroneOwnedByOther",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+        Ok(_) => {
+            let msg = format!("Drone ball {drone_ball_id} is not in space");
+            return Err(BridgeRpcError::with_client_error(
+                "DroneNotInSpace",
                 msg.clone(),
                 eve_proto::ClientError::CustomInfo(msg),
             ));
@@ -1170,7 +1182,15 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             ScoopTxResult::Scooped(drone_item_id)
     });
     let drone_item_id = match tx_res {
-        ScoopTxResult::Scooped(id) => id,
+        ScoopTxResult::Scooped(id) => {
+            let _ = sys_handle
+                .drone_scoop_claim_op(
+                    drone_ball_id,
+                    crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
+                )
+                .await;
+            id
+        }
         ScoopTxResult::Destroyed {
             item_id,
             purge_db,
@@ -1187,27 +1207,33 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             .await);
         }
         ScoopTxResult::CallerUnavailableAbandon(should_abandon, msg) => {
-            if let Some(drone_st) = active_drone {
-                if should_abandon {
+            if should_abandon {
+                if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
+                    live_st,
+                ))) = sys_handle
+                    .drone_scoop_claim_op(
+                        drone_ball_id,
+                        crate::system_actor::DroneScoopClaimAction::ReleaseOrTakeForAbandon {
+                            char_id_opt: Some(char_id),
+                            ship_id,
+                        },
+                    )
+                    .await
+                {
                     crate::sp6_lifecycle::drone_return::abandon_returning_drone_in_space(
                         ctx,
                         &sys_handle,
-                        drone_st,
+                        live_st,
                     )
                     .await;
-                } else {
-                    let not_destroyed = ctx.db.with_snapshot(|snap| {
-                        !snap
-                            .combat_crimewatch_state
-                            .is_recently_destroyed_item_id(drone_st.ball_id)
-                            && !snap
-                                .combat_crimewatch_state
-                                .is_recently_destroyed_item_id(drone_st.drone_item_id)
-                    });
-                    if not_destroyed {
-                        let _ = sys_handle.upsert_active_drones(vec![drone_st], true).await;
-                    }
                 }
+            } else {
+                let _ = sys_handle
+                    .drone_scoop_claim_op(
+                        drone_ball_id,
+                        crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
+                    )
+                    .await;
             }
             return Err(BridgeRpcError::with_client_error(
                 "DroneNotInSpace",
@@ -1216,23 +1242,22 @@ pub(crate) async fn handle_scoop_to_drone_bay(
             ));
         }
         ScoopTxResult::ErrClear(e) => {
+            let _ = sys_handle
+                .drone_scoop_claim_op(
+                    drone_ball_id,
+                    crate::system_actor::DroneScoopClaimAction::ConsumeScoop,
+                )
+                .await;
             let _ = sys_handle.clear_drone_runtime(drone_ball_id).await;
             return Err(e);
         }
         ScoopTxResult::Err(e) => {
-            if let Some(drone_st) = active_drone {
-                let not_destroyed = ctx.db.with_snapshot(|snap| {
-                    !snap
-                        .combat_crimewatch_state
-                        .is_recently_destroyed_item_id(drone_st.ball_id)
-                        && !snap
-                            .combat_crimewatch_state
-                            .is_recently_destroyed_item_id(drone_st.drone_item_id)
-                });
-                if not_destroyed {
-                    let _ = sys_handle.upsert_active_drones(vec![drone_st], true).await;
-                }
-            }
+            let _ = sys_handle
+                .drone_scoop_claim_op(
+                    drone_ball_id,
+                    crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
+                )
+                .await;
             return Err(e);
         }
     };

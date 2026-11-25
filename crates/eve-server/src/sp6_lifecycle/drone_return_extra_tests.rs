@@ -1649,4 +1649,162 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
             "OnDroneStateChange(0,0) must precede OnDroneControlLost on dock-during-scoop"
         );
     }
+
+    // 4. `D2B-P1-04`: non-destructive transient scoop claim (`scoop_claimed_drones`) lets
+    //    concurrent actor abandonment mutate the live entry while DB is contended and
+    //    preserves that abandonment when `BayFull` / `InsufficientDroneBayCapacity` releases claim.
+    {
+        let d_bayfull = 777_990_004i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = None;
+            }
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = sys_id as i64;
+                sh.flag = InventoryFlag::None;
+                sh.dynamic_attributes.insert(283, 0.0); // Zero drone bay cap -> BayFull / InsufficientDroneBayCapacity
+            }
+            snap.items.insert(
+                d_bayfull,
+                InventoryItemRecord {
+                    item_id: d_bayfull,
+                    type_id: 2_454,
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: d_bayfull,
+                type_id: 2_454,
+                position: DVec3::new(300.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 1_500.0,
+                inertia: 1.0,
+                mass: 5_000.0,
+                radius: 5.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        drone_test_helpers::seed_active_drone(
+            &ctx,
+            DroneSpaceState {
+                ball_id: d_bayfull,
+                drone_item_id: d_bayfull,
+                type_id: 2_454,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 4,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1_500.0,
+                optimal_range: 5_000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+
+        let db_hold = Arc::clone(&ctx.db);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::task::spawn_blocking(move || {
+            db_hold.with_mut_snapshot(|_| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.blocking_recv();
+            });
+        });
+        locked_rx.await.unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let c_full = Arc::clone(&ctx);
+        let mut s_full = owner_sess.clone();
+        let k_full = kw.clone();
+        let full_task = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            handle_npcs_drones(
+                &c_full,
+                &mut s_full,
+                "ship",
+                "ScoopToDroneBay",
+                &[PyRep::Integer(d_bayfull)],
+                &k_full,
+            )
+            .await
+        });
+        entered_rx.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // While ScoopToDroneBay holds the transient claim awaiting `ctx.db`, abandon `d_bayfull` in SystemActor:
+        // the live map entry is still present so the abandon mutation succeeds without being overwritten!
+        sys_handle
+            .mutate_active_drones(move |drones, _, _| {
+                let st = drones
+                    .get_mut(&d_bayfull)
+                    .expect("claimed drone stays live in active_drones_in_space");
+                st.is_abandoned = true;
+                st.owner_char_id = 0;
+                st.parent_ship_id = 0;
+                st.activity_state = 0;
+                (true, ())
+            })
+            .await
+            .unwrap();
+
+        let _ = release_tx.send(());
+        holder.await.unwrap();
+
+        let err = full_task
+            .await
+            .unwrap()
+            .expect("handled")
+            .expect_err("zero-capacity bay must fail with InsufficientDroneBayCapacity");
+        assert_eq!(err.code, "InsufficientDroneBayCapacity");
+
+        let live_after = drone_test_helpers::active_drone(&ctx, d_bayfull)
+            .expect("drone stays tracked after scoop failure");
+        assert!(
+            live_after.is_abandoned && live_after.owner_char_id == 0 && live_after.parent_ship_id == 0,
+            "releasing transient scoop claim must preserve concurrent abandonment mutation, got {live_after:?}"
+        );
+
+        // Claim was cleanly released, so expanding capacity and retrying ScoopToDroneBay succeeds.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items
+                .get_mut(&ship_id)
+                .unwrap()
+                .dynamic_attributes
+                .insert(283, 25.0);
+        });
+        handle_npcs_drones(
+            &ctx,
+            &mut owner_sess.clone(),
+            "ship",
+            "ScoopToDroneBay",
+            &[PyRep::Integer(d_bayfull)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("retry after claim release must succeed");
+    }
 }

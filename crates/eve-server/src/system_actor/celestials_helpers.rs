@@ -382,14 +382,22 @@ pub fn try_remove_ball_for_db(
                     sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
             } else {
-                let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(st_arc) = st_opt.as_ref() {
-                    let mut st = st_arc.write().unwrap_or_else(|e| e.into_inner());
-                    remove_with(&mut bp, Some(&mut st));
-                } else {
-                    remove_with(&mut bp, None);
+                {
+                    let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(st_arc) = st_opt.as_ref() {
+                        let mut st = st_arc.write().unwrap_or_else(|e| e.into_inner());
+                        remove_with(&mut bp, Some(&mut st));
+                    } else {
+                        remove_with(&mut bp, None);
+                    }
+                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
-                sync_ball_positions(&bp, &pos_arc, &scram_arc);
+                if let Some(st_arc) = st_opt.as_ref() {
+                    crate::system_actor::drones::try_flush_actor_active_drones_checkpoint_post_unlock(
+                        solar_system_id,
+                        st_arc,
+                    );
+                }
             }
         }
     }
