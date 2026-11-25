@@ -749,7 +749,7 @@ fn mk_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: In
     InventoryItemRecord { item_id, type_id, owner_id, location_id, flag, quantity, singleton, version: 1, ..Default::default() }
 }
 
-async fn run_dispatch_tx<F: FnOnce(&mut eve_db::TxContext<'_>) -> Result<(), eve_db::TxError>>(ctx: &ServerContext, label: &'static str, f: F) {
+async fn run_dispatch_tx<F: FnOnce(&mut eve_db::WorldTx<'_>) -> Result<(), eve_db::TxError>>(ctx: &ServerContext, label: &'static str, f: F) {
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db.tx(label, f).expect(label);
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
@@ -758,8 +758,8 @@ async fn run_dispatch_tx<F: FnOnce(&mut eve_db::TxContext<'_>) -> Result<(), eve
 
 async fn run_dispatch_2tx<F1, F2>(ctx: &ServerContext, l1: &'static str, f1: F1, l2: &'static str, f2: F2)
 where
-    F1: FnOnce(&mut eve_db::TxContext<'_>) -> Result<(), eve_db::TxError>,
-    F2: FnOnce(&mut eve_db::TxContext<'_>) -> Result<(), eve_db::TxError>,
+    F1: FnOnce(&mut eve_db::WorldTx<'_>) -> Result<(), eve_db::TxError>,
+    F2: FnOnce(&mut eve_db::WorldTx<'_>) -> Result<(), eve_db::TxError>,
 {
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db.tx(l1, f1).expect(l1);
