@@ -1528,6 +1528,11 @@ mod t3c2_tests {
             ch.solar_system_id = 30_000_142;
             let uid = ch.user_id;
             snap.characters.insert(char_id, ch);
+            snap.items.retain(|_, it| {
+                !(it.owner_id == char_id
+                    && it.location_id == station_id
+                    && it.flag == eve_db::InventoryFlag::Hangar)
+            });
             snap.items.insert(
                 trit_item_id,
                 eve_db::InventoryItemRecord {
