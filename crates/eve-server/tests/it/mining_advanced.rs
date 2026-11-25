@@ -535,10 +535,29 @@ async fn test_metenox_moon_drill_fuel_exhaustion_regression() {
     let mut sess = create_auth_session(&ctx, 1402).await;
 
     let structure_id = 1_040_000_000_142_i64;
-    let corp_id = sess.corporation_id.unwrap();
+    let corp_id = 98_140_002_i64;
     let lowsec_system_id = 30_000_012_u32;
     let fuel_item_id = 890_001_i64;
     let gas_item_id = 890_002_i64;
+
+    crate::common::sync_legal_corp_member(
+        &ctx,
+        &mut sess,
+        90_000_001,
+        corp_id,
+        "Asabona Fuel Test",
+        "AFT",
+        false,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+        None,
+    );
+    crate::common::assert_it_legal_fixture(
+        &ctx,
+        "metenox_fuel_exhaustion_regression",
+        &sess,
+        true,
+        eve_db::corp_roles::ROLE_DIRECTOR,
+    );
 
     // Deposit N = 23 fuel blocks into SpecializedFuelBay (flag 133).
     // Fuel per cycle is 5; gas per cycle is 10.

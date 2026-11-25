@@ -1,9 +1,9 @@
 use crate::router::ServerContext;
 use crate::services::mining_advanced::{tick_all_metenox_moon_drills, tick_all_moon_extractions};
 use eve_db::{
-    AutoMoonMinerRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    MoonExtractionRecord, NeuralAttributes, ServerClock, UpwellStructureRecord, VirtualServerClock,
-    WorldRepository,
+    AutoMoonMinerRecord, CharacterRecord, CorporationRecord, InventoryFlag, InventoryItemRecord,
+    IskCents, MoonExtractionRecord, NeuralAttributes, ServerClock, UpwellStructureRecord,
+    VirtualServerClock, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -101,6 +101,17 @@ async fn test_moon_extraction_validation_fracture_decay_and_auto_fracture() {
     let moon_pos = [moon.position.x + 1_000.0, moon.position.y, moon.position.z];
 
     db.with_mut_snapshot(|snap| {
+        let ceo_id = char_id + 1;
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Moon Ops".into();
+        corp.ticker = "MOON".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, char_id]);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
         snap.characters.insert(
             char_id,
             CharacterRecord {
