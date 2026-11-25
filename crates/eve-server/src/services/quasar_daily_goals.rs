@@ -1836,6 +1836,7 @@ pub fn register_daily_goal_handlers(
     // 5. eve_public.dailygoal.api.RedeemRequest -> RedeemResponse
     let mgr = Arc::clone(&manager);
     let db_redeem = Arc::clone(&db);
+    let q_redeem = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.dailygoal.api.RedeemRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1850,6 +1851,7 @@ pub fn register_daily_goal_handlers(
 
             // Publish RedeemedNotice
             crate::quasar_gateway::queue_pb_notice(
+                &q_redeem,
                 NoticeScope::Character(cid),
                 "quasar_daily_goals.redeem.redeemed",
                 pb::message("eve_public.dailygoal.api.RedeemedNotice")
@@ -1867,6 +1869,7 @@ pub fn register_daily_goal_handlers(
     // 6. eve_public.dailygoal.api.RedeemAllRequest -> RedeemAllResponse
     let mgr = Arc::clone(&manager);
     let db_redeem_all = Arc::clone(&db);
+    let q_redeem_all = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.dailygoal.api.RedeemAllRequest",
         Arc::new(move |ctx, _any, _dyn| {
@@ -1877,6 +1880,7 @@ pub fn register_daily_goal_handlers(
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 if let Ok(redeemed) = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all) {
                     crate::quasar_gateway::queue_pb_notice(
+                        &q_redeem_all,
                         NoticeScope::Character(cid),
                         "quasar_daily_goals.redeem_all.redeemed",
                         pb::message("eve_public.dailygoal.api.RedeemedNotice")
@@ -1896,6 +1900,7 @@ pub fn register_daily_goal_handlers(
     // 7. eve_public.dailygoal.api.PayForCompletionRequest -> PayForCompletionResponse
     let mgr = Arc::clone(&manager);
     let db_pay = Arc::clone(&db);
+    let q_pay = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.dailygoal.api.PayForCompletionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1910,6 +1915,7 @@ pub fn register_daily_goal_handlers(
 
             // 1. ProgressedNotice
             crate::quasar_gateway::queue_pb_notice(
+                &q_pay,
                 NoticeScope::Character(cid),
                 "quasar_daily_goals.pay_for_completion.progressed",
                 pb::message("eve_public.dailygoal.api.ProgressedNotice")
@@ -1920,6 +1926,7 @@ pub fn register_daily_goal_handlers(
 
             // 2. CompletedNotice
             crate::quasar_gateway::queue_pb_notice(
+                &q_pay,
                 NoticeScope::Character(cid),
                 "quasar_daily_goals.pay_for_completion.completed",
                 pb::message("eve_public.dailygoal.api.CompletedNotice")
@@ -1936,6 +1943,7 @@ pub fn register_daily_goal_handlers(
 
     // 8. eve_public.dailygoal.api.admin.ProgressRequest -> ProgressResponse
     let mgr = Arc::clone(&manager);
+    let q_prog = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.dailygoal.api.admin.ProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1976,6 +1984,7 @@ pub fn register_daily_goal_handlers(
 
             if let Some((goal, just_completed)) = updated {
                 crate::quasar_gateway::queue_pb_notice(
+                    &q_prog,
                     NoticeScope::Character(target_char),
                     "quasar_daily_goals.admin_progress.progressed",
                     pb::message("eve_public.dailygoal.api.ProgressedNotice")
@@ -1986,6 +1995,7 @@ pub fn register_daily_goal_handlers(
 
                 if just_completed {
                     crate::quasar_gateway::queue_pb_notice(
+                        &q_prog,
                         NoticeScope::Character(target_char),
                         "quasar_daily_goals.admin_progress.completed",
                         pb::message("eve_public.dailygoal.api.CompletedNotice")

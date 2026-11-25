@@ -1710,6 +1710,7 @@ pub fn register_career_goal_handlers(
 
     // 4. eve_public.career.goal.api.admin.ProgressRequest -> ProgressResponse
     let mgr = Arc::clone(&manager);
+    let q_prog = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.career.goal.api.admin.ProgressRequest",
         Arc::new(move |ctx, any, dyn_msg| {
@@ -1753,6 +1754,7 @@ pub fn register_career_goal_handlers(
             mgr.save_to_db();
 
             crate::quasar_gateway::queue_pb_notice(
+                &q_prog,
                 crate::quasar_gateway::NoticeScope::Character(target_char),
                 "quasar_career_goals.admin_progress.progressed",
                 pb::message("eve_public.career.goal.api.ProgressedNotice")
@@ -1763,6 +1765,7 @@ pub fn register_career_goal_handlers(
 
             if just_completed {
                 crate::quasar_gateway::queue_pb_notice(
+                    &q_prog,
                     crate::quasar_gateway::NoticeScope::Character(target_char),
                     "quasar_career_goals.admin_progress.completed",
                     pb::message("eve_public.career.goal.api.CompletedNotice")
@@ -1777,6 +1780,7 @@ pub fn register_career_goal_handlers(
 
     // 5. eve_public.career.goal.api.admin.CompleteRequest -> CompleteResponse
     let mgr = Arc::clone(&manager);
+    let q_comp = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.career.goal.api.admin.CompleteRequest",
         Arc::new(move |ctx, any, dyn_msg| {
@@ -1793,6 +1797,7 @@ pub fn register_career_goal_handlers(
             mgr.save_to_db();
 
             crate::quasar_gateway::queue_pb_notice(
+                &q_comp,
                 crate::quasar_gateway::NoticeScope::Character(target_char),
                 "quasar_career_goals.admin_complete.completed",
                 pb::message("eve_public.career.goal.api.CompletedNotice")

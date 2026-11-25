@@ -610,7 +610,7 @@ fn fleet_navigation_builders_decode_strictly_with_descriptors() {
     assert_eq!(ess_seen, 6);
 
     // 3. Registered RPC handlers + queued notices
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
 
     let regen_resp = router
         .dispatch(
@@ -709,7 +709,7 @@ fn fleet_navigation_builders_decode_strictly_with_descriptors() {
         .unwrap();
     roundtrip("eve.solarsystem.bounty.npc.ApplyMultiplierFactorResponse", &bounty_resp.value);
 
-    let notices = crate::services::quasar_social_chat::drain_local_notices();
+    let notices = router.drain_queued_notices();
     assert!(notices.len() >= 12);
     for (_, any_msg, _) in &notices {
         let short_type = any_msg

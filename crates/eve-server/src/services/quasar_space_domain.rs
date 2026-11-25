@@ -5,9 +5,8 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
@@ -420,6 +419,7 @@ pub fn register_handlers(
         ),
     ] {
         let db_m = Arc::clone(&db);
+        let q_m = Arc::clone(&router.queued_notices);
         router.register_handler(
             req_name,
             Arc::new(move |ctx: &AuthoritativeContext, raw_any, msg| {
@@ -463,7 +463,7 @@ pub fn register_handlers(
                     .set("measurement.value", val)
                     .to_any()
                 {
-                    Ok(not_msg) => ctx_queue_notice(NoticeScope::Broadcast, not_msg, ctx.now_unix()),
+                    Ok(not_msg) => queue_notice(&q_m, NoticeScope::Broadcast, not_msg, ctx.now_unix()),
                     Err(e) => tracing::warn!("failed to encode measurement Recorded notice: {e}"),
                 }
                 Ok(any(rsp_name, Vec::new()))
@@ -514,6 +514,7 @@ pub fn register_handlers(
     // 6. Space tags: ApplyRequest, RemoveRequest, GetTagsRequest, GetLocationsRequest, QueryRequest
     {
         let db_ap = Arc::clone(&db);
+        let q_ap = Arc::clone(&router.queued_notices);
         router.register_handler(
             "eve.space.tag.admin.api.ApplyRequest",
             Arc::new(move |ctx, raw_any, msg| {
@@ -554,7 +555,7 @@ pub fn register_handlers(
                     not = not.add_with("tags", |tb| tb.set("name", t));
                 }
                 match not.to_any() {
-                    Ok(notice) => ctx_queue_notice(NoticeScope::Broadcast, notice, ctx.now_unix()),
+                    Ok(notice) => queue_notice(&q_ap, NoticeScope::Broadcast, notice, ctx.now_unix()),
                     Err(e) => tracing::warn!("failed to encode space tag notice: {e}"),
                 }
                 Ok(any("eve.space.tag.admin.api.ApplyResponse", Vec::new()))
@@ -564,6 +565,7 @@ pub fn register_handlers(
 
     {
         let db_rm = Arc::clone(&db);
+        let q_rm = Arc::clone(&router.queued_notices);
         router.register_handler(
             "eve.space.tag.admin.api.RemoveRequest",
             Arc::new(move |ctx, raw_any, msg| {
@@ -587,7 +589,7 @@ pub fn register_handlers(
                     not = not.add_with("tags", |tb| tb.set("name", t));
                 }
                 match not.to_any() {
-                    Ok(notice) => ctx_queue_notice(NoticeScope::Broadcast, notice, ctx.now_unix()),
+                    Ok(notice) => queue_notice(&q_rm, NoticeScope::Broadcast, notice, ctx.now_unix()),
                     Err(e) => tracing::warn!("failed to encode space tag notice: {e}"),
                 }
                 Ok(any("eve.space.tag.admin.api.RemoveResponse", Vec::new()))

@@ -4,8 +4,8 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, QuasarHandlerFn,
+    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
 use super::quasar_achievements::{
     emit_achievement_notices, extract_u32_ident, extract_u64_val, AchievementManager,
@@ -13,8 +13,8 @@ use super::quasar_achievements::{
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
-use eve_proto::quasar::{sha256_hex, DynamicValue, GoogleTimestamp};
-use std::sync::Arc;
+use eve_proto::quasar::{sha256_hex, DynamicValue, GoogleAny, GoogleTimestamp};
+use std::sync::{Arc, RwLock};
 
 fn id_to_uuid(id: u32) -> [u8; 16] {
     let mut uuid = [0u8; 16];
@@ -23,6 +23,7 @@ fn id_to_uuid(id: u32) -> [u8; 16] {
 }
 
 fn queue_category_progressed_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     cid: u32,
     cat_id: u32,
     score: u32,
@@ -32,11 +33,7 @@ fn queue_category_progressed_notice(
         .set("category.uuid", id_to_uuid(cat_id))
         .set("score", score)
         .to_any_or_internal_err()?;
-    super::quasar_social_chat::ctx_queue_notice(
-        crate::quasar_gateway::NoticeScope::Character(cid),
-        cat_prog,
-        now_unix,
-    );
+    queue_notice(queued_notices, NoticeScope::Character(cid), cat_prog, now_unix);
     Ok(())
 }
 
@@ -128,6 +125,7 @@ pub fn register_achievement_admin_handlers(
 ) {
     // 1. eve_public.achievement.api.admin.AddProgressRequest -> AddProgressResponse
     let mgr_prog = Arc::clone(&manager);
+    let q_prog = Arc::clone(&router.queued_notices);
     let progress_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
         require_admin_role(ctx)?;
         let Some(cid) = ctx.effective_character_id() else {
@@ -152,6 +150,7 @@ pub fn register_achievement_admin_handlers(
         mgr_prog.save_to_db();
 
         emit_achievement_notices(
+            &q_prog,
             cid,
             aid,
             outcome.achievement.def.category_id,
@@ -178,6 +177,7 @@ pub fn register_achievement_admin_handlers(
 
     // 2. eve_public.achievement.api.admin.CompleteRequest -> CompleteResponse
     let mgr_comp = Arc::clone(&manager);
+    let q_comp = Arc::clone(&router.queued_notices);
     let complete_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
         require_admin_role(ctx)?;
         let Some(cid) = ctx.effective_character_id() else {
@@ -192,6 +192,7 @@ pub fn register_achievement_admin_handlers(
         mgr_comp.save_to_db();
 
         emit_achievement_notices(
+            &q_comp,
             cid,
             aid,
             outcome.achievement.def.category_id,
@@ -222,6 +223,7 @@ pub fn register_achievement_admin_handlers(
 
     // 3. eve_public.achievement.api.admin.ResetRequest -> ResetResponse
     let mgr = Arc::clone(&manager);
+    let q_reset = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.achievement.api.admin.ResetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -237,7 +239,7 @@ pub fn register_achievement_admin_handlers(
             let (_, score_update) = mgr.reset_achievement_with_category_score(cid, aid)?;
             mgr.save_to_db();
             if let Some((cat_id, new_score)) = score_update {
-                queue_category_progressed_notice(cid, cat_id, new_score, ctx.now_unix())?;
+                queue_category_progressed_notice(&q_reset, cid, cat_id, new_score, ctx.now_unix())?;
             }
             pb::message("eve_public.achievement.api.admin.ResetResponse")
                 .to_any_or_internal_err()
@@ -261,6 +263,7 @@ pub fn register_achievement_admin_handlers(
 
     // 5. eve_public.achievement.category.api.admin.ResetRequest -> ResetResponse
     let mgr_cat_reset = Arc::clone(&manager);
+    let q_cat_reset = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.achievement.category.api.admin.ResetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -275,7 +278,7 @@ pub fn register_achievement_admin_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             mgr_cat_reset.reset_category(cid, cat_id);
 
-            queue_category_progressed_notice(cid, cat_id, 0, ctx.now_unix())?;
+            queue_category_progressed_notice(&q_cat_reset, cid, cat_id, 0, ctx.now_unix())?;
 
             pb::message("eve_public.achievement.category.api.admin.ResetResponse")
                 .to_any_or_internal_err()
@@ -283,6 +286,7 @@ pub fn register_achievement_admin_handlers(
     );
 
     // 6. eve.achievement.definition.version.api.admin.SetDefaultVersionRequest
+    let q_ver = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.achievement.definition.version.api.admin.SetDefaultVersionRequest",
         Arc::new(move |ctx, _any, _dyn| {
@@ -294,11 +298,7 @@ pub fn register_achievement_admin_handlers(
                     .set("version.patch", 0u32)
                     .to_any_or_internal_err()?;
 
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Broadcast,
-                ver_notice,
-                ctx.now_unix(),
-            );
+            queue_notice(&q_ver, NoticeScope::Broadcast, ver_notice, ctx.now_unix());
             pb::message("eve.achievement.definition.version.api.admin.SetDefaultVersionResponse")
                 .to_any_or_internal_err()
         }),

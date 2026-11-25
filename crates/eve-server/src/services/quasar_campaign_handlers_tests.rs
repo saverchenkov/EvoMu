@@ -647,7 +647,9 @@ fn campaign_handlers_cover_filtering_auth_not_found_and_rewards() {
     assert_eq!(wire_field_all_bytes(&pr_wire, 1).len(), 0);
 
     // queue_notices executes cleanly on empty notices
-    queue_notices(Vec::new(), 1_700_000_000);
+    let queued = std::sync::RwLock::new(Vec::new());
+    queue_notices(&queued, Vec::new(), 1_700_000_000);
+    assert!(queued.read().unwrap().is_empty());
 }
 
 #[test]

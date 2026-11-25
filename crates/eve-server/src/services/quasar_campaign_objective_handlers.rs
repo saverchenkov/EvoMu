@@ -32,11 +32,12 @@ fn get_objective(mgr: &ProgressionExtraManager, oid: u64) -> Result<CampaignObje
 /// Registers the objective and track request handlers on the public gateway router.
 pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manager: Arc<ProgressionExtraManager>) {
     let mgr = Arc::clone(&manager);
+    let q_obj_get = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.objective.api.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_obj_get, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let obj = get_objective(&mgr, oid)?;
             let mut resp = pb::message("eve_public.campaign.objective.api.GetResponse")
                 .set("attributes", objective_attributes_builder(&obj));
@@ -51,11 +52,12 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
     );
 
     let mgr = Arc::clone(&manager);
+    let q_obj_status = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.objective.api.GetStatusRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_obj_status, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let obj = get_objective(&mgr, oid)?;
             let mut resp = pb::message("eve_public.campaign.objective.api.GetStatusResponse")
                 .set(
@@ -108,6 +110,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
     );
 
     let mgr = Arc::clone(&manager);
+    let q_commit = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.objective.api.CommitRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -115,13 +118,14 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             let mut notices = Vec::new();
             let res = mgr.commit_to_objective(char_id, oid, ctx.now_unix(), &mut notices);
-            queue_notices(notices, ctx.now_unix());
+            queue_notices(&q_commit, notices, ctx.now_unix());
             res?;
             pb::message("eve_public.campaign.objective.api.CommitResponse").to_any_or_internal_err()
         }),
     );
 
     let mgr = Arc::clone(&manager);
+    let q_resign = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.objective.api.ResignRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -129,7 +133,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             let mut notices = Vec::new();
             let res = mgr.resign_from_objective(char_id, oid, ctx.now_unix(), &mut notices);
-            queue_notices(notices, ctx.now_unix());
+            queue_notices(&q_resign, notices, ctx.now_unix());
             res?;
             pb::message("eve_public.campaign.objective.api.ResignResponse").to_any_or_internal_err()
         }),
@@ -147,12 +151,13 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
     );
 
     let mgr = Arc::clone(&manager);
+    let q_obj_stats = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.objective.api.GetStatsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let ids = extract_campaign_ids(dyn_msg.get(1));
             require_id(ids.first().copied(), "campaign objective")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_obj_stats, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let mut resp = pb::message("eve_public.campaign.objective.api.GetStatsResponse");
             for oid in ids {
                 let obj = get_objective(&mgr, oid)?;
@@ -194,11 +199,12 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
     );
 
     let mgr = Arc::clone(&manager);
+    let q_pred = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let tid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign track")?;
-            queue_notices(mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
+            queue_notices(&q_pred, mgr.evaluate_campaign_lifecycle(ctx.now_unix()), ctx.now_unix());
             let trk = mgr
                 .campaign_tracks
                 .read()

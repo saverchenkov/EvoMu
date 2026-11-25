@@ -566,8 +566,11 @@ pub(crate) fn strip_applied_thirdparty_skins_in_memory(db: &WorldRepository, shi
     }
 }
 
-/// Periodically settles completed SKINR sequencing jobs for the given world repository (`#545`).
-pub fn settle_completed_skinr_jobs_for_db(db: &Arc<WorldRepository>, now: u64) {
+fn settle_completed_skinr_jobs_inner(
+    db: &Arc<WorldRepository>,
+    queued_notices: Option<&RwLock<Vec<(NoticeScope, GoogleAny, u64)>>>,
+    now: u64,
+) {
     let state_opt: Option<Arc<SkinrCosmeticsState>> = {
         let runtime = skinr_runtime(db);
         let mut list = runtime
@@ -578,8 +581,22 @@ pub fn settle_completed_skinr_jobs_for_db(db: &Arc<WorldRepository>, now: u64) {
         list.iter().find_map(|w| w.upgrade())
     };
     if let Some(state) = state_opt {
-        state.settle_completed_jobs(now);
+        state.settle_completed_jobs(queued_notices, now);
     }
+}
+
+/// Periodically settles completed SKINR sequencing jobs for the given world repository (`#545`).
+pub fn settle_completed_skinr_jobs_for_db(db: &Arc<WorldRepository>, now: u64) {
+    settle_completed_skinr_jobs_inner(db, None, now);
+}
+
+/// Periodically settles completed SKINR sequencing jobs and queues notices for the gateway router (`#545`).
+pub fn settle_completed_skinr_jobs_with_notices(
+    db: &Arc<WorldRepository>,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    now: u64,
+) {
+    settle_completed_skinr_jobs_inner(db, Some(queued_notices), now);
 }
 
 impl SkinrCosmeticsState {
@@ -608,8 +625,12 @@ impl SkinrCosmeticsState {
         st
     }
 
-    pub(crate) fn settle_completed_jobs(&self, now: u64) {
-        super::quasar_cosmetics_skinr_seq::settle_completed_jobs(self, now);
+    pub(crate) fn settle_completed_jobs(
+        &self,
+        queued_notices: Option<&RwLock<Vec<(NoticeScope, GoogleAny, u64)>>>,
+        now: u64,
+    ) {
+        super::quasar_cosmetics_skinr_seq::settle_completed_jobs(self, queued_notices, now);
     }
 
     pub fn sync_redeemed_skins_if_needed(&self) {
@@ -763,6 +784,7 @@ fn handle_finite_get(
 
 fn handle_finite_admin_grant(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -810,7 +832,7 @@ fn handle_finite_admin_grant(
         entry.capacity = entry.capacity.saturating_add(capacity);
     }
     state.save();
-    queue_component_license_granted_notice(cid, comp_id, is_pattern, Some(capacity), now);
+    queue_component_license_granted_notice(queued_notices, cid, comp_id, is_pattern, Some(capacity), now);
 
     pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantResponse",
@@ -895,6 +917,7 @@ fn handle_infinite_get(
 
 fn handle_infinite_admin_grant(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -925,7 +948,7 @@ fn handle_infinite_admin_grant(
         },
     );
     state.save();
-    queue_component_license_granted_notice(cid, comp_id, is_pattern, None, now);
+    queue_component_license_granted_notice(queued_notices, cid, comp_id, is_pattern, None, now);
 
     pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantResponse",
@@ -974,6 +997,7 @@ fn handle_infinite_admin_revoke(
 
 fn handle_item_consume(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -1098,7 +1122,7 @@ fn handle_item_consume(
 
     emit_item_changes(&state.db, &state.sde, cid as i64, &[item_change]);
     let now = ctx.now_unix();
-    grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
+    grant_component_license_from_item(state, queued_notices, cid, comp_id, is_pattern, uses_granted, quantity, now);
 
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeResponse",
@@ -1151,6 +1175,7 @@ pub(super) fn plan_component_activation(
 /// `immediately_activate == true`). Returns `true` when `type_id` mapped to an SDE component.
 pub(super) fn grant_component_license_from_item_type(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     cid: u32,
     type_id: u32,
     quantity: u64,
@@ -1164,12 +1189,22 @@ pub(super) fn grant_component_license_from_item_type(
         .components
         .get(&comp_id)
         .is_some_and(SdeSkinComponent::is_pattern);
-    grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
+    grant_component_license_from_item(
+        state,
+        queued_notices,
+        cid,
+        comp_id,
+        is_pattern,
+        uses_granted,
+        quantity,
+        now,
+    );
     true
 }
 
 fn grant_component_license_from_item(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     cid: u32,
     comp_id: u32,
     is_pattern: bool,
@@ -1191,7 +1226,7 @@ fn grant_component_license_from_item(
             },
         );
         state.save();
-        queue_component_license_granted_notice(cid, comp_id, is_pattern, None, now);
+        queue_component_license_granted_notice(queued_notices, cid, comp_id, is_pattern, None, now);
     } else {
         let added_capacity = quantity.saturating_mul(uses_granted as u64);
         {
@@ -1206,7 +1241,14 @@ fn grant_component_license_from_item(
             entry.capacity = entry.capacity.saturating_add(added_capacity);
         }
         state.save();
-        queue_component_license_granted_notice(cid, comp_id, is_pattern, Some(added_capacity), now);
+        queue_component_license_granted_notice(
+            queued_notices,
+            cid,
+            comp_id,
+            is_pattern,
+            Some(added_capacity),
+            now,
+        );
     }
 }
 
@@ -1340,8 +1382,13 @@ fn handle_title_def_list(state: &SkinrCosmeticsState, _req_type: &str) -> Handle
     rsp.to_any_or_internal_err()
 }
 
-fn broadcast_title_version_notice(ver: [u32; 3], now_unix: u64) {
+fn broadcast_title_version_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    ver: [u32; 3],
+    now_unix: u64,
+) {
     crate::quasar_gateway::queue_pb_notice(
+        queued_notices,
         NoticeScope::Broadcast,
         "quasar_cosmetics_skinr.broadcast_title_version_notice",
         pb::message(
@@ -1354,6 +1401,7 @@ fn broadcast_title_version_notice(ver: [u32; 3], now_unix: u64) {
 
 fn handle_title_version_set_default(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -1371,7 +1419,7 @@ fn handle_title_version_set_default(
     state.sync_redeemed_skins_if_needed();
     state.data.write().unwrap_or_else(|e| e.into_inner()).title_def_version = ver;
     state.save();
-    broadcast_title_version_notice(ver, ctx.now_unix());
+    broadcast_title_version_notice(queued_notices, ver, ctx.now_unix());
     Ok(any_msg(
         "eve.cosmetic.character.title.definition.version.api.admin.SetDefaultVersionResponse",
         Vec::new(),
@@ -1380,6 +1428,7 @@ fn handle_title_version_set_default(
 
 fn handle_title_version_override_tenant(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
@@ -1400,7 +1449,7 @@ fn handle_title_version_override_tenant(
         data.title_def_version = ver;
     }
     state.save();
-    broadcast_title_version_notice(ver, ctx.now_unix());
+    broadcast_title_version_notice(queued_notices, ver, ctx.now_unix());
     Ok(any_msg(
         "eve.cosmetic.character.title.definition.version.api.admin.OverrideVersionForTenantResponse",
         Vec::new(),
@@ -1431,6 +1480,13 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
             router.register_handler($name, Arc::new(move |ctx, any, dyn_msg| ($closure)(&s, ctx, any, dyn_msg)));
         }};
     }
+    macro_rules! reg_q {
+        ($name:expr, $closure:expr) => {{
+            let s = Arc::clone(&state);
+            let q = Arc::clone(&router.queued_notices);
+            router.register_handler($name, Arc::new(move |ctx, any, dyn_msg| ($closure)(&s, &q, ctx, any, dyn_msg)));
+        }};
+    }
 
     // 1. 3rd-Party SKINR Component License endpoints
     reg!(
@@ -1441,9 +1497,9 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.GetRequest",
         |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_finite_get(s, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_finite_admin_grant(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_finite_admin_grant(s, q, ctx, &any.value, d)
     );
     reg!(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.RevokeRequest",
@@ -1453,17 +1509,17 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetRequest",
         |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_infinite_get(s, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_infinite_admin_grant(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_infinite_admin_grant(s, q, ctx, &any.value, d)
     );
     reg!(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.RevokeRequest",
         |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_infinite_admin_revoke(s, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_item_consume(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_item_consume(s, q, ctx, &any.value, d)
     );
 
     // 2. Character Title Definition & Version endpoints
@@ -1487,13 +1543,13 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
             handle_title_def_list(s, req_name)
         });
     }
-    reg!(
+    reg_q!(
         "eve.cosmetic.character.title.definition.version.api.admin.SetDefaultVersionRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_title_version_set_default(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_title_version_set_default(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve.cosmetic.character.title.definition.version.api.admin.OverrideVersionForTenantRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, _any: &GoogleAny, d| handle_title_version_override_tenant(s, ctx, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, _any: &GoogleAny, d| handle_title_version_override_tenant(s, q, ctx, d)
     );
     reg!(
         "eve.cosmetic.character.title.definition.version.api.GetDefaultVersionRequest",

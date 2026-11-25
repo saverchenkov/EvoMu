@@ -56,6 +56,7 @@ pub(crate) fn encode_plex_balance_changed_notice(
 }
 
 pub(crate) fn queue_plex_balance_changed_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     user_id: u64,
     tx_id: u64,
     amount: i64,
@@ -64,7 +65,8 @@ pub(crate) fn queue_plex_balance_changed_notice(
     now_unix: u64,
 ) {
     match try_encode_plex_balance_changed_notice(tx_id, amount, balance_after, now_unix) {
-        Ok(any) => super::quasar_social_chat::ctx_queue_notice(
+        Ok(any) => crate::quasar_gateway::queue_notice(
+            queued_notices,
             NoticeScope::User(user_id as i32),
             any,
             now_unix,
@@ -242,29 +244,9 @@ pub fn process_due_payment_schedules(
                         type_url: format!(
                             "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
                         ),
-                        value: notice_bytes.clone(),
+                        value: notice_bytes,
                     },
                 ));
-            crate::services::quasar_social_chat::ctx_queue_notice(
-                NoticeScope::User(uid as i32),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.PaymentFailedNotice"
-                    ),
-                    value: notice_bytes.clone(),
-                },
-                now_unix,
-            );
-            crate::services::quasar_social_chat::ctx_queue_notice(
-                NoticeScope::User(uid as i32),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
-                    ),
-                    value: notice_bytes,
-                },
-                now_unix,
-            );
         }
     }
 }

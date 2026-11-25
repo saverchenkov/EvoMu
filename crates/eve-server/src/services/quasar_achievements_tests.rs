@@ -228,7 +228,7 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     assert_eq!(a52_second.unclaimed_reward_count, 1);
 
     // apply_client_task_completions_and_counters MUST ignore non-client achievement ID 50!
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = ctx.quasar_gateway.drain_queued_notices();
     let _ = ctx.quasar_gateway.pending_notices.write().unwrap().drain(..).count();
     mgr.apply_client_task_completions_and_counters(
         cid,
@@ -389,9 +389,9 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     assert!(mgr.character_achievements.read().unwrap().contains_key(&cid2));
 
     // 6. emit_achievement_notices exact payloads & extract_u32_ident exact length-4 boundary
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
-    emit_achievement_notices(cid, 50, 0, 12, 0, false, false, &[1], &[99], 7_000);
-    let n_cat0 = crate::services::quasar_social_chat::drain_local_notices();
+    let queued = std::sync::RwLock::new(Vec::new());
+    emit_achievement_notices(&queued, cid, 50, 0, 12, 0, false, false, &[1], &[99], 7_000);
+    let n_cat0 = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(n_cat0.len(), 2);
     assert_eq!(n_cat0[0].0, NoticeScope::Character(cid));
     assert!(n_cat0[0].1.type_url.ends_with("achievement.api.ProgressedNotice"));
@@ -399,15 +399,15 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     let prog_wm = WireMessage::decode(&n_cat0[0].1.value).unwrap();
     assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(), Some(12));
 
-    emit_achievement_notices(cid, 50, 1, 12, 0, false, false, &[1], &[], 7_000);
-    let n_cat1_unchanged = crate::services::quasar_social_chat::drain_local_notices();
+    emit_achievement_notices(&queued, cid, 50, 1, 12, 0, false, false, &[1], &[], 7_000);
+    let n_cat1_unchanged = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(n_cat1_unchanged.len(), 2);
     assert!(!n_cat1_unchanged
         .iter()
         .any(|(_, a, _)| a.type_url.ends_with("achievement.category.api.ProgressedNotice")));
 
-    emit_achievement_notices(cid, 50, 1, 30, 50, true, true, &[2, 3], &[101, 102], 7_001);
-    let n_cat1 = crate::services::quasar_social_chat::drain_local_notices();
+    emit_achievement_notices(&queued, cid, 50, 1, 30, 50, true, true, &[2, 3], &[101, 102], 7_001);
+    let n_cat1 = std::mem::take(&mut *queued.write().unwrap());
     assert_eq!(n_cat1.len(), 7);
     let ach_ms_uuids: Vec<[u8; 16]> = n_cat1
         .iter()
@@ -627,7 +627,7 @@ fn category_milestones_client_task_notices_and_completion_sync() {
     assert!(reloaded.reached_category_milestones(cid, 1).is_empty());
 
     // 4. apply_client_task_completions_and_counters passes computed category score & separated milestones
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = ctx.quasar_gateway.drain_queued_notices();
     let mut sess = eve_machonet::SessionState::new(77_001);
     sess.user_id = Some(1);
     sess.character_id = Some(cid as i64);

@@ -15,10 +15,9 @@ use super::quasar_cosmetics_skinr::{
     tier_base_plex_cents, HandlerResult, ItemChangeEvent, SequencingJobRecord, SkinDesignRecord,
     SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
 };
-use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::InventoryFlag;
 use eve_proto::pb::{self, ProtoBuilder};
@@ -27,7 +26,7 @@ use eve_proto::quasar::{
     GoogleTimestamp, WireMessage,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 const DEFAULT_SHIP_TYPE_ID: u32 = 587; // Rifter
 
@@ -69,12 +68,13 @@ fn handle_skin_get(
 
 fn handle_skin_license_get_owned(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     req_type: &str,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     state.sync_redeemed_skins_if_needed();
-    settle_completed_jobs(state, ctx.now_unix());
+    settle_completed_jobs(state, Some(queued_notices), ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let owned_hexes: Vec<String> = data
         .skin_licenses
@@ -97,6 +97,7 @@ fn handle_skin_license_get_owned(
 
 fn handle_skin_license_get(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     req_type: &str,
     raw: &[u8],
@@ -112,7 +113,7 @@ fn handle_skin_license_get(
     }
     let key = SkinrCosmeticsState::skin_lic_key(target_cid, &skin_hex);
     state.sync_redeemed_skins_if_needed();
-    settle_completed_jobs(state, ctx.now_unix());
+    settle_completed_jobs(state, Some(queued_notices), ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let Some(lic_cow) = data.skin_licenses.get(&key).cloned() else {
         return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into()));
@@ -128,6 +129,7 @@ fn handle_skin_license_get(
 
 fn handle_skin_license_activate(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -142,7 +144,7 @@ fn handle_skin_license_activate(
     }
     let key = SkinrCosmeticsState::skin_lic_key(caller, &skin_hex);
     state.sync_redeemed_skins_if_needed();
-    settle_completed_jobs(state, ctx.now_unix());
+    settle_completed_jobs(state, Some(queued_notices), ctx.now_unix());
     let (updated, prev) = {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(lic) = data.skin_licenses.get_mut(&key) else {
@@ -160,7 +162,7 @@ fn handle_skin_license_activate(
         (lic.clone(), prev)
     };
     state.save();
-    queue_skin_license_updated_notice(&updated, &prev, ctx.now_unix());
+    queue_skin_license_updated_notice(queued_notices, &updated, &prev, ctx.now_unix());
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.ActivateResponse",
         Vec::new(),
@@ -169,6 +171,7 @@ fn handle_skin_license_activate(
 
 fn handle_skin_license_apply(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -199,7 +202,7 @@ fn handle_skin_license_apply(
 
     let key = SkinrCosmeticsState::skin_lic_key(caller, &skin_hex);
     state.sync_redeemed_skins_if_needed();
-    settle_completed_jobs(state, ctx.now_unix());
+    settle_completed_jobs(state, Some(queued_notices), ctx.now_unix());
     {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(lic) = data.skin_licenses.get(&key) else {
@@ -216,7 +219,7 @@ fn handle_skin_license_apply(
         data.applied_thirdparty_skins.insert(ship_id, skin_hex.clone());
     }
     state.save();
-    queue_ship_skin_set_notice(caller, ship_id, Some(&skin_hex), ctx.now_unix());
+    queue_ship_skin_set_notice(queued_notices, caller, ship_id, Some(&skin_hex), ctx.now_unix());
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyResponse",
         Vec::new(),
@@ -225,6 +228,7 @@ fn handle_skin_license_apply(
 
 fn handle_skin_license_unapply(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -254,7 +258,7 @@ fn handle_skin_license_unapply(
         .applied_thirdparty_skins
         .remove(&ship_id);
     state.save();
-    queue_ship_skin_set_notice(caller, ship_id, None, ctx.now_unix());
+    queue_ship_skin_set_notice(queued_notices, caller, ship_id, None, ctx.now_unix());
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.UnapplyResponse",
         Vec::new(),
@@ -263,6 +267,7 @@ fn handle_skin_license_unapply(
 
 fn grant_or_increment_skin_license(
     state: &SkinrCosmeticsState,
+    queued_notices: Option<&RwLock<Vec<(NoticeScope, GoogleAny, u64)>>>,
     character_id: u32,
     skin_hex: &str,
     unactivated_delta: u64,
@@ -303,15 +308,18 @@ fn grant_or_increment_skin_license(
         }
     }
     state.save();
-    if let Some(lic) = added {
-        queue_skin_license_added_notice(&lic, now_unix);
-    } else if let Some((lic, prev)) = updated {
-        queue_skin_license_updated_notice(&lic, &prev, now_unix);
+    if let Some(qn) = queued_notices {
+        if let Some(lic) = added {
+            queue_skin_license_added_notice(qn, &lic, now_unix);
+        } else if let Some((lic, prev)) = updated {
+            queue_skin_license_updated_notice(qn, &lic, &prev, now_unix);
+        }
     }
 }
 
 fn handle_skin_license_admin_grant(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -337,7 +345,7 @@ fn handle_skin_license_admin_grant(
     if unactivated == 0 {
         return Err((STATUS_BAD_REQUEST, "Unactivated license count must be > 0".into()));
     }
-    grant_or_increment_skin_license(state, cid, &skin_hex, unactivated, ctx.now_unix());
+    grant_or_increment_skin_license(state, Some(queued_notices), cid, &skin_hex, unactivated, ctx.now_unix());
 
     pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantResponse",
@@ -349,6 +357,7 @@ fn handle_skin_license_admin_grant(
 
 fn handle_skin_license_admin_revoke(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -408,9 +417,9 @@ fn handle_skin_license_admin_revoke(
         &skin_hex,
     );
     for sid in cleared_ships {
-        queue_ship_skin_set_notice(target_cid, sid, None, ctx.now_unix());
+        queue_ship_skin_set_notice(queued_notices, target_cid, sid, None, ctx.now_unix());
     }
-    queue_skin_license_deleted_notice(target_cid, &skin_hex, ctx.now_unix());
+    queue_skin_license_deleted_notice(queued_notices, target_cid, &skin_hex, ctx.now_unix());
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.RevokeResponse",
         Vec::new(),
@@ -568,31 +577,47 @@ fn build_job_attributes(job: &SequencingJobRecord) -> ProtoBuilder {
     )
 }
 
-fn queue_job_started_notice(character_id: u32, uuid: &[u8; 16], now_unix: u64) {
+fn queue_job_started_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    character_id: u32,
+    uuid: &[u8; 16],
+    now_unix: u64,
+) {
     match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice",
     )
     .set("id", build_job_id(uuid))
     .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(character_id), notice, now_unix),
         Err(e) => tracing::warn!(character_id, error = %e, "failed to encode SKINR StartedNotice"),
     }
 }
 
-fn queue_job_completed_notice(character_id: u32, uuid: &[u8; 16], now_unix: u64) {
+fn queue_job_completed_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    character_id: u32,
+    uuid: &[u8; 16],
+    now_unix: u64,
+) {
     match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompletedNotice",
     )
     .set("id", build_job_id(uuid))
     .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(character_id), notice, now_unix),
         Err(e) => tracing::warn!(character_id, error = %e, "failed to encode SKINR CompletedNotice"),
     }
 }
 
-fn queue_job_failed_notice(character_id: u32, uuid: &[u8; 16], reason_enum: u32, now_unix: u64) {
+fn queue_job_failed_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    character_id: u32,
+    uuid: &[u8; 16],
+    reason_enum: u32,
+    now_unix: u64,
+) {
     match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.FailedNotice",
     )
@@ -600,7 +625,7 @@ fn queue_job_failed_notice(character_id: u32, uuid: &[u8; 16], reason_enum: u32,
     .set("reason", reason_enum.max(1) as i32)
     .to_any()
     {
-        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(character_id), notice, now_unix),
         Err(e) => tracing::warn!(character_id, error = %e, "failed to encode SKINR FailedNotice"),
     }
 }
@@ -825,13 +850,14 @@ pub(super) fn debit_sequencing_binders_and_plex_in_snap(
 
 fn handle_job_initiate(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     _raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let now = ctx.now_unix();
-    settle_completed_jobs(state, now);
+    settle_completed_jobs(state, Some(queued_notices), now);
     let (price_disc, dur_disc, max_jobs) = skill_discounts_and_cap(state, Some(cid));
 
     let preview_uuid = {
@@ -844,7 +870,7 @@ fn handle_job_initiate(
         let next_uuid = job_seq_to_uuid(data.next_job_seq);
         if active_count >= max_jobs {
             drop(data);
-            queue_job_failed_notice(cid, &next_uuid, 1, now);
+            queue_job_failed_notice(queued_notices, cid, &next_uuid, 1, now);
             return Err((STATUS_BAD_REQUEST, "Maximum active sequencing jobs reached".into()));
         }
         next_uuid
@@ -858,7 +884,7 @@ fn handle_job_initiate(
     let max_runs = max_runs_per_job(state, cid);
     let licenses_qty = if let Some(v) = dyn_msg.get(5).and_then(as_u64) {
         let Some(q) = u32::try_from(v).ok().filter(|&q| (1..=max_runs).contains(&q)) else {
-            queue_job_failed_notice(cid, &preview_uuid, 1, now);
+            queue_job_failed_notice(queued_notices, cid, &preview_uuid, 1, now);
             return Err((STATUS_BAD_REQUEST, format!("Sequencing job licenses quantity must be in 1..={max_runs}")));
         };
         q
@@ -878,19 +904,19 @@ fn handle_job_initiate(
                 .map(|t| t.category_id)
                 != Some(CATEGORY_SHIP)
         {
-            queue_job_failed_notice(cid, &preview_uuid, 1, now);
+            queue_job_failed_notice(queued_notices, cid, &preview_uuid, 1, now);
             return Err((STATUS_BAD_REQUEST, format!("Invalid ship hull type {st_id} for SKINR layout")));
         }
         let blend = layout_m.get(3).and_then(as_u64).unwrap_or(1) as u32;
         match parse_initiate_slots(state, layout_m, st_id) {
             Ok((sl, rc)) => (st_id, blend, sl, rc),
             Err(e) => {
-                queue_job_failed_notice(cid, &preview_uuid, 1, now);
+                queue_job_failed_notice(queued_notices, cid, &preview_uuid, 1, now);
                 return Err(e);
             }
         }
     } else {
-        queue_job_failed_notice(cid, &preview_uuid, 1, now);
+        queue_job_failed_notice(queued_notices, cid, &preview_uuid, 1, now);
         return Err((STATUS_BAD_REQUEST, "InitiateRequest missing valid layout".into()));
     };
 
@@ -917,7 +943,7 @@ fn handle_job_initiate(
             let cap = data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0);
             if cap < licenses_qty as u64 {
                 drop(data);
-                queue_job_failed_notice(cid, &preview_uuid, 3, now);
+                queue_job_failed_notice(queued_notices, cid, &preview_uuid, 3, now);
                 return Err((
                     STATUS_BAD_REQUEST,
                     format!("Insufficient component license capacity for component {comp_id}"),
@@ -967,7 +993,7 @@ fn handle_job_initiate(
         let next_uuid = job_seq_to_uuid(data.next_job_seq);
         if active_count >= max_jobs {
             drop(data);
-            queue_job_failed_notice(cid, &next_uuid, 1, now);
+            queue_job_failed_notice(queued_notices, cid, &next_uuid, 1, now);
             return Err((STATUS_BAD_REQUEST, "Maximum active sequencing jobs reached".into()));
         }
         let mut req_binders: BTreeMap<u32, u64> = BTreeMap::new();
@@ -982,7 +1008,7 @@ fn handle_job_initiate(
                 }
             } else if data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0) < licenses_qty as u64 {
                 drop(data);
-                queue_job_failed_notice(cid, &next_uuid, 3, now);
+                queue_job_failed_notice(queued_notices, cid, &next_uuid, 3, now);
                 return Err((STATUS_BAD_REQUEST, "SKINR sequencing license capacity exceeded".into()));
             }
         }
@@ -1038,6 +1064,7 @@ fn handle_job_initiate(
     if let Ok((uid, tx_id, rem_plex, item_events)) = debit_res {
         emit_item_changes(&state.db, &state.sde, cid as i64, &item_events);
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(
+            queued_notices,
             uid,
             tx_id,
             -total_plex_cost,
@@ -1060,11 +1087,11 @@ fn handle_job_initiate(
                 }
             }
         }
-        queue_job_failed_notice(cid, &job_uuid, 3, now);
+        queue_job_failed_notice(queued_notices, cid, &job_uuid, 3, now);
         return Err((STATUS_BAD_REQUEST, err_msg));
     }
     state.save();
-    queue_job_started_notice(cid, &job_uuid, now);
+    queue_job_started_notice(queued_notices, cid, &job_uuid, now);
 
     pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateResponse",
@@ -1075,7 +1102,11 @@ fn handle_job_initiate(
     .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
-pub(super) fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
+pub(super) fn settle_completed_jobs(
+    state: &SkinrCosmeticsState,
+    queued_notices: Option<&RwLock<Vec<(NoticeScope, GoogleAny, u64)>>>,
+    now: u64,
+) {
     state.sync_redeemed_skins_if_needed();
     let mut completed = Vec::new();
     {
@@ -1096,19 +1127,22 @@ pub(super) fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
     if !completed.is_empty() {
         state.save();
         for (seq_id, uuid, sh, qty, end_unix) in completed {
-            queue_job_completed_notice(seq_id, &uuid, end_unix);
-            grant_or_increment_skin_license(state, seq_id, &sh, qty as u64, end_unix);
+            if let Some(qn) = queued_notices {
+                queue_job_completed_notice(qn, seq_id, &uuid, end_unix);
+            }
+            grant_or_increment_skin_license(state, queued_notices, seq_id, &sh, qty as u64, end_unix);
         }
     }
 }
 
 fn handle_job_get_all_active(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     state.sync_redeemed_skins_if_needed();
-    settle_completed_jobs(state, ctx.now_unix());
+    settle_completed_jobs(state, Some(queued_notices), ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let mut rsp = pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveResponse",
@@ -1142,6 +1176,7 @@ fn parse_job_uuid(dyn_msg: &DynamicQuasarMessage, raw: &[u8]) -> Option<[u8; 16]
 
 fn handle_job_get(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
@@ -1152,7 +1187,7 @@ fn handle_job_get(
     };
     let key = hex_bytes(&uuid);
     state.sync_redeemed_skins_if_needed();
-    settle_completed_jobs(state, ctx.now_unix());
+    settle_completed_jobs(state, Some(queued_notices), ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let Some(job) = data.sequencing_jobs.get(&key) else {
         return Err((STATUS_NOT_FOUND, "Sequencing job not found".into()));
@@ -1170,13 +1205,14 @@ fn handle_job_get(
 
 fn handle_job_complete_early(
     state: &SkinrCosmeticsState,
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
     ctx: &AuthoritativeContext,
     raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let caller = require_char(ctx)?;
     let now = ctx.now_unix();
-    settle_completed_jobs(state, now);
+    settle_completed_jobs(state, Some(queued_notices), now);
     let target_uuid = match parse_job_uuid(dyn_msg, raw) {
         Some(u) => u,
         None if raw.is_empty() => {
@@ -1229,6 +1265,7 @@ fn handle_job_complete_early(
         return Err((STATUS_BAD_REQUEST, format!("Insufficient PLEX balance for early sequencing completion (requires {plex_cost} PLEX)")));
     };
     super::quasar_payment_store_types::queue_plex_balance_changed_notice(
+        queued_notices,
         uid,
         tx_id,
         -plex_cost,
@@ -1243,8 +1280,8 @@ fn handle_job_complete_early(
         }
     }
     state.save();
-    queue_job_completed_notice(caller, &target_uuid, now);
-    grant_or_increment_skin_license(state, caller, &skin_hex, qty as u64, now);
+    queue_job_completed_notice(queued_notices, caller, &target_uuid, now);
+    grant_or_increment_skin_license(state, Some(queued_notices), caller, &skin_hex, qty as u64, now);
 
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyResponse",
@@ -1258,6 +1295,13 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         ($name:expr, $closure:expr) => {{
             let s = Arc::clone(&state);
             router.register_handler($name, Arc::new(move |ctx, any, dyn_msg| ($closure)(&s, ctx, any, dyn_msg)));
+        }};
+    }
+    macro_rules! reg_q {
+        ($name:expr, $closure:expr) => {{
+            let s = Arc::clone(&state);
+            let q = Arc::clone(&router.queued_notices);
+            router.register_handler($name, Arc::new(move |ctx, any, dyn_msg| ($closure)(&s, &q, ctx, any, dyn_msg)));
         }};
     }
 
@@ -1276,37 +1320,37 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
         "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
     ] {
-        reg!(req_name, move |s: &Arc<SkinrCosmeticsState>, ctx, _any: &GoogleAny, _d| {
-            handle_skin_license_get_owned(s, ctx, req_name)
+        reg_q!(req_name, move |s: &Arc<SkinrCosmeticsState>, q, ctx, _any: &GoogleAny, _d| {
+            handle_skin_license_get_owned(s, q, ctx, req_name)
         });
     }
     for req_name in [
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetRequest",
         "eve.cosmetic.ship.skin.thirdparty.license.api.GetRequest",
     ] {
-        reg!(req_name, move |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| {
-            handle_skin_license_get(s, ctx, req_name, &any.value, d)
+        reg_q!(req_name, move |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| {
+            handle_skin_license_get(s, q, ctx, req_name, &any.value, d)
         });
     }
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.ActivateRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_skin_license_activate(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_skin_license_activate(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_skin_license_apply(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_skin_license_apply(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.UnapplyRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_skin_license_unapply(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_skin_license_unapply(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_skin_license_admin_grant(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_skin_license_admin_grant(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.RevokeRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_skin_license_admin_revoke(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_skin_license_admin_revoke(s, q, ctx, &any.value, d)
     );
 
     // 3. Sequencing pricing, durations, and capacity
@@ -1348,21 +1392,21 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
     );
 
     // 4. Sequencing job lifecycle
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_job_initiate(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_job_initiate(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, _any: &GoogleAny, _d| handle_job_get_all_active(s, ctx)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, _any: &GoogleAny, _d| handle_job_get_all_active(s, q, ctx)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_job_get(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_job_get(s, q, ctx, &any.value, d)
     );
-    reg!(
+    reg_q!(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest",
-        |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_job_complete_early(s, ctx, &any.value, d)
+        |s: &Arc<SkinrCosmeticsState>, q, ctx, any: &GoogleAny, d| handle_job_complete_early(s, q, ctx, &any.value, d)
     );
 }
 

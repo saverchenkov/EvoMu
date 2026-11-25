@@ -2325,8 +2325,12 @@ async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_s
     for (scope, payload) in pending_gw_notices {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, now_unix);
     }
-    crate::services::quasar_cosmetics_skinr::settle_completed_skinr_jobs_for_db(&ctx.db, now_unix);
-    for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+    crate::services::quasar_cosmetics_skinr::settle_completed_skinr_jobs_with_notices(
+        &ctx.db,
+        &ctx.quasar_gateway.queued_notices,
+        now_unix,
+    );
+    for (scope, payload, ts) in ctx.quasar_gateway.drain_queued_notices() {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, ts);
     }
 

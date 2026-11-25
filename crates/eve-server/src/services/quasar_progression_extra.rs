@@ -13,11 +13,11 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    queue_notice, require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_NOT_FOUND,
 };
 
 use super::quasar_goal_tale_notices as notices;
-use super::quasar_social_chat::ctx_queue_notice;
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, GoogleAny};
@@ -545,6 +545,7 @@ pub fn register_progression_extra_handlers(
     );
 
     let mgr = Arc::clone(&manager);
+    let q_track_add = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.communitytrack.api.AddProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -572,7 +573,8 @@ pub fn register_progression_extra_handlers(
 
             if completed {
                 if let Some(notice) = notices::community_track_completed_notice(updated.track_id) {
-                    ctx_queue_notice(
+                    queue_notice(
+                        &q_track_add,
                         crate::quasar_gateway::NoticeScope::Broadcast,
                         notice,
                         ctx.now_unix(),
@@ -635,6 +637,7 @@ pub fn register_progression_extra_handlers(
     );
 
     let mgr = Arc::clone(&manager);
+    let q_track_set = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.communitytrack.admin.api.SetProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -662,7 +665,8 @@ pub fn register_progression_extra_handlers(
             mgr.save_to_db();
             if let Some(track_id) = completed_track_id {
                 if let Some(notice) = notices::community_track_completed_notice(track_id) {
-                    ctx_queue_notice(
+                    queue_notice(
+                        &q_track_set,
                         crate::quasar_gateway::NoticeScope::Broadcast,
                         notice,
                         ctx.now_unix(),
@@ -678,6 +682,7 @@ pub fn register_progression_extra_handlers(
     // 2. Tales Handlers
     // ------------------------------------------------------------------------
     let mgr = Arc::clone(&manager);
+    let q_start_tale = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.tale.api.StartTaleRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -706,7 +711,8 @@ pub fn register_progression_extra_handlers(
             };
             mgr.save_to_db();
             // The client's tale service invalidates its per-template tale cache on StartedNotice.
-            ctx_queue_notice(
+            queue_notice(
+                &q_start_tale,
                 notices::tale_scope(),
                 notices::tale_lifecycle(true, tale_id as u64, template_id as u64, system_id as u64),
                 now,
@@ -717,6 +723,7 @@ pub fn register_progression_extra_handlers(
     );
 
     let mgr = Arc::clone(&manager);
+    let q_stop_tales = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve.tale.api.StopTalesRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -741,7 +748,8 @@ pub fn register_progression_extra_handlers(
                 for (tr, completed) in progressed {
                     if completed {
                         if let Some(notice) = notices::community_track_completed_notice(tr.track_id) {
-                            ctx_queue_notice(
+                            queue_notice(
+                                &q_stop_tales,
                                 crate::quasar_gateway::NoticeScope::Broadcast,
                                 notice,
                                 now,
@@ -751,7 +759,8 @@ pub fn register_progression_extra_handlers(
                 }
             }
             for (tale_id, system_id) in stopped {
-                ctx_queue_notice(
+                queue_notice(
+                    &q_stop_tales,
                     notices::tale_scope(),
                     notices::tale_lifecycle(false, tale_id as u64, template_id as u64, system_id as u64),
                     now,
@@ -936,6 +945,7 @@ pub fn register_progression_extra_handlers(
     }
 
     let mgr = Arc::clone(&manager);
+    let q_create_goal = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.goal.api.CreateRequest",
         Arc::new(move |ctx, any, dyn_msg| {
@@ -1056,7 +1066,7 @@ pub fn register_progression_extra_handlers(
             );
             mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).insert(uuid_to_hex(&uuid), rec);
             mgr.save_to_db();
-            ctx_queue_notice(notices::goal_scope(goal_corp, cid), created, now_u);
+            queue_notice(&q_create_goal, notices::goal_scope(goal_corp, cid), created, now_u);
 
             pb::message("eve_public.goal.api.CreateResponse")
                 .set("goal.uuid", uuid.to_vec())
@@ -1172,6 +1182,7 @@ pub fn register_progression_extra_handlers(
     };
 
     let mgr = Arc::clone(&manager);
+    let q_close_goal = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.goal.api.CloseRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1203,7 +1214,8 @@ pub fn register_progression_extra_handlers(
                 }
             }
             if was_open {
-                ctx_queue_notice(
+                queue_notice(
+                    &q_close_goal,
                     notices::goal_scope(goal_corp, live_g.creator_id),
                     notices::goal_closed(&target_uuid, caller_id),
                     now_u,
@@ -1214,6 +1226,7 @@ pub fn register_progression_extra_handlers(
     );
 
     let mgr = Arc::clone(&manager);
+    let q_set_prog = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.goal.api.SetCurrentProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1274,16 +1287,17 @@ pub fn register_progression_extra_handlers(
             }
             let scope = notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id);
             if capped != prev {
-                ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), now_u);
+                queue_notice(&q_set_prog, scope.clone(), notices::goal_progressed(&target_uuid, capped), now_u);
             }
             if capped >= desired && prev < desired {
-                ctx_queue_notice(scope, notices::goal_completed(&target_uuid), now_u);
+                queue_notice(&q_set_prog, scope, notices::goal_completed(&target_uuid), now_u);
             }
             pb::message("eve_public.goal.api.SetCurrentProgressResponse").to_any_or_internal_err()
         }),
     );
 
     let mgr = Arc::clone(&manager);
+    let q_del_goal = Arc::clone(&router.queued_notices);
     router.register_handler(
         "eve_public.goal.api.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -1311,7 +1325,8 @@ pub fn register_progression_extra_handlers(
                     cs.close_or_delete_goal(pid as u64, true, now_u);
                 }
             }
-            ctx_queue_notice(
+            queue_notice(
+                &q_del_goal,
                 notices::goal_scope(goal_corp, live_g.creator_id),
                 notices::goal_deleted(&target_uuid),
                 now_u,
@@ -1328,6 +1343,7 @@ pub fn register_progression_extra_handlers(
         ("eve.goal.api.SetDescriptionRequest", "eve.goal.api.SetDescriptionResponse", false),
     ] {
         let mgr = Arc::clone(&manager);
+        let q_rename_goal = Arc::clone(&router.queued_notices);
         router.register_handler(
             req_name,
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -1365,7 +1381,12 @@ pub fn register_progression_extra_handlers(
                 } else {
                     notices::goal_description_changed(&target_uuid, &text)
                 };
-                ctx_queue_notice(notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id), notice, now_u);
+                queue_notice(
+                    &q_rename_goal,
+                    notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id),
+                    notice,
+                    now_u,
+                );
                 pb::message(rsp_name).to_any_or_internal_err()
             }),
         );

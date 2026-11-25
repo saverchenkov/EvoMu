@@ -365,7 +365,7 @@ fn freelance_builders_decode_strictly_with_descriptors() {
         vec![1],
     );
 
-    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let _ = router.drain_queued_notices();
 
     let mut cfg = DynamicQuasarMessage::new("Cfg");
     cfg.fields.insert(1, DynamicValue::String("DestroyNPCShips".into()));
@@ -456,7 +456,7 @@ fn freelance_builders_decode_strictly_with_descriptors() {
     roundtrip("eve_public.freelance.project.api.CommitResponse", &closed_commit.value);
 
     // Every descriptor-backed notice queued by the handlers above
-    let notices = crate::services::quasar_social_chat::drain_local_notices();
+    let notices = router.drain_queued_notices();
     assert!(notices.len() >= 6);
     for (_, any_msg, _) in &notices {
         let short_type = any_msg

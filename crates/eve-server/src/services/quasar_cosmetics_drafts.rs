@@ -12,16 +12,16 @@
 
 use super::quasar_cosmetics_services::{QuasarCosmeticsState, QuasarCosmeticsStateData};
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter,
+    queue_notice, require_admin_role, NoticeScope, PublicGatewayRouter,
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
     WireMessage,
 };
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Persistent record of a SKINR saved design draft.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -469,13 +469,15 @@ pub fn encode_revoked_notice(title_id: u64) -> Vec<u8> {
         })
 }
 
-fn queue_title_notice(char_id: u32, builder: ProtoBuilder, now_unix: u64, label: &str) {
+fn queue_title_notice(
+    queued_notices: &RwLock<Vec<(NoticeScope, GoogleAny, u64)>>,
+    char_id: u32,
+    builder: ProtoBuilder,
+    now_unix: u64,
+    label: &str,
+) {
     match builder.to_any() {
-        Ok(notice) => super::quasar_social_chat::ctx_queue_notice(
-            NoticeScope::Character(char_id),
-            notice,
-            now_unix,
-        ),
+        Ok(notice) => queue_notice(queued_notices, NoticeScope::Character(char_id), notice, now_unix),
         Err(e) => tracing::warn!(character_id = char_id, notice = label, error = %e, "failed to encode title notice"),
     }
 }
@@ -989,6 +991,7 @@ pub fn register_draft_and_title_handlers(
     // 2c. EquipRequest
     {
         let st = Arc::clone(&state);
+        let q_equip = Arc::clone(&router.queued_notices);
         router.register_handler(
             "eve_public.cosmetic.character.title.api.EquipRequest",
             Arc::new(move |ctx, any, dyn_msg| {
@@ -1010,6 +1013,7 @@ pub fn register_draft_and_title_handlers(
                     st.sync_to_db();
 
                     queue_title_notice(
+                        &q_equip,
                         char_id,
                         build_set_notice(char_id, None),
                         ctx.now_unix(),
@@ -1038,6 +1042,7 @@ pub fn register_draft_and_title_handlers(
                     });
 
                     queue_title_notice(
+                        &q_equip,
                         char_id,
                         build_set_notice(char_id, Some(title_id)),
                         ctx.now_unix(),
@@ -1055,6 +1060,7 @@ pub fn register_draft_and_title_handlers(
     // 2d. UnequipRequest
     {
         let st = Arc::clone(&state);
+        let q_unequip = Arc::clone(&router.queued_notices);
         router.register_handler(
             "eve_public.cosmetic.character.title.api.UnequipRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
@@ -1075,6 +1081,7 @@ pub fn register_draft_and_title_handlers(
 
                 // Publish SetNotice with no_title = true
                 queue_title_notice(
+                    &q_unequip,
                     char_id,
                     build_set_notice(char_id, None),
                     ctx.now_unix(),
@@ -1091,6 +1098,7 @@ pub fn register_draft_and_title_handlers(
     // 2e. Admin GrantRequest
     {
         let st = Arc::clone(&state);
+        let q_grant = Arc::clone(&router.queued_notices);
         let grant_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, any, dyn_msg| {
             require_admin_role(ctx)?;
             let (cid, tid) = extract_target_char_and_title(ctx, dyn_msg, &any.value)?;
@@ -1103,6 +1111,7 @@ pub fn register_draft_and_title_handlers(
             st.sync_to_db();
 
             queue_title_notice(
+                &q_grant,
                 cid,
                 pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
                     .set("title.uuid", id_to_uuid_bytes(tid).to_vec()),
@@ -1133,6 +1142,7 @@ pub fn register_draft_and_title_handlers(
     // 2f. Admin RevokeRequest
     {
         let st = Arc::clone(&state);
+        let q_revoke = Arc::clone(&router.queued_notices);
         let revoke_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, any, dyn_msg| {
             require_admin_role(ctx)?;
             let (cid, tid) = extract_target_char_and_title(ctx, dyn_msg, &any.value)?;
@@ -1152,6 +1162,7 @@ pub fn register_draft_and_title_handlers(
             st.sync_to_db();
 
             queue_title_notice(
+                &q_revoke,
                 cid,
                 pb::message("eve_public.cosmetic.character.title.api.RevokedNotice")
                     .set("title.uuid", id_to_uuid_bytes(tid).to_vec()),
@@ -1161,6 +1172,7 @@ pub fn register_draft_and_title_handlers(
 
             if was_equipped {
                 queue_title_notice(
+                    &q_revoke,
                     cid,
                     build_set_notice(cid, None),
                     ctx.now_unix(),
