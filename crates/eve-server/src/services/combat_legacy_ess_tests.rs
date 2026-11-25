@@ -1465,7 +1465,7 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
 #[tokio::test]
 async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements() {
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
-    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+    use crate::services::combat_crimewatch::with_mut_combat_runtime;
     use crate::services::social_corp_fleet::social_corp_projects::{
         create_canonical_project, CanonicalProjectSpec,
     };
