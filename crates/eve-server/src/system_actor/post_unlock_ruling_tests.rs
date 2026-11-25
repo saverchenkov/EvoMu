@@ -228,7 +228,7 @@ async fn bf2_fire_weapon_cycle_volley_waits_for_post_unlock_before_death_hooks()
         }
     });
     for (cid, sid, pos) in [(CHAR_ID, a_ship, p_atk), (v_char, v_ship, p_vic)] {
-        sys.try_spawn_ball_with_meta(make_ball(sid, 587, pos), ctx.build_ship_combat_state(cid, sid, 587), ctx.build_ship_slim_meta(cid, sid, 587));
+        sys.try_spawn_ball_with_meta(make_ball(sid, 587, pos), ctx.build_ship_combat_state(cid, sid, 587), ctx.build_ship_slim_meta(cid, 587));
     }
     sys.add_module_cycle(ActiveModuleCycle {
         ship_id: a_ship, module_id: mod_id, module_type_id: 486, owner_char_id: Some(CHAR_ID),
@@ -786,9 +786,7 @@ async fn bf_1170_r8_01_take_ball_nonblocking_on_current_thread_and_drains_nanite
     let mut ops_p = PostUnlockOps::default(); ops_p.push(PostUnlockIntent::ModuleBurnout { ship_id: ship_a, module_id: mod_a });
     send_in_flight(&sys, &ctx, ops_p);
     for (sid, mid) in [(ship_a, mod_a), (ship_b, mod_b)] {
-        sys.cmd_sender().send(crate::system_actor::SystemCommand::StartNaniteRepair {
-            repair: ActiveNaniteRepair { ship_id: sid, char_id: CHAR_ID, module_id: mid, initial_damage_hp: 100.0, duration_s: 10.0, elapsed_s: 6.0, paste_total_needed: 10, paste_consumed_so_far: 10 },
-        }).await.unwrap();
+        sys.start_nanite_repair(ActiveNaniteRepair { ship_id: sid, char_id: CHAR_ID, module_id: mid, initial_damage_hp: 100.0, duration_s: 10.0, elapsed_s: 6.0, paste_total_needed: 10, paste_consumed_so_far: 10 }).await.unwrap();
     }
     let take_h = tokio::spawn({ let s = sys.clone(); async move { s.take_ball(ship_a).await } });
     let dock_h = tokio::spawn({ let s = sys.clone(); async move { s.take_ball_for_docking(ship_b, 60_003_760, DVec3::ZERO).await } });
@@ -797,7 +795,6 @@ async fn bf_1170_r8_01_take_ball_nonblocking_on_current_thread_and_drains_nanite
             && sys.actor_state.read().unwrap().active_nanite_repairs.is_empty()
     }).await;
     assert!(!take_h.is_finished() && !dock_h.is_finished(), "TakeBall bypassed barrier");
-
     release_writer(held);
     assert!(take_h.await.unwrap().is_some() && dock_h.await.unwrap().is_some());
     assert!(mod_dmg(&ctx.db, mod_a).is_some_and(|d| (d - 40.0).abs() < 1e-6) && paste_qty(&ctx.db, ship_a) == 14);

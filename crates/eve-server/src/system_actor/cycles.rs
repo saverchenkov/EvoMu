@@ -544,6 +544,7 @@ pub(crate) fn apply_weapon_cycle_damage_collecting(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
     solar_system_id: SolarSystemId,
