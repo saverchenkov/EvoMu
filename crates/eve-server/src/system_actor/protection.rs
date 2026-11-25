@@ -1172,18 +1172,17 @@ impl SystemHandle {
             .is_some_and(|p| p.has_active_non_gate_cloak())
     }
 
-    /// Synchronous read-only check of actor protection registry / combat state for non-gate cloak (`#1486`).
+    /// Synchronous read-only check of [`SystemView`] protection registry / active cycles for non-gate cloak (`#1486`).
     pub fn has_active_non_gate_cloak_sync(&self, ship_id: BallId) -> bool {
-        let state = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        if state
+        let view = self.view();
+        if view
             .protection_registry
             .get(&ship_id)
             .is_some_and(ActorShipProtection::has_active_non_gate_cloak)
         {
             return true;
         }
-        state
-            .active_module_cycles
+        view.active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && is_cloak_cycle(c))
     }

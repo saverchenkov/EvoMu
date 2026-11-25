@@ -18,7 +18,7 @@ use super::{
     SystemHandle, WarpProvenance,
 };
 use eve_db::lock_rank::{RankedMutex, RankedRwLock, RANK_LEAF};
-use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, MovementMode};
+use eve_destiny::{Ball, BallId, Ballpark, CombatState, DestinyEvent, MovementMode, SlimItemMeta};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
@@ -64,6 +64,10 @@ impl<'a> BallOpsCtx<'a> {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub(in crate::system_actor) fn sync_positions(&self) {
+        celestials::sync_ball_positions(self.ballpark, self.ball_positions, self.scrambled_balls);
     }
 }
 
@@ -194,7 +198,7 @@ fn run_direct_ball_op_on_current_thread<R>(
     out
 }
 
-fn dispatch_actor_sync_reply_with_deadline<P, T>(
+pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
@@ -1721,6 +1725,70 @@ impl SystemHandle {
             returns,
             |returns, reply| SystemCommand::LaunchDeadwarpReturns { returns, reply },
             launch_deadwarp_returns_in_actor,
+        )
+    }
+
+fn spawn_ball_with_meta_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ball: Ball,
+    combat_state: CombatState,
+    slim_meta: SlimItemMeta,
+) -> Result<u64, String> {
+    let ball_id = ball.id;
+    if let Some(tokens) = ctx.ball_spawn_tokens.as_deref_mut() {
+        tokens.remove(&ball_id);
+    }
+    let was_warping = matches!(
+        ctx.ballpark.balls.get(&ball_id).map(|b| &b.mode),
+        Some(MovementMode::Warp { .. })
+    );
+    let is_warp = matches!(ball.mode, MovementMode::Warp { .. });
+    let deact_guard = ctx.read_deact_hook();
+    let tick = super::cycles_tackle::spawn_ball_with_combat_in_actor_collecting(
+        ctx.solar_system_id,
+        ctx.ballpark,
+        &mut ctx.actor_st.active_module_cycles,
+        &mut ctx.actor_st.base_scramble_strengths,
+        &mut ctx.actor_st.base_core_strengths,
+        &ctx.actor_st.sde_opt,
+        &ctx.actor_st.db_opt,
+        deact_guard.as_ref(),
+        ball,
+        combat_state,
+        Some(slim_meta),
+        ctx.post_unlock_ops,
+    );
+    if was_warping && !is_warp {
+        ctx.actor_st.warp_state.clear_ball(ball_id, true);
+    }
+    protection::sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
+    ctx.sync_positions();
+    Ok(tick)
+}
+
+impl SystemHandle {
+    /// Synchronously spawns `ball` with `combat_state` and `slim_meta` through the bounded actor
+    /// mailbox (`#1342`).
+    pub fn spawn_ball_with_meta_sync(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+    ) -> Result<u64, String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "SpawnBallWithMeta",
+            ACTOR_CMD_TIMEOUT,
+            (ball, combat_state, slim_meta),
+            |(ball, combat_state, slim_meta), reply| SystemCommand::SpawnBallWithMeta {
+                ball,
+                combat_state,
+                slim_meta,
+                reply,
+            },
+            |ctx, (ball, combat_state, slim_meta)| {
+                spawn_ball_with_meta_in_actor(ctx, ball, combat_state, slim_meta)
+            },
         )
     }
 

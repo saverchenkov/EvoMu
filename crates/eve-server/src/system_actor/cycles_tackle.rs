@@ -1485,9 +1485,10 @@ pub(crate) use super::post_unlock_test_shims::{
 
 impl SystemHandle {
     pub fn is_ball_warping_sync(&self, ship_id: BallId) -> bool {
-        self.ballpark
-            .read()
-            .is_ok_and(|bp| bp.balls.get(&ship_id).is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. })))
+        self.view()
+            .balls
+            .get(&ship_id)
+            .is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. }))
     }
 
     pub fn committed_warp_destination_sync(&self, ship_id: BallId) -> Option<DVec3> {
@@ -1500,23 +1501,19 @@ impl SystemHandle {
         {
             return Some(dest);
         }
-        self.ballpark.try_read().ok().and_then(|bp| {
-            bp.balls.get(&ship_id).and_then(|b| match b.mode {
-                MovementMode::Warp { destination, phase, .. }
-                    if phase != eve_destiny::WarpPhase::Aligning =>
-                {
-                    Some(destination)
-                }
-                _ => None,
-            })
+        self.view().balls.get(&ship_id).and_then(|b| match b.mode {
+            MovementMode::Warp { destination, phase, .. }
+                if phase != eve_destiny::WarpPhase::Aligning =>
+            {
+                Some(destination)
+            }
+            _ => None,
         })
     }
 
     pub fn is_ball_aligning_warp_sync(&self, ship_id: BallId) -> bool {
-        self.ballpark.read().is_ok_and(|bp| {
-            bp.balls.get(&ship_id).is_some_and(|b| {
-                matches!(b.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. })
-            })
+        self.view().balls.get(&ship_id).is_some_and(|b| {
+            matches!(b.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. })
         })
     }
 
@@ -1526,9 +1523,9 @@ impl SystemHandle {
         cyno_expiry_unix: u64,
         now_unix: u64,
     ) -> u64 {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        let view = self.view();
         let mut max_exp = cyno_expiry_unix;
-        for c in st
+        for c in view
             .active_module_cycles
             .iter()
             .filter(|c| c.ship_id == ship_id && c.duration_s > 0.0)

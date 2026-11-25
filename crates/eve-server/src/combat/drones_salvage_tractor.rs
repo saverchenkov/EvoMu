@@ -276,18 +276,11 @@ async fn finalize_salvaged_wreck_ball(
         false
     };
 
-    let sibling_candidates: Vec<crate::system_actor::ActiveModuleCycle> = {
-        let st = sys_handle.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles
-            .iter()
-            .filter(|c| {
-                (c.target_id == Some(wreck_id) || c.ship_id == wreck_id)
-                    && !active_module_id_opt
-                        .is_some_and(|mid| c.ship_id == ship_id && c.module_id == mid)
-            })
-            .cloned()
-            .collect()
-    };
+    let sibling_candidates: Vec<crate::system_actor::ActiveModuleCycle> = sys_handle
+        .active_cycles_referencing_ball(
+            wreck_id,
+            active_module_id_opt.map(|mid| (ship_id, mid)),
+        );
     let mut deferred_sibling_cycles = Vec::with_capacity(sibling_candidates.len());
     for cycle in sibling_candidates {
         if sys_handle

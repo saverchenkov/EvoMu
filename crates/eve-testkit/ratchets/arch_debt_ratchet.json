@@ -951,6 +951,30 @@
       "description": "Direct ballpark lock acquisitions (.read/.write/.try_read/.try_write/.lock) outside system_actor* (#1342).",
       "files": {}
     },
+    "actor_state_locks_outside_system_actor": {
+      "zero_required": true,
+      "owning_issue": 1342,
+      "regex": "\\bactor_state\\s*\\.\\s*(?:read|write|try_read|try_write|lock)\\s*\\(",
+      "path_exclude_substring": "system_actor",
+      "description": "Direct actor_state lock acquisitions (.read/.write/.try_read/.try_write/.lock) outside system_actor* (#1342).",
+      "files": {}
+    },
+    "system_handle_sync_lock_helpers": {
+      "zero_required": false,
+      "owning_issue": 1342,
+      "regex": "\\b(?:ballpark|actor_state)\\s*\\.\\s*(?:read|write|try_read|try_write|lock)\\s*\\(",
+      "description": "Remaining sync ballpark/actor_state lock acquisitions (.read/.write/.try_read/.try_write/.lock) after Track 4A read-pure SystemHandle conversion (#1342).",
+      "files": {
+        "system_actor.rs": 2,
+        "system_actor/activation_ops.rs": 3,
+        "system_actor/ball_ops.rs": 1,
+        "system_actor/celestials_helpers.rs": 4,
+        "system_actor/cycles.rs": 6,
+        "system_actor/disruptors.rs": 1,
+        "system_actor/post_unlock.rs": 1,
+        "system_actor/protection.rs": 3
+      }
+    },
     "handwritten_item_change_emitters": {
       "zero_required": true,
       "owning_issue": 931,

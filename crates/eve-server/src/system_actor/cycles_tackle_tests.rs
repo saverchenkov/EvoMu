@@ -1237,39 +1237,40 @@ async fn system_handle_and_registry_warp_and_module_expiry_sync_helpers() {
     assert_eq!(handle.committed_warp_destination_sync(ship_id), Some(dest));
     assert!(reg.is_ball_in_committed_warp_sync(sys_id, ship_id));
 
-    {
-        let mut st = handle.actor_state.write().unwrap();
-        // Cyno cycle skipped when cyno_expiry_unix > 0
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id,
-            module_id: 9501,
-            effect_name: "cynosuralGeneration".into(),
-            duration_s: 300.0,
-            started_at_unix: 1_000,
-            ..Default::default()
-        });
-        // Lance warmup adds repeat seconds
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id,
-            module_id: 9502,
-            effect_name: "superWeaponLanceWarmup".into(),
-            duration_s: 15.0,
-            elapsed_s: 2.0,
-            started_at_unix: 1_000,
-            repeat: 5,
-            ..Default::default()
-        });
-        // Normal module with started_at_unix == 0
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id,
-            module_id: 9503,
-            effect_name: "warpScramble".into(),
-            duration_s: 10.0,
-            elapsed_s: 1.0,
-            started_at_unix: 0,
-            ..Default::default()
-        });
-    }
+    handle
+        .test_with_actor_state_mut_async(move |st| {
+            // Cyno cycle skipped when cyno_expiry_unix > 0
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id,
+                module_id: 9501,
+                effect_name: "cynosuralGeneration".into(),
+                duration_s: 300.0,
+                started_at_unix: 1_000,
+                ..Default::default()
+            });
+            // Lance warmup adds repeat seconds
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id,
+                module_id: 9502,
+                effect_name: "superWeaponLanceWarmup".into(),
+                duration_s: 15.0,
+                elapsed_s: 2.0,
+                started_at_unix: 1_000,
+                repeat: 5,
+                ..Default::default()
+            });
+            // Normal module with started_at_unix == 0
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id,
+                module_id: 9503,
+                effect_name: "warpScramble".into(),
+                duration_s: 10.0,
+                elapsed_s: 1.0,
+                started_at_unix: 0,
+                ..Default::default()
+            });
+        })
+        .await;
     // now = 1005 -> lance rem = 10 + 5 = 15 -> exp = 1020
     let exp = reg.max_active_module_cycle_expiry_unix_sync(sys_id, ship_id, 1_010, 1_005);
     assert_eq!(exp, 1_020);
@@ -2119,8 +2120,7 @@ async fn destiny_events_warp_queries_and_cycle_expiry_helpers_cover_remaining_pa
     assert!(ctx.systems.is_ball_in_committed_warp_sync(30_000_142, ship_id));
 
     // max_active_module_cycle_expiry_unix_sync: cyno skipped when cyno_expiry_unix > 0, lance repeat added
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.active_module_cycles.push(ActiveModuleCycle {
             ship_id,
             module_id: 91,
@@ -2139,7 +2139,8 @@ async fn destiny_events_warp_queries_and_cycle_expiry_helpers_cover_remaining_pa
             started_at_unix: 0,
             ..ActiveModuleCycle::default()
         });
-    }
+    })
+    .await;
     let exp = ctx
         .systems
         .max_active_module_cycle_expiry_unix_sync(30_000_142, ship_id, 1005, 1000);

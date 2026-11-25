@@ -2064,17 +2064,20 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
     }
     {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.active_module_cycles
-            .push(crate::system_actor::ActiveModuleCycle {
-                ship_id,
-                module_id: cycled_mod_id,
-                module_type_id: 2048,
-                owner_char_id: Some(victim),
-                effect_name: "online".to_string(),
-                duration_s: 10.0,
-                ..Default::default()
-            });
+        sys_handle
+            .test_with_actor_state_mut_async(move |st| {
+                st.active_module_cycles
+                    .push(crate::system_actor::ActiveModuleCycle {
+                        ship_id,
+                        module_id: cycled_mod_id,
+                        module_type_id: 2048,
+                        owner_char_id: Some(victim),
+                        effect_name: "online".to_string(),
+                        duration_s: 10.0,
+                        ..Default::default()
+                    });
+            })
+            .await;
     }
     let _ = ctx.drain_notifications_for_char(victim);
 

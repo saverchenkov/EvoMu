@@ -498,6 +498,8 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::SetDroneNextReadyUnix { .. } => "SetDroneNextReadyUnix",
             SystemCommand::ClearDroneRuntime { .. } => "ClearDroneRuntime",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
+            #[cfg(any(test, feature = "testkit"))]
+            SystemCommand::TestAccess { .. } => "TestAccess",
         }
     }
 
@@ -864,9 +866,15 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
+        #[cfg(any(test, feature = "testkit"))]
+        SystemCommand::TestAccess {
+            op: Box::new(|_, _| {}),
+            mutated: false,
+            reply: oneshot::channel().0,
+        },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 101);
+    assert_eq!(tags.len(), 102);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -891,11 +899,27 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[98], "ClearDroneRuntime");
     assert_eq!(tags[99], "CancelShipNaniteRepairs");
     assert_eq!(tags[100], "ShutdownActor");
+    assert_eq!(tags[101], "TestAccess");
 }
 
 #[test]
 fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
     use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
+    #[cfg(any(test, feature = "testkit"))]
+    {
+        assert!(!SystemCommand::TestAccess {
+            op: Box::new(|_, _| {}),
+            mutated: false,
+            reply: oneshot::channel().0,
+        }
+        .may_mutate_system_view());
+        assert!(SystemCommand::TestAccess {
+            op: Box::new(|_, _| {}),
+            mutated: true,
+            reply: oneshot::channel().0,
+        }
+        .may_mutate_system_view());
+    }
     assert!(!SystemCommand::GetBallSnapshot {
         ball_id: 1,
         reply: oneshot::channel().0,

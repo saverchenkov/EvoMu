@@ -1072,14 +1072,18 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&mod_id);
     });
-    sys_h.actor_state.write().unwrap().active_module_cycles.push(
-        crate::system_actor::ActiveModuleCycle {
-            ship_id: target_cruiser,
-            module_id: mod_id,
-            duration_s: 10.0,
-            ..Default::default()
-        },
-    );
+    sys_h
+        .test_with_actor_state_mut_async(move |st| {
+            st.active_module_cycles.push(
+                crate::system_actor::ActiveModuleCycle {
+                    ship_id: target_cruiser,
+                    module_id: mod_id,
+                    duration_s: 10.0,
+                    ..Default::default()
+                },
+            );
+        })
+        .await;
     assert_eq!(
         ship_scoop_and_store(&ctx, &mut sess, "StoreVessel", &[PyRep::Integer(target_cruiser), PyRep::Integer(host_id)], &kw)
             .await
@@ -1088,11 +1092,10 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
         "CannotStoreShipWithActiveModules"
     );
     sys_h
-        .actor_state
-        .write()
-        .unwrap()
-        .active_module_cycles
-        .retain(|c| c.ship_id != target_cruiser);
+        .test_with_actor_state_mut_async(move |st| {
+            st.active_module_cycles.retain(|c| c.ship_id != target_cruiser);
+        })
+        .await;
 
     // 2h. Target lock held by another vessel -> CannotStoreTargetedShip
     spawn_ball_at(&ctx, null_sys, watcher_id, 998_020, other_char, DVec3::new(1000.0, 0.0, 0.0)).await;

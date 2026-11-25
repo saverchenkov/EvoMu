@@ -457,10 +457,9 @@ impl SystemHandle {
         if !self.hibernated.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
-        if let Ok(bp) = self.ballpark.try_read() {
-            if bp.balls.keys().any(|&bid| !bp.is_static_ball(bid)) {
-                return false;
-            }
+        let view = self.view();
+        if view.balls.keys().any(|&bid| !view.is_static_ball(bid)) {
+            return false;
         }
         true
     }
@@ -649,10 +648,7 @@ impl SystemHandle {
 
     /// Reads the tracked activation state for stargate `gate_id`, if present (`#1080`).
     pub fn stargate_activation_state(&self, gate_id: BallId) -> Option<eve_destiny::StargateActivationState> {
-        self.ballpark
-            .read()
-            .ok()
-            .and_then(|bp| bp.stargate_activation_state(gate_id))
+        self.view().stargate_activation_state(gate_id)
     }
 
     /// Transitions a `CLOSED` stargate into `ACTIVATING` (`#1080`).
@@ -1261,36 +1257,28 @@ impl SystemHandle {
     }
 
     pub fn has_active_nanite_repair_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_nanite_repairs
             .iter()
             .any(|r| r.ship_id == ship_id && r.module_id == module_id)
     }
 
     pub fn has_active_module_cycle_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.module_id == module_id)
     }
 
     pub fn has_active_mjd_or_mjfg_spool_sync(&self, ship_id: BallId) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.mjd_jump_distance_m.is_some())
     }
 
     pub fn is_module_mjd_or_mjfg_spooling_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.module_id == module_id && c.mjd_jump_distance_m.is_some())
@@ -1371,6 +1359,7 @@ impl SystemHandle {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
             drain_fn(&mut st)
         };
+        self.publish_view();
         super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
     }
 
@@ -1433,27 +1422,30 @@ impl SystemHandle {
     }
 
     pub fn sync_asteroid_quantity(&self, asteroid_id: BallId, remaining_units: u64, due_unix_on_belt_empty: u64) {
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let mut belt_id_opt = None;
-        if let Some(ast) = st.asteroids.get_mut(&asteroid_id) {
-            ast.remaining_units = remaining_units;
-            ast.depleted = remaining_units == 0;
-            if remaining_units == 0 {
-                belt_id_opt = Some(ast.belt_id);
+        {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let mut belt_id_opt = None;
+            if let Some(ast) = st.asteroids.get_mut(&asteroid_id) {
+                ast.remaining_units = remaining_units;
+                ast.depleted = remaining_units == 0;
+                if remaining_units == 0 {
+                    belt_id_opt = Some(ast.belt_id);
+                }
             }
-        }
-        if let Some(belt_id) = belt_id_opt {
-            let belt_fully_depleted = st
-                .asteroids
-                .values()
-                .filter(|a| a.belt_id == belt_id)
-                .all(|a| a.remaining_units == 0);
-            if belt_fully_depleted {
-                for belt_ast in st.asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
-                    belt_ast.respawn_at_tick = Some(due_unix_on_belt_empty);
+            if let Some(belt_id) = belt_id_opt {
+                let belt_fully_depleted = st
+                    .asteroids
+                    .values()
+                    .filter(|a| a.belt_id == belt_id)
+                    .all(|a| a.remaining_units == 0);
+                if belt_fully_depleted {
+                    for belt_ast in st.asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
+                        belt_ast.respawn_at_tick = Some(due_unix_on_belt_empty);
+                    }
                 }
             }
         }
+        self.publish_view();
     }
 
     pub fn try_spawn_ball_with_meta(
@@ -1776,16 +1768,11 @@ impl SystemHandle {
 
     /// Computes live simulation load in this solar system (dynamic balls + weighted active module/repair/anchoring cycles).
     pub fn active_entity_and_cycle_load(&self) -> usize {
-        let dyn_balls = {
-            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count()
-        };
-        let cycle_load = {
-            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-            st.active_module_cycles.len().saturating_mul(2)
-                + st.pending_anchoring_disruptors.len()
-                + st.active_nanite_repairs.len()
-        };
+        let view = self.view();
+        let dyn_balls = view.balls.keys().filter(|&&bid| !view.is_static_ball(bid)).count();
+        let cycle_load = view.active_module_cycles.len().saturating_mul(2)
+            + view.pending_anchoring_disruptor_count
+            + view.active_nanite_repairs.len();
         dyn_balls.saturating_add(cycle_load)
     }
 
@@ -1962,19 +1949,11 @@ impl SystemHandle {
 
     fn read_warp_state_field<T>(
         &self,
-        from_actor: impl FnOnce(&super::types::ActorWarpState) -> T,
+        _from_actor: impl FnOnce(&super::types::ActorWarpState) -> T,
         from_view: impl FnOnce(&super::SystemView) -> T,
     ) -> T {
-        if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= RANK_ACTOR_STATE)
-        {
-            let view = self.view();
-            from_view(&view)
-        } else {
-            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-            from_actor(&st.warp_state)
-        }
+        let view = self.view();
+        from_view(&view)
     }
 
     pub fn set_warp_provenance(&self, ball_id: BallId, provenance: super::WarpProvenance) {
@@ -3085,20 +3064,19 @@ impl SystemHandle {
     }
 
     pub fn has_any_active_nanite_repair_sync(&self, ship_id: BallId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
+        self.view().active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
     }
 
     pub fn is_module_being_nanite_repaired_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_nanite_repairs
+        self.view()
+            .active_nanite_repairs
             .iter()
             .any(|r| r.ship_id == ship_id && r.module_id == module_id)
     }
 
     pub fn has_active_overloaded_cycle_sync(&self, ship_id: BallId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles
+        self.view()
+            .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.is_overloaded)
     }
@@ -3108,8 +3086,8 @@ impl SystemHandle {
         target_ship_id: BallId,
         sde: Option<&eve_sde::SdeRegistry>,
     ) -> Vec<BallId> {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles
+        self.view()
+            .active_module_cycles
             .iter()
             .filter(|c| {
                 c.target_id == Some(target_ship_id)
@@ -3121,23 +3099,28 @@ impl SystemHandle {
     }
 
     pub fn has_active_industrial_core_sync(&self, ship_id: BallId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles.iter().any(|c| {
+        self.view().active_module_cycles.iter().any(|c| {
             c.ship_id == ship_id
                 && matches!(c.module_type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591)
         })
     }
 
     pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let mut cancelled = Vec::new();
-        let all = std::mem::take(&mut st.active_nanite_repairs);
-        for job in all {
-            if job.ship_id == ship_id {
-                cancelled.push(job);
-            } else {
-                st.active_nanite_repairs.push(job);
+        let cancelled = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let mut cancelled = Vec::new();
+            let all = std::mem::take(&mut st.active_nanite_repairs);
+            for job in all {
+                if job.ship_id == ship_id {
+                    cancelled.push(job);
+                } else {
+                    st.active_nanite_repairs.push(job);
+                }
             }
+            cancelled
+        };
+        if !cancelled.is_empty() {
+            self.publish_view();
         }
         cancelled
     }

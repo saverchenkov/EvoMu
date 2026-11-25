@@ -364,13 +364,14 @@ pub fn on_decloaked_relay_attacked_sync(
     };
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let drifter_meta = build_wh_npc_slim_meta(&ctx.sde, drifter_tid, 500_024, sde_type.group_id);
-    sys_handle.try_spawn_ball_with_meta(ball, cs, drifter_meta);
-    sys_handle
-        .actor_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .base_core_strengths
-        .insert(drifter_bid, 3);
+    if let Err(err) = sys_handle.spawn_ball_with_meta_sync(ball, cs, drifter_meta) {
+        tracing::warn!(
+            solar_system_id,
+            drifter_bid,
+            error = %err,
+            "spawn_ball_with_meta_sync failed for wormhole drifter escalation"
+        );
+    }
 
     let dmg_mult = attr(64).unwrap_or(0.0);
     let mut entity = ExtendedNpcEntity {

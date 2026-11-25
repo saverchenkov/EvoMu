@@ -385,6 +385,8 @@ enum PatternKind {
     SlashCommandPrefixParse,
     RouterBindingGraceHelpers,
     BallparkLocksOutsideSystemActor,
+    ActorStateLocksOutsideSystemActor,
+    SystemHandleSyncLockHelpers,
     HandwrittenItemChangeEmitters,
     HandwrittenAccountChangeEmitters,
     SystemTimeNowInGameplay,
@@ -422,6 +424,8 @@ impl PatternKind {
         Self::SlashCommandPrefixParse,
         Self::RouterBindingGraceHelpers,
         Self::BallparkLocksOutsideSystemActor,
+        Self::ActorStateLocksOutsideSystemActor,
+        Self::SystemHandleSyncLockHelpers,
         Self::HandwrittenItemChangeEmitters,
         Self::HandwrittenAccountChangeEmitters,
         Self::SystemTimeNowInGameplay,
@@ -459,6 +463,8 @@ impl PatternKind {
             Self::SlashCommandPrefixParse => "slash_command_prefix_parse",
             Self::RouterBindingGraceHelpers => "router_binding_grace_helpers",
             Self::BallparkLocksOutsideSystemActor => "ballpark_locks_outside_system_actor",
+            Self::ActorStateLocksOutsideSystemActor => "actor_state_locks_outside_system_actor",
+            Self::SystemHandleSyncLockHelpers => "system_handle_sync_lock_helpers",
             Self::HandwrittenItemChangeEmitters => "handwritten_item_change_emitters",
             Self::HandwrittenAccountChangeEmitters => "handwritten_account_change_emitters",
             Self::SystemTimeNowInGameplay => "system_time_now_in_gameplay",
@@ -522,6 +528,12 @@ impl PatternKind {
             Self::SlashCommandPrefixParse
             | Self::RouterBindingGraceHelpers
             | Self::BallparkLocksOutsideSystemActor => None,
+            Self::ActorStateLocksOutsideSystemActor => {
+                Some(r"\bactor_state\s*\.\s*(?:read|write|try_read|try_write|lock)\s*\(")
+            }
+            Self::SystemHandleSyncLockHelpers => {
+                Some(r"\b(?:ballpark|actor_state)\s*\.\s*(?:read|write|try_read|try_write|lock)\s*\(")
+            }
             Self::HandwrittenItemChangeEmitters => Some(
                 r"\b(?:(?:notify_item_mutation|emit_inv_item_change|emit_inv_item_deleted|emit_item_change_routed|emit_item_deleted_routed|notify_item_record_change|emit_market_item_change|emit_ship_charge_item_diffs|notify_item_change|emit_item_change_with_industry_refresh|notify_item_record_change_with_target|notify_fitted_item_trashed|emit_item_change_with_target|emit_item_changes|emit_item_changes_with_sink|emit_store_item_mutations|emit_mission_item_reward_notification)\s*\(|(?:OnItemChange|OnMultipleItemChange|OnBlueprintsUpdated)\s*\{)",
             ),
@@ -608,6 +620,28 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
                     &[b"read", b"write", b"try_read", b"try_write", b"lock"],
                 )
             }
+        }
+        PatternKind::ActorStateLocksOutsideSystemActor => {
+            if rel_key.contains("system_actor") {
+                0
+            } else {
+                count_word_dot_method_lparen(
+                    text,
+                    "actor_state",
+                    &[b"read", b"write", b"try_read", b"try_write", b"lock"],
+                )
+            }
+        }
+        PatternKind::SystemHandleSyncLockHelpers => {
+            count_word_dot_method_lparen(
+                text,
+                "ballpark",
+                &[b"read", b"write", b"try_read", b"try_write", b"lock"],
+            ) + count_word_dot_method_lparen(
+                text,
+                "actor_state",
+                &[b"read", b"write", b"try_read", b"try_write", b"lock"],
+            )
         }
         PatternKind::HandwrittenItemChangeEmitters => {
             if rel_key.contains("router/delta_") {

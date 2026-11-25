@@ -97,16 +97,19 @@ async fn ewar_immunity_ecm_taunt_victim_resolution_and_aggression_timers() {
     assert!(!is_target_immune_to_drone_ewar(&ctx, &sys_handle, other_ship, 587).await);
 
     // Active module cycle with self_ewar_immune
-    {
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id: other_ship,
-            self_ewar_immune: true,
-            ..Default::default()
-        });
-    }
+    sys_handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id: other_ship,
+                self_ewar_immune: true,
+                ..Default::default()
+            });
+        })
+        .await;
     assert!(is_target_immune_to_drone_ewar(&ctx, &sys_handle, other_ship, 587).await);
-    sys_handle.actor_state.write().unwrap().active_module_cycles.clear();
+    sys_handle
+        .test_with_actor_state_mut_async(|st| st.active_module_cycles.clear())
+        .await;
 
     // Active Bastion module (33400) on ship in DB
     ctx.db.with_mut_snapshot(|snap| {

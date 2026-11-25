@@ -31,14 +31,7 @@ pub(crate) async fn is_target_immune_to_drone_ewar(
             return true;
         }
     }
-    if sys_handle
-        .actor_state
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .active_module_cycles
-        .iter()
-        .any(|c| c.ship_id == target_id && c.self_ewar_immune)
-    {
+    if sys_handle.has_self_ewar_immune_cycle(target_id) {
         return true;
     }
 
@@ -329,15 +322,7 @@ pub(crate) async fn apply_drone_web_cycle(
     {
         return false;
     }
-    sys_handle
-        .actor_state
-        .read()
-        .map(|st| {
-            st.active_module_cycles.iter().any(|c| {
-                c.ship_id == d.ball_id && c.module_id == synth_id && c.target_id == Some(target_id)
-            })
-        })
-        .unwrap_or(false)
+    sys_handle.has_active_module_cycle_on_target(d.ball_id, synth_id, target_id)
 }
 
 /// Atomically reconciles an engaged drone's post-cycle state without overwriting concurrent
