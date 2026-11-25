@@ -2819,13 +2819,13 @@ async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_
             })
             .expect("commit 2");
 
-        // Replaced via emit_inv_item_change (inventory_bound wrapper)
+        // Replaced via emit_item_change_routed (same routed path)
         let site_inv_mut = format!("{file_norm}:{}", line!() + 1);
-        crate::services::inventory_bound::emit_inv_item_change(&ctx, pilot_id, &item_inv_mut, vec![(3, PyRep::Integer(0))]);
+        ctx.emit_item_change_routed(pilot_id, &item_inv_mut, vec![(3, PyRep::Integer(0))]);
 
-        // Replaced via emit_inv_item_deleted (inventory_bound wrapper)
+        // Replaced via emit_item_deleted_routed (same routed path)
         let site_inv_del = format!("{file_norm}:{}", line!() + 1);
-        crate::services::inventory_bound::emit_inv_item_deleted(&ctx, pilot_id, &item_inv_del);
+        ctx.emit_item_deleted_routed(pilot_id, &item_inv_del);
 
         // Replaced via notify_item_mutation
         let site_mut_helper = format!("{file_norm}:{}", line!() + 1);

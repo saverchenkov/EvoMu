@@ -326,7 +326,7 @@ pub(crate) fn handle_structure_deliver(ctx: &ServerContext, session: &mut Sessio
     if item_ids.iter().any(|&item_id| session.ship_id == Some(item_id)) {
         return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
     }
-    let mutations = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         for &item_id in &item_ids {
             if snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
                 return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
@@ -349,22 +349,15 @@ pub(crate) fn handle_structure_deliver(ctx: &ServerContext, session: &mut Sessio
                 return Err(err("CannotDeliverNonEmptyContainer", format!("Item {item_id} contains nested items and must be repackaged or emptied before delivery")));
             }
         }
-        let mut mutations = Vec::with_capacity(item_ids.len());
         for &item_id in &item_ids {
             if let Some(it) = snap.items.get_mut(&item_id) {
-                let pre = it.clone();
                 it.owner_id = recipient_id;
                 it.flag = InventoryFlag::Deliveries;
                 it.version += 1;
-                let post = it.clone();
-                mutations.push((pre, post));
             }
         }
-        Ok(mutations)
+        Ok(())
     })?;
-    for (pre, post) in &mutations {
-        ctx.notify_item_mutation(char_id, Some(pre), Some(post));
-    }
     Ok(PyRep::None)
 }
 

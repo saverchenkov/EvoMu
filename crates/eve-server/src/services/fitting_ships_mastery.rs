@@ -1570,23 +1570,19 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         client_error: None,
                     });
                 }
-                let old_loc = it.location_id;
-                let old_flag = it.flag as i64;
                 it.location_id = sys_id as i64;
                 it.flag = InventoryFlag::None;
                 it.singleton = true;
                 it.version += 1;
-                let moved_item = it.clone();
                 snap.item_positions.insert(item_id, [launch_pos.x, launch_pos.y, launch_pos.z]);
                 if is_ship {
                     crate::sp6_lifecycle::enter_space_in_snap(snap, item_id, sys_id);
                 }
-                Ok((old_loc, old_flag, moved_item))
+                Ok(())
             });
-            let (old_loc, old_flag, moved_item) = match res {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
             let t_sde = ctx.sde.types.get(&type_id);
             let launched_cs = if is_ship {
                 let mut cs = ctx.build_ship_combat_state(item_owner, item_id, type_id);
@@ -1633,45 +1629,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     type_id: type_id as i64,
                 },
             );
-            let launch_changes = [
-                (3, PyRep::Integer(old_loc)),
-                (4, PyRep::Integer(old_flag)),
-            ];
-            if !ctx.try_consume_projected_item_mutation_with_changes(
-                char_id,
-                &moved_item,
-                &launch_changes,
-                "LaunchFromContainer",
-            ) {
-                let (group_id, category_id) = ctx
-                    .sde
-                    .types
-                    .get(&type_id)
-                    .map(|t| (t.group_id, t.category_id))
-                    .unwrap_or((0, 0));
-                ctx.emit_typed_checked(
-                    crate::router::NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::OnItemChange {
-                        item: PyRep::keyval([
-                            ("itemID", PyRep::Integer(item_id)),
-                            ("typeID", PyRep::Integer(type_id as i64)),
-                            ("ownerID", PyRep::Integer(item_owner)),
-                            ("locationID", PyRep::Integer(sys_id as i64)),
-                            ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
-                            ("quantity", PyRep::Integer(-1)),
-                            ("groupID", PyRep::Integer(i64::from(group_id))),
-                            ("categoryID", PyRep::Integer(i64::from(category_id))),
-                            ("singleton", PyRep::Bool(true)),
-                        ]),
-                        change: PyRep::Dict(vec![
-                            (PyRep::Integer(3), PyRep::Integer(old_loc)),
-                            (PyRep::Integer(4), PyRep::Integer(old_flag)),
-                        ]),
-                        location: PyRep::None,
-                    },
-                    "LaunchFromContainer",
-                );
-            }
             Some(Ok(PyRep::keyval([
                 ("launchedItemID", PyRep::Integer(item_id)),
                 ("typeID", PyRep::Integer(type_id as i64)),

@@ -647,8 +647,7 @@ fn handle_take_offer(
             (rem, current_lp)
         };
 
-        // Consume required items strictly from pre-verified unlocked matching items and capture deltas for post-commit notifications
-        let mut item_mutations: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)> = Vec::new();
+        // Consume required items strictly from pre-verified unlocked matching items
         for (mut remaining, candidate_ids) in unlocked_tradein_ids_per_req {
             for iid in candidate_ids {
                 if remaining <= 0 {
@@ -667,8 +666,6 @@ fn handle_take_offer(
                 opts.reject_blueprint_copy = true;
                 opts.active_ship_id = Some(ch.active_ship_id);
                 if snap.consume_exact_item_quantity(iid, take, opts).is_ok() {
-                    let post_item = snap.items.get(&iid).cloned();
-                    item_mutations.push((Some(pre_item), post_item));
                     remaining -= take;
                 }
             }
@@ -753,8 +750,7 @@ fn handle_take_offer(
                     blueprint_runs_remaining: Some(bpc_runs),
                     ..Default::default()
                 };
-                snap.items.insert(new_item_id, granted_item.clone());
-                item_mutations.push((None, Some(granted_item)));
+                snap.items.insert(new_item_id, granted_item);
             }
             (first_id, qty_i32)
         } else {
@@ -771,19 +767,15 @@ fn handle_take_offer(
                 version: 1,
                 ..Default::default()
             };
-            snap.items.insert(new_item_id, granted_item.clone());
-            item_mutations.push((None, Some(granted_item)));
+            snap.items.insert(new_item_id, granted_item);
             (new_item_id, total_items_qty)
         };
 
-        Ok((first_item_id, offer.type_id, delivered_qty, rem_lp, bal_after, lp_before, ch.corporation_id, item_mutations))
+        Ok((first_item_id, offer.type_id, delivered_qty, rem_lp, bal_after, lp_before, ch.corporation_id))
     });
 
     match res {
-        Ok((item_id, type_id, qty_delivered, rem_lp, bal_after, lp_before, corp_id, item_mutations)) => {
-            for (pre_item, post_item) in &item_mutations {
-                ctx.notify_item_mutation(char_id, pre_item.as_ref(), post_item.as_ref());
-            }
+        Ok((item_id, type_id, qty_delivered, rem_lp, bal_after, lp_before, corp_id)) => {
             if !is_corp_take
                 && offer.corp_id == crate::services::lp_store_catalog::PARAGON_CORP_ID
             {

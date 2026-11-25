@@ -6,7 +6,7 @@
 use super::{contract_legacy_bid_div, rpc_err};
 use crate::domain::market_acl::ContractAvailability;
 use crate::router::{NotificationTarget, RpcArgs, ServerContext};
-use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, TypeId, WorldStateSnapshot};
+use eve_db::{ContractRecord, InventoryFlag, IskCents, TypeId, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
@@ -142,118 +142,10 @@ pub(crate) fn emit_contract_terminal_notifications(
     }
 }
 
-pub(crate) struct ContractResolvedNotifications {
-    fallback_char: i64,
-    item_diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>,
-}
-
-impl ContractResolvedNotifications {
-    pub(crate) fn emit(self, ctx: &ServerContext) {
-        for (pre, post) in self.item_diffs {
-            ctx.notify_item_mutation(self.fallback_char, pre.as_ref(), post.as_ref());
-        }
-    }
-}
-
-pub(crate) struct ContractNotifyDelta {
-    fallback_char: i64,
-    pre_next_entity_id: i64,
-    items_before: HashMap<i64, InventoryItemRecord>,
-}
-
-impl ContractNotifyDelta {
-    pub(crate) fn capture(
-        snap: &WorldStateSnapshot,
-        fallback_char: i64,
-        contract_id: i64,
-        _owner_ids: &[i64],
-        station_ids: &[i64],
-        extra_item_ids: &[i64],
-    ) -> Self {
-        let mut items_before = HashMap::new();
-        let mut root_ids: Vec<i64> = extra_item_ids.to_vec();
-        for &iid in extra_item_ids {
-            if let Some(it) = snap.items.get(&iid) {
-                items_before.insert(iid, it.clone());
-            }
-        }
-        for (&iid, it) in &snap.items {
-            if (contract_id > 0 && it.location_id == contract_id)
-                || station_ids.contains(&it.location_id)
-            {
-                items_before.insert(iid, it.clone());
-                if contract_id > 0 && it.location_id == contract_id {
-                    root_ids.push(iid);
-                }
-            }
-        }
-        for child_id in snap.collect_item_descendants_many(&root_ids) {
-            if let Some(it) = snap.items.get(&child_id) {
-                items_before.insert(child_id, it.clone());
-            }
-        }
-        Self {
-            fallback_char,
-            pre_next_entity_id: snap.next_entity_id,
-            items_before,
-        }
-    }
-
-    pub(crate) fn item_changed(a: &InventoryItemRecord, b: &InventoryItemRecord) -> bool {
-        a.owner_id != b.owner_id
-            || a.location_id != b.location_id
-            || a.flag != b.flag
-            || a.quantity != b.quantity
-            || a.singleton != b.singleton
-            || a.type_id != b.type_id
-    }
-
-    pub(crate) fn finish(self, snap: &WorldStateSnapshot) -> ContractResolvedNotifications {
-        let mut item_diffs = Vec::new();
-        for (iid, pre) in &self.items_before {
-            match snap.items.get(iid) {
-                None => item_diffs.push((Some(pre.clone()), None)),
-                Some(post) if Self::item_changed(pre, post) => {
-                    item_diffs.push((Some(pre.clone()), Some(post.clone())));
-                }
-                _ => {}
-            }
-        }
-        for (&iid, post) in &snap.items {
-            if iid > self.pre_next_entity_id
-                && iid <= snap.next_entity_id
-                && !self.items_before.contains_key(&iid)
-            {
-                item_diffs.push((None, Some(post.clone())));
-            }
-        }
-        ContractResolvedNotifications {
-            fallback_char: self.fallback_char,
-            item_diffs,
-        }
-    }
-}
-
 fn is_contract_due(c: &ContractRecord, now_unix: u64) -> bool {
     matches!(c.status.as_str(), "Outstanding" | "InProgress")
         && c.expiration_unix > 0
         && now_unix >= c.expiration_unix
-}
-
-fn collect_contract_wrap_extra(snap: &WorldStateSnapshot, c: &ContractRecord) -> Vec<i64> {
-    let mut extra = c.item_ids.clone();
-    let mut wrap_ids: Vec<i64> = snap
-        .items
-        .iter()
-        .filter(|(_, it)| {
-            c.item_ids
-                .iter()
-                .any(|iid| snap.items.get(iid).is_some_and(|ci| ci.location_id == it.item_id))
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    extra.append(&mut wrap_ids);
-    extra
 }
 
 /// Lazily resolves any due contracts in `cids` (or all due contracts if `cids` is `None`)
@@ -295,31 +187,16 @@ pub(crate) fn lazy_resolve_expired_and_notify(
             let Some(c_snap) = snap.contracts.get(&cid).cloned() else {
                 continue;
             };
-            let extra = collect_contract_wrap_extra(snap, &c_snap);
-            let delta = ContractNotifyDelta::capture(
-                snap,
-                c_snap.issuer_id,
-                cid,
-                &[
-                    c_snap.issuer_id,
-                    c_snap.issuer_corp_id,
-                    c_snap.acceptor_id.unwrap_or(0),
-                    c_snap.current_bidder_id.unwrap_or(0),
-                ],
-                &[c_snap.start_station_id, c_snap.end_station_id],
-                &extra,
-            );
             let party_chars = collect_contract_notify_chars(snap, &c_snap);
             if let Some(new_state) = snap.resolve_expired_contract(cid, now_unix) {
-                events.push((cid, new_state, party_chars, delta.finish(snap)));
+                events.push((cid, new_state, party_chars));
             }
         }
         events
     });
 
     let mut summary = Vec::with_capacity(resolved.len());
-    for (cid, new_state, party_chars, notify_delta) in resolved {
-        notify_delta.emit(ctx);
+    for (cid, new_state, party_chars) in resolved {
         emit_contract_terminal_notifications(ctx, &party_chars, new_state, cid);
         summary.push((cid, new_state));
     }
@@ -693,7 +570,7 @@ pub(crate) fn handle_place_bid(
         ));
     }
 
-    let (new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id, transferred_ids, notify_delta) =
+    let (new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id, transferred_ids) =
         ctx.db.try_with_mut_snapshot(|snap| {
             let Some(c) = snap.contracts.get(&cid).cloned() else {
                 return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
@@ -832,20 +709,6 @@ pub(crate) fn handle_place_bid(
                 }
             }
 
-            let bid_delta = ContractNotifyDelta::capture(
-                snap,
-                char_id,
-                cid,
-                &[
-                    char_id,
-                    effective_caller_corp,
-                    c.issuer_id,
-                    c.issuer_corp_id,
-                    c.current_bidder_id.unwrap_or(0),
-                ],
-                &[c.start_station_id],
-                &c.item_ids,
-            );
             let prev_bidder_opt = c.current_bidder_id;
             if let Some(prev_bidder) = prev_bidder_opt {
                 if c.current_bid.0 > 0 {
@@ -938,8 +801,7 @@ pub(crate) fn handle_place_bid(
                     c_mut.acceptor_id = Some(bidder_entity_id);
                     c_mut.status = "Completed".into();
                 }
-                let notify_delta = bid_delta.finish(snap);
-                return Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, transferred_ids, notify_delta));
+                return Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, transferred_ids));
             }
 
             if let Some(c_mut) = snap.contracts.get_mut(&cid) {
@@ -947,11 +809,9 @@ pub(crate) fn handle_place_bid(
                 c_mut.current_bidder_id = Some(bidder_entity_id);
                 c_mut.bid_history.push((bidder_entity_id, effective_bid, now_unix));
             }
-            let notify_delta = bid_delta.finish(snap);
-            Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, Vec::new(), notify_delta))
+            Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, Vec::new()))
         })?;
 
-    notify_delta.emit(ctx);
     if !transferred_ids.is_empty() {
         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
         for &tid in &transferred_ids {
@@ -986,7 +846,7 @@ pub(crate) fn handle_gm_expire_contract(
     let rpc = RpcArgs::new(args, kwargs);
     let cid = rpc.req_positive_i64(0, "contractID")?;
     let now_unix = ctx.now_unix();
-    let (new_status, party_chars, notify_delta) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (new_status, party_chars) = ctx.db.try_with_mut_snapshot(|snap| {
         let effective_role = snap
             .accounts
             .values()
@@ -1014,31 +874,15 @@ pub(crate) fn handle_gm_expire_contract(
             .get(&cid)
             .cloned()
             .ok_or_else(|| rpc_err("ContractNotFound", format!("Contract {cid} does not exist")))?;
-        let expire_extra = collect_contract_wrap_extra(snap, &c_snap);
-        let expire_delta = ContractNotifyDelta::capture(
-            snap,
-            c_snap.issuer_id,
-            cid,
-            &[
-                c_snap.issuer_id,
-                c_snap.issuer_corp_id,
-                c_snap.acceptor_id.unwrap_or(0),
-                c_snap.current_bidder_id.unwrap_or(0),
-            ],
-            &[c_snap.start_station_id, c_snap.end_station_id],
-            &expire_extra,
-        );
         let party_chars = collect_contract_notify_chars(snap, &c_snap);
         let Some(c_mut) = snap.contracts.get_mut(&cid) else {
             return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
         };
         c_mut.expiration_unix = 1;
         let resolved = snap.resolve_expired_contract(cid, now_unix).unwrap_or("Expired");
-        let notify_delta = expire_delta.finish(snap);
-        Ok((resolved, party_chars, notify_delta))
+        Ok((resolved, party_chars))
     })?;
 
-    notify_delta.emit(ctx);
     emit_contract_terminal_notifications(ctx, &party_chars, new_status, cid);
     Ok(PyRep::keyval([
         ("contractID", PyRep::Integer(cid)),
@@ -1064,7 +908,7 @@ pub(crate) fn handle_break_plastic_wrap_rpc(
         }
     };
     let now_unix = ctx.now_unix();
-    let (cid, issuer_id, party_chars, extracted, transferred_ids, notify_delta) =
+    let (cid, issuer_id, party_chars, extracted, transferred_ids) =
         ctx.db.try_with_mut_snapshot(|snap| {
             let wrap_item_ids: Vec<(i64, i64)> = snap
                 .items
@@ -1072,13 +916,6 @@ pub(crate) fn handle_break_plastic_wrap_rpc(
                 .filter(|it| it.location_id == wrap_id)
                 .map(|it| (it.item_id, it.owner_id))
                 .collect();
-            let mut break_extra = vec![wrap_id];
-            break_extra.extend(wrap_item_ids.iter().map(|(iid, _)| *iid));
-            let mut break_owners: Vec<i64> = snap
-                .items
-                .get(&wrap_id)
-                .map(|w| vec![char_id, w.owner_id])
-                .unwrap_or_else(|| vec![char_id]);
             let matching_c = snap
                 .contracts
                 .values()
@@ -1092,14 +929,6 @@ pub(crate) fn handle_break_plastic_wrap_rpc(
                 .as_ref()
                 .map(|mc| collect_contract_notify_chars(snap, mc))
                 .unwrap_or_default();
-            if let Some(mc) = &matching_c {
-                break_owners.push(mc.issuer_id);
-                break_owners.push(mc.issuer_corp_id);
-                if let Some(aid) = mc.acceptor_id {
-                    break_owners.push(aid);
-                }
-            }
-            let break_delta = ContractNotifyDelta::capture(snap, char_id, 0, &break_owners, &[], &break_extra);
             let (cid, issuer_id, extracted) =
                 super::break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
             let transferred_ids: Vec<i64> = wrap_item_ids
@@ -1111,11 +940,9 @@ pub(crate) fn handle_break_plastic_wrap_rpc(
                         .then_some(iid)
                 })
                 .collect();
-            let notify_delta = break_delta.finish(snap);
-            Ok((cid, issuer_id, party_chars, extracted, transferred_ids, notify_delta))
+            Ok((cid, issuer_id, party_chars, extracted, transferred_ids))
         })?;
 
-    notify_delta.emit(ctx);
     if !transferred_ids.is_empty() {
         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
     }
@@ -1187,7 +1014,7 @@ pub(crate) fn handle_reject_delete_fail(
         }
     }
 
-    let (new_status, party_chars, notify_delta) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (new_status, party_chars) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(c) = snap.contracts.get(&cid).cloned() else {
             return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
         };
@@ -1202,22 +1029,6 @@ pub(crate) fn handle_reject_delete_fail(
             .map(|ch| ch.corporation_id)
             .filter(|&id| id != 0)
             .unwrap_or(caller_corp);
-        let resolve_extra = collect_contract_wrap_extra(snap, &c);
-        let resolve_delta = ContractNotifyDelta::capture(
-            snap,
-            char_id,
-            cid,
-            &[
-                char_id,
-                effective_corp,
-                c.issuer_id,
-                c.issuer_corp_id,
-                c.acceptor_id.unwrap_or(0),
-                c.current_bidder_id.unwrap_or(0),
-            ],
-            &[c.start_station_id, c.end_station_id],
-            &resolve_extra,
-        );
         let party_chars = collect_contract_notify_chars(snap, &c);
         let has_caller_corp_contract_role = has_corp_contract_role(snap, char_id, effective_corp, now_unix);
 
@@ -1243,7 +1054,7 @@ pub(crate) fn handle_reject_delete_fail(
             if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                 c_mut.status = "Rejected".into();
             }
-            return Ok(("Rejected", vec![c.issuer_id], resolve_delta.finish(snap)));
+            return Ok(("Rejected", vec![c.issuer_id]));
         }
 
         let can_manage_as_issuer = c.issuer_id == char_id
@@ -1267,7 +1078,7 @@ pub(crate) fn handle_reject_delete_fail(
             ));
         }
         if let Some(new_state) = snap.resolve_expired_contract(cid, now_unix) {
-            return Ok((new_state, party_chars, resolve_delta.finish(snap)));
+            return Ok((new_state, party_chars));
         }
         if method == "DeleteContract" {
             if !can_manage_as_issuer {
@@ -1300,10 +1111,10 @@ pub(crate) fn handle_reject_delete_fail(
             if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                 c_mut.status = "Deleted".into();
             }
-            return Ok(("Deleted", Vec::new(), resolve_delta.finish(snap)));
+            return Ok(("Deleted", Vec::new()));
         }
         if c.status == "Failed" && c.contract_type == "Courier" && c.expiration_unix > 0 && c.expiration_unix <= now_unix {
-            return Ok(("Failed", Vec::new(), resolve_delta.finish(snap)));
+            return Ok(("Failed", Vec::new()));
         }
         if c.status != "InProgress" {
             return Err(eve_proto::BridgeRpcError::invalid_contract_state(
@@ -1321,10 +1132,9 @@ pub(crate) fn handle_reject_delete_fail(
             ));
         }
         snap.fail_courier_contract(cid, now_unix);
-        Ok(("Failed", party_chars, resolve_delta.finish(snap)))
+        Ok(("Failed", party_chars))
     })?;
 
-    notify_delta.emit(ctx);
     if new_status != "Deleted" && !party_chars.is_empty() {
         emit_contract_terminal_notifications(ctx, &party_chars, new_status, cid);
     }

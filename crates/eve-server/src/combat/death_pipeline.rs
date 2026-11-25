@@ -2011,18 +2011,14 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
     let Some(d) = removed_drone else {
         return false;
     };
-    let removed_item = ctx.db.with_mut_snapshot(|snap| {
-        let item = snap.items.remove(&d.drone_item_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&d.drone_item_id);
         snap.item_positions.remove(&d.ball_id);
         snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
-        item
     });
     let _ = sys_handle.clear_drone_runtime_sync(ball_id);
     sys_handle.try_remove_ball(ball_id);
     if d.owner_char_id > 0 {
-        if let Some(ref old_item) = removed_item {
-            ctx.emit_item_deleted_routed(d.owner_char_id, old_item);
-        }
         if let Some(scene) = BallparkScene::try_solar_system(sys_handle.solar_system_id) {
             ctx.emit_typed(
                 NotificationTarget::Character(d.owner_char_id),

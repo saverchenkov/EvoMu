@@ -175,7 +175,7 @@ pub(super) async fn handle_loot_all(
         .get_or_create(wreck_item.owner_id)
         .is_criminal(now_unix);
 
-    let (looted_ids, remaining_ids, suspect_triggered, is_abandoned, item_mutations, looter_corp_id) =
+    let (looted_ids, remaining_ids, suspect_triggered, is_abandoned) =
         ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get(&char_id) {
             let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
@@ -257,8 +257,6 @@ pub(super) async fn handle_loot_all(
 
         let mut looted = Vec::new();
         let mut remaining = Vec::new();
-        let mut item_mutations: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>, bool)> =
-            Vec::new();
         for cid in wreck_children {
             let Some(child) = snap.items.get(&cid).cloned() else {
                 continue;
@@ -282,7 +280,6 @@ pub(super) async fn handle_loot_all(
                     c_mut.owner_id = char_id;
                     c_mut.flag = InventoryFlag::Cargo;
                     c_mut.version += 1;
-                    item_mutations.push((Some(child), Some(c_mut.clone()), false));
                 }
                 looted.push(cid);
             } else {
@@ -292,7 +289,6 @@ pub(super) async fn handle_loot_all(
                     if let Some(c_mut) = snap.items.get_mut(&cid) {
                         c_mut.quantity -= max_units;
                         c_mut.version += 1;
-                        item_mutations.push((Some(child.clone()), Some(c_mut.clone()), true));
                     }
                     snap.next_entity_id += 1;
                     let split_id = snap.next_entity_id;
@@ -311,14 +307,13 @@ pub(super) async fn handle_loot_all(
                         is_blueprint_copy: child.is_blueprint_copy,
                         blueprint_runs_remaining: child.blueprint_runs_remaining,
                     };
-                    snap.items.insert(split_id, split_rec.clone());
-                    item_mutations.push((None, Some(split_rec), false));
+                    snap.items.insert(split_id, split_rec);
                     looted.push(split_id);
                 }
                 remaining.push(cid);
             }
         }
-        Ok((looted, remaining, needs_suspect, is_abandoned, item_mutations, c1))
+        Ok((looted, remaining, needs_suspect, is_abandoned))
     })?;
 
     if suspect_triggered {
@@ -328,31 +323,6 @@ pub(super) async fn handle_loot_all(
             st.suspect_flag_until_unix = now_unix.saturating_add(900);
         }
         let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
-    }
-
-    for (pre, post, notify_looter_split) in &item_mutations {
-        ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
-        if *notify_looter_split {
-            if let (Some(pre_rec), Some(post_rec)) = (pre.as_ref(), post.as_ref()) {
-                // Match `notify_item_mutation`'s exact recipient resolution (`resolve_item_notification_target`):
-                // non-corp-hangar items with non-character owners (NPC corp, faction, foreign corp) already
-                // route to `char_id` above, so only emit an extra copy when the first one went elsewhere.
-                let (resolved_target, _) = ctx.resolve_item_notification_target(char_id, post_rec);
-                let already_addressed_to_looter = match resolved_target {
-                    NotificationTarget::Character(cid) => cid == char_id,
-                    NotificationTarget::Corporation(corp_id) => looter_corp_id == Some(corp_id),
-                    _ => false,
-                };
-                if !already_addressed_to_looter {
-                    let _ = ctx.notify_item_record_change_with_target(
-                        NotificationTarget::Character(char_id),
-                        "charid",
-                        post_rec,
-                        vec![(9, PyRep::Integer(i64::from(pre_rec.quantity)))],
-                    );
-                }
-            }
-        }
     }
 
     ctx.emit_typed(

@@ -510,10 +510,6 @@ pub fn scan_and_enforce_highsec_contraband(
 
     if char_id > 0 {
         for (pre_item, fine_isk) in confiscated {
-            // Retained for Track 5C: `CmdStargateJump` puts `char_id` into
-            // `prior_transitioned_chars` before calling `check_and_spawn_faction_police`,
-            // suppressing commit projection for contraband confiscated on gate arrival.
-            ctx.notify_item_mutation(char_id, Some(&pre_item), None);
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnRemoteMessage {

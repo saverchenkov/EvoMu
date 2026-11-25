@@ -1805,7 +1805,6 @@ pub(crate) async fn commit_post_cycle_activation_effects(
             );
         }
         for (pre, post) in &item_diffs {
-            ctx.notify_item_mutation(char_id, Some(pre), post.as_ref());
             if matches!(pre.flag as u16, 11..=34 | 125..=132) {
                 crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
                     ctx,

@@ -535,8 +535,9 @@ async fn deliver_login_reward_docked_claim_notification_toggle_and_milestone_sid
         assert!(undocked.expire_date_time.is_some());
     });
 
-    // 2. Docked loginCampaignManager.claim_reward with live_notify_listener = false vs true:
-    //    kills `handle_login_campaign_claim_reward -> Ok(Default::default())` AND `delete !` on `!session.live_notify_listener`.
+    // 2. Docked loginCampaignManager.claim_reward emits commit-driven OnItemChange even when
+    //    session.live_notify_listener = false (no legacy per-session duplicate push).
+    ctx.db.acquire_online_lock(uid1, 1, Some(cid1), true, now).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         snap.seasons_and_campaigns = Default::default();
         if let Some(ch) = snap.characters.get_mut(&cid1) {
@@ -557,8 +558,14 @@ async fn deliver_login_reward_docked_claim_notification_toggle_and_milestone_sid
     assert!(matches!(claim1, PyRep::Tuple(ref parts) if parts.len() == 4));
     let sess_false_notifs = sess_false.drain_notifications();
     assert!(
-        sess_false_notifs.iter().any(|(ev, _)| ev == "OnItemChange"),
-        "when !session.live_notify_listener, session must push OnItemChange"
+        sess_false_notifs.iter().all(|(ev, _)| ev != "OnItemChange"),
+        "session must not push legacy duplicate OnItemChange when !session.live_notify_listener"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(cid1)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "commit-driven projection must emit OnItemChange for docked claim_reward"
     );
 
     let cid2 = 90_990_002_i64;

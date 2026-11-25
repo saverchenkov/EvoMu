@@ -1667,8 +1667,6 @@ fn validate_and_apply_fitting_with_options(
     let mut missing: HashMap<TypeId, i64> = HashMap::new();
     let mut moved_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
     let mut fitted_online_states: HashMap<i64, bool> = HashMap::new();
-    let mut split_source_changes: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)> =
-        Vec::new();
     let mut failed_ship_id: Option<i64> = None;
     let char_skills = ctx.character_skill_levels(char_id);
     let before_attrs_by_ship: HashMap<i64, std::collections::BTreeMap<u16, f64>> = target_ship_ids
@@ -1681,7 +1679,6 @@ fn validate_and_apply_fitting_with_options(
         })
         .collect();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut split_source_pre: BTreeMap<i64, eve_db::InventoryItemRecord> = BTreeMap::new();
         for &ship_id in target_ship_ids {
             let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
             let mut engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, ship_type_id, &ctx.sde)
@@ -1804,11 +1801,6 @@ fn validate_and_apply_fitting_with_options(
                             continue;
                         }
                     } else {
-                        let pre_src = if emit_single_item_change {
-                            snap.items.get(&cid).cloned()
-                        } else {
-                            None
-                        };
                         if snap
                             .consume_exact_item_quantity(
                                 cid,
@@ -1818,9 +1810,6 @@ fn validate_and_apply_fitting_with_options(
                             .is_err()
                         {
                             continue;
-                        }
-                        if let Some(pre) = pre_src {
-                            split_source_pre.entry(cid).or_insert(pre);
                         }
                         snap.next_entity_id += 1;
                         let split_id = snap.next_entity_id;
@@ -1858,85 +1847,31 @@ fn validate_and_apply_fitting_with_options(
                 failed_ship_id = Some(ship_id);
             }
         }
-        if emit_single_item_change {
-            for (cid, pre) in split_source_pre {
-                if !moved_items.iter().any(|m| m.item_id == cid) {
-                    if let Some(post) = snap.items.get(&cid).cloned() {
-                        split_source_changes.push((pre, post));
-                    }
-                }
-            }
-        }
     });
 
     for &ship_id in target_ship_ids {
         ctx.invalidate_ship_fitting(ship_id);
     }
-    if fitted_count > 0 && !moved_items.is_empty() {
-        if emit_single_item_change {
-            let mut single_changes: Vec<(&eve_db::InventoryItemRecord, Vec<(i32, PyRep)>)> =
-                Vec::with_capacity(split_source_changes.len() + moved_items.len());
-            for (pre_src, post_src) in &split_source_changes {
-                let changes = ServerContext::compute_item_change_dict(pre_src, post_src);
-                if !changes.is_empty() {
-                    single_changes.push((post_src, changes));
-                }
-            }
-            for item in &moved_items {
-                single_changes.push((
-                    item,
-                    vec![
-                        (3, PyRep::Integer(station_id)),
-                        (4, PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                    ],
-                ));
-            }
-            for (item, changes) in single_changes {
-                let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                    crate::services::inventory_bound::item_to_packed_cells(ctx, item),
+    if fitted_count > 0 && !moved_items.is_empty() && emit_single_item_change {
+        for item in &moved_items {
+            if let Some(&online) = fitted_online_states.get(&item.item_id) {
+                let group_id = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .map(|t| i64::from(t.group_id))
+                    .unwrap_or(0);
+                ctx.emit_typed(
+                    crate::router::NotificationTarget::Character(char_id),
+                    crate::router::notify_registry::OnModuleFitted {
+                        char_id,
+                        flag: item.flag as i64,
+                        type_id: item.type_id as i64,
+                        group_id,
+                    },
                 );
-                let _ = ctx.notify_item_change(char_id, item_row, changes);
-                if let Some(&online) = fitted_online_states.get(&item.item_id) {
-                    let group_id = ctx
-                        .sde
-                        .types
-                        .get(&item.type_id)
-                        .map(|t| i64::from(t.group_id))
-                        .unwrap_or(0);
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnModuleFitted {
-                            char_id,
-                            flag: item.flag as i64,
-                            type_id: item.type_id as i64,
-                            group_id,
-                        },
-                    );
-                    let _ = ctx.notify_module_online_state(char_id, item.item_id, online);
-                }
+                let _ = ctx.notify_module_online_state(char_id, item.item_id, online);
             }
-        } else {
-            let items_py: Vec<PyRep> = moved_items
-                .iter()
-                .map(|item| {
-                    eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                        crate::services::inventory_bound::item_to_packed_cells(ctx, item),
-                    )
-                })
-                .collect();
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnMultipleItemChange {
-                    items: items_py,
-                    change: PyRep::Dict(vec![
-                        (PyRep::Integer(3), PyRep::Integer(station_id)),
-                        (
-                            PyRep::Integer(4),
-                            PyRep::Integer(eve_db::InventoryFlag::Hangar as i64),
-                        ),
-                    ]),
-                },
-            );
         }
     }
     if fitted_count > 0 {

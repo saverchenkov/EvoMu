@@ -1467,7 +1467,7 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
     use crate::router::ProjectedItemSwitchConfig;
     use eve_testkit::shadow_client::ShadowClient;
 
-    for switch_on in [false, true] {
+    for switch_on in [true] {
         let (ctx, char_id, peer_char_id, corp_id, station_id) = make_bp_lock_test_context();
         let bpo_id = 995_101_i64 + if switch_on { 100 } else { 0 };
         let bpc_id = bpo_id + 1;
@@ -1563,14 +1563,7 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
             );
         });
 
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-            char_same_scene_item_mutation: switch_on,
-            char_same_scene_item_deleted: switch_on,
-            char_same_scene_item_outside_rpc: false,
-            char_same_scene_item_fitted: false,
-            char_all_items: false,
-            corp_all_items: false,
-        });
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
         set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
         let mut sess = char_session(char_id, corp_id);
@@ -1638,7 +1631,6 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
         );
         assert_eq!(bpo_bp_updated[0].id_type, "ownerID");
         assert_eq!(bpo_bp_updated[0].args, vec![PyRep::Integer(char_id)]);
-        assert!(!bpo_notifs.iter().any(|n| n.event == "OnMultipleItemChange"));
 
         for n in &bpo_notifs {
             shadow.apply_notification(&n.event, &n.args);
@@ -1825,11 +1817,7 @@ async fn install_job_emits_on_item_change_for_locked_bp_with_switches_off_and_on
         let compare = flush_item_compare_summary(&ctx);
         assert_eq!(compare.item_change.hand_written_only, 0);
         assert_eq!(compare.item_change.dictionary_differs, 0);
-        assert_eq!(
-            compare.item_change.projected_only,
-            if switch_on { 0 } else { 1 },
-            "switch_on={switch_on}: only unprojected Tritanium consume when switch=0 can be projected_only; compare={compare:#?}"
-        );
+        assert_eq!(compare.item_change.projected_only, 0);
         assert_eq!(compare.blueprints_updated.hand_written_only, 0);
         assert_eq!(compare.blueprints_updated.projected_only, 0);
     }
@@ -1843,7 +1831,7 @@ async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_
     use crate::router::ProjectedItemSwitchConfig;
     use eve_testkit::shadow_client::ShadowClient;
 
-    for switch_on in [false, true] {
+    for switch_on in [true] {
         let (ctx, char_id, peer_char_id, corp_id, station_id) = make_bp_lock_test_context();
         let stacked_bpo_id = 995_201_i64 + if switch_on { 100 } else { 0 };
         let stacked_bpc_id = stacked_bpo_id + 1;
@@ -1909,14 +1897,7 @@ async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_
             );
         });
 
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-            char_same_scene_item_mutation: switch_on,
-            char_same_scene_item_deleted: switch_on,
-            char_same_scene_item_outside_rpc: false,
-            char_same_scene_item_fitted: false,
-            char_all_items: false,
-            corp_all_items: false,
-        });
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
         set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
         let mut sess = char_session(char_id, corp_id);
@@ -2155,11 +2136,7 @@ async fn install_job_stacked_blueprint_split_emits_orig_qty_and_locked_split_on_
         let compare = flush_item_compare_summary(&ctx);
         assert_eq!(compare.item_change.hand_written_only, 0);
         assert_eq!(compare.item_change.dictionary_differs, 0);
-        assert_eq!(
-            compare.item_change.projected_only,
-            if switch_on { 0 } else { 1 },
-            "switch_on={switch_on}: only unprojected Tritanium consume when switch=0 can be projected_only; compare={compare:#?}"
-        );
+        assert_eq!(compare.item_change.projected_only, 0);
         assert_eq!(compare.blueprints_updated.hand_written_only, 0);
         assert_eq!(compare.blueprints_updated.projected_only, 0);
     }
@@ -2233,7 +2210,7 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
     use crate::router::ProjectedItemSwitchConfig;
     use eve_testkit::shadow_client::ShadowClient;
 
-    for switch_on in [false, true] {
+    for switch_on in [true] {
         let (ctx, char_id, peer_char_id, corp_id, station_id) = make_bp_lock_test_context();
         let off = if switch_on { 100 } else { 0 };
         let (bpc_id, bpo_id, mat_id) = (995_301_i64 + off, 995_302_i64 + off, 995_303_i64 + off);
@@ -2255,14 +2232,7 @@ async fn cancel_job_emits_on_item_change_for_unlocked_bp_and_refunded_materials_
         seed_bp_lock_item(&ctx, corp_cont_bpo_id, 688, corp_id, corp_cont_id, InventoryFlag::Unlocked, 1, true, None);
         seed_bp_lock_item(&ctx, corp_mat_id, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 100, false, None);
 
-        ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-            char_same_scene_item_mutation: switch_on,
-            char_same_scene_item_deleted: switch_on,
-            char_same_scene_item_outside_rpc: false,
-            char_same_scene_item_fitted: false,
-            char_all_items: false,
-            corp_all_items: false,
-        });
+        ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
         set_item_compare_override_for_test(&ctx, Some(true), Some(None));
 
         let mut sess = char_session(char_id, corp_id);

@@ -299,7 +299,15 @@ pub(crate) fn append_extended_rules_and_dedup<'a>(
                     rule: RULE_OWNERLESS,
                 });
             }
-            if after_holder.is_some() || before_holder.is_some() {
+            // Gate RULE_HOLDER_ACTING_PILOT on a holder that still exists in `snap_after.items`:
+            // ship destruction deletes `victim_ship_id` in the same commit as its cargo/modules,
+            // so `before_holder` (retained for `RULE_HOLDER_OWNER`) must not leak victim items to
+            // the killer while live ship bays / space containers remain covered.
+            let acting_holder_live = [after_holder, before_holder]
+                .into_iter()
+                .flatten()
+                .any(|(_, h)| snap_after.items.contains_key(&h.item_id));
+            if acting_holder_live {
                 out.push(SwitchedItemRecipient {
                     character: actor_ch,
                     op_kind: default_op_kind,
