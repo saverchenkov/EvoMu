@@ -472,24 +472,24 @@ pub fn check_crimewatch_action_restriction(
                 | "jump_portal"
         ) && !is_capsule
         {
-            let msg = format!(
-                "Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"
-            );
-            return Err(match action {
-                "dock" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantDockGlobalCriminalFlag),
-                "wormhole_jump" | "wh_jump" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CantEnterWormholeGlobalCriminalFlag),
-                "jump_drive" | "jump_bridge" | "jump_portal" => BridgeRpcError {
-                    code: "CantBeaconJumpGlobalCriminalFlag".into(),
-                    message: msg,
-                    client_error: None,
-                },
-                "store_ship" | "switch_ship" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotBoardShipInHighSecAsCriminal),
-                "eject" => BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotEjectInvolvedInCrime),
-                _ => BridgeRpcError {
-                    code: "CantJumpGlobalCriminalFlag".into(),
-                    message: msg,
-                    client_error: None,
-                },
+            const ERR_EJECT_CRIM: &str = "CannotEjectInvolvedInCrime";
+            let mut code = match action {
+                "stargate_jump" => "CantJumpGlobalCriminalFlag",
+                "dock" => "CantDockGlobalCriminalFlag",
+                "wormhole_jump" | "wh_jump" => "CantEnterWormholeGlobalCriminalFlag",
+                "jump_drive" | "jump_bridge" | "jump_portal" => "CantBeaconJumpGlobalCriminalFlag",
+                "store_ship" | "switch_ship" => "CannotBoardShipInHighSecAsCriminal",
+                _ => "CantJumpGlobalCriminalFlag",
+            };
+            if action == "eject" {
+                code = ERR_EJECT_CRIM;
+            }
+            return Err(BridgeRpcError {
+                code: code.into(),
+                message: format!(
+                    "Action '{action}' is blocked by an active high-security criminal timer / CONCORD response"
+                ),
+                client_error: None,
             });
         }
     }
