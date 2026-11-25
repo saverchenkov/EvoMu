@@ -1889,7 +1889,7 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         }
         let ret_full_state = make_drone_state(d_ret_full, d_ret_full, 2_454, char_id, ship_id, sys_id, false, 4);
         let warp_rej_state = make_drone_state(d_warp_rej, d_warp_rej, 2_454, char_id, ship_id, sys_id, false, 4);
-        drone_test_helpers::seed_active_drones(&ctx, [ret_full_state.clone(), warp_rej_state.clone()]);
+        drone_test_helpers::seed_active_drone(&ctx, ret_full_state.clone());
 
         let db_hold = Arc::clone(&ctx.db);
         let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1935,6 +1935,7 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         assert!(ret_notifs.iter().any(|n| n.event == "OnDroneControlLost" && matches!(n.args.first(), Some(PyRep::Integer(id)) if *id == d_ret_full)));
 
         // Clear filler and restore capacity so capacity is NOT the reason for warp/disconnected rejection.
+        drone_test_helpers::seed_active_drone(&ctx, warp_rej_state.clone());
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&bay_filler);
             snap.items
