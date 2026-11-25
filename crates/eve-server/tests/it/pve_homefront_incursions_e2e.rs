@@ -525,7 +525,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
             }
         }
     }
-    activate_drifter_gate_checked(&ctx, &mut sess1, drifter_sys, false).await;
+    activate_drifter_gate_checked(&ctx, &mut sess1, drifter_sys, true).await;
     let warden_id = get_drifter_hive_for_system(&ctx, drifter_sys).unwrap().warden_npc_ball_id;
     let w_tgt = PyRep::Integer(i64::from(drifter_sys));
     fleet_warp_and_engage_ball(

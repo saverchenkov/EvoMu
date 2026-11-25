@@ -818,8 +818,10 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
     kill_npc_with_weapons(&ctx, &mut trig_p, &trig_mods[..4], trig_boss_id, tpos).await;
     assert_eq!(qty_of(&ctx, &mut trig_p.sess, trig_p.ship_id, 48_121 /* Triglavian Survey Database */, None).await, 150);
 
-    common::slash_cmd(&ctx, &mut trig_p.sess, "/tr 30000012").await;
-    ok(&ctx, &mut trig_p.sess, "beyonce", "MachoBindObject", &[int(30_000_012), PyRep::None]).await;
+    let tr_eden_rep = common::slash_cmd(&ctx, &mut trig_p.sess, "/tr 30000012").await;
+    assert!(matches!(tr_eden_rep, PyRep::KeyVal(_) | PyRep::Dict(_)), "/tr 30000012 reply: {tr_eden_rep:?}");
+    let PyRep::Tuple(eden_bound) = ok(&ctx, &mut trig_p.sess, "beyonce", "MachoBindObject", &[int(30_000_012), PyRep::None]).await else { panic!("rebind beyonce for 30000012") };
+    trig_p.beyonce = eden_bound[0].as_i64().unwrap() as u64;
     ok(&ctx, &mut trig_p.sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await;
     let eden_boss_id = 1_897_700_000 + (30_000_012 * 100 + 1);
     let epos = ctx.systems.get_or_spawn(30_000_012).get_ball_snapshot(eden_boss_id).await.unwrap().unwrap().1.position;
