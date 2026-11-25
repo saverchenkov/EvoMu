@@ -54,6 +54,7 @@ fn broadcast_sim_clock_rebase_to_space_chars(
     solar_system_id: SolarSystemId,
     old_sim_ft: i64,
     new_sim_ft: i64,
+    rebase_gen: u64,
 ) {
     // Deliver solar-system TiDi rebases only to online in-space pilots (matching
     // `emit_sim_clock_rebase_if_advanced` in `notify_emitters_tournaments_anomalies`); docked
@@ -79,6 +80,19 @@ fn broadcast_sim_clock_rebase_to_space_chars(
     };
     in_space_chars.sort_unstable();
     in_space_chars.dedup();
+    if !in_space_chars.is_empty() {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if cn.rebase_generation_by_system.get(&solar_system_id).copied() == Some(rebase_gen) {
+            for &char_id in &in_space_chars {
+                cn.char_rebased_system_gen
+                    .insert(char_id, (solar_system_id, rebase_gen));
+            }
+        }
+    }
     // parity: notify:DoSimClockRebase
     for &char_id in &in_space_chars {
         ctx.emit_typed_with_id_type(
@@ -101,7 +115,7 @@ fn broadcast_sim_clock_rebase_to_space_chars(
 
 fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, old_factor: f64, new_factor: f64) {
     let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
-    let (old_sim_ft, new_sim_ft) = {
+    let (old_sim_ft, new_sim_ft, rebase_gen) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
@@ -138,6 +152,7 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
         }
         let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
         *gen = gen.saturating_add(1);
+        let committed_gen = *gen;
         let prev_act = cn
             .last_sim_activation_ft_by_system
             .get(&solar_system_id)
@@ -145,9 +160,15 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
             .unwrap_or(0);
         cn.last_sim_activation_ft_by_system
             .insert(solar_system_id, new_ft.max(prev_act));
-        (old_ft, new_ft)
+        (old_ft, new_ft, committed_gen)
     };
-    broadcast_sim_clock_rebase_to_space_chars(ctx, solar_system_id, old_sim_ft, new_sim_ft);
+    broadcast_sim_clock_rebase_to_space_chars(
+        ctx,
+        solar_system_id,
+        old_sim_ft,
+        new_sim_ft,
+        rebase_gen,
+    );
 }
 
 /// Emits `DoSimClockRebase((oldSimTime, newSimTime))` **once** directly to `char_id` on login
@@ -263,7 +284,13 @@ pub fn sync_jump_clock_and_emit_rebase_if_needed(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let from_anchor = cn.sim_clock_anchoring.get(&from_sys).copied();
-        let jump_anchor = cn.character_jump_clocks.get(&char_id).copied();
+        let jump_anchor = cn
+            .character_jump_clocks
+            .get(&char_id)
+            .copied()
+            .and_then(|(stored_sys, wall_ft, sim_ft, factor)| {
+                (stored_sys == from_sys).then_some((wall_ft, sim_ft, factor))
+            });
         let cur_sim_ft = if let Some(anchor) = from_anchor.or(jump_anchor) {
             project_anchored_sim_ft(anchor, now_wall_ft)
         } else {
@@ -283,24 +310,26 @@ pub fn sync_jump_clock_and_emit_rebase_if_needed(
                 && (target_sim_ft - cur_sim_ft).abs() >= eve_db::clock::FILETIME_TICKS_PER_MS);
 
         cn.character_jump_clocks
-            .insert(char_id, (now_wall_ft, target_sim_ft, new_factor));
+            .insert(char_id, (to_sys, now_wall_ft, target_sim_ft, new_factor));
         if new_factor < 1.0 - delta {
             cn.sim_clock_anchoring
                 .entry(to_sys)
                 .or_insert((now_wall_ft, target_sim_ft, new_factor));
             cn.tidi_history_systems.insert(to_sys);
         }
-        if emit {
+        if emit || to_anchor.is_some() {
             let gen = *cn.rebase_generation_by_system.entry(to_sys).or_insert(1);
             cn.char_rebased_system_gen.insert(char_id, (to_sys, gen));
-            let prev_act = cn
-                .last_sim_activation_ft_by_system
-                .get(&to_sys)
-                .copied()
-                .unwrap_or(0);
-            if prev_act < target_sim_ft {
-                cn.last_sim_activation_ft_by_system
-                    .insert(to_sys, target_sim_ft);
+            if emit {
+                let prev_act = cn
+                    .last_sim_activation_ft_by_system
+                    .get(&to_sys)
+                    .copied()
+                    .unwrap_or(0);
+                if prev_act < target_sim_ft {
+                    cn.last_sim_activation_ft_by_system
+                        .insert(to_sys, target_sim_ft);
+                }
             }
         } else if cn
             .char_rebased_system_gen
@@ -357,7 +386,7 @@ pub(crate) fn sync_anchored_system_tidi(
     let now_secs = ctx.now_unix() as f64;
     let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
 
-    let (prev_sim_ft, prev_effective_factor, had_override, will_emit) = {
+    let (prev_sim_ft, prev_effective_factor, had_override, will_emit, rebase_gen) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
@@ -398,6 +427,7 @@ pub(crate) fn sync_anchored_system_tidi(
         } else {
             *gen = (*gen).max(1);
         }
+        let committed_gen = *gen;
         cn.last_sim_activation_ft_by_system
             .insert(solar_system_id, anchor_sim_ft);
 
@@ -429,7 +459,7 @@ pub(crate) fn sync_anchored_system_tidi(
                 });
             autoscaler.clear_manual(now_secs);
         }
-        (prev_sim, prev_eff, had_ov, emit_rebase)
+        (prev_sim, prev_eff, had_ov, emit_rebase, committed_gen)
     };
 
     if has_tidi_override {
@@ -446,7 +476,13 @@ pub(crate) fn sync_anchored_system_tidi(
             .unwrap_or(prev_effective_factor);
     }
     if will_emit {
-        broadcast_sim_clock_rebase_to_space_chars(ctx, solar_system_id, prev_sim_ft, anchor_sim_ft);
+        broadcast_sim_clock_rebase_to_space_chars(
+            ctx,
+            solar_system_id,
+            prev_sim_ft,
+            anchor_sim_ft,
+            rebase_gen,
+        );
     }
 }
 

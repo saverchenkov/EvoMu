@@ -1674,8 +1674,8 @@ pub struct ClusterNodeRegistry {
     /// Systems that experienced genuine TiDi (`< 1.0`) or physics overrun dilation (excludes pure
     /// `1.0x` clock-offset anchors so module reactivation delays advance across `ctx.advance_secs`, `#1196`).
     pub tidi_history_systems: std::collections::HashSet<SolarSystemId>,
-    /// Preserved per-character continuous jump clock `(anchor_wall_ft, anchor_sim_ft, tidi_factor)` across TiDi jumps (`#1080`).
-    pub character_jump_clocks: HashMap<i64, (i64, i64, f64)>,
+    /// Preserved per-character continuous jump clock `(solar_system_id, anchor_wall_ft, anchor_sim_ft, tidi_factor)` across TiDi jumps (`#1080`).
+    pub character_jump_clocks: HashMap<i64, (SolarSystemId, i64, i64, f64)>,
     pub node_load_tidi_threshold: usize,
     pub next_dedicated_node_id: u32,
     pub auto_tidi_enabled: bool,

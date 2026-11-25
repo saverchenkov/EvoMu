@@ -1122,6 +1122,42 @@ async fn anchor_tidi_on_occupied_system_preserves_pre_anchor_delta_pins_autoscal
         sim_clock.sim_filetime().as_ticks() + ((895 * FILETIME_TICKS_PER_SEC) / 4);
     assert_eq!(notifs_a[pvp_pos].args[1].as_i64(), Some(expected_pvp_a));
 
+    // Occupied-system anchor broadcast must mark `char_a` rebased at the committed generation so
+    // an immediate UpdateStateRequest / entry check emits 0 duplicate DoSimClockRebase shifts.
+    assert!(
+        !emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_a, sys_a),
+        "already-broadcast in-space pilot must not receive a duplicate entry DoSimClockRebase"
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_a)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
+
+    // Subsequent TiDi transition via `emit_sim_clock_rebase` must likewise keep `char_rebased_system_gen` synced.
+    let _ = set_system_tidi_factor(&ctx, sys_a, 0.50);
+    let tidi_notifs_a = ctx.drain_notifications_for_char(char_a);
+    assert_eq!(
+        tidi_notifs_a
+            .iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        1
+    );
+    assert!(
+        !emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_a, sys_a),
+        "TiDi broadcast must also mark in-space pilot rebased at the new generation"
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_a)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
+
     // Entry rebase into a dilated 0.25x system also re-emits scaled active CrimeWatch timers.
     let sys_b = 30_000_144_u32;
     let char_b = 90_000_888_i64;
@@ -1251,4 +1287,35 @@ async fn backward_reanchor_resets_last_sim_activation_clamp_to_match_peek_sim_fi
         .get(&pure_sys)
         .copied();
     assert_eq!(gen, Some(1), "single anchor must bump rebase generation once");
+}
+
+#[tokio::test]
+async fn character_jump_clock_does_not_leak_across_non_stargate_relocations() {
+    use crate::services::serverops_cluster::sync_jump_clock_and_emit_rebase_if_needed;
+
+    let ctx = edge_ctx(1_800_000_000);
+    let char_id = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let sys_c = 30_000_145_u32;
+    let sys_d = 30_000_146_u32;
+
+    // Jump into dilated `sys_b`, then advance wallclock while dilated anchor sits on `sys_b`.
+    assert!(sync_jump_clock_and_emit_rebase_if_needed(&ctx, char_id, sys_a, sys_b, 1.0, 0.25).is_some());
+    ctx.advance_secs(16);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Non-stargate relocation into unanchored 1.0x `sys_c`, followed by stargate jump `sys_c -> sys_d`,
+    // must ignore stale `(sys_b, ...)` `character_jump_clocks` and emit no spurious rebase.
+    assert_eq!(
+        sync_jump_clock_and_emit_rebase_if_needed(&ctx, char_id, sys_c, sys_d, 1.0, 1.0),
+        None
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
 }

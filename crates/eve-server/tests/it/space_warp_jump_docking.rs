@@ -6030,3 +6030,113 @@ async fn stargate_jump_from_dilated_space_into_offset_anchored_1x_system_aligns_
     assert!((expected_dest_cloak..=expected_dest_cloak + 5).contains(&cloak.args[1].as_i64().unwrap()));
     assert!((expected_dest_cloak..=expected_dest_cloak + 5).contains(&invuln.args[1].as_i64().unwrap()));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_between_matching_offset_anchored_1x_systems_emits_no_rebase() {
+    use eve_db::clock::FILETIME_TICKS_PER_SEC;
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    // Anchor both source and destination systems at matching -300_000 ms offset, 1.0x.
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(gate.from_solar_system_id, -300_000, 1.0);
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(gate.to_solar_system_id, -300_000, 1.0);
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_196_003_i64;
+    let ship_id = 101_196_003_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let src_beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(src_beyonce_id),
+        "UpdateStateRequest",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("initial UpdateStateRequest in offset-anchored source");
+    let entry_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        entry_notifs
+            .iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        1,
+        "initial entry into -300_000 ms 1.0x source system emits one DoSimClockRebase"
+    );
+
+    // Jump between two matching -300_000 ms 1.0x anchored systems: must NOT double-shift client SimTime.
+    let jump_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(src_beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdStargateJump between matching -300_000 ms 1.0x systems");
+    let PyRep::KeyVal(kv) = jump_res else {
+        panic!("expected KeyVal from CmdStargateJump");
+    };
+    let dest_beyonce_id = kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+
+    let jump_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        jump_notifs
+            .iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0,
+        "matching-offset 1.0x jump must emit 0 DoSimClockRebase notifications"
+    );
+    let sim_dest = ctx
+        .peek_system_sim_filetime(gate.to_solar_system_id)
+        .expect("-300_000 ms 1.0x destination sim clock");
+    let cloak = jump_notifs
+        .iter()
+        .find(|n| n.event == "OnJumpCloakUpdated")
+        .expect("OnJumpCloakUpdated");
+    let invuln = jump_notifs
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("OnRestoringInvulnUpdated");
+    let expected_dest_cloak = sim_dest.as_ticks() + 60 * FILETIME_TICKS_PER_SEC;
+    assert!((expected_dest_cloak..=expected_dest_cloak + 5).contains(&cloak.args[1].as_i64().unwrap()));
+    assert!((expected_dest_cloak..=expected_dest_cloak + 5).contains(&invuln.args[1].as_i64().unwrap()));
+
+    // Subsequent UpdateStateRequest in destination must likewise emit 0 DoSimClockRebase notifications.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(dest_beyonce_id),
+        "UpdateStateRequest",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("UpdateStateRequest in matching destination");
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "DoSimClockRebase")
+            .count(),
+        0
+    );
+}
