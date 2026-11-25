@@ -543,15 +543,10 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     assert!(sh_cs.max_structure_hp > 0.0);
 
     // Stronghold site listed in dungeonInstanceCacheMgr
-    let instances_rep = ctx
-        .dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)], &kw, None)
-        .await
-        .expect("GetPirateInsurgencyInstances");
-    let PyRep::List(inst_list) = instances_rep else { panic!("Expected List") };
-    let stronghold_inst = inst_list
-        .iter()
-        .find(|i| i.dict_get("siteType").and_then(|v| v.as_str()) == Some("PirateStronghold"))
-        .expect("PirateStronghold site spawned in FOB system");
+    let instances_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)], &kw, None).await.expect("GetPirateInsurgencyInstances");
+    let PyRep::Dict(ref inst_sys) = instances_rep else { panic!("Expected Dict") };
+    let (_, PyRep::List(ref inst_list)) = inst_sys.iter().find(|(k, _)| k.as_i64() == Some(i64::from(fob_sys))).expect("fob_sys") else { panic!("Expected List") };
+    let stronghold_inst = inst_list.iter().find(|i| i.dict_get("siteType").and_then(|v| v.as_str()) == Some("PirateStronghold")).expect("PirateStronghold site spawned in FOB system");
     assert_eq!(stronghold_inst.dict_get("instanceID"), Some(&PyRep::Integer(stronghold_id)));
     assert_eq!(stronghold_inst.dict_get("completed"), Some(&PyRep::Bool(false)));
 
@@ -691,8 +686,8 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
 
     // Stronghold site is marked completed in dungeonInstanceCacheMgr
     let inst_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)], &kw, None).await.expect("GetPirateInsurgencyInstances after destruction");
-    let PyRep::List(inst_list_after) = inst_after else { panic!("Expected List") };
-    let sh_after = inst_list_after.iter().find(|i| i.dict_get("instanceID") == Some(&PyRep::Integer(stronghold_id))).unwrap();
+    let PyRep::Dict(ref by_sys_after) = inst_after else { panic!("Expected Dict") };
+    let sh_after = by_sys_after.iter().find_map(|(_, v)| match v { PyRep::List(l) => l.iter().find(|i| i.dict_get("instanceID") == Some(&PyRep::Integer(stronghold_id))), _ => None }).unwrap();
     assert_eq!(sh_after.dict_get("completed"), Some(&PyRep::Bool(true)));
 
     // Campaign transitioned to WindDown and FOB suppression increased

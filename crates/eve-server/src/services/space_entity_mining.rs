@@ -2461,108 +2461,89 @@ pub async fn handle(
                 Some(first) => first.as_i64().into_iter().collect(),
                 None => Vec::new(),
             };
-            let (station_base_yield, station_tax_rate, reproc_lvl, reproc_eff_lvl) =
-                ctx.db.with_snapshot(|snap| {
-                    let dummy_type = ctx.sde.types.get(&1230);
-                    let (mut base, _, tax) = dummy_type
-                        .map(|t| compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, t, Some(now_unix)))
-                        .unwrap_or((0.50, 0.50, 0.0));
-                    if station_id >= 1_000_000_000_000 {
-                        base = compute_structure_rigged_base_yield(&ctx.sde, snap, station_id, None);
-                    }
-                    let char_skills = snap.skills.get(&char_id);
-                    let r = char_skills.and_then(|m| m.get(&3385)).map(|s| s.level).unwrap_or(0);
-                    let re = char_skills.and_then(|m| m.get(&3389)).map(|s| s.level).unwrap_or(0);
-                    (base, tax, r, re)
-                });
-            if item_ids.is_empty() && args.is_empty() {
-                return Some(Ok(PyRep::keyval([
-                    ("stationBaseYield", PyRep::Real(station_base_yield)),
-                    ("stationTaxRate", PyRep::Real(station_tax_rate)),
-                    ("reprocessingSkillLevel", PyRep::Integer(reproc_lvl as i64)),
-                    ("reprocessingEfficiencyLevel", PyRep::Integer(reproc_eff_lvl as i64)),
-                ])));
-            }
-            let quotes = ctx.db.with_snapshot(|snap| {
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
-                let mut quotes = Vec::new();
-                for item_id in item_ids {
-                    let Some(item) = snap.items.get(&item_id) else { continue };
-                    if item.owner_id != char_id && !(caller_corp > 0 && item.owner_id == caller_corp) {
-                        continue;
-                    }
-                    let Some(inv_type) = ctx.sde.types.get(&item.type_id) else { continue };
-                    let portion_size = inv_type.portion_size.max(1) as i32;
-                    let portions = item.quantity / portion_size;
-                    let Some(materials) = resolve_reprocessable_materials_for_portions(
-                        &ctx.sde,
-                        inv_type,
-                        item_id,
-                        snap.next_entity_id,
-                        0,
-                        portions,
-                        true,
-                    ) else {
-                        continue;
-                    };
-                    let (item_base_yield, yield_rate, item_tax_rate) =
-                        compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
-                    let net_yield_rate = yield_rate;
-                    let quantity_to_process = portions * portion_size;
-                    let left_overs = (item.quantity - quantity_to_process).max(0);
-                    let mut est_outputs = Vec::new();
-                    for mat in &materials {
-                        let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
-                        let unrecoverable = (mat.quantity as i64 - out_qty as i64).max(0);
-                        if out_qty > 0 {
-                            est_outputs.push(PyRep::keyval([
-                                ("typeID", PyRep::Integer(mat.material_type_id as i64)),
-                                ("quantity", PyRep::Integer(out_qty as i64)),
-                                ("unrecoverable", PyRep::Integer(unrecoverable)),
-                                ("station", PyRep::Integer(0)),
-                                ("iskCost", PyRep::Real(0.0)),
-                            ]));
-                        }
-                    }
-                    quotes.push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(item_id)),
-                        ("typeID", PyRep::Integer(item.type_id as i64)),
-                        ("quantityToProcess", PyRep::Integer(quantity_to_process as i64)),
-                        ("leftOvers", PyRep::Integer(left_overs as i64)),
-                        ("iskCost", PyRep::Real(0.0)),
-                        ("totalISKCost", PyRep::Real(0.0)),
-                        ("stationBaseYield", PyRep::Real(item_base_yield)),
-                        ("yieldRate", PyRep::Real(yield_rate)),
-                        ("stationTaxRate", PyRep::Real(item_tax_rate)),
-                        ("netYieldRate", PyRep::Real(net_yield_rate)),
-                        ("portionSize", PyRep::Integer(portion_size as i64)),
-                        ("outputs", PyRep::List(est_outputs)),
-                    ]));
+            let (station_base_yield, station_tax_rate) = ctx.db.with_snapshot(|snap| {
+                let dummy_type = ctx.sde.types.get(&1230);
+                let (mut base, _, tax) = dummy_type
+                    .map(|t| compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, t, Some(now_unix)))
+                    .unwrap_or((0.50, 0.50, 0.0));
+                if station_id >= 1_000_000_000_000 {
+                    base = compute_structure_rigged_base_yield(&ctx.sde, snap, station_id, None);
                 }
-                quotes
+                (base, tax)
             });
-            if args.len() < 2 {
-                // V24.01 `Quotes._GetQuotes` (`reprocessing/ui/quotes.pyj:14-19`) passes `{itemID: DBRow}`
-                // or a list/tuple/itemID; whenever `activeShipID` is omitted (`args.len() < 2`), always
-                // return the V24.01 3-tuple `(stationTax, stationEfficiencyDict, {itemID: KeyVal(...)})` (`#723`).
-                Some(Ok(
-                    crate::router::client_compat::build_v24_reprocessing_quotes_tuple(
-                        PyRep::Real(station_tax_rate),
-                        PyRep::Real(station_base_yield),
-                        quotes,
-                    ),
-                ))
+            let quotes = if item_ids.is_empty() {
+                Vec::new()
             } else {
-                Some(Ok(PyRep::Tuple(vec![
+                ctx.db.with_snapshot(|snap| {
+                    let caller_corp = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(0);
+                    let mut quotes = Vec::new();
+                    for item_id in item_ids {
+                        let Some(item) = snap.items.get(&item_id) else { continue };
+                        if item.owner_id != char_id && !(caller_corp > 0 && item.owner_id == caller_corp) {
+                            continue;
+                        }
+                        let Some(inv_type) = ctx.sde.types.get(&item.type_id) else { continue };
+                        let portion_size = inv_type.portion_size.max(1) as i32;
+                        let portions = item.quantity / portion_size;
+                        let Some(materials) = resolve_reprocessable_materials_for_portions(
+                            &ctx.sde,
+                            inv_type,
+                            item_id,
+                            snap.next_entity_id,
+                            0,
+                            portions,
+                            true,
+                        ) else {
+                            continue;
+                        };
+                        let (item_base_yield, yield_rate, item_tax_rate) =
+                            compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
+                        let net_yield_rate = yield_rate;
+                        let quantity_to_process = portions * portion_size;
+                        let left_overs = (item.quantity - quantity_to_process).max(0);
+                        let mut est_outputs = Vec::new();
+                        for mat in &materials {
+                            let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
+                            let unrecoverable = (mat.quantity as i64 - out_qty as i64).max(0);
+                            if out_qty > 0 {
+                                est_outputs.push(PyRep::keyval([
+                                    ("typeID", PyRep::Integer(mat.material_type_id as i64)),
+                                    ("quantity", PyRep::Integer(out_qty as i64)),
+                                    ("unrecoverable", PyRep::Integer(unrecoverable)),
+                                    ("station", PyRep::Integer(0)),
+                                    ("iskCost", PyRep::Real(0.0)),
+                                ]));
+                            }
+                        }
+                        quotes.push(PyRep::keyval([
+                            ("itemID", PyRep::Integer(item_id)),
+                            ("typeID", PyRep::Integer(item.type_id as i64)),
+                            ("quantityToProcess", PyRep::Integer(quantity_to_process as i64)),
+                            ("leftOvers", PyRep::Integer(left_overs as i64)),
+                            ("iskCost", PyRep::Real(0.0)),
+                            ("totalISKCost", PyRep::Real(0.0)),
+                            ("stationBaseYield", PyRep::Real(item_base_yield)),
+                            ("yieldRate", PyRep::Real(yield_rate)),
+                            ("stationTaxRate", PyRep::Real(item_tax_rate)),
+                            ("netYieldRate", PyRep::Real(net_yield_rate)),
+                            ("portionSize", PyRep::Integer(portion_size as i64)),
+                            ("outputs", PyRep::List(est_outputs)),
+                        ]));
+                    }
+                    quotes
+                })
+            };
+            Some(Ok(
+                crate::router::client_compat::build_v24_reprocessing_quotes_tuple(
                     PyRep::Real(station_tax_rate),
                     PyRep::Real(station_base_yield),
-                    PyRep::List(quotes),
-                ])))
-            }
+                    quotes,
+                ),
+            ))
         }
 
 

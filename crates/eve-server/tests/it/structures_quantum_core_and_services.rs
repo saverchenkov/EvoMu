@@ -520,7 +520,9 @@ async fn test_structure_market_clone_bay_and_reprocessing_services() {
     assert_eq!(comp_ice.dict_get("compressedUnits").and_then(|v| v.as_i64()), Some(5));
 
     let ath_quotes = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[]).await.expect("athanor quotes");
-    let ath_base = ath_quotes.dict_get("stationBaseYield").and_then(|v| v.as_f64()).unwrap();
+    let PyRep::Tuple(ref ath_tup) = ath_quotes else { panic!("expected 3-tuple"); };
+    let PyRep::Dict(ref ath_eff) = ath_tup[1] else { panic!("expected eff dict"); };
+    let ath_base = ath_eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
     assert!((ath_base - 0.51).abs() < 1e-6, "Athanor base yield must be 51.0%");
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -528,6 +530,8 @@ async fn test_structure_market_clone_bay_and_reprocessing_services() {
     });
     sess.structure_id = Some(tatara_id);
     let tat_quotes = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[]).await.expect("tatara quotes");
-    let tat_base = tat_quotes.dict_get("stationBaseYield").and_then(|v| v.as_f64()).unwrap();
+    let PyRep::Tuple(ref tat_tup) = tat_quotes else { panic!("expected 3-tuple"); };
+    let PyRep::Dict(ref tat_eff) = tat_tup[1] else { panic!("expected eff dict"); };
+    let tat_base = tat_eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
     assert!((tat_base - 0.5275).abs() < 1e-6, "Tatara base yield must be 52.75%");
 }

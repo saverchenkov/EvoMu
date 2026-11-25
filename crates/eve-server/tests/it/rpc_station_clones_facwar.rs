@@ -534,10 +534,14 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     let reproc_jita = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[])
         .await
         .expect("GetQuotes must succeed at Jita which offers reprocessing");
-    let PyRep::KeyVal(reproc_kv) = reproc_jita else {
-        panic!("Expected KeyVal from GetQuotes, got {reproc_jita:?}");
+    let PyRep::Tuple(reproc_tup) = reproc_jita else {
+        panic!("Expected 3-tuple from GetQuotes, got {reproc_jita:?}");
     };
-    assert!(reproc_kv.get("stationBaseYield").is_some(), "Expected stationBaseYield in reprocessing quotes");
+    assert_eq!(reproc_tup.len(), 3);
+    assert!(
+        matches!(&reproc_tup[1], PyRep::Dict(eff) if eff.iter().any(|(k, v)| *k == PyRep::None && v.as_f64().is_some())),
+        "Expected stationEfficiency Dict in reprocessing quotes: {reproc_tup:?}"
+    );
 
     // Positive fitting test at Jita: fit module 100_000_003 into ship 100_000_001 slot 19 (MedSlot0)
     let fit_jita = rpc(

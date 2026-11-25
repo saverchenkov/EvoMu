@@ -16,7 +16,7 @@ use eve_machonet::SessionState;
 use eve_proto::pb;
 use eve_proto::quasar::{GoogleAny, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX};
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const FACTION_GURISTAS: i64 = 500010;
 pub const FACTION_ANGEL_CARTEL: i64 = 500011;
@@ -1436,59 +1436,86 @@ fn handle_get_local_campaign_snapshot(
     ]))
 }
 
+fn group_instances_by_system(
+    rows: impl IntoIterator<Item = (u32, PyRep)>,
+) -> PyRep {
+    let mut by_sys: BTreeMap<i64, Vec<PyRep>> = BTreeMap::new();
+    for (sys_id, row) in rows {
+        if sys_id > 0 {
+            by_sys.entry(i64::from(sys_id)).or_default().push(row);
+        }
+    }
+    PyRep::Dict(
+        by_sys
+            .into_iter()
+            .map(|(sys_id, list)| (PyRep::Integer(sys_id), PyRep::List(list)))
+            .collect(),
+    )
+}
+
 fn handle_get_pirate_insurgency_instances(
     ctx: &ServerContext,
     sys_id: Option<u32>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let instances = read_insurgency_runtime(ctx, |rt| {
-        rt.insurgency_instances
-            .iter()
-            .filter(|s| sys_id.map(|sys| s.solar_system_id == sys).unwrap_or(true))
-            .map(|s| {
-                PyRep::keyval([
-                    ("dungeonID", PyRep::Integer(10_477)),
-                    ("factionID", PyRep::Integer(500_010)),
-                    ("instanceID", PyRep::Integer(s.instance_id)),
-                    ("solarSystemID", PyRep::Integer(i64::from(s.solar_system_id))),
-                    ("siteType", PyRep::String(s.site_type.clone())),
-                    ("name", PyRep::String(s.name.clone())),
-                    ("corruptionReward", PyRep::Real(s.corruption_reward)),
-                    ("completed", PyRep::Bool(s.completed)),
-                ])
-            })
-            .collect::<Vec<PyRep>>()
+    let rep = read_insurgency_runtime(ctx, |rt| {
+        group_instances_by_system(
+            rt.insurgency_instances
+                .iter()
+                .filter(|s| sys_id.map(|sys| s.solar_system_id == sys).unwrap_or(true))
+                .map(|s| {
+                    (
+                        s.solar_system_id,
+                        PyRep::keyval([
+                            ("dungeonID", PyRep::Integer(10_477)),
+                            ("dungeonNameID", PyRep::Integer(0)),
+                            ("factionID", PyRep::Integer(500_010)),
+                            ("instanceID", PyRep::Integer(s.instance_id)),
+                            ("solarSystemID", PyRep::Integer(i64::from(s.solar_system_id))),
+                            ("siteType", PyRep::String(s.site_type.clone())),
+                            ("name", PyRep::String(s.name.clone())),
+                            ("corruptionReward", PyRep::Real(s.corruption_reward)),
+                            ("completed", PyRep::Bool(s.completed)),
+                        ]),
+                    )
+                }),
+        )
     });
-    Ok(PyRep::List(instances))
+    Ok(rep)
 }
 
 fn handle_get_pirate_ice_heist_instances(
     ctx: &ServerContext,
     sys_id: Option<u32>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let instances = read_insurgency_runtime(ctx, |rt| {
-        rt.ice_heist_instances
-            .iter()
-            .filter(|h| sys_id.map(|sys| h.solar_system_id == sys).unwrap_or(true))
-            .map(|h| {
-                PyRep::keyval([
-                    ("dungeonID", PyRep::Integer(10_497)),
-                    ("factionID", PyRep::Integer(500_010)),
-                    ("instanceID", PyRep::Integer(h.instance_id)),
-                    ("solarSystemID", PyRep::Integer(i64::from(h.solar_system_id))),
+    let rep = read_insurgency_runtime(ctx, |rt| {
+        group_instances_by_system(
+            rt.ice_heist_instances
+                .iter()
+                .filter(|h| sys_id.map(|sys| h.solar_system_id == sys).unwrap_or(true))
+                .map(|h| {
                     (
-                        "pirateTankersSaved",
-                        PyRep::Integer(i64::from(h.pirate_tankers_saved)),
-                    ),
-                    (
-                        "empireTankersSaved",
-                        PyRep::Integer(i64::from(h.empire_tankers_saved)),
-                    ),
-                    ("completed", PyRep::Bool(h.completed)),
-                ])
-            })
-            .collect::<Vec<PyRep>>()
+                        h.solar_system_id,
+                        PyRep::keyval([
+                            ("dungeonID", PyRep::Integer(10_497)),
+                            ("dungeonNameID", PyRep::Integer(0)),
+                            ("factionID", PyRep::Integer(500_010)),
+                            ("instanceID", PyRep::Integer(h.instance_id)),
+                            ("solarSystemID", PyRep::Integer(i64::from(h.solar_system_id))),
+                            (
+                                "pirateTankersSaved",
+                                PyRep::Integer(i64::from(h.pirate_tankers_saved)),
+                            ),
+                            (
+                                "empireTankersSaved",
+                                PyRep::Integer(i64::from(h.empire_tankers_saved)),
+                            ),
+                            ("completed", PyRep::Bool(h.completed)),
+                        ]),
+                    )
+                }),
+        )
     });
-    Ok(PyRep::List(instances))
+    Ok(rep)
 }
 
 #[cfg(test)] #[path = "insurgency_services_tests.rs"] mod insurgency_services_tests;

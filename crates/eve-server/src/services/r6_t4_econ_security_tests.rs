@@ -58,20 +58,6 @@ fn make_session(user_id: u64, char_id: i64, corp_id: i64, station_id: i64, corp_
 
 #[test]
 fn test_402_quasar_normalization_preserves_authoritative_backend_replies_and_notices() {
-    let quotes_reply = PyRep::Tuple(vec![
-        PyRep::Real(0.02),
-        PyRep::Real(0.55),
-        PyRep::List(vec![PyRep::keyval([
-            ("itemID", PyRep::Integer(777_001)),
-            ("outputs", PyRep::List(vec![PyRep::keyval([("typeID", PyRep::Integer(34)), ("quantity", PyRep::Integer(250))])])),
-        ])]),
-    ]);
-    let norm_quotes = normalize_macho_rpc_reply("reprocessingSvc", "GetQuotes", Ok(quotes_reply)).unwrap();
-    let PyRep::Tuple(q_parts) = norm_quotes else { panic!("expected tuple"); };
-    let PyRep::Dict(q_entries) = &q_parts[2] else { panic!("expected quotes dict"); };
-    assert_eq!(q_entries.len(), 1);
-    assert_eq!(q_entries[0].0, PyRep::Integer(777_001));
-
     let fit = normalize_macho_rpc_reply(
         "ship",
         "GetShipFittingInfo",

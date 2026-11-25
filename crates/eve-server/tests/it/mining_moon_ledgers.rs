@@ -1308,7 +1308,8 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         .dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[], &kw, None)
         .await
         .expect("GetQuotes with 6.67 standing");
-    assert_eq!(get_dict_val(&quotes_zero_tax, "stationTaxRate").unwrap().as_f64(), Some(0.0));
+    let PyRep::Tuple(ref qz_tup) = quotes_zero_tax else { panic!("expected 3-tuple") };
+    assert_eq!(qz_tup[0].as_f64(), Some(0.0));
 
     // 1b. Implant factor (`feat:mining.reprocessing-yield`): Zainou 'Beancounter' Reprocessing RX-804 (27174, +4% attr 379)
     let veld_imp_id = 800_000_152i64;
@@ -1494,7 +1495,9 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         session = crate::common::session_for_character(&ctx, session.session_id, char_id);
 
         let struct_info = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.expect("GetQuotes");
-        let struct_base = get_dict_val(&struct_info, "stationBaseYield").unwrap().as_f64().unwrap();
+        let PyRep::Tuple(ref si_tup) = struct_info else { panic!("expected 3-tuple") };
+        let PyRep::Dict(ref si_eff) = si_tup[1] else { panic!("expected eff dict") };
+        let struct_base = si_eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
         assert!((struct_base - expected_base).abs() < 1e-6, "{label} base yield mismatch");
 
         let ore_item_id = 800_000_161 + (idx as i64) * 2;
@@ -1539,7 +1542,10 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         session = crate::common::session_for_character(&ctx, session.session_id, char_id);
         let expected_rigged_base = 0.51 * sec_mult * 1.02;
         let q = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-        assert!((get_dict_val(&q, "stationBaseYield").unwrap().as_f64().unwrap() - expected_rigged_base).abs() < 1e-6);
+        let PyRep::Tuple(ref q_tup) = q else { panic!("expected 3-tuple") };
+        let PyRep::Dict(ref q_eff) = q_tup[1] else { panic!("expected eff dict") };
+        let q_base = q_eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
+        assert!((q_base - expected_rigged_base).abs() < 1e-6);
 
         let r = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(ore_id)], &kw, None).await.unwrap();
         assert!((get_dict_val(&r, "stationBaseYield").unwrap().as_f64().unwrap() - expected_rigged_base).abs() < 1e-6);

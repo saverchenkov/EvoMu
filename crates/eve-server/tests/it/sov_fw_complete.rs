@@ -1191,10 +1191,14 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     let ice_instances = sov_call(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", &[])
         .await
         .expect("GetPirateInsurgencyIceHeistInstances");
-    if let PyRep::List(list) = ice_instances {
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].dict_get("instanceID").and_then(|v| v.as_i64()), Some(ice_id));
-    }
+    let PyRep::Dict(by_sys) = ice_instances else {
+        panic!("expected Dict from GetPirateInsurgencyIceHeistInstances");
+    };
+    let (_, PyRep::List(list)) = by_sys.iter().find(|(k, _)| k.as_i64() == Some(i64::from(sys_id))).expect("sys_id entry") else {
+        panic!("expected List under sys_id");
+    };
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].dict_get("instanceID").and_then(|v| v.as_i64()), Some(ice_id));
 }
 
 #[tokio::test]

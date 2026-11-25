@@ -441,12 +441,17 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
         );
     }
 
-    // 4. GetQuotes: 0 args (KeyVal), 1 list arg (V24 3-tuple), and 2 args (Tuple)
+    // 4. GetQuotes: 0 args, 1 list arg, and 2 args all return V24 3-tuple (tax, eff_dict, {itemID: KeyVal})
     let q_empty = handle(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[], None)
         .await
         .unwrap()
         .unwrap();
-    assert!(q_empty.dict_get("stationBaseYield").is_some());
+    let PyRep::Tuple(ref qe_parts) = q_empty else {
+        panic!("expected 3-tuple from 0-arg GetQuotes, got {q_empty:?}");
+    };
+    assert_eq!(qe_parts.len(), 3);
+    assert!(matches!(&qe_parts[1], PyRep::Dict(eff) if eff.iter().any(|(k, v)| *k == PyRep::None && v.as_f64().is_some())));
+    assert_eq!(qe_parts[2], PyRep::Dict(Vec::new()));
 
     let q_list = handle(
         &ctx,
@@ -476,7 +481,7 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(q_tuple, PyRep::Tuple(ref t) if t.len() == 3));
+    assert!(matches!(q_tuple, PyRep::Tuple(ref t) if t.len() == 3 && matches!(t[2], PyRep::Dict(ref d) if d.len() == 1)));
 
     // 5. Reprocess 250 Veldspar (931_104) -> consumes 200 units, leaves 50 remainder, mints Tritanium, deducts tax
     let bal_before = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);

@@ -171,12 +171,17 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
         ..Default::default()
     };
 
-    // 1. GetQuotes empty summary dict and 2-arg tuple quote
+    // 1. GetQuotes empty V24 3-tuple and 2-arg tuple quote
     let summary = handle(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[], None)
         .await
         .expect("handled")
         .expect("summary quote");
-    assert!(matches!(summary, PyRep::KeyVal(_)));
+    let PyRep::Tuple(ref sum_parts) = summary else {
+        panic!("expected 3-tuple from 0-arg GetQuotes, got {summary:?}");
+    };
+    assert_eq!(sum_parts.len(), 3);
+    assert!(matches!(&sum_parts[1], PyRep::Dict(eff) if eff.iter().any(|(k, _)| *k == PyRep::None)));
+    assert_eq!(sum_parts[2], PyRep::Dict(Vec::new()));
 
     let tuple_quote = handle(
         &ctx,
@@ -189,9 +194,9 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
     .await
     .expect("handled")
     .expect("tuple quote");
-    assert!(matches!(tuple_quote, PyRep::Tuple(ref t) if t.len() == 3));
+    assert!(matches!(tuple_quote, PyRep::Tuple(ref t) if t.len() == 3 && matches!(t[2], PyRep::Dict(_))));
 
-    // V24 client sends Dict {itemID: invItem} to GetQuotes; quote must return item typeID and outputs
+    // V24 client sends Dict {itemID: invItem} to GetQuotes; quote must return (tax, eff_dict, {itemID: KeyVal})
     let dict_quote = handle(
         &ctx,
         &mut sess,
@@ -212,13 +217,17 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
     let PyRep::Tuple(ref dq_parts) = dict_quote else {
         panic!("expected 3-tuple from GetQuotes Dict, got {dict_quote:?}");
     };
-    let PyRep::List(ref dq_list) = dq_parts[2] else {
-        panic!("expected quote list");
+    let PyRep::Dict(ref dq_eff) = dq_parts[1] else {
+        panic!("expected stationEfficiency Dict");
     };
-    assert_eq!(dq_list.len(), 1);
-    assert_eq!(dq_list[0].dict_get("itemID").and_then(|v| v.as_i64()), Some(ore_stack_id));
-    assert_eq!(dq_list[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(1230));
-    assert!(!matches!(dq_list[0].dict_get("outputs"), Some(PyRep::List(o)) if o.is_empty()));
+    assert!(dq_eff.iter().any(|(k, _)| *k == PyRep::Integer(1230)));
+    let PyRep::Dict(ref dq_dict) = dq_parts[2] else {
+        panic!("expected quotes Dict");
+    };
+    assert_eq!(dq_dict.len(), 1);
+    assert_eq!(dq_dict[0].0, PyRep::Integer(ore_stack_id));
+    assert_eq!(dq_dict[0].1.dict_get("typeID").and_then(|v| v.as_i64()), Some(1230));
+    assert!(dq_dict[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
 
     // 1-arg Dict (`activeShipID` omitted, `< 2` args) returns V24.01 3-tuple `(tax, eff_dict, {itemID: KeyVal})`
     let single_arg_dict_quote = handle(

@@ -1470,13 +1470,15 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
         ch.standings.insert(1_000_035, 0.0);
     });
     let quote_zero = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    assert!((get_dict_val(&quote_zero, "stationTaxRate").and_then(|v| v.as_f64()).unwrap() - 0.05).abs() < 1e-6);
+    let PyRep::Tuple(ref qz_parts) = quote_zero else { panic!("expected 3-tuple") };
+    assert!((qz_parts[0].as_f64().unwrap() - 0.05).abs() < 1e-6);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.insert(1_000_035, 6.67);
     });
     let quote_high = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    assert!((get_dict_val(&quote_high, "stationTaxRate").and_then(|v| v.as_f64()).unwrap() - 0.0).abs() < 1e-6);
+    let PyRep::Tuple(ref qh_parts) = quote_high else { panic!("expected 3-tuple") };
+    assert!((qh_parts[0].as_f64().unwrap() - 0.0).abs() < 1e-6);
 
     // 2. Scrapmetal yield exclusions (`feat:mining.scrapmetal-yield-exclusions`):
     // Dock in a Null-Sec rigged Tatara (35836) with Reprocessing V, Reprocessing Efficiency V,
@@ -1522,35 +1524,15 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
     let ore_yield = get_dict_val(&ore_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
     assert!(ore_yield > 0.75, "Ore at rigged NS Tatara must receive structure/rig/nullsec/implant bonuses (got {ore_yield})");
 
-    // V24 client Dict {itemID: invItem} input to GetQuotes preserves typeID (Miner I = 482) and non-empty outputs
-    let miner_dict_quote = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "reprocessingSvc",
-            None,
-            "GetQuotes",
-            &[
-                PyRep::Dict(vec![(
-                    PyRep::Integer(100_000_870),
-                    PyRep::keyval([("itemID", PyRep::Integer(100_000_870))]),
-                )]),
-                PyRep::Integer(char_id),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .unwrap();
-    let PyRep::Tuple(ref m_parts) = miner_dict_quote else {
-        panic!("expected 3-tuple from GetQuotes Dict, got {miner_dict_quote:?}");
-    };
-    let PyRep::List(ref m_quotes) = m_parts[2] else {
-        panic!("expected quote list");
-    };
+    // V24 client Dict {itemID: invItem} input to GetQuotes preserves typeID (Miner I = 482) and non-empty recoverables
+    let req_dict = PyRep::Dict(vec![(PyRep::Integer(100_000_870), PyRep::keyval([("itemID", PyRep::Integer(100_000_870))]))]);
+    let miner_dict_quote = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[req_dict, PyRep::Integer(char_id)], &kw, None).await.unwrap();
+    let PyRep::Tuple(ref m_parts) = miner_dict_quote else { panic!("expected 3-tuple from GetQuotes Dict, got {miner_dict_quote:?}"); };
+    let PyRep::Dict(ref m_quotes) = m_parts[2] else { panic!("expected quotes Dict"); };
     assert_eq!(m_quotes.len(), 1);
-    assert_eq!(get_dict_val(&m_quotes[0], "itemID").and_then(|v| v.as_i64()), Some(100_000_870));
-    assert_eq!(get_dict_val(&m_quotes[0], "typeID").and_then(|v| v.as_i64()), Some(482));
-    assert!(!matches!(get_dict_val(&m_quotes[0], "outputs"), Some(PyRep::List(o)) if o.is_empty()));
+    assert_eq!(m_quotes[0].0, PyRep::Integer(100_000_870));
+    assert_eq!(m_quotes[0].1.dict_get("typeID").and_then(|v| v.as_i64()), Some(482));
+    assert!(!m_quotes[0].1.dict_get("recoverables").and_then(PyRep::crowset_rows).unwrap_or_default().is_empty());
 
     // Module (482) and packaged ship (587) ignore Upwell structure, rig, security-band, Reprocessing, and RX-804 bonuses -> exact 55% at Scrapmetal V
     let mod_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_870)], &kw, None).await.unwrap();

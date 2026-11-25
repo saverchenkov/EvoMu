@@ -125,35 +125,30 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         ])
     );
 
-    // raffleProxy, reprocessingSvc, scanMgr, ship, skillMgr2
-    let quotes = normalize_macho_rpc_reply(
-        "reprocessingSvc",
-        "GetQuotes",
-        Ok(PyRep::Tuple(vec![
-            PyRep::Real(0.05),
-            PyRep::Real(0.55),
-            PyRep::List(vec![PyRep::keyval([
-                ("itemID", PyRep::Integer(700)),
-                ("typeID", PyRep::Integer(1230)),
-                ("stationBaseYield", PyRep::Real(0.55)),
-                ("quantityToProcess", PyRep::Integer(1000)),
-                ("leftOvers", PyRep::Integer(0)),
-                ("iskCost", PyRep::Real(0.0)),
-                ("totalISKCost", PyRep::Real(0.0)),
-                (
-                    "outputs",
-                    PyRep::List(vec![PyRep::keyval([
-                        ("typeID", PyRep::Integer(34)),
-                        ("quantity", PyRep::Integer(2288)),
-                        ("unrecoverable", PyRep::Integer(1872)),
-                        ("station", PyRep::Integer(0)),
-                        ("iskCost", PyRep::Real(0.0)),
-                    ])]),
-                ),
-            ])]),
-        ])),
-    )
-    .expect("quotes");
+    // raffleProxy, scanMgr, ship, skillMgr2; direct builder preserves CRowset marshal layout
+    let quotes = build_v24_reprocessing_quotes_tuple(
+        PyRep::Real(0.05),
+        PyRep::Real(0.55),
+        vec![PyRep::keyval([
+            ("itemID", PyRep::Integer(700)),
+            ("typeID", PyRep::Integer(1230)),
+            ("stationBaseYield", PyRep::Real(0.55)),
+            ("quantityToProcess", PyRep::Integer(1000)),
+            ("leftOvers", PyRep::Integer(0)),
+            ("iskCost", PyRep::Real(0.0)),
+            ("totalISKCost", PyRep::Real(0.0)),
+            (
+                "outputs",
+                PyRep::List(vec![PyRep::keyval([
+                    ("typeID", PyRep::Integer(34)),
+                    ("quantity", PyRep::Integer(2288)),
+                    ("unrecoverable", PyRep::Integer(1872)),
+                    ("station", PyRep::Integer(0)),
+                    ("iskCost", PyRep::Real(0.0)),
+                ])]),
+            ),
+        ])],
+    );
     let PyRep::Tuple(ref qt) = quotes else {
         panic!("expected tuple");
     };
@@ -164,7 +159,7 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     assert!(eff_entries.iter().any(|(k, v)| *k == PyRep::None && *v == PyRep::Real(0.55)));
     assert!(eff_entries.iter().any(|(k, v)| *k == PyRep::Integer(1230) && *v == PyRep::Real(0.55)));
     let PyRep::Dict(ref qentries) = qt[2] else {
-        panic!("expected normalized quotes Dict");
+        panic!("expected quotes Dict");
     };
     assert_eq!(qentries[0].0, PyRep::Integer(700));
     assert_eq!(
@@ -202,51 +197,6 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     let d_recov = d_entries[0].1.dict_get("recoverables").expect("decoded recoverables");
     assert!(d_recov.is_crowset());
     assert_eq!(d_recov.crowset_rows().unwrap()[0].dbrow_get("client").and_then(|v| v.as_i64()), Some(2288));
-
-    // `< 2` args GetQuotes replies (`PyRep::List` and summary `PyRep::KeyVal`) also normalize to `(tax, eff_dict, {itemID: KeyVal})`
-    let single_arg_list_quotes = normalize_macho_rpc_reply(
-        "reprocessingSvc",
-        "GetQuotes",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("itemID", PyRep::Integer(701)),
-            ("typeID", PyRep::Integer(1230)),
-            ("stationBaseYield", PyRep::Real(0.50)),
-            ("stationTaxRate", PyRep::Real(0.05)),
-            ("quantityToProcess", PyRep::Integer(1000)),
-            ("leftOvers", PyRep::Integer(0)),
-            (
-                "outputs",
-                PyRep::List(vec![PyRep::keyval([
-                    ("typeID", PyRep::Integer(34)),
-                    ("quantity", PyRep::Integer(2000)),
-                ])]),
-            ),
-        ])])),
-    )
-    .expect("1-arg list quotes normalized");
-    let PyRep::Tuple(ref sq_tup) = single_arg_list_quotes else {
-        panic!("expected 3-tuple from 1-arg list GetQuotes");
-    };
-    let PyRep::Dict(ref sq_dict) = sq_tup[2] else {
-        panic!("expected quotes Dict from 1-arg list GetQuotes");
-    };
-    assert_eq!(sq_dict.len(), 1);
-    assert_eq!(sq_dict[0].0, PyRep::Integer(701));
-    assert_eq!(sq_dict[0].1.dict_get("typeID").and_then(PyRep::as_i64), Some(1230));
-
-    let zero_arg_summary_quotes = normalize_macho_rpc_reply(
-        "reprocessingSvc",
-        "GetQuotes",
-        Ok(PyRep::keyval([
-            ("stationBaseYield", PyRep::Real(0.50)),
-            ("stationTaxRate", PyRep::Real(0.05)),
-        ])),
-    )
-    .expect("0-arg summary quotes normalized");
-    assert!(matches!(
-        zero_arg_summary_quotes,
-        PyRep::Tuple(ref t) if t.len() == 3 && matches!(t[2], PyRep::Dict(ref d) if d.is_empty())
-    ));
 
     let fit = normalize_macho_rpc_reply(
         "ship",
@@ -1070,43 +1020,6 @@ fn signature_instances_normalize_nested_dungeon_map_to_system_counts() {
             items[0].dict_get("factionID"),
             Some(&PyRep::Integer(expected_fac)),
             "did {did} must map to faction {expected_fac}"
-        );
-    }
-
-    // #806: GetPirateInsurgencyInstances and GetPirateInsurgencyIceHeistInstances must group
-    // flat KeyVal lists by solarSystemID and populate default dungeonID and factionID.
-    for (method, expected_did) in [
-        ("GetPirateInsurgencyInstances", 10_477_i64),
-        ("GetPirateInsurgencyIceHeistInstances", 10_497_i64),
-    ] {
-        let ins_raw = PyRep::List(vec![
-            PyRep::keyval([
-                ("instanceID", PyRep::Integer(7001)),
-                ("solarSystemID", PyRep::Integer(30_002_813)),
-            ]),
-            PyRep::keyval([("instanceID", PyRep::Integer(7002))]),
-        ]);
-        let ins_norm =
-            normalize_macho_rpc_reply("dungeonInstanceCacheMgr", method, Ok(ins_raw)).unwrap();
-        let PyRep::Dict(ins_sys) = ins_norm else {
-            panic!("expected Dict from {method}");
-        };
-        assert_eq!(ins_sys.len(), 1);
-        assert_eq!(ins_sys[0].0, PyRep::Integer(30_002_813));
-        let (_, PyRep::List(ins_items)) = &ins_sys[0] else {
-            panic!("expected List under solarSystemID");
-        };
-        assert_eq!(
-            ins_items[0].dict_get("dungeonID"),
-            Some(&PyRep::Integer(expected_did))
-        );
-        assert_eq!(
-            ins_items[0].dict_get("factionID"),
-            Some(&PyRep::Integer(500_010))
-        );
-        assert_eq!(
-            ins_items[0].dict_get("instanceID"),
-            Some(&PyRep::Integer(7001))
         );
     }
 }

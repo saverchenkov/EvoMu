@@ -453,7 +453,7 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     assert!(!scan_notifs.iter().any(|(e, _)| e == "OnSystemScanStopped"));
     let started_args = find_notif(&scan_notifs, "OnSystemScanStarted");
     assert_eq!(started_args.len(), 3);
-    assert!(matches!(started_args[2], PyRep::List(ref l) if l.len() == 8));
+    assert!(matches!(&started_args[2], PyRep::Dict(entries) if entries.len() == 8 && entries.iter().all(|(_, v)| v.dict_get("state") == Some(&PyRep::Integer(4)))));
     ctx.advance_secs(15);
     let post_scan_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(post_scan_notifs.iter().filter(|(e, _)| e == "OnProbeWarpEnd").count(), 8);

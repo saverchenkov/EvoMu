@@ -914,6 +914,15 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
     assert!(hit_jackpot, "Moon fracture must produce jackpot (+100%) ore variant when jackpot roll hits");
 
     // 3. Upwell refinery base yield via GetQuotes & Reprocess: Citadel/EC 50%, Athanor 51%, Tatara 52% (+1.5% = 52.75%)
+    let quote_tax = |rep: &PyRep| -> f64 {
+        let PyRep::Tuple(parts) = rep else { panic!("expected 3-tuple from GetQuotes: {rep:?}"); };
+        parts[0].as_f64().unwrap_or(0.0)
+    };
+    let quote_base = |rep: &PyRep| -> f64 {
+        let PyRep::Tuple(parts) = rep else { panic!("expected 3-tuple from GetQuotes: {rep:?}"); };
+        let PyRep::Dict(eff) = &parts[1] else { panic!("expected stationEfficiency Dict: {parts:?}"); };
+        eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap_or(0.0)
+    };
     for (idx, (st_id, exp_base, exp_trit)) in [
         (raitaru_id, 0.50, 200),
         (astrahus_id, 0.50, 200),
@@ -928,7 +937,7 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
             if let Some(ch) = s.characters.get_mut(&CHAR_ID) { ch.station_id = None; ch.structure_id = Some(st_id); }
         });
         let quote = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-        let q_base = dict_get(&quote, "stationBaseYield").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let q_base = quote_base(&quote);
         assert!((q_base - exp_base).abs() < 1e-4, "GetQuotes stationBaseYield at {st_id} expected {exp_base}, got {q_base}");
         let rep = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(item_id)], &kw, None).await.unwrap();
         let r_yield = dict_get(&rep, "yieldRate").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -944,7 +953,7 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         if let Some(ch) = s.characters.get_mut(&CHAR_ID) { ch.structure_id = None; ch.station_id = Some(low_npc_station.0); }
     });
     let low_q = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    let low_base = dict_get(&low_q, "stationBaseYield").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let low_base = quote_base(&low_q);
     assert!((low_base - low_npc_station.1).abs() < 1e-4 && low_base < 0.50, "NPC station <50% base yield must match SDE: got {low_base}, expected {}", low_npc_station.1);
 
     sess.station_id = Some(60_003_760);
@@ -953,11 +962,11 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         s.characters.get_mut(&CHAR_ID).unwrap().standings.insert(1_000_035, 0.0);
     });
     let q0 = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    assert!((dict_get(&q0, "stationTaxRate").and_then(|v| v.as_f64()).unwrap() - 0.05).abs() < 1e-4);
+    assert!((quote_tax(&q0) - 0.05).abs() < 1e-4);
 
     p.ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&CHAR_ID).unwrap().standings.insert(1_000_035, 3.335); });
     let q_mid = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    assert!((dict_get(&q_mid, "stationTaxRate").and_then(|v| v.as_f64()).unwrap() - 0.025).abs() < 1e-3);
+    assert!((quote_tax(&q_mid) - 0.025).abs() < 1e-3);
 
     // Corp standing via real corp members' personal standings (0.0 + 10.0 + 10.0 => avg 6.67 => 0% tax)
     p.ctx.db.with_mut_snapshot(|s| {
@@ -971,7 +980,7 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         }
     });
     let q_corp = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    assert!(dict_get(&q_corp, "stationTaxRate").and_then(|v| v.as_f64()).unwrap().abs() < 1e-4);
+    assert!(quote_tax(&q_corp).abs() < 1e-4);
 
     // Connections V applies ONLY after >= 1 completed mission for that corp
     let agent_id = p.ctx.sde.agents.values().find(|a| a.corporation_id == 1_000_035).map(|a| a.agent_id).unwrap_or(3_008_416);
@@ -981,7 +990,7 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         s.characters.get_mut(&CHAR_ID).unwrap().standings.insert(1_000_035, 5.0);
     });
     let q_no_mission = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    let tax_no_mission = dict_get(&q_no_mission, "stationTaxRate").and_then(|v| v.as_f64()).unwrap();
+    let tax_no_mission = quote_tax(&q_no_mission);
     assert!((tax_no_mission - 0.0125).abs() < 1e-4, "Connections must not apply with 0 completed corp missions, got {tax_no_mission}");
 
     p.ctx.db.with_mut_snapshot(|s| {
@@ -992,7 +1001,7 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         });
     });
     let q_with_mission = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
-    let tax_with_mission = dict_get(&q_with_mission, "stationTaxRate").and_then(|v| v.as_f64()).unwrap();
+    let tax_with_mission = quote_tax(&q_with_mission);
     assert!((tax_with_mission - 0.005).abs() < 1e-4, "Connections V must apply after >=1 completed corp mission, got {tax_with_mission}");
 
     // 5. Scrapmetal yield exclusions: ignores Upwell structure, rig, security-band, and implant bonuses (capped at 55%)
