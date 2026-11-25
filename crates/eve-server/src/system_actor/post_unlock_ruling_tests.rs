@@ -679,8 +679,8 @@ async fn bf_1170_r9_01_post_commit_hook_window_no_double_deduction() {
     *sys.target_lock_completed_hook.write().unwrap() = None;
     let _ = sys.ask_step_tick_only(5.0).await.unwrap();
     let st_cap = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
-    let (cyc_len, mis_len, reload_empty, asb_need, aar_rep) = { let st = sys.actor_state.read().unwrap(); (st.active_module_cycles.len(), st.active_guided_missiles.len(), st.module_reload_sim_remaining.is_empty(), st.active_module_cycles.iter().find(|c| c.module_id == m_asb).map(|c| c.cap_need_per_cycle), st.active_module_cycles.iter().find(|c| c.module_id == m_aar).map(|c| c.armor_repair_amount)) };
-    assert!((st_cap - 150.0).abs() < 1e-6 && cyc_len == 5 && mis_len == 2 && reload_empty && asb_need == Some(0.0) && aar_rep == Some(60.0));
+    let (cyc_len, mis_len, pend_mis, reload_empty, asb_need, aar_rep) = { let st = sys.actor_state.read().unwrap(); (st.active_module_cycles.len(), st.active_guided_missiles.len(), st.pending_missile_launches.len(), st.module_reload_sim_remaining.is_empty(), st.active_module_cycles.iter().find(|c| c.module_id == m_asb).map(|c| c.cap_need_per_cycle), st.active_module_cycles.iter().find(|c| c.module_id == m_aar).map(|c| c.armor_repair_amount)) };
+    assert!((st_cap - 150.0).abs() < 1e-6 && cyc_len == 5 && mis_len == 1 && pend_mis == 1 && reload_empty && asb_need == Some(0.0) && aar_rep == Some(60.0), "st_cap={st_cap} cyc_len={cyc_len} mis_len={mis_len} pend_mis={pend_mis} reload_empty={reload_empty} asb_need={asb_need:?} aar_rep={aar_rep:?}");
     let _ = go_tx.send(()); assert!(sys.wait_for_post_unlock_barrier().await);
     ctx.db.with_snapshot(|s| {
         assert!(s.items[&778_221_201].quantity == 1 && s.items[&778_221_202].quantity == 5 && !s.cluster_and_runtime.module_reload_until_unix.contains_key(&m_tur));
