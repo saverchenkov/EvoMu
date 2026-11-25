@@ -150,7 +150,6 @@ async fn ruling_w5_nanite_repair_cancel_queued_behind_earlier_tick_applies_once_
         elapsed_s: 6.0, paste_total_needed: 10, paste_consumed_so_far: 10,
     });
 
-    let proj = ctx.build_fit_projection(char_id, ship_id, eve_dogma::FitRev(1)).unwrap();
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     // Queue earlier NaniteRepairTick (`10 - 6 = 4` paste, `DAMAGE = 95.0`) ahead of cancel (`+4 = 8` paste, `DAMAGE = 40.0`).
     let mut earlier_ops = PostUnlockOps::default();
@@ -226,7 +225,6 @@ async fn ruling_w3_w5_deactivation_hook_helper_for_own_system_no_deadlock_and_ru
         let _ = hook_tx.send((mod_active, pos_when_ran, rep, pos_after_enq));
     }));
 
-    let proj = ctx.build_fit_projection(char_id, ship_id, eve_dogma::FitRev(1)).unwrap();
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     let fut_before = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_b, p_before_hook).await } });
     wait_until("p_before_hook never reached memory", || sys.get_ball_position_sync(ship_b) == Some(p_before_hook)).await;
@@ -368,7 +366,6 @@ async fn bf2_fire_weapon_cycle_volley_waits_for_post_unlock_before_death_hooks()
         })
     }));
 
-    let proj = ctx.build_fit_projection(char_id, ship_id, eve_dogma::FitRev(1)).unwrap();
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     let pos_fut = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(a_ship, p_prior).await } });
     wait_until("prior post_unlock item should be in flight", || sys.has_in_flight_post_unlock()).await;
@@ -403,7 +400,6 @@ async fn bf3_empty_ops_take_ball_flush_checkpoint_and_apply_step_output_wait_fif
     sys.spawn_ball(make_ball(ship_b, 606, DVec3::new(100.0, 0.0, 0.0))).await.unwrap();
     let _ = sys.flush_condition_checkpoint().await.unwrap();
 
-    let proj = ctx.build_fit_projection(char_id, ship_id, eve_dogma::FitRev(1)).unwrap();
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     let p1 = DVec3::new(77.0, 88.0, 99.0);
     let pos_fut = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_a, p1).await } });
@@ -616,7 +612,6 @@ async fn bf5_target_lock_hook_runs_post_commit_flush_guarded_and_would_block_can
     }).await.unwrap();
 
     let p1 = DVec3::new(321.0, 0.0, 0.0);
-    let proj = ctx.build_fit_projection(char_id, ship_id, eve_dogma::FitRev(1)).unwrap();
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     let pos_fut = tokio::spawn({ let s = sys.clone(); async move { s.set_ball_position(ship_a, p1).await } });
     wait_until("prior post_unlock item should be in flight", || sys.has_in_flight_post_unlock()).await;
@@ -701,7 +696,6 @@ async fn bf_1170_seed_asteroid_enqueues_post_unlock_without_db_write() {
         }
     }
     ctx.systems.register_content_provider(Arc::new(AstProvider(ast_b, make_ast(ast_b)))).unwrap();
-    let proj = ctx.build_fit_projection(char_id, ship_id, eve_dogma::FitRev(1)).unwrap();
     let (rel_w, writer) = hold_db_writer(&ctx.db);
     let sys = ctx.systems.get_or_spawn(sys_id);
     assert!(ctx.db.with_snapshot(|s| !s.asteroids.contains_key(&ast_b)));
