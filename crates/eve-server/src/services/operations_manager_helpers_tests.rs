@@ -202,6 +202,10 @@ fn test_operations_manager_helpers_private_parsers_conditions_and_edge_branches(
         assert!(!snap.items[&iid].singleton);
         assert_eq!(snap.items[&iid].quantity, 5);
 
+        deliver_op_item(snap, &mut out, 1, char_id, Some(0), 34, 5, "zero loc fallback");
+        assert_eq!(out.created_hangar_items.len(), 1);
+        assert!(out.enqueued_redeem_tokens);
+
         assert!(credit_op_isk(snap, char_id, 0, 100, "op", "zero".into()).is_none());
         assert!(credit_op_isk(snap, 999_999_999, 100, 100, "op", "nochar".into()).is_none());
         let before_bal = snap.characters[&char_id].balance;

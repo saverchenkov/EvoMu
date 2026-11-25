@@ -2129,13 +2129,30 @@ impl WorldStateSnapshot {
         if spec.quantity <= 0 {
             return Err(DbError::ValidationError("Quantity must be positive".into()));
         }
+        if spec.singleton && spec.quantity != 1 {
+            return Err(DbError::ValidationError(format!(
+                "Singleton item must have quantity == 1, got {}",
+                spec.quantity
+            )));
+        }
+        if spec.is_blueprint_copy && (!spec.singleton || spec.quantity != 1) {
+            return Err(DbError::ValidationError(format!(
+                "Blueprint copy must be a singleton with quantity == 1 (singleton={}, quantity={})",
+                spec.singleton, spec.quantity
+            )));
+        }
         if spec.location_id <= 0 {
             return Err(DbError::ValidationError(format!(
                 "Invalid destination location_id {}",
                 spec.location_id
             )));
         }
-        if spec.merge_existing_stack && !spec.singleton && !spec.is_blueprint_copy {
+        if spec.merge_existing_stack
+            && !spec.singleton
+            && !spec.is_blueprint_copy
+            && spec.blueprint_runs_remaining.is_none()
+            && !Self::is_flag_stack_ineligible(spec.flag)
+        {
             let existing_id = self
                 .items
                 .values()
@@ -2145,6 +2162,10 @@ impl WorldStateSnapshot {
                         && it.flag == spec.flag
                         && it.type_id == spec.type_id
                         && self.is_clean_stackable_item(it)
+                        && !Self::has_locked_flag_or_wrap_type(it)
+                        && !self.is_item_or_ancestor_locked_or_impounded(it.item_id)
+                        && !self.is_container_non_empty(it.item_id)
+                        && it.quantity.checked_add(spec.quantity).is_some()
                 })
                 .map(|it| it.item_id);
             if let Some(existing_id) = existing_id {

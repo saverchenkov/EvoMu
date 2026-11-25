@@ -668,7 +668,8 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
     harness.call_ok("invbroker", Some(ship_bid), "List", &[], &kw).await;
     harness.assert_shadow_converged();
 
-    // 3. Undocked `/giveitem` (cargo stack) and `/createitem` (packaged hull singleton).
+    // 3. Undocked `/giveitem` (cargo stack), `/createitem` (assembled hull singleton),
+    //    and multi-ship `/giveitem` (packaged ship stack with singleton = false).
     let cargo_trit = harness
         .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 34 25".into())], &kw)
         .await;
@@ -685,6 +686,14 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
         .dict_get("itemID")
         .and_then(PyRep::as_i64)
         .expect("cargo ship itemID");
+
+    let cargo_ships_stack = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 587 5".into())], &kw)
+        .await;
+    let cargo_ships_stack_id = cargo_ships_stack
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("cargo packaged ship stack itemID");
     harness.assert_shadow_converged();
 
     // 4. Verify invalid typed parser inputs reject cleanly without diverging ShadowInventory.
@@ -717,6 +726,15 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
         (sh_cargo_ship.type_id, sh_cargo_ship.location_id, sh_cargo_ship.flag_id, sh_cargo_ship.quantity, sh_cargo_ship.singleton),
         (587, ship_id, InventoryFlag::Cargo as u16, 1, true)
     );
+    let sh_cargo_ships = shadow
+        .inventory
+        .items
+        .get(&cargo_ships_stack_id)
+        .expect("cargo packaged ship stack replicated to ShadowInventory");
+    assert_eq!(
+        (sh_cargo_ships.type_id, sh_cargo_ships.location_id, sh_cargo_ships.flag_id, sh_cargo_ships.quantity, sh_cargo_ships.singleton),
+        (587, ship_id, InventoryFlag::Cargo as u16, 5, false)
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&hangar_trit_id].quantity, 50);
         assert_eq!(snap.items[&hangar_trit_id].location_id, station_id);
@@ -726,5 +744,7 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
         assert_eq!(snap.items[&cargo_trit_id].location_id, ship_id);
         assert_eq!(snap.items[&cargo_trit_id].flag, InventoryFlag::Cargo);
         assert!(snap.items[&cargo_ship_id].singleton);
+        assert_eq!(snap.items[&cargo_ships_stack_id].quantity, 5);
+        assert!(!snap.items[&cargo_ships_stack_id].singleton);
     });
 }

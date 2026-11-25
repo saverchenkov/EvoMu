@@ -702,3 +702,156 @@ fn test_auth_runtime_state_persists_and_prunes_across_sqlite_restart() {
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(&copy_path);
 }
+
+#[test]
+fn mint_inventory_item_validates_singleton_bpc_invariants_and_skips_locked_stacks() {
+    let mut snap = WorldStateSnapshot::default();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+
+    // 1. BF-1: singleton with qty != 1 and BPC with non-singleton or qty != 1 must be rejected.
+    let bad_singleton = MintItemSpec {
+        type_id: 587,
+        owner_id: char_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 2,
+        singleton: true,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+        merge_existing_stack: false,
+    };
+    assert!(matches!(
+        snap.mint_inventory_item_in_snap(bad_singleton),
+        Err(DbError::ValidationError(_))
+    ));
+
+    let bad_bpc_non_singleton = MintItemSpec {
+        type_id: 967,
+        owner_id: char_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: false,
+        is_blueprint_copy: true,
+        blueprint_runs_remaining: Some(5),
+        merge_existing_stack: false,
+    };
+    assert!(matches!(
+        snap.mint_inventory_item_in_snap(bad_bpc_non_singleton),
+        Err(DbError::ValidationError(_))
+    ));
+
+    let bad_bpc_multi_qty = MintItemSpec {
+        singleton: true,
+        quantity: 2,
+        ..bad_bpc_non_singleton
+    };
+    assert!(matches!(
+        snap.mint_inventory_item_in_snap(bad_bpc_multi_qty),
+        Err(DbError::ValidationError(_))
+    ));
+
+    // 2. BF-2: merge_existing_stack skips escrow-locked, ALSC-locked, and overflowing stacks.
+    let escrow_stack_id = 500_101_i64;
+    let alsc_stack_id = 500_102_i64;
+    let near_full_id = 500_103_i64;
+    for (id, qty) in [(escrow_stack_id, 100), (alsc_stack_id, 200)] {
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: qty,
+                singleton: false,
+                version: 1,
+                ..InventoryItemRecord::default()
+            },
+        );
+    }
+    snap.contracts.insert(
+        777,
+        ContractRecord {
+            contract_id: 777,
+            issuer_id: char_id,
+            status: "Outstanding".into(),
+            item_ids: vec![escrow_stack_id],
+            ..Default::default()
+        },
+    );
+    snap.kv_mut(crate::Ns::AlscLockedItem)
+        .set(alsc_stack_id, "", &true)
+        .expect("set alsc lock");
+    snap.items.insert(
+        near_full_id,
+        InventoryItemRecord {
+            item_id: near_full_id,
+            type_id: 34,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: i32::MAX - 5,
+            singleton: false,
+            version: 1,
+            ..InventoryItemRecord::default()
+        },
+    );
+
+    let fresh = snap
+        .mint_inventory_item_in_snap(MintItemSpec {
+            type_id: 34,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 25,
+            singleton: false,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+            merge_existing_stack: true,
+        })
+        .expect("mint fresh unlocked stack when existing stacks are locked or overflowing");
+    assert_ne!(fresh.item_id, escrow_stack_id);
+    assert_ne!(fresh.item_id, alsc_stack_id);
+    assert_ne!(fresh.item_id, near_full_id);
+    assert_eq!(fresh.quantity, 25);
+    assert_eq!(snap.items[&escrow_stack_id].quantity, 100);
+    assert_eq!(snap.items[&alsc_stack_id].quantity, 200);
+    assert_eq!(snap.items[&near_full_id].quantity, i32::MAX - 5);
+
+    // Subsequent merge targets the new unlocked clean stack instead of locked stacks.
+    let merged = snap
+        .mint_inventory_item_in_snap(MintItemSpec {
+            type_id: 34,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 15,
+            singleton: false,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+            merge_existing_stack: true,
+        })
+        .expect("merge into fresh unlocked stack");
+    assert_eq!(merged.item_id, fresh.item_id);
+    assert_eq!(merged.quantity, 40);
+
+    // Limited-run non-BPC spec with blueprint_runs_remaining must not merge onto an unlimited stack.
+    let limited = snap
+        .mint_inventory_item_in_snap(MintItemSpec {
+            type_id: 34,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: false,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: Some(3),
+            merge_existing_stack: true,
+        })
+        .expect("limited-run grant mints distinct item");
+    assert_ne!(limited.item_id, fresh.item_id);
+    assert_eq!(snap.items[&fresh.item_id].quantity, 40);
+}

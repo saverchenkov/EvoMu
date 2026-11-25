@@ -123,11 +123,15 @@ pub fn should_grant_as_singleton(
     match policy {
         ItemSingletonPolicy::Fixed(b) => b,
         ItemSingletonPolicy::ShipOnlyFromSde => {
-            sde.types.get(&type_id).is_some_and(|t| t.category_id == 6)
+            quantity == 1 && sde.types.get(&type_id).is_some_and(|t| t.category_id == 6)
         }
-        ItemSingletonPolicy::AutoFromSde => sde.types.get(&type_id).is_some_and(|t| {
-            t.category_id == 6 || (quantity == 1 && matches!(t.category_id, 7 | 32))
-        }),
+        ItemSingletonPolicy::AutoFromSde => {
+            quantity == 1
+                && sde
+                    .types
+                    .get(&type_id)
+                    .is_some_and(|t| matches!(t.category_id, 6 | 7 | 32))
+        }
     }
 }
 
@@ -142,7 +146,11 @@ pub fn resolve_character_item_destination_in_snap(
     })?;
     match policy {
         ItemDeliveryPolicy::DockedHangarOrActiveShipCargo => {
-            if let Some(st_id) = ch.station_id.or(ch.structure_id).filter(|&id| id > 0) {
+            if let Some(st_id) = ch
+                .station_id
+                .filter(|&id| id > 0)
+                .or_else(|| ch.structure_id.filter(|&id| id > 0))
+            {
                 Ok((st_id, InventoryFlag::Hangar))
             } else if ch.active_ship_id > 0 {
                 Ok((ch.active_ship_id, InventoryFlag::Cargo))
@@ -156,9 +164,9 @@ pub fn resolve_character_item_destination_in_snap(
         ItemDeliveryPolicy::DockedOrHomeHangar => {
             if let Some(st_id) = ch
                 .station_id
-                .or(ch.structure_id)
-                .or(Some(ch.home_station_id))
                 .filter(|&id| id > 0)
+                .or_else(|| ch.structure_id.filter(|&id| id > 0))
+                .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id))
             {
                 Ok((st_id, InventoryFlag::Hangar))
             } else {

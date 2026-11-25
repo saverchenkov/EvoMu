@@ -370,7 +370,7 @@ fn deliver_op_item(
     if type_id == 0 || amount == 0 {
         return;
     }
-    if let Some(loc_id) = docked_loc {
+    if let Some(loc_id) = docked_loc.filter(|&id| id > 0) {
         if let Ok(qty_i32) = i32::try_from(amount) {
             if let Ok(granted) = crate::domain::items::grant_item_in_snap(
                 None,
@@ -387,20 +387,21 @@ fn deliver_op_item(
             ) {
                 out.created_hangar_items
                     .push((granted.item.item_id, type_id, loc_id, amount));
+                return;
             }
         }
-    } else {
-        crate::services::account_services::enqueue_redeem_token_in_snapshot(
-            snap,
-            uid,
-            type_id,
-            amount as i32,
-            reason.to_string(),
-            None,
-            None,
-        );
-        out.enqueued_redeem_tokens = true;
     }
+    let redeem_qty = i32::try_from(amount).unwrap_or(i32::MAX);
+    crate::services::account_services::enqueue_redeem_token_in_snapshot(
+        snap,
+        uid,
+        type_id,
+        redeem_qty,
+        reason.to_string(),
+        None,
+        None,
+    );
+    out.enqueued_redeem_tokens = true;
 }
 
 fn credit_op_isk(

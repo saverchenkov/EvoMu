@@ -810,7 +810,8 @@ fn handle_inner(
                 }
                 let dest_loc = ch
                     .station_id
-                    .or(ch.structure_id)
+                    .filter(|&id| id > 0)
+                    .or_else(|| ch.structure_id.filter(|&id| id > 0))
                     .unwrap_or(ch.home_station_id);
                 let list = store.redeem_tokens.entry(uid).or_default();
                 let mut claimed_toks = Vec::new();
