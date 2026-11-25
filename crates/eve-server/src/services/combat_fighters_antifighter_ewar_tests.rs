@@ -334,7 +334,7 @@ async fn fighter_abilities_damage_antifighter_ewar_and_deactivation() {
     .unwrap();
     assert_eq!(py_key(&deact_web, "deactivated").and_then(|v| v.as_bool()), Some(true));
     assert!(sys.projected_ewar_for(enemy_ship_id).is_empty());
-    assert!(sys.view().ewar.projected_ewar_source(enemy_ship_id).is_none());
+    assert!(sys.view().projected_ewar_source(enemy_ship_id).is_none());
 
     // Activate Evasive Maneuvers (slot 1 -> ability 13) -> boosts speed and lowers signature_radius, then deactivate
     let before_sig = sys.get_combat_state(attacker_fid).await.unwrap().unwrap().signature_radius;

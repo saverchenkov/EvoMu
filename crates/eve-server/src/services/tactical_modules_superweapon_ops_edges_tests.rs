@@ -407,6 +407,8 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
         }
     }
 
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, 587, mod_id, dd_tid, DVec3::ZERO);
+
     // 1. ModuleInReactivationDelay
     ctx.record_module_reactivation_delay(titan_id, mod_id, 60.0);
     assert_eq!(
@@ -419,7 +421,6 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
     ctx.clear_all_reactivation_delays();
 
     // 2. InvalidShipGroup (frigate 587)
-    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, 587, mod_id, dd_tid, DVec3::ZERO);
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", None)
             .await

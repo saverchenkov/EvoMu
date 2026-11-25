@@ -516,6 +516,29 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ReloadFighterStateClean { .. } => "ReloadFighterStateClean",
             SystemCommand::MergeFighterState { .. } => "MergeFighterState",
             SystemCommand::TestHelperFighterOp { .. } => "TestHelperFighterOp",
+            SystemCommand::UpsertProjectedEwar { .. } => "UpsertProjectedEwar",
+            SystemCommand::RecordProjectedEwarSource { .. } => "RecordProjectedEwarSource",
+            SystemCommand::RemoveProjectedEwarByModule { .. } => "RemoveProjectedEwarByModule",
+            SystemCommand::ClearProjectedEwarForTarget { .. } => "ClearProjectedEwarForTarget",
+            SystemCommand::RecordActiveEwarStart { .. } => "RecordActiveEwarStart",
+            SystemCommand::ReplaceActiveEwarStarts { .. } => "ReplaceActiveEwarStarts",
+            SystemCommand::FlushModuleEwar { .. } => "FlushModuleEwar",
+            SystemCommand::ClearEwarState { .. } => "ClearEwarState",
+            SystemCommand::RecordModuleCooldown { .. } => "RecordModuleCooldown",
+            SystemCommand::SeedModuleCooldownEntry { .. } => "SeedModuleCooldownEntry",
+            SystemCommand::RemoveModuleCooldown { .. } => "RemoveModuleCooldown",
+            SystemCommand::ClearShipModuleCooldowns { .. } => "ClearShipModuleCooldowns",
+            SystemCommand::ClearAllModuleCooldowns { .. } => "ClearAllModuleCooldowns",
+            SystemCommand::ReplaceModuleCooldowns { .. } => "ReplaceModuleCooldowns",
+            SystemCommand::SnapshotModuleCooldownCheckpoint { .. } => {
+                "SnapshotModuleCooldownCheckpoint"
+            }
+            SystemCommand::RecordModuleReloadSimDeadlines { .. } => {
+                "RecordModuleReloadSimDeadlines"
+            }
+            SystemCommand::ClearModuleReloadSimDeadline { .. } => {
+                "ClearModuleReloadSimDeadline"
+            }
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -897,6 +920,113 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::ReloadFighterStateClean { state: crate::system_actor::SystemFighterState::default(), reply: oneshot::channel().0 },
         SystemCommand::MergeFighterState { state: crate::system_actor::SystemFighterState::default(), mark_dirty: false, clear_hydration: true, reply: oneshot::channel().0 },
         SystemCommand::TestHelperFighterOp { op: crate::system_actor::FighterTestHelperOp::ClearAllActive, reply: oneshot::channel().0 },
+        SystemCommand::UpsertProjectedEwar {
+            source_ship_id: 1,
+            target_ship_id: 2,
+            effect: eve_dogma::ProjectedEwarEffect {
+                source_module_id: 10,
+                source_module_type_id: 526,
+                charge_type_id: None,
+                distance: 1_000.0,
+                overloaded: false,
+                effective_module: eve_dogma::DogmaItemState {
+                    item_id: 10,
+                    type_id: 526,
+                    group_id: None,
+                    category_id: None,
+                    base_attributes: HashMap::new(),
+                    modifiers: Vec::new(),
+                    skill_levels: HashMap::new(),
+                },
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RecordProjectedEwarSource {
+            source_module_id: 10,
+            source_ship_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveProjectedEwarByModule {
+            source_ship_id: 1,
+            source_module_id: 10,
+            allow_db_source_fallback: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearProjectedEwarForTarget {
+            target_ship_id: 2,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RecordActiveEwarStart {
+            source_ship_id: 1,
+            module_id: 10,
+            target_ship_id: 2,
+            jamming_type: "webify",
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ReplaceActiveEwarStarts {
+            source_ship_id: 1,
+            module_id: 10,
+            targets: vec![(2, "webify")],
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::FlushModuleEwar {
+            source_ship_id: 1,
+            source_module_id: 10,
+            allow_db_source_fallback: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearEwarState {
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RecordModuleCooldown {
+            ship_id: 1,
+            module_id: 10,
+            module_type_id: 526,
+            now_unix_f64: 100.0,
+            delay_s: 15.0,
+            tidi_factor: 1.0,
+            has_tidi_history: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SeedModuleCooldownEntry {
+            key: (1, 10, 526),
+            entry: crate::system_actor::ModuleCooldownEntry {
+                recorded_unix_f64: 100.0,
+                delay_s: 15.0,
+                solar_system_id: Some(30_000_142),
+                recorded_sys_sim_s: 0.0,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveModuleCooldown {
+            key: (1, 10, 526),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearShipModuleCooldowns {
+            ship_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearAllModuleCooldowns {
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ReplaceModuleCooldowns {
+            cooldowns: HashMap::new(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SnapshotModuleCooldownCheckpoint {
+            only_if_dirty: true,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RecordModuleReloadSimDeadlines {
+            module_ids: vec![10],
+            sim_start_s: 1.0,
+            sim_deadline_s: 6.0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ClearModuleReloadSimDeadline {
+            module_id: 10,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -908,7 +1038,11 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 117);
+    if cfg!(any(test, feature = "testkit")) {
+        assert_eq!(tags.len(), 134);
+    } else {
+        assert_eq!(tags.len(), 133);
+    }
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -937,9 +1071,11 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[112], "ReloadFighterStateClean");
     assert_eq!(tags[113], "MergeFighterState");
     assert_eq!(tags[114], "TestHelperFighterOp");
-    assert_eq!(tags[115], "ShutdownActor");
+    assert_eq!(tags[115], "UpsertProjectedEwar");
+    assert_eq!(tags[131], "ClearModuleReloadSimDeadline");
+    assert_eq!(tags[132], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[116], "TestAccess");
+    assert_eq!(tags[133], "TestAccess");
 }
 
 #[test]

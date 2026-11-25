@@ -500,22 +500,20 @@ async fn combat_state_slim_meta_ewar_and_skill_prerequisites_cover_branches() {
     // Projected EWAR & effective_target_signature_radius
     let _ewar_sys = ctx.systems.get_or_spawn(30_000_142);
     ctx.db.with_mut_snapshot(|snap| {
-        for eid in [888_001_i64, 999_001_i64] {
-            snap.items.insert(
-                eid,
-                InventoryItemRecord {
-                    item_id: eid,
-                    type_id: 606,
-                    owner_id: char_id,
-                    location_id: 30_000_142,
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-        }
+        snap.items.insert(
+            888_001,
+            InventoryItemRecord {
+                item_id: 888_001,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
     });
     let mut tp_mod = DogmaItemState::from_sde(777_001, 379, &ctx.sde);
     tp_mod.base_attributes.insert(554, 30.0);

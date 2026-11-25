@@ -207,22 +207,20 @@ async fn alpha_omega_skill_prerequisites_and_projected_ewar_signature_radius_mat
     let ewar_sys_id = 30_000_142_u32;
     let ewar_sys = ctx.systems.get_or_spawn(ewar_sys_id);
     ctx.db.with_mut_snapshot(|snap| {
-        for eid in [800_001_i64, 900_001_i64] {
-            snap.items.insert(
-                eid,
-                InventoryItemRecord {
-                    item_id: eid,
-                    type_id: 606,
-                    owner_id: char_id,
-                    location_id: ewar_sys_id as i64,
-                    flag: InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-        }
+        snap.items.insert(
+            800_001,
+            InventoryItemRecord {
+                item_id: 800_001,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: ewar_sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
     });
     let mut tp_mod = DogmaItemState::from_sde(700_001, 379, &ctx.sde);
     tp_mod.base_attributes.insert(554, 25.0);

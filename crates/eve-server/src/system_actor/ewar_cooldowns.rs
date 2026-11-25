@@ -81,10 +81,19 @@ pub struct ModuleEwarFlushSnapshot {
 
 pub type ModuleCooldownCheckpointRow = (String, ((i64, i64, u32), ModuleCooldownEntry));
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ModuleCooldownPersistPayload {
     pub db_opt: Option<Arc<WorldRepository>>,
     pub rows: Vec<ModuleCooldownCheckpointRow>,
+}
+
+impl std::fmt::Debug for ModuleCooldownPersistPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModuleCooldownPersistPayload")
+            .field("has_db", &self.db_opt.is_some())
+            .field("rows_len", &self.rows.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
