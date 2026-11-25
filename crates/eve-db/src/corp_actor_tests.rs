@@ -103,7 +103,7 @@ fn resolve_enforces_npc_exclusion_ceo_pending_stasis_and_location_scoping() {
     let bd_pre = corp_role_breakdown(&snap, corp_id, member_id, now + 100);
     assert!(!bd_pre.is_ceo);
     assert_eq!(bd_pre.roles, ROLE_TRADER | ROLE_ACCOUNTANT);
-    assert_eq!(bd_pre.roles_at_hq, 0);
+    assert_eq!(bd_pre.roles_at_hq, ROLE_HANGAR_CAN_TAKE[0]);
     assert_eq!(bd_pre.roles_at_base, ROLE_HANGAR_CAN_TAKE[1]);
     assert_eq!(bd_pre.roles_at_other, ROLE_HANGAR_CAN_TAKE[2]);
     assert_eq!(
@@ -126,4 +126,84 @@ fn resolve_enforces_npc_exclusion_ceo_pending_stasis_and_location_scoping() {
     };
     assert_eq!(bd_matured_promoted_only.roles & ROLE_DIRECTOR, 0);
     assert_eq!(corp_role_breakdown(&snap, 98_999_999, member_id, now), CorpRoleBreakdown::default());
+}
+
+#[test]
+fn pending_global_grant_preserves_scoped_roles_while_scoped_grant_masks_only_its_location() {
+    let sde = test_sde();
+    let mut snap = WorldStateSnapshot::default();
+    let (corp_id, ceo_id, member_id) = (98_555_011, 91_601, 91_602);
+    let (hq_id, base_id, other_id, now) = (60_003_760, 60_003_761, 60_003_762, 1_800_040_000);
+
+    snap.characters.insert(ceo_id, test_char(ceo_id, corp_id, None));
+    snap.characters.insert(member_id, test_char(member_id, corp_id, None));
+    snap.corporations.insert(corp_id, CorporationRecord {
+        corporation_id: corp_id,
+        name: "Scoped Preservation Corp".into(),
+        ticker: "SCPR".into(),
+        ceo_id,
+        hq_station_id: Some(hq_id),
+        members: HashSet::from([ceo_id, member_id]),
+        ..CorporationRecord::default()
+    });
+    let hq_roles = ROLE_DIRECTOR | ROLE_PERSONNEL_MANAGER | ROLE_HANGAR_CAN_TAKE[0];
+    snap.corp_role_assignments.insert((corp_id, member_id), CorpMemberRoleAssignment {
+        character_id: member_id,
+        roles_at_hq: hq_roles,
+        roles_at_base: ROLE_HANGAR_CAN_TAKE[1],
+        roles_at_other: ROLE_HANGAR_CAN_TAKE[2],
+        ..CorpMemberRoleAssignment::default()
+    });
+    let mut gov = CorpGovState::default();
+    gov.member_bases.insert(member_id, base_id);
+    gov.pending_role_grants.insert(member_id, (ROLE_DIRECTOR | ROLE_HANGAR_CAN_TAKE[0], now + 3_600));
+    snap.corp_governance.insert(corp_id, gov);
+
+    // Unmatured global grant must NOT strip existing scoped roles from breakdown or effective_scoped_corp_roles_db.
+    let bd = corp_role_breakdown(&snap, corp_id, member_id, now + 100);
+    assert_eq!(bd.roles, 0);
+    assert_eq!(bd.unmatured_mask, ROLE_DIRECTOR | ROLE_HANGAR_CAN_TAKE[0]);
+    assert_eq!((bd.roles_at_hq, bd.roles_at_base, bd.roles_at_other), (hq_roles, ROLE_HANGAR_CAN_TAKE[1], ROLE_HANGAR_CAN_TAKE[2]));
+    assert_eq!(
+        effective_scoped_corp_roles_db(&snap, corp_id, member_id, now + 100),
+        (hq_roles, ROLE_HANGAR_CAN_TAKE[1], ROLE_HANGAR_CAN_TAKE[2])
+    );
+
+    // CorpActor::resolve_at still masks unmatured_role_bits from flattened location roles, while keeping non-pending HQ roles.
+    let actor_global = CorpActor::resolve(&snap, &sde, member_id, now + 100);
+    assert!(!actor_global.is_director() && actor_global.effective_roles == 0);
+    let actor_hq = CorpActor::resolve_at(&snap, &sde, member_id, Some(hq_id), now + 100);
+    assert_eq!(actor_hq.effective_roles, ROLE_PERSONNEL_MANAGER);
+
+    // Pending scoped grant masks ONLY its matching location (HQ), leaving Base and Other untouched.
+    snap.corp_governance
+        .get_mut(&corp_id)
+        .unwrap()
+        .pending_scoped_role_grants
+        .insert(member_id, (ROLE_HANGAR_CAN_TAKE[0] | ROLE_HANGAR_CAN_TAKE[3], 0, 0, now + 7_200));
+    let bd_scoped = corp_role_breakdown(&snap, corp_id, member_id, now + 100);
+    assert_eq!(bd_scoped.roles_at_hq, ROLE_DIRECTOR | ROLE_PERSONNEL_MANAGER);
+    assert_eq!(bd_scoped.roles_at_base, ROLE_HANGAR_CAN_TAKE[1]);
+    assert_eq!(bd_scoped.roles_at_other, ROLE_HANGAR_CAN_TAKE[2]);
+    assert_eq!(
+        effective_scoped_corp_roles_db(&snap, corp_id, member_id, now + 100),
+        (ROLE_DIRECTOR | ROLE_PERSONNEL_MANAGER, ROLE_HANGAR_CAN_TAKE[1], ROLE_HANGAR_CAN_TAKE[2])
+    );
+    assert_eq!(CorpActor::resolve_at(&snap, &sde, member_id, Some(base_id), now + 100).effective_roles, ROLE_HANGAR_CAN_TAKE[1]);
+    assert_eq!(CorpActor::resolve_at(&snap, &sde, member_id, Some(other_id), now + 100).effective_roles, ROLE_HANGAR_CAN_TAKE[2]);
+
+    // Pending title role grant continues to suppress matching scoped title/role bits until maturity.
+    snap.corp_governance
+        .get_mut(&corp_id)
+        .unwrap()
+        .pending_title_role_grants
+        .insert(member_id, (ROLE_PERSONNEL_MANAGER, now + 7_200));
+    let bd_title = corp_role_breakdown(&snap, corp_id, member_id, now + 100);
+    assert_eq!(bd_title.roles_at_hq, ROLE_DIRECTOR);
+
+    // After maturity, global, scoped, and title pending grants apply cleanly.
+    let bd_post = corp_role_breakdown(&snap, corp_id, member_id, now + 7_200);
+    assert_eq!(bd_post.unmatured_mask, 0);
+    assert_eq!(bd_post.roles, ROLE_DIRECTOR | ROLE_HANGAR_CAN_TAKE[0] | ROLE_PERSONNEL_MANAGER);
+    assert_eq!(bd_post.roles_at_hq, hq_roles | ROLE_HANGAR_CAN_TAKE[3]);
 }
