@@ -1,16 +1,14 @@
 //! Shared types and default data for Quasar Payment, PLEX Vault, and NES Store.
 
 use crate::quasar_gateway::{
-    require_admin_role, MachoNotifySink, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{WorldRepository, WorldStateSnapshot};
 use eve_proto::pb;
 use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
-use eve_sde::SdeRegistry;
 use std::sync::{Arc, RwLock};
 
 fn try_encode_plex_balance_changed_notice(
@@ -963,9 +961,6 @@ pub(crate) fn deliver_store_hangar_items_in_snapshot(
 pub(crate) use super::store_purchase_engine::*;
 
 pub(crate) fn emit_store_purchase_notices(
-    _db: &WorldRepository,
-    _sde: &SdeRegistry,
-    _macho_sink_lock: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pending_notices: &Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
     outcome: &StorePurchaseOutcome,
     emit_balance_notice: bool,
@@ -1007,8 +1002,6 @@ pub fn register_plex_vault_extra_handlers(
     // 1. eve_public.plex.vault.api.PurchaseRequest -> PurchaseResponse
     let db_purch = Arc::clone(&db);
     let pending_purch = Arc::clone(&router.pending_notices);
-    let macho_sink_purch = Arc::clone(&router.macho_notify_sink);
-    let sde_purch = Arc::clone(&router.sde);
     let allow_free_plex = free_fast_checkout_plex;
     router.register_handler(
         "eve_public.plex.vault.api.PurchaseRequest",
@@ -1099,15 +1092,7 @@ pub fn register_plex_vault_extra_handlers(
                 .try_with_mut_snapshot(|snap| purchase_store_offer_in_snapshot(snap, &input))
                 .map_err(store_purchase_error_to_quasar)?;
 
-            emit_store_purchase_notices(
-                &db_purch,
-                &sde_purch,
-                &macho_sink_purch,
-                &pending_purch,
-                &outcome,
-                true,
-                now_unix,
-            );
+            emit_store_purchase_notices(&pending_purch, &outcome, true, now_unix);
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.PurchaseResponse"

@@ -7,9 +7,6 @@ use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
 };
 use super::delta_item_switch::*;
-use super::delta_item_switch_report::{
-    normalize_dispatch_method_label, push_dispatch_rpc_method_guard,
-};
 use super::ServerContext;
 use crate::services::notify_emitters_character_services::{
     save_industry_material_monitors, IndustryMaterialMonitorSub,
@@ -366,10 +363,6 @@ async fn disabled_switches_preserve_handwritten_only_item_delivery() {
     assert_eq!(
         deleted.iter().filter(|n| n.event == "OnItemChange").count(),
         1
-    );
-    assert!(
-        !projected_item_switch_summary(&ctx).has_activity(),
-        "disabled switches must not emit switch telemetry"
     );
 }
 
@@ -1104,7 +1097,7 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    // Once dispatch ends, dispatch facts are dropped so a later RPC without a commit sends (`NotSet`).
+    // Once dispatch ends, dispatch facts are dropped so a later RPC without a commit sends.
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         assert!(
             !ctx.try_consume_projected_item_mutation(pilot_id, &item2),
@@ -1113,13 +1106,6 @@ async fn dedupe_ledger_invalidates_stale_tokens_and_skips_offline_targets() {
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    let sw_mid = projected_item_switch_summary(&ctx);
-    assert_eq!(sw_mid.replaced, 1, "sw={sw_mid:#?}");
-    assert_eq!(sw_mid.superseded, 1, "sw={sw_mid:#?}");
-    assert_eq!(sw_mid.by_scope.dispatch.would_announce, 2, "sw={sw_mid:#?}");
-    assert_eq!(sw_mid.by_scope.dispatch.replaced, 2, "sw={sw_mid:#?}");
-    assert_eq!(sw_mid.by_scope.dispatch.superseded, 1, "sw={sw_mid:#?}");
-    assert_eq!(sw_mid.by_scope.dispatch.no_projected_event, 1, "sw={sw_mid:#?}");
     let two_commit_notifs = ctx.drain_notifications_for_char(pilot_id);
     assert_eq!(two_commit_notifs.iter().filter(|n| n.event == "OnItemChange").count(), 2);
     assert_eq!(
@@ -1496,13 +1482,6 @@ async fn fix1_tokens_expire_at_end_of_dispatch_and_never_dedupe_across_dispatche
         1,
         "expired token from Dispatch 1 must never suppress helper in Dispatch 2"
     );
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.emitted, 1);
-    assert_eq!(sw.new, 1);
-    assert_eq!(sw.replaced, 0);
-    assert_eq!(sw.helper_without_token, 1);
-    assert_eq!(sw.helper_without_token_with_projected_event, 0);
-    assert_eq!(sw.helper_without_token_no_projected_event, 1);
 }
 
 #[tokio::test]
@@ -1564,152 +1543,6 @@ async fn fix2_no_silent_eviction_above_4096_and_tracks_evictions_zero() {
     .await;
 
     assert_eq!(emitted_count, COUNT as usize);
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.evictions, 0);
-    assert_eq!(sw.emitted, COUNT as u64);
-    assert_eq!(sw.replaced, COUNT as u64);
-    assert_eq!(sw.new, 0);
-    assert_eq!(sw.helper_without_token, 0);
-    assert_eq!(sw.helper_without_token_with_projected_event, 0);
-    assert_eq!(sw.helper_without_token_no_projected_event, 0);
-}
-
-#[tokio::test]
-async fn fix3_and_fix5_change_dict_comparison_and_switched_telemetry() {
-    let ctx = test_ctx();
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_930_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-        char_same_scene_item_mutation: true,
-        char_same_scene_item_deleted: true,
-        char_same_scene_item_outside_rpc: false,
-        char_same_scene_item_fitted: false,
-        char_all_items: false,
-        corp_all_items: false,
-    });
-
-    let same_del = InventoryItemRecord {
-        item_id: 993_100_001,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: ship_id,
-        flag: InventoryFlag::Cargo,
-        quantity: 20,
-        version: 1,
-        ..Default::default()
-    };
-    let diff_del = InventoryItemRecord {
-        item_id: 993_100_002,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 15,
-        version: 1,
-        ..Default::default()
-    };
-    let new_only = InventoryItemRecord {
-        item_id: 993_100_003,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 7,
-        version: 1,
-        ..Default::default()
-    };
-    let no_token_hangar = InventoryItemRecord {
-        item_id: 993_100_004,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 9,
-        version: 1,
-        ..Default::default()
-    };
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(same_del.item_id, same_del.clone());
-        s.items.insert(diff_del.item_id, diff_del.clone());
-    });
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("fix3_fix5_tx", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.remove_system_cleanup_item(same_del.item_id);
-                tx.snap.remove_system_cleanup_item(diff_del.item_id);
-                tx.snap.items.insert(new_only.item_id, new_only.clone());
-                Ok(())
-            })
-            .expect("tx");
-
-        // 1. Tombstone helper has identical {3, 4, 9} change dict -> dictionary_same.
-        ctx.emit_item_deleted_routed(pilot_id, &same_del);
-        // 2. Helper omitting col 4/9 ({3: station_id} like TrashItems) -> dictionary_differs.
-        assert!(
-            ctx.try_consume_projected_item_deleted_with_changes(
-                pilot_id,
-                &diff_del,
-                &[(3, PyRep::Integer(station_id))],
-                "TrashItems_style",
-            ),
-            "TrashItems-style delete helper must consume commit token cleanly"
-        );
-        // 3. Helper without commit token on a first-set row -> helper_without_token.
-        ctx.notify_item_mutation(pilot_id, None, Some(&no_token_hangar));
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.evictions, 0);
-    assert_eq!(sw.emitted, 3, "sw={sw:#?}");
-    assert_eq!(sw.replaced, 2, "sw={sw:#?}");
-    assert_eq!(sw.new, 1, "sw={sw:#?}");
-    assert_eq!(sw.emitted, sw.replaced + sw.new);
-    assert_eq!(sw.helper_without_token, 1, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_with_projected_event, 0, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_no_projected_event, 1, "sw={sw:#?}");
-    assert_eq!(sw.dictionary_same, 1, "sw={sw:#?}");
-    assert_eq!(sw.dictionary_differs, 1, "sw={sw:#?}");
-    assert_eq!(sw.sample_dictionary_differs.len(), 1, "sw={sw:#?}");
-    assert!(
-        sw.sample_dictionary_differs[0].contains("first_set=true"),
-        "switch dictionary_differs sample must carry first_set=true: {:?}",
-        sw.sample_dictionary_differs
-    );
-    assert_eq!(sw.sample_helper_without_token_no_projected_event.len(), 1);
-    assert!(sw.sample_helper_without_token_with_projected_event.is_empty());
-    assert!(
-        sw.by_class
-            .contains_key("before=ship_or_container,after=recycling_loc_6,flag=0,before_flag=5,owner=character,singleton=false")
-    );
-    assert!(
-        sw.by_helper
-            .get("emit_item_deleted_routed")
-            .is_some_and(|h| h.replaced == 1 && h.dictionary_same == 1 && h.dictionary_differs == 0)
-    );
-    assert!(
-        sw.by_helper
-            .get("TrashItems_style")
-            .is_some_and(|h| h.replaced == 1 && h.dictionary_same == 0 && h.dictionary_differs == 1)
-    );
-    assert!(
-        sw.by_helper
-            .get("emit_item_change_routed")
-            .is_some_and(|h| {
-                h.helper_without_token == 1
-                    && h.helper_without_token_with_projected_event == 0
-                    && h.helper_without_token_no_projected_event == 1
-            }),
-        "by_helper={:#?}",
-        sw.by_helper
-    );
-    let md = sw.format_markdown_report();
-    assert!(md.contains("helper_without_token_no_projected_event=1"), "{md}");
-    assert!(md.contains("first_set=true"), "{md}");
 }
 
 #[tokio::test]
@@ -1797,163 +1630,6 @@ async fn fix4_switches_off_build_item_tombstone_clears_is_blueprint_copy_qty_min
 }
 
 #[tokio::test]
-async fn check39_helper_without_token_splits_projected_intermediate_vs_no_projected_event() {
-    let ctx = test_ctx();
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_950_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-        char_same_scene_item_mutation: true,
-        char_same_scene_item_deleted: true,
-        char_same_scene_item_outside_rpc: false,
-        char_same_scene_item_fitted: false,
-        char_all_items: false,
-        corp_all_items: false,
-    });
-
-    let sell_item_id = 993_300_001_i64;
-    let noop_item_id = 993_300_002_i64;
-    let sell_start = InventoryItemRecord {
-        item_id: sell_item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 1_000,
-        version: 1,
-        ..Default::default()
-    };
-    let noop_row = InventoryItemRecord {
-        item_id: noop_item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 50,
-        version: 1,
-        ..Default::default()
-    };
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(sell_item_id, sell_start.clone());
-        s.items.insert(noop_item_id, noop_row.clone());
-    });
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-
-    // Dispatch 1 (`marketProxy.PlaceMultiSellOrder`): one commit reduces stack 1000 -> 200;
-    // helper still emits intermediate quantities (800, 600, 400), consumes final (200), and
-    // another post-consumption emit (150) sees the item still had a projected event in this
-    // dispatch even after its token was consumed.
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("marketProxy", "PlaceMultiSellOrder"),
-        );
-        let mut final_after = sell_start.clone();
-        final_after.quantity = 200;
-        final_after.version = 2;
-        ctx.db
-            .tx("place_multi_sell_commit", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(sell_item_id, final_after.clone());
-                Ok(())
-            })
-            .expect("commit");
-
-        for (prev_qty, next_qty) in [(1_000, 800), (800, 600), (600, 400)] {
-            let mut step = sell_start.clone();
-            step.quantity = next_qty;
-            step.version = 2;
-            ctx.emit_item_change_routed(pilot_id, &step, vec![(9, PyRep::Integer(prev_qty))]);
-        }
-        // Final state matches and consumes the commit token:
-        ctx.notify_item_mutation(pilot_id, Some(&sell_start), Some(&final_after));
-        // Even after token consumption, another un-tokenized emit for the same item in the same
-        // dispatch classifies under `with_projected_event` (never `no_projected_event`).
-        let mut stale_post = final_after.clone();
-        stale_post.quantity = 150;
-        ctx.emit_item_change_routed(pilot_id, &stale_post, vec![(9, PyRep::Integer(200))]);
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-
-    let d1_notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(
-        d1_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        1,
-        "1 projected (qty=200) sends; 3 intermediate + 1 stale post helper calls are suppressed as superseded"
-    );
-
-    // Dispatch 2 (`invbroker.Add`): Dispatch 1 facts were dropped at dispatch end, so both
-    // `noop_item_id` and `sell_item_id` have no set fact -> `no_projected_event` (both send).
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("invbroker", "Add"),
-        );
-        ctx.emit_item_change_routed(pilot_id, &noop_row, vec![(9, PyRep::Integer(40))]);
-        // Dispatch 1's `sell_item_id` fact must not bleed into Dispatch 2:
-        ctx.emit_item_change_routed(pilot_id, &sell_start, vec![(9, PyRep::Integer(900))]);
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-
-    let d2_notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(
-        d2_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        2,
-        "helper calls without a set fact in invbroker.Add must continue sending"
-    );
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.evictions, 0);
-    assert_eq!(sw.emitted, 1, "sw={sw:#?}");
-    assert_eq!(sw.replaced, 1, "sw={sw:#?}");
-    assert_eq!(sw.superseded, 4, "sw={sw:#?}");
-    assert_eq!(sw.new, 0, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token, 2, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_with_projected_event, 0, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_no_projected_event, 2, "sw={sw:#?}");
-    assert_eq!(sw.by_scope.dispatch.would_announce, 1, "sw={sw:#?}");
-    assert_eq!(sw.by_scope.dispatch.replaced, 1, "sw={sw:#?}");
-    assert_eq!(sw.by_scope.dispatch.superseded, 4, "sw={sw:#?}");
-    assert_eq!(sw.by_scope.dispatch.no_projected_event, 2, "sw={sw:#?}");
-
-    let pms = sw
-        .by_dispatch_method
-        .get("marketProxy.PlaceMultiSellOrder")
-        .expect("PlaceMultiSellOrder bucket");
-    assert_eq!(pms.emitted, 1);
-    assert_eq!(pms.replaced, 1);
-    assert_eq!(pms.superseded, 4);
-    assert_eq!(pms.helper_without_token, 0);
-
-    let inv_add = sw
-        .by_dispatch_method
-        .get("invbroker.Add")
-        .expect("invbroker.Add bucket");
-    assert_eq!(inv_add.helper_without_token, 2);
-    assert_eq!(inv_add.helper_without_token_with_projected_event, 0);
-    assert_eq!(inv_add.helper_without_token_no_projected_event, 2);
-
-    assert_eq!(
-        sw.no_projected_event_rpcs(),
-        BTreeMap::from([("invbroker.Add".to_string(), 2)])
-    );
-    assert_eq!(sw.sample_superseded.len(), 4);
-    assert_eq!(sw.sample_helper_without_token_no_projected_event.len(), 2);
-    assert!(sw
-        .sample_helper_without_token_no_projected_event
-        .iter()
-        .all(|s| s.contains("had_projected_event=false")));
-
-    let md = sw.format_markdown_report();
-    assert!(md.contains("superseded=4"), "{md}");
-    assert!(md.contains("helper_without_token_no_projected_event=2"), "{md}");
-    assert!(md.contains("`invbroker.Add`"), "{md}");
-}
-
-#[tokio::test]
 async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projection() {
     let ctx = test_ctx();
     let (pilot_id, station_id, sys_id, ship_a_id, ship_b_id) =
@@ -2038,11 +1714,6 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("ship", "Board"),
-        );
         ctx.db
             .tx("r1_bf01_commit1_space_ship_transition", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap
@@ -2071,18 +1742,9 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
         0,
         "Commit 2 mutating the transitioned active ship itself must remain suppressed"
     );
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.emitted, 0, "sw={sw:#?}");
-    assert_eq!(sw.replaced, 0, "sw={sw:#?}");
-    assert_eq!(sw.new, 0, "sw={sw:#?}");
 
     // Follow-up in same dispatch style: Commit 2 inserting non-ship cargo item projects cleanly.
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("ship", "Board"),
-        );
         ctx.db
             .tx("r1_bf01_commit1b_space_ship_transition", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap
@@ -2137,11 +1799,6 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("ship", "Board"),
-        );
         ctx.db
             .tx("r1_bf01_docked_station_commit1_ship_only", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap
@@ -2185,11 +1842,6 @@ async fn r1_bf01_multi_commit_transition_dispatch_suppresses_commit2_item_projec
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("ship", "Board"),
-        );
         ctx.db
             .tx("r1_bf01_docked_struct_commit1_ship_only", |tx| -> Result<(), eve_db::TxError> {
                 tx.snap
@@ -2301,11 +1953,6 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
         let _ = ctx.drain_notifications_for_char(pilot_id);
 
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-            let _rpc_guard = push_dispatch_rpc_method_guard(
-                &*ctx.pending_notifications,
-                &ctx.notify_tx,
-                normalize_dispatch_method_label("marketProxy", "PlaceMultiSellOrder"),
-            );
             ctx.db
                 .tx("r1_bf02_consume_full_stack", |tx| -> Result<(), eve_db::TxError> {
                     tx.snap.remove_system_cleanup_item(item_id);
@@ -2345,90 +1992,7 @@ async fn r1_bf02_loc6_tombstone_via_emit_item_change_routed_and_notify_item_chan
                 1
             );
         }
-        let sw = projected_item_switch_summary(&ctx);
-        assert_eq!(sw.emitted, 1, "sw={sw:#?}");
-        assert_eq!(sw.replaced, 1, "sw={sw:#?}");
-        assert_eq!(sw.new, 0, "sw={sw:#?}");
-        assert_eq!(sw.helper_without_token, 0, "sw={sw:#?}");
-        assert_eq!(sw.dictionary_same, 1, "sw={sw:#?}");
-        assert_eq!(sw.dictionary_differs, 0, "sw={sw:#?}");
     }
-}
-
-#[tokio::test]
-async fn r1_bf03_untokenized_deleted_helper_records_recycling_loc6_class_key() {
-    let ctx = test_ctx();
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_980_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig {
-        char_same_scene_item_mutation: false,
-        char_same_scene_item_deleted: true,
-        char_same_scene_item_outside_rpc: false,
-        char_same_scene_item_fitted: false,
-        char_all_items: false,
-        corp_all_items: false,
-    });
-
-    let old_item = InventoryItemRecord {
-        item_id: 992_980_020_i64,
-        type_id: 587,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 1,
-        singleton: true,
-        version: 1,
-        ..Default::default()
-    };
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(old_item.item_id, old_item.clone());
-    });
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("invbroker", "TrashItems"),
-        );
-        // No commit occurred for `old_item` in this dispatch -> un-tokenized `emit_item_deleted_routed`.
-        ctx.emit_item_deleted_routed(pilot_id, &old_item);
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-
-    let notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(notifs.iter().filter(|n| n.event == "OnItemChange").count(), 1);
-
-    let expected_class =
-        "before=station,after=recycling_loc_6,flag=0,before_flag=4,owner=character,singleton=false";
-    let expected_crh = format!(
-        "class={expected_class}|rpc=invbroker.TrashItems|helper=emit_item_deleted_routed"
-    );
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.helper_without_token, 1, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_no_projected_event, 1, "sw={sw:#?}");
-    assert_eq!(
-        sw.by_class.get(expected_class).map(|c| c.helper_without_token),
-        Some(1),
-        "sw.by_class={:#?}",
-        sw.by_class
-    );
-    assert_eq!(
-        sw.by_class
-            .get(expected_class)
-            .map(|c| c.helper_without_token_no_projected_event),
-        Some(1)
-    );
-    assert_eq!(
-        sw.by_class_rpc_helper
-            .get(&expected_crh)
-            .map(|c| c.helper_without_token),
-        Some(1),
-        "sw.by_class_rpc_helper={:#?}",
-        sw.by_class_rpc_helper
-    );
 }
 
 #[tokio::test]
@@ -2590,235 +2154,6 @@ async fn t3c1_commit_companions_on_industry_materials_and_multi_item_without_hel
         del_bp_events,
         vec!["OnItemChange", "OnMultipleItemChange", "OnBlueprintsUpdated"]
     );
-}
-
-#[tokio::test]
-async fn t3c1_track_caller_telemetry_records_call_sites_across_wrappers_and_non_first_set() {
-    use super::cache_notifications::NotificationTarget;
-
-    let ctx = test_ctx();
-    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::enabled());
-    // This test specifically verifies pre-char_all_items/pre-corp_all_items non-first-set fallback.
-    ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled()
-            .with_char_all_items(false)
-            .with_corp_all_items(false),
-    );
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 992_995_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-
-    let file_norm = file!().replace('\\', "/");
-    let mk_hangar = |item_id: i64, qty: i32| InventoryItemRecord {
-        item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: qty,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
-
-    let id_inv_mut = 992_995_101_i64;
-    let id_inv_del = 992_995_102_i64;
-    let id_mut_helper = 992_995_103_i64;
-    let id_target_hit = 992_995_104_i64;
-    let id_stale_routed = 992_995_105_i64;
-    let id_no_proj_del = 992_995_106_i64;
-
-    let item_inv_del = mk_hangar(id_inv_del, 10);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(id_inv_del, item_inv_del.clone());
-    });
-
-    let (
-        site_inv_mut,
-        site_inv_del,
-        site_mut_helper,
-        site_target_hit,
-        site_with_proj_routed,
-        site_no_proj_deleted,
-        site_non_first_target,
-        site_non_first_drone,
-    ) = with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let _rpc_guard = push_dispatch_rpc_method_guard(
-            &*ctx.pending_notifications,
-            &ctx.notify_tx,
-            normalize_dispatch_method_label("invbroker", "MoveItems"),
-        );
-
-        let item_inv_mut = mk_hangar(id_inv_mut, 20);
-        let item_mut_helper = mk_hangar(id_mut_helper, 30);
-        let item_target_hit = mk_hangar(id_target_hit, 40);
-        let item_stale_v1 = mk_hangar(id_stale_routed, 50);
-        let item_stale_v2 = mk_hangar(id_stale_routed, 60);
-
-        ctx.db
-            .tx("t3c1_tc_commits", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(id_inv_mut, item_inv_mut.clone());
-                tx.snap.remove_system_cleanup_item(id_inv_del);
-                tx.snap.items.insert(id_mut_helper, item_mut_helper.clone());
-                tx.snap.items.insert(id_target_hit, item_target_hit.clone());
-                tx.snap.items.insert(id_stale_routed, item_stale_v1.clone());
-                Ok(())
-            })
-            .expect("commit 1");
-        ctx.db
-            .tx("t3c1_tc_stale_v2", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(id_stale_routed, item_stale_v2.clone());
-                Ok(())
-            })
-            .expect("commit 2");
-
-        // Replaced via emit_item_change_routed (same routed path)
-        let site_inv_mut = format!("{file_norm}:{}", line!() + 1);
-        ctx.emit_item_change_routed(pilot_id, &item_inv_mut, vec![(3, PyRep::Integer(0))]);
-
-        // Replaced via emit_item_deleted_routed (same routed path)
-        let site_inv_del = format!("{file_norm}:{}", line!() + 1);
-        ctx.emit_item_deleted_routed(pilot_id, &item_inv_del);
-
-        // Replaced via notify_item_mutation
-        let site_mut_helper = format!("{file_norm}:{}", line!() + 1);
-        ctx.notify_item_mutation(pilot_id, None, Some(&item_mut_helper));
-
-        // Replaced via emit_item_change_with_target
-        let site_target_hit = format!("{file_norm}:{}", line!() + 1);
-        ctx.emit_item_change_with_target(NotificationTarget::Character(pilot_id), "charid", &item_target_hit, vec![(3, PyRep::Integer(0))]);
-
-        // superseded via emit_item_change_routed (stale qty=50 sees v2 qty=60 fact -> not sent)
-        let site_with_proj_routed = format!("{file_norm}:{}", line!() + 1);
-        ctx.emit_item_change_routed(pilot_id, &item_stale_v1, vec![(3, PyRep::Integer(0))]);
-
-        // no_projected_event via emit_item_deleted_routed (no commit for id_no_proj_del)
-        let item_no_proj_del = mk_hangar(id_no_proj_del, 5);
-        let site_no_proj_deleted = format!("{file_norm}:{}", line!() + 1);
-        ctx.emit_item_deleted_routed(pilot_id, &item_no_proj_del);
-
-        // non_first_set_emitted via emit_item_change_with_target (Corporation target)
-        let pilot_corp = ctx.db.with_snapshot(|s| s.characters[&pilot_id].corporation_id);
-        let corp_item = InventoryItemRecord {
-            item_id: 992_995_107_i64,
-            type_id: 34,
-            owner_id: pilot_corp,
-            location_id: station_id,
-            flag: InventoryFlag::CorpSAG1,
-            quantity: 100,
-            ..Default::default()
-        };
-        let site_non_first_target = format!("{file_norm}:{}", line!() + 1);
-        ctx.emit_item_change_with_target(NotificationTarget::Corporation(pilot_corp), "corpid", &corp_item, vec![(3, PyRep::Integer(0))]);
-
-        // non_first_set_emitted via notify_item_mutation (non-first-set DroneBay flag=87)
-        let drone_item = InventoryItemRecord {
-            item_id: 992_995_108_i64,
-            type_id: 2454,
-            owner_id: pilot_id,
-            location_id: ship_id,
-            flag: InventoryFlag::DroneBay,
-            quantity: 5,
-            ..Default::default()
-        };
-        let site_non_first_drone = format!("{file_norm}:{}", line!() + 1);
-        ctx.notify_item_mutation(pilot_id, None, Some(&drone_item));
-
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-        (
-            site_inv_mut,
-            site_inv_del,
-            site_mut_helper,
-            site_target_hit,
-            site_with_proj_routed,
-            site_no_proj_deleted,
-            site_non_first_target,
-            site_non_first_drone,
-        )
-    })
-    .await;
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.replaced, 4, "sw={sw:#?}");
-    assert_eq!(sw.superseded, 1, "sw={sw:#?}");
-    assert_eq!(sw.non_first_set_emitted, 2, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_with_projected_event, 0, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token_no_projected_event, 1, "sw={sw:#?}");
-
-    for site in [
-        &site_inv_mut,
-        &site_inv_del,
-        &site_mut_helper,
-        &site_target_hit,
-    ] {
-        assert_eq!(
-            sw.by_call_site.get(site),
-            Some(&SwitchCallSiteCounts {
-                replaced: 1,
-                superseded: 0,
-                non_first_set_emitted: 0,
-                helper_without_token_with_projected_event: 0,
-                helper_without_token_no_projected_event: 0,
-            }),
-            "site={site} by_call_site={:#?}",
-            sw.by_call_site
-        );
-    }
-    assert_eq!(
-        sw.by_call_site.get(&site_with_proj_routed),
-        Some(&SwitchCallSiteCounts {
-            replaced: 0,
-            superseded: 1,
-            non_first_set_emitted: 0,
-            helper_without_token_with_projected_event: 0,
-            helper_without_token_no_projected_event: 0,
-        })
-    );
-    assert_eq!(
-        sw.by_call_site.get(&site_no_proj_deleted),
-        Some(&SwitchCallSiteCounts {
-            replaced: 0,
-            superseded: 0,
-            non_first_set_emitted: 0,
-            helper_without_token_with_projected_event: 0,
-            helper_without_token_no_projected_event: 1,
-        })
-    );
-    for site in [&site_non_first_target, &site_non_first_drone] {
-        assert_eq!(
-            sw.by_call_site.get(site),
-            Some(&SwitchCallSiteCounts {
-                replaced: 0,
-                superseded: 0,
-                non_first_set_emitted: 1,
-                helper_without_token_with_projected_event: 0,
-                helper_without_token_no_projected_event: 0,
-            }),
-            "site={site} by_call_site={:#?}",
-            sw.by_call_site
-        );
-    }
-
-    for k in sw.by_call_site.keys() {
-        assert!(
-            k.contains("delta_item_switch_tests.rs:"),
-            "call site must propagate through wrappers to caller, got {k}"
-        );
-    }
-
-    let md = sw.format_markdown_report();
-    assert!(md.contains("| Call Site |"), "{md}");
-    assert!(md.contains(&site_inv_mut), "{md}");
-    assert!(md.contains(&site_non_first_drone), "{md}");
-
-    let json = serde_json::to_value(&sw).expect("serialize summary");
-    assert_eq!(json["non_first_set_emitted"], 2);
-    assert_eq!(json["superseded"], 1);
-    assert_eq!(json["by_call_site"][&site_inv_mut]["replaced"], 1);
-    assert_eq!(json["by_call_site"][&site_with_proj_routed]["superseded"], 1);
-    assert_eq!(json["by_call_site"][&site_no_proj_deleted]["helper_without_token_no_projected_event"], 1);
-    assert_eq!(json["by_call_site"][&site_non_first_target]["non_first_set_emitted"], 1);
 }
 
 #[tokio::test]
@@ -3261,7 +2596,6 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
         "charge load must project once"
     );
 
-    let superseded_before = projected_item_switch_summary(&ctx).superseded;
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         let charge_200 = charge_a.clone();
         let mut charge_autoload_before = charge_a.clone();
@@ -3293,10 +2627,6 @@ async fn step1_fitted_switch_projects_fit_unfit_swap_charges_autoload_strip_and_
     assert_eq!(
         autoload_notifs[0].args[0].dbrow_get("quantity"),
         Some(&PyRep::Integer(199))
-    );
-    assert!(
-        projected_item_switch_summary(&ctx).superseded > superseded_before,
-        "intermediate qty=200 helper must increment superseded counter"
     );
 
     // 2d. Unfit (`HiSlot1 -> Hangar`) projects once cleanly.
@@ -3707,15 +3037,6 @@ async fn track5b_s1_char_all_items_specialized_holds_locked_drone_implant_remote
             .count(),
         3,
         "default char_all_items=false preserves legacy hand-written OnItemChange for generalized locs/flags"
-    );
-    let sum_off = projected_item_switch_summary(&ctx);
-    assert!(
-        sum_off.not_covered_by_reason.contains_key("flag is not 4 or 5")
-            || sum_off
-                .not_covered_by_reason
-                .contains_key("location is not the docked hangar or the active ship"),
-        "expected default char_all_items=false not_covered_by_reason: {:?}",
-        sum_off.not_covered_by_reason
     );
 
     // Part B: With `char_all_items == true`, ALL 5 categories project on commit and dedupe helpers.
@@ -4204,77 +3525,19 @@ async fn track5b_s1_cross_owner_char_transfer_both_recipients_and_outgoing_dedup
 }
 
 #[tokio::test]
-async fn track5b_s1_char_all_items_telemetry_and_20k_pending_batch_cap() {
+async fn track5b_s1_char_all_items_20k_pending_batch_cap() {
     use super::cache_notifications::{
         assemble_pending_notification, enqueue_or_stage_pending_batch,
         MAX_PENDING_NOTIFICATIONS_PER_CHAR,
     };
 
     let ctx = test_ctx();
-    let (pilot_id, offline_id, station_id, sys_id, ship_id, corp_id) = (
-        90_000_001_i64,
-        90_000_002_i64,
-        60_003_760_i64,
-        30_000_142_u32,
-        993_940_010_i64,
-        98_000_001_i64,
-    );
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_940_010_i64);
     setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations
-            .entry(corp_id)
-            .or_insert_with(|| CorporationRecord::new(corp_id, "Tel Corp", "TEL", pilot_id));
-        snap.characters.get_mut(&pilot_id).expect("pilot").corporation_id = corp_id;
-    });
     let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled());
-
-    let report_on = projected_item_switch_summary(&ctx).format_markdown_report();
-    assert!(
-        report_on.contains("char_all_items=true") && report_on.contains("corp_all_items=true"),
-        "report should expose char_all_items=true, corp_all_items=true: {report_on}"
-    );
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_corp_all_items(false));
-
-    // Offline non-hangar item must report OwnerOffline (never FlagNot4Or5 / LocationNotDockedHangarOrActiveShip).
-    let off_item = InventoryItemRecord {
-        item_id: 993_940_021,
-        type_id: 34,
-        owner_id: offline_id,
-        location_id: ship_id,
-        flag: InventoryFlag::SpecializedFuelBay,
-        quantity: 10,
-        ..Default::default()
-    };
-    let corp_item = InventoryItemRecord {
-        item_id: 993_940_022,
-        type_id: 34,
-        owner_id: corp_id,
-        location_id: station_id,
-        flag: InventoryFlag::CorpSAG1,
-        quantity: 10,
-        ..Default::default()
-    };
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.notify_item_mutation(offline_id, None, Some(&off_item));
-        ctx.notify_item_mutation(pilot_id, None, Some(&corp_item));
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let sum = projected_item_switch_summary(&ctx);
-    assert!(sum.not_covered_by_reason.contains_key("owner offline"));
-    assert!(sum.not_covered_by_reason.contains_key("not character-owned"));
-    assert!(
-        !sum.not_covered_by_reason.contains_key("flag is not 4 or 5")
-            && !sum
-                .not_covered_by_reason
-                .contains_key("location is not the docked hangar or the active ship"),
-        "char_all_items=true must never blame flag/location: {:?}",
-        sum.not_covered_by_reason
-    );
 
     // 20,000-item pending batch sanity check: linear-time cap retention + exact trailing order.
-    let _ = ctx.drain_notifications_for_char(pilot_id);
     let batch: Vec<_> = (0..20_000_i64)
         .map(|i| {
             assemble_pending_notification(
@@ -4639,8 +3902,6 @@ async fn track5c_s1_corp_all_items_off_default_and_on_projects_corp_hangar_upwel
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    assert_eq!(projected_item_switch_summary(&ctx).emitted, 0);
-    assert_eq!(projected_item_switch_summary(&ctx).replaced, 0);
     for cid in [p1_id, p2_id] {
         let notifs = ctx.drain_notifications_for_char(cid);
         assert_eq!(
@@ -4792,12 +4053,6 @@ async fn track5c_s1_corp_all_items_off_default_and_on_projects_corp_hangar_upwel
         assert!(item_notifs.iter().all(|n| n.id_type == "corpid"));
         assert!(multi_notifs.iter().all(|n| n.id_type == "corpid"));
     }
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.replaced, 9, "expected exact unique replaced corp facts in sw={sw:#?}");
-    assert!(
-        sw.by_scope.dispatch.replaced >= 15,
-        "expected deduped corp emit calls across multi-row + should_skip helpers in sw={sw:#?}"
-    );
 
     // 3. Partial multi-recipient dedupe: p1 moves in Commit 1 (excluded on that transition commit
     //    while CorpSAG1 projects to non-transitioned p2); legacy Corporation(corp_id) notify
@@ -5348,8 +4603,6 @@ async fn track5c_s1_post_jump_contraband_confiscation_unblocked_and_active_ship_
     );
     let (_, fp) = ItemWireFingerprint::from_pyrep_row(&item_changes[0].args[0]).expect("row fp");
     assert_eq!(fp.location_id, 6, "confiscated cargo must tombstone to locationID=6");
-    let sw = projected_item_switch_summary(&ctx);
-    assert!(sw.replaced >= 1, "legacy contraband delete must consume token cleanly: {sw:#?}");
 }
 
 #[tokio::test]
@@ -5479,141 +4732,7 @@ async fn track5c_s1_ragged_multi_recipient_corp_on_multiple_item_change_splits_p
 }
 
 #[tokio::test]
-async fn track5c_s1_corp_off_telemetry_single_increment_and_deleted_only_per_kind_gating() {
-    let ctx = test_ctx();
-    let (p1_id, p2_id, p3_id, station_id, sys_id, ship1, ship2, corp_id) = (
-        90_000_001_i64,
-        90_000_002_i64,
-        90_000_003_i64,
-        60_003_760_i64,
-        30_000_142_u32,
-        993_990_010_i64,
-        993_990_011_i64,
-        98_000_901_i64,
-    );
-    let setup_corp_3_members = |target_ctx: &ServerContext, corp_name: &str, ticker: &str| {
-        setup_online_pilot_in_station(target_ctx, p1_id, station_id, sys_id, ship1);
-        setup_online_pilot_in_station(target_ctx, p2_id, station_id, sys_id, ship2);
-        target_ctx.db.with_mut_snapshot(|snap| {
-            let mut acct3 = snap.accounts["demo"].clone();
-            acct3.user_id = 90_000_003;
-            acct3.username = "pilot3".to_string();
-            snap.accounts.insert("pilot3".to_string(), acct3);
-            let mut ch3 = snap.characters[&p1_id].clone();
-            ch3.character_id = p3_id;
-            ch3.user_id = 90_000_003;
-            ch3.name = "Pilot Three".to_string();
-            ch3.active_ship_id = 993_990_012;
-            snap.characters.insert(p3_id, ch3);
-            let mut corp = CorporationRecord::new(corp_id, corp_name, ticker, p1_id);
-            corp.members.insert(p1_id);
-            corp.members.insert(p2_id);
-            corp.members.insert(p3_id);
-            snap.corporations.insert(corp_id, corp);
-            for cid in [p1_id, p2_id, p3_id] {
-                snap.characters.get_mut(&cid).expect("char").corporation_id = corp_id;
-            }
-        });
-        target_ctx
-            .db
-            .acquire_online_lock(90_000_003, 9_310, Some(p3_id), true, 1_700_000_500)
-            .expect("lock p3");
-    };
-    setup_corp_3_members(&ctx, "TelGate Corp", "TGC");
-
-    let item = InventoryItemRecord {
-        item_id: 993_990_101,
-        type_id: 34,
-        owner_id: corp_id,
-        location_id: station_id,
-        flag: InventoryFlag::CorpSAG1,
-        quantity: 15,
-        version: 1,
-        ..Default::default()
-    };
-    let row = super::delta_projection::build_inv_item_dbrow(&item, &ctx.sde, "");
-    let change_dict = PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]);
-
-    // 1. Multi-member (N=3) corp OnItemChange under test-overridden `corp_all_items = false` increments
-    //    `NotCharacterOwned` and `non_first_set_emitted` ONCE per broadcast, not 3x.
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_corp_all_items(false));
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.notify(
-            super::NotificationTarget::Corporation(corp_id),
-            "OnItemChange",
-            "corpid",
-            vec![row.clone(), change_dict.clone()],
-        );
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let sw_default = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        sw_default.not_covered_by_reason.get("not character-owned").copied().unwrap_or(0),
-        1,
-        "3-member corp OnItemChange must increment NotCharacterOwned once, got: {sw_default:#?}"
-    );
-    assert_eq!(sw_default.non_first_set_emitted, 1, "sw={sw_default:#?}");
-    for cid in [p1_id, p2_id, p3_id] {
-        assert_eq!(ctx.drain_notifications_for_char(cid).len(), 1);
-    }
-
-    // 2. Deleted-only switch config (`mutation=false, char_all_items=false, corp_all_items=false`):
-    //    corp CreatedOrUpdated OnItemChange (both N=3 and N=1) and single-member OnMultipleItemChange
-    //    must increment neither `NotCharacterOwned` nor `non_first_set_emitted`.
-    let ctx_del_only = test_ctx();
-    setup_corp_3_members(&ctx_del_only, "DelOnly Corp", "DOC");
-    ctx_del_only.set_projected_item_switches(ProjectedItemSwitchConfig {
-        char_same_scene_item_mutation: false,
-        char_same_scene_item_deleted: true,
-        char_same_scene_item_outside_rpc: false,
-        char_same_scene_item_fitted: false,
-        char_all_items: false,
-        corp_all_items: false,
-    });
-    with_staged_dispatch_notifications(&*ctx_del_only.pending_notifications, &ctx_del_only.notify_tx, async {
-        // N=3 OnItemChange
-        ctx_del_only.notify(
-            super::NotificationTarget::Corporation(corp_id),
-            "OnItemChange",
-            "corpid",
-            vec![row.clone(), change_dict.clone()],
-        );
-        // Log off p2 & p3 so N=1 OnItemChange + OnMultipleItemChange hit per-recipient inner path:
-        assert!(ctx_del_only.db.release_online_lock(
-            ctx_del_only.db.with_snapshot(|s| s.characters[&p2_id].user_id),
-            9_310,
-        ));
-        assert!(ctx_del_only.db.release_online_lock(90_000_003, 9_310));
-        ctx_del_only.notify(
-            super::NotificationTarget::Corporation(corp_id),
-            "OnItemChange",
-            "corpid",
-            vec![row.clone(), change_dict.clone()],
-        );
-        ctx_del_only.notify(
-            super::NotificationTarget::Corporation(corp_id),
-            "OnMultipleItemChange",
-            "corpid",
-            vec![PyRep::List(vec![row.clone()]), change_dict.clone()],
-        );
-        flush_staged_dispatch_notifications(&*ctx_del_only.pending_notifications, &ctx_del_only.notify_tx);
-    })
-    .await;
-    let sw_del_only = projected_item_switch_summary(&ctx_del_only);
-    assert_eq!(
-        sw_del_only.not_covered_by_reason.get("not character-owned").copied().unwrap_or(0),
-        0,
-        "deleted-only switch must never blame NotCharacterOwned for CreatedOrUpdated: {sw_del_only:#?}"
-    );
-    assert_eq!(sw_del_only.non_first_set_emitted, 0, "sw={sw_del_only:#?}");
-    for cid in [p1_id, p2_id, p3_id] {
-        let _ = ctx_del_only.drain_notifications_for_char(cid);
-    }
-}
-
-#[tokio::test]
-async fn track5c_s1_p2_flag_only_npc_corp_hangar_exit_and_commit2_non_ship_pilot_moved_scoping() {
+async fn track5c_s1_p2_flag_only_npc_corp_hangar_exit_dedupes_legacy_corpid() {
     let ctx = test_ctx();
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_995_010_i64);
@@ -5626,7 +4745,7 @@ async fn track5c_s1_p2_flag_only_npc_corp_hangar_exit_and_commit2_non_ship_pilot
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
     // P2-02: Same-station NPC corp flag exit (`CorpSAG1 -> Hangar`, ONLY `col 4` in dict, `col 3` omitted)
-    // must match `CorpSAG1` eligibility via `col 4` cleanly without falling back to `NotCharacterOwned`.
+    // must match and dedupe legacy `corpid` notification cleanly.
     let npc_item_id = 993_995_101_i64;
     let npc_after = InventoryItemRecord {
         item_id: npc_item_id,
@@ -5669,132 +4788,16 @@ async fn track5c_s1_p2_flag_only_npc_corp_hangar_exit_and_commit2_non_ship_pilot
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    let sw_npc = projected_item_switch_summary(&ctx);
-    assert_eq!(sw_npc.replaced, 1, "sw_npc={sw_npc:#?}");
+    let notifs = ctx.drain_notifications_for_char(pilot_id);
     assert_eq!(
-        sw_npc.not_covered_by_reason.get("not character-owned").copied().unwrap_or(0),
-        0,
-        "flag-only NPC corp exit must not misclassify NotCharacterOwned: {sw_npc:#?}"
-    );
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-
-    // Also test flag-only NPC corp exit with NO prior commit fact so `has_corp_owner_match_for_recipient`
-    // is the sole gate: must resolve CorpSAG1 from `col 4` (`0 NotCharacterOwned`, `helper_without_token == 1`).
-    let npc_unmatched = InventoryItemRecord {
-        item_id: 993_995_109,
-        type_id: 34,
-        owner_id: npc_corp_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 7,
-        version: 2,
-        ..Default::default()
-    };
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        let row = super::delta_projection::build_inv_item_dbrow(&npc_unmatched, &ctx.sde, "");
-        ctx.notify(
-            super::NotificationTarget::Corporation(npc_corp_id),
-            "OnItemChange",
-            "corpid",
-            vec![
-                row,
-                PyRep::Dict(vec![(
-                    PyRep::Integer(4),
-                    PyRep::Integer(InventoryFlag::CorpSAG1 as i64),
-                )]),
-            ],
-        );
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let sw_npc_unmatched = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        sw_npc_unmatched
-            .not_covered_by_reason
-            .get("not character-owned")
-            .copied()
-            .unwrap_or(0),
-        0,
-        "unmatched flag-only NPC corp exit must use col 4 instead of NotCharacterOwned: {sw_npc_unmatched:#?}"
-    );
-    assert!(
-        sw_npc_unmatched.helper_without_token >= 1,
-        "expected unmatched helper match via col 4: {sw_npc_unmatched:#?}"
-    );
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-
-    // P2-03: Commit 1 transitions pilot; Commit 2 mutates another item cleanly (`latest_commit_transitioned_chars`
-    // clears on Commit 2), so an unmatched non-ship Commit 2 helper is NOT falsely blamed on `PilotMovedInThisCommit`.
-    let (other_item_id, untracked_non_ship_id) = (993_995_102_i64, 993_995_103_i64);
-    let untracked_item = InventoryItemRecord {
-        item_id: untracked_non_ship_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 5,
-        version: 1,
-        ..Default::default()
-    };
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("p2_03_commit1_move", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap
-                    .characters
-                    .get_mut(&pilot_id)
-                    .expect("pilot")
-                    .solar_system_id = sys_id + 1;
-                Ok(())
-            })
-            .expect("commit 1");
-        ctx.db
-            .tx("p2_03_commit2_other_item", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(
-                    other_item_id,
-                    InventoryItemRecord {
-                        item_id: other_item_id,
-                        type_id: 34,
-                        owner_id: pilot_id,
-                        location_id: station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: 1,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
-                Ok(())
-            })
-            .expect("commit 2");
-        // Unmatched legacy emit for non-ship item in Commit 2 must NOT mask under PilotMovedInThisCommit,
-        // while unmatched emit for the transitioned active ship itself (`ship_id`) DOES report PilotMovedInThisCommit.
-        ctx.notify_item_mutation(pilot_id, None, Some(&untracked_item));
-        let sw_mid = projected_item_switch_summary(&ctx);
-        assert_eq!(
-            sw_mid.not_covered_by_reason.get("pilot moved in this commit").copied().unwrap_or(0),
-            0,
-            "Commit 2 non-ship unmatched helper must not mask under PilotMovedInThisCommit: {sw_mid:#?}"
-        );
-        assert!(
-            sw_mid.helper_without_token >= 1,
-            "Commit 2 non-ship unmatched helper must record helper_without_token: {sw_mid:#?}"
-        );
-
-        let ship_rec = ctx.db.with_snapshot(|s| s.items[&ship_id].clone());
-        ctx.notify_item_mutation(pilot_id, None, Some(&ship_rec));
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let sw_end = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        sw_end.not_covered_by_reason.get("pilot moved in this commit").copied().unwrap_or(0),
+        notifs.iter().filter(|n| n.event == "OnItemChange").count(),
         1,
-        "Commit 2 unmatched active-ship emit must still report PilotMovedInThisCommit: {sw_end:#?}"
+        "flag-only NPC corp exit must project once and dedupe legacy corpid notification: {notifs:?}"
     );
-    let _ = ctx.drain_notifications_for_char(pilot_id);
 }
 
 #[tokio::test]
-async fn track5c_s2_r2_p2_bp_invalidation_oid_only_and_deferred_commit1_transition_telemetry() {
+async fn track5c_s2_r2_p2_bp_invalidation_oid_only() {
     let ctx = test_ctx();
     let (pilot_id, corp_id, station_id, sys_id, ship_id) = (
         90_000_001_i64,
@@ -5907,122 +4910,217 @@ async fn track5c_s2_r2_p2_bp_invalidation_oid_only_and_deferred_commit1_transiti
         !out_notifs.iter().any(|n| n.event == "OnBlueprintsUpdated"),
         "personal bp commit outside RPC must not evict (pilot_id, corp_id) fact: {out_notifs:?}"
     );
+}
 
-    // 2. Step 1 R2 P2 #2:
-    //    (a) Commit 1 transitions pilot + mutates `commit1_item_id`, Commit 2 mutates `commit2_other_id`
-    //        (non-transition): deferred Commit 1 emission for `commit1_item_id` still records
-    //        `PilotMovedInThisCommit`.
-    //    (b) Commit 1 transitions pilot (no items), Commit 2 updates character only (`changes.items`
-    //        empty, non-transition): deferred Commit 1 emission still records `PilotMovedInThisCommit`.
-    let (commit1_item_id, commit2_other_id) = (993_996_201_i64, 993_996_202_i64);
-    let commit1_item = InventoryItemRecord {
-        item_id: commit1_item_id,
+#[tokio::test]
+async fn outside_rpc_false_invalidates_active_dispatch_bucket_facts_monitors_blueprints_and_transitions() {
+    use crate::services::notify_emitters_character_services::emit_industry_materials_for_scopes;
+
+    let ctx = test_ctx();
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_997_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::enabled().with_outside_rpc(false));
+
+    const MAT_TYPE: u32 = 38;
+    let bp_type_id = *ctx.sde.blueprints.keys().next().expect("bp type in sde");
+    let monitor_id = 77_997_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut monitors = BTreeMap::new();
+        monitors.insert(
+            monitor_id,
+            IndustryMaterialMonitorSub {
+                char_id: pilot_id,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Hangar as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    let (item_id, mat_id, bp_id) = (993_997_021_i64, 993_997_022_i64, 993_997_023_i64);
+    let item_v1 = InventoryItemRecord {
+        item_id,
         type_id: 34,
         owner_id: pilot_id,
         location_id: station_id,
         flag: InventoryFlag::Hangar,
-        quantity: 42,
+        quantity: 100,
+        version: 1,
+        ..Default::default()
+    };
+    let mut item_v2 = item_v1.clone();
+    item_v2.quantity = 250;
+    item_v2.version = 2;
+
+    let mat_v1 = InventoryItemRecord {
+        item_id: mat_id,
+        type_id: MAT_TYPE,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1000,
+        version: 1,
+        ..Default::default()
+    };
+    let mut mat_v2 = mat_v1.clone();
+    mat_v2.quantity = 400;
+    mat_v2.version = 2;
+
+    let bp_v1 = InventoryItemRecord {
+        item_id: bp_id,
+        type_id: bp_type_id,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        version: 1,
+        ..Default::default()
+    };
+    let mut bp_v2 = bp_v1.clone();
+    bp_v2.is_blueprint_copy = true;
+    bp_v2.blueprint_runs_remaining = Some(5);
+    bp_v2.version = 2;
+
+    // 1. Inside an active dispatch bucket, commit item/monitor/blueprint facts, then mutate them
+    //    from an outside-RPC task while `outside_rpc=false` and verify all three are invalidated.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .tx("bf03_dispatch_seed", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(item_id, item_v1.clone());
+                tx.snap.items.insert(mat_id, mat_v1.clone());
+                tx.snap.items.insert(bp_id, bp_v1.clone());
+                Ok(())
+            })
+            .expect("dispatch seed");
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        let seeded = ctx.drain_notifications_for_char(pilot_id);
+        assert!(seeded.iter().any(|n| n.event == "OnItemChange"));
+        assert!(seeded.iter().any(|n| n.event == "OnIndustryMaterials"));
+        assert!(seeded.iter().any(|n| n.event == "OnBlueprintsUpdated"));
+
+        let db_outside = std::sync::Arc::clone(&ctx.db);
+        let (iv2, mv2, bv2) = (item_v2.clone(), mat_v2.clone(), bp_v2.clone());
+        tokio::task::spawn(async move {
+            db_outside
+                .tx("bf03_outside_item_mut", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.items.insert(item_id, iv2);
+                    tx.snap.items.insert(mat_id, mv2);
+                    tx.snap.items.insert(bp_id, bv2);
+                    Ok(())
+                })
+                .expect("outside item tx");
+        })
+        .await
+        .expect("outside task");
+
+        assert!(
+            ctx.drain_notifications_for_char(pilot_id).is_empty(),
+            "outside_rpc=false commit must emit zero projected notifications"
+        );
+        assert!(
+            !ctx.try_consume_projected_item_mutation(pilot_id, &item_v1),
+            "outside_rpc=false must invalidate active dispatch item facts"
+        );
+        emit_industry_materials_for_scopes(
+            &ctx,
+            &[(pilot_id, station_id, InventoryFlag::Hangar as i64, MAT_TYPE)],
+        );
+        ctx.notify(
+            super::NotificationTarget::Character(pilot_id),
+            "OnBlueprintsUpdated",
+            "ownerID",
+            vec![PyRep::Integer(pilot_id)],
+        );
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let post = ctx.drain_notifications_for_char(pilot_id);
+    assert!(
+        post.iter().any(|n| n.event == "OnIndustryMaterials"),
+        "outside_rpc=false must invalidate active dispatch monitor coverage: {post:?}"
+    );
+    assert!(
+        post.iter().any(|n| n.event == "OnBlueprintsUpdated"),
+        "outside_rpc=false must invalidate active dispatch blueprint_facts by owner ID: {post:?}"
+    );
+
+    // 2. Empty-items transition commit outside RPC (`outside_rpc=false`) must invalidate prior
+    //    dispatch_buckets item/monitor/blueprint facts for `transitioned_chars`.
+    let trans_item = InventoryItemRecord {
+        item_id: 993_997_024,
+        type_id: MAT_TYPE,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 100,
+        version: 1,
+        ..Default::default()
+    };
+    let trans_bp = InventoryItemRecord {
+        item_id: 993_997_025,
+        type_id: bp_type_id,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
         version: 1,
         ..Default::default()
     };
     with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
         ctx.db
-            .tx("r2p2_c1_move_with_item", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap
-                    .characters
-                    .get_mut(&pilot_id)
-                    .expect("pilot")
-                    .solar_system_id = sys_id + 1;
-                tx.snap.items.insert(commit1_item_id, commit1_item.clone());
+            .tx("bf03_dispatch_before_outside_transition", |tx| -> Result<(), eve_db::TxError> {
+                tx.snap.items.insert(trans_item.item_id, trans_item.clone());
+                tx.snap.items.insert(trans_bp.item_id, trans_bp.clone());
                 Ok(())
             })
-            .expect("c1");
-        ctx.db
-            .tx("r2p2_c2_other_item", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(
-                    commit2_other_id,
-                    InventoryItemRecord {
-                        item_id: commit2_other_id,
-                        type_id: 34,
-                        owner_id: pilot_id,
-                        location_id: station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: 3,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
-                Ok(())
-            })
-            .expect("c2");
-        ctx.notify_item_mutation(pilot_id, None, Some(&commit1_item));
+            .expect("dispatch before transition");
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    let sw_p2_a = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        sw_p2_a
-            .not_covered_by_reason
-            .get("pilot moved in this commit")
-            .copied()
-            .unwrap_or(0),
-        1,
-        "deferred Commit 1 item emission after non-transition Commit 2 must record PilotMovedInThisCommit: {sw_p2_a:#?}"
-    );
-    assert_eq!(
-        sw_p2_a.helper_without_token, 0,
-        "deferred Commit 1 emission must not miscount as helper_without_token: {sw_p2_a:#?}"
-    );
-    let _ = ctx.drain_notifications_for_char(pilot_id);
+        let _ = ctx.drain_notifications_for_char(pilot_id);
 
-    let deferred_probe = InventoryItemRecord {
-        item_id: 993_996_203,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 9,
-        version: 1,
-        ..Default::default()
-    };
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("r2p2_c1_move_only", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap
-                    .characters
-                    .get_mut(&pilot_id)
-                    .expect("pilot")
-                    .solar_system_id = sys_id + 2;
-                Ok(())
-            })
-            .expect("c1 move");
-        ctx.db
-            .tx("r2p2_c2_char_only_no_items", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap
-                    .characters
-                    .get_mut(&pilot_id)
-                    .expect("pilot")
-                    .security_status = 1.5;
-                Ok(())
-            })
-            .expect("c2 char only");
-        ctx.notify_item_mutation(pilot_id, None, Some(&deferred_probe));
+        let db_outside = std::sync::Arc::clone(&ctx.db);
+        tokio::task::spawn(async move {
+            db_outside
+                .tx("bf03_outside_char_transition_only", |tx| -> Result<(), eve_db::TxError> {
+                    tx.snap.characters.get_mut(&pilot_id).expect("pilot").station_id =
+                        Some(station_id + 1);
+                    Ok(())
+                })
+                .expect("outside char transition tx");
+        })
+        .await
+        .expect("outside transition task");
+
+        assert!(
+            !ctx.try_consume_projected_item_mutation(pilot_id, &trans_item),
+            "outside_rpc=false transition must invalidate dispatch item facts for transitioned_chars"
+        );
+        emit_industry_materials_for_scopes(
+            &ctx,
+            &[(pilot_id, station_id, InventoryFlag::Hangar as i64, MAT_TYPE)],
+        );
+        ctx.notify(
+            super::NotificationTarget::Character(pilot_id),
+            "OnBlueprintsUpdated",
+            "ownerID",
+            vec![PyRep::Integer(pilot_id)],
+        );
         flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
     })
     .await;
-    let sw_p2_b = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        sw_p2_b
-            .not_covered_by_reason
-            .get("pilot moved in this commit")
-            .copied()
-            .unwrap_or(0),
-        2,
-        "deferred emission after char-only non-transition Commit 2 must keep PilotMovedInThisCommit: {sw_p2_b:#?}"
+
+    let trans_post = ctx.drain_notifications_for_char(pilot_id);
+    assert!(
+        trans_post.iter().any(|n| n.event == "OnIndustryMaterials"),
+        "outside_rpc=false transition must invalidate dispatch monitor coverage: {trans_post:?}"
     );
-    assert_eq!(
-        sw_p2_b.helper_without_token, 0,
-        "char-only Commit 2 must not force deferred Commit 1 into helper_without_token: {sw_p2_b:#?}"
+    assert!(
+        trans_post.iter().any(|n| n.event == "OnBlueprintsUpdated"),
+        "outside_rpc=false transition must invalidate dispatch blueprint_facts: {trans_post:?}"
     );
-    let _ = ctx.drain_notifications_for_char(pilot_id);
 }

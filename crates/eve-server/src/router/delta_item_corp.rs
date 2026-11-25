@@ -18,12 +18,10 @@ use eve_sde::SdeRegistry;
 use super::cache_notifications::{
     assemble_pending_notification, is_corp_hangar_flag, PendingMachoNotification,
 };
-use super::delta_item_outside_rpc::classify_char_same_scene_item_change_for_scope;
-use super::delta_item_recipients::{
-    append_extended_rules_and_dedup, SwitchedItemRecipient, RULE_CORPORATION, RULE_OWNER,
-};
+use super::delta_item_recipients::{append_extended_rules_and_dedup, SwitchedItemRecipient};
 use super::delta_item_switch::{
-    is_character_scene_or_ship_transition, ItemBeforeAfter, ProjectedItemOpKind,
+    evaluate_fitted_coords_pair, is_character_scene_or_ship_transition, is_first_set_direct_slot,
+    online_non_transitioned_owner, pair_owner_and_op_kind, ItemBeforeAfter, ProjectedItemOpKind,
     ProjectedItemSwitchConfig,
 };
 use super::delta_projection::{is_blueprint_type, OnlineCharacterLookup};
@@ -138,9 +136,74 @@ pub(crate) fn resolve_online_non_transitioned_corp_recipients<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn classify_char_same_scene_item_change_for_scope<'a>(
+    in_dispatch: bool,
+    config: ProjectedItemSwitchConfig,
+    change: &'a RowChange<i64, InventoryItemRecord>,
+    snap_after: &WorldStateSnapshot,
+    changed_chars: &HashMap<i64, (Option<&CharacterRecord>, Option<&CharacterRecord>)>,
+    online: &impl OnlineCharacterLookup,
+    sde: &SdeRegistry,
+) -> [Option<(i64, ProjectedItemOpKind, &'a InventoryItemRecord)>; 2] {
+    let before_opt = change.before.as_deref();
+    let after_opt = change.after.as_deref();
+    let Some(fp_rec) = after_opt.or(before_opt) else {
+        return [None, None];
+    };
+    if config.is_char_all_items_enabled_in_scope(in_dispatch) {
+        let qualify_char = |cid: i64, kind: ProjectedItemOpKind| {
+            online_non_transitioned_owner(cid, cid, snap_after, changed_chars, online, sde)
+                .map(|_| (cid, kind, fp_rec))
+        };
+        return match (before_opt, after_opt) {
+            (None, Some(new_item)) => [
+                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+                None,
+            ],
+            (Some(old_item), None) => [
+                qualify_char(old_item.owner_id, ProjectedItemOpKind::Deleted),
+                None,
+            ],
+            (Some(old_item), Some(new_item)) if old_item.owner_id == new_item.owner_id => [
+                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+                None,
+            ],
+            (Some(old_item), Some(new_item)) => [
+                qualify_char(new_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+                qualify_char(old_item.owner_id, ProjectedItemOpKind::CreatedOrUpdated),
+            ],
+            (None, None) => [None, None],
+        };
+    }
+
+    let Some((owner_id, op_kind)) = pair_owner_and_op_kind(before_opt, after_opt) else {
+        return [None, None];
+    };
+    let Some(ch) = online_non_transitioned_owner(
+        owner_id,
+        owner_id,
+        snap_after,
+        changed_chars,
+        online,
+        sde,
+    ) else {
+        return [None, None];
+    };
+    let direct_slot_ok = before_opt.is_none_or(|r| is_first_set_direct_slot(r, ch))
+        && after_opt.is_none_or(|r| is_first_set_direct_slot(r, ch));
+    let direct_active = direct_slot_ok && config.is_kind_enabled_in_scope(in_dispatch, op_kind);
+    let fitted_active = config.is_fitted_enabled_in_scope(in_dispatch)
+        && evaluate_fitted_coords_pair(
+            before_opt.map(|r| (r.location_id, r.flag as i64)),
+            after_opt.map(|r| (r.location_id, r.flag as i64)),
+            ch,
+        );
+    [(direct_active || fitted_active).then_some((owner_id, op_kind, fp_rec)), None]
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_switched_item_recipients_for_change<'a>(
     in_dispatch: bool,
-    shadow_outside_dry_run: bool,
     cfg: ProjectedItemSwitchConfig,
     acting_char_id: Option<i64>,
     change: &'a RowChange<i64, InventoryItemRecord>,
@@ -154,7 +217,6 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
 ) -> Vec<SwitchedItemRecipient<'a>> {
     let char_entries = classify_char_same_scene_item_change_for_scope(
         in_dispatch,
-        shadow_outside_dry_run,
         cfg,
         change,
         snap_after,
@@ -163,9 +225,7 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
         sde,
     );
 
-    let corp_all_active = cfg.corp_all_items
-        && (in_dispatch || shadow_outside_dry_run || cfg.char_same_scene_item_outside_rpc);
-    if !corp_all_active {
+    if !cfg.is_corp_all_items_enabled_in_scope(in_dispatch) {
         let mut out = Vec::with_capacity(2);
         let mut seen = HashSet::with_capacity(2);
         for (cid, op_kind, fp_rec) in char_entries.into_iter().flatten() {
@@ -176,7 +236,6 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
                         op_kind,
                         fp_rec,
                         id_type: "charid",
-                        rule: RULE_OWNER,
                     });
                 }
             }
@@ -203,7 +262,6 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
                 op_kind,
                 fp_rec,
                 id_type: "charid",
-                rule: RULE_OWNER,
             });
         }
     };
@@ -227,7 +285,6 @@ pub(crate) fn collect_switched_item_recipients_for_change<'a>(
                 op_kind,
                 fp_rec,
                 id_type: "corpid",
-                rule: RULE_CORPORATION,
             });
         }
     };

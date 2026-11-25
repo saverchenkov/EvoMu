@@ -1,5 +1,5 @@
-//! Unit tests for Step 1 outside-RPC (`"tick"` class) item projection switch,
-//! shadow dry-run telemetry, single-fact deduplication, exclusions, and offline clearing (`#931`).
+//! Behavioral tests for outside-RPC (`Markerless` / background tick) commit-driven item,
+//! fitted, blueprint, corporation, and `OnIndustryMaterials` monitor projection (`#931`).
 
 #![forbid(unsafe_code)]
 
@@ -15,240 +15,11 @@ use crate::services::notify_emitters_character_services::{
 use super::cache_notifications::{
     flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
 };
-use super::delta_item_switch_report::with_compare_tick_scope;
-use super::delta_item_switch::{
-    projected_item_switch_summary, ProjectedItemSwitchConfig, ProjectedItemSwitchSummary,
-    SwitchScopeOutcomeCounts,
-};
+use super::delta_item_switch::ProjectedItemSwitchConfig;
 use super::delta_item_switch_tests::{setup_online_pilot_in_station, test_ctx};
 
 #[tokio::test]
-async fn step1_outside_rpc_test_override_off_records_shadow_by_scope_without_altering_delivery() {
-    let ctx = test_ctx();
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_950_010_i64);
-    let tick_probe_id = 993_950_021_i64;
-    let neither_item_id = 993_950_022_i64;
-    let no_proj_item_id = 993_950_023_i64;
-    let dispatch_item_id = 993_950_024_i64;
-
-    let neither_hangar_before = InventoryItemRecord {
-        item_id: neither_item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 100,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
-    // Seed pre-existing hangar stack while pilot is offline so setup itself does not count as
-    // a `would_announce` commit in shadow `by_scope.neither`.
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(neither_item_id, neither_hangar_before.clone());
-    });
-
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    assert_eq!(ctx.projected_item_switches(), ProjectedItemSwitchConfig::default());
-    assert!(ctx.projected_item_switches().char_same_scene_item_outside_rpc);
-    assert!(ctx.projected_item_switches().char_same_scene_item_fitted);
-    assert!(
-        ProjectedItemSwitchConfig::from_env_lookup(|k| {
-            (k == "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC").then(|| "0".to_string())
-        })
-        .char_same_scene_item_outside_rpc
-    );
-    assert!(
-        ProjectedItemSwitchConfig::from_env_lookup(|k| {
-            (k == "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED").then(|| "0".to_string())
-        })
-        .char_same_scene_item_fitted
-    );
-    assert_eq!(
-        ProjectedItemSwitchConfig::retired_off_env_vars_lookup(|k| match k {
-            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC"
-            | "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED" => Some("0".to_string()),
-            _ => None,
-        }),
-        vec![
-            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_OUTSIDE_RPC",
-            "EVOMU_SWITCH_CHAR_SAME_SCENE_ITEM_FITTED",
-        ]
-    );
-    assert!(ctx.projected_item_switches().char_all_items);
-    ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::enabled()
-            .with_outside_rpc(false)
-            .with_char_all_items(false)
-            .with_corp_all_items(false),
-    );
-
-    let tick_probe_after = InventoryItemRecord {
-        item_id: tick_probe_id,
-        type_id: 30_013,
-        owner_id: pilot_id,
-        location_id: ship_id,
-        flag: InventoryFlag::Cargo,
-        quantity: 8,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
-
-    let mut neither_hangar_after = neither_hangar_before.clone();
-    neither_hangar_after.quantity = 250;
-    neither_hangar_after.version = 2;
-
-    let no_proj_hangar = InventoryItemRecord {
-        item_id: no_proj_item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 42,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
-
-    let dispatch_hangar = InventoryItemRecord {
-        item_id: dispatch_item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 77,
-        singleton: false,
-        version: 1,
-        ..Default::default()
-    };
-
-    // 1. Inside-dispatch baseline works as before even when outside-RPC is OFF.
-    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
-        ctx.db
-            .tx("step1_dispatch_insert", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(dispatch_item_id, dispatch_hangar.clone());
-                Ok(())
-            })
-            .expect("dispatch insert");
-        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
-    })
-    .await;
-    assert_eq!(
-        ctx.drain_notifications_for_char(pilot_id)
-            .iter()
-            .filter(|n| n.event == "OnItemChange")
-            .count(),
-        1
-    );
-
-    // 2. Tick-scoped commit (probe launched -> active ship cargo) emits 0 live projection
-    //    notifications while Step 1 is off, but populates shadow `by_scope.tick`.
-    with_compare_tick_scope(async {
-        ctx.db
-            .tx("step1_tick_probe_return", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(tick_probe_id, tick_probe_after.clone());
-                Ok(())
-            })
-            .expect("tick probe commit");
-    })
-    .await;
-    assert!(
-        ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "Step 1 off by default must emit 0 OnItemChange from tick commit"
-    );
-
-    // 3. Markerless spawned-task/neither commit populates shadow `by_scope.neither` identically.
-    let db_clone = ctx.db.clone();
-    let neither_after_spawn = neither_hangar_after.clone();
-    tokio::spawn(async move {
-        db_clone
-            .tx("step1_neither_hangar_update", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(neither_item_id, neither_after_spawn.clone());
-                Ok(())
-            })
-            .expect("neither commit");
-    })
-    .await
-    .expect("spawned task");
-    assert!(
-        ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "Step 1 off by default must emit 0 OnItemChange from markerless outside-RPC commit"
-    );
-
-    // 4. Hand-written helpers outside RPC still send normally in Step 1 while classifying
-    //    `replaced`, `superseded`, and `no_projected_event` into `by_scope.{tick, neither}`.
-    with_compare_tick_scope(async {
-        ctx.notify_item_mutation(pilot_id, None, Some(&tick_probe_after));
-    })
-    .await;
-    let tick_helper_notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(
-        tick_helper_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        1,
-        "hand-written helper in tick must still emit live while Step 1 is OFF"
-    );
-
-    ctx.emit_item_change_routed(
-        pilot_id,
-        &neither_hangar_before,
-        vec![(9, PyRep::Integer(50))],
-    );
-    ctx.notify_item_mutation(pilot_id, None, Some(&no_proj_hangar));
-    let neither_helper_notifs = ctx.drain_notifications_for_char(pilot_id);
-    assert_eq!(
-        neither_helper_notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        2,
-        "hand-written helpers in neither must still emit live while Step 1 is OFF"
-    );
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert!(!sw.config.char_same_scene_item_outside_rpc);
-    assert_eq!(sw.emitted, 1, "only dispatch commit emitted live; sw={sw:#?}");
-    assert_eq!(sw.replaced, 0, "sw={sw:#?}");
-    assert_eq!(sw.superseded, 0, "sw={sw:#?}");
-    assert_eq!(sw.helper_without_token, 0, "sw={sw:#?}");
-    assert_eq!(
-        sw.not_covered_by_reason.get("not in an RPC").copied(),
-        Some(3),
-        "outside helpers keep reporting NotInAnRpc while Step 1 switch is OFF; sw={sw:#?}"
-    );
-    assert_eq!(sw.by_scope.dispatch.would_announce, 1, "sw={sw:#?}");
-    assert_eq!(
-        sw.by_scope.tick,
-        SwitchScopeOutcomeCounts {
-            would_announce: 1,
-            replaced: 1,
-            superseded: 0,
-            no_projected_event: 0,
-        },
-        "sw={sw:#?}"
-    );
-    assert_eq!(
-        sw.by_scope.neither,
-        SwitchScopeOutcomeCounts {
-            would_announce: 1,
-            replaced: 0,
-            superseded: 1,
-            no_projected_event: 1,
-        },
-        "sw={sw:#?}"
-    );
-
-    let md = sw.format_markdown_report();
-    assert!(md.contains("char_same_scene_item_outside_rpc=false"), "{md}");
-    assert!(md.contains("Per-Scope Projection & Dedupe Outcomes (`by_scope`)"), "{md}");
-    assert!(md.contains("| `tick` | 1 | 1 | 0 | 0 |"), "{md}");
-    assert!(md.contains("| `neither` | 1 | 0 | 1 | 1 |"), "{md}");
-
-    let round_trip: ProjectedItemSwitchSummary =
-        serde_json::from_value(serde_json::to_value(&sw).expect("serialize")).expect("deserialize");
-    assert_eq!(round_trip.by_scope, sw.by_scope);
-}
-
-#[tokio::test]
-async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dispatch_vs_outside_facts() {
+async fn outside_rpc_announces_markerless_commits_and_records_industry_monitors() {
     let ctx = test_ctx();
     let (pilot_id, station_id, sys_id, ship_id) =
         (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_960_010_i64);
@@ -307,8 +78,7 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
     });
     let _ = ctx.drain_notifications_for_char(pilot_id);
 
-    // 1. Markerless spawned task recovers probe from space (`None`) into active ship cargo (`Cargo`),
-    //    even without any telemetry tick scope -> announces immediately via commit listener.
+    // 1. Markerless spawned task recovers probe from space (`None`) into active ship cargo (`Cargo`) -> announces immediately.
     let mut probe_spawn_cargo = InventoryItemRecord {
         item_id: probe_spawn_id,
         type_id: 30_013,
@@ -339,7 +109,7 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         "markerless spawned commit returning probe to cargo in space must announce immediately"
     );
 
-    // 2. Repeated matching helper outside RPC -> suppressed (`replaced`); stale row -> suppressed (`superseded`).
+    // 2. Repeated matching helper outside RPC -> suppressed; stale row -> suppressed.
     ctx.notify_item_mutation(pilot_id, None, Some(&probe_spawn_cargo));
     ctx.notify_item_mutation(pilot_id, None, Some(&probe_spawn_cargo));
     probe_spawn_cargo.quantity = 4;
@@ -372,7 +142,7 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
     );
 
     // 4. Conversely, a commit inside dispatch sets ONLY dispatch facts (dropped at dispatch end),
-    //    so a later outside-RPC helper still sends (`no_projected_event`).
+    //    so a later outside-RPC helper still sends.
     let mut rpc_row = InventoryItemRecord {
         item_id: rpc_only_item_id,
         type_id: 30_013,
@@ -411,7 +181,7 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         "outside call must check outside facts only, never stale dispatch facts"
     );
 
-    // 5. Tick-scoped probe update + docked hangar commit with OnIndustryMaterials causal ordering.
+    // 5. Probe update + docked hangar commit with OnIndustryMaterials causal ordering.
     let tick_probe_cargo = InventoryItemRecord {
         item_id: probe_tick_id,
         type_id: 30_013,
@@ -422,15 +192,12 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         version: 2,
         ..Default::default()
     };
-    with_compare_tick_scope(async {
-        ctx.db
-            .tx("tick_probe_return", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(probe_tick_id, tick_probe_cargo.clone());
-                Ok(())
-            })
-            .expect("tick probe");
-    })
-    .await;
+    ctx.db
+        .tx("tick_probe_return", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(probe_tick_id, tick_probe_cargo.clone());
+            Ok(())
+        })
+        .expect("tick probe");
     assert_eq!(
         ctx.drain_notifications_for_char(pilot_id)
             .iter()
@@ -479,8 +246,7 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         "outside industry monitor cover flag must be recorded while outside switch is ON"
     );
 
-    // 6. Any commit touching an item that does not announce it clears the fact in BOTH places:
-    //    (a) Outside fact cleared by silent non-first-set commit (moved to DroneBay).
+    // 6. Any commit touching an item that does not announce it clears the fact in BOTH places.
     let silent_first_set = InventoryItemRecord {
         item_id: silent_clear_id,
         type_id: 2454,
@@ -519,7 +285,6 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         "silent commit touching the item must clear its outside fact so later hand-written call sends"
     );
 
-    //    (b) Dispatch fact cleared by a subsequent silent commit in the same dispatch (AND outside fact cleared too).
     ctx.db
         .tx("reset_outside_fact_for_cross_clear", |tx| -> Result<(), eve_db::TxError> {
             let r = tx.snap.items.get_mut(&silent_clear_id).expect("item");
@@ -592,18 +357,10 @@ async fn step1_outside_rpc_enabled_announces_markerless_commits_and_isolates_dis
         1,
         "silent Commit 2 inside dispatch also cleared the prior outside fact for silent_clear_id"
     );
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert!(sw.by_scope.tick.would_announce >= 1, "sw={sw:#?}");
-    assert!(sw.by_scope.neither.would_announce >= 3, "sw={sw:#?}");
-    assert!(sw.by_scope.neither.replaced >= 2, "sw={sw:#?}");
-    assert!(sw.by_scope.neither.superseded >= 1, "sw={sw:#?}");
-    assert!(sw.by_scope.neither.no_projected_event >= 2, "sw={sw:#?}");
-    assert!(sw.by_scope.dispatch.no_projected_event >= 2, "sw={sw:#?}");
 }
 
 #[tokio::test]
-async fn step1_outside_rpc_exclusions_hold_silent_commits() {
+async fn outside_rpc_exclusions_hold_silent_commits() {
     let ctx = test_ctx();
     let (pilot_id, station_id, other_station, sys_id, ship_id, other_ship_id, cont_id) = (
         90_000_001_i64,
@@ -651,33 +408,30 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&pilot_id].corporation_id);
 
     // 1. Fitted module, item in space, container item, non-char corp item -> all silent outside RPC.
-    with_compare_tick_scope(async {
-        ctx.db
-            .tx("outside_non_first_set_exclusions", |tx| -> Result<(), eve_db::TxError> {
-                let mut ins = |id: i64, owner: i64, loc: i64, flag: InventoryFlag| {
-                    tx.snap.items.insert(
-                        id,
-                        InventoryItemRecord {
-                            item_id: id,
-                            type_id: 34,
-                            owner_id: owner,
-                            location_id: loc,
-                            flag,
-                            quantity: 5,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                };
-                ins(fitted_id, pilot_id, ship_id, InventoryFlag::HiSlot0);
-                ins(space_item_id, pilot_id, i64::from(sys_id), InventoryFlag::None);
-                ins(cont_item_id, pilot_id, cont_id, InventoryFlag::Cargo);
-                ins(corp_item_id, corp_id, station_id, InventoryFlag::CorpSAG1);
-                Ok(())
-            })
-            .expect("exclusions tx");
-    })
-    .await;
+    ctx.db
+        .tx("outside_non_first_set_exclusions", |tx| -> Result<(), eve_db::TxError> {
+            let mut ins = |id: i64, owner: i64, loc: i64, flag: InventoryFlag| {
+                tx.snap.items.insert(
+                    id,
+                    InventoryItemRecord {
+                        item_id: id,
+                        type_id: 34,
+                        owner_id: owner,
+                        location_id: loc,
+                        flag,
+                        quantity: 5,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            };
+            ins(fitted_id, pilot_id, ship_id, InventoryFlag::HiSlot0);
+            ins(space_item_id, pilot_id, i64::from(sys_id), InventoryFlag::None);
+            ins(cont_item_id, pilot_id, cont_id, InventoryFlag::Cargo);
+            ins(corp_item_id, corp_id, station_id, InventoryFlag::CorpSAG1);
+            Ok(())
+        })
+        .expect("exclusions tx");
     assert!(
         ctx.drain_notifications_for_char(pilot_id).is_empty(),
         "fitted/space/container/corp items must never project outside RPC"
@@ -803,159 +557,6 @@ async fn step1_outside_rpc_exclusions_hold_silent_commits() {
         })
         .expect("offline tx");
     assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());
-
-    let sw = projected_item_switch_summary(&ctx);
-    assert_eq!(sw.emitted, 0, "all excluded commits must stay unprojected: {sw:#?}");
-    assert!(sw.not_covered_by_reason.contains_key("explicit effect"), "{sw:#?}");
-    assert!(sw.not_covered_by_reason.contains_key("fuel reservation"), "{sw:#?}");
-}
-
-#[tokio::test]
-async fn step1_outside_rpc_unbounded_untimed_persistence_and_offline_clear() {
-    let ctx = test_ctx();
-    let (pilot_id, station_id, sys_id, ship_id) =
-        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_980_010_i64);
-    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
-
-    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
-    let alt_char_id = 90_931_999_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut alt = snap.characters[&pilot_id].clone();
-        alt.character_id = alt_char_id;
-        alt.name = "Alt Char".to_string();
-        snap.characters.insert(alt_char_id, alt);
-    });
-
-    // 1. Unbounded persistence: >4,096 distinct items outside RPC never evict item #0.
-    const COUNT: usize = 4_150;
-    const BASE_ID: i64 = 994_000_000;
-    let mk_hangar = |item_id: i64| InventoryItemRecord {
-        item_id,
-        type_id: 34,
-        owner_id: pilot_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 5,
-        version: 1,
-        ..Default::default()
-    };
-    for batch_start in (0..COUNT).step_by(40) {
-        let batch_end = (batch_start + 40).min(COUNT);
-        ctx.db
-            .tx("outside_unbounded_batch", |tx| -> Result<(), eve_db::TxError> {
-                for i in batch_start..batch_end {
-                    let id = BASE_ID + i as i64;
-                    tx.snap.items.insert(id, mk_hangar(id));
-                }
-                Ok(())
-            })
-            .expect("batch commit");
-        let drained = ctx.drain_notifications_for_char(pilot_id);
-        assert_eq!(
-            drained.iter().filter(|n| n.event == "OnItemChange").count(),
-            batch_end - batch_start
-        );
-    }
-
-    let first_item = mk_hangar(BASE_ID);
-    ctx.notify_item_mutation(pilot_id, None, Some(&first_item));
-    assert!(
-        ctx.drain_notifications_for_char(pilot_id).is_empty(),
-        "item #0 must still be present in outside_facts after 4,150 items with zero cap/eviction"
-    );
-    assert_eq!(projected_item_switch_summary(&ctx).evictions, 0);
-
-    // 2. Disconnect (`release_online_lock`) clears outside facts even when reconnecting with the SAME session_id.
-    assert!(ctx.db.release_online_lock(uid, 9_310));
-    ctx.db
-        .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_600)
-        .expect("reconnect same session_id");
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.notify_item_mutation(pilot_id, None, Some(&first_item));
-    assert_eq!(
-        ctx.drain_notifications_for_char(pilot_id)
-            .iter()
-            .filter(|n| n.event == "OnItemChange")
-            .count(),
-        1,
-        "reconnect even with same session_id must see outside facts cleared on prior offline"
-    );
-
-    // 3. Character switch on the same account clears prior character's outside facts.
-    let switch_item = mk_hangar(994_100_001);
-    ctx.db
-        .tx("outside_before_char_switch", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.items.insert(switch_item.item_id, switch_item.clone());
-            Ok(())
-        })
-        .expect("char switch setup");
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.db
-        .acquire_online_lock(uid, 9_310, Some(alt_char_id), true, 1_700_000_700)
-        .expect("switch to alt");
-    ctx.db
-        .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_710)
-        .expect("switch back to pilot");
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.notify_item_mutation(pilot_id, None, Some(&switch_item));
-    assert_eq!(
-        ctx.drain_notifications_for_char(pilot_id)
-            .iter()
-            .filter(|n| n.event == "OnItemChange")
-            .count(),
-        1,
-        "switching characters must clear previous character's outside facts"
-    );
-
-    // 4. Direct session removal (`kick_user`/teardown via WorldRepository::tx) clears outside facts.
-    let kick_item = mk_hangar(994_100_002);
-    ctx.db
-        .tx("outside_before_kick_remove", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.items.insert(kick_item.item_id, kick_item.clone());
-            Ok(())
-        })
-        .expect("kick setup");
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.db
-        .tx("simulate_kick_session_removal", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.sessions.remove(&uid);
-            Ok(())
-        })
-        .expect("kick tx");
-    ctx.db
-        .acquire_online_lock(uid, 9_312, Some(pilot_id), true, 1_700_000_800)
-        .expect("relogin after kick");
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.notify_item_mutation(pilot_id, None, Some(&kick_item));
-    assert_eq!(
-        ctx.drain_notifications_for_char(pilot_id)
-            .iter()
-            .filter(|n| n.event == "OnItemChange")
-            .count(),
-        1,
-        "direct session removal (kick) must clear outside facts"
-    );
-
-    // 5. `clear_notifications_for_char` also clears outside facts immediately.
-    let clear_item = mk_hangar(994_100_003);
-    ctx.db
-        .tx("outside_before_clear_helper", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.items.insert(clear_item.item_id, clear_item.clone());
-            Ok(())
-        })
-        .expect("clear helper setup");
-    let _ = ctx.drain_notifications_for_char(pilot_id);
-    ctx.clear_notifications_for_char(pilot_id);
-    ctx.notify_item_mutation(pilot_id, None, Some(&clear_item));
-    assert_eq!(
-        ctx.drain_notifications_for_char(pilot_id)
-            .iter()
-            .filter(|n| n.event == "OnItemChange")
-            .count(),
-        1,
-        "clear_notifications_for_char must clear outside facts"
-    );
 }
 
 #[tokio::test]
@@ -1190,6 +791,153 @@ async fn outside_rpc_narrowed_pilot_moved_rule_suppresses_transitions_and_projec
 }
 
 #[tokio::test]
+async fn step1_outside_rpc_unbounded_untimed_persistence_and_offline_clear() {
+    let ctx = test_ctx();
+    let (pilot_id, station_id, sys_id, ship_id) =
+        (90_000_001_i64, 60_003_760_i64, 30_000_142_u32, 993_980_010_i64);
+    setup_online_pilot_in_station(&ctx, pilot_id, station_id, sys_id, ship_id);
+    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
+
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    let alt_char_id = 90_931_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut alt = snap.characters[&pilot_id].clone();
+        alt.character_id = alt_char_id;
+        alt.name = "Alt Char".to_string();
+        snap.characters.insert(alt_char_id, alt);
+    });
+
+    // 1. Unbounded persistence: >4,096 distinct items outside RPC never evict item #0.
+    const COUNT: usize = 4_150;
+    const BASE_ID: i64 = 994_000_000;
+    let mk_hangar = |item_id: i64| InventoryItemRecord {
+        item_id,
+        type_id: 34,
+        owner_id: pilot_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 5,
+        version: 1,
+        ..Default::default()
+    };
+    for batch_start in (0..COUNT).step_by(40) {
+        let batch_end = (batch_start + 40).min(COUNT);
+        ctx.db
+            .tx("outside_unbounded_batch", |tx| -> Result<(), eve_db::TxError> {
+                for i in batch_start..batch_end {
+                    let id = BASE_ID + i as i64;
+                    tx.snap.items.insert(id, mk_hangar(id));
+                }
+                Ok(())
+            })
+            .expect("batch commit");
+        let drained = ctx.drain_notifications_for_char(pilot_id);
+        assert_eq!(
+            drained.iter().filter(|n| n.event == "OnItemChange").count(),
+            batch_end - batch_start
+        );
+    }
+
+    let first_item = mk_hangar(BASE_ID);
+    ctx.notify_item_mutation(pilot_id, None, Some(&first_item));
+    assert!(
+        ctx.drain_notifications_for_char(pilot_id).is_empty(),
+        "item #0 must still be present in outside_facts after 4,150 items with zero cap/eviction"
+    );
+
+    // 2. Disconnect (`release_online_lock`) clears outside facts even when reconnecting with the SAME session_id.
+    assert!(ctx.db.release_online_lock(uid, 9_310));
+    ctx.db
+        .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_600)
+        .expect("reconnect same session_id");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.notify_item_mutation(pilot_id, None, Some(&first_item));
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1,
+        "reconnect even with same session_id must see outside facts cleared on prior offline"
+    );
+
+    // 3. Character switch on the same account clears prior character's outside facts.
+    let switch_item = mk_hangar(994_100_001);
+    ctx.db
+        .tx("outside_before_char_switch", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(switch_item.item_id, switch_item.clone());
+            Ok(())
+        })
+        .expect("char switch setup");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db
+        .acquire_online_lock(uid, 9_310, Some(alt_char_id), true, 1_700_000_700)
+        .expect("switch to alt");
+    ctx.db
+        .acquire_online_lock(uid, 9_310, Some(pilot_id), true, 1_700_000_710)
+        .expect("switch back to pilot");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.notify_item_mutation(pilot_id, None, Some(&switch_item));
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1,
+        "switching characters must clear previous character's outside facts"
+    );
+
+    // 4. Direct session removal (`kick_user`/teardown via WorldRepository::tx) clears outside facts.
+    let kick_item = mk_hangar(994_100_002);
+    ctx.db
+        .tx("outside_before_kick_remove", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(kick_item.item_id, kick_item.clone());
+            Ok(())
+        })
+        .expect("kick setup");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db
+        .tx("simulate_kick_session_removal", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.sessions.remove(&uid);
+            Ok(())
+        })
+        .expect("kick tx");
+    ctx.db
+        .acquire_online_lock(uid, 9_312, Some(pilot_id), true, 1_700_000_800)
+        .expect("relogin after kick");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.notify_item_mutation(pilot_id, None, Some(&kick_item));
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1,
+        "direct session removal (kick) must clear outside facts"
+    );
+
+    // 5. `clear_notifications_for_char` also clears outside facts immediately.
+    let clear_item = mk_hangar(994_100_003);
+    ctx.db
+        .tx("outside_before_clear_helper", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(clear_item.item_id, clear_item.clone());
+            Ok(())
+        })
+        .expect("clear helper setup");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.clear_notifications_for_char(pilot_id);
+    ctx.notify_item_mutation(pilot_id, None, Some(&clear_item));
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .iter()
+            .filter(|n| n.event == "OnItemChange")
+            .count(),
+        1,
+        "clear_notifications_for_char must clear outside facts"
+    );
+}
+
+#[tokio::test]
 async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches() {
     let ctx = test_ctx();
     let (pilot_id, station_id, sys_id, ship_id) =
@@ -1246,17 +994,14 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
             .with_outside_rpc(false)
             .with_char_all_items(false),
     );
-    with_compare_tick_scope(async {
-        charge.quantity = 49;
-        charge.version += 1;
-        ctx.db
-            .tx("tick_fitted_only_switch", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(charge_id, charge.clone());
-                Ok(())
-            })
-            .expect("tick_fitted_only_switch");
-    })
-    .await;
+    charge.quantity = 49;
+    charge.version += 1;
+    ctx.db
+        .tx("tick_fitted_only_switch", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(charge_id, charge.clone());
+            Ok(())
+        })
+        .expect("tick_fitted_only_switch");
     assert!(
         ctx.drain_notifications_for_char(pilot_id).is_empty(),
         "fitted=true with outside_rpc=false must never project outside RPC"
@@ -1270,20 +1015,17 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
             .with_outside_rpc(true)
             .with_char_all_items(false),
     );
-    with_compare_tick_scope(async {
-        charge.quantity = 48;
-        charge.version += 1;
-        hangar_item.quantity = 12;
-        hangar_item.version += 1;
-        ctx.db
-            .tx("tick_outside_only_switch", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(charge_id, charge.clone());
-                tx.snap.items.insert(hangar_item_id, hangar_item.clone());
-                Ok(())
-            })
-            .expect("tick_outside_only_switch");
-    })
-    .await;
+    charge.quantity = 48;
+    charge.version += 1;
+    hangar_item.quantity = 12;
+    hangar_item.version += 1;
+    ctx.db
+        .tx("tick_outside_only_switch", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(charge_id, charge.clone());
+            tx.snap.items.insert(hangar_item_id, hangar_item.clone());
+            Ok(())
+        })
+        .expect("tick_outside_only_switch");
     let only_hangar: Vec<i64> = ctx
         .drain_notifications_for_char(pilot_id)
         .into_iter()
@@ -1300,19 +1042,16 @@ async fn step1_fitted_outside_rpc_requires_both_fitted_and_outside_rpc_switches(
     //    tick-scoped and markerless outside-RPC commits project fitted charge ticks, slot swaps,
     //    and deletions, while consuming duplicate hand-written helpers cleanly.
     ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_char_all_items(false));
-    with_compare_tick_scope(async {
-        let charge_prev = charge.clone();
-        charge.quantity = 47;
-        charge.version += 1;
-        ctx.db
-            .tx("tick_fitted_charge_consume", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(charge_id, charge.clone());
-                Ok(())
-            })
-            .expect("tick_fitted_charge_consume");
-        ctx.notify_item_mutation(pilot_id, Some(&charge_prev), Some(&charge));
-    })
-    .await;
+    let charge_prev = charge.clone();
+    charge.quantity = 47;
+    charge.version += 1;
+    ctx.db
+        .tx("tick_fitted_charge_consume", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(charge_id, charge.clone());
+            Ok(())
+        })
+        .expect("tick_fitted_charge_consume");
+    ctx.notify_item_mutation(pilot_id, Some(&charge_prev), Some(&charge));
     let tick_notifs: Vec<_> = ctx
         .drain_notifications_for_char(pilot_id)
         .into_iter()
@@ -1431,22 +1170,19 @@ async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_a
     let _ = ctx.drain_notifications_for_char(p2_id);
 
     // 1. Outside-RPC <tick>: generalized items + locked blueprint + cross-owner transfer.
-    with_compare_tick_scope(async {
-        ctx.db
-            .tx("outside_5b_all", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(fuel_id, fuel.clone());
-                tx.snap.items.insert(remote_id, remote.clone());
-                tx.snap.items.insert(bpo_id, bpo.clone());
-                tx.snap.items.insert(xfer_id, xfer_post.clone());
-                Ok(())
-            })
-            .expect("tx");
-        ctx.notify_item_mutation(p1_id, None, Some(&fuel));
-        ctx.notify_item_mutation(p1_id, None, Some(&remote));
-        ctx.notify_item_mutation(p1_id, None, Some(&bpo));
-        ctx.notify_item_mutation(p2_id, Some(&xfer_pre), Some(&xfer_post));
-    })
-    .await;
+    ctx.db
+        .tx("outside_5b_all", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(fuel_id, fuel.clone());
+            tx.snap.items.insert(remote_id, remote.clone());
+            tx.snap.items.insert(bpo_id, bpo.clone());
+            tx.snap.items.insert(xfer_id, xfer_post.clone());
+            Ok(())
+        })
+        .expect("tx");
+    ctx.notify_item_mutation(p1_id, None, Some(&fuel));
+    ctx.notify_item_mutation(p1_id, None, Some(&remote));
+    ctx.notify_item_mutation(p1_id, None, Some(&bpo));
+    ctx.notify_item_mutation(p2_id, Some(&xfer_pre), Some(&xfer_post));
 
     let n1 = ctx.drain_notifications_for_char(p1_id);
     let n2 = ctx.drain_notifications_for_char(p2_id);
@@ -1546,70 +1282,10 @@ async fn step5b_outside_rpc_char_all_items_projects_and_invalidates_blueprints_a
         1,
         "logout/offline clear must invalidate outside-RPC blueprint dedupe facts"
     );
-
-    // P2-3: Shadow dry-run (`char_all_items=true, outside_rpc=false`) checks `shadow.facts` in
-    // `has_fact_in_scope(None, ...)` even when outgoing `OnItemChange` omits `ixOwnerID (2)`.
-    ctx.set_projected_item_switches(
-        ProjectedItemSwitchConfig::all_enabled().with_outside_rpc(false),
-    );
-    let shadow_xfer_id = 993_995_025_i64;
-    let shadow_pre = InventoryItemRecord {
-        item_id: shadow_xfer_id,
-        type_id: 34,
-        owner_id: p1_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 42,
-        version: 1,
-        ..Default::default()
-    };
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(shadow_xfer_id, shadow_pre);
-    });
-    let _ = ctx.drain_notifications_for_char(p1_id);
-    let shadow_post = InventoryItemRecord {
-        item_id: shadow_xfer_id,
-        type_id: 34,
-        owner_id: p2_id,
-        location_id: station_id,
-        flag: InventoryFlag::Hangar,
-        quantity: 42,
-        version: 2,
-        ..Default::default()
-    };
-    ctx.db
-        .tx("shadow_outgoing_transfer", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.items.insert(shadow_xfer_id, shadow_post.clone());
-            Ok(())
-        })
-        .expect("shadow_outgoing_transfer");
-    let before_nc = projected_item_switch_summary(&ctx)
-        .not_covered_by_reason
-        .get("not character-owned")
-        .copied()
-        .unwrap_or(0);
-    // Hand-written emit to outgoing owner `p1_id` without `ixOwnerID` in dict:
-    let row = super::delta_projection::build_inv_item_dbrow(&shadow_post, &ctx.sde, "");
-    ctx.notify(
-        super::NotificationTarget::Character(p1_id),
-        "OnItemChange",
-        "charid",
-        vec![row, PyRep::Dict(vec![])],
-    );
-    let after_nc = projected_item_switch_summary(&ctx)
-        .not_covered_by_reason
-        .get("not character-owned")
-        .copied()
-        .unwrap_or(0);
-    assert_eq!(
-        after_nc, before_nc,
-        "shadow dry-run outgoing transfer without ixOwnerID must resolve shadow.facts instead of NotCharacterOwned"
-    );
-    let _ = ctx.drain_notifications_for_char(p1_id);
 }
 
 #[tokio::test]
-async fn track5c_s1_outside_rpc_corp_projection_and_shadow_isolation() {
+async fn track5c_s1_outside_rpc_corp_projection() {
     let ctx = test_ctx();
     let (p1_id, p2_id, station_id, sys_id, ship1, ship2, corp_id) = (
         90_000_001_i64,
@@ -1667,23 +1343,20 @@ async fn track5c_s1_outside_rpc_corp_projection_and_shadow_isolation() {
         version: 1,
         ..Default::default()
     };
-    with_compare_tick_scope(async {
-        ctx.db
-            .tx("outside_5c_corp_tick", |tx| -> Result<(), eve_db::TxError> {
-                tx.snap.items.insert(xfer_id, xfer_post.clone());
-                tx.snap.items.insert(corp_bp_id, corp_bp.clone());
-                Ok(())
-            })
-            .expect("outside corp tx");
-        ctx.notify_item_mutation(p1_id, Some(&xfer_pre), Some(&xfer_post));
-        ctx.notify(
-            super::NotificationTarget::Corporation(corp_id),
-            "OnBlueprintsUpdated",
-            "ownerID",
-            vec![PyRep::Integer(corp_id)],
-        );
-    })
-    .await;
+    ctx.db
+        .tx("outside_5c_corp_tick", |tx| -> Result<(), eve_db::TxError> {
+            tx.snap.items.insert(xfer_id, xfer_post.clone());
+            tx.snap.items.insert(corp_bp_id, corp_bp.clone());
+            Ok(())
+        })
+        .expect("outside corp tx");
+    ctx.notify_item_mutation(p1_id, Some(&xfer_pre), Some(&xfer_post));
+    ctx.notify(
+        super::NotificationTarget::Corporation(corp_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(corp_id)],
+    );
     let n1 = ctx.drain_notifications_for_char(p1_id);
     let n2 = ctx.drain_notifications_for_char(p2_id);
     // Section 4C: p1 receives one OnItemChange (`corpid` from new_item), zero duplicate `charid`.
@@ -1710,57 +1383,4 @@ async fn track5c_s1_outside_rpc_corp_projection_and_shadow_isolation() {
     );
     assert_eq!(n1.iter().filter(|n| n.event == "OnBlueprintsUpdated").count(), 1);
     assert_eq!(n2.iter().filter(|n| n.event == "OnBlueprintsUpdated").count(), 1);
-
-    // 2. Shadow dry-run (`corp_all_items=true, outside_rpc=false`): 0 projected notifications,
-    //    legacy corp emission records `NotInAnRpc` (not `NotCharacterOwned`).
-    ctx.set_projected_item_switches(ProjectedItemSwitchConfig::all_enabled().with_outside_rpc(false));
-    let shadow_corp_id = 993_996_103_i64;
-    let shadow_corp_item = InventoryItemRecord {
-        item_id: shadow_corp_id,
-        type_id: 34,
-        owner_id: corp_id,
-        location_id: station_id,
-        flag: InventoryFlag::CorpSAG1,
-        quantity: 9,
-        version: 1,
-        ..Default::default()
-    };
-    let before_not_char = projected_item_switch_summary(&ctx)
-        .not_covered_by_reason
-        .get("not character-owned")
-        .copied()
-        .unwrap_or(0);
-    let before_not_rpc = projected_item_switch_summary(&ctx)
-        .not_covered_by_reason
-        .get("not in an RPC")
-        .copied()
-        .unwrap_or(0);
-    ctx.db
-        .tx("outside_5c_shadow_dry", |tx| -> Result<(), eve_db::TxError> {
-            tx.snap.items.insert(shadow_corp_id, shadow_corp_item.clone());
-            Ok(())
-        })
-        .expect("shadow dry tx");
-    let row = super::delta_projection::build_inv_item_dbrow(&shadow_corp_item, &ctx.sde, "");
-    ctx.notify(
-        super::NotificationTarget::Corporation(corp_id),
-        "OnItemChange",
-        "corpid",
-        vec![row, PyRep::Dict(vec![])],
-    );
-    let after = projected_item_switch_summary(&ctx);
-    assert_eq!(
-        after.not_covered_by_reason.get("not character-owned").copied().unwrap_or(0),
-        before_not_char,
-        "shadow corp outside_rpc=false must not record NotCharacterOwned: {:?}",
-        after.not_covered_by_reason
-    );
-    assert!(
-        after.not_covered_by_reason.get("not in an RPC").copied().unwrap_or(0)
-            > before_not_rpc,
-        "shadow corp outside_rpc=false must record NotInAnRpc: {:?}",
-        after.not_covered_by_reason
-    );
-    let _ = ctx.drain_notifications_for_char(p1_id);
-    let _ = ctx.drain_notifications_for_char(p2_id);
 }

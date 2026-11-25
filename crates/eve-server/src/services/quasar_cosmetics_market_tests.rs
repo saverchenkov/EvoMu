@@ -52,7 +52,6 @@ pub(super) fn new_market_harness() -> (
         Arc::clone(&db),
         Arc::clone(&sde),
         Arc::clone(&skinr),
-        Arc::clone(&router.macho_notify_sink),
     );
     super::register_with_state(&router, Arc::clone(&state));
     (router, db, skinr, state)

@@ -30,7 +30,6 @@ use crate::quasar_gateway::{
     STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
     STATUS_UNAUTHORIZED,
 };
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
@@ -112,14 +111,13 @@ pub(crate) fn purge_revoked_skin_listings(db: &WorldRepository, seller_id: u32, 
 
 impl CosmeticsMarketState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>, skinr: Arc<SkinrCosmeticsState>) -> Arc<Self> {
-        Self::load_with_sink(db, sde, skinr, Arc::new(RankedRwLock::new(None)))
+        Self::load_with_sink(db, sde, skinr)
     }
 
     pub fn load_with_sink(
         db: Arc<WorldRepository>,
         _sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
-        _macho_notify_sink: Arc<RankedRwLock<Option<crate::quasar_gateway::MachoNotifySink>, RANK_LEAF>>,
     ) -> Arc<Self> {
         let data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
@@ -1525,7 +1523,7 @@ pub fn register(
     sde: Arc<SdeRegistry>,
     skinr: Arc<SkinrCosmeticsState>,
 ) {
-    let state = CosmeticsMarketState::load_with_sink(db, sde, skinr, Arc::clone(&router.macho_notify_sink));
+    let state = CosmeticsMarketState::load_with_sink(db, sde, skinr);
     register_with_state(router, state);
 }
 

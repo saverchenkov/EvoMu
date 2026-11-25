@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::{
-    assemble_pending_notification, current_dispatch_staging_scope_info,
+    assemble_pending_notification, current_dispatch_staging_scope_id,
     enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
     insert_before_staged_seq_or_stage, is_active_dispatch_char, next_notification_seq_id,
     pending_notifications_ptr, push_pending_notification_capped, try_stage_dispatch_notification,
@@ -437,9 +437,8 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             let now_unix = db.now_unix_secs();
             // Assigned per `(owner_id, account_key)` inside `EpochLedger::record_batch`.
             let commit_epoch = 0u64;
-            let staging_scope_info =
-                current_dispatch_staging_scope_info(Some(&*pend), Some(&notify_tx));
-            let staging_scope_id = staging_scope_info.as_ref().map(|(scope_id, _)| *scope_id);
+            let staging_scope_id =
+                current_dispatch_staging_scope_id(Some(&*pend), Some(&notify_tx));
 
             let (emitted_effects, mut committed_records) = if effects.notifications.is_empty() {
                 (EmittedEffectKeys::default(), Vec::new())
@@ -510,16 +509,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             }
 
             if !changes.items.is_empty() || !changes.characters.is_empty() {
-                let origin_scope =
-                    crate::router::delta_item_switch_report::origin_scope_telemetry_for_commit(
-                        staging_scope_info.is_some(),
-                    );
                 let batch = crate::router::delta_item_switch::collect_switched_char_same_scene_item_specs(
                     &switches,
                     &*pend,
                     &notify_tx,
-                    staging_scope_info.as_ref(),
-                    origin_scope,
+                    staging_scope_id,
                     effects.acting_char_id,
                     &*db,
                     snap,
@@ -532,7 +526,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                 if !batch.item_specs.is_empty() || !batch.blueprint_specs.is_empty() {
                     let corp_all_items = switches
                         .config()
-                        .is_corp_all_items_enabled_in_scope(staging_scope_info.is_some());
+                        .is_corp_all_items_enabled_in_scope(staging_scope_id.is_some());
                     let built =
                         crate::router::delta_item_switch::build_switched_item_commit_notifications(
                             snap,
@@ -721,18 +715,13 @@ pub(crate) fn try_handle_legacy_account_change_emit(
     }
     let Some((account_key, owner_id, manual_bal)) = extract_account_change_fields(payload_args)
     else {
-        ctx.projected_item_switches
-            .record_account_call_site(0, recipients.len() as u64);
         return None;
     };
     let Some(bridge) = lookup_commit_bridge(ctx) else {
-        ctx.projected_item_switches
-            .record_account_call_site(0, recipients.len() as u64);
         return None;
     };
     let staging_scope_id =
-        current_dispatch_staging_scope_info(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx))
-            .map(|(scope_id, _)| scope_id);
+        current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx));
     let matching: Vec<ProjectedAccountRecord> = {
         let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
         let current_wallet_epoch = ledger.wallet_epoch(owner_id, &account_key);
@@ -750,8 +739,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
             .collect()
     };
     if matching.is_empty() {
-        ctx.projected_item_switches
-            .record_account_call_site(0, recipients.len() as u64);
         return None;
     }
 
@@ -762,8 +749,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
     });
     let mut emitted = Vec::with_capacity(recipients.len());
     let mut seq_updates: Vec<(i64, u64, u64)> = Vec::new();
-    let mut replaced_count = 0_u64;
-    let mut passed_through_count = 0_u64;
 
     for &(cid, uid) in recipients {
         let make_notif = || {
@@ -790,7 +775,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                     let exact = cid_records[exact_idx];
                     if let Some(pos) = queue.iter().position(|n| n.seq_id == exact.seq_id) {
                         emitted.push(queue[pos].clone());
-                        replaced_count += 1;
                         continue;
                     }
                     // `exact` was already drained. Keep suppressing unless a newer wallet
@@ -799,7 +783,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                         exact_idx + 1 < cid_records.len() - 1 && latest_pos.is_some();
                     if !round_tripped_alias {
                         emitted.push(make_notif());
-                        replaced_count += 1;
                         continue;
                     }
                 }
@@ -813,12 +796,10 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                     // Do not re-broadcast stale pre-settlement balance on `notify_tx`
                     // after `latest.seq_id` (`B_final`) was already sent at commit time.
                     emitted.push(notif);
-                    passed_through_count += 1;
                 } else {
                     // `latest.seq_id` was already drained to live listeners: do not re-push
                     // duplicates or stale intermediate balances onto the live stream.
                     emitted.push(make_notif());
-                    replaced_count += 1;
                 }
             }
             (None, Some(queues)) => {
@@ -826,7 +807,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                 push_pending_notification_capped(queues.entry(cid).or_default(), notif.clone());
                 let _ = ctx.notify_tx.send((cid, notif.clone()));
                 emitted.push(notif);
-                passed_through_count += 1;
             }
             (Some(latest), None) => {
                 if let Some(existing) = cid_records.iter().rev().find_map(|r| {
@@ -837,11 +817,9 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                     }
                 }) {
                     emitted.push(existing);
-                    replaced_count += 1;
                 } else if exact_idx_opt.is_some() {
                     // Exact balance for this staged scope was already flushed or drained.
                     emitted.push(make_notif());
-                    replaced_count += 1;
                 } else if find_staged_notification_by_seq(&*ctx.pending_notifications, latest.seq_id)
                     .is_some()
                 {
@@ -855,10 +833,8 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                         seq_updates.push((cid, latest.seq_id, new_tail_seq));
                     }
                     emitted.push(notif);
-                    passed_through_count += 1;
                 } else {
                     emitted.push(make_notif());
-                    replaced_count += 1;
                 }
             }
             (None, None) => {
@@ -870,7 +846,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                     None,
                 );
                 emitted.push(notif);
-                passed_through_count += 1;
             }
         }
     }
@@ -888,8 +863,6 @@ pub(crate) fn try_handle_legacy_account_change_emit(
             }
         }
     }
-    ctx.projected_item_switches
-        .record_account_call_site(replaced_count, passed_through_count);
 
     Some(emitted)
 }
@@ -1064,7 +1037,6 @@ mod t3c2_tests {
     use super::super::cache_notifications::{
         flush_staged_dispatch_notifications, with_staged_dispatch_notifications,
     };
-    use super::super::delta_item_switch::projected_item_switch_summary;
     use super::ServerContext;
     use eve_db::IskCents;
 
@@ -1126,14 +1098,13 @@ mod t3c2_tests {
     }
 
     #[tokio::test]
-    async fn account_change_helper_tracks_replaced_and_passed_through_by_call_site() {
+    async fn account_change_helper_dedupes_matching_and_passes_through_unmatched() {
         let ctx = ServerContext::new();
         let (pilot_id, other_id) = (90_000_001_i64, 90_000_099_i64);
         let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
         ctx.db.acquire_online_lock(uid, 93_203, Some(pilot_id), true, 1_700_000_500).expect("lock");
         let _ = ctx.drain_notifications_for_char(pilot_id);
 
-        let mut call_lines = (0, 0);
         with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
             let new_bal = ctx
                 .db
@@ -1143,39 +1114,18 @@ mod t3c2_tests {
                     Ok(ch.balance.to_f64_isk())
                 })
                 .expect("tx");
-            // Matching account delta token is replaced; non-matching/second emit passes through.
-            call_lines.0 = line!() + 1;
+            // Matching account delta token is deduplicated; non-matching owner passes through.
             ctx.notify_account_change(pilot_id, "cash", pilot_id, new_bal);
-            call_lines.1 = line!() + 1;
             ctx.notify_account_change(pilot_id, "cash", other_id, new_bal);
             flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
         })
         .await;
 
-        let summary = projected_item_switch_summary(&ctx);
-        assert_eq!(summary.account_switches.replaced, 1);
-        assert_eq!(summary.account_switches.passed_through, 1);
-        let replaced_suffix = format!("delta_commit_listener.rs:{}", call_lines.0);
-        let passed_suffix = format!("delta_commit_listener.rs:{}", call_lines.1);
-        assert!(
-            summary
-                .account_switches
-                .by_call_site
-                .iter()
-                .any(|(site, c)| site.ends_with(&replaced_suffix) && c.replaced == 1),
-            "{:?}",
-            summary.account_switches
-        );
-        assert!(
-            summary
-                .account_switches
-                .by_call_site
-                .iter()
-                .any(|(site, c)| site.ends_with(&passed_suffix) && c.passed_through == 1),
-            "{:?}",
-            summary.account_switches
-        );
-        let md = summary.format_markdown_report();
-        assert!(md.contains("#### Account Change Switch Telemetry"), "{md}");
+        let notifs: Vec<_> = ctx
+            .drain_notifications_for_char(pilot_id)
+            .into_iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .collect();
+        assert_eq!(notifs.len(), 2, "expected 1 deduped pilot + 1 other OnAccountChange, got {notifs:?}");
     }
 }
