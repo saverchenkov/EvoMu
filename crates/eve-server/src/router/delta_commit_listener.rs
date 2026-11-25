@@ -9,11 +9,12 @@
 
 use crate::router::cache_notifications::{
     assemble_pending_notification, current_dispatch_staging_scope_id,
-    enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
-    insert_before_staged_seq_or_stage, is_active_dispatch_char, next_notification_seq_id,
-    pending_notifications_ptr, push_pending_notification_capped, try_stage_dispatch_notification,
-    with_matching_dispatch_projection_scope, NotificationTarget, PendingMachoNotification,
-    MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
+    current_dispatch_staging_scope_liveness, enqueue_or_stage_pending_batch,
+    find_staged_notification_by_seq, insert_before_staged_seq_or_stage, is_active_dispatch_char,
+    next_notification_seq_id, pending_notifications_ptr, push_pending_notification_capped,
+    try_stage_dispatch_notification, with_matching_dispatch_transitioned_chars, NotificationTarget,
+    PendingMachoNotification, MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR,
+    MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
 use crate::router::delta_projection::{
@@ -33,6 +34,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 const MAX_RECENT_COMMIT_EPOCH_LAG: u64 = 32;
 const MAX_RECENT_PROJECTED_RECORDS: usize = 4096;
+const MAX_OUTSIDE_COVERED_MONITORS: usize = 512;
+const MAX_DISPATCH_COVERED_MONITOR_SCOPES: usize = 512;
+
+type CoveredMonitorMap = HashMap<i64, (i64, i64, HashSet<u32>)>;
 
 #[derive(Debug, Clone)]
 struct ProjectedAccountRecord {
@@ -51,7 +56,10 @@ struct EpochLedger {
     /// Monotonic commit counter per `(owner_id, account_key)` so unrelated DB
     /// commits (career goals, telemetry, other wallets) never evict recent records.
     wallet_epochs: HashMap<i64, HashMap<String, u64>>,
-    outside_covered_monitors: HashMap<i64, (i64, i64, HashSet<u32>)>,
+    dispatch_covered_monitors: HashMap<u64, (Weak<()>, CoveredMonitorMap)>,
+    dispatch_monitor_scope_order: VecDeque<u64>,
+    outside_covered_monitors: CoveredMonitorMap,
+    outside_covered_monitor_order: VecDeque<i64>,
 }
 
 impl EpochLedger {
@@ -108,6 +116,139 @@ impl EpochLedger {
             .and_then(|m| m.get(account_key))
             .copied()
             .unwrap_or(0)
+    }
+
+    fn prune_dead_dispatch_scopes(&mut self) {
+        self.dispatch_covered_monitors
+            .retain(|_, (w, monitors)| w.strong_count() > 0 && !monitors.is_empty());
+        self.dispatch_monitor_scope_order
+            .retain(|id| self.dispatch_covered_monitors.contains_key(id));
+    }
+
+    fn invalidate_all_covered_monitors(
+        &mut self,
+        touched_types: &HashMap<i64, HashSet<u32>>,
+        excluded_chars: &[i64],
+    ) {
+        self.prune_dead_dispatch_scopes();
+        for (_, monitors) in self.dispatch_covered_monitors.values_mut() {
+            invalidate_covered_monitors_for_types(monitors, None, touched_types);
+            retain_monitors_excluding_chars(monitors, None, excluded_chars);
+        }
+        self.prune_dead_dispatch_scopes();
+        invalidate_covered_monitors_for_types(
+            &mut self.outside_covered_monitors,
+            Some(&mut self.outside_covered_monitor_order),
+            touched_types,
+        );
+        retain_monitors_excluding_chars(
+            &mut self.outside_covered_monitors,
+            Some(&mut self.outside_covered_monitor_order),
+            excluded_chars,
+        );
+    }
+
+    fn record_dispatch_covered_monitors(
+        &mut self,
+        scope_id: u64,
+        liveness: Weak<()>,
+        covered: &HashMap<i64, (i64, i64, Vec<u32>)>,
+        excluded_chars: &[i64],
+    ) {
+        if covered.is_empty() || liveness.strong_count() == 0 {
+            return;
+        }
+        self.prune_dead_dispatch_scopes();
+        let had_scope = self.dispatch_covered_monitors.contains_key(&scope_id);
+        let entry = self
+            .dispatch_covered_monitors
+            .entry(scope_id)
+            .or_insert_with(|| (liveness, HashMap::new()));
+        merge_covered_industry_monitors(&mut entry.1, None, None, covered, excluded_chars);
+        if entry.1.is_empty() {
+            self.dispatch_covered_monitors.remove(&scope_id);
+            self.dispatch_monitor_scope_order
+                .retain(|&id| id != scope_id);
+            return;
+        }
+        if had_scope {
+            self.dispatch_monitor_scope_order
+                .retain(|&id| id != scope_id);
+        }
+        self.dispatch_monitor_scope_order.push_back(scope_id);
+        while self.dispatch_covered_monitors.len() > MAX_DISPATCH_COVERED_MONITOR_SCOPES {
+            let Some(oldest_scope) = self.dispatch_monitor_scope_order.pop_front() else {
+                break;
+            };
+            self.dispatch_covered_monitors.remove(&oldest_scope);
+        }
+    }
+
+    fn record_outside_covered_monitors(
+        &mut self,
+        covered: &HashMap<i64, (i64, i64, Vec<u32>)>,
+        excluded_chars: &[i64],
+    ) {
+        if covered.is_empty() {
+            return;
+        }
+        merge_covered_industry_monitors(
+            &mut self.outside_covered_monitors,
+            Some(&mut self.outside_covered_monitor_order),
+            Some(MAX_OUTSIDE_COVERED_MONITORS),
+            covered,
+            excluded_chars,
+        );
+    }
+
+    fn clear_monitors_for_chars(&mut self, chars: &[i64]) {
+        if chars.is_empty() {
+            return;
+        }
+        self.prune_dead_dispatch_scopes();
+        for (_, monitors) in self.dispatch_covered_monitors.values_mut() {
+            retain_monitors_excluding_chars(monitors, None, chars);
+        }
+        self.prune_dead_dispatch_scopes();
+        retain_monitors_excluding_chars(
+            &mut self.outside_covered_monitors,
+            Some(&mut self.outside_covered_monitor_order),
+            chars,
+        );
+    }
+
+    fn remove_monitor_by_id(&mut self, monitor_id: i64) {
+        self.prune_dead_dispatch_scopes();
+        for (_, monitors) in self.dispatch_covered_monitors.values_mut() {
+            monitors.remove(&monitor_id);
+        }
+        self.prune_dead_dispatch_scopes();
+        if self.outside_covered_monitors.remove(&monitor_id).is_some() {
+            self.outside_covered_monitor_order
+                .retain(|&id| id != monitor_id);
+        }
+    }
+
+    fn is_monitor_covered(
+        &mut self,
+        scope_id: Option<u64>,
+        monitor_id: i64,
+        tids: &[u32],
+    ) -> bool {
+        if tids.is_empty() {
+            return false;
+        }
+        self.prune_dead_dispatch_scopes();
+        let monitors = match scope_id {
+            Some(sid) => match self.dispatch_covered_monitors.get(&sid) {
+                Some((_, map)) => map,
+                None => return false,
+            },
+            None => &self.outside_covered_monitors,
+        };
+        monitors
+            .get(&monitor_id)
+            .is_some_and(|(_, _, types)| tids.iter().all(|tid| types.contains(tid)))
     }
 }
 
@@ -380,9 +521,8 @@ fn project_wallet_notifs_for_commit(
 }
 
 /// Registers the authoritative DB post-commit listener on `ctx.db`, dispatching explicit
-/// `TxNotificationEffect`s, projecting committed wallet / corp-division / PLEX Vault deltas
-/// Registers the post-commit delta listener projecting wallet/corp/PLEX changes (`OnAccountChange`)
-/// and switched item/blueprint deltas (`#931`).
+/// `TxNotificationEffect`s and projecting committed wallet/corp/PLEX (`OnAccountChange`) and
+/// item/blueprint/`OnIndustryMaterials` deltas (`#931`).
 pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
     let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
     let slot = commit_bridges_slot(&ctx.db);
@@ -425,9 +565,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
         .register_session_offline_listener(Arc::new(move |offline_chars| {
             if let Some(bridge) = offline_bridge.upgrade() {
                 let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-                ledger
-                    .outside_covered_monitors
-                    .retain(|_, (char_id, _, _)| !offline_chars.contains(char_id));
+                ledger.clear_monitors_for_chars(offline_chars);
             }
         }));
 
@@ -512,12 +650,37 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             }
 
             if !changes.items.is_empty() || !changes.characters.is_empty() {
-                let in_dispatch = staging_scope_id.is_some();
+                let dispatch_scope =
+                    current_dispatch_staging_scope_liveness(Some(&*pend), Some(&notify_tx));
+                let in_dispatch = dispatch_scope.is_some();
+                let touched_types = collect_touched_monitor_types(changes);
+                let newly_transitioned: Vec<i64> = if !changes.characters.is_empty() {
+                    let changed_chars =
+                        crate::router::delta_item_switch::index_changed_characters(changes);
+                    changed_chars
+                        .keys()
+                        .copied()
+                        .filter(|&char_id| {
+                            crate::router::delta_item_switch::is_character_scene_or_ship_transition(
+                                char_id,
+                                &changed_chars,
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                {
+                    let mut ledger =
+                        bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+                    ledger.invalidate_all_covered_monitors(&touched_types, &newly_transitioned);
+                }
+
                 let prior_transitioned = if in_dispatch {
-                    with_matching_dispatch_projection_scope(
+                    with_matching_dispatch_transitioned_chars(
                         Some(&*pend),
                         Some(&notify_tx),
-                        |scope| scope.transitioned_chars.clone(),
+                        |chars| chars.clone(),
                     )
                     .unwrap_or_default()
                 } else {
@@ -536,26 +699,12 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                         &active_fuel_reserves,
                         db_key,
                     );
-                if in_dispatch && !changes.characters.is_empty() {
-                    let changed_chars =
-                        crate::router::delta_item_switch::index_changed_characters(changes);
-                    let newly_transitioned: Vec<i64> = changed_chars
-                        .keys()
-                        .copied()
-                        .filter(|&char_id| {
-                            crate::router::delta_item_switch::is_character_scene_or_ship_transition(
-                                char_id,
-                                &changed_chars,
-                            )
-                        })
-                        .collect();
-                    if !newly_transitioned.is_empty() {
-                        with_matching_dispatch_projection_scope(
-                            Some(&*pend),
-                            Some(&notify_tx),
-                            |scope| scope.transitioned_chars.extend(newly_transitioned),
-                        );
-                    }
+                if in_dispatch && !newly_transitioned.is_empty() {
+                    with_matching_dispatch_transitioned_chars(
+                        Some(&*pend),
+                        Some(&notify_tx),
+                        |chars| chars.extend(newly_transitioned.iter().copied()),
+                    );
                 }
                 if !batch.item_specs.is_empty() || !batch.blueprint_specs.is_empty() {
                     let built =
@@ -570,23 +719,19 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                             db_key,
                         );
                     if !built.covered_industry_monitors.is_empty() {
-                        if in_dispatch {
-                            with_matching_dispatch_projection_scope(
-                                Some(&*pend),
-                                Some(&notify_tx),
-                                |scope| {
-                                    merge_covered_industry_monitors(
-                                        &mut scope.covered_industry_monitors,
-                                        &built.covered_industry_monitors,
-                                    );
-                                },
+                        let mut ledger =
+                            bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some((scope_id, liveness)) = dispatch_scope {
+                            ledger.record_dispatch_covered_monitors(
+                                scope_id,
+                                liveness,
+                                &built.covered_industry_monitors,
+                                &newly_transitioned,
                             );
                         } else {
-                            let mut ledger =
-                                bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-                            merge_covered_industry_monitors(
-                                &mut ledger.outside_covered_monitors,
+                            ledger.record_outside_covered_monitors(
                                 &built.covered_industry_monitors,
+                                &newly_transitioned,
                             );
                         }
                     }
@@ -1108,15 +1253,94 @@ impl ServerContext {
     }
 }
 
+fn collect_touched_monitor_types(changes: &ChangeSet) -> HashMap<i64, HashSet<u32>> {
+    let mut touched_types: HashMap<i64, HashSet<u32>> = HashMap::new();
+    for change in &changes.items {
+        for rec in [change.before.as_deref(), change.after.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            touched_types
+                .entry(rec.owner_id)
+                .or_default()
+                .insert(rec.type_id);
+        }
+    }
+    touched_types
+}
+
+fn prune_monitor_order(monitors: &CoveredMonitorMap, order: Option<&mut VecDeque<i64>>) {
+    if let Some(q) = order {
+        q.retain(|id| monitors.contains_key(id));
+    }
+}
+
+fn invalidate_covered_monitors_for_types(
+    monitors: &mut CoveredMonitorMap,
+    order: Option<&mut VecDeque<i64>>,
+    touched_types: &HashMap<i64, HashSet<u32>>,
+) {
+    if monitors.is_empty() || touched_types.is_empty() {
+        return;
+    }
+    monitors.retain(|_, (_, oid, tids)| {
+        if let Some(removed) = touched_types.get(oid) {
+            tids.retain(|tid| !removed.contains(tid));
+        }
+        !tids.is_empty()
+    });
+    prune_monitor_order(monitors, order);
+}
+
+fn retain_monitors_excluding_chars(
+    monitors: &mut CoveredMonitorMap,
+    order: Option<&mut VecDeque<i64>>,
+    chars: &[i64],
+) {
+    if !chars.is_empty() && !monitors.is_empty() {
+        monitors.retain(|_, (cid, oid, _)| !chars.contains(cid) && !chars.contains(oid));
+        prune_monitor_order(monitors, order);
+    }
+}
+
 fn merge_covered_industry_monitors(
-    target: &mut HashMap<i64, (i64, i64, HashSet<u32>)>,
+    target: &mut CoveredMonitorMap,
+    mut order: Option<&mut VecDeque<i64>>,
+    max_entries: Option<usize>,
     covered: &HashMap<i64, (i64, i64, Vec<u32>)>,
+    excluded_chars: &[i64],
 ) {
     for (&monitor_id, (char_id, owner_id, tids)) in covered {
+        if tids.is_empty()
+            || excluded_chars.contains(char_id)
+            || excluded_chars.contains(owner_id)
+        {
+            continue;
+        }
+        let was_present = target.contains_key(&monitor_id);
         let entry = target
             .entry(monitor_id)
             .or_insert_with(|| (*char_id, *owner_id, HashSet::with_capacity(tids.len())));
+        if entry.0 != *char_id || entry.1 != *owner_id {
+            entry.0 = *char_id;
+            entry.1 = *owner_id;
+            entry.2.clear();
+        }
         entry.2.extend(tids.iter().copied());
+        if let Some(q) = order.as_deref_mut() {
+            if was_present {
+                q.retain(|&id| id != monitor_id);
+            }
+            q.push_back(monitor_id);
+        }
+    }
+    if let (Some(q), Some(cap)) = (order, max_entries) {
+        while target.len() > cap {
+            let Some(oldest_id) = q.pop_front() else {
+                break;
+            };
+            target.remove(&oldest_id);
+        }
     }
 }
 
@@ -1128,36 +1352,31 @@ pub(crate) fn is_industry_monitor_covered(
     if tids.is_empty() {
         return false;
     }
-    if let Some(covered) = with_matching_dispatch_projection_scope(
+    let scope_id = current_dispatch_staging_scope_id(
         Some(&*ctx.pending_notifications),
         Some(&ctx.notify_tx),
-        |scope| {
-            scope
-                .covered_industry_monitors
-                .get(&monitor_id)
-                .is_some_and(|(_, _, types)| tids.iter().all(|tid| types.contains(tid)))
-        },
-    ) {
-        return covered;
-    }
+    );
     let Some(bridge) = lookup_commit_bridge(ctx) else {
         return false;
     };
-    let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-    ledger
-        .outside_covered_monitors
-        .get(&monitor_id)
-        .is_some_and(|(_, _, types)| tids.iter().all(|tid| types.contains(tid)))
+    let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+    ledger.is_monitor_covered(scope_id, monitor_id, tids)
 }
 
-pub(crate) fn clear_outside_covered_monitors_for_char(ctx: &ServerContext, char_id: i64) {
+pub(crate) fn clear_covered_monitors_for_char(ctx: &ServerContext, char_id: i64) {
     let Some(bridge) = lookup_commit_bridge(ctx) else {
         return;
     };
     let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-    ledger
-        .outside_covered_monitors
-        .retain(|_, (sub_char_id, owner_id, _)| *sub_char_id != char_id && *owner_id != char_id);
+    ledger.clear_monitors_for_chars(&[char_id]);
+}
+
+pub(crate) fn clear_covered_monitor_by_id(ctx: &ServerContext, monitor_id: i64) {
+    let Some(bridge) = lookup_commit_bridge(ctx) else {
+        return;
+    };
+    let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+    ledger.remove_monitor_by_id(monitor_id);
 }
 
 /// Builds the V24 `OnItemChange` payload (`location = 10`, `flag = 147`) expected for fitted
@@ -1293,5 +1512,360 @@ mod t3c2_tests {
             .filter(|n| n.event == "OnAccountChange")
             .collect();
         assert_eq!(notifs.len(), 2, "expected 1 deduped pilot + 1 other OnAccountChange, got {notifs:?}");
+    }
+
+    fn setup_monitored_char_and_tritanium(
+        ctx: &ServerContext,
+        char_id: i64,
+        station_id: i64,
+        monitor_ids: &[i64],
+        trit_item_id: i64,
+    ) -> u64 {
+        let uid = ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters.get(&char_id).cloned().expect("char");
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            let uid = ch.user_id;
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                trit_item_id,
+                eve_db::InventoryItemRecord {
+                    item_id: trit_item_id,
+                    type_id: 34,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 500,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+            let mut monitors = std::collections::BTreeMap::new();
+            for &mon_id in monitor_ids {
+                monitors.insert(
+                    mon_id,
+                    crate::services::notify_emitters_character_services::IndustryMaterialMonitorSub {
+                        char_id,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag_id: eve_db::InventoryFlag::Hangar as i64,
+                    },
+                );
+            }
+            crate::services::notify_emitters_character_services::save_industry_material_monitors(
+                snap,
+                &monitors,
+            );
+            uid
+        });
+        ctx.db
+            .acquire_online_lock(
+                uid,
+                93_300 + (char_id as u64 % 1000),
+                Some(char_id),
+                true,
+                1_700_000_500,
+            )
+            .expect("online lock");
+        let _ = ctx.drain_notifications_for_char(char_id);
+        uid
+    }
+
+    fn suppressed_on_item_change_args(
+        char_id: i64,
+        item_id: i64,
+        station_id: i64,
+        new_qty: i64,
+        old_qty: i64,
+    ) -> Vec<super::PyRep> {
+        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+            super::PyRep::Integer(item_id),
+            super::PyRep::Integer(34),
+            super::PyRep::Integer(char_id),
+            super::PyRep::Integer(station_id),
+            super::PyRep::Integer(eve_db::InventoryFlag::Hangar as i64),
+            super::PyRep::Integer(new_qty),
+            super::PyRep::Integer(18),
+            super::PyRep::Integer(4),
+            super::PyRep::String(String::new()),
+        ]);
+        vec![
+            row,
+            super::PyRep::Dict(vec![(super::PyRep::Integer(9), super::PyRep::Integer(old_qty))]),
+        ]
+    }
+
+    #[test]
+    fn outside_dispatch_suppressed_commit_invalidates_covered_industry_monitor() {
+        let ctx = ServerContext::new();
+        let (char_id, station_id, mon_id, trit_id) =
+            (90_000_001_i64, 60_003_760_i64, 88_901_i64, 995_931_201_i64);
+        setup_monitored_char_and_tritanium(&ctx, char_id, station_id, &[mon_id], trit_id);
+
+        ctx.db
+            .tx("outside_cover", |tx| {
+                tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 400;
+                Ok::<_, eve_db::TxError>(())
+            })
+            .expect("outside_cover");
+        assert!(super::is_industry_monitor_covered(&ctx, mon_id, &[34]));
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        // Subsequent commit touching (char_id, 34) under tx.effects suppression does not re-cover
+        // the monitor and must invalidate prior outside-dispatch coverage so follow-up emit fires.
+        ctx.db
+            .tx("outside_suppressed", |tx| {
+                tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 150;
+                tx.effects.notify_character(
+                    char_id,
+                    "OnItemChange",
+                    "charid",
+                    suppressed_on_item_change_args(char_id, trit_id, station_id, 150, 400),
+                );
+                Ok::<_, eve_db::TxError>(())
+            })
+            .expect("outside_suppressed");
+        assert!(!super::is_industry_monitor_covered(&ctx, mon_id, &[34]));
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        crate::services::notify_emitters_character_services::emit_industry_materials_consumed(
+            &ctx,
+            char_id,
+            mon_id,
+            station_id,
+            station_id,
+            char_id,
+            false,
+            eve_db::InventoryFlag::Hangar,
+            None,
+            &[(34, 250)],
+        );
+        let mats: Vec<_> = ctx
+            .drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "OnIndustryMaterials")
+            .collect();
+        assert_eq!(mats.len(), 1, "follow-up OnIndustryMaterials must emit after invalidation");
+        assert_eq!(mats[0].args[0], super::PyRep::Integer(mon_id));
+        assert_eq!(
+            mats[0].args[1],
+            super::PyRep::Dict(vec![(super::PyRep::Integer(34), super::PyRep::Integer(150))])
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_suppressed_commit_and_transition_invalidate_covered_monitors() {
+        let ctx = ServerContext::new();
+        let (char_id, station_id, mon_id, trit_id) =
+            (90_000_001_i64, 60_003_760_i64, 88_902_i64, 995_931_202_i64);
+        setup_monitored_char_and_tritanium(&ctx, char_id, station_id, &[mon_id], trit_id);
+
+        // 1. Multi-commit dispatch: Commit 1 covers monitor; suppressed Commit 2 invalidates it so
+        //    follow-up emit_industry_materials_consumed fires cleanly inside the same dispatch.
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            ctx.db
+                .tx("dispatch_cover", |tx| {
+                    tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 400;
+                    Ok::<_, eve_db::TxError>(())
+                })
+                .expect("dispatch_cover");
+            assert!(super::is_industry_monitor_covered(&ctx, mon_id, &[34]));
+
+            ctx.db
+                .tx("dispatch_suppressed", |tx| {
+                    tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 125;
+                    tx.effects.notify_character(
+                        char_id,
+                        "OnItemChange",
+                        "charid",
+                        suppressed_on_item_change_args(char_id, trit_id, station_id, 125, 400),
+                    );
+                    Ok::<_, eve_db::TxError>(())
+                })
+                .expect("dispatch_suppressed");
+            assert!(!super::is_industry_monitor_covered(&ctx, mon_id, &[34]));
+
+            crate::services::notify_emitters_character_services::emit_industry_materials_consumed(
+                &ctx,
+                char_id,
+                mon_id,
+                station_id,
+                station_id,
+                char_id,
+                false,
+                eve_db::InventoryFlag::Hangar,
+                None,
+                &[(34, 275)],
+            );
+            flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        })
+        .await;
+
+        let mats: Vec<_> = ctx
+            .drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "OnIndustryMaterials")
+            .collect();
+        assert_eq!(mats.len(), 2, "expected Commit 1 + post-invalidation follow-up OnIndustryMaterials, got {mats:?}");
+        assert_eq!(
+            mats[1].args[1],
+            super::PyRep::Dict(vec![(super::PyRep::Integer(34), super::PyRep::Integer(125))])
+        );
+
+        // 2. Multi-commit dispatch: Commit 2 transitions subscriber character -> purges monitor coverage.
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            ctx.db
+                .tx("dispatch_cover_before_transition", |tx| {
+                    tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 100;
+                    Ok::<_, eve_db::TxError>(())
+                })
+                .expect("dispatch_cover_before_transition");
+            assert!(super::is_industry_monitor_covered(&ctx, mon_id, &[34]));
+
+            ctx.db
+                .tx("dispatch_undock_transition", |tx| {
+                    tx.snap.characters.get_mut(&char_id).expect("char").station_id = None;
+                    Ok::<_, eve_db::TxError>(())
+                })
+                .expect("dispatch_undock_transition");
+            assert!(!super::is_industry_monitor_covered(&ctx, mon_id, &[34]));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_job_and_clear_notifications_prune_covered_monitors() {
+        let ctx = ServerContext::new();
+        let (char_id, station_id, mon_a, mon_b, trit_id) =
+            (90_000_001_i64, 60_003_760_i64, 88_903_i64, 88_904_i64, 995_931_203_i64);
+        let uid = setup_monitored_char_and_tritanium(
+            &ctx,
+            char_id,
+            station_id,
+            &[mon_a, mon_b],
+            trit_id,
+        );
+        let mut sess = eve_machonet::SessionState {
+            user_id: Some(uid),
+            character_id: Some(char_id),
+            corporation_id: Some(1_000_009),
+            solar_system_id: Some(30_000_142),
+            station_id: Some(station_id),
+            ..Default::default()
+        };
+
+        // Outside-dispatch DisconnectJob(mon_a) removes only mon_a; DisconnectJob(None) clears mon_b.
+        ctx.db
+            .tx("cover_both_outside", |tx| {
+                tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 420;
+                Ok::<_, eve_db::TxError>(())
+            })
+            .expect("cover_both_outside");
+        assert!(super::is_industry_monitor_covered(&ctx, mon_a, &[34]));
+        assert!(super::is_industry_monitor_covered(&ctx, mon_b, &[34]));
+
+        let disc_a = crate::services::industry_pi::handle_industry_job_queries(
+            &ctx,
+            &mut sess,
+            "industryMonitor",
+            "DisconnectJob",
+            &[super::PyRep::Integer(mon_a)],
+            &std::collections::HashMap::new(),
+        )
+        .expect("handled")
+        .expect("DisconnectJob(mon_a) ok");
+        assert_eq!(disc_a, super::PyRep::Bool(true));
+        assert!(!super::is_industry_monitor_covered(&ctx, mon_a, &[34]));
+        assert!(super::is_industry_monitor_covered(&ctx, mon_b, &[34]));
+
+        let disc_all = crate::services::industry_pi::handle_industry_job_queries(
+            &ctx,
+            &mut sess,
+            "industryMonitor",
+            "DisconnectJob",
+            &[super::PyRep::None],
+            &std::collections::HashMap::new(),
+        )
+        .expect("handled")
+        .expect("DisconnectJob(None) ok");
+        assert_eq!(disc_all, super::PyRep::None);
+        assert!(!super::is_industry_monitor_covered(&ctx, mon_b, &[34]));
+
+        // Re-register mon_a, cover inside dispatch, and verify clear_notifications_for_char clears it.
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut monitors = std::collections::BTreeMap::new();
+            monitors.insert(
+                mon_a,
+                crate::services::notify_emitters_character_services::IndustryMaterialMonitorSub {
+                    char_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag_id: eve_db::InventoryFlag::Hangar as i64,
+                },
+            );
+            crate::services::notify_emitters_character_services::save_industry_material_monitors(
+                snap,
+                &monitors,
+            );
+        });
+        with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+            ctx.db
+                .tx("cover_in_dispatch_clear", |tx| {
+                    tx.snap.items.get_mut(&trit_id).expect("trit").quantity = 350;
+                    Ok::<_, eve_db::TxError>(())
+                })
+                .expect("cover_in_dispatch_clear");
+            assert!(super::is_industry_monitor_covered(&ctx, mon_a, &[34]));
+            ctx.clear_notifications_for_char(char_id);
+            assert!(!super::is_industry_monitor_covered(&ctx, mon_a, &[34]));
+        })
+        .await;
+    }
+
+    #[test]
+    fn epoch_ledger_monitors_enforce_identity_reset_and_bounded_eviction() {
+        let mut ledger = super::EpochLedger::default();
+        let covered_a: std::collections::HashMap<i64, (i64, i64, Vec<u32>)> =
+            [(777_i64, (90_000_001_i64, 90_000_001_i64, vec![34]))]
+                .into_iter()
+                .collect();
+        ledger.record_outside_covered_monitors(&covered_a, &[]);
+        assert!(ledger.is_monitor_covered(None, 777, &[34]));
+
+        // Identity change on reused monitor_id must reset previous type set.
+        let covered_b: std::collections::HashMap<i64, (i64, i64, Vec<u32>)> =
+            [(777_i64, (90_000_002_i64, 98_000_001_i64, vec![35]))]
+                .into_iter()
+                .collect();
+        ledger.record_outside_covered_monitors(&covered_b, &[]);
+        assert!(!ledger.is_monitor_covered(None, 777, &[34]));
+        assert!(ledger.is_monitor_covered(None, 777, &[35]));
+
+        // Clearing by owner_id removes corp/owner-matched monitors even when sub_char_id differs.
+        ledger.clear_monitors_for_chars(&[98_000_001_i64]);
+        assert!(!ledger.is_monitor_covered(None, 777, &[35]));
+        ledger.record_outside_covered_monitors(&covered_b, &[]);
+        assert!(ledger.is_monitor_covered(None, 777, &[35]));
+
+        // Bounded eviction caps outside_covered_monitors at MAX_OUTSIDE_COVERED_MONITORS.
+        let overflow = 16usize;
+        for offset in 0..(super::MAX_OUTSIDE_COVERED_MONITORS + overflow) {
+            let mon_id = 10_000 + offset as i64;
+            let batch: std::collections::HashMap<i64, (i64, i64, Vec<u32>)> =
+                [(mon_id, (90_000_001, 90_000_001, vec![34]))]
+                    .into_iter()
+                    .collect();
+            ledger.record_outside_covered_monitors(&batch, &[]);
+        }
+        assert_eq!(ledger.outside_covered_monitors.len(), super::MAX_OUTSIDE_COVERED_MONITORS);
+        assert_eq!(ledger.outside_covered_monitor_order.len(), super::MAX_OUTSIDE_COVERED_MONITORS);
+        assert!(!ledger.is_monitor_covered(None, 777, &[35]));
+        assert!(!ledger.is_monitor_covered(None, 10_000, &[34]));
+        assert!(ledger.is_monitor_covered(
+            None,
+            10_000 + (super::MAX_OUTSIDE_COVERED_MONITORS + overflow - 1) as i64,
+            &[34],
+        ));
     }
 }

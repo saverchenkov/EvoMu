@@ -1518,72 +1518,85 @@ pub(crate) fn handle_industry_job_queries(
                     .or_else(|| arg.dict_get("jobID").and_then(|v| v.as_i64()))
                     .filter(|&id| id > 0),
             };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut monitors = crate::services::notify_emitters_character_services::load_industry_material_monitors(snap);
-                let Some(job_id) = job_id_opt else {
-                    let before_len = monitors.len();
-                    monitors.retain(|_, sub| sub.char_id != char_id);
-                    if monitors.len() != before_len {
+            let res = ctx
+                .db
+                .try_with_mut_snapshot(|snap| {
+                    let mut monitors = crate::services::notify_emitters_character_services::load_industry_material_monitors(snap);
+                    let Some(job_id) = job_id_opt else {
+                        let before_len = monitors.len();
+                        monitors.retain(|_, sub| sub.char_id != char_id);
+                        if monitors.len() != before_len {
+                            crate::services::notify_emitters_character_services::save_industry_material_monitors(snap, &monitors);
+                        }
+                        let nid = -8_950_000_000_000_i64 - char_id;
+                        snap.owner_notes.remove(&nid);
+                        return Ok((PyRep::None, Some(None)));
+                    };
+                    if let Some(sub) = monitors.get(&job_id) {
+                        if sub.char_id != char_id && !session.has_gm_role() {
+                            return Err(BridgeRpcError {
+                                code: "CrpAccessDenied".into(),
+                                message: format!("Monitor {job_id} belongs to another character"),
+                                client_error: None,
+                            });
+                        }
+                        monitors.remove(&job_id);
                         crate::services::notify_emitters_character_services::save_industry_material_monitors(snap, &monitors);
+                        return Ok((PyRep::Bool(true), Some(Some(job_id))));
+                    }
+                    let Some(j) = snap.industry_jobs.get(&job_id) else {
+                        return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found"), client_error: None });
+                    };
+                    let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                    if j.installer_id != char_id && !session.has_gm_role() {
+                        let required_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                            | eve_db::corp_roles::ROLE_FACTORY_MANAGER;
+                        let allowed = meta.use_corp
+                            && has_corp_monitor_access(
+                                ctx,
+                                snap,
+                                session,
+                                char_id,
+                                meta.owner_id,
+                                Some(j.facility_id).filter(|&id| id > 0),
+                                required_roles,
+                                ctx.now_unix(),
+                            );
+                        if !allowed {
+                            return Err(BridgeRpcError {
+                                code: "CrpAccessDenied".into(),
+                                message: format!(
+                                    "Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role"
+                                ),
+                                client_error: None,
+                            });
+                        }
                     }
                     let nid = -8_950_000_000_000_i64 - char_id;
-                    snap.owner_notes.remove(&nid);
-                    return Ok(PyRep::None);
-                };
-                if let Some(sub) = monitors.get(&job_id) {
-                    if sub.char_id != char_id && !session.has_gm_role() {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: format!("Monitor {job_id} belongs to another character"),
-                            client_error: None,
-                        });
+                    let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
+                    let was_subscribed = set.remove(&job_id);
+                    snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
+                        note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
+                        note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
+                    });
+                    Ok((
+                        PyRep::keyval([
+                            ("jobID", PyRep::Integer(j.job_id)),
+                            ("connected", PyRep::Bool(false)),
+                            ("unsubscribed", PyRep::Bool(was_subscribed)),
+                            ("subscriberCharID", PyRep::Integer(char_id)),
+                        ]),
+                        None,
+                    ))
+                })
+                .map(|(reply, clear_target)| {
+                    match clear_target {
+                        Some(None) => crate::router::delta_commit_listener::clear_covered_monitors_for_char(ctx, char_id),
+                        Some(Some(monitor_id)) => crate::router::delta_commit_listener::clear_covered_monitor_by_id(ctx, monitor_id),
+                        None => {}
                     }
-                    monitors.remove(&job_id);
-                    crate::services::notify_emitters_character_services::save_industry_material_monitors(snap, &monitors);
-                    return Ok(PyRep::Bool(true));
-                }
-                let Some(j) = snap.industry_jobs.get(&job_id) else {
-                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found"), client_error: None });
-                };
-                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
-                if j.installer_id != char_id && !session.has_gm_role() {
-                    let required_roles = eve_db::corp_roles::ROLE_DIRECTOR
-                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER;
-                    let allowed = meta.use_corp
-                        && has_corp_monitor_access(
-                            ctx,
-                            snap,
-                            session,
-                            char_id,
-                            meta.owner_id,
-                            Some(j.facility_id).filter(|&id| id > 0),
-                            required_roles,
-                            ctx.now_unix(),
-                        );
-                    if !allowed {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: format!(
-                                "Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role"
-                            ),
-                            client_error: None,
-                        });
-                    }
-                }
-                let nid = -8_950_000_000_000_i64 - char_id;
-                let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
-                let was_subscribed = set.remove(&job_id);
-                snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
-                    note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
-                    note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
+                    reply
                 });
-                Ok(PyRep::keyval([
-                    ("jobID", PyRep::Integer(j.job_id)),
-                    ("connected", PyRep::Bool(false)),
-                    ("unsubscribed", PyRep::Bool(was_subscribed)),
-                    ("subscriberCharID", PyRep::Integer(char_id)),
-                ]))
-            });
             Some(res)
         }
 

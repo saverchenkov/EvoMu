@@ -218,30 +218,41 @@ struct StagedDispatchNotification {
     explicit_queue_cap: Option<usize>,
 }
 
-#[derive(Default)]
-pub(crate) struct DispatchProjectionScope {
-    pub transitioned_chars: HashSet<i64>,
-    pub covered_industry_monitors: HashMap<i64, (i64, i64, HashSet<u32>)>,
-}
-
 struct DispatchNotificationStage {
     scope_id: u64,
+    scope_liveness: std::sync::Arc<()>,
     target_pend_ptr: usize,
     target_notify_tx: tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     staged: Vec<StagedDispatchNotification>,
-    projection_scope: DispatchProjectionScope,
+    transitioned_chars: HashSet<i64>,
 }
 
-pub(crate) fn with_matching_dispatch_projection_scope<R>(
+pub(crate) fn current_dispatch_staging_scope_liveness(
     pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
-    f: impl FnOnce(&mut DispatchProjectionScope) -> R,
+) -> Option<(u64, std::sync::Weak<()>)> {
+    let pend_ptr = pend.map(pending_notifications_ptr);
+    DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let stage = cell.borrow();
+            stage_matches_target(&stage, pend_ptr, notify_tx)
+                .then(|| (stage.scope_id, std::sync::Arc::downgrade(&stage.scope_liveness)))
+        })
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn with_matching_dispatch_transitioned_chars<R>(
+    pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    f: impl FnOnce(&mut HashSet<i64>) -> R,
 ) -> Option<R> {
     let pend_ptr = pend.map(pending_notifications_ptr);
     DISPATCH_STAGED_NOTIFICATIONS
         .try_with(|cell| {
             let mut stage = cell.borrow_mut();
-            stage_matches_target(&stage, pend_ptr, notify_tx).then(|| f(&mut stage.projection_scope))
+            stage_matches_target(&stage, pend_ptr, notify_tx)
+                .then(|| f(&mut stage.transitioned_chars))
         })
         .ok()
         .flatten()
@@ -289,10 +300,11 @@ where
 {
     let stage = DispatchNotificationStage {
         scope_id: NEXT_STAGING_SCOPE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        scope_liveness: std::sync::Arc::new(()),
         target_pend_ptr: pending_notifications_ptr(pend),
         target_notify_tx: notify_tx.clone(),
         staged: Vec::new(),
-        projection_scope: DispatchProjectionScope::default(),
+        transitioned_chars: HashSet::new(),
     };
     DISPATCH_STAGED_NOTIFICATIONS
         .scope(std::cell::RefCell::new(stage), fut)
@@ -1375,29 +1387,6 @@ impl ServerContext {
         emitted
     }
 
-    pub(crate) fn notify_with_source(
-        &self,
-        target: NotificationTarget,
-        event: &str,
-        id_type: &str,
-        args: Vec<PyRep>,
-        _source: &'static str,
-    ) -> Vec<PendingMachoNotification> {
-        self.notify_inner(target, event, id_type, args, None)
-    }
-
-    pub(crate) fn notify_in_scene_with_source(
-        &self,
-        target: NotificationTarget,
-        event: &str,
-        id_type: &str,
-        args: Vec<PyRep>,
-        _source: &'static str,
-        scene_scope: Option<crate::outbound_sequencer::OutboundSceneScope>,
-    ) -> Vec<PendingMachoNotification> {
-        self.notify_inner(target, event, id_type, args, scene_scope)
-    }
-
     /// Returns the highest queued `seq_id` for `char_id` (or `0` when empty).
     pub fn latest_notification_seq_for_char(&self, char_id: i64) -> u64 {
         self.pending_notifications
@@ -1424,7 +1413,7 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&char_id);
         clear_staged_notifications_for_char(&*self.pending_notifications, char_id);
-        super::delta_commit_listener::clear_outside_covered_monitors_for_char(self, char_id);
+        super::delta_commit_listener::clear_covered_monitors_for_char(self, char_id);
     }
 
     /// Re-queues system shutdown/maintenance notifications after `logoff_character_sync` clears stale per-character queues.

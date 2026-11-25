@@ -901,7 +901,7 @@ mod t3c2_tests {
     use eve_db::{InventoryFlag, InventoryItemRecord};
 
     #[tokio::test]
-    async fn withdraw_plex_deleted_handwritten_emitter_while_deposit_retains_it() {
+    async fn plex_vault_deposit_and_withdraw_use_commit_projection_without_duplicates() {
         let ctx = ServerContext::new();
         let (char_id, corp_id, station_id) = (90_000_001_i64, 98_000_001_i64, 60_003_760_i64);
         let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
