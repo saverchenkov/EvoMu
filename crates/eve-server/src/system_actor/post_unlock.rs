@@ -133,6 +133,30 @@ pub(crate) struct DeferredDeactivationHookOp {
     pub cycle: ActiveModuleCycle,
 }
 
+#[derive(Clone)]
+pub(crate) struct DeferredCooldownDeactOp {
+    pub solar_system_id: SolarSystemId,
+    pub char_id: CharacterId,
+    pub cycle: ActiveModuleCycle,
+    pub ewar_snap: super::ewar_cooldowns::ModuleEwarFlushSnapshot,
+    pub post_hook: super::types::ModuleDeactivationPostUnlockHook,
+    pub cooldown_payload: Option<super::module_cooldowns::ModuleCooldownPersistPayload>,
+    pub cooldown_persist_gate: Arc<super::module_cooldowns::CooldownPersistGate>,
+    pub ballpark_weak: std::sync::Weak<super::celestials::BallparkHandle>,
+    pub actor_state_weak: std::sync::Weak<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+}
+
+impl std::fmt::Debug for DeferredCooldownDeactOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredCooldownDeactOp")
+            .field("solar_system_id", &self.solar_system_id)
+            .field("char_id", &self.char_id)
+            .field("ship_id", &self.cycle.ship_id)
+            .field("module_id", &self.cycle.module_id)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeferredTargetLockHookOp {
     pub char_id: CharacterId,
@@ -186,12 +210,16 @@ pub(crate) enum PostUnlockIntent {
         tube_rearms: Vec<(i64, usize)>,
     },
     DeactivationHook(DeferredDeactivationHookOp),
+    CooldownDeactivation(Box<DeferredCooldownDeactOp>),
     TargetLockHook(DeferredTargetLockHookOp),
 }
 
 impl PostUnlockIntent {
     fn writes_db(&self) -> bool {
-        !matches!(self, Self::DeactivationHook(_) | Self::TargetLockHook(_))
+        !matches!(
+            self,
+            Self::DeactivationHook(_) | Self::CooldownDeactivation(_) | Self::TargetLockHook(_)
+        )
     }
 }
 
@@ -238,6 +266,14 @@ impl PostUnlockActorShadows {
 
 impl PostUnlockOps {
     pub(crate) fn is_empty(&self) -> bool { self.intents.is_empty() }
+    pub(crate) fn has_deactivation_hook(&self) -> bool {
+        self.intents.iter().any(|intent| {
+            matches!(
+                intent,
+                PostUnlockIntent::DeactivationHook(_) | PostUnlockIntent::CooldownDeactivation(_)
+            )
+        })
+    }
     pub(crate) fn push(&mut self, intent: PostUnlockIntent) { self.intents.push(intent); }
     pub(crate) fn push_item_positions<I>(&mut self, updates: I)
     where
@@ -826,9 +862,7 @@ pub(crate) fn collect_ship_charge_consume(
 
 pub(crate) fn step_module_reloads_sim_clock_collecting(
     reload_sim_remaining: &mut HashMap<i64, super::types::ModuleReloadSimEntry>,
-    reload_sim_deadlines_opt: Option<
-        &eve_db::lock_rank::RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, { eve_db::lock_rank::RANK_LEAF }>,
-    >,
+    reload_sim_deadlines_opt: Option<&mut HashMap<i64, super::module_cooldowns::ModuleReloadSimDeadline>>,
     db_opt: &Option<Arc<WorldRepository>>,
     dt_sim: f64,
     tidi_factor: f64,
@@ -882,8 +916,7 @@ pub(crate) fn step_module_reloads_sim_clock_collecting(
         }
         if !finished.is_empty() {
             if let Some(deadlines) = reload_sim_deadlines_opt {
-                let mut dead_guard = deadlines.write().unwrap_or_else(|e| e.into_inner());
-                for mod_id in &finished { dead_guard.remove(mod_id); }
+                for mod_id in &finished { deadlines.remove(mod_id); }
             }
         }
     }
@@ -970,11 +1003,13 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
 fn collect_non_db_hooks(
     intents: Vec<PostUnlockIntent>,
     deferred_deact_hooks: &mut Vec<DeferredDeactivationHookOp>,
+    deferred_cooldown_hooks: &mut Vec<Box<DeferredCooldownDeactOp>>,
     deferred_lock_hooks: &mut Vec<DeferredTargetLockHookOp>,
 ) {
     for intent in intents {
         match intent {
             PostUnlockIntent::DeactivationHook(h) => deferred_deact_hooks.push(h),
+            PostUnlockIntent::CooldownDeactivation(h) => deferred_cooldown_hooks.push(h),
             PostUnlockIntent::TargetLockHook(h) => deferred_lock_hooks.push(h),
             _ => {}
         }
@@ -989,6 +1024,7 @@ fn apply_intent_in_snap(
     local_actions: &mut Vec<PendingCycleAction>,
     sqlite_checkpoints: &mut CheckpointBatch,
     deferred_deact_hooks: &mut Vec<DeferredDeactivationHookOp>,
+    deferred_cooldown_hooks: &mut Vec<Box<DeferredCooldownDeactOp>>,
     deferred_lock_hooks: &mut Vec<DeferredTargetLockHookOp>,
     post_commit_bp_ops: &mut Vec<PostCommitBallparkOp>,
     post_commit_arena: &mut Vec<crate::services::pvp_filament_arena::ProvingArenaPostCommit>,
@@ -1130,6 +1166,7 @@ fn apply_intent_in_snap(
             super::fighters_persistence::prune_migrated_ext_json_in_snap(snap, &damage_fids, &tube_rearms);
         }
         PostUnlockIntent::DeactivationHook(hook) => deferred_deact_hooks.push(hook),
+        PostUnlockIntent::CooldownDeactivation(hook) => deferred_cooldown_hooks.push(hook),
         PostUnlockIntent::TargetLockHook(hook) => deferred_lock_hooks.push(hook),
     }
 }
@@ -1258,6 +1295,7 @@ fn execute_post_unlock_ops_inner(
     let can_write_db = !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER);
     let mut emitted_actions = Vec::new();
     let mut deferred_deact_hooks = Vec::new();
+    let mut deferred_cooldown_hooks = Vec::new();
     let mut deferred_lock_hooks = Vec::new();
     let mut sqlite_checkpoints: CheckpointBatch = Vec::new();
     let mut post_commit_bp_ops: Vec<PostCommitBallparkOp> = Vec::new();
@@ -1271,6 +1309,7 @@ fn execute_post_unlock_ops_inner(
         };
         if open_tx {
             let mut tx_hooks = Vec::new();
+            let mut tx_cooldown_hooks = Vec::new();
             let mut tx_lock_hooks = Vec::new();
             let mut tx_actions = Vec::new();
             let mut tx_checkpoints = Vec::new();
@@ -1287,6 +1326,7 @@ fn execute_post_unlock_ops_inner(
                             &mut tx_actions,
                             &mut tx_checkpoints,
                             &mut tx_hooks,
+                            &mut tx_cooldown_hooks,
                             &mut tx_lock_hooks,
                             &mut tx_bp_ops,
                             &mut tx_arena,
@@ -1304,6 +1344,7 @@ fn execute_post_unlock_ops_inner(
                     emitted_actions = tx_actions;
                     sqlite_checkpoints = tx_checkpoints;
                     deferred_deact_hooks = tx_hooks;
+                    deferred_cooldown_hooks = tx_cooldown_hooks;
                     deferred_lock_hooks = tx_lock_hooks;
                     post_commit_bp_ops = tx_bp_ops;
                     post_commit_arena = tx_arena;
@@ -1314,7 +1355,12 @@ fn execute_post_unlock_ops_inner(
             }
         } else {
             sqlite_checkpoints = prechecked_checkpoints;
-            collect_non_db_hooks(ops.intents, &mut deferred_deact_hooks, &mut deferred_lock_hooks);
+            collect_non_db_hooks(
+                ops.intents,
+                &mut deferred_deact_hooks,
+                &mut deferred_cooldown_hooks,
+                &mut deferred_lock_hooks,
+            );
         }
 
         for (sys_id, valid_entries, snap_written, written_out) in sqlite_checkpoints {
@@ -1334,7 +1380,12 @@ fn execute_post_unlock_ops_inner(
             }
         }
     } else {
-        collect_non_db_hooks(ops.intents, &mut deferred_deact_hooks, &mut deferred_lock_hooks);
+        collect_non_db_hooks(
+            ops.intents,
+            &mut deferred_deact_hooks,
+            &mut deferred_cooldown_hooks,
+            &mut deferred_lock_hooks,
+        );
     }
 
     if can_write_db {
@@ -1372,14 +1423,32 @@ fn execute_post_unlock_ops_inner(
                 }
             }
         }
+        for op in deferred_cooldown_hooks {
+            if let Some(payload) = op.cooldown_payload {
+                let bp_up = op.ballpark_weak.upgrade();
+                let st_up = op.actor_state_weak.upgrade();
+                let _ = super::ewar_cooldowns::persist_cooldown_payload_with_gate(
+                    op.solar_system_id,
+                    &op.cooldown_persist_gate,
+                    bp_up.as_deref(),
+                    st_up.as_deref(),
+                    payload,
+                );
+            }
+            (op.post_hook)(op.solar_system_id, op.char_id, op.cycle, op.ewar_snap);
+        }
         if let Some(lock_hook) = lock_completed_hook {
             for hook_op in deferred_lock_hooks {
                 lock_hook(hook_op.char_id, hook_op.target_id);
             }
         }
-    } else if !deferred_deact_hooks.is_empty() || !deferred_lock_hooks.is_empty() {
+    } else if !deferred_deact_hooks.is_empty()
+        || !deferred_cooldown_hooks.is_empty()
+        || !deferred_lock_hooks.is_empty()
+    {
         tracing::warn!(
             deact = deferred_deact_hooks.len(),
+            cooldown_deact = deferred_cooldown_hooks.len(),
             lock = deferred_lock_hooks.len(),
             "skipping post-unlock hooks under held >= RANK_WORLD_INNER lock"
         );

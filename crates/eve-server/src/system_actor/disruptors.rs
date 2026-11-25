@@ -192,10 +192,15 @@ pub(crate) fn handle_apply_ecm_burst(
 impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
+        let tidi = self.tidi_factor();
         let (deact_guard, ticket) = {
             let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
+                &self.module_deactivation_hook,
+                &self.module_deactivation_post_unlock_hook,
+            );
+            let deact_guard = super::ewar_cooldowns::active_sink_hook(raw_hook.as_ref(), post_hook.as_ref());
             let mut ops = super::post_unlock::PostUnlockOps::default();
             let (db_opt_c, sde_opt_c) = {
                 let super::SystemActorState {
@@ -234,9 +239,17 @@ impl super::SystemHandle {
                 );
                 (db_opt.clone(), sde_opt.clone())
             };
-            st.has_tidi_history = st.has_tidi_history
-                || self.tidi_factor() < 0.999_999
-                || self.cooldown_persist_gate.has_tidi_history();
+            let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+                self.solar_system_id,
+                &mut st,
+                &mut ops,
+                raw_hook.clone(),
+                post_hook,
+                &self.cooldown_persist_gate,
+                Some(&self.ballpark),
+                Some(&self.actor_state),
+                tidi,
+            );
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));
             let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
@@ -246,7 +259,7 @@ impl super::SystemHandle {
                 ops,
                 caller_can_wait,
             );
-            (deact_guard, ticket)
+            (raw_hook, ticket)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
     }

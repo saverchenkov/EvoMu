@@ -837,65 +837,6 @@ impl SystemRegistry {
             .unwrap_or(1.0)
     }
 
-    /// Resolves effective `(tidi_factor, has_tidi_history)` for live or cold `solar_system_id`
-    /// (`G1A-R3-P1-01`), respecting `#1196`'s `tidi_history_systems` distinction from pure `1.0x` anchors.
-    pub(crate) fn resolve_effective_tidi_mode(
-        &self,
-        solar_system_id: SolarSystemId,
-        db_read_safe: bool,
-    ) -> (f64, bool) {
-        if solar_system_id == 0 {
-            return (1.0, false);
-        }
-        let live_tidi = self.get_handle(solar_system_id).map(|h| h.tidi_factor());
-        let held_svc = held_lock_ranks().iter().any(|&r| r >= RANK_SERVICE_STATE);
-        let (manual_override, cn_tidi_hist) = if held_svc {
-            let cn = self
-                .cluster_nodes
-                .read_unranked()
-                .unwrap_or_else(|e| e.into_inner());
-            (
-                cn.manual_tidi_overrides.get(&solar_system_id).copied(),
-                cn.tidi_history_systems.contains(&solar_system_id),
-            )
-        } else {
-            let cn = self.cluster_nodes.read().unwrap_or_else(|e| e.into_inner());
-            (
-                cn.manual_tidi_overrides.get(&solar_system_id).copied(),
-                cn.tidi_history_systems.contains(&solar_system_id),
-            )
-        };
-        let tidi = live_tidi
-            .or(manual_override)
-            .or_else(|| {
-                if db_read_safe
-                    && !held_lock_ranks()
-                        .iter()
-                        .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
-                {
-                    self.db.as_ref().and_then(|db| {
-                        db.with_snapshot(|snap| {
-                            let nid =
-                                -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-                            snap.owner_notes
-                                .get(&nid)
-                                .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-                        })
-                    })
-                } else {
-                    None
-                }
-            })
-            .filter(|v| v.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.10, 1.0);
-        let gate_tidi_hist = self
-            .get_existing_cooldown_persist_gate(solar_system_id)
-            .is_some_and(|gate| gate.has_tidi_history());
-        let has_tidi_history = tidi < 0.999_999 || cn_tidi_hist || gate_tidi_hist;
-        (tidi, has_tidi_history)
-    }
-
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
         self.get_handle(solar_system_id)
             .map(|h| h.take_pending_cycle_actions())
@@ -932,32 +873,6 @@ impl SystemRegistry {
                 .and_then(lifecycle_sm::SystemLifecycleSlot::live_handle)
                 .cloned()
         }
-    }
-
-    pub(crate) fn transitioning_system_ids(
-        &self,
-        exclude_sys_opt: Option<SolarSystemId>,
-    ) -> Vec<SolarSystemId> {
-        let collect_transitioning =
-            |guard: &HashMap<SolarSystemId, lifecycle_sm::SystemLifecycleSlot>| {
-                guard
-                    .iter()
-                    .filter(|&(&id, slot)| {
-                        Some(id) != exclude_sys_opt && slot.live_handle().is_none()
-                    })
-                    .map(|(&id, _)| id)
-                    .collect::<Vec<_>>()
-            };
-        let mut ids: Vec<SolarSystemId> =
-            if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
-                let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
-                collect_transitioning(&guard)
-            } else {
-                let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
-                collect_transitioning(&guard)
-            };
-        ids.sort_unstable();
-        ids
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
@@ -1521,17 +1436,12 @@ impl SystemRegistry {
                 let mut batch_delivery: Option<PendingActorDelivery> = None;
                 for cmd in cmd_batch {
                 let cmd_may_mutate_view = cmd.may_mutate_system_view();
-                let raw_hook_cmd = module_deactivation_hook_actor
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let post_hook_cmd = module_deactivation_post_unlock_hook_actor
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let deact_batch =
-                    ewar_cooldowns::ActorDeactivationBatch::new(raw_hook_cmd, post_hook_cmd);
-                let deactivation_sink_hook = deact_batch.collector_hook().cloned();
+                let (raw_hook_cmd, post_hook_cmd) = ewar_cooldowns::read_deactivation_hooks(
+                    &module_deactivation_hook_actor,
+                    &module_deactivation_post_unlock_hook_actor,
+                );
+                let deactivation_sink_hook =
+                    ewar_cooldowns::active_sink_hook(raw_hook_cmd.as_ref(), post_hook_cmd.as_ref());
                 let cur_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
@@ -2297,11 +2207,15 @@ impl SystemRegistry {
                 }
                 })();
                 let post_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
-                if post_tidi_cmd < 0.999_999 {
-                    cooldown_persist_gate_actor.mark_tidi_history();
-                    actor_st.has_tidi_history = true;
-                } else if cooldown_persist_gate_actor.has_tidi_history() {
-                    actor_st.has_tidi_history = true;
+                let deact_mutated = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+                    solar_system_id, &mut actor_st, &mut cmd_post_unlock_ops,
+                    raw_hook_cmd, post_hook_cmd, &cooldown_persist_gate_actor,
+                    Some(&ballpark_actor), Some(&actor_state_actor), post_tidi_cmd,
+                );
+                if deact_mutated || cmd_post_unlock_ops.has_deactivation_hook() {
+                    let prev_view = { view_tx_actor.borrow().clone() };
+                    let next_view = SystemView::from_ballpark(&ballpark, Some(&actor_st), post_tidi_cmd, Some(prev_view.as_ref()));
+                    let _ = view_tx_actor.send(Arc::new(next_view));
                 }
                 post_unlock::enqueue_actor_cmd_post_unlock_ops(
                     &mut actor_st,
@@ -2309,7 +2223,6 @@ impl SystemRegistry {
                     &post_unlock_in_flight_actor,
                     cmd_post_unlock_ops,
                 );
-                let deact_mutated = false;
                 (deact_mutated, out)
                 };
                 (
@@ -2534,55 +2447,6 @@ impl SystemRegistry {
         };
         (handle, lazy_gates)
     }
-}
-
-pub(crate) fn apply_repair_combat_state_in_ballpark(
-    bp: &mut Ballpark,
-    ball_id: BallId,
-    hull_heal: f64,
-    armor_heal: f64,
-    shield_heal: f64,
-) -> Option<eve_destiny::CombatState> {
-    let grid_id = bp.ball_grid_ids.get(&ball_id).copied();
-    let cs = bp.combat_states.get_mut(&ball_id)?;
-    let prev_s = cs.shield_hp;
-    let prev_a = cs.armor_hp;
-    let prev_h = cs.structure_hp;
-    cs.shield_hp = (cs.shield_hp + shield_heal.max(0.0)).min(cs.max_shield_hp);
-    cs.armor_hp = (cs.armor_hp + armor_heal.max(0.0)).min(cs.max_armor_hp);
-    cs.structure_hp = (cs.structure_hp + hull_heal.max(0.0)).min(cs.max_structure_hp);
-    let hp_changed = (cs.shield_hp - prev_s).abs() > 1e-6
-        || (cs.armor_hp - prev_a).abs() > 1e-6
-        || (cs.structure_hp - prev_h).abs() > 1e-6;
-    let cloned = cs.clone();
-    if hp_changed {
-        let ratio = |cur: f64, max: f64| if max > 0.0 { (cur / max).clamp(0.0, 1.0) } else { 1.0 };
-        bp.emit_damage_and_destruction_events(ball_id, grid_id, ratio(cloned.shield_hp, cloned.max_shield_hp), ratio(cloned.armor_hp, cloned.max_armor_hp), ratio(cloned.structure_hp, cloned.max_structure_hp), false);
-    }
-    Some(cloned)
-}
-
-pub(crate) fn flush_post_unlock_actions(
-    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-) -> usize {
-    if !held_lock_ranks().is_empty() {
-        return 0;
-    }
-    let mut executed = 0usize;
-    loop {
-        let batch = {
-            let mut guard = actions.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.is_empty() {
-                break;
-            }
-            std::mem::take(&mut *guard)
-        };
-        for action in batch {
-            action();
-            executed += 1;
-        }
-    }
-    executed
 }
 
 #[cfg(test)] #[path = "system_actor_tests.rs"] mod system_actor_tests;

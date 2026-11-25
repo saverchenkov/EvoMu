@@ -646,9 +646,11 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
         npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        module_deactivation_post_unlock_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
+        cooldown_persist_gate: Arc::new(super::super::CooldownPersistGate::default()),
     };
     h.ballpark.attach_actor_state(&h.actor_state);
     h

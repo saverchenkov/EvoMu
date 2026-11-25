@@ -2092,7 +2092,14 @@ impl SystemHandle {
             Some((&mut post_unlock_shadows.arena_hazard_ticks, next_pu_seq)), &mut post_unlock_ops,
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
-        let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let (raw_hook_tick, post_hook_tick) = super::ewar_cooldowns::read_deactivation_hooks(
+            &self.module_deactivation_hook,
+            &self.module_deactivation_post_unlock_hook,
+        );
+        let deact_hook_guard = super::ewar_cooldowns::active_sink_hook(
+            raw_hook_tick.as_ref(),
+            post_hook_tick.as_ref(),
+        );
         for ev in &events {
             if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                 if mode == "lost" {
@@ -2270,9 +2277,19 @@ impl SystemHandle {
             mod_guard.extend(external_active_modules.iter().map(|&(sid, _)| sid));
         }
         let tick = bp.current_tick;
-        let ops_was_empty = post_unlock_ops.is_empty();
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
-        st.has_tidi_history = st.has_tidi_history || tidi < 0.999_999 || self.cooldown_persist_gate.has_tidi_history();
+        let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+            self.solar_system_id,
+            &mut st,
+            &mut post_unlock_ops,
+            raw_hook_tick.clone(),
+            post_hook_tick,
+            &self.cooldown_persist_gate,
+            Some(&self.ballpark),
+            Some(&self.actor_state),
+            tidi,
+        );
+        let ops_was_empty = post_unlock_ops.is_empty();
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
         self.publish_view_from(&bp, Some(&st));
         let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
@@ -2293,7 +2310,7 @@ impl SystemHandle {
         drop(bp);
         super::post_unlock::finish_post_unlock_after_unlock(
             self,
-            deact_hook_guard.as_ref(),
+            raw_hook_tick.as_ref(),
             lock_hook_opt.as_ref(),
             wait_ticket,
         );

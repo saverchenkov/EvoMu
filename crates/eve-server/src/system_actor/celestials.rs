@@ -1098,22 +1098,13 @@ impl SystemHandle {
     fn try_remove_ball_impl(&self, ball_id: BallId, emit_destruction_fx: bool) {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
+        let tidi_cur = self.tidi_factor();
         let remove_from_bp_and_st =
             |bp: &mut Ballpark, st: &mut super::SystemActorState| {
-                let deact_guard = if eve_db::lock_rank::held_lock_ranks()
-                    .iter()
-                    .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
-                {
-                    self.module_deactivation_hook
-                        .read_unranked()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                } else {
-                    self.module_deactivation_hook
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                };
+                let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
+                    &self.module_deactivation_hook,
+                    &self.module_deactivation_post_unlock_hook,
+                );
                 let (removed_cycles, fallback_slim_owner, db_opt_cloned, sde_opt_cloned) = {
                     let super::SystemActorState {
                         active_module_cycles,
@@ -1151,29 +1142,22 @@ impl SystemHandle {
                     (removed_cycles, fallback_slim_owner, db_opt.clone(), sde_opt.clone())
                 };
                 let _ = st.clear_fighter_ball_and_track(ball_id);
+                let ops = super::ewar_cooldowns::build_and_finalize_removed_ball_ops(
+                    self, st, ball_id, removed_cycles, fallback_slim_owner,
+                    raw_hook.clone(), post_hook, tidi_cur,
+                );
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
                 celestials_helpers::update_system_hibernation_flag(st, bp, self.event_tx.receiver_count());
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
                 self.publish_view_from(bp, Some(st));
-                let ticket = if db_opt_cloned.is_some() {
-                    let ops = super::post_unlock::build_removed_ball_post_unlock_ops(
-                        self.solar_system_id,
-                        ball_id,
-                        removed_cycles,
-                        fallback_slim_owner,
-                        deact_guard.is_some(),
-                    );
-                    super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                        self,
-                        db_opt_cloned.as_ref(),
-                        sde_opt_cloned.as_ref(),
-                        ops,
-                        caller_can_wait,
-                    )
-                } else {
-                    super::post_unlock::PostUnlockWaitTicket::None
-                };
-                (deact_guard, ticket)
+                let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                    self,
+                    db_opt_cloned.as_ref(),
+                    sde_opt_cloned.as_ref(),
+                    ops,
+                    caller_can_wait,
+                );
+                (raw_hook, ticket)
             };
         let (deact_guard, ticket) = if eve_db::lock_rank::held_lock_ranks()
             .iter()

@@ -165,21 +165,39 @@ fn flush_module_ewar_in_actor(
 
 
 
-pub(in crate::system_actor) fn read_effective_deactivation_hooks(
+fn read_opt_leaf_lock<T: Clone>(lock: &Arc<RankedRwLock<Option<T>, RANK_LEAF>>) -> Option<T> {
+    if held_lock_ranks().iter().any(|&r| r >= RANK_LEAF) {
+        lock.read_unranked().unwrap_or_else(|e| e.into_inner()).clone()
+    } else {
+        lock.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+pub(in crate::system_actor) fn read_deactivation_hooks(
     raw_lock: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     post_lock: &Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
 ) -> (
     Option<ModuleDeactivationHook>,
-    Option<ModuleDeactivationPostUnlockHook>,
+    Option<PairedModuleDeactivationPostUnlockHook>,
 ) {
-    fn read_opt<T: Clone>(lock: &Arc<RankedRwLock<Option<T>, RANK_LEAF>>) -> Option<T> {
-        if held_lock_ranks().iter().any(|&r| r >= RANK_LEAF) {
-            lock.read_unranked().unwrap_or_else(|e| e.into_inner()).clone()
-        } else {
-            lock.read().unwrap_or_else(|e| e.into_inner()).clone()
-        }
-    }
-    resolve_effective_deactivation_hooks(read_opt(raw_lock), read_opt(post_lock))
+    (read_opt_leaf_lock(raw_lock), read_opt_leaf_lock(post_lock))
+}
+
+pub(in crate::system_actor) fn active_sink_hook(
+    raw_hook: Option<&ModuleDeactivationHook>,
+    post_hook: Option<&PairedModuleDeactivationPostUnlockHook>,
+) -> Option<ModuleDeactivationHook> {
+    raw_hook
+        .cloned()
+        .or_else(|| post_hook.map(|(paired_raw, _)| Arc::clone(paired_raw)))
+}
+
+pub(in crate::system_actor) fn read_active_deactivation_sink(
+    raw_lock: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    post_lock: &Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
+) -> Option<ModuleDeactivationHook> {
+    let (raw, post) = read_deactivation_hooks(raw_lock, post_lock);
+    active_sink_hook(raw.as_ref(), post.as_ref())
 }
 
 fn resolve_removed_cycle_char_id(
@@ -207,96 +225,6 @@ fn resolve_removed_cycle_char_id(
         .or(fallback_slim_owner)
 }
 
-pub(in crate::system_actor) fn finalize_removed_ball_deactivations_in_actor(
-    handle: &SystemHandle,
-    st: &mut SystemActorState,
-    tidi_cur: f64,
-    post_hook_opt: Option<&ModuleDeactivationPostUnlockHook>,
-    removed_cycles: &[(ActiveModuleCycle, Option<CharacterId>)],
-    fallback_slim_owner: Option<CharacterId>,
-) -> bool {
-    let Some(post_hook) = post_hook_opt else {
-        return false;
-    };
-    if removed_cycles.is_empty() {
-        return false;
-    }
-    let rank_blocks_snapshot = held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER);
-    let mut collected = Vec::with_capacity(removed_cycles.len());
-    for (removed, char_id_opt) in removed_cycles {
-        if removed.module_id < 0
-            || super::cycles_tackle::parse_minion_cycle_parent(&removed.effect_name).is_some()
-        {
-            continue;
-        }
-        if let Some(cid) = resolve_removed_cycle_char_id(
-            *char_id_opt,
-            removed.ship_id,
-            st.db_opt.as_deref(),
-            fallback_slim_owner,
-            rank_blocks_snapshot,
-        ) {
-            collected.push((handle.solar_system_id, cid, removed.clone()));
-        }
-    }
-    if collected.is_empty() {
-        return false;
-    }
-    if tidi_cur < 0.999_999 {
-        handle.cooldown_persist_gate.mark_tidi_history();
-    }
-    let has_tidi =
-        st.has_tidi_history || handle.cooldown_persist_gate.has_tidi_history() || tidi_cur < 0.999_999;
-    st.has_tidi_history = has_tidi;
-    finalize_collected_deactivations_in_actor(
-        handle.solar_system_id,
-        st,
-        &handle.post_unlock_actions,
-        &handle.cooldown_persist_gate,
-        Some(&handle.ballpark),
-        Some(&handle.actor_state),
-        tidi_cur,
-        has_tidi,
-        None,
-        Some(post_hook),
-        collected,
-    );
-    true
-}
-
-pub(in crate::system_actor) fn finish_removed_ball_deactivation_hooks(
-    handle: &SystemHandle,
-    db_opt: Option<&eve_db::WorldRepository>,
-    post_unlock_enqueued: bool,
-    deact_guard: Option<&ModuleDeactivationHook>,
-    removed_cycles: &[(ActiveModuleCycle, Option<CharacterId>)],
-    fallback_slim_owner: Option<CharacterId>,
-) {
-    if post_unlock_enqueued {
-        if held_lock_ranks().is_empty() {
-            super::flush_post_unlock_actions(&handle.post_unlock_actions);
-        }
-        return;
-    }
-    let (Some(hook), Some(db_ref)) = (deact_guard, db_opt) else {
-        return;
-    };
-    if held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER) {
-        return;
-    }
-    for (removed, char_id_opt) in removed_cycles {
-        if let Some(cid) = resolve_removed_cycle_char_id(
-            *char_id_opt,
-            removed.ship_id,
-            Some(db_ref),
-            fallback_slim_owner,
-            false,
-        ) {
-            hook(handle.solar_system_id, cid, removed);
-        }
-    }
-}
-
 pub(in crate::system_actor) fn resolve_effective_deactivation_hooks(
     raw_hook: Option<ModuleDeactivationHook>,
     post_hook: Option<PairedModuleDeactivationPostUnlockHook>,
@@ -311,84 +239,6 @@ pub(in crate::system_actor) fn resolve_effective_deactivation_hooks(
             .then_some(post)
     });
     (raw_hook, effective_post)
-}
-
-/// Collects cycle deactivations emitted while `ballpark`/`actor_state` are locked, mutates
-/// actor-owned EWAR & cloak cooldown state synchronously BEFORE unlocking, and queues
-/// out-of-lock DB/notification/fit-projection actions onto the owning actor's
-/// per-actor `post_unlock_actions` queue (`#1541`).
-pub(in crate::system_actor) struct ActorDeactivationBatch {
-    collected: Arc<RankedMutex<Vec<(SolarSystemId, CharacterId, ActiveModuleCycle)>, RANK_LEAF>>,
-    collector_hook: Option<ModuleDeactivationHook>,
-    raw_hook: Option<ModuleDeactivationHook>,
-    post_unlock_hook: Option<ModuleDeactivationPostUnlockHook>,
-}
-
-impl ActorDeactivationBatch {
-    pub(in crate::system_actor) fn new(
-        raw_hook: Option<ModuleDeactivationHook>,
-        post_unlock_hook: Option<PairedModuleDeactivationPostUnlockHook>,
-    ) -> Self {
-        let (raw_hook, post_unlock_hook) =
-            resolve_effective_deactivation_hooks(raw_hook, post_unlock_hook);
-        let collected = Arc::new(RankedMutex::new(Vec::new()));
-        let collector_hook = if raw_hook.is_some() || post_unlock_hook.is_some() {
-            let sink = Arc::clone(&collected);
-            Some(Arc::new(
-                move |sys_id: SolarSystemId, cid: CharacterId, cycle: &ActiveModuleCycle| {
-                    sink.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push((sys_id, cid, cycle.clone()));
-                },
-            ) as ModuleDeactivationHook)
-        } else {
-            None
-        };
-        Self {
-            collected,
-            collector_hook,
-            raw_hook,
-            post_unlock_hook,
-        }
-    }
-
-    pub(in crate::system_actor) fn collector_hook(&self) -> Option<&ModuleDeactivationHook> {
-        self.collector_hook.as_ref()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::system_actor) fn finalize_in_actor(
-        &self,
-        solar_system_id: SolarSystemId,
-        actor_st: &mut SystemActorState,
-        post_unlock_actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-        cooldown_persist_gate: &Arc<CooldownPersistGate>,
-        ballpark_shared: Option<&Arc<BallparkHandle>>,
-        actor_state_shared: Option<&Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>>,
-        tidi_factor: f64,
-        has_tidi_history: bool,
-    ) -> bool {
-        let items = {
-            let mut guard = self.collected.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.is_empty() {
-                return false;
-            }
-            std::mem::take(&mut *guard)
-        };
-        finalize_collected_deactivations_in_actor(
-            solar_system_id,
-            actor_st,
-            post_unlock_actions,
-            cooldown_persist_gate,
-            ballpark_shared,
-            actor_state_shared,
-            tidi_factor,
-            has_tidi_history,
-            self.raw_hook.as_ref(),
-            self.post_unlock_hook.as_ref(),
-            items,
-        )
-    }
 }
 
 pub(in crate::system_actor) fn cloak_reactivation_delay_for_cycle(
@@ -416,78 +266,158 @@ pub(in crate::system_actor) fn cloak_reactivation_delay_for_cycle(
     (delay.is_finite() && delay > 0.0).then_some(delay)
 }
 
+/// Synchronizes TiDi history and upgrades any collected `PostUnlockIntent::DeactivationHook`
+/// intents into [`PostUnlockIntent::CooldownDeactivation`] while actor locks are still held,
+/// flushing EWAR and recording cloak reactivation cooldowns before `SystemView` publish and
+/// FIFO worker submission (`#1541` + `#1170`).
 #[allow(clippy::too_many_arguments)]
-pub(in crate::system_actor) fn finalize_collected_deactivations_in_actor(
+pub(in crate::system_actor) fn finalize_post_unlock_ops_deactivations_in_actor(
     solar_system_id: SolarSystemId,
     actor_st: &mut SystemActorState,
-    post_unlock_actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    ops: &mut super::post_unlock::PostUnlockOps,
+    raw_hook: Option<ModuleDeactivationHook>,
+    post_hook: Option<PairedModuleDeactivationPostUnlockHook>,
     cooldown_persist_gate: &Arc<CooldownPersistGate>,
     ballpark_shared: Option<&Arc<BallparkHandle>>,
     actor_state_shared: Option<&Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>>,
     tidi_factor: f64,
-    has_tidi_history: bool,
-    raw_hook: Option<&ModuleDeactivationHook>,
-    post_unlock_hook: Option<&ModuleDeactivationPostUnlockHook>,
-    items: Vec<(SolarSystemId, CharacterId, ActiveModuleCycle)>,
 ) -> bool {
-    if items.is_empty() {
+    if tidi_factor < 0.999_999 {
+        cooldown_persist_gate.mark_tidi_history();
+        actor_st.has_tidi_history = true;
+    } else if cooldown_persist_gate.has_tidi_history() {
+        actor_st.has_tidi_history = true;
+    }
+    let has_tidi_history = actor_st.has_tidi_history;
+    if !ops.has_deactivation_hook() {
         return false;
     }
-    let mut mutated_actor = false;
-    if let Some(post_hook) = post_unlock_hook {
-        let now_unix_f64 = actor_st.db_opt.as_ref().map(|db| db.clock().now_unix_secs() as f64).unwrap_or(0.0);
-        let rank_blocks_snapshot = held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER);
-        let mut actions_to_push: Vec<PostUnlockHookAction> = Vec::with_capacity(items.len());
-        for (deact_sys_id, char_id, cycle) in items {
-            let allow_db_fallback = !rank_blocks_snapshot
-                && actor_st.db_opt.as_ref().is_some_and(|db| {
-                    db.with_snapshot(|s| s.items.get(&cycle.module_id).is_some_and(|i| i.location_id == cycle.ship_id))
-                });
-            let ewar_snap = flush_module_ewar_in_state(&mut actor_st.ewar_state, cycle.ship_id, cycle.module_id, allow_db_fallback);
-            mutated_actor |= !ewar_snap.started_targets.is_empty()
-                || !ewar_snap.projected_targets.is_empty()
-                || !ewar_snap.affected_ships.is_empty();
-            let payload_opt = (deact_sys_id > 0 && deact_sys_id == solar_system_id)
-                .then(|| cloak_reactivation_delay_for_cycle(&actor_st.sde_opt, &cycle))
-                .flatten()
-                .and_then(|delay_s| {
-                    mutated_actor = true;
-                    record_module_cooldown_in_actor_state(
-                        solar_system_id, actor_st, cycle.ship_id, cycle.module_id, cycle.module_type_id,
-                        now_unix_f64, delay_s, tidi_factor, has_tidi_history,
-                    )
-                });
-            let post_hook_c = Arc::clone(post_hook);
-            let gate_c = Arc::clone(cooldown_persist_gate);
-            let ballpark_w = ballpark_shared.map(Arc::downgrade);
-            let actor_state_w = actor_state_shared.map(Arc::downgrade);
-            actions_to_push.push(Box::new(move || {
-                if let Some(payload) = payload_opt {
-                    let do_persist = move || {
-                        let bp_up = ballpark_w.and_then(|w| w.upgrade());
-                        let st_up = actor_state_w.and_then(|w| w.upgrade());
-                        let _ = persist_cooldown_payload_with_gate(
-                            deact_sys_id, &gate_c, bp_up.as_deref(), st_up.as_deref(), payload,
-                        );
-                    };
-                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                        let _ = rt.spawn_blocking(do_persist);
-                    } else {
-                        do_persist();
-                    }
-                }
-                post_hook_c(deact_sys_id, char_id, cycle, ewar_snap);
-            }));
+    let (raw_eff, post_eff) = resolve_effective_deactivation_hooks(raw_hook, post_hook);
+    let Some(post_hook) = post_eff else {
+        if raw_eff.is_none() {
+            ops.intents
+                .retain(|intent| !matches!(intent, super::post_unlock::PostUnlockIntent::DeactivationHook(_)));
         }
-        post_unlock_actions.lock().unwrap_or_else(|e| e.into_inner()).extend(actions_to_push);
-    } else if let Some(hook) = raw_hook {
-        let actions: Vec<PostUnlockHookAction> = items.into_iter().map(|(deact_sys_id, char_id, cycle)| {
-            let hook_c = Arc::clone(hook);
-            Box::new(move || hook_c(deact_sys_id, char_id, &cycle)) as PostUnlockHookAction
-        }).collect();
-        post_unlock_actions.lock().unwrap_or_else(|e| e.into_inner()).extend(actions);
+        return false;
+    };
+
+    let now_unix_f64 = actor_st
+        .db_opt
+        .as_ref()
+        .map(|db| db.clock().now_unix_secs() as f64)
+        .unwrap_or(0.0);
+    let rank_blocks_snapshot = held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER);
+    let mut mutated_actor = false;
+    let prev_intents = std::mem::take(&mut ops.intents);
+    let mut next_intents = Vec::with_capacity(prev_intents.len());
+    for intent in prev_intents {
+        match intent {
+            super::post_unlock::PostUnlockIntent::DeactivationHook(hook_op) => {
+                if hook_op.cycle.module_id < 0
+                    || super::cycles_tackle::parse_minion_cycle_parent(&hook_op.cycle.effect_name)
+                        .is_some()
+                {
+                    continue;
+                }
+                let Some(char_id) = resolve_removed_cycle_char_id(
+                    hook_op.char_id,
+                    hook_op.cycle.ship_id,
+                    actor_st.db_opt.as_deref(),
+                    hook_op.fallback_owner_id,
+                    rank_blocks_snapshot,
+                ) else {
+                    continue;
+                };
+                let allow_db_fallback = !rank_blocks_snapshot
+                    && actor_st.db_opt.as_ref().is_some_and(|db| {
+                        db.with_snapshot(|s| {
+                            s.items
+                                .get(&hook_op.cycle.module_id)
+                                .is_some_and(|i| i.location_id == hook_op.cycle.ship_id)
+                        })
+                    });
+                let ewar_snap = flush_module_ewar_in_state(
+                    &mut actor_st.ewar_state,
+                    hook_op.cycle.ship_id,
+                    hook_op.cycle.module_id,
+                    allow_db_fallback,
+                );
+                mutated_actor |= !ewar_snap.started_targets.is_empty()
+                    || !ewar_snap.projected_targets.is_empty()
+                    || !ewar_snap.affected_ships.is_empty();
+                let payload_opt = (hook_op.solar_system_id > 0
+                    && hook_op.solar_system_id == solar_system_id)
+                    .then(|| cloak_reactivation_delay_for_cycle(&actor_st.sde_opt, &hook_op.cycle))
+                    .flatten()
+                    .and_then(|delay_s| {
+                        mutated_actor = true;
+                        record_module_cooldown_in_actor_state(
+                            solar_system_id,
+                            actor_st,
+                            hook_op.cycle.ship_id,
+                            hook_op.cycle.module_id,
+                            hook_op.cycle.module_type_id,
+                            now_unix_f64,
+                            delay_s,
+                            tidi_factor,
+                            has_tidi_history,
+                        )
+                    });
+                next_intents.push(super::post_unlock::PostUnlockIntent::CooldownDeactivation(
+                    Box::new(super::post_unlock::DeferredCooldownDeactOp {
+                        solar_system_id: hook_op.solar_system_id,
+                        char_id,
+                        cycle: hook_op.cycle,
+                        ewar_snap,
+                        post_hook: Arc::clone(&post_hook),
+                        cooldown_payload: payload_opt,
+                        cooldown_persist_gate: Arc::clone(cooldown_persist_gate),
+                        ballpark_weak: ballpark_shared.map(Arc::downgrade).unwrap_or_default(),
+                        actor_state_weak: actor_state_shared.map(Arc::downgrade).unwrap_or_default(),
+                    }),
+                ));
+            }
+            other => next_intents.push(other),
+        }
     }
+    ops.intents = next_intents;
     mutated_actor
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn build_and_finalize_removed_ball_ops(
+    handle: &SystemHandle,
+    st: &mut SystemActorState,
+    ball_id: eve_destiny::BallId,
+    removed_cycles: Vec<(ActiveModuleCycle, Option<CharacterId>)>,
+    fallback_slim_owner: Option<CharacterId>,
+    raw_hook: Option<ModuleDeactivationHook>,
+    post_hook: Option<PairedModuleDeactivationPostUnlockHook>,
+    tidi_factor: f64,
+) -> super::post_unlock::PostUnlockOps {
+    let include_deact = raw_hook.is_some() || post_hook.is_some();
+    if st.db_opt.is_none() && !include_deact {
+        return super::post_unlock::PostUnlockOps::default();
+    }
+    let mut ops = super::post_unlock::build_removed_ball_post_unlock_ops(
+        handle.solar_system_id,
+        ball_id,
+        removed_cycles,
+        fallback_slim_owner,
+        include_deact,
+    );
+    let _ = finalize_post_unlock_ops_deactivations_in_actor(
+        handle.solar_system_id,
+        st,
+        &mut ops,
+        raw_hook,
+        post_hook,
+        &handle.cooldown_persist_gate,
+        Some(&handle.ballpark),
+        Some(&handle.actor_state),
+        tidi_factor,
+    );
+    ops
 }
 
 
@@ -1259,6 +1189,114 @@ impl SystemRegistry {
             .map(|(_, h)| h.view().ewar.active_ewar_starts.len())
             .sum()
     }
+
+    /// Resolves effective `(tidi_factor, has_tidi_history)` for live or cold `solar_system_id`
+    /// (`G1A-R3-P1-01`), respecting `#1196`'s `tidi_history_systems` distinction from pure `1.0x` anchors.
+    pub(crate) fn resolve_effective_tidi_mode(
+        &self,
+        solar_system_id: SolarSystemId,
+        db_read_safe: bool,
+    ) -> (f64, bool) {
+        if solar_system_id == 0 {
+            return (1.0, false);
+        }
+        let live_tidi = self.get_handle(solar_system_id).map(|h| h.tidi_factor());
+        let held_svc = held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_SERVICE_STATE);
+        let (manual_override, cn_tidi_hist) = if held_svc {
+            let cn = self
+                .cluster_nodes
+                .read_unranked()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                cn.manual_tidi_overrides.get(&solar_system_id).copied(),
+                cn.tidi_history_systems.contains(&solar_system_id),
+            )
+        } else {
+            let cn = self.cluster_nodes.read().unwrap_or_else(|e| e.into_inner());
+            (
+                cn.manual_tidi_overrides.get(&solar_system_id).copied(),
+                cn.tidi_history_systems.contains(&solar_system_id),
+            )
+        };
+        let tidi = live_tidi
+            .or(manual_override)
+            .or_else(|| {
+                if db_read_safe && !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER) {
+                    self.db.as_ref().and_then(|db| {
+                        db.with_snapshot(|snap| {
+                            let nid =
+                                -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
+                            snap.owner_notes
+                                .get(&nid)
+                                .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+                        })
+                    })
+                } else {
+                    None
+                }
+            })
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.10, 1.0);
+        let gate_tidi_hist = self
+            .get_existing_cooldown_persist_gate(solar_system_id)
+            .is_some_and(|gate| gate.has_tidi_history());
+        let has_tidi_history = tidi < 0.999_999 || cn_tidi_hist || gate_tidi_hist;
+        (tidi, has_tidi_history)
+    }
+
+    pub(crate) fn transitioning_system_ids(
+        &self,
+        exclude_sys_opt: Option<SolarSystemId>,
+    ) -> Vec<SolarSystemId> {
+        let collect_transitioning =
+            |guard: &HashMap<SolarSystemId, super::lifecycle_sm::SystemLifecycleSlot>| {
+                guard
+                    .iter()
+                    .filter(|&(&id, slot)| {
+                        Some(id) != exclude_sys_opt && slot.live_handle().is_none()
+                    })
+                    .map(|(&id, _)| id)
+                    .collect::<Vec<_>>()
+            };
+        let mut ids: Vec<SolarSystemId> = if held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_SYSTEM_REGISTRY)
+        {
+            let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
+            collect_transitioning(&guard)
+        } else {
+            let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+            collect_transitioning(&guard)
+        };
+        ids.sort_unstable();
+        ids
+    }
+}
+
+pub(crate) fn flush_post_unlock_actions(
+    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+) -> usize {
+    if !held_lock_ranks().is_empty() {
+        return 0;
+    }
+    let mut executed = 0usize;
+    loop {
+        let batch = {
+            let mut guard = actions.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_empty() {
+                break;
+            }
+            std::mem::take(&mut *guard)
+        };
+        for action in batch {
+            action();
+            executed += 1;
+        }
+    }
+    executed
 }
 
 #[cfg(test)]

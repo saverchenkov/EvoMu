@@ -1047,9 +1047,9 @@ fn system_command_all_variants_construct_and_match() {
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
     if cfg!(any(test, feature = "testkit")) {
-        assert_eq!(tags.len(), 134);
+        assert_eq!(tags.len(), 135);
     } else {
-        assert_eq!(tags.len(), 133);
+        assert_eq!(tags.len(), 134);
     }
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
@@ -1080,10 +1080,10 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[113], "MergeFighterState");
     assert_eq!(tags[114], "TestHelperFighterOp");
     assert_eq!(tags[115], "UpsertProjectedEwar");
-    assert_eq!(tags[131], "ClearModuleReloadSimDeadline");
-    assert_eq!(tags[132], "ShutdownActor");
+    assert_eq!(tags[132], "ClearModuleReloadSimDeadline");
+    assert_eq!(tags[133], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[133], "TestAccess");
+    assert_eq!(tags[134], "TestAccess");
 }
 
 #[test]
