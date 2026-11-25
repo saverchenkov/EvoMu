@@ -738,7 +738,12 @@ pub struct DungeonNpcGroup {
 impl DungeonNpcGroup {
     pub fn effective_entries(&self) -> Vec<DungeonNpcSpawnEntry> {
         if !self.npc_entries.is_empty() {
-            return self.npc_entries.clone();
+            return self
+                .npc_entries
+                .iter()
+                .filter(|e| e.type_id > 0 && e.count > 0)
+                .cloned()
+                .collect();
         }
         self.npc_specs
             .iter()
@@ -753,9 +758,17 @@ impl DungeonNpcGroup {
 
     pub fn total_npc_count(&self) -> usize {
         if !self.npc_entries.is_empty() {
-            self.npc_entries.iter().map(|e| e.count).sum()
+            self.npc_entries
+                .iter()
+                .filter(|e| e.type_id > 0 && e.count > 0)
+                .map(|e| e.count)
+                .sum()
         } else {
-            self.npc_specs.iter().map(|&(_, c)| c).sum()
+            self.npc_specs
+                .iter()
+                .filter(|&&(tid, cnt)| tid > 0 && cnt > 0)
+                .map(|&(_, c)| c)
+                .sum()
         }
     }
 }

@@ -814,7 +814,10 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
     // Check if landing in a DungeonRuntimeInstance room
     let runtime_entry = read_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
-            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
+            if instance_is_finished(inst)
+                || inst.solar_system_id != sys_id
+                || inst.category == "Flashpoint"
+            {
                 return None;
             }
             let (room_vec_idx, room) = inst
@@ -1135,8 +1138,12 @@ async fn spawn_gate_ball(
     sys_handle: &crate::system_actor::SystemHandle,
     ball_id: i64,
     pos: [f64; 3],
+    gate_type_id: Option<u32>,
 ) {
-    let mut ball = make_site_npc_ball(ball_id, ACCELERATION_GATE_TYPE_ID, DVec3::from_array(pos));
+    let tid = gate_type_id
+        .filter(|&id| id > 0)
+        .unwrap_or(ACCELERATION_GATE_TYPE_ID);
+    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
     ball.radius = 1_500.0;
     let _ = sys_handle.spawn_ball(ball).await;
 }
@@ -1295,7 +1302,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
             let total_rooms = inst.rooms.len();
             let owner_char_id = inst.owner_char_id;
 
-            let mut gate_plans: Vec<(i64, [f64; 3])> = Vec::new();
+            let mut gate_plans: Vec<(i64, [f64; 3], Option<u32>)> = Vec::new();
             let mut obj_plans: Vec<(i64, u32, [f64; 3], f64, bool)> = Vec::new();
             let mut npc_plans: Vec<NpcSpawnOrder> = Vec::new();
             let mut obj_ids: Vec<i64> = Vec::new();
@@ -1309,7 +1316,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
                         .unwrap_or_else(|| snap.alloc_entity_id());
                     inst.entry_gate_ball_id = Some(eg_id);
                     if first_eg {
-                        gate_plans.push((eg_id, ep));
+                        gate_plans.push((eg_id, ep, None));
                     }
                 }
             }
@@ -1386,7 +1393,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
                     }
                     if newly_spawned || !was_room_spawned {
                         if let Some(gid) = gl.gate_ball_id {
-                            gate_plans.push((gid, gl.gate_position));
+                            gate_plans.push((gid, gl.gate_position, gl.gate_type_id));
                         }
                     }
                 }
@@ -1404,7 +1411,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
                             room.position[1],
                             room.position[2],
                         ];
-                        gate_plans.push((gid, gate_pos));
+                        gate_plans.push((gid, gate_pos, None));
                     }
                 }
             }
@@ -1446,8 +1453,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
         })?;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for (ball_id, pos) in gate_plans {
-        spawn_gate_ball(&sys_handle, ball_id, pos).await;
+    for (ball_id, pos, gate_type_id) in gate_plans {
+        spawn_gate_ball(&sys_handle, ball_id, pos, gate_type_id).await;
     }
     for (ball_id, type_id, pos, radius, destructible) in obj_plans {
         spawn_object_ball(&sys_handle, &ctx.sde, ball_id, type_id, pos, radius, destructible).await;
@@ -1575,10 +1582,9 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
     instance_id: i64,
 ) -> usize {
     let active_in_sys = read_dungeon_runtime_store(ctx, |store| {
-        store
-            .instances
-            .get(&instance_id)
-            .is_some_and(|inst| !inst.despawned && inst.solar_system_id == sys_id)
+        store.instances.get(&instance_id).is_some_and(|inst| {
+            !inst.despawned && inst.solar_system_id == sys_id && inst.category != "Flashpoint"
+        })
     });
     if !active_in_sys {
         return 0;
@@ -1591,17 +1597,17 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
         let Some(inst) = snap.dungeon_runtime.instances.get(&instance_id) else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
-        if inst.despawned || inst.solar_system_id != sys_id {
+        if inst.despawned || inst.solar_system_id != sys_id || inst.category == "Flashpoint" {
             return (Vec::new(), Vec::new(), Vec::new());
         }
-        let mut gates = Vec::new();
+        let mut gates: Vec<(i64, [f64; 3], Option<u32>)> = Vec::new();
         let mut objs = Vec::new();
         let mut npcs = Vec::new();
 
         if !instance_is_finished(inst) {
             if let (Some(eg_id), Some(eg_pos)) = (inst.entry_gate_ball_id, inst.entry_gate_pos) {
                 if !view.contains_ball(eg_id) {
-                    gates.push((eg_id, eg_pos));
+                    gates.push((eg_id, eg_pos, None));
                 }
             }
         }
@@ -1616,14 +1622,14 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
                         if gl.spawned {
                             if let Some(gid) = gl.gate_ball_id {
                                 if !view.contains_ball(gid) {
-                                    gates.push((gid, gl.gate_position));
+                                    gates.push((gid, gl.gate_position, gl.gate_type_id));
                                 }
                             }
                         }
                     }
                 } else if let Some(gid) = r.gate_ball_id {
                     if !view.contains_ball(gid) {
-                        gates.push((gid, [r.position[0] + 5_000.0, r.position[1], r.position[2]]));
+                        gates.push((gid, [r.position[0] + 5_000.0, r.position[1], r.position[2]], None));
                     }
                 }
             }
@@ -1634,10 +1640,7 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
                     && !o.destroyed
                     && o.ball_id > 0
                     && (!instance_is_finished(inst) || o.is_container)
-                    && view.ball(o.ball_id).is_none_or(|b| {
-                        b.position.distance(DVec3::from_array(pos)) > 1.0
-                            || (b.radius - o.radius.max(100.0)).abs() > 1.0
-                    });
+                    && !view.contains_ball(o.ball_id);
                 if needs_ball {
                     objs.push((o.ball_id, o.type_id, pos, o.radius, o.destructible));
                 }
@@ -1696,8 +1699,8 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
     drop(view);
 
     let count = gates_to_spawn.len() + objects_to_spawn.len() + npcs_to_spawn.len();
-    for (gid, gpos) in gates_to_spawn {
-        spawn_gate_ball(&sys_handle, gid, gpos).await;
+    for (gid, gpos, gate_type_id) in gates_to_spawn {
+        spawn_gate_ball(&sys_handle, gid, gpos, gate_type_id).await;
     }
     for (bid, tid, pos, radius, destructible) in objects_to_spawn {
         spawn_object_ball(&sys_handle, &ctx.sde, bid, tid, pos, radius, destructible).await;

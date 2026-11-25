@@ -31,7 +31,7 @@ pub async fn try_activate_dungeon_runtime_gate(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let arg_int = args.first().and_then(|a| a.as_i64());
-    let arg_str = args.first().and_then(|a| a.as_str());
+    let arg_str = args.first().and_then(|a| a.as_str()).map(str::trim);
 
     let match_info = ctx.db.with_snapshot(|snap| {
         for inst in snap.dungeon_runtime.instances.values() {

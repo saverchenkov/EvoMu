@@ -598,6 +598,289 @@ async fn zero_indexed_multi_room_dng_inst_traversal_and_enter_next_room_observat
     assert_eq!(e2.dict_get("roomID").and_then(|v| v.as_i64()), Some(9782));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flashpoint_warp_landing_and_reconcile_preserve_world_ark_hp_locks_and_dead_defenders() {
+    use crate::services::pve_dungeon_runtime::{
+        on_warp_landed_at_dungeon_pocket_if_present, reconcile_and_rematerialize_dungeon_instance,
+    };
+    use crate::services::pve_fob_observatory::{get_observatory_site_state, spawn_observatory_flashpoint};
+    use eve_destiny::TargetLock;
+
+    let pochven_sys = shared_sde()
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("SDE has Pochven solar system");
+    let char_id: i64 = 90_040_016;
+    let ship_id: i64 = 1_020_000_006;
+    let (ctx, _sess) = make_ctx_and_ship(pochven_sys, char_id, ship_id, 1_000_000.0);
+    let _ = spawn_observatory_flashpoint(&ctx, pochven_sys)
+        .await
+        .expect("spawn Observatory Flashpoint");
+    let obs = get_observatory_site_state(&ctx, pochven_sys).expect("observatory persisted");
+    let sys_handle = ctx.systems.get_or_spawn(pochven_sys);
+
+    let (_, ark_before) = sys_handle
+        .get_ball_snapshot(obs.world_ark_id)
+        .await
+        .unwrap()
+        .expect("World Ark ball spawned");
+    let ark_cs_before = sys_handle
+        .get_combat_state(obs.world_ark_id)
+        .await
+        .unwrap()
+        .expect("World Ark CombatState spawned");
+    assert_eq!(ark_cs_before.max_shield_hp, 200_000.0);
+    assert_eq!(ark_cs_before.max_armor_hp, 400_000.0);
+    assert_eq!(ark_cs_before.max_structure_hp, 200_000.0);
+
+    // Damage World Ark, establish a target lock, and kill one defense-wave NPC before warp landing.
+    sys_handle
+        .modify_combat_state(obs.world_ark_id, |cs| {
+            cs.shield_hp = 150_000.0;
+        })
+        .await
+        .expect("damage World Ark");
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: obs.world_ark_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock World Ark");
+    let dead_defender = obs.defense_wave_ids[0];
+    let live_defender = obs.defense_wave_ids[1];
+    let def_cs_before = sys_handle
+        .get_combat_state(live_defender)
+        .await
+        .unwrap()
+        .expect("defender CombatState");
+    assert!(sys_handle.remove_ball(dead_defender).await.is_some());
+
+    // Warping to outer gate or interior pocket and invoking reconcile must leave Flashpoint untouched.
+    on_warp_landed_at_dungeon_pocket_if_present(&ctx, char_id, pochven_sys, obs.gate_pos).await;
+    on_warp_landed_at_dungeon_pocket_if_present(&ctx, char_id, pochven_sys, obs.site_pos).await;
+    assert_eq!(
+        reconcile_and_rematerialize_dungeon_instance(&ctx, pochven_sys, obs.dungeon_instance_id).await,
+        0
+    );
+
+    let (_, ark_after) = sys_handle
+        .get_ball_snapshot(obs.world_ark_id)
+        .await
+        .unwrap()
+        .expect("World Ark still present");
+    assert_eq!(ark_after.radius, ark_before.radius);
+    let ark_cs_after = sys_handle
+        .get_combat_state(obs.world_ark_id)
+        .await
+        .unwrap()
+        .expect("World Ark CombatState still present");
+    assert_eq!(ark_cs_after.shield_hp, 150_000.0);
+    assert_eq!(ark_cs_after.max_shield_hp, 200_000.0);
+    assert_eq!(ark_cs_after.max_armor_hp, 400_000.0);
+    assert_eq!(ark_cs_after.max_structure_hp, 200_000.0);
+
+    let locks = sys_handle.get_target_locks(ship_id).await.unwrap();
+    assert!(locks.iter().any(|l| l.target_id == obs.world_ark_id && l.locked));
+    assert!(sys_handle.get_ball_snapshot(dead_defender).await.unwrap().is_none());
+    assert_eq!(
+        sys_handle.get_combat_state(live_defender).await.unwrap(),
+        Some(def_cs_before)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconcile_preserves_live_custom_radius_and_bumped_dungeon_objects_while_restoring_missing() {
+    use crate::services::pve_dungeon_runtime::{
+        materialize_dungeon_room_entities, reconcile_and_rematerialize_dungeon_instance,
+        with_dungeon_runtime_store,
+    };
+    use eve_db::service_domains::{DungeonNpcGroup, DungeonNpcSpawnEntry};
+    use eve_destiny::{CombatState, TargetLock};
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_017;
+    let ship_id: i64 = 1_020_000_007;
+    let (ctx, mut sess) = make_ctx_and_ship(sys_id, char_id, ship_id, 1_000_000.0);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (diff1_did, _) = find_difficulty1_and_any_dungeon(&ctx.sde);
+    let r0_pos = [92_000_000.0, 0.0, 0.0];
+    let live_obj_id = 88_001_001_i64;
+    let missing_obj_id = 88_001_002_i64;
+    let gate_id = 88_001_003_i64;
+    let custom_gate_type = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 366 && t.type_id != 17_831)
+        .map(|t| t.type_id)
+        .unwrap_or(17_831);
+
+    let inst = DungeonRuntimeInstance {
+        instance_id: 978_003,
+        dungeon_id: diff1_did,
+        dungeon_name: "ReconcileLiveObject".into(),
+        category: "Deadspace".into(),
+        archetype: "Deadspace".into(),
+        solar_system_id: sys_id,
+        owner_char_id: char_id,
+        base_position: r0_pos,
+        current_room_index: 0,
+        rooms: vec![
+            DungeonRuntimeRoom {
+                room_index: 0,
+                room_id: 9783,
+                room_name: "R0".into(),
+                position: r0_pos,
+                gate_destination_pos: [92_500_000.0, 0.0, 0.0],
+                spawned: true,
+                entered: true,
+                objects: vec![
+                    DungeonRuntimeObject {
+                        ball_id: live_obj_id,
+                        type_id: 23,
+                        name: "CustomLiveBeacon".into(),
+                        position: r0_pos,
+                        radius: 1_500.0,
+                        spawned: true,
+                        destructible: true,
+                        ..Default::default()
+                    },
+                    DungeonRuntimeObject {
+                        ball_id: missing_obj_id,
+                        type_id: 23,
+                        name: "MissingBeacon".into(),
+                        position: [r0_pos[0] + 2_000.0, 0.0, 0.0],
+                        radius: 1_500.0,
+                        spawned: true,
+                        destructible: false,
+                        ..Default::default()
+                    },
+                ],
+                gate_links: vec![DungeonGateLink {
+                    gate_ball_id: Some(gate_id),
+                    gate_position: [r0_pos[0] + 5_000.0, 0.0, 0.0],
+                    target_room_index: 1,
+                    destination_pos: [92_500_000.0, 0.0, 0.0],
+                    gate_type_id: Some(custom_gate_type),
+                    spawned: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            DungeonRuntimeRoom {
+                room_index: 1,
+                room_id: 9784,
+                room_name: "R1".into(),
+                position: [92_500_000.0, 0.0, 0.0],
+                gated: true,
+                ..Default::default()
+            },
+        ],
+        created_unix: 1_775_300_000,
+        ..Default::default()
+    };
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(978_003, inst);
+    });
+
+    // Spawn live_obj with custom radius 220m, bumped position, damaged CombatState, and target lock.
+    let bumped_pos = DVec3::new(r0_pos[0] + 120.0, 0.0, 0.0);
+    let mut live_ball = Ball {
+        id: live_obj_id,
+        type_id: 23,
+        position: bumped_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 220.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    live_ball.radius = 220.0;
+    let custom_cs = CombatState {
+        shield_hp: 7_777.0,
+        max_shield_hp: 10_000.0,
+        armor_hp: 5_000.0,
+        max_armor_hp: 5_000.0,
+        structure_hp: 5_000.0,
+        max_structure_hp: 5_000.0,
+        ..Default::default()
+    };
+    let _ = sys_handle.spawn_ball_with_combat(live_ball, custom_cs).await;
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: live_obj_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock live_obj");
+
+    // Reconcile + already_spawned materialization restores missing_obj & gate, but leaves live_obj intact.
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx, sys_id, 978_003).await, 2);
+    let _ = materialize_dungeon_room_entities(&ctx, sys_id, 978_003, 0).await.unwrap();
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx, sys_id, 978_003).await, 0);
+
+    let (_, live_after) = sys_handle.get_ball_snapshot(live_obj_id).await.unwrap().unwrap();
+    assert!(live_after.position.distance(bumped_pos) < 1.0);
+    assert_eq!(live_after.radius, 220.0);
+    let cs_after = sys_handle.get_combat_state(live_obj_id).await.unwrap().unwrap();
+    assert_eq!(cs_after.shield_hp, 7_777.0);
+    assert_eq!(cs_after.max_shield_hp, 10_000.0);
+    assert!(sys_handle
+        .get_target_locks(ship_id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|l| l.target_id == live_obj_id && l.locked));
+
+    let (_, missing_after) = sys_handle.get_ball_snapshot(missing_obj_id).await.unwrap().unwrap();
+    assert_eq!(missing_after.radius, 1_500.0);
+    let (_, gate_after) = sys_handle.get_ball_snapshot(gate_id).await.unwrap().unwrap();
+    assert_eq!(gate_after.type_id, custom_gate_type);
+
+    // P2-1 & P2-4 consistency checks: zero type_id/count entries filtered consistently, trimmed DNG-INST- resolves.
+    let grp = DungeonNpcGroup {
+        npc_entries: vec![
+            DungeonNpcSpawnEntry { type_id: 0, count: 2, ..Default::default() },
+            DungeonNpcSpawnEntry { type_id: 48_090, count: 0, ..Default::default() },
+            DungeonNpcSpawnEntry { type_id: 48_090, count: 3, ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(grp.effective_entries().len(), 1);
+    assert_eq!(grp.total_npc_count(), 3);
+
+    let _ = sys_handle
+        .set_ball_position(ship_id, DVec3::new(r0_pos[0] + 5_000.0, 0.0, 0.0))
+        .await;
+    let trimmed = try_activate_dungeon_runtime_gate(
+        &ctx,
+        &mut sess,
+        sys_id,
+        &[PyRep::String("  DNG-INST-978003  ".into())],
+    )
+    .await
+    .expect("trimmed DNG-INST- recognized")
+    .expect("trimmed DNG-INST- activates");
+    assert_eq!(trimmed.dict_get("roomID").and_then(|v| v.as_i64()), Some(9784));
+}
+
 #[cfg(test)]
 #[path = "pve_dungeon_runtime_rpc_extra_unit_tests.rs"]
 mod pve_dungeon_runtime_rpc_extra_unit_tests;
