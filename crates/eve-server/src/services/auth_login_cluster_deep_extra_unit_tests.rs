@@ -73,7 +73,7 @@ async fn call_login(
     args: &[PyRep],
     kw: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    client_login::handle(ctx, sess, svc, method, args, kw, Some("unit_test"))
+    client_login::handle(ctx, sess, svc, method, args, kw)
         .await
         .expect("unhandled client_login route")
 }

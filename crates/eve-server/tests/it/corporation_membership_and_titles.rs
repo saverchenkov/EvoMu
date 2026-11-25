@@ -627,7 +627,7 @@ async fn test_corp_titles_and_role_bundling() {
     let titles_rep = rpc(&ctx, &mut sess_ceo, "corpRegistry", "GetTitles", &[])
         .await
         .expect("GetTitles");
-    let PyRep::Rowset { rows, .. } = titles_rep else { panic!("expected Rowset") };
+    let PyRep::Dict(rows) = titles_rep else { panic!("expected Dict") };
     assert_eq!(rows.len(), 16);
 
     // Non-director cannot UpdateTitle
@@ -699,9 +699,9 @@ async fn test_corp_titles_and_role_bundling() {
     let titles_after = rpc(&ctx, &mut sess_ceo, "corpRegistry", "GetTitles", &[])
         .await
         .expect("GetTitles after delete");
-    let PyRep::Rowset { rows: rows_after, .. } = titles_after else { panic!("expected Rowset") };
+    let PyRep::Dict(rows_after) = titles_after else { panic!("expected Dict") };
     assert_eq!(rows_after.len(), 16);
-    assert_eq!(rows_after[1][1], PyRep::String("".into()));
+    assert_eq!(rows_after[1].1.dict_get("titleName"), Some(&PyRep::String("".into())));
 }
 
 #[tokio::test]
@@ -885,16 +885,15 @@ async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_u
     .expect("UpdateTitle 1");
 
     // Internal caller receives sorted 10-column Rowset with all 16 power-of-two slots
-    let internal_rs = rpc(&ctx, &mut sess, "corpRegistry", "GetTitles", &[])
+    let direct_rep = rpc(&ctx, &mut sess, "corpRegistry", "GetTitles", &[])
         .await
-        .expect("internal GetTitles");
-    let PyRep::Rowset { columns, rows } = internal_rs else {
-        panic!("expected Rowset for internal GetTitles");
+        .expect("direct GetTitles");
+    let PyRep::Dict(ref direct_entries) = direct_rep else {
+        panic!("expected Dict for direct GetTitles");
     };
-    assert_eq!(columns.len(), 10);
-    assert_eq!(rows.len(), 16);
-    assert_eq!(rows[0][0], PyRep::Integer(1));
-    assert_eq!(rows[2][0], PyRep::Integer(4));
+    assert_eq!(direct_entries.len(), 16);
+    assert_eq!(direct_entries[0].0, PyRep::Integer(1));
+    assert_eq!(direct_entries[2].0, PyRep::Integer(4));
 
     // Live V24 client (machoNet:26000) receives Dict<titleID, util.Row> with all 16 power-of-two keys
     let live_rep = ctx

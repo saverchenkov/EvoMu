@@ -21,7 +21,7 @@ async fn call_login(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let kw = HashMap::new();
-    handle(ctx, sess, svc, method, args, &kw, Some("test_trace")).await
+    handle(ctx, sess, svc, method, args, &kw).await
 }
 
 async fn login_ok(
@@ -550,7 +550,7 @@ async fn cohorts_lock_types_population_cap_portrait_station_and_skill_handlers()
     assert!(login_ok(&ctx, &mut sess, "map", "GetStationInfo", &[]).await != PyRep::None);
     let mut kw_station = HashMap::new();
     kw_station.insert("stationID".to_string(), PyRep::Integer(60_003_760));
-    let kw_res = handle(&ctx, &mut sess, "map", "GetStationInfo", &[], &kw_station, None)
+    let kw_res = handle(&ctx, &mut sess, "map", "GetStationInfo", &[], &kw_station)
         .await
         .unwrap()
         .unwrap();

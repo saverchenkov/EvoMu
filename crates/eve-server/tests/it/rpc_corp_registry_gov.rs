@@ -71,6 +71,30 @@ fn rowset_data(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
             columns.clone(),
             items.iter().map(|(_, row)| row.clone()).collect(),
         ),
+        PyRep::Dict(entries) => {
+            let mut cols = Vec::new();
+            let mut rows = Vec::with_capacity(entries.len());
+            for (_, v) in entries {
+                if let PyRep::Object { type_name, args } = v {
+                    if type_name == "util.Row" {
+                        if let PyRep::Tuple(parts) = args.as_ref() {
+                            if let (Some(PyRep::List(hdr)), Some(PyRep::List(line))) =
+                                (parts.first(), parts.get(1))
+                            {
+                                if cols.is_empty() {
+                                    cols = hdr
+                                        .iter()
+                                        .filter_map(|c| c.as_str().map(str::to_string))
+                                        .collect();
+                                }
+                                rows.push(line.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            (cols, rows)
+        }
         _ => (Vec::new(), Vec::new()),
     }
 }

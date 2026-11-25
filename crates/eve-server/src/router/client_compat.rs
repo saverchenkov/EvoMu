@@ -17,27 +17,6 @@ fn kv_str(entries: &HashMap<String, PyRep>, key: &str) -> String {
     }
 }
 
-fn rowset_to_crowset(rep: PyRep, col_types: &[(&str, DbColumnType)]) -> PyRep {
-    let PyRep::Rowset { columns, rows } = rep else {
-        return rep;
-    };
-    let descriptor = DBRowDescriptor::new(col_types.iter().map(|&(name, ty)| (name, ty)));
-    let col_indices: Vec<Option<usize>> = col_types
-        .iter()
-        .map(|&(name, _)| columns.iter().position(|c| c == name))
-        .collect();
-    let mapped_rows: Vec<Vec<PyRep>> = rows
-        .into_iter()
-        .map(|row| {
-            col_indices
-                .iter()
-                .map(|idx| idx.and_then(|i| row.get(i).cloned()).unwrap_or(PyRep::None))
-                .collect()
-        })
-        .collect();
-    descriptor.build_crowset(mapped_rows)
-}
-
 fn inv_keyval_to_dbrow_with_sde(rep: PyRep, sde: Option<&eve_sde::SdeRegistry>) -> PyRep {
     let PyRep::KeyVal(entries) = rep else {
         return rep;
@@ -274,116 +253,6 @@ pub fn normalize_macho_rpc_reply_at(
             return Ok(PyRep::Dict(out));
         }
     }
-    if matches!(service, "corpRegistry" | "machoNet") && method == "GetMembersPaged" {
-        if let Ok(PyRep::ObjectEx {
-            is_type_2: false,
-            header,
-            list,
-            dict,
-        }) = rpc_res
-        {
-            let header = match *header {
-                PyRep::Tuple(mut h) => {
-                    if h.len() == 2
-                        && h[0]
-                            == PyRep::Token(
-                                "eve.common.script.util.pagedCollection.PagedResultSet".into(),
-                            )
-                    {
-                        if let PyRep::Tuple(mut args) = h[1].clone() {
-                            if !args.is_empty() {
-                                const CORP_MEMBER_COLS: &[(&str, DbColumnType)] = &[
-                                    ("characterID", DbColumnType::I8),
-                                    ("name", DbColumnType::WStr),
-                                    ("role", DbColumnType::I8),
-                                    ("title", DbColumnType::WStr),
-                                    ("corporationID", DbColumnType::I8),
-                                    ("locationID", DbColumnType::I8),
-                                    ("shipTypeID", DbColumnType::I4),
-                                    ("logonDateTime", DbColumnType::FileTime),
-                                    ("roles", DbColumnType::I8),
-                                    ("grantableRoles", DbColumnType::I8),
-                                    ("rolesAtHQ", DbColumnType::I8),
-                                    ("grantableRolesAtHQ", DbColumnType::I8),
-                                    ("rolesAtBase", DbColumnType::I8),
-                                    ("grantableRolesAtBase", DbColumnType::I8),
-                                    ("rolesAtOther", DbColumnType::I8),
-                                    ("grantableRolesAtOther", DbColumnType::I8),
-                                    ("titleMask", DbColumnType::I8),
-                                    ("baseID", DbColumnType::I8),
-                                    ("startDateTime", DbColumnType::FileTime),
-                                    ("accountKey", DbColumnType::I4),
-                                    ("divisionID", DbColumnType::I4),
-                                    ("squadronID", DbColumnType::I4),
-                                    ("blockRoles", DbColumnType::I4),
-                                    ("blocksRoles", DbColumnType::I4),
-                                ];
-                                let coll = std::mem::replace(&mut args[0], PyRep::None);
-                                args[0] = rowset_to_crowset(coll, CORP_MEMBER_COLS);
-                            }
-                            h[1] = PyRep::Tuple(args);
-                        }
-                    }
-                    PyRep::Tuple(h)
-                }
-                other => other,
-            };
-            return Ok(PyRep::ObjectEx {
-                is_type_2: false,
-                header: Box::new(header),
-                list,
-                dict,
-            });
-        }
-    }
-    if matches!(service, "corpRegistry" | "machoNet") && method == "GetTitles" {
-        if let Ok(PyRep::Rowset { columns, rows }) = rpc_res {
-            let key_idx = columns.iter().position(|c| c == "titleID").unwrap_or(0);
-            let header: Vec<PyRep> = columns.into_iter().map(PyRep::String).collect();
-            let mut dict = Vec::with_capacity(rows.len());
-            for row in rows {
-                let row_key = row
-                    .get(key_idx)
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(dict.len() as i64 + 1));
-                let row_obj = PyRep::Object {
-                    type_name: "util.Row".into(),
-                    args: Box::new(PyRep::Tuple(vec![
-                        PyRep::List(header.clone()),
-                        PyRep::List(row),
-                    ])),
-                };
-                dict.push((row_key, row_obj));
-            }
-            return Ok(PyRep::Dict(dict));
-        }
-    }
-    if matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation" {
-        if let Ok(PyRep::KeyVal(mut entries)) = rpc_res {
-            let cid = entries
-                .get("corporationID")
-                .and_then(PyRep::as_i64)
-                .unwrap_or(0);
-            let ceo_missing = match entries.get("ceoID") {
-                None | Some(PyRep::None) => true,
-                Some(PyRep::Integer(v)) => *v <= 0,
-                _ => false,
-            };
-            if ceo_missing && cid > 0 {
-                entries.insert("ceoID".into(), PyRep::Integer(cid));
-            }
-            let mut header = Vec::with_capacity(entries.len());
-            let mut line = Vec::with_capacity(entries.len());
-            for (k, v) in entries {
-                header.push(PyRep::String(k));
-                line.push(v);
-            }
-            return Ok(PyRep::Object {
-                type_name: "util.Row".into(),
-                args: Box::new(PyRep::Tuple(vec![PyRep::List(header), PyRep::List(line)])),
-            });
-        }
-    }
     if service == "structureDirectory" && method == "GetJumpBridgesWithMyAccess" {
         if let Ok(PyRep::List(items)) = rpc_res {
             let mut pairs = Vec::with_capacity(items.len());
@@ -492,16 +361,6 @@ pub fn normalize_macho_rpc_reply_at(
             PyRep::List(input_ids),
             PyRep::Dict(dict_entries),
         ]));
-    } else if service == "ship" && method == "GetShipFittingInfo" {
-        if let Ok(ref rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let cpu_load = rep.dict_get("cpuLoad").cloned().unwrap_or(PyRep::Real(0.0));
-                let cpu_out = rep.dict_get("cpuOutput").cloned().unwrap_or(PyRep::Real(0.0));
-                let pwg_load = rep.dict_get("powerLoad").cloned().unwrap_or(PyRep::Real(0.0));
-                let pwg_out = rep.dict_get("powerOutput").cloned().unwrap_or(PyRep::Real(0.0));
-                return Ok(PyRep::Tuple(vec![cpu_load, cpu_out, pwg_load, pwg_out]));
-            }
-        }
     } else if service == "agentMgr" && matches!(method, "DoAction" | "GetOffer") {
         if let Ok(rep) = rpc_res {
             return Ok(normalize_agent_do_action_rep(rep));

@@ -66,12 +66,11 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    caller_trace: Option<&str>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if service == "trademgr" && method == "InitiateTrade" {
         return Some(
             super::wallet_services_ext::initiate_trade_session(ctx, session, args)
-                .map(|bid| ctx.bound_object_rep(bid, caller_trace)),
+                .map(|bid| PyRep::Integer(bid as i64)),
         );
     }
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
@@ -364,7 +363,10 @@ pub fn handle(
                     format!("item {item_id} is not an inventory reachable by character {char_id} at {location_id}"),
                 )));
             }
-            Some(ctx.bind_verified_sub_object(session, "invbroker", item_id).map(|bid| ctx.bound_object_rep(bid, caller_trace)))
+            Some(
+                ctx.bind_verified_sub_object(session, "invbroker", item_id)
+                    .map(|bid| PyRep::Integer(bid as i64)),
+            )
         }
         _ => {
             let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -431,7 +433,10 @@ pub fn handle(
                     }
                 }
             }
-            Some(ctx.bind_verified_sub_object(session, "invbroker", target_loc_id).map(|bid| ctx.bound_object_rep(bid, caller_trace)))
+            Some(
+                ctx.bind_verified_sub_object(session, "invbroker", target_loc_id)
+                    .map(|bid| PyRep::Integer(bid as i64)),
+            )
         }
     }
 }
@@ -2242,15 +2247,15 @@ pub(crate) fn resolve_inv_target_location(
 use crate::router::rpc_registry::{rpc_entry, RpcDispatchHandler, RpcEntry};
 
 pub(crate) const RPCS: &[RpcEntry] = &[
-    rpc_entry("trademgr", "InitiateTrade", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("trademgr", "InitiateTrade", RpcDispatchHandler::BoundSync(handle)),
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
-    rpc_entry("i2", "IsPrimed", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("i2", "IsPrimed", RpcDispatchHandler::BoundSync(handle)),
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
-    rpc_entry("i2", "GetItem", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
-    rpc_entry("invbroker", "GetInventoryFromId", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
-    rpc_entry("invbroker", "GetInventory", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
-    rpc_entry("invbroker", "GetSelfInvItem", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
-    rpc_entry("invbroker", "GetAvailableTurretSlots", RpcDispatchHandler::BoundSyncCallerTrace(handle)),
+    rpc_entry("i2", "GetItem", RpcDispatchHandler::BoundSync(handle)),
+    rpc_entry("invbroker", "GetInventoryFromId", RpcDispatchHandler::BoundSync(handle)),
+    rpc_entry("invbroker", "GetInventory", RpcDispatchHandler::BoundSync(handle)),
+    rpc_entry("invbroker", "GetSelfInvItem", RpcDispatchHandler::BoundSync(handle)),
+    rpc_entry("invbroker", "GetAvailableTurretSlots", RpcDispatchHandler::BoundSync(handle)),
 ];
 
 #[cfg(test)]

@@ -258,10 +258,13 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         .dispatch_rpc(&mut sess2, "corpRegistry", None, "GetCorporation", &[PyRep::Integer(corp_id)], &kw, None)
         .await
         .expect("corpRegistry.GetCorporation");
-    let PyRep::KeyVal(ci_kv) = &corp_reg_info else { panic!() };
-    assert_eq!(ci_kv["ceoID"], PyRep::Integer(90_000_001));
-    assert_eq!(ci_kv["tickerName"], PyRep::String("DSLOG".into()));
-    assert_eq!(ci_kv["shares"], PyRep::Integer(1000));
+    assert!(matches!(
+        &corp_reg_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(corp_reg_info.dict_get("ceoID"), Some(&PyRep::Integer(90_000_001)));
+    assert_eq!(corp_reg_info.dict_get("tickerName"), Some(&PyRep::String("DSLOG".into())));
+    assert_eq!(corp_reg_info.dict_get("shares"), Some(&PyRep::Integer(1000)));
 
     let outsider_corp_info = ctx
         .dispatch_rpc(&mut sess2, "corporationSvc", None, "GetCorpInfo", &[PyRep::Integer(corp_id)], &kw, None)
@@ -351,14 +354,17 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         .dispatch_rpc(&mut sess1, "corpRegistry", None, "GetCorporation", &[PyRep::Integer(corp_id)], &kw, None)
         .await
         .expect("GetCorporation after UpdateCorporation");
-    let PyRep::KeyVal(pub_after_kv) = &public_info_after else { panic!() };
-    assert_eq!(pub_after_kv["description"], PyRep::String("Premier nullsec freight services".into()));
-    assert_eq!(pub_after_kv["url"], PyRep::String("https://dslogistics.eve".into()));
-    assert_eq!(pub_after_kv["taxRate"], PyRep::Real(0.08));
-    assert_eq!(pub_after_kv["shape1"], PyRep::Integer(415));
-    assert_eq!(pub_after_kv["shape2"], PyRep::Integer(416));
-    assert_eq!(pub_after_kv["shape3"], PyRep::Integer(417));
-    assert_eq!(pub_after_kv["color1"], PyRep::Integer(681));
+    assert!(matches!(
+        &public_info_after,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(public_info_after.dict_get("description"), Some(&PyRep::String("Premier nullsec freight services".into())));
+    assert_eq!(public_info_after.dict_get("url"), Some(&PyRep::String("https://dslogistics.eve".into())));
+    assert_eq!(public_info_after.dict_get("taxRate"), Some(&PyRep::Real(0.08)));
+    assert_eq!(public_info_after.dict_get("shape1"), Some(&PyRep::Integer(415)));
+    assert_eq!(public_info_after.dict_get("shape2"), Some(&PyRep::Integer(416)));
+    assert_eq!(public_info_after.dict_get("shape3"), Some(&PyRep::Integer(417)));
+    assert_eq!(public_info_after.dict_get("color1"), Some(&PyRep::Integer(681)));
 
     // 4. Pilot 2 Application and Acceptance via V24 corpRegistry.InsertApplication / UpdateApplicationOffer
     let apply_rep = ctx

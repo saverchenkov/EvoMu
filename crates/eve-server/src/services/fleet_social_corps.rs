@@ -1017,9 +1017,6 @@ pub(crate) fn handle_corps(
                 entries: Vec<(String, PyRep)>,
             }
             impl CorpInfoReply {
-                fn into_keyval(self) -> PyRep {
-                    PyRep::KeyVal(self.entries.into_iter().collect())
-                }
                 fn into_util_row(self) -> PyRep {
                     let map: std::collections::BTreeMap<String, PyRep> =
                         self.entries.into_iter().collect();
@@ -1081,11 +1078,7 @@ pub(crate) fn handle_corps(
                 entries.push((format!("walletDivision{i}"), PyRep::String(w_name)));
             }
             let reply = CorpInfoReply { entries };
-            if service == "corpmgr" {
-                Some(Ok(reply.into_util_row()))
-            } else {
-                Some(Ok(reply.into_keyval()))
-            }
+            Some(Ok(reply.into_util_row()))
         }
 
         ("corpmgr", "allianceID")

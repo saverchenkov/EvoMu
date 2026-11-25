@@ -2433,3 +2433,187 @@ async fn pin_933_t4_migrated_rpc_and_notify_wire_shapes() {
         "notify:OnClientEvent_ChatMessageSent",
     ]);
 }
+
+#[tokio::test]
+async fn pin_933_t5_corp_shipfit_and_trace_wire_parity() {
+    let ctx = fresh_ctx();
+    let now_unix = ctx.now_unix();
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = JITA_SYSTEM_ID;
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+    });
+    ctx.db
+        .acquire_online_lock(1, 87_501, Some(DEMO_CHAR_ID), true, now_unix)
+        .expect("online lock char 1");
+    ctx.db
+        .acquire_online_lock(2, 87_502, Some(90_000_002), true, now_unix)
+        .expect("online lock char 2");
+
+    let mut sess = player_sess(
+        87_501,
+        Some(DEMO_CHAR_ID),
+        Some(corp_id),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    sess.corp_role = u64::MAX;
+    sess.ship_id = Some(ship_id);
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    // 1. corpRegistry.GetCorporation natively emits util.Row on wire.
+    let corp_rep = wire_session_call_ok(
+        &mut wire,
+        "corpRegistry",
+        None,
+        "GetCorporation",
+        &[PyRep::Integer(corp_id)],
+        &kw,
+    )
+    .await;
+    assert!(
+        matches!(&corp_rep, PyRep::Object { type_name, .. } if type_name == "util.Row"),
+        "corpRegistry.GetCorporation must emit util.Row natively: {corp_rep:?}"
+    );
+    assert_eq!(corp_rep.dict_get("corporationID"), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(corp_rep.dict_get("ceoID"), Some(&PyRep::Integer(DEMO_CHAR_ID)));
+    assert_contract_enforcing(&ctx, "corpRegistry.GetCorporation", &corp_rep);
+
+    // 2. corpRegistry.GetTitles natively emits Dict<titleID, util.Row> on wire.
+    let upd_title = wire_session_call_ok(
+        &mut wire,
+        "corpRegistry",
+        None,
+        "UpdateTitle",
+        &[PyRep::Integer(1), PyRep::String("Fleet Ops".into()), PyRep::Integer(256)],
+        &kw,
+    )
+    .await;
+    assert_eq!(
+        upd_title.dict_get("titleName"),
+        Some(&PyRep::String("Fleet Ops".into()))
+    );
+    let titles_rep = wire_session_call_ok(&mut wire, "corpRegistry", None, "GetTitles", &[], &kw).await;
+    let PyRep::Dict(ref title_entries) = titles_rep else {
+        panic!("corpRegistry.GetTitles must return Dict<titleID, util.Row>: {titles_rep:?}");
+    };
+    assert_eq!(title_entries.len(), 16);
+    assert!(matches!(
+        &title_entries[0].1,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(
+        title_entries[0].1.dict_get("titleName"),
+        Some(&PyRep::String("Fleet Ops".into()))
+    );
+    assert_contract_enforcing(&ctx, "corpRegistry.GetTitles", &titles_rep);
+
+    // 3. corpRegistry.GetMembersPaged natively emits PagedResultSet wrapping 24-col dbutil.CRowset.
+    let members_rep = wire_session_call_ok(
+        &mut wire,
+        "corpRegistry",
+        None,
+        "GetMembersPaged",
+        &[PyRep::Integer(corp_id)],
+        &kw,
+    )
+    .await;
+    let PyRep::ObjectEx { is_type_2: false, ref header, .. } = members_rep else {
+        panic!("GetMembersPaged must return PagedResultSet ObjectEx: {members_rep:?}");
+    };
+    let PyRep::Tuple(ref h_parts) = **header else { panic!("expected Tuple header") };
+    let PyRep::Tuple(ref h_args) = h_parts[1] else { panic!("expected Tuple args") };
+    assert!(h_args[0].is_crowset(), "GetMembersPaged inner collection must be CRowset");
+    assert_contract_enforcing(&ctx, "corpRegistry.GetMembersPaged", &members_rep);
+
+    // 4. ship.GetShipFittingInfo natively emits 4-tuple (cpuLoad, cpuOutput, powerLoad, powerOutput).
+    let fit_rep = wire_session_call_ok(
+        &mut wire,
+        "ship",
+        None,
+        "GetShipFittingInfo",
+        &[
+            PyRep::Integer(i64::from(RIFTER_TYPE_ID)),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(2048),
+                PyRep::Integer(11),
+                PyRep::Integer(1),
+            ])]),
+        ],
+        &kw,
+    )
+    .await;
+    let PyRep::Tuple(ref fit_vals) = fit_rep else {
+        panic!("ship.GetShipFittingInfo must return 4-tuple natively: {fit_rep:?}");
+    };
+    assert_eq!(fit_vals.len(), 4);
+    assert!(fit_vals[0].as_f64().is_some_and(|v| v > 0.0));
+    assert_contract_enforcing(&ctx, "ship.GetShipFittingInfo", &fit_rep);
+
+    // 5. Migrated dispatch-layer bound_object_rep wrapping works over ClientWireSession.
+    let skill_rep = wire_session_call_ok(&mut wire, "skillMgr2", None, "GetMySkillHandler", &[], &kw).await;
+    let skill_bid = extract_bound_id_from_wire_rep(&skill_rep)
+        .expect("skillMgr2.GetMySkillHandler wire SubStruct bound id");
+    assert!(ctx.verify_bound_object(&wire.session, skill_bid).is_ok());
+
+    let bind_inv = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        None,
+        "MachoBindObject",
+        &[PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(15)]), PyRep::None],
+        &kw,
+    )
+    .await;
+    let mgr_bid = extract_bound_id_from_wire_rep(&bind_inv).expect("invbroker mgr bound id");
+    let hangar_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        Some(mgr_bid),
+        "GetInventory",
+        &[PyRep::Integer(10_004), PyRep::None],
+        &kw,
+    )
+    .await;
+    assert!(extract_bound_id_from_wire_rep(&hangar_rep).is_some());
+    let ship_inv_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        Some(mgr_bid),
+        "GetInventoryFromId",
+        &[PyRep::Integer(ship_id), PyRep::Integer(0)],
+        &kw,
+    )
+    .await;
+    assert!(extract_bound_id_from_wire_rep(&ship_inv_rep).is_some());
+
+    let trade_rep = wire_session_call_ok(
+        &mut wire,
+        "trademgr",
+        None,
+        "InitiateTrade",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+    )
+    .await;
+    let trade_bid = extract_bound_id_from_wire_rep(&trade_rep)
+        .expect("trademgr.InitiateTrade wire SubStruct bound id");
+    assert!(ctx.verify_bound_object(&wire.session, trade_bid).is_ok());
+
+    eve_testkit::attest(&[
+        "rpc:corpRegistry.GetCorporation",
+        "rpc:corpRegistry.GetTitles",
+        "rpc:corpRegistry.GetMembersPaged",
+        "rpc:ship.GetShipFittingInfo",
+        "rpc:skillMgr2.GetMySkillHandler",
+        "rpc:trademgr.InitiateTrade",
+    ]);
+}

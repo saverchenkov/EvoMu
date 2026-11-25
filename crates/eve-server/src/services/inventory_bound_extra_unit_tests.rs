@@ -68,7 +68,7 @@ fn call_invbroker(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle(ctx, session, bound, "invbroker", method, args, Some("trace"))
+    handle(ctx, session, bound, "invbroker", method, args)
 }
 
 fn call_i2(
@@ -79,7 +79,7 @@ fn call_i2(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let svc = i2_svc_name();
-    handle(ctx, session, bound, &svc, method, args, Some("trace"))
+    handle(ctx, session, bound, &svc, method, args)
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn routing_i2_bound_fallback_and_item_to_packed_cells_branches() {
         role: 0x7FFF_FFFF_FFFF_FFFF,
         ..Default::default()
     };
-    assert!(handle(&ctx, &gm_sess, None, "dogmaIM", "GetAllInfo", &[], None).is_none());
+    assert!(handle(&ctx, &gm_sess, None, "dogmaIM", "GetAllInfo", &[]).is_none());
     assert!(call_invbroker(&ctx, &gm_sess, None, "List", &[]).is_none());
     assert!(call_i2(&ctx, &gm_sess, None, "List", &[]).is_none());
 

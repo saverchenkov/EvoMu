@@ -451,7 +451,7 @@ fn wave2_pending_role_promotion_allow_war_division_aliases_and_account_take_role
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.fleet_and_social_ops.corp_allow_war.get(&98_000_001), Some(&false));
     });
-    let PyRep::KeyVal(pub_info) = handle_corps(
+    let pub_info = handle_corps(
         &ctx,
         &mut ceo_sess,
         "corpRegistry",
@@ -460,9 +460,13 @@ fn wave2_pending_role_promotion_allow_war_division_aliases_and_account_take_role
         &kw,
     )
     .unwrap()
-    .unwrap() else { panic!() };
-    assert_eq!(pub_info.get("allowWar").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(pub_info.get("friendlyFire").and_then(|v| v.as_bool()), Some(true));
+    .unwrap();
+    assert!(matches!(
+        &pub_info,
+        PyRep::Object { type_name, .. } if type_name == "util.Row"
+    ));
+    assert_eq!(pub_info.dict_get("allowWar").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(pub_info.dict_get("friendlyFire").and_then(|v| v.as_bool()), Some(true));
     let ceo_notes = ctx.drain_notifications_for_char(90_000_001);
     assert!(ceo_notes.iter().any(|n| n.event == "OnCorporationChanged"));
     assert!(ceo_notes.iter().any(|n| n.event == "OnAllowWarUpdated"));

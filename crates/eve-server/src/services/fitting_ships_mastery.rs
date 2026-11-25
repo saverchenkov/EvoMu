@@ -1911,21 +1911,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             let cpu_out = eval_ctx.ship.get_attribute(attr_ids::CPU_OUTPUT, &ctx.sde);
             let pwg_load = eval_ctx.ship.get_attribute(attr_ids::POWER_LOAD, &ctx.sde);
             let pwg_out = eval_ctx.ship.get_attribute(attr_ids::POWER_OUTPUT, &ctx.sde);
-            let max_vel = eval_ctx.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-            let shield_cap = eval_ctx.ship.get_attribute(attr_ids::SHIELD_CAPACITY, &ctx.sde);
-            let armor_hp = eval_ctx.ship.get_attribute(attr_ids::ARMOR_HP, &ctx.sde);
-            let hull_hp = eval_ctx.ship.get_attribute(9, &ctx.sde);
-            Some(Ok(PyRep::keyval([
-                ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
-                ("simulated", PyRep::Bool(true)),
-                ("cpuLoad", PyRep::Real(cpu_load)),
-                ("cpuOutput", PyRep::Real(cpu_out)),
-                ("powerLoad", PyRep::Real(pwg_load)),
-                ("powerOutput", PyRep::Real(pwg_out)),
-                ("maxVelocity", PyRep::Real(max_vel)),
-                ("shieldCapacity", PyRep::Real(shield_cap)),
-                ("armorHP", PyRep::Real(armor_hp)),
-                ("hullHP", PyRep::Real(hull_hp)),
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Real(cpu_load),
+                PyRep::Real(cpu_out),
+                PyRep::Real(pwg_load),
+                PyRep::Real(pwg_out),
             ])))
         }
 

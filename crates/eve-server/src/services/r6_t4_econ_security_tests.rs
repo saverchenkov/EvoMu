@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::client_compat::{normalize_macho_notification, normalize_macho_rpc_reply};
+use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use eve_db::{
     corp_roles, service_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
@@ -58,19 +58,6 @@ fn make_session(user_id: u64, char_id: i64, corp_id: i64, station_id: i64, corp_
 
 #[test]
 fn test_402_quasar_normalization_preserves_authoritative_backend_replies_and_notices() {
-    let fit = normalize_macho_rpc_reply(
-        "ship",
-        "GetShipFittingInfo",
-        Ok(PyRep::keyval([
-            ("cpuLoad", PyRep::Real(44.5)),
-            ("cpuOutput", PyRep::Real(210.0)),
-            ("powerLoad", PyRep::Real(18.0)),
-            ("powerOutput", PyRep::Real(65.0)),
-        ])),
-    )
-    .unwrap();
-    assert_eq!(fit, PyRep::Tuple(vec![PyRep::Real(44.5), PyRep::Real(210.0), PyRep::Real(18.0), PyRep::Real(65.0)]));
-
     let bm_notif = vec![PyRep::List(vec![PyRep::keyval([("folderID", PyRep::Integer(8801))])])];
     assert_eq!(normalize_macho_notification("OnSharedBookmarksFolderUpdated", bm_notif.clone()), bm_notif);
     let mod_notif = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::List(vec![PyRep::Integer(700_009)])]);

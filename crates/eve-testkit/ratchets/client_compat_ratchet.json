@@ -2,7 +2,7 @@
   "version": 2,
   "counters": {
     "rpc_rules": {
-      "crates/eve-server/src/router/client_compat.rs": 17
+      "crates/eve-server/src/router/client_compat.rs": 13
     },
     "suppress_rules": {
       "crates/eve-server/src/router/client_compat.rs": 5
@@ -14,7 +14,7 @@
       "crates/eve-server/src/router/client_compat.rs": 4
     },
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 1723
+      "crates/eve-server/src/router/client_compat.rs": 1582
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -30,15 +30,15 @@
       "crates/eve-server/src/quasar_grpc_extra_unit_tests.rs": 6,
       "crates/eve-server/src/quasar_grpc_notifications_and_errors_unit_tests.rs": 35,
       "crates/eve-server/src/quasar_grpc_payload_and_jwt_unit_tests.rs": 16,
-      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 7,
-      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 39,
+      "crates/eve-server/src/quasar_grpc_unit_tests.rs": 6,
+      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 34,
       "crates/eve-server/src/router/client_compat_extra_tests.rs": 64,
       "crates/eve-server/src/router/notify_registry_tests.rs": 1,
       "crates/eve-server/src/server_core_cov_unit_tests.rs": 9,
       "crates/eve-server/src/services/contracts_service_tests.rs": 1,
       "crates/eve-server/src/services/industry_facilities_bps_unit_tests.rs": 1,
       "crates/eve-server/src/services/market_price_history_tests.rs": 1,
-      "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 5,
+      "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 4,
       "crates/eve-server/src/services/station_structure_handlers_extra_unit_tests.rs": 1,
       "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 4,
       "crates/eve-server/tests/it/navigation_warp_tunnel_immobility.rs": 1,
@@ -46,12 +46,9 @@
       "crates/eve-server/tests/it/rpc_client_contracts.rs": 1
     },
     "service_caller_trace_comparisons": {},
-    "service_caller_trace_params": {
-      "crates/eve-server/src/services/client_login.rs": 1,
-      "crates/eve-server/src/services/inventory_bound.rs": 1
-    }
+    "service_caller_trace_params": {}
   },
-  "max_transport_differing_replies": 30,
+  "max_transport_differing_replies": 27,
   "known_rules": [
     "destiny:payload:CloakBall",
     "destiny:payload:OnSlimItemChange",
@@ -97,9 +94,6 @@
     "rpc:agentMgr.GetAgentLocationWrap",
     "rpc:agentMgr.GetMissionBriefingInfo",
     "rpc:agentMgr.GetOffer",
-    "rpc:corpRegistry.GetCorporation",
-    "rpc:corpRegistry.GetMembersPaged",
-    "rpc:corpRegistry.GetTitles",
     "rpc:dogmaIM.AddTarget",
     "rpc:dungeonInstanceCacheMgr.GetCombatAnomalyInstances",
     "rpc:dungeonInstanceCacheMgr.GetFactionWarfareBattlefieldInstances",
@@ -111,11 +105,7 @@
     "rpc:entity.CmdReturnAndOrbit",
     "rpc:entity.CmdReturnBay",
     "rpc:entity.CmdReturnHome",
-    "rpc:machoNet.GetCorporation",
-    "rpc:machoNet.GetMembersPaged",
-    "rpc:machoNet.GetTitles",
     "rpc:reprocessingSvc.Reprocess",
-    "rpc:ship.GetShipFittingInfo",
     "rpc:structureDirectory.GetCorporationStructures",
     "rpc:structureDirectory.GetJumpBridgesWithMyAccess",
     "rpc:structureDirectory.GetMyCharacterStructures",
@@ -129,10 +119,7 @@
     "suppress:OnSessionChanged",
     "suppress:OnTarget"
   ],
-  "allowed_service_caller_trace_files": [
-    "crates/eve-server/src/services/client_login.rs",
-    "crates/eve-server/src/services/inventory_bound.rs"
-  ],
+  "allowed_service_caller_trace_files": [],
   "allowed_it_dispatch_rpc_files": [
     "abyssal_and_void_space_suite.rs",
     "abyssal_deadspace.rs",

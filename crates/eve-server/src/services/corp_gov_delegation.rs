@@ -490,10 +490,25 @@ pub(crate) fn handle_get_titles(
             }
         }
     });
-    let rows: Vec<Vec<PyRep>> = by_id
+    let header: Vec<PyRep> = [
+        "titleID",
+        "titleName",
+        "roles",
+        "grantableRoles",
+        "rolesAtHQ",
+        "grantableRolesAtHQ",
+        "rolesAtBase",
+        "grantableRolesAtBase",
+        "rolesAtOther",
+        "grantableRolesAtOther",
+    ]
+    .into_iter()
+    .map(|col| PyRep::String(col.into()))
+    .collect();
+    let entries: Vec<(PyRep, PyRep)> = by_id
         .into_iter()
         .map(|(tid, (tname, masks))| {
-            vec![
+            let line = vec![
                 PyRep::Integer(tid),
                 PyRep::String(tname),
                 PyRep::Integer(masks[0] as i64),
@@ -504,24 +519,18 @@ pub(crate) fn handle_get_titles(
                 PyRep::Integer(masks[5] as i64),
                 PyRep::Integer(masks[6] as i64),
                 PyRep::Integer(masks[7] as i64),
-            ]
+            ];
+            let row_obj = PyRep::Object {
+                type_name: "util.Row".into(),
+                args: Box::new(PyRep::Tuple(vec![
+                    PyRep::List(header.clone()),
+                    PyRep::List(line),
+                ])),
+            };
+            (PyRep::Integer(tid), row_obj)
         })
         .collect();
-    Some(Ok(PyRep::rowset(
-        vec![
-            "titleID",
-            "titleName",
-            "roles",
-            "grantableRoles",
-            "rolesAtHQ",
-            "grantableRolesAtHQ",
-            "rolesAtBase",
-            "grantableRolesAtBase",
-            "rolesAtOther",
-            "grantableRolesAtOther",
-        ],
-        rows,
-    )))
+    Some(Ok(PyRep::Dict(entries)))
 }
 
 pub(crate) fn handle_get_recruiters(

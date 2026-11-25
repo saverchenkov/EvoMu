@@ -1760,7 +1760,6 @@ async fn venture_station_hangar_and_active_cargo_capacity_for_issue_1301() {
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(active_venture), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_ok());
@@ -1875,7 +1874,6 @@ async fn venture_station_hangar_and_active_cargo_capacity_for_issue_1301() {
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(spare_venture), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_ok());
@@ -2234,7 +2232,6 @@ async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_clo
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(foreign_space_carrier), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_err());
@@ -2245,7 +2242,6 @@ async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_clo
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .unwrap()
     .is_err());
@@ -2431,7 +2427,6 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(fh_box), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_err());
@@ -2468,7 +2463,6 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(fh_box), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_ok());
@@ -2479,7 +2473,6 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
         "invbroker",
         "GetSelfInvItem",
         &[],
-        None,
     )
     .unwrap()
     .expect("GetSelfInvItem on nested box inside unlocked foreign FleetHangar");
@@ -2547,7 +2540,6 @@ async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() 
         "invbroker",
         "GetInventoryFromId",
         &[PyRep::Integer(fh_box), PyRep::Integer(0)],
-        None,
     )
     .unwrap()
     .is_err());
@@ -2723,18 +2715,17 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
                 "invbroker",
                 "GetInventoryFromId",
                 &[PyRep::Integer(target), PyRep::Integer(0)],
-                None,
             )
             .unwrap()
             .is_ok(),
             "GetInventoryFromId({target}) must succeed at 1,950m surface range without Tokio runtime"
         );
     }
-    let titan_row = crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&titan_bound), "invbroker", "GetSelfInvItem", &[], None)
+    let titan_row = crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&titan_bound), "invbroker", "GetSelfInvItem", &[])
         .unwrap()
         .expect("GetSelfInvItem on foreign Titan");
     assert_eq!(dbrow_i64(&titan_row, "itemID"), Some(owner_titan));
-    let box_row = crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&box_bound), "invbroker", "GetSelfInvItem", &[], None)
+    let box_row = crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&box_bound), "invbroker", "GetSelfInvItem", &[])
         .unwrap()
         .expect("GetSelfInvItem on nested box inside foreign Titan");
     assert_eq!(dbrow_i64(&box_row, "itemID"), Some(titan_fh_box));
@@ -2762,7 +2753,6 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
             "invbroker",
             "GetInventoryFromId",
             &[PyRep::Integer(owner_titan), PyRep::Integer(0)],
-            None,
         )
         .unwrap()
         .unwrap_err()
@@ -2770,7 +2760,7 @@ fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
         "InventoryNotAccessible"
     );
     assert!(
-        crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&box_bound), "invbroker", "GetSelfInvItem", &[], None)
+        crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&box_bound), "invbroker", "GetSelfInvItem", &[])
             .unwrap()
             .is_err()
     );
