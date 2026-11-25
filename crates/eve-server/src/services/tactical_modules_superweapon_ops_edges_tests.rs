@@ -2358,8 +2358,8 @@ async fn emit_superweapon_fuel_diffs_cross_owner_transfer_scopes_clearance_bf148
     assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
-#[test]
-fn superweapon_fuel_skips_lower_id_bpc_and_consumes_valid_commodity() {
+#[tokio::test]
+async fn superweapon_fuel_skips_lower_id_bpc_and_consumes_valid_commodity() {
     let ctx = test_ctx();
     let null_sys = find_nullsec_sys(&ctx.sde);
     let char_id = 90_000_001_i64;

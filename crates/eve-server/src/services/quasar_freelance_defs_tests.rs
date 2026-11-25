@@ -612,14 +612,14 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
         det.creator_id = cid;
         det.created_unix = now;
         det.status = "Active".into();
-        det.filter_id = Some(999_123);
+        det.filter_id = Some(999_124);
         det.batch_size = 10;
         det.max_per_character = Some(10);
         det.uuid_bytes = uuid_bpc.clone();
         det.committed_participants.push(cid);
         s.alliance_war_state.project_details.insert(pid_bpc, det);
-        s.items.insert(910_090, InventoryItemRecord { item_id: 910_090, type_id: 999_123, owner_id: cid, location_id: station_id, flag: InventoryFlag::Hangar, quantity: 10, is_blueprint_copy: true, ..Default::default() });
-        s.items.insert(910_091, InventoryItemRecord { item_id: 910_091, type_id: 999_123, owner_id: cid, location_id: station_id, flag: InventoryFlag::Hangar, quantity: 10, ..Default::default() });
+        s.items.insert(910_090, InventoryItemRecord { item_id: 910_090, type_id: 999_124, owner_id: cid, location_id: station_id, flag: InventoryFlag::Hangar, quantity: 10, is_blueprint_copy: true, ..Default::default() });
+        s.items.insert(910_091, InventoryItemRecord { item_id: 910_091, type_id: 999_124, owner_id: cid, location_id: station_id, flag: InventoryFlag::Hangar, quantity: 10, ..Default::default() });
     });
     let auto_req = pb::message("eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest")
         .set("project.uuid", uuid_bpc)
