@@ -935,3 +935,40 @@ async fn finalize_safe_logoff_flushes_staged_dispatch_notifications_before_chars
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step_system_ai_and_combat_bounded_enforces_deadline_when_sync_npc_ai_stalls() {
+    use std::time::Duration;
+
+    let ctx = seeded_downtime_ctx();
+    let sys_id = 30_000_142_u32;
+    let handle = ctx.systems.get_or_spawn(sys_id);
+
+    // Hold `npc_spawns` write lock on a background thread so `step_system_ai_and_combat_bounded`'s
+    // synchronous `spawn_blocking` AI/spawns check stalls until released (`step_combat_system`
+    // does not touch `npc_spawns`), verifying the bounded timeout returns promptly at `deadline`.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let npc_spawns = Arc::clone(&ctx.npc_spawns);
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = npc_spawns.write().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+    });
+    held_rx.recv().unwrap();
+
+    let deadline = Duration::from_millis(80);
+    let started = std::time::Instant::now();
+    super::step_system_ai_and_combat_bounded(&ctx, &handle, sys_id, deadline).await;
+    let elapsed = started.elapsed();
+
+    let _ = release_tx.send(());
+    lock_thread.join().unwrap();
+
+    assert!(
+        elapsed >= deadline.saturating_sub(Duration::from_millis(25))
+            && elapsed < Duration::from_millis(750),
+        "step_system_ai_and_combat_bounded must return promptly past deadline={deadline:?}, got {elapsed:?}"
+    );
+}
+
+

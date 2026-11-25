@@ -88,6 +88,7 @@ pub struct SessionWireState {
     guard: SequencerGuardState,
     synthetic_remove_floor: Option<(u32, u32)>,
     last_wire_epoch_and_stamp: Option<(u32, u32)>,
+    awaiting_tick_set_state_resync: bool,
     pub(crate) held_frames: VecDeque<HeldSceneFrame>,
     pub(crate) scene_drop_count: u64,
 }
@@ -109,6 +110,7 @@ impl SessionWireState {
             guard: SequencerGuardState::default(),
             synthetic_remove_floor: None,
             last_wire_epoch_and_stamp: None,
+            awaiting_tick_set_state_resync: false,
             held_frames: VecDeque::new(),
             scene_drop_count: 0,
         }
@@ -233,6 +235,7 @@ impl SessionWireState {
         self.guard.reset_epoch_state();
         self.synthetic_remove_floor = None;
         self.last_wire_epoch_and_stamp = None;
+        self.awaiting_tick_set_state_resync = false;
         self.destiny = DestinyStream::AwaitingSetState { epoch: ep };
         ep
     }
@@ -271,6 +274,7 @@ impl SessionWireState {
         self.guard.reset_epoch_state();
         self.synthetic_remove_floor = None;
         self.last_wire_epoch_and_stamp = None;
+        self.awaiting_tick_set_state_resync = false;
         self.destiny = DestinyStream::Detached;
     }
 
@@ -305,12 +309,43 @@ impl SessionWireState {
     pub fn on_broadcast_lagged(&mut self) -> Option<u32> {
         match self.destiny {
             DestinyStream::Detached => None,
-            DestinyStream::AwaitingSetState { epoch } | DestinyStream::Live { epoch, .. } => {
+            DestinyStream::AwaitingSetState { epoch } => {
                 self.scene_entered = false;
+                if self
+                    .last_wire_epoch_and_stamp
+                    .is_some_and(|(ep, _)| ep == epoch)
+                {
+                    self.awaiting_tick_set_state_resync = true;
+                }
+                Some(epoch)
+            }
+            DestinyStream::Live { epoch, .. } => {
+                self.scene_entered = false;
+                self.awaiting_tick_set_state_resync = true;
                 self.destiny = DestinyStream::AwaitingSetState { epoch };
                 Some(epoch)
             }
         }
+    }
+
+    /// Marks an attached `AwaitingSetState` stream for client-independent `SetState` recovery on
+    /// the next live tick (e.g. post-commit Upwell `Undock` or in-space ship swap ask timeouts
+    /// after `enter_space` cleared `last_wire_epoch_and_stamp`, `BF-1170-R2-02`).
+    pub fn mark_awaiting_tick_set_state_resync(&mut self) {
+        if matches!(self.destiny, DestinyStream::AwaitingSetState { .. }) {
+            self.awaiting_tick_set_state_resync = true;
+        }
+    }
+
+    /// Returns `true` when this stream is currently paused in `AwaitingSetState { epoch }` and
+    /// requires snapshot `SetState` recovery on the next live tick (`BF-1170-R2-02`).
+    pub fn needs_awaiting_set_state_resync(&self) -> bool {
+        matches!(
+            self.destiny,
+            DestinyStream::AwaitingSetState { epoch }
+                if self.awaiting_tick_set_state_resync
+                    || self.last_wire_epoch_and_stamp.is_some_and(|(ep, _)| ep == epoch)
+        )
     }
 }
 
@@ -420,6 +455,7 @@ impl SessionWireState {
                 };
                 self.scene_entered = true;
                 self.last_wire_epoch_and_stamp = Some((epoch, wire_stamp));
+                self.awaiting_tick_set_state_resync = false;
                 AcceptDestinyOutcome::Accepted(batch)
             }
             DestinyStream::Live {
@@ -448,6 +484,7 @@ impl SessionWireState {
                         last_stamp: wire_stamp,
                     };
                     self.last_wire_epoch_and_stamp = Some((epoch, wire_stamp));
+                    self.awaiting_tick_set_state_resync = false;
                     AcceptDestinyOutcome::Accepted(batch)
                 } else {
                     let trusted_stamp = last_stamp.max(set_state_stamp);

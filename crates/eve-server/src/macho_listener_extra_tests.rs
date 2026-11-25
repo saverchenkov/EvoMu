@@ -372,7 +372,7 @@ async fn test_empty_ping_non_packet_frames_async_notifications_and_revocation() 
     }
 }
 
-fn decode_wrapped_user_error(body: PyRep) -> (String, Vec<(String, PyRep)>) {
+pub(super) fn decode_wrapped_user_error(body: PyRep) -> (String, Vec<(String, PyRep)>) {
     let PyRep::Tuple(parts) = body else {
         panic!("expected ErrorResponse tuple body, got {body:?}");
     };
@@ -2125,7 +2125,7 @@ async fn test_1172_notify_rx_ship_swap_broadcast_lagged_triggers_set_state_resyn
     }
 
     let sync = sync_in_space_ship_swap_destiny(
-        &ctx,
+        &ctx, &sys_handle,
         &mut sys_rx,
         &mut wire_state,
         11_723,

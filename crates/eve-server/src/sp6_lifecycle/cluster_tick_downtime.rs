@@ -700,6 +700,95 @@ fn finalize_safe_logoff_sessions_inner<F>(
     }
 }
 
+pub(super) fn warn_sync_deadline_overrun(
+    kind: &'static str,
+    sys_id: Option<u32>,
+    tick_secs: Option<u64>,
+    elapsed: std::time::Duration,
+    budget: std::time::Duration,
+) {
+    if elapsed > budget {
+        tracing::warn!(
+            solar_system_id = ?sys_id,
+            tick_secs = ?tick_secs,
+            elapsed_ms = elapsed.as_millis() as u64,
+            budget_ms = budget.as_millis() as u64,
+            "{kind} exceeded deadline budget"
+        );
+    }
+}
+
+/// Runs synchronous per-system NPC AI/spawns off the Tokio worker pool under a bounded timeout and logs deadline budget overruns on `step_combat_system` (`#1170`, `#1208`).
+pub(super) async fn step_system_ai_and_combat_bounded(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    sys_id: eve_sde::SolarSystemId,
+    deadline: std::time::Duration,
+) {
+    let step_start = std::time::Instant::now();
+    let ctx_ai = ctx.clone();
+    let handle_ai = handle.clone();
+    let npc_ai_start = std::time::Instant::now();
+    match tokio::time::timeout(
+        deadline,
+        tokio::task::spawn_blocking(move || {
+            let _tick_scope =
+                crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&ctx_ai.db));
+            crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
+                &ctx_ai, sys_id,
+            );
+            let has_spawns = ctx_ai
+                .npc_spawns
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&sys_id)
+                .is_some_and(|mgr| !mgr.entities.is_empty());
+            if has_spawns {
+                let tick = handle_ai.view().current_tick;
+                let tidi =
+                    crate::services::serverops_cluster::get_system_tidi_factor(&ctx_ai, sys_id);
+                crate::combat::npc_ai::step_system_npc_spawns_ai_sync(
+                    &ctx_ai,
+                    sys_id,
+                    tick,
+                    1.0 * tidi,
+                );
+            }
+        }),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(join_err)) => {
+            tracing::error!(
+                solar_system_id = sys_id,
+                error = %join_err,
+                "per-system NPC AI blocking step panicked"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                solar_system_id = sys_id,
+                elapsed_ms = npc_ai_start.elapsed().as_millis() as u64,
+                timeout_ms = deadline.as_millis() as u64,
+                "per-system NPC AI / spawns step exceeded deadline timeout"
+            );
+        }
+    }
+    // Run `step_combat_system` outside cancellation so multi-step missile/structure damage and
+    // `on_ball_destroyed` commits cannot be aborted mid-`.await` (`P2-1`), logging budget overruns.
+    let remaining_budget = deadline.saturating_sub(step_start.elapsed());
+    let combat_step_start = std::time::Instant::now();
+    crate::services::combat_crimewatch::step_combat_system(ctx, sys_id, 1.0).await;
+    warn_sync_deadline_overrun(
+        "step_combat_system",
+        Some(sys_id),
+        None,
+        combat_step_start.elapsed(),
+        remaining_budget,
+    );
+}
+
 #[cfg(test)]
 #[path = "downtime_cleanup_tests.rs"]
 mod downtime_cleanup_tests;

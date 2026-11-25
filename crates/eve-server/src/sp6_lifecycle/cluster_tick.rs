@@ -1683,6 +1683,7 @@ pub fn on_advance_secs_internal(
         for _ in 0..step_iters {
             if step_active_npc_ai_sync && !dedicated_physics_active {
                 for (&sys_id, handle) in &active_systems {
+                    let sync_start = std::time::Instant::now();
                     crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
                     let has_spawns = {
                         ctx.npc_spawns
@@ -1695,6 +1696,13 @@ pub fn on_advance_secs_internal(
                         let tick = handle.view().current_tick;
                         crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0);
                     }
+                    super::cluster_tick_downtime::warn_sync_deadline_overrun(
+                        "catch-up synchronous NPC AI/spawns step",
+                        Some(sys_id),
+                        None,
+                        sync_start.elapsed(),
+                        SYSTEM_STEP_ASK_TIMEOUT,
+                    );
                 }
             }
             for (&sys_id, handle) in &disconnected_systems {
@@ -2292,7 +2300,15 @@ async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_s
     // - `sync_all_alliance_timers`
     // - `sync_all_structures`
     if tick_secs > 0 {
+        let pipeline_start = std::time::Instant::now();
         ctx.run_clock_advanced_sync_pipeline(prev, tick_secs, false, false);
+        super::cluster_tick_downtime::warn_sync_deadline_overrun(
+            "cluster tick synchronous clock-advance pipeline",
+            None,
+            Some(tick_secs),
+            pipeline_start.elapsed(),
+            SYSTEM_STEP_ASK_TIMEOUT,
+        );
     }
     crate::services::industry_pi::pi_helpers::tick_all_colonies_background(ctx, now_unix);
 
@@ -2758,38 +2774,13 @@ async fn step_single_system_physics_step_with_lateness(
         let stepped_tick = step_output.tick;
         // Run synchronous NPC AI / deployables off the Tokio async worker pool under timeout so
         // heavy systems neither starve async RPC/actor tasks nor defeat `SYSTEM_STEP_ASK_TIMEOUT` (`#1208`).
-        let ctx_ai = ctx.clone();
-        let handle_ai = handle.clone();
-        let _ = tokio::time::timeout(
+        super::cluster_tick_downtime::step_system_ai_and_combat_bounded(
+            ctx,
+            handle,
+            sys_id,
             SYSTEM_STEP_ASK_TIMEOUT,
-            tokio::task::spawn_blocking(move || {
-                let _tick_scope = crate::router::delta_item_compare::enter_compare_tick_sync_scope(Some(&ctx_ai.db));
-                crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
-                    &ctx_ai, sys_id,
-                );
-                let has_spawns = ctx_ai
-                    .npc_spawns
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&sys_id)
-                    .is_some_and(|mgr| !mgr.entities.is_empty());
-                if has_spawns {
-                    let tick = handle_ai.view().current_tick;
-                    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(
-                        &ctx_ai, sys_id,
-                    );
-                    crate::combat::npc_ai::step_system_npc_spawns_ai_sync(
-                        &ctx_ai,
-                        sys_id,
-                        tick,
-                        1.0 * tidi,
-                    );
-                }
-            }),
         )
         .await;
-        // NOTE (#1079 merge hook): missile flight, breacher DoTs, and self-destruct progress follow sim clock in step_combat_system.
-        let _ = crate::services::combat_crimewatch::step_combat_system(ctx, sys_id, 1.0).await;
         let ticker_active = ctx
             .dedicated_physics_ticker_active
             .load(std::sync::atomic::Ordering::Acquire);
