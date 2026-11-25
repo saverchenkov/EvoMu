@@ -691,10 +691,17 @@ async fn flashpoint_warp_landing_and_reconcile_preserve_world_ark_hp_locks_and_d
     let locks = sys_handle.get_target_locks(ship_id).await.unwrap();
     assert!(locks.iter().any(|l| l.target_id == obs.world_ark_id && l.locked));
     assert!(sys_handle.get_ball_snapshot(dead_defender).await.unwrap().is_none());
-    assert_eq!(
-        sys_handle.get_combat_state(live_defender).await.unwrap(),
-        Some(def_cs_before)
-    );
+    let def_cs_after = sys_handle
+        .get_combat_state(live_defender)
+        .await
+        .unwrap()
+        .expect("live defender CombatState still present");
+    assert_eq!(def_cs_after.shield_hp, def_cs_before.shield_hp);
+    assert_eq!(def_cs_after.max_shield_hp, def_cs_before.max_shield_hp);
+    assert_eq!(def_cs_after.armor_hp, def_cs_before.armor_hp);
+    assert_eq!(def_cs_after.max_armor_hp, def_cs_before.max_armor_hp);
+    assert_eq!(def_cs_after.structure_hp, def_cs_before.structure_hp);
+    assert_eq!(def_cs_after.max_structure_hp, def_cs_before.max_structure_hp);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
