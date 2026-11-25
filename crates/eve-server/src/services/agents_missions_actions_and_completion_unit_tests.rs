@@ -118,10 +118,16 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     assert_eq!(research[0].dict_get("points"), Some(&PyRep::Real(200.0)));
 
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, char_id, mid_exp_offer).unwrap().state, "Expired");
-        let exp_accept = mission_fixture::get(snap, char_id, mid_exp_accept).unwrap();
-        assert_eq!(exp_accept.state, "Failed");
-        assert_eq!(exp_accept.npcs_remaining, 0);
+        assert!(mission_fixture::get(snap, char_id, mid_exp_offer).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid_exp_offer).as_deref(),
+            Some("Expired")
+        );
+        assert!(mission_fixture::get(snap, char_id, mid_exp_accept).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid_exp_accept).as_deref(),
+            Some("Failed")
+        );
     });
 
     let obj_info = call_agent_mgr(
@@ -341,7 +347,11 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         "MissionExpired"
     );
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, char_id, mid).unwrap().state, "Failed");
+        assert!(mission_fixture::get(snap, char_id, mid).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid).as_deref(),
+            Some("Failed")
+        );
         assert!((snap.characters[&char_id].standings[&ag.agent_id] - 4.90).abs() < 1e-6);
     });
 
@@ -2990,15 +3000,18 @@ async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
     assert_eq!(accept_err.code, "MissionExpired");
 
     ctx.db.with_snapshot(|snap| {
-        let offer_m = mission_fixture::get(snap, char_id, mid_offer).expect("offer mission");
-        assert_eq!(offer_m.state, "Expired");
-        assert_eq!(offer_m.bookmark_id, None);
+        assert!(mission_fixture::get(snap, char_id, mid_offer).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid_offer).as_deref(),
+            Some("Expired")
+        );
         assert!(!snap.bookmarks.contains_key(&bm_offer));
 
-        let accept_m = mission_fixture::get(snap, char_id, mid_accept).expect("accept mission");
-        assert_eq!(accept_m.state, "Failed");
-        assert_eq!(accept_m.npcs_remaining, 0);
-        assert_eq!(accept_m.bookmark_id, None);
+        assert!(mission_fixture::get(snap, char_id, mid_accept).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid_accept).as_deref(),
+            Some("Failed")
+        );
         assert!(!snap.bookmarks.contains_key(&bm_accept));
     });
 

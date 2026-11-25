@@ -384,19 +384,19 @@ fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
         .max(2)
 }
 
-/// Transitions a character's active mission state, removes any mission bookmark, and reclaims
-/// mission-scoped courier cargo.
+/// Reclaims mission-scoped courier cargo, removes any mission bookmark, and archives
+/// the character's mission instance into persistent history with terminal `new_state`.
 fn finalize_mission_state_cleanup(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
     mission_id: u32,
     new_state: MissionState,
     zero_npcs: bool,
+    ended_at_unix: u64,
 ) {
     let mut bmid = None;
     let _ = snap.missions
         .update_by_character_template(char_id, mission_id, |m| {
-            m.state = new_state;
             if zero_npcs {
                 if let Some(enc) = m.encounter_mut() {
                     enc.npcs_remaining = 0;
@@ -408,6 +408,9 @@ fn finalize_mission_state_cleanup(
         snap.bookmarks.remove(&bmid);
     }
     reclaim_courier_cargo(snap, char_id, mission_id);
+    let _ = snap
+        .missions
+        .archive_by_character_template(char_id, mission_id, new_state, ended_at_unix);
 }
 
 /// Resolves mission-specific briefing text from SDE templates, agent/corp/system/station
@@ -519,8 +522,18 @@ fn build_mission_briefing_text(
             )
         }
         MissionKind::Heraldry => {
+            let derived = tmpl_opt.map(|t| resolve_heraldry_mission_details(ctx, t));
+            let tid = req_tid
+                .or_else(|| derived.map(|d| d.ship_type_id))
+                .unwrap_or(587);
+            let qty = if req_qty > 0 {
+                req_qty
+            } else {
+                derived.map_or(1, |d| d.quantity)
+            };
+            let item = item_label(tid, "ship hull");
             format!(
-                "Heraldry commission \"{title}\" for {issuer}: complete the Paragon emblem assignment at {dropoff} in {origin_sys_name}."
+                "Heraldry commission \"{title}\" for {issuer}: deliver {qty}x {item} (packaged) to the Paragon station hangar at {dropoff} in {origin_sys_name}."
             )
         }
         MissionKind::Trade => {
@@ -854,7 +867,7 @@ pub async fn handle_with_bound(
                     })
                     .collect();
                 for (mid, target_state, zero_npcs) in expired_updates {
-                    finalize_mission_state_cleanup(snap, char_id, mid, target_state, zero_npcs);
+                    finalize_mission_state_cleanup(snap, char_id, mid, target_state, zero_npcs, now);
                 }
 
                 let mut active: Vec<MissionInstance> = snap
@@ -1015,6 +1028,23 @@ pub async fn handle_with_bound(
                     })
                 }
             };
+            let has_explicit_mission_id = args.get(1).and_then(|a| a.as_i64()).is_some()
+                || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
+                    v > 19
+                        && !ctx.sde.agents.contains_key(&v)
+                        && u32::try_from(v).is_ok_and(|mid| {
+                            ctx.sde.missions.contains_key(&mid)
+                                || ctx.db.with_snapshot(|snap| {
+                                    snap.missions.contains_character_template(char_id, mid)
+                                        || snap
+                                            .missions
+                                            .latest_history_for_character_template(char_id, mid)
+                                            .is_some()
+                                })
+                        })
+                });
+            let allow_history_lookup =
+                method == "GetMissionJournalInfo" || has_explicit_mission_id;
             let Some((m, bm_coords)) = ctx.db.with_snapshot(|snap| {
                 snap.missions
                     .get_by_character_template(char_id, mission_id)
@@ -1027,23 +1057,28 @@ pub async fn handle_with_bound(
                             .map(|b| (b.solar_system_id, b.x, b.y, b.z));
                         (m, bm_coords)
                     })
+                    .or_else(|| {
+                        if !allow_history_lookup {
+                            return None;
+                        }
+                        snap.missions
+                            .latest_history_for_character_template(char_id, mission_id)
+                            .map(|entry| {
+                                let origin_sid = ctx
+                                    .sde
+                                    .agents
+                                    .get(&entry.agent_id)
+                                    .and_then(|a| a.station_id)
+                                    .or(session.station_id);
+                                (MissionInstance::from_history_entry(entry, origin_sid), None)
+                            })
+                    })
             }) else {
                 return Some(not_active_reply(format!(
                     "Mission {mission_id} is not active for character {char_id}"
                 )));
             };
-            let has_explicit_mission_id = args.get(1).and_then(|a| a.as_i64()).is_some()
-                || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
-                    v > 19
-                        && !ctx.sde.agents.contains_key(&v)
-                        && u32::try_from(v).is_ok_and(|mid| {
-                            ctx.sde.missions.contains_key(&mid)
-                                || ctx.db.with_snapshot(|snap| {
-                                    snap.missions.contains_character_template(char_id, mid)
-                                })
-                        })
-                });
-            if method != "GetMissionJournalInfo" && !has_explicit_mission_id {
+            if !allow_history_lookup {
                 if (explicit_agent && m.agent_id != agent_id) || !m.state.is_active() {
                     return Some(not_active_reply(format!(
                         "No active Offered/Accepted mission for character {char_id} with agent {agent_id}"
@@ -1082,6 +1117,7 @@ pub async fn handle_with_bound(
             let is_trade = m.kind == MissionKind::Trade;
             let is_courier = m.kind == MissionKind::Courier;
             let is_mining = m.kind == MissionKind::Mining;
+            let is_heraldry = m.kind == MissionKind::Heraldry;
             let agent_lvl = ctx.sde.agents.get(&m.agent_id).map_or(1, |a| a.level);
             let objectives = match m.kind {
                 MissionKind::ResearchTurnIn => {
@@ -1101,7 +1137,24 @@ pub async fn handle_with_bound(
                     }
                 }
                 MissionKind::Heraldry => {
-                    "Complete heraldry assignment and report back.".to_string()
+                    let derived = tmpl.map(|t| resolve_heraldry_mission_details(ctx, t));
+                    let ship_tid = req_tid_opt
+                        .or_else(|| derived.map(|d| d.ship_type_id))
+                        .unwrap_or(587);
+                    let ship_name = ctx
+                        .sde
+                        .types
+                        .get(&ship_tid)
+                        .map(|t| t.name.as_str())
+                        .unwrap_or("ship hull");
+                    let qty = if req_qty > 0 {
+                        req_qty
+                    } else {
+                        derived.map_or(1, |d| i64::from(d.quantity))
+                    };
+                    format!(
+                        "Deliver {qty}x {ship_name} (packaged) to the Paragon station hangar."
+                    )
                 }
                 MissionKind::Mining => {
                     let ore_tid = req_tid_opt.unwrap_or(1230);
@@ -1195,7 +1248,8 @@ pub async fn handle_with_bound(
                     (PyRep::String("BookmarkID".into()), m.bookmark_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ])
             };
-            let has_dungeon_site = !is_courier && !is_trade && !is_data_center && !is_rnd_turnin;
+            let has_dungeon_site =
+                !is_courier && !is_trade && !is_data_center && !is_rnd_turnin && !is_heraldry;
             let dun_sys = bm_coords
                 .map(|(sid, _, _, _)| sid)
                 .filter(|&sid| sid > 0)
@@ -1239,6 +1293,7 @@ pub async fn handle_with_bound(
                     && !is_mining
                     && !is_data_center
                     && !is_rnd_turnin
+                    && !is_heraldry
                     && m.npcs_remaining() == 0)
             {
                 1_i64
@@ -1398,7 +1453,7 @@ pub async fn handle_with_bound(
                             make_cargo_dict(cargo_tid, cargo_qty, has_transport_cargo),
                         ]),
                     ]));
-                } else if is_rnd_turnin || is_data_center || is_mining || is_trade {
+                } else if is_rnd_turnin || is_data_center || is_mining || is_trade || is_heraldry {
                     let (fetch_tid, fetch_qty) = if is_rnd_turnin {
                         (
                             i64::from(req_tid_opt.unwrap_or(34)),
@@ -1412,6 +1467,20 @@ pub async fn handle_with_bound(
                         (
                             i64::from(req_tid_opt.unwrap_or(17202)),
                             if req_qty > 0 { req_qty } else { 1 },
+                        )
+                    } else if is_heraldry {
+                        let hd = tmpl.map(|t| resolve_heraldry_mission_details(ctx, t));
+                        (
+                            i64::from(
+                                req_tid_opt
+                                    .or_else(|| hd.map(|d| d.ship_type_id))
+                                    .unwrap_or(587),
+                            ),
+                            if req_qty > 0 {
+                                req_qty
+                            } else {
+                                hd.map_or(1, |d| i64::from(d.quantity))
+                            },
                         )
                     } else if is_mining {
                         let md = tmpl.map(|t| resolve_mining_mission_details(ctx, t));
@@ -1466,6 +1535,7 @@ pub async fn handle_with_bound(
                                 is_mining,
                                 agent_station_id,
                                 active_ship_id,
+                                is_heraldry,
                             )
                         })
                     };

@@ -1293,10 +1293,10 @@ pub fn compute_reprocessing_rates_for_item_at(
                     .unwrap_or(0);
                 let has_completed_mission_for_corp = snap
                     .missions
-                    .iter_by_character(char_id)
-                    .any(|m| {
-                        m.state == eve_db::MissionState::Completed
-                            && sde.agents.get(&m.agent_id).is_some_and(|a| a.corporation_id == cid)
+                    .iter_history_by_character(char_id)
+                    .any(|e| {
+                        e.final_state == eve_db::MissionState::Completed
+                            && sde.agents.get(&e.agent_id).is_some_and(|a| a.corporation_id == cid)
                     })
                     || snap
                     .standing_transactions

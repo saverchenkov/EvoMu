@@ -63,12 +63,12 @@ fn handle_get_completed_career_agent_ids(
     // `agentID` must be mapped to `PyRep::Bool(completed)` in the returned `PyRep::Dict`.
     let completed_set: BTreeSet<i64> = ctx.db.with_snapshot(|snap| {
         snap.missions
-            .iter_by_character(char_id)
-            .filter(|m| m.state == eve_db::MissionState::Completed)
-            .filter_map(|m| {
+            .iter_history_by_character(char_id)
+            .filter(|e| e.final_state == eve_db::MissionState::Completed)
+            .filter_map(|e| {
                 ctx.sde
                     .agents
-                    .get(&m.agent_id)
+                    .get(&e.agent_id)
                     .filter(|a| a.agent_type_id == 12)
                     .map(|a| a.agent_id)
             })

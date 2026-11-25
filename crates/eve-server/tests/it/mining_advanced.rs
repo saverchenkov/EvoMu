@@ -1781,15 +1781,21 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let PyRep::List(journal_missions) = &journal_tuple[0] else { panic!("Expected List") };
     assert!(journal_missions.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.len() == 10 && t[9].as_i64() == Some(mission_id as i64) && t[0].as_i64() == Some(2))));
 
+    let (req_ore_tid, req_units) = ctx.db.with_snapshot(|snap| {
+        let meta = eve_server::services::mission_fixture::get(snap, char_id, mission_id)
+            .expect("mining mission meta");
+        (meta.required_delivery_type_id.expect("ore type"), meta.required_delivery_qty)
+    });
+    assert!(req_units > 0, "mining mission must require positive ore units");
+
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap();
-    // L1 mission 4801 ("Starting Simple") resolves to Scordite (1228) per mission_id % 4 == 1
-    assert_eq!(pocket_ast.unwrap().type_id, 1228);
+    assert_eq!(pocket_ast.unwrap().type_id, req_ore_tid);
     assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bookmark_id)));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1228));
+        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == req_ore_tid));
     });
 
     let incomplete_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await;
@@ -1797,7 +1803,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
 
     let ore_item_id = 710_000_018_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(ore_item_id, make_item(ore_item_id, 1228, char_id, station_id, InventoryFlag::Hangar, 500, false));
+        snap.items.insert(ore_item_id, make_item(ore_item_id, req_ore_tid, char_id, station_id, InventoryFlag::Hangar, req_units, false));
     });
 
     let complete_res = ctx
@@ -1805,7 +1811,8 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
         .await
         .expect("agentMgr.DoAction(Complete)");
     assert_eq!(complete_res.dict_get("missionID").and_then(|v| v.as_i64()), Some(mission_id as i64));
-    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mission_id).map(|m| m.state)).as_deref(), Some("Completed"));
+    assert!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mission_id).is_none()));
+    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::latest_history(snap, char_id, mission_id)).as_deref(), Some("Completed"));
     assert_eq!(ctx.db.with_snapshot(|snap| snap.items.get(&ore_item_id).map(|it| it.quantity).unwrap_or(0)), 0);
 
     let goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32);

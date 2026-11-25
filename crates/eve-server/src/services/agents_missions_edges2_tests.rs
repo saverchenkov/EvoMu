@@ -611,13 +611,15 @@ async fn mission_briefing_objective_journal_state_mapping_and_expiry_sweeps() {
     assert!(matches!(journal, PyRep::Tuple(_)));
 
     ctx.db.with_snapshot(|snap| {
+        assert!(mission_fixture::get(snap, char_id, 71_901).is_none());
         assert_eq!(
-            mission_fixture::get(snap, char_id, 71_901).map(|m| m.state),
-            Some("Expired".to_string())
+            mission_fixture::latest_history(snap, char_id, 71_901).as_deref(),
+            Some("Expired")
         );
+        assert!(mission_fixture::get(snap, char_id, 71_902).is_none());
         assert_eq!(
-            mission_fixture::get(snap, char_id, 71_902).map(|m| m.state),
-            Some("Failed".to_string())
+            mission_fixture::latest_history(snap, char_id, 71_902).as_deref(),
+            Some("Failed")
         );
     });
 }

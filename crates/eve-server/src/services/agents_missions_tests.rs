@@ -6,7 +6,7 @@ use super::*;
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::lp_store_catalog::PARAGON_CORP_ID;
 use crate::services::mission_fixture::{self, MissionFixture};
-use eve_db::WorldRepository;
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -224,7 +224,10 @@ async fn paragon_iris_heraldry_offer_accept_complete_lifecycle_succeeds_without_
             .contains("Heraldry"),
         "IRIS must offer a Heraldry mission, got mid={offered_mid}"
     );
-    assert_eq!(offered_meta.required_delivery_type_id, None);
+    let req_ship_tid = offered_meta
+        .required_delivery_type_id
+        .expect("Heraldry mission must specify a required ship type_id");
+    assert_eq!(offered_meta.required_delivery_qty, 1);
     assert_eq!(offered_meta.destination_station_id, None);
 
     // 2. Journal details must not classify the Heraldry mission as Courier.
@@ -296,7 +299,82 @@ async fn paragon_iris_heraldry_offer_accept_complete_lifecycle_succeeds_without_
         );
     });
 
-    // 4. Complete mission via DoAction(6): must credit Paragon LP and avoid distribution career goals.
+    // 4. Complete mission via DoAction(6)/(7): requires 1x packaged ship hull in IRIS station hangar.
+    let empty_err = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(6)],
+        &kw,
+    )
+    .await
+    .expect("DoAction(6) must be handled")
+    .expect_err("Heraldry DoAction(6) without required ship must fail");
+    assert_eq!(empty_err.code, "MissionIncomplete");
+
+    let remote_err = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(7)],
+        &kw,
+    )
+    .await
+    .expect("DoAction(7) must be handled")
+    .expect_err("Heraldry DoAction(7) cannot complete remotely");
+    assert_eq!(remote_err.code, "CannotCompleteRemotely");
+
+    let assembled_ship_id = 77_900_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            assembled_ship_id,
+            InventoryItemRecord {
+                item_id: assembled_ship_id,
+                type_id: req_ship_tid,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let assembled_err = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(6)],
+        &kw,
+    )
+    .await
+    .expect("DoAction(6) must be handled")
+    .expect_err("Assembled singleton ship must not satisfy Heraldry delivery");
+    assert_eq!(assembled_err.code, "MissionIncomplete");
+
+    let packaged_ship_id = 77_900_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            packaged_ship_id,
+            InventoryItemRecord {
+                item_id: packaged_ship_id,
+                type_id: req_ship_tid,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
     handle_with_bound(
         &ctx,
         &mut sess,
@@ -308,11 +386,16 @@ async fn paragon_iris_heraldry_offer_accept_complete_lifecycle_succeeds_without_
     )
     .await
     .expect("DoAction(6) must be handled")
-    .expect("DoAction(6) complete must succeed for Paragon Heraldry");
+    .expect("DoAction(6) complete must succeed with packaged ship hull for Paragon Heraldry");
 
     ctx.db.with_snapshot(|snap| {
-        let m = mission_fixture::get(snap, char_id, offered_mid).expect("completed mission");
-        assert_eq!(m.state, "Completed");
+        assert!(!snap.items.contains_key(&packaged_ship_id));
+        assert!(snap.items.contains_key(&assembled_ship_id));
+        assert!(mission_fixture::get(snap, char_id, offered_mid).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, offered_mid).as_deref(),
+            Some("Completed")
+        );
         let paragon_lp = snap.characters[&char_id]
             .loyalty_points
             .get(&PARAGON_CORP_ID)
@@ -341,8 +424,11 @@ async fn paragon_iris_mission_17013_accept_and_complete_succeeds() {
         .sde
         .missions
         .get(&PARAGON_IRIS_MISSION_17013_ID)
-        .expect("SDE mission 17013 must exist");
+        .expect("SDE mission 17013 must exist")
+        .clone();
     assert!(m17013.is_courier);
+    let expected_details = resolve_heraldry_mission_details(&ctx, &m17013);
+    assert_eq!(expected_details.quantity, 1);
 
     let sys_id = iris.solar_system_id.expect("IRIS solar system");
     let st_id = iris.station_id.expect("IRIS station");
@@ -362,7 +448,9 @@ async fn paragon_iris_mission_17013_accept_and_complete_succeeds() {
             .offered_at_unix(now)
             .offer_expiry_unix(now + 86_400)
             .origin_station_id(Some(st_id))
-            .offered_level(Some(iris.level)),
+            .offered_level(Some(iris.level))
+            .required_delivery_type_id(Some(expected_details.ship_type_id))
+            .required_delivery_qty(expected_details.quantity),
         );
     });
 
@@ -383,6 +471,81 @@ async fn paragon_iris_mission_17013_accept_and_complete_succeeds() {
     .unwrap()
     .expect("Mission 17013 accept must not return InvalidMissionLocation");
 
+    let empty_err = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(6)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Mission 17013 without required packaged ship must fail");
+    assert_eq!(empty_err.code, "MissionIncomplete");
+
+    let remote_err = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(7)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Mission 17013 remote completion must reject");
+    assert_eq!(remote_err.code, "CannotCompleteRemotely");
+
+    let assembled_id = 77_900_011_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            assembled_id,
+            InventoryItemRecord {
+                item_id: assembled_id,
+                type_id: expected_details.ship_type_id,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let assembled_err = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(6)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Mission 17013 must reject assembled singleton ship");
+    assert_eq!(assembled_err.code, "MissionIncomplete");
+
+    let packaged_id = 77_900_012_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            packaged_id,
+            InventoryItemRecord {
+                item_id: packaged_id,
+                type_id: expected_details.ship_type_id,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
     handle_with_bound(
         &ctx,
         &mut sess,
@@ -394,14 +557,16 @@ async fn paragon_iris_mission_17013_accept_and_complete_succeeds() {
     )
     .await
     .unwrap()
-    .expect("Mission 17013 complete must succeed");
+    .expect("Mission 17013 complete with packaged hull must succeed");
 
     ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&packaged_id));
+        assert!(snap.items.contains_key(&assembled_id));
+        assert!(mission_fixture::get(snap, char_id, PARAGON_IRIS_MISSION_17013_ID).is_none());
         assert_eq!(
-            mission_fixture::get(snap, char_id, PARAGON_IRIS_MISSION_17013_ID)
-                .expect("completed 17013")
-                .state,
-            "Completed"
+            mission_fixture::latest_history(snap, char_id, PARAGON_IRIS_MISSION_17013_ID)
+                .as_deref(),
+            Some("Completed")
         );
         let paragon_lp = snap.characters[&char_id]
             .loyalty_points
@@ -952,6 +1117,7 @@ async fn fw_initial_offer_target_sys_courier_origin_sys_and_epic_arc_v24_briefin
     let talk_mid = 999_881_u32;
     let epic_mid = 14_117_u32;
     let courier_mid = 999_882_u32;
+    sde.missions.clear();
     sde.missions.insert(
         fw_kill_mid,
         eve_sde::MissionTemplate {
@@ -3438,4 +3604,371 @@ fn decide_mission_kind_strict_exhaustive_over_real_sde_and_rejects_unknown() {
         eve_db::decide_mission_kind_strict(&unknown_tmpl, None).is_err(),
         "unknown SDE content_template must fail strict classification"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn regular_agent_repeatable_offers_past_pool_size_and_weighted_selection() {
+    let base_ctx = test_ctx();
+    let reg_ag = base_ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("regular L1 security agent must exist in SDE");
+    let mut sde = (*base_ctx.sde).clone();
+    let mut pool_ids: Vec<u32> = sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.has_standing_rewards
+                && m.content_template.as_deref() == Some("agent.missionTemplatizedContent_BasicKillMission")
+                && mission_matches_agent_pool_with_sde(&sde, m, &reg_ag)
+        })
+        .map(|m| m.mission_id)
+        .collect();
+    pool_ids.sort_unstable();
+    pool_ids.truncate(3);
+    assert_eq!(pool_ids.len(), 3, "need 3-template pool to prove repeat past pool size");
+    sde.missions.retain(|mid, _| pool_ids.contains(mid));
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    )
+    .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+
+    let char_id = 90_000_001_i64;
+    let sys_id = reg_ag.solar_system_id.unwrap();
+    let st_id = reg_ag.station_id.unwrap();
+    move_demo_character(&ctx, char_id, sys_id, Some(st_id));
+    let mut sess = docked_session(char_id, sys_id, Some(st_id));
+    let bound = bound_agent(char_id, reg_ag.agent_id);
+    let kw = HashMap::new();
+
+    let mut offered_sequence = Vec::new();
+    let mut prev_hwm = ctx.db.with_snapshot(|s| s.next_entity_id);
+
+    // 1. Six full offer -> accept -> complete cycles (twice the 3-mission pool size).
+    for _ in 0..6 {
+        ctx.advance_secs(10);
+        let offer = handle_with_bound(
+            &ctx,
+            &mut sess,
+            Some(&bound),
+            "agentMgr",
+            "DoAction",
+            &[PyRep::Integer(2)],
+            &kw,
+        )
+        .await
+        .expect("DoAction(2) handled")
+        .expect("repeatable agent must never exhaust pool with NoMissionsAvailable");
+        let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+        offered_sequence.push(mid);
+        let next_hwm = ctx.db.with_snapshot(|s| s.next_entity_id);
+        assert!(next_hwm > prev_hwm, "each re-offer must allocate a fresh entity ID");
+        prev_hwm = next_hwm;
+
+        handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(3)], &kw)
+            .await
+            .unwrap()
+            .expect("accept repeatable offer");
+        ctx.db.with_mut_snapshot(|snap| {
+            mission_fixture::edit(snap, char_id, mid, |m| m.npcs_remaining = 0);
+        });
+        ctx.advance_secs(10);
+        handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(6)], &kw)
+            .await
+            .unwrap()
+            .expect("complete repeatable mission");
+        ctx.db.with_snapshot(|snap| {
+            assert!(mission_fixture::get(snap, char_id, mid).is_none());
+            assert_eq!(
+                mission_fixture::latest_history(snap, char_id, mid).as_deref(),
+                Some("Completed")
+            );
+        });
+    }
+
+    // 2. Decline (DoAction(9)), Quit (DoAction(11)), Expire, then re-offer & complete cleanly.
+    ctx.advance_secs(10);
+    let dec_offer = handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer before decline");
+    let dec_mid = dec_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    offered_sequence.push(dec_mid);
+    ctx.advance_secs(10);
+    handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(9)], &kw)
+        .await
+        .unwrap()
+        .expect("decline offer");
+    ctx.db.with_snapshot(|snap| {
+        assert!(mission_fixture::get(snap, char_id, dec_mid).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, dec_mid).as_deref(),
+            Some("Declined")
+        );
+    });
+
+    ctx.advance_secs(10);
+    let quit_offer = handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer before quit");
+    let quit_mid = quit_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    offered_sequence.push(quit_mid);
+    handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(3)], &kw)
+        .await
+        .unwrap()
+        .expect("accept before quit");
+    ctx.advance_secs(10);
+    handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(11)], &kw)
+        .await
+        .unwrap()
+        .expect("quit accepted mission");
+
+    ctx.advance_secs(10);
+    let exp_offer = handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer before expire");
+    let exp_mid = exp_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    offered_sequence.push(exp_mid);
+    ctx.advance_secs(605_000);
+    handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "GetMyJournalDetails", &[], &kw)
+        .await
+        .unwrap()
+        .expect("sweep expired offer");
+
+    ctx.advance_secs(10);
+    let final_offer = handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+        .await
+        .unwrap()
+        .expect("offer after expire");
+    offered_sequence.push(final_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32);
+    handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(3)], &kw)
+        .await
+        .unwrap()
+        .expect("accept final offer");
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::edit(snap, char_id, *offered_sequence.last().unwrap(), |m| {
+            m.npcs_remaining = 0;
+        });
+    });
+    handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", "DoAction", &[PyRep::Integer(6)], &kw)
+        .await
+        .unwrap()
+        .expect("complete final offer");
+
+    for pair in offered_sequence.windows(2) {
+        assert_ne!(
+            pair[0], pair[1],
+            "weighted selector must not repeat immediate previous offer when pool >= 2: {offered_sequence:?}"
+        );
+    }
+    let distinct: std::collections::HashSet<u32> = offered_sequence.iter().copied().collect();
+    assert!(
+        distinct.len() >= 2,
+        "offered sequence must span multiple pool templates: {offered_sequence:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(mission_fixture::list_for_character(snap, char_id).is_empty());
+        assert_eq!(mission_fixture::list_history_for_character(snap, char_id).len(), 10);
+    });
+
+    // Direct determinism & non-lowest-first check across seeds on select_weighted_mission_template.
+    let candidates: Vec<&eve_sde::MissionTemplate> =
+        pool_ids.iter().map(|id| &ctx.sde.missions[id]).collect();
+    let picks_across_seeds: std::collections::HashSet<u32> = (0_u64..16)
+        .map(|cnt| {
+            select_weighted_mission_template(
+                &candidates,
+                &[],
+                mission_offer_selection_seed(char_id, reg_ag.agent_id, cnt),
+            )
+            .unwrap()
+            .mission_id
+        })
+        .collect();
+    assert!(
+        picks_across_seeds.len() >= 2,
+        "SplitMix64 selection must vary across seeds instead of always picking lowest mission_id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_persists_mission_history_and_blocks_one_time_agent_across_reload() {
+    let base_sde = shared_sde();
+    let career_ag = base_sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 12 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("Career agent must exist in SDE");
+    let dc_ag = base_sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 5 && a.level == 1 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("L1 Data Center / COSMOS agent must exist in SDE");
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "evomu_mission_history_persist_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).expect("create temp sqlite dir");
+    let db_path = temp_dir.join("world.sqlite");
+    let char_id = 90_000_001_i64;
+    let kw = HashMap::new();
+
+    {
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open sqlite db");
+        repo.with_mut_snapshot(|snap| *snap = WorldRepository::create_demo_snapshot());
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&base_sde), Arc::new(repo))
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+
+        // 1. Complete a Career agent mission.
+        let c_sys = career_ag.solar_system_id.unwrap();
+        let c_st = career_ag.station_id.unwrap();
+        move_demo_character(&ctx, char_id, c_sys, Some(c_st));
+        let mut c_sess = docked_session(char_id, c_sys, Some(c_st));
+        let c_bound = bound_agent(char_id, career_ag.agent_id);
+        let c_offer = handle_with_bound(&ctx, &mut c_sess, Some(&c_bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+            .await
+            .unwrap()
+            .expect("offer career mission");
+        let c_mid = c_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+        handle_with_bound(&ctx, &mut c_sess, Some(&c_bound), "agentMgr", "DoAction", &[PyRep::Integer(3)], &kw)
+            .await
+            .unwrap()
+            .expect("accept career mission");
+        let mut dst_override = None;
+        ctx.db.with_mut_snapshot(|snap| {
+            mission_fixture::edit(snap, char_id, c_mid, |m| {
+                m.npcs_remaining = 0;
+            });
+            if let Some(m) = mission_fixture::get(snap, char_id, c_mid) {
+                if let Some(dst) = m.destination_station_id {
+                    dst_override = Some(dst);
+                    if let Some(gid) = m.granted_courier_item_id {
+                        if let Some(it) = snap.items.get_mut(&gid) {
+                            if it.flag == InventoryFlag::Hangar {
+                                it.location_id = dst;
+                            }
+                        }
+                    }
+                } else if let Some(req_tid) = m.required_delivery_type_id {
+                    snap.next_entity_id += 1;
+                    let iid = snap.next_entity_id;
+                    snap.items.insert(
+                        iid,
+                        InventoryItemRecord {
+                            item_id: iid,
+                            type_id: req_tid,
+                            owner_id: char_id,
+                            location_id: c_st,
+                            flag: InventoryFlag::Hangar,
+                            quantity: m.required_delivery_qty.max(1) as i32,
+                            singleton: false,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        });
+        if let Some(dst) = dst_override {
+            let dst_sys = ctx
+                .sde
+                .stations
+                .get(&dst)
+                .map_or(c_sys, |s| s.solar_system_id);
+            move_demo_character(&ctx, char_id, dst_sys, Some(dst));
+            c_sess.solar_system_id = Some(dst_sys);
+            c_sess.station_id = Some(dst);
+        }
+        handle_with_bound(&ctx, &mut c_sess, Some(&c_bound), "agentMgr", "DoAction", &[PyRep::Integer(6)], &kw)
+            .await
+            .unwrap()
+            .expect("complete career mission");
+
+        // 2. Offer and expire a Data Center / COSMOS agent mission.
+        let dc_sys = dc_ag.solar_system_id.unwrap();
+        let dc_st = dc_ag.station_id;
+        move_demo_character(&ctx, char_id, dc_sys, dc_st);
+        let mut dc_sess = docked_session(char_id, dc_sys, dc_st);
+        let dc_bound = bound_agent(char_id, dc_ag.agent_id);
+        handle_with_bound(&ctx, &mut dc_sess, Some(&dc_bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+            .await
+            .unwrap()
+            .expect("offer DC mission");
+        ctx.advance_secs(605_000);
+        handle_with_bound(&ctx, &mut dc_sess, Some(&dc_bound), "agentMgr", "GetMyJournalDetails", &[], &kw)
+            .await
+            .unwrap()
+            .expect("expire DC offer");
+
+        ctx.db.with_sqlite_conn(|conn| {
+            let active_rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM mission_instances", [], |r| r.get(0))
+                .unwrap();
+            let hist_rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM mission_history", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(active_rows, 0);
+            assert_eq!(hist_rows, 2);
+        });
+    }
+
+    // Reload from disk into a fresh ServerContext and verify persistence.
+    {
+        let repo2 = WorldRepository::open_sqlite(&db_path).expect("reload sqlite db");
+        let ctx2 = ServerContext::with_sde_and_repository(base_sde, Arc::new(repo2))
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+
+        let c_sys = career_ag.solar_system_id.unwrap();
+        let c_st = career_ag.station_id.unwrap();
+        move_demo_character(&ctx2, char_id, c_sys, Some(c_st));
+        let mut c_sess = docked_session(char_id, c_sys, Some(c_st));
+        let c_bound = bound_agent(char_id, career_ag.agent_id);
+        let c_err = handle_with_bound(&ctx2, &mut c_sess, Some(&c_bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+            .await
+            .unwrap()
+            .expect_err("Career agent must remain blocked after SQLite reload");
+        assert_eq!(c_err.code, "OneTimeAgentMissionCompleted");
+
+        let dc_sys = dc_ag.solar_system_id.unwrap();
+        let dc_st = dc_ag.station_id;
+        move_demo_character(&ctx2, char_id, dc_sys, dc_st);
+        let mut dc_sess = docked_session(char_id, dc_sys, dc_st);
+        let dc_bound = bound_agent(char_id, dc_ag.agent_id);
+        let dc_err = handle_with_bound(&ctx2, &mut dc_sess, Some(&dc_bound), "agentMgr", "DoAction", &[PyRep::Integer(2)], &kw)
+            .await
+            .unwrap()
+            .expect_err("Expired DC/COSMOS agent must remain blocked after SQLite reload");
+        assert_eq!(dc_err.code, "CosmosMissionExpired");
+
+        let completed_career = handle_extended(
+            &ctx2,
+            &mut c_sess,
+            "agentMgr",
+            "GetCompletedCareerAgentIDs",
+            &[PyRep::List(vec![PyRep::Integer(career_ag.agent_id)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            completed_career,
+            PyRep::Dict(vec![(PyRep::Integer(career_ag.agent_id), PyRep::Bool(true))])
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

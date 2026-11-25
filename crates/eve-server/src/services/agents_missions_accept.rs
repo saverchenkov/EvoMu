@@ -137,7 +137,7 @@ pub(super) async fn handle_mission_accept_action(
         if state == MissionState::Offered {
             if is_expired {
                 ctx.db.with_mut_snapshot(|snap| {
-                    finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Expired, false);
+                    finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Expired, false, now);
                 });
                 return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired"), client_error: None }));
             }
@@ -148,6 +148,20 @@ pub(super) async fn handle_mission_accept_action(
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(m_check) = snap.missions.get_by_character_template(char_id, mission_id) else {
+            if let Some(hist) = snap
+                .missions
+                .latest_history_for_character_template(char_id, mission_id)
+            {
+                let msg = format!(
+                    "Mission {mission_id} is in terminal state '{}', not Offered",
+                    hist.final_state.as_str()
+                );
+                return Err(BridgeRpcError::with_client_error(
+                    "InvalidMissionState",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                ));
+            }
             return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}"), client_error: None });
         };
         if m_check.state != MissionState::Offered && !(m_check.state == MissionState::Accepted && m_check.solar_system_id == mission_sys_id && can_respawn_missing) {

@@ -8,8 +8,8 @@
 
 use eve_db::{
     decide_mission_kind, lookup_sde_mission_and_agent, open_sde_sqlite_ro, CourierObjective,
-    DeliveryObjective, EncounterObjective, MissionInstance, MissionKind, MissionObjective,
-    MissionState, WorldRepository, WorldStateSnapshot,
+    DeliveryObjective, EncounterObjective, MissionHistoryEntry, MissionInstance, MissionKind,
+    MissionObjective, MissionState, WorldRepository, WorldStateSnapshot,
 };
 
 /// Plain test value representing one `(character_id, mission_id)` mission entry across the
@@ -335,14 +335,8 @@ fn infer_kind_with_sde(
         | MissionKind::DataCenterTurnIn
         | MissionKind::Mining
         | MissionKind::Trade
-        | MissionKind::Courier => base_kind,
-        MissionKind::Heraldry => {
-            if has_delivery_fields {
-                MissionKind::Trade
-            } else {
-                MissionKind::Heraldry
-            }
-        }
+        | MissionKind::Courier
+        | MissionKind::Heraldry => base_kind,
         MissionKind::Encounter => {
             if has_delivery_fields {
                 MissionKind::Trade
@@ -407,6 +401,21 @@ fn from_instance(inst: &MissionInstance) -> MissionFixture {
     out
 }
 
+fn from_history_entry_fixture(entry: &MissionHistoryEntry) -> MissionFixture {
+    MissionFixture {
+        character_id: entry.character_id,
+        mission_id: entry.template_id,
+        agent_id: entry.agent_id,
+        solar_system_id: 0,
+        state: entry.final_state.as_str().to_string(),
+        current_room_id: 1,
+        offered_at_unix: entry.offered_at_unix,
+        completed_at_unix: Some(entry.ended_at_unix),
+        has_metadata: true,
+        ..Default::default()
+    }
+}
+
 fn insert_with_kind(
     snap: &mut WorldStateSnapshot,
     mission: MissionFixture,
@@ -420,6 +429,28 @@ fn insert_with_kind(
             mission.state, mission.character_id, mission.mission_id
         )
     });
+    if !state.is_active() {
+        snap.missions
+            .remove_by_character_template(mission.character_id, mission.mission_id);
+        snap.missions.remove_history(instance_id);
+        let ended_at_unix = mission
+            .completed_at_unix
+            .or(mission.accepted_at_unix)
+            .unwrap_or(mission.offered_at_unix);
+        snap.missions
+            .record_history(MissionHistoryEntry {
+                instance_id,
+                character_id: mission.character_id,
+                agent_id: mission.agent_id,
+                template_id: mission.mission_id,
+                kind,
+                final_state: state,
+                offered_at_unix: mission.offered_at_unix,
+                ended_at_unix,
+            })
+            .expect("record mission history fixture");
+        return;
+    }
     let objective = match kind {
         MissionKind::Encounter => MissionObjective::Encounter(EncounterObjective {
             npcs_remaining: mission.npcs_remaining,
@@ -437,12 +468,12 @@ fn insert_with_kind(
         }),
         MissionKind::Trade
         | MissionKind::Mining
+        | MissionKind::Heraldry
         | MissionKind::DataCenterTurnIn
         | MissionKind::ResearchTurnIn => MissionObjective::Delivery(DeliveryObjective {
             item_type_id: mission.required_delivery_type_id,
             quantity: i32::try_from(mission.required_delivery_qty).unwrap_or(i32::MAX),
         }),
-        MissionKind::Heraldry => MissionObjective::None,
     };
     snap.missions
         .upsert_by_character_template(MissionInstance {
@@ -513,34 +544,51 @@ pub fn get_in(db: &WorldRepository, character_id: i64, mission_id: u32) -> Optio
     db.with_snapshot(|snap| get(snap, character_id, mission_id))
 }
 
-/// Reads `(character_id, mission_id)` from `snap`, passes it to `f`, and writes back the updated fixture.
+/// Reads `(character_id, mission_id)` from `snap` (falling back to latest history), passes it to `f`, and writes back the updated fixture.
 pub fn edit<R>(
     snap: &mut WorldStateSnapshot,
     character_id: i64,
     mission_id: u32,
     f: impl FnOnce(&mut MissionFixture) -> R,
 ) -> Option<R> {
-    let existing = snap
+    if let Some(existing) = snap
         .missions
-        .get_by_character_template(character_id, mission_id)?;
-    let existing_id = existing.instance_id;
-    let existing_kind = existing.kind;
-    let mut fixture = from_instance(existing);
-    let prev_had_cargo = has_cargo_or_courier_fields(&fixture);
+        .get_by_character_template(character_id, mission_id)
+    {
+        let existing_id = existing.instance_id;
+        let existing_kind = existing.kind;
+        let mut fixture = from_instance(existing);
+        let prev_had_cargo = has_cargo_or_courier_fields(&fixture);
+        let out = f(&mut fixture);
+        let now_has_cargo = has_cargo_or_courier_fields(&fixture);
+        let next_kind = if prev_had_cargo && !now_has_cargo {
+            MissionKind::Encounter
+        } else if !prev_had_cargo && now_has_cargo {
+            infer_kind(&fixture)
+        } else {
+            existing_kind
+        };
+        if fixture.character_id != character_id || fixture.mission_id != mission_id {
+            snap.missions
+                .remove_by_character_template(character_id, mission_id);
+        }
+        insert_with_kind(snap, fixture, next_kind, Some(existing_id));
+        return Some(out);
+    }
+
+    let hist = snap
+        .missions
+        .latest_history_for_character_template(character_id, mission_id)?
+        .clone();
+    let mut fixture = from_history_entry_fixture(&hist);
     let out = f(&mut fixture);
-    let now_has_cargo = has_cargo_or_courier_fields(&fixture);
-    let next_kind = if prev_had_cargo && !now_has_cargo {
-        MissionKind::Encounter
-    } else if !prev_had_cargo && now_has_cargo {
+    snap.missions.remove_history(hist.instance_id);
+    let next_kind = if has_cargo_or_courier_fields(&fixture) {
         infer_kind(&fixture)
     } else {
-        existing_kind
+        hist.kind
     };
-    if fixture.character_id != character_id || fixture.mission_id != mission_id {
-        snap.missions
-            .remove_by_character_template(character_id, mission_id);
-    }
-    insert_with_kind(snap, fixture, next_kind, Some(existing_id));
+    insert_with_kind(snap, fixture, next_kind, Some(hist.instance_id));
     Some(out)
 }
 
@@ -554,11 +602,17 @@ pub fn edit_in<R>(
     db.with_mut_snapshot(|snap| edit(snap, character_id, mission_id, f))
 }
 
-/// Removes `(character_id, mission_id)` from `snap`.
+/// Removes `(character_id, mission_id)` from active missions and archived history in `snap`.
 pub fn remove(snap: &mut WorldStateSnapshot, character_id: i64, mission_id: u32) -> bool {
-    snap.missions
+    let active = snap
+        .missions
         .remove_by_character_template(character_id, mission_id)
-        .is_some()
+        .is_some();
+    let hist = snap
+        .missions
+        .remove_history_for_character_template(character_id, mission_id)
+        > 0;
+    active || hist
 }
 
 /// Removes `(character_id, mission_id)` from `db`.
@@ -566,7 +620,7 @@ pub fn remove_in(db: &WorldRepository, character_id: i64, mission_id: u32) -> bo
     db.with_mut_snapshot(|snap| remove(snap, character_id, mission_id))
 }
 
-/// Clears all missions belonging to `character_id` from `snap`.
+/// Clears all active missions and archived history belonging to `character_id` from `snap`.
 pub fn clear_character(snap: &mut WorldStateSnapshot, character_id: i64) {
     let mids: Vec<u32> = snap
         .missions
@@ -576,6 +630,7 @@ pub fn clear_character(snap: &mut WorldStateSnapshot, character_id: i64) {
     for mid in mids {
         snap.missions.remove_by_character_template(character_id, mid);
     }
+    snap.missions.remove_history_by_character(character_id);
 }
 
 /// Clears all missions belonging to `character_id` from `db`.
@@ -614,6 +669,33 @@ pub fn list_for_character(snap: &WorldStateSnapshot, character_id: i64) -> Vec<M
         .collect();
     out.sort_by_key(|m| m.mission_id);
     out
+}
+
+/// Returns the latest archived terminal state string for `(character_id, mission_id)`.
+pub fn latest_history(
+    snap: &WorldStateSnapshot,
+    character_id: i64,
+    mission_id: u32,
+) -> Option<String> {
+    snap.missions
+        .latest_history_for_character_template(character_id, mission_id)
+        .map(|e| e.final_state.as_str().to_string())
+}
+
+/// Lists all archived mission history entries for `character_id`, ordered chronologically.
+pub fn list_history_for_character(
+    snap: &WorldStateSnapshot,
+    character_id: i64,
+) -> Vec<MissionFixture> {
+    let mut entries: Vec<&MissionHistoryEntry> = snap
+        .missions
+        .iter_history_by_character(character_id)
+        .collect();
+    entries.sort_by_key(|e| (e.ended_at_unix, e.instance_id));
+    entries
+        .into_iter()
+        .map(from_history_entry_fixture)
+        .collect()
 }
 
 #[cfg(test)]
@@ -723,9 +805,12 @@ mod tests {
             m.npcs_remaining = 0;
         })
         .is_some());
-        let failed = get(&snap, 90_000_001, 100).unwrap();
-        assert_eq!(failed.state, "Failed");
-        assert!(!failed.has_metadata);
+        assert!(get(&snap, 90_000_001, 100).is_none());
+        assert_eq!(
+            latest_history(&snap, 90_000_001, 100).as_deref(),
+            Some("Failed")
+        );
+        assert_eq!(list_history_for_character(&snap, 90_000_001).len(), 1);
 
         assert!(edit(&mut snap, 90_000_001, 300, |m| {
             m.awaiting_downtime_respawn = true;

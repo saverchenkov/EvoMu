@@ -701,7 +701,7 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
                 if mission_fixture::get(snap, char_id, m.mission_id).is_none() {
                     mission_fixture::insert(
                         snap,
-                        MissionFixture::new(char_id, m.mission_id, any_ag.agent_id, any_sys, "Completed").current_room_id(1),
+                        MissionFixture::new(char_id, m.mission_id, any_ag.agent_id, any_sys, "Accepted").current_room_id(1),
                     );
                 }
             }

@@ -6,18 +6,20 @@ use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 fn mission_delivery_consume_opts(
     char_id: i64,
     active_ship_id: Option<i64>,
+    require_packaged: bool,
 ) -> eve_db::ConsumeExactOptions {
     eve_db::ConsumeExactOptions {
         active_ship_id,
+        reject_singleton: require_packaged,
         ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
     }
 }
 
 /// Evaluates whether `item` passes consumption safety checks (ownership, positive quantity,
-/// lock/impound/War-HQ/structure-controller/boarded-ship/structure-ACL, fitted-slot, and non-empty
-/// container guards), is not courier-tagged, and sits in an eligible delivery location (`Hangar`
-/// at `agent_station_id`, or active ship `Cargo` / `SpecializedOreHold` for mining missions or
-/// Tritanium).
+/// lock/impound/War-HQ/structure-controller/boarded-ship/structure-ACL, fitted-slot, packaged-singleton
+/// when required, and non-empty container guards), is not courier-tagged, and sits in an eligible
+/// delivery location (`Hangar` at `agent_station_id`, or active ship `Cargo` / `SpecializedOreHold`
+/// for mining missions or Tritanium).
 fn is_eligible_mission_delivery_item(
     snap: &WorldStateSnapshot,
     delivery_opts: &eve_db::ConsumeExactOptions,
@@ -50,8 +52,9 @@ pub(crate) fn count_eligible_mission_delivery_items(
     is_mining_mission: bool,
     agent_station_id: Option<i64>,
     active_ship_id: Option<i64>,
+    require_packaged: bool,
 ) -> i64 {
-    let delivery_opts = mission_delivery_consume_opts(char_id, active_ship_id);
+    let delivery_opts = mission_delivery_consume_opts(char_id, active_ship_id, require_packaged);
     snap.items
         .values()
         .filter(|it| {
@@ -72,9 +75,10 @@ pub(crate) fn count_eligible_mission_delivery_items(
 ///
 /// For courier missions, only items created for the specific courier mission
 /// (`courier_cargo:{char_id}:{mission_id}`) at the destination station are valid.
-/// For non-courier item-delivery / trade / mining missions, contract-locked items,
+/// For non-courier item-delivery / trade / mining / heraldry missions, contract-locked items,
 /// industry-job-locked items, and borrowed courier mission items (`courier_cargo:*`)
-/// are strictly excluded from eligibility and consumption.
+/// are strictly excluded from eligibility and consumption. When `require_packaged` is true
+/// (Paragon Heraldry ship delivery), assembled/fitted/boarded singletons are rejected.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_and_consume_mission_delivery_items(
     snap: &mut WorldStateSnapshot,
@@ -89,6 +93,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
     active_ship_id: Option<i64>,
     destination_station_id: Option<i64>,
     granted_courier_item_id: Option<i64>,
+    require_packaged: bool,
 ) -> Result<(), BridgeRpcError> {
     if is_courier {
         let dest_station = destination_station_id.ok_or_else(|| BridgeRpcError {
@@ -185,6 +190,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
         is_mining_mission,
         agent_station_id,
         active_ship_id,
+        require_packaged,
     );
     if found_qty < i64::from(req_units) {
         return Err(BridgeRpcError {
@@ -197,7 +203,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
     }
 
     let mut rem = req_units;
-    let delivery_opts = mission_delivery_consume_opts(char_id, active_ship_id);
+    let delivery_opts = mission_delivery_consume_opts(char_id, active_ship_id, require_packaged);
     let mut matching_ids: Vec<i64> = snap
         .items
         .values()

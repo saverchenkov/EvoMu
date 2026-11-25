@@ -1029,3 +1029,118 @@ fn sqlite_legacy_missions_anomic_delivery_direct_load_ddl_and_key_mismatch() {
         "key mismatch row must be quarantined: {quarantined:?}"
     );
 }
+
+#[test]
+fn sqlite_legacy_mission_instances_upgrade_terminal_and_heraldry() {
+    let cid = 90_000_001_i64;
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_legacy_mission_instances_upgrade_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+
+    let mut snap = WorldRepository::create_demo_snapshot();
+    snap.missions.clear();
+    // Simulate pre-Track-4 SQLite schema/data before Track 4 migration.
+    {
+        let mut conn = Connection::open(&db_path).expect("open seed sqlite");
+        apply_migrations(&conn).expect("apply migrations");
+        replace_sqlite_from_snapshot(&mut conn, &snap).expect("seed snapshot");
+        conn.execute_batch("DROP TABLE IF EXISTS mission_history;")
+            .expect("drop mission_history to simulate pre-Track-4 schema");
+
+        let legacy_completed_json = serde_json::json!({
+            "instance_id": 200_000_111_i64,
+            "character_id": cid,
+            "agent_id": 3_018_418_i64,
+            "template_id": 501_u32,
+            "state": "Completed",
+            "kind": "Encounter",
+            "solar_system_id": 30_000_142_i64,
+            "current_room_id": 1_u32,
+            "offered_at_unix": 1_700_000_000_u64,
+            "offer_expiry_unix": 1_700_086_400_u64,
+            "accepted_at_unix": 1_700_000_500_u64,
+            "objective": {
+                "Encounter": {
+                    "npcs_remaining": 0,
+                    "spawned_npc_ball_ids": [],
+                    "initial_wave_count": null,
+                    "initial_wave_types": [],
+                    "awaiting_downtime_respawn": false
+                }
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO mission_instances (instance_id, character_id, agent_id, mission_id, state, record_json)
+             VALUES (200000111, ?1, 3018418, 501, 'Completed', ?2)",
+            rusqlite::params![cid, legacy_completed_json],
+        )
+        .expect("insert legacy terminal row into mission_instances");
+
+        let legacy_heraldry_json = serde_json::json!({
+            "instance_id": 200_000_112_i64,
+            "character_id": cid,
+            "agent_id": 3_019_500_i64,
+            "template_id": 17_013_u32,
+            "state": "Accepted",
+            "kind": "Heraldry",
+            "solar_system_id": 30_000_142_i64,
+            "current_room_id": 1_u32,
+            "offered_at_unix": 1_700_001_000_u64,
+            "offer_expiry_unix": 1_700_087_400_u64,
+            "accepted_at_unix": 1_700_001_100_u64,
+            "objective": "None"
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO mission_instances (instance_id, character_id, agent_id, mission_id, state, record_json)
+             VALUES (200000112, ?1, 3019500, 17013, 'Accepted', ?2)",
+            rusqlite::params![cid, legacy_heraldry_json],
+        )
+        .expect("insert legacy Heraldry None row into mission_instances");
+    }
+
+    let repo = WorldRepository::open_sqlite(&db_path).expect("upgrade legacy DB cleanly");
+    repo.with_snapshot(|loaded| {
+        assert_eq!(loaded.missions.len(), 1);
+        assert_eq!(loaded.missions.history_len(), 1);
+        assert!(loaded.missions.has_history_for_agent_state(
+            cid,
+            3_018_418,
+            crate::MissionState::Completed
+        ));
+        let heraldry = loaded
+            .missions
+            .get_by_character_template(cid, 17_013)
+            .expect("active heraldry mission present");
+        assert_eq!(heraldry.kind, crate::MissionKind::Heraldry);
+        assert!(matches!(
+            heraldry.objective,
+            crate::MissionObjective::Delivery(_)
+        ));
+        assert!(heraldry.is_objective_consistent());
+        loaded.missions.assert_invariants().expect("valid store");
+    });
+    repo.with_sqlite_conn(|conn| {
+        assert!(table_exists(conn, "mission_history").unwrap());
+        let active_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mission_instances", [], |r| r.get(0))
+            .unwrap();
+        let history_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mission_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(active_count, 1);
+        assert_eq!(history_count, 1);
+    });
+    let expected_missions = repo.with_snapshot(|s| s.missions.clone());
+    drop(repo);
+
+    let repo2 = WorldRepository::open_sqlite(&db_path).expect("reopen must be idempotent");
+    repo2.with_snapshot(|reloaded| {
+        assert_eq!(reloaded.missions, expected_missions);
+    });
+    drop(repo2);
+    let _ = std::fs::remove_file(&db_path);
+}

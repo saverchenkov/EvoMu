@@ -10,6 +10,65 @@ use rusqlite::{params, Connection, Transaction};
 use std::collections::HashMap;
 use std::hash::Hash;
 
+fn insert_mission_instance_row(
+    tx: &Transaction<'_>,
+    m: &crate::missions::MissionInstance,
+) -> Result<(), String> {
+    let js = to_checked_json_string(m)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO mission_instances (instance_id, character_id, agent_id, mission_id, state, record_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            m.instance_id,
+            m.character_id,
+            m.agent_id,
+            m.template_id as i64,
+            m.state.as_str(),
+            js,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn insert_mission_history_row(
+    tx: &Transaction<'_>,
+    h: &crate::missions::MissionHistoryEntry,
+) -> Result<(), String> {
+    let js = to_checked_json_string(h)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO mission_history (instance_id, character_id, agent_id, mission_id, final_state, record_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            h.instance_id,
+            h.character_id,
+            h.agent_id,
+            h.template_id as i64,
+            h.final_state.as_str(),
+            js,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Replaces `mission_instances` and `mission_history` rows in `tx` to match `snap.missions`
+/// after an in-memory legacy upgrade on load.
+pub(super) fn rewrite_mission_tables(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+) -> Result<(), String> {
+    tx.execute_batch("DELETE FROM mission_instances; DELETE FROM mission_history;")
+        .map_err(|e| e.to_string())?;
+    for m in snap.missions.iter() {
+        insert_mission_instance_row(tx, m)?;
+    }
+    for h in snap.missions.iter_history() {
+        insert_mission_history_row(tx, h)?;
+    }
+    Ok(())
+}
+
 fn sync_cell_map<K, V>(
     tx: &Transaction<'_>,
     before: &CowCell<HashMap<K, V>>,
@@ -324,7 +383,7 @@ fn sync_part2_activity_tables(
         },
     )?;
 
-    // 14. mission_instances
+    // 14. mission_instances & mission_history
     if before.missions != snap.missions {
         for instance_id in before.missions.keys() {
             if !snap.missions.contains_instance_id(instance_id) {
@@ -337,20 +396,21 @@ fn sync_part2_activity_tables(
         }
         for m in snap.missions.iter() {
             if before.missions.get(m.instance_id) != Some(m) {
-                let js = to_checked_json_string(m)?;
+                insert_mission_instance_row(tx, m)?;
+            }
+        }
+        for instance_id in before.missions.history_keys() {
+            if !snap.missions.contains_history_id(instance_id) {
                 tx.execute(
-                    "INSERT OR REPLACE INTO mission_instances (instance_id, character_id, agent_id, mission_id, state, record_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        m.instance_id,
-                        m.character_id,
-                        m.agent_id,
-                        m.template_id as i64,
-                        m.state.as_str(),
-                        js,
-                    ],
+                    "DELETE FROM mission_history WHERE instance_id = ?1",
+                    params![instance_id],
                 )
                 .map_err(|e| e.to_string())?;
+            }
+        }
+        for h in snap.missions.iter_history() {
+            if before.missions.get_history(h.instance_id) != Some(h) {
+                insert_mission_history_row(tx, h)?;
             }
         }
     }
@@ -869,6 +929,7 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM industry_jobs;
          DELETE FROM planetary_colonies;
          DELETE FROM mission_instances;
+         DELETE FROM mission_history;
          DELETE FROM mission_tally;
          DELETE FROM standings;
          DELETE FROM npe_progress;

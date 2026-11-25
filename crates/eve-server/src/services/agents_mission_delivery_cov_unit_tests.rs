@@ -15,7 +15,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
     assert_eq!(
         verify_and_consume_mission_delivery_items(
             &mut snap, char_id, 10, 34, 100, true, false, Some(agent_station), Some(agent_station),
-            Some(ship_id), None, Some(1),
+            Some(ship_id), None, Some(1), false,
         )
         .expect_err("missing dest")
         .code,
@@ -36,6 +36,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
             Some(ship_id),
             Some(dest_station),
             Some(1),
+            false,
         )
         .expect_err("not at dest")
         .code,
@@ -56,6 +57,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
             Some(ship_id),
             Some(dest_station),
             Some(99_100_200),
+            false,
         )
         .expect_err("missing cargo")
         .code,
@@ -110,6 +112,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
         Some(ship_id),
         Some(dest_station),
         Some(99_100_200),
+        false,
     )
     .expect("courier delivery consumes across cargo and hangar");
     assert!(!snap.items.contains_key(&99_100_201));
@@ -130,6 +133,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
             Some(ship_id),
             None,
             None,
+            false,
         )
         .expect_err("must dock at agent station")
         .code,
@@ -150,6 +154,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
             Some(ship_id),
             None,
             None,
+            false,
         )
         .expect_err("borrowed courier cargo excluded")
         .code,
@@ -198,6 +203,7 @@ fn mission_delivery_covers_courier_and_non_courier_validation_and_partial_consum
         Some(ship_id),
         None,
         None,
+        false,
     )
     .expect("mining mission consumes hangar + ore hold");
     assert!(!snap.items.contains_key(&99_100_301));
@@ -290,6 +296,7 @@ fn courier_delivery_locked_ancestor_gid_boundary_and_deterministic_order() {
             Some(impounded_ship),
             Some(dest_station),
             Some(gid),
+            false,
         )
         .unwrap_err()
         .code,
@@ -342,6 +349,7 @@ fn courier_delivery_locked_ancestor_gid_boundary_and_deterministic_order() {
             Some(ship_id),
             Some(dest_station),
             None,
+            false,
         )
         .unwrap_err()
         .code,
@@ -362,6 +370,7 @@ fn courier_delivery_locked_ancestor_gid_boundary_and_deterministic_order() {
         Some(ship_id),
         Some(dest_station),
         Some(gid),
+        false,
     )
     .expect("exact gid boundary & sorted consumption succeed");
     assert!(!snap.items.contains_key(&gid));
@@ -450,6 +459,7 @@ fn non_courier_delivery_excludes_fitted_non_empty_locked_and_handles_trit_and_no
             Some(ship_id),
             None,
             None,
+            false,
         )
         .unwrap_err()
         .code,
@@ -483,6 +493,7 @@ fn non_courier_delivery_excludes_fitted_non_empty_locked_and_handles_trit_and_no
         Some(ship_id),
         None,
         None,
+        false,
     )
     .expect("empty container eligible while non-empty excluded");
     assert!(snap.items.contains_key(&99_300_012));
@@ -516,6 +527,7 @@ fn non_courier_delivery_excludes_fitted_non_empty_locked_and_handles_trit_and_no
             Some(ship_id),
             None,
             None,
+            false,
         )
         .unwrap_err()
         .code,
@@ -550,6 +562,7 @@ fn non_courier_delivery_excludes_fitted_non_empty_locked_and_handles_trit_and_no
         Some(ship_id),
         None,
         None,
+        false,
     )
     .expect("tritanium (type 34) accepted from ship cargo even on non-mining mission");
     assert!(!snap.items.contains_key(&99_300_020));
@@ -582,6 +595,7 @@ fn non_courier_delivery_excludes_fitted_non_empty_locked_and_handles_trit_and_no
         Some(ship_id),
         None,
         None,
+        false,
     )
     .expect("None agent_station_id bypasses station check and consumes Hangar");
     assert_eq!(snap.items.get(&99_300_021).map(|i| i.quantity), Some(3));
@@ -600,6 +614,7 @@ fn non_courier_delivery_excludes_fitted_non_empty_locked_and_handles_trit_and_no
         None,
         None,
         None,
+        false,
     )
     .expect("zero required units succeeds");
 }
@@ -661,6 +676,7 @@ fn delivery_kills_locked_courier_multi_stack_rem_nonempty_fitted_and_active_ship
             Some(active_ship),
             Some(dest_station),
             Some(c1),
+            false,
         )
         .unwrap_err()
         .code,
@@ -681,6 +697,7 @@ fn delivery_kills_locked_courier_multi_stack_rem_nonempty_fitted_and_active_ship
         Some(active_ship),
         Some(dest_station),
         Some(c1),
+        false,
     )
     .expect("two valid courier stacks must satisfy qty 7");
     assert!(!snap.items.contains_key(&c1));
@@ -785,6 +802,7 @@ fn delivery_kills_locked_courier_multi_stack_rem_nonempty_fitted_and_active_ship
                 Some(active_ship),
                 None,
                 None,
+                false,
             )
             .unwrap_err()
             .code,
@@ -820,6 +838,7 @@ fn delivery_kills_locked_courier_multi_stack_rem_nonempty_fitted_and_active_ship
         Some(active_ship),
         None,
         None,
+        false,
     )
     .expect("valid positive stack satisfies 5 units alongside negative stack");
     assert!(!snap.items.contains_key(&valid_mix));
@@ -866,6 +885,7 @@ fn delivery_kills_locked_courier_multi_stack_rem_nonempty_fitted_and_active_ship
         Some(active_ship),
         None,
         None,
+        false,
     )
     .expect("consumes spare hull while active_ship_id remains protected");
     assert!(
@@ -906,9 +926,113 @@ fn delivery_kills_locked_courier_multi_stack_rem_nonempty_fitted_and_active_ship
         Some(active_ship),
         None,
         None,
+        false,
     )
     .expect("non-courier multi-stack qty 7");
     assert!(!snap.items.contains_key(&d1));
     assert_eq!(snap.items.get(&d2).map(|i| i.quantity), Some(2));
     assert_eq!(snap.items.get(&d3).map(|i| i.quantity), Some(5));
+}
+
+#[test]
+fn heraldry_require_packaged_rejects_assembled_and_boarded_ships() {
+    let mut snap = WorldStateSnapshot::default();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let active_ship = 99_800_001_i64;
+    let assembled_ship = 99_800_002_i64;
+    let packaged_ship = 99_800_003_i64;
+
+    snap.items.insert(
+        active_ship,
+        InventoryItemRecord {
+            item_id: active_ship,
+            type_id: 587,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: false,
+            ..Default::default()
+        },
+    );
+    snap.items.insert(
+        assembled_ship,
+        InventoryItemRecord {
+            item_id: assembled_ship,
+            type_id: 587,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        count_eligible_mission_delivery_items(
+            &snap,
+            char_id,
+            587,
+            false,
+            Some(station_id),
+            Some(active_ship),
+            true,
+        ),
+        0
+    );
+    assert_eq!(
+        verify_and_consume_mission_delivery_items(
+            &mut snap,
+            char_id,
+            17_013,
+            587,
+            1,
+            false,
+            false,
+            Some(station_id),
+            Some(station_id),
+            Some(active_ship),
+            None,
+            None,
+            true,
+        )
+        .unwrap_err()
+        .code,
+        "MissionIncomplete"
+    );
+
+    snap.items.insert(
+        packaged_ship,
+        InventoryItemRecord {
+            item_id: packaged_ship,
+            type_id: 587,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: false,
+            ..Default::default()
+        },
+    );
+    verify_and_consume_mission_delivery_items(
+        &mut snap,
+        char_id,
+        17_013,
+        587,
+        1,
+        false,
+        false,
+        Some(station_id),
+        Some(station_id),
+        Some(active_ship),
+        None,
+        None,
+        true,
+    )
+    .expect("packaged spare hull satisfies heraldry delivery");
+    assert!(!snap.items.contains_key(&packaged_ship));
+    assert!(snap.items.contains_key(&assembled_ship));
+    assert!(snap.items.contains_key(&active_ship));
 }

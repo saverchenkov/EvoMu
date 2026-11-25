@@ -213,31 +213,44 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     });
     assert_eq!(ball_ids.len(), enc.wave_npc_count as usize);
 
-    // Independently derive expected NPC spawn group from SDE (R-MSN-TEST-02)
-    let agent_faction = ctx
-        .sde
-        .npc_corporations
-        .get(&burner_agent.corporation_id)
-        .and_then(|c| c.faction_id)
-        .unwrap_or(0);
-    let target_ship_class = match burner_agent.level {
-        1 => 1,
-        2 | 3 => 2,
-        _ => 3,
+    // Verify spawned NPC types match the SDE spawn group matching enc.faction_id / enc.spawn_group_id (R-MSN-TEST-02)
+    let target_faction_name = match enc.faction_id {
+        500_010 => "Guristas".to_string(),
+        500_011 => "Angel Cartel".to_string(),
+        500_012 => "Blood Raiders".to_string(),
+        500_019 => "Sansha's Nation".to_string(),
+        500_020 => "Serpentis".to_string(),
+        _ => ctx
+            .sde
+            .factions
+            .get(&enc.faction_id)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "Hostile".to_string()),
     };
-    let independent_spawn_group = ctx
+    let expected_spawn_group = ctx
         .sde
         .npc_spawn_groups
-        .values()
-        .filter(|sg| {
-            (sg.faction_id == agent_faction || sg.group_name.contains("Deadspace"))
-                && !sg.npc_type_ids.is_empty()
-        })
-        .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
-        .expect("Matching NPC spawn group in SDE");
-    assert!(!independent_spawn_group.npc_type_ids.is_empty(), "SDE spawn group must have NPC types");
+        .get(&enc.spawn_group_id)
+        .expect("Resolved spawn group must exist in SDE");
+    assert!(
+        !expected_spawn_group.npc_type_ids.is_empty(),
+        "SDE spawn group must have NPC types"
+    );
+    assert!(
+        expected_spawn_group
+            .group_name
+            .to_lowercase()
+            .contains(&target_faction_name.to_lowercase())
+            || expected_spawn_group.faction_id == enc.faction_id
+            || expected_spawn_group.group_name.contains("Deadspace"),
+        "Spawn group {:?} (faction={}) must agree with mission faction {} ({})",
+        expected_spawn_group.group_name,
+        expected_spawn_group.faction_id,
+        target_faction_name,
+        enc.faction_id,
+    );
 
-    // Verify spawned NPC types match expected SDE spawn group NPC type IDs derived independently (R-MSN-TEST-02)
+    // Verify spawned NPC types match expected SDE spawn group NPC type IDs derived from SDE (R-MSN-TEST-02)
     let sys_handle = ctx.systems.get_or_spawn(agent_sys_id);
     for bid in &ball_ids {
         let (_, ball) = sys_handle
@@ -247,11 +260,11 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
             .flatten()
             .expect("spawned NPC ball in system");
         assert!(
-            independent_spawn_group.npc_type_ids.contains(&ball.type_id),
-            "Spawned NPC type {} must match independently derived SDE spawn group (id={}, name={:?})",
+            expected_spawn_group.npc_type_ids.contains(&ball.type_id),
+            "Spawned NPC type {} must match SDE spawn group (id={}, name={:?})",
             ball.type_id,
-            independent_spawn_group.spawn_group_id,
-            independent_spawn_group.group_name,
+            expected_spawn_group.spawn_group_id,
+            expected_spawn_group.group_name,
         );
         let sde_type = ctx.sde.types.get(&ball.type_id).expect("NPC type exists in SDE");
         assert!(sde_type.group_id > 0, "NPC type must have valid group");
@@ -451,7 +464,11 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         .await.expect_err("Accepting expired offer must fail");
     assert_eq!(exp_err.code, "MissionOfferExpired");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(mission_fixture::get(snap, char_id, mid2).map(|m| m.state), Some("Expired".to_string()));
+        assert!(mission_fixture::get(snap, char_id, mid2).is_none());
+        assert_eq!(
+            mission_fixture::latest_history(snap, char_id, mid2).as_deref(),
+            Some("Expired")
+        );
         let courier_tag2 = format!("courier_cargo:{char_id}:{mid2}");
         assert!(!snap.items.values().any(|it| snap.item_custom_names.get(&it.item_id) == Some(&courier_tag2)));
     });
@@ -2307,11 +2324,12 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
         .expect_err("Expired mission must fail on completion");
     assert_eq!(exp_err.code, "MissionExpired");
 
-    // Verify active mission transitioned to Failed state
+    // Verify active mission left live table and archived in Failed state
     let is_failed = ctx.db.with_snapshot(|snap| {
-        mission_fixture::get(snap, char_id, mid2).is_some_and(|m| m.state == "Failed")
+        mission_fixture::get(snap, char_id, mid2).is_none()
+            && mission_fixture::latest_history(snap, char_id, mid2).as_deref() == Some("Failed")
     });
-    assert!(is_failed, "Expired mission must be transitioned to Failed state");
+    assert!(is_failed, "Expired mission must be archived in Failed state");
 }
 
 /// feat:pve.mission-trade

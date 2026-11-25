@@ -426,11 +426,10 @@ async fn test_mission_offer_expiry_no_penalty() {
     // Call GetMyJournalDetails to trigger offer expiry sweep
     let _ = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[]).await;
 
-    // Check mission state is now Expired
+    // Check mission left active store and archived as Expired
     let state = ctx.db.with_snapshot(|snap| {
-        mission_fixture::get(snap, char_id, mid)
-            .map(|m| m.state)
-            .unwrap()
+        assert!(mission_fixture::get(snap, char_id, mid).is_none());
+        mission_fixture::latest_history(snap, char_id, mid).unwrap()
     });
     assert_eq!(state, "Expired");
 
