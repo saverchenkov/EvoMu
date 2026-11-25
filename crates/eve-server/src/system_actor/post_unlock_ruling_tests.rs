@@ -594,22 +594,37 @@ async fn bf_1170_rev01_initiate_module_repair_many_waits_behind_in_flight_nanite
     let _ = rel1.send(()); w1.join().unwrap();
     assert_eq!(rpc1.await.unwrap().unwrap().unwrap_err().code, "NoDamagedModulesToRepair");
 
-    // 2. In-flight NaniteRepairCancel leaves DAMAGE=15.0 & clears shortfall=2: RPC waits before reading DAMAGE and starting fresh repair.
+    // 2. In-flight NaniteRepairCancel with shortfall=2 & refund=5 consumes shortfall BEFORE RPC clears it (4 + 3 - 1 = 6 paste, no 2-paste minting).
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&mod_id).unwrap().dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 30.0);
+        snap.items.get_mut(&paste_id).unwrap().quantity = 4;
         snap.sp6_lifecycle.nanite_paste_shortfall.insert((ship_id, mod_id), 2);
     });
     let (rel2, w2) = hold_db_writer(&ctx.db);
     let mut ops2 = PostUnlockOps::default();
-    ops2.push(PostUnlockIntent::NaniteRepairCancel(super::NaniteRepairCancelDbOp { char_id, ship_id, module_id: mod_id, rem_dmg: 15.0, refund_paste: false, refund: 0 }));
+    ops2.push(PostUnlockIntent::NaniteRepairCancel(super::NaniteRepairCancelDbOp { char_id, ship_id, module_id: mod_id, rem_dmg: 15.0, refund_paste: true, refund: 5 }));
     send_post_ops(&sys, &ctx, ops2);
     let rpc2 = call_repair();
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert!(!rpc2.is_finished(), "InitiateModuleRepairMany bypassed in-flight NaniteRepairCancel");
+    assert!(!rpc2.is_finished(), "InitiateModuleRepairMany bypassed in-flight NaniteRepairCancel (shortfall)");
     let _ = rel2.send(()); w2.join().unwrap();
     let res2 = rpc2.await.unwrap().unwrap().unwrap();
     assert!(matches!(res2, PyRep::Tuple(ref p) if p.first() == Some(&PyRep::List(vec![PyRep::Integer(mod_id)]))));
-    assert!(sys.is_module_being_nanite_repaired_sync(ship_id, mod_id));
+    assert_eq!(paste_qty(&ctx.db, ship_id), 6, "shortfall=2 must be deducted from refund=5 BEFORE InitiateModuleRepairMany clears shortfall");
+
+    // 3. With shortfall=0, in-flight NaniteRepairCancel updates DAMAGE 30.0 -> 15.0 BEFORE RPC reads DAMAGE.
+    sys.cancel_ship_nanite_repairs_sync(ship_id, false);
+    ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&mod_id).unwrap().dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 30.0); });
+    let (rel3, w3) = hold_db_writer(&ctx.db);
+    let mut ops3 = PostUnlockOps::default();
+    ops3.push(PostUnlockIntent::NaniteRepairCancel(super::NaniteRepairCancelDbOp { char_id, ship_id, module_id: mod_id, rem_dmg: 15.0, refund_paste: false, refund: 0 }));
+    send_post_ops(&sys, &ctx, ops3);
+    let rpc3 = call_repair();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!rpc3.is_finished(), "InitiateModuleRepairMany bypassed in-flight NaniteRepairCancel (DAMAGE)");
+    let _ = rel3.send(()); w3.join().unwrap();
+    let res3 = rpc3.await.unwrap().unwrap().unwrap();
+    assert!(matches!(res3, PyRep::Tuple(ref p) if p.first() == Some(&PyRep::List(vec![PyRep::Integer(mod_id)]))));
     assert_eq!(sys.actor_state.read().unwrap().active_nanite_repairs.iter().find(|r| r.module_id == mod_id).map(|r| r.initial_damage_hp), Some(15.0));
 }
 
