@@ -718,7 +718,7 @@ pub(super) fn warn_sync_deadline_overrun(
     }
 }
 
-/// Runs synchronous per-system NPC AI/spawns off the Tokio worker pool and bounds `step_combat_system` (`#1170`, `#1208`).
+/// Runs synchronous per-system NPC AI/spawns off the Tokio worker pool under a bounded timeout and logs deadline budget overruns on `step_combat_system` (`#1170`, `#1208`).
 pub(super) async fn step_system_ai_and_combat_bounded(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,

@@ -854,11 +854,17 @@ async fn pending_dock_and_docking_transition_asks_against_paused_actor_stay_boun
         sid,
         &sess,
         &plan,
-        Duration::from_millis(80),
+        Duration::from_millis(200),
     )
     .await
     .expect("pending dock settle timeout must not break connection");
-    assert!(dock_start.elapsed() < Duration::from_millis(500));
+    // NB-1: when `drain_observer_updates_with_seq` times out, peer flush is skipped so total
+    // latency stays 1x (~200ms) rather than 2x (~400ms).
+    let dock_elapsed = dock_start.elapsed();
+    assert!(
+        dock_elapsed >= Duration::from_millis(180) && dock_elapsed < Duration::from_millis(360),
+        "expected single bounded ask deadline (~200ms), got {dock_elapsed:?}"
+    );
 
     assert_next_tick_recovers_set_state_without_client_rpc(
         &ctx,
@@ -1238,4 +1244,436 @@ async fn live_macho_tcp_client_recovers_set_state_within_two_ticks_after_paused_
     drop(stream);
     let _ = rt_stop_tx.send(());
     let _ = actor_thread.join();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn docking_transition_peer_flush_timeout_preserves_pre_dock_destiny_before_session_change() {
+    use crate::outbound_sequencer::{sequence, DestinyDrain, RpcCompletion};
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sid = 91_510_u64;
+    let client_id = sid * 10;
+
+    let (ctx, sys_handle, sess) =
+        setup_bootstrapped_space_session(sid, sys_id, char_id, ship_id).await;
+    let mut sys_rx = sys_handle.subscribe();
+    let mut wire_state = SessionWireState::new(sid, client_id);
+    let (mut client_rd, mut server_wr) = tokio::io::duplex(64 * 1024);
+    let _ep = emit_initial_live_set_state(
+        &ctx,
+        &sys_handle,
+        &mut sys_rx,
+        &mut wire_state,
+        &mut server_wr,
+        &mut client_rd,
+        &sess,
+        sys_id,
+        ship_id,
+        false,
+    )
+    .await;
+
+    // Enqueue a real observer destiny update before docking so `run_pre_dock_observer_ask_bounded`
+    // collects a non-empty `pre_dock_destiny` batch while the actor is healthy.
+    assert!(
+        sys_handle
+            .emit_observer_destiny_event(
+                ship_id,
+                eve_destiny::DestinyEvent::Stop { ball_id: ship_id },
+            )
+            .await
+    );
+    let pre_dock_scope =
+        crate::outbound_scene_scope::space_scope(Some(sys_id), Some(wire_state.scene_epoch));
+    let (pre_dock_destiny, pre_dock_ticks) = run_pre_dock_observer_ask_bounded(
+        &ctx,
+        &sys_handle,
+        &mut wire_state,
+        Some(&mut sys_rx),
+        sys_id,
+        ship_id,
+        sid,
+        pre_dock_scope,
+        Duration::from_millis(200),
+    )
+    .await
+    .expect("healthy pre_dock drain succeeds");
+    assert!(
+        pre_dock_destiny.is_some(),
+        "expected non-empty pre_dock_destiny before Detach"
+    );
+
+    // BF-1: pause actor before the Detach peer flush; timeout must NOT mark `AwaitingSetState` or
+    // drop already-drained `pre_dock_destiny` before `SessionChangeNotification`.
+    let pause_guard = PausedActorGuard::pause(&sys_handle);
+    let flush_start = std::time::Instant::now();
+    let flush_ok = best_effort_flush_peer_observer_updates_detach(
+        sid,
+        &sys_handle,
+        Some(ship_id),
+        Duration::from_millis(80),
+        "docking_transition",
+    )
+    .await;
+    assert!(!flush_ok);
+    assert!(flush_start.elapsed() < Duration::from_millis(500));
+    assert!(
+        matches!(wire_state.destiny, DestinyStream::Live { .. }),
+        "BF-1: Detach peer flush timeout must keep stream Live until Detach sequencing, got {:?}",
+        wire_state.destiny
+    );
+    assert!(!wire_state.needs_awaiting_set_state_resync());
+
+    let out = sequence(
+        &mut wire_state,
+        RpcCompletion {
+            call_id: 210,
+            response_frame: PyRep::Tuple(vec![PyRep::Integer(1)]),
+            session_change_frame: Some(PyRep::Tuple(vec![PyRep::String("SessionChange".into())])),
+            pending_tick_batches: pre_dock_ticks,
+            destiny_drain: DestinyDrain::Detach {
+                pre_detach: pre_dock_destiny,
+            },
+            notifications: Vec::new(),
+            item_change_before_session_change: false,
+        },
+    );
+    let destiny_idx = out
+        .iter()
+        .position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. }))
+        .expect("BF-1: pre_dock_destiny must NOT be dropped when Detach peer flush times out");
+    let sc_idx = out
+        .iter()
+        .position(|f| matches!(f, OutFrame::SessionChange { .. }))
+        .expect("SessionChange frame present");
+    assert!(
+        destiny_idx < sc_idx,
+        "BF-1: pre_dock_destiny ({destiny_idx}) must precede SessionChange ({sc_idx})"
+    );
+    assert_eq!(wire_state.destiny, DestinyStream::Detached);
+    pause_guard.resume();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upwell_view_outside_undock_and_detached_ship_swap_timeout_recover_on_next_tick() {
+    use std::sync::Mutex;
+
+    // 1) Upwell View Outside -> Undock (`BF-2`): `enter_space` clears `last_wire_epoch_and_stamp`,
+    //    then `post_rpc` times out while `is_beyonce_ballpark_rpc == false` (`Ok` reply kept).
+    //    `awaiting_tick_set_state_resync` must keep `needs_awaiting_set_state_resync() == true`
+    //    and deliver `SetState` on the next `Ok(tick_msg)` without any client RPC.
+    let ctx = ServerContext::new();
+    let sys_id = 30_000_144_u32;
+    let char_id = 90_000_001_i64;
+    let struct_id = 1_040_001_170_201_i64;
+    let sid = 91_511_u64;
+    let client_id = sid * 10;
+    let user_id = 1_u64;
+    let mut ship_id = 0_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).expect("pilot char");
+        let corp_id = ch.corporation_id;
+        ship_id = ch.active_ship_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.location_id = struct_id;
+            ship_item.flag = eve_db::InventoryFlag::Hangar;
+        }
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                solar_system_id: sys_id,
+                owner_corp_id: corp_id,
+                name: "GH1170 BF2 Astrahus".into(),
+                position: [250_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("acquire online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.structure_id = Some(struct_id);
+    sess.live_notify_listener = true;
+
+    let mut sys_rx: Option<tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>> =
+        None;
+    let mut subscribed_sys_id = None;
+    let mut wire_state = SessionWireState::new(sid, client_id);
+    let mut deferred_ship_id = None;
+    let kwargs = HashMap::new();
+    let req_source = MachoAddress::Client {
+        client_id,
+        call_id: 1,
+        service: None,
+    };
+    let beyonce_dest = MachoAddress::Node {
+        node_id: eve_machonet::MACHO_PROXY_NODE_ID,
+        service: Some("beyonce".to_string()),
+        call_id: 0,
+    };
+    {
+        let mut wire_refs = CallReqWireRefs {
+            client_id,
+            sys_rx: &mut sys_rx,
+            subscribed_sys_id: &mut subscribed_sys_id,
+            wire_state: &mut wire_state,
+            deferred_ship_id: &mut deferred_ship_id,
+        };
+        let view_out = execute_call_req_wire_with_ask_timeout(
+            &ctx,
+            &mut sess,
+            &mut wire_refs,
+            &req_source,
+            &beyonce_dest,
+            "beyonce",
+            None,
+            "GetFormations",
+            &[],
+            &kwargs,
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(view_out.rpc_result.is_ok());
+    }
+    assert!(
+        matches!(wire_state.destiny, DestinyStream::Live { .. }),
+        "View Outside must bootstrap Live wire_state, got {:?}",
+        wire_state.destiny
+    );
+    let ep_before_undock = wire_state.current_epoch();
+
+    // Undock from View Outside; pause the actor immediately after `dispatch_rpc` commits Undock.
+    let undock_dest = MachoAddress::Node {
+        node_id: eve_machonet::MACHO_PROXY_NODE_ID,
+        service: Some("stationSvc".to_string()),
+        call_id: 0,
+    };
+    let pause_holder: Arc<Mutex<Option<PausedActorGuard>>> = Arc::new(Mutex::new(None));
+    let pause_holder_hook = Arc::clone(&pause_holder);
+    let sys_handle_hook = sys_handle.clone();
+    let undock_out = {
+        let mut wire_refs = CallReqWireRefs {
+            client_id,
+            sys_rx: &mut sys_rx,
+            subscribed_sys_id: &mut subscribed_sys_id,
+            wire_state: &mut wire_state,
+            deferred_ship_id: &mut deferred_ship_id,
+        };
+        execute_call_req_wire_with_ask_timeout_and_post_dispatch(
+            &ctx,
+            &mut sess,
+            &mut wire_refs,
+            &MachoAddress::Client {
+                client_id,
+                call_id: 2,
+                service: None,
+            },
+            &undock_dest,
+            "stationSvc",
+            None,
+            "Undock",
+            &[],
+            &kwargs,
+            Duration::from_millis(80),
+            Some(Box::new(move || {
+                *pause_holder_hook.lock().unwrap() = Some(PausedActorGuard::pause(&sys_handle_hook));
+            })),
+        )
+        .await
+    };
+    assert!(
+        undock_out.rpc_result.is_ok(),
+        "Upwell Undock must preserve Ok reply on post-RPC ask timeout: {:?}",
+        undock_out.rpc_result
+    );
+    assert!(
+        undock_out
+            .out_frames
+            .iter()
+            .any(|f| matches!(f, OutFrame::SessionChange { .. })),
+        "Upwell Undock must still send SessionChangeNotification"
+    );
+    let ep_after_undock = wire_state.current_epoch();
+    assert!(ep_after_undock > ep_before_undock);
+    assert!(
+        wire_state.needs_awaiting_set_state_resync(),
+        "BF-2: Upwell View Outside -> Undock timeout must set awaiting_tick_set_state_resync even after enter_space cleared last_wire_epoch_and_stamp"
+    );
+    let (mut client_rd, mut server_wr) = tokio::io::duplex(64 * 1024);
+    let mut rx = sys_rx.take().expect("Undock attached sys_rx");
+    let pause_undock = pause_holder.lock().unwrap().take().unwrap();
+    assert_next_tick_recovers_set_state_without_client_rpc(
+        &ctx,
+        &sys_handle,
+        &mut rx,
+        &mut wire_state,
+        &mut server_wr,
+        &mut client_rd,
+        &sess,
+        ship_id,
+        ep_after_undock,
+        pause_undock,
+    )
+    .await;
+
+    // 2) BF-2: `sync_in_space_ship_swap_destiny_bounded` entering from `Detached` and timing out
+    //    must also set `needs_awaiting_set_state_resync() == true` and recover on next tick.
+    let mut detached_ws = SessionWireState::new(sid + 1, client_id + 1);
+    let mut swap_rx = sys_handle.subscribe();
+    let pause_swap = PausedActorGuard::pause(&sys_handle);
+    let swap_res = sync_in_space_ship_swap_destiny_bounded(
+        &ctx,
+        &sys_handle,
+        &mut swap_rx,
+        &mut detached_ws,
+        sid + 1,
+        sys_id,
+        ship_id,
+        None,
+        false,
+        Duration::from_millis(80),
+    )
+    .await;
+    assert!(swap_res.is_none());
+    let ep_swap = detached_ws.current_epoch();
+    assert!(
+        detached_ws.needs_awaiting_set_state_resync(),
+        "BF-2: ship swap timeout from Detached must mark stream for next-tick SetState recovery"
+    );
+    assert_next_tick_recovers_set_state_without_client_rpc(
+        &ctx,
+        &sys_handle,
+        &mut swap_rx,
+        &mut detached_ws,
+        &mut server_wr,
+        &mut client_rd,
+        &sess,
+        ship_id,
+        ep_swap,
+        pause_swap,
+    )
+    .await;
+
+    // 3) Negative control: an unbootstrapped initial `beyonce.GetFormations` timeout (returning
+    //    `ErrorResponse`) must leave `needs_awaiting_set_state_resync() == false`.
+    let mut unboot_ws = SessionWireState::new(sid + 2, client_id + 2);
+    let mut unboot_rx: Option<tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>> =
+        Some(sys_handle.subscribe());
+    let mut unboot_sub_sys = Some(sys_id);
+    let mut unboot_def_ship = None;
+    let pause_unboot = PausedActorGuard::pause(&sys_handle);
+    let unboot_out = {
+        let mut wire_refs = CallReqWireRefs {
+            client_id: client_id + 2,
+            sys_rx: &mut unboot_rx,
+            subscribed_sys_id: &mut unboot_sub_sys,
+            wire_state: &mut unboot_ws,
+            deferred_ship_id: &mut unboot_def_ship,
+        };
+        execute_call_req_wire_with_ask_timeout(
+            &ctx,
+            &mut sess,
+            &mut wire_refs,
+            &req_source,
+            &beyonce_dest,
+            "beyonce",
+            None,
+            "GetFormations",
+            &[],
+            &kwargs,
+            Duration::from_millis(80),
+        )
+        .await
+    };
+    assert!(unboot_out.rpc_result.is_err());
+    assert!(
+        !unboot_ws.needs_awaiting_set_state_resync(),
+        "BF-2 negative control: initial unbootstrapped beyonce ErrorResponse must NOT emit unsolicited SetState on tick"
+    );
+    pause_unboot.resume();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_dock_warp_settle_bounded_prevents_station_dock_hang_and_recovers() {
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sid = 91_512_u64;
+    let client_id = sid * 10;
+
+    let (ctx, sys_handle, sess) =
+        setup_bootstrapped_space_session(sid, sys_id, char_id, ship_id).await;
+    let mut sys_rx = sys_handle.subscribe();
+    let mut wire_state = SessionWireState::new(sid, client_id);
+    let (mut client_rd, mut server_wr) = tokio::io::duplex(64 * 1024);
+    let ep = emit_initial_live_set_state(
+        &ctx,
+        &sys_handle,
+        &mut sys_rx,
+        &mut wire_state,
+        &mut server_wr,
+        &mut client_rd,
+        &sess,
+        sys_id,
+        ship_id,
+        false,
+    )
+    .await;
+
+    let pause_guard = PausedActorGuard::pause(&sys_handle);
+    let started = std::time::Instant::now();
+    let err = prepare_dock_warp_settle_bounded(
+        &ctx,
+        &sess,
+        &mut wire_state,
+        "stationSvc",
+        "Dock",
+        &[PyRep::Integer(60_003_760)],
+        Duration::from_millis(80),
+    )
+    .await
+    .expect_err("BF-3: paused actor must bound prepare_dock_warp_settle instead of hanging");
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(err.code, "ServiceTemporarilyUnavailable");
+    assert!(matches!(
+        err.to_client_error("stationSvc", "Dock"),
+        eve_proto::ClientError::CustomNotify(ref msg)
+            if msg.contains("prepare_dock_warp_settle") && msg.contains("ask timed out")
+    ));
+    assert_next_tick_recovers_set_state_without_client_rpc(
+        &ctx,
+        &sys_handle,
+        &mut sys_rx,
+        &mut wire_state,
+        &mut server_wr,
+        &mut client_rd,
+        &sess,
+        ship_id,
+        ep,
+        pause_guard,
+    )
+    .await;
 }

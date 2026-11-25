@@ -911,6 +911,8 @@ async fn dispatch_call_req_to_wire<W: AsyncWriteExt + Unpin>(
         call_args,
         call_kwargs,
         POST_RPC_ACTOR_ASK_TIMEOUT,
+        #[cfg(test)]
+        None,
     )
     .await;
     let frame_user_id = session.user_id.or(user_id_before_call);
@@ -1463,6 +1465,8 @@ pub async fn execute_call_req_wire(
         call_args,
         call_kwargs,
         POST_RPC_ACTOR_ASK_TIMEOUT,
+        #[cfg(test)]
+        None,
     )
     .await
 }
@@ -1480,6 +1484,7 @@ async fn execute_call_req_wire_inner(
     call_args: &[PyRep],
     call_kwargs: &HashMap<String, PyRep>,
     ask_timeout: std::time::Duration,
+    #[cfg(test)] post_dispatch: Option<Box<dyn FnOnce() + Send>>,
 ) -> CallReqWireOutcome {
     let call_started_at = std::time::Instant::now();
     let call_id = match (req_dest, req_source) {
@@ -1579,6 +1584,10 @@ async fn execute_call_req_wire_inner(
         ),
     )
     .await;
+    #[cfg(test)]
+    if let Some(hook) = post_dispatch {
+        hook();
+    }
     let pending_structure_set_state = session.character_id.and_then(|cid| {
         crate::services::space_destiny::take_pending_structure_set_state(
             ctx,
@@ -1824,6 +1833,7 @@ async fn execute_call_req_wire_inner(
     let cross_sys_pre_detach =
         !cross_sys_pre_ticks.is_empty() || cross_sys_pre_destiny.is_some();
     let mut was_live = matches!(wire.wire_state.destiny, DestinyStream::Live { .. });
+    let was_live_before_rpc = was_live;
     let is_ballpark_init_rpc = (is_beyonce_ballpark_rpc && is_in_space) || is_upwell_undock;
     let structure_dock_transition =
         is_structure_docked && prev_session.structure_id != session.structure_id;
@@ -1973,8 +1983,8 @@ async fn execute_call_req_wire_inner(
 
     if post_rpc_timeout_err.is_none() && owns_char_session && docking_transition {
         if let Some(sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
-            best_effort_flush_peer_observer_updates(
-                wire.wire_state,
+            best_effort_flush_peer_observer_updates_detach(
+                session.session_id,
                 &ctx.systems.get_or_spawn(sys_id),
                 ballpark_observer_id_for_session(&prev_session)
                     .or_else(|| ballpark_observer_id_for_session(session)),
@@ -1989,8 +1999,8 @@ async fn execute_call_req_wire_inner(
         && prev_session.solar_system_id != session.solar_system_id
     {
         if let Some(old_sys_id) = prev_session.solar_system_id {
-            best_effort_flush_peer_observer_updates(
-                wire.wire_state,
+            best_effort_flush_peer_observer_updates_detach(
+                session.session_id,
                 &ctx.systems.get_or_spawn(old_sys_id),
                 ballpark_observer_id_for_session(&prev_session),
                 ask_timeout,
@@ -2386,6 +2396,15 @@ async fn execute_call_req_wire_inner(
             error_wire_body = next_err_body;
             rsp_pkt = next_pkt;
         }
+    }
+    if rpc_result.is_ok()
+        && is_in_space
+        && was_live_before_rpc
+        && !post_rpc_direct_batch
+            .as_ref()
+            .is_some_and(|batch| batch.has_set_state)
+    {
+        wire.wire_state.mark_awaiting_tick_set_state_resync();
     }
     let notifications = typed_notifications
         .iter()
@@ -3380,6 +3399,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 if let Some(old_sys_id) = prev_session.solar_system_id {
                                     let old_sys = ctx.systems.get_or_spawn(old_sys_id);
                                     if session_owns_char_notifications(&ctx, &session) {
+                                        let mut pre_drain_ok = true;
                                         if let Some(old_obs_id) = prev_obs_id {
                                             if !is_shared_structure_observer(&prev_session, old_obs_id)
                                             {
@@ -3387,19 +3407,22 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                 // TerminalExplosion / RemoveBall / SetState) on async
                                                 // DeathRespawn (#1010) before SessionChangeNotification
                                                 // tears down the client ballpark via OnPrimaryViewChanged.
-                                                let _ = bounded_actor_ask(
+                                                pre_drain_ok = bounded_actor_ask(
                                                     &mut wire_state,
                                                     "drain_observer_updates",
                                                     "notify_session_transition",
                                                     POST_RPC_ACTOR_ASK_TIMEOUT,
                                                     old_sys.drain_observer_updates(old_obs_id),
                                                 )
-                                                .await;
+                                                .await
+                                                .is_ok();
                                             }
                                         }
-                                        if session_owns_char_notifications(&ctx, &session) {
-                                            best_effort_flush_peer_observer_updates(
-                                                &mut wire_state,
+                                        if pre_drain_ok
+                                            && session_owns_char_notifications(&ctx, &session)
+                                        {
+                                            best_effort_flush_peer_observer_updates_detach(
+                                                session_id,
                                                 &old_sys,
                                                 prev_obs_id,
                                                 POST_RPC_ACTOR_ASK_TIMEOUT,
@@ -4073,14 +4096,40 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         let dock_plan = if session_owns_char_notifications(&ctx, &session) {
                             let effective_dock_service = bound_id
                                 .and_then(|bid| ctx.owned_bound_service_for_metrics(&session, bid));
-                            crate::services::space_warp_jump::prepare_dock_warp_settle(
+                            let dock_service =
+                                effective_dock_service.as_deref().unwrap_or(&service);
+                            match prepare_dock_warp_settle_bounded(
                                 &ctx,
                                 &session,
-                                effective_dock_service.as_deref().unwrap_or(&service),
+                                &mut wire_state,
+                                dock_service,
                                 &method,
                                 &call_args,
+                                POST_RPC_ACTOR_ASK_TIMEOUT,
                             )
                             .await
+                            {
+                                Ok(plan) => plan,
+                                Err(timeout_err) => {
+                                    pending_dock = None;
+                                    let (_, _, err_pkt) = build_call_req_reply_packet(
+                                        &pkt.source,
+                                        &pkt.destination,
+                                        session.user_id,
+                                        session.character_id,
+                                        dock_service,
+                                        &method,
+                                        Err(timeout_err),
+                                    );
+                                    if write_framed_pyrep(&mut writer, &err_pkt.to_pyrep())
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            }
                         } else {
                             pending_dock = None;
                             None

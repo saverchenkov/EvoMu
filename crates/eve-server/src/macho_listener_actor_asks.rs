@@ -91,6 +91,44 @@ pub(super) async fn best_effort_flush_peer_observer_updates(
     .is_ok()
 }
 
+/// Flushes peer observer updates along a `Detach` / `leave_space` path under a bounded deadline
+/// without mutating `wire_state` (`BF-1`): preserves already-drained `pre_detach` frames on the
+/// wire before [`SessionWireState::leave_space`].
+pub(super) async fn best_effort_flush_peer_observer_updates_detach(
+    session_id: u64,
+    sys_handle: &crate::system_actor::SystemHandle,
+    exclude_observer_id: Option<i64>,
+    ask_timeout: std::time::Duration,
+    context: &str,
+) -> bool {
+    match tokio::time::timeout(
+        ask_timeout,
+        sys_handle.flush_peer_observer_updates(exclude_observer_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
+            warn!(
+                session_id,
+                context,
+                error = %err,
+                "peer observer flush before detach failed; preserving drained pre-detach frames"
+            );
+            false
+        }
+        Err(_) => {
+            warn!(
+                session_id,
+                context,
+                timeout_ms = ask_timeout.as_millis() as u64,
+                "peer observer flush before detach exceeded deadline; preserving drained pre-detach frames"
+            );
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resync_set_state_with_sys_rx_with_mode_bounded(
     ctx: &ServerContext,
@@ -295,7 +333,7 @@ pub(super) async fn sync_in_space_ship_swap_destiny_bounded(
     ask_timeout: std::time::Duration,
 ) -> Option<ShipSwapDestinySync> {
     let mut ep = wire_state.ensure_in_space(Some(sys_id));
-    let (mut tick, mut events, mut updates_pyrep, watermark_seq) = bounded_actor_ask(
+    let Ok((mut tick, mut events, mut updates_pyrep, watermark_seq)) = bounded_actor_ask(
         wire_state,
         "drain_observer_updates_with_seq",
         "ship_swap",
@@ -303,7 +341,10 @@ pub(super) async fn sync_in_space_ship_swap_destiny_bounded(
         sys_handle.drain_observer_updates_with_seq(new_ship_id),
     )
     .await
-    .ok()?;
+    else {
+        wire_state.mark_awaiting_tick_set_state_resync();
+        return None;
+    };
     sys_handle.record_warp_stops_from_events(&events);
     let has_set_state = events
         .iter()
@@ -379,6 +420,7 @@ pub(super) async fn sync_in_space_ship_swap_destiny_bounded(
             ep = wire_state.current_epoch();
         } else {
             aborted_resync = true;
+            wire_state.mark_awaiting_tick_set_state_resync();
         }
     }
 
@@ -693,6 +735,35 @@ pub(super) async fn run_pre_dock_observer_ask_bounded(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(super) async fn prepare_dock_warp_settle_bounded(
+    ctx: &ServerContext,
+    session: &SessionState,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    service: &str,
+    method: &str,
+    call_args: &[PyRep],
+    ask_timeout: std::time::Duration,
+) -> std::result::Result<Option<crate::services::space_warp_jump::DockWarpSettlePlan>, BridgeRpcError>
+{
+    match tokio::time::timeout(
+        ask_timeout,
+        crate::services::space_warp_jump::prepare_dock_warp_settle(
+            ctx, session, service, method, call_args,
+        ),
+    )
+    .await
+    {
+        Ok(plan) => Ok(plan),
+        Err(_) => Err(on_actor_ask_timeout_or_failure(
+            wire_state,
+            "prepare_dock_warp_settle",
+            "pending_dock_prepare",
+            format!("deadline {}ms exceeded", ask_timeout.as_millis()),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_pending_dock_settle_destiny_sync<W: AsyncWriteExt + Unpin>(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
@@ -705,6 +776,7 @@ pub(super) async fn run_pending_dock_settle_destiny_sync<W: AsyncWriteExt + Unpi
     plan: &crate::services::space_warp_jump::DockWarpSettlePlan,
     ask_timeout: std::time::Duration,
 ) -> std::result::Result<(), ()> {
+    let mut drain_ok = false;
     if let Ok((tick, events, updates_pyrep, watermark_seq)) = bounded_actor_ask(
         wire_state,
         "drain_observer_updates_with_seq",
@@ -714,6 +786,7 @@ pub(super) async fn run_pending_dock_settle_destiny_sync<W: AsyncWriteExt + Unpi
     )
     .await
     {
+        drain_ok = true;
         if session_owns_char_notifications(ctx, session) {
             let mut pre_batches = Vec::new();
             let mut post_batches = Vec::new();
@@ -798,7 +871,7 @@ pub(super) async fn run_pending_dock_settle_destiny_sync<W: AsyncWriteExt + Unpi
             }
         }
     }
-    if plan.stopped_now && session_owns_char_notifications(ctx, session) {
+    if drain_ok && plan.stopped_now && session_owns_char_notifications(ctx, session) {
         best_effort_flush_peer_observer_updates(
             wire_state,
             handle,
@@ -826,6 +899,39 @@ pub(super) async fn execute_call_req_wire_with_ask_timeout(
     call_kwargs: &HashMap<String, PyRep>,
     ask_timeout: std::time::Duration,
 ) -> CallReqWireOutcome {
+    execute_call_req_wire_with_ask_timeout_and_post_dispatch(
+        ctx,
+        session,
+        wire,
+        req_source,
+        req_dest,
+        service,
+        bound_id,
+        method,
+        call_args,
+        call_kwargs,
+        ask_timeout,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_call_req_wire_with_ask_timeout_and_post_dispatch(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    wire: &mut CallReqWireRefs<'_>,
+    req_source: &MachoAddress,
+    req_dest: &MachoAddress,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    call_args: &[PyRep],
+    call_kwargs: &HashMap<String, PyRep>,
+    ask_timeout: std::time::Duration,
+    post_dispatch: Option<Box<dyn FnOnce() + Send>>,
+) -> CallReqWireOutcome {
     let mut inner = InternalCallReqWireRefs {
         client_id: wire.client_id,
         sys_rx: TickRxSlot::Borrowed(wire.sys_rx),
@@ -845,6 +951,7 @@ pub(super) async fn execute_call_req_wire_with_ask_timeout(
         call_args,
         call_kwargs,
         ask_timeout,
+        post_dispatch,
     )
     .await
 }
