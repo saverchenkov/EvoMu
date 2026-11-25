@@ -1157,7 +1157,7 @@ impl SystemRegistry {
         let (initial_tidi, mut has_tidi_history) =
             self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
         let persist_gate = self.cooldown_persist_gate(solar_system_id);
-        let (persist_epoch, initial_cooldowns) = {
+        let (persist_epoch, initial_cooldowns, loaded_cooldowns_cleanly) = {
             let _gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
             let persist_epoch = persist_gate.bump_epoch();
             if has_tidi_history {
@@ -1165,9 +1165,9 @@ impl SystemRegistry {
             } else if persist_gate.has_tidi_history() {
                 has_tidi_history = true;
             }
-            let initial_cooldowns = if db_read_safe {
-                if let Some(ref db) = db_opt {
-                    ewar_cooldowns::load_active_system_module_cooldowns_for_boot(
+            let boot_loaded_opt = if db_read_safe {
+                db_opt.as_ref().and_then(|db| {
+                    ewar_cooldowns::load_active_system_module_cooldowns_for_boot_nonblocking(
                         db,
                         solar_system_id,
                         initial_tidi,
@@ -1175,13 +1175,12 @@ impl SystemRegistry {
                         0.0,
                         0.0,
                     )
-                } else {
-                    HashMap::new()
-                }
+                })
             } else {
-                HashMap::new()
+                None
             };
-            (persist_epoch, initial_cooldowns)
+            let loaded_cleanly = boot_loaded_opt.is_some();
+            (persist_epoch, boot_loaded_opt.unwrap_or_default(), loaded_cleanly)
         };
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
@@ -1193,7 +1192,7 @@ impl SystemRegistry {
             tactical_state: self.tactical_state.clone(),
             module_cooldowns: ActorModuleCooldownState {
                 reactivation_cooldowns: initial_cooldowns,
-                boot_db_pending_merge: !db_read_safe && db_opt.is_some(),
+                boot_db_pending_merge: db_opt.is_some() && !loaded_cooldowns_cleanly,
                 ..Default::default()
             },
             module_cooldown_persist_epoch: persist_epoch,

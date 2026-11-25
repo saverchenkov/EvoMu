@@ -192,14 +192,6 @@ pub(in crate::system_actor) fn active_sink_hook(
         .or_else(|| post_hook.map(|(paired_raw, _)| Arc::clone(paired_raw)))
 }
 
-pub(in crate::system_actor) fn read_active_deactivation_sink(
-    raw_lock: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    post_lock: &Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
-) -> Option<ModuleDeactivationHook> {
-    let (raw, post) = read_deactivation_hooks(raw_lock, post_lock);
-    active_sink_hook(raw.as_ref(), post.as_ref())
-}
-
 fn resolve_removed_cycle_char_id(
     char_id_opt: Option<CharacterId>,
     ship_id: eve_destiny::BallId,

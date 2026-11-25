@@ -410,6 +410,20 @@ pub(crate) fn persist_system_module_cooldowns_in_db(
     solar_system_id != 0 && persist_module_cooldowns_rows_in_db(db, solar_system_id, rows)
 }
 
+fn collect_cold_cooldown_rows(
+    conn: &rusqlite::Connection,
+    solar_system_id: SolarSystemId,
+) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
+    let Ok(rows) = load_system_checkpoints::<((i64, i64, u32), ModuleCooldownEntry)>(
+        conn,
+        solar_system_id,
+        KIND_MODULE_COOLDOWNS,
+    ) else {
+        return HashMap::new();
+    };
+    rows.into_iter().map(|(_, (k, v))| (k, v)).collect()
+}
+
 pub(crate) fn load_cold_system_module_cooldowns_from_db(
     db: &WorldRepository,
     solar_system_id: SolarSystemId,
@@ -427,19 +441,26 @@ pub(crate) fn load_cold_system_module_cooldowns_from_db(
     rows.into_iter().map(|(_, (k, v))| (k, v)).collect()
 }
 
-pub(crate) fn load_active_system_module_cooldowns_for_boot(
+/// Nonblocking counterpart to [`load_cold_system_module_cooldowns_from_db`] for actor
+/// activation paths (`prepare_system_activation`), returning `None` immediately when
+/// `db.writer` is held by another thread (`bf_1170` deadlock avoidance).
+pub(crate) fn load_cold_system_module_cooldowns_from_db_nonblocking(
     db: &WorldRepository,
+    solar_system_id: SolarSystemId,
+) -> Option<HashMap<(i64, i64, u32), ModuleCooldownEntry>> {
+    db.try_with_sqlite_conn(|conn| collect_cold_cooldown_rows(conn, solar_system_id))
+}
+
+fn filter_active_cooldowns_for_boot(
+    db: &WorldRepository,
+    raw: HashMap<(i64, i64, u32), ModuleCooldownEntry>,
     solar_system_id: SolarSystemId,
     tidi_factor: f64,
     has_tidi_history: bool,
     eval_sys_sim_s: f64,
     anchor_sys_sim_s: f64,
 ) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
-    if solar_system_id == 0 {
-        return HashMap::new();
-    }
     let now_unix_f64 = db.clock().now_unix_secs() as f64;
-    let raw = load_cold_system_module_cooldowns_from_db(db, solar_system_id);
     let mut active = HashMap::new();
     for (key, entry) in raw {
         let rem = remaining_cooldown_secs_with_tidi(
@@ -463,6 +484,52 @@ pub(crate) fn load_active_system_module_cooldowns_for_boot(
         }
     }
     active
+}
+
+pub(crate) fn load_active_system_module_cooldowns_for_boot(
+    db: &WorldRepository,
+    solar_system_id: SolarSystemId,
+    tidi_factor: f64,
+    has_tidi_history: bool,
+    eval_sys_sim_s: f64,
+    anchor_sys_sim_s: f64,
+) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
+    if solar_system_id == 0 {
+        return HashMap::new();
+    }
+    let raw = load_cold_system_module_cooldowns_from_db(db, solar_system_id);
+    filter_active_cooldowns_for_boot(
+        db,
+        raw,
+        solar_system_id,
+        tidi_factor,
+        has_tidi_history,
+        eval_sys_sim_s,
+        anchor_sys_sim_s,
+    )
+}
+
+pub(crate) fn load_active_system_module_cooldowns_for_boot_nonblocking(
+    db: &WorldRepository,
+    solar_system_id: SolarSystemId,
+    tidi_factor: f64,
+    has_tidi_history: bool,
+    eval_sys_sim_s: f64,
+    anchor_sys_sim_s: f64,
+) -> Option<HashMap<(i64, i64, u32), ModuleCooldownEntry>> {
+    if solar_system_id == 0 {
+        return Some(HashMap::new());
+    }
+    let raw = load_cold_system_module_cooldowns_from_db_nonblocking(db, solar_system_id)?;
+    Some(filter_active_cooldowns_for_boot(
+        db,
+        raw,
+        solar_system_id,
+        tidi_factor,
+        has_tidi_history,
+        eval_sys_sim_s,
+        anchor_sys_sim_s,
+    ))
 }
 
 /// Removes expired (and future-clock-stale `#1036`) module reactivation cooldowns in memory.
