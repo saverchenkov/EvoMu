@@ -1057,7 +1057,10 @@ impl SystemHandle {
             .push(action);
     }
 
-    fn persist_cooldown_payload(&self, mut payload: ModuleCooldownPersistPayload) -> bool {
+    pub(in crate::system_actor) fn persist_cooldown_payload(
+        &self,
+        mut payload: ModuleCooldownPersistPayload,
+    ) -> bool {
         payload.tidi_factor = self.tidi_factor();
         if payload.tidi_factor < 0.999_999 || self.cooldown_persist_gate.has_tidi_history() {
             payload.has_tidi_history = true;

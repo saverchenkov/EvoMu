@@ -189,7 +189,11 @@ impl ServerContext {
 
     /// Resolves the Unix expiry timestamp (`f64`) of `(ship_id, module_id)`'s active reactivation
     /// cooldown across all live and cold systems, picking the longest active expiry (`G1A-01`).
-    fn resolve_active_reactivation_cooldown(&self, ship_id: i64, module_id: i64) -> Option<f64> {
+    pub(crate) fn resolve_active_reactivation_cooldown(
+        &self,
+        ship_id: i64,
+        module_id: i64,
+    ) -> Option<f64> {
         let now = self.now_unix_secs() as f64;
         let (type_id, _sys_opt, _) = self.resolve_ship_cooldown_clock(ship_id, module_id);
         let (_, entry, rem, tidi_factor, has_tidi_history) =

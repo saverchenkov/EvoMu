@@ -847,14 +847,17 @@ impl SystemRegistry {
         }
         let live_tidi = self.get_handle(solar_system_id).map(|h| h.tidi_factor());
         let held_svc = held_lock_ranks().iter().any(|&r| r >= RANK_SERVICE_STATE);
-        let (manual_override, cn_tidi_hist) = {
-            let cn = if held_svc {
-                self.cluster_nodes
-                    .read_unranked()
-                    .unwrap_or_else(|e| e.into_inner())
-            } else {
-                self.cluster_nodes.read().unwrap_or_else(|e| e.into_inner())
-            };
+        let (manual_override, cn_tidi_hist) = if held_svc {
+            let cn = self
+                .cluster_nodes
+                .read_unranked()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                cn.manual_tidi_overrides.get(&solar_system_id).copied(),
+                cn.tidi_history_systems.contains(&solar_system_id),
+            )
+        } else {
+            let cn = self.cluster_nodes.read().unwrap_or_else(|e| e.into_inner());
             (
                 cn.manual_tidi_overrides.get(&solar_system_id).copied(),
                 cn.tidi_history_systems.contains(&solar_system_id),

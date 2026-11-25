@@ -59,7 +59,7 @@ impl<'a> BallOpsCtx<'a> {
             ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
             post_unlock_ops: exec_ctx.post_unlock_ops,
-            tidi_factor: super::clamp_tidi_factor_bits(exec_ctx.tidi_factor_bits_actor),
+            tidi_factor: celestials::clamp_tidi_factor_bits(exec_ctx.tidi_factor_bits_actor),
         }
     }
 

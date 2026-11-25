@@ -1971,6 +1971,14 @@ async fn loading_transition_hook_serializes_record_remove_clear_ship_and_cross_s
     let (sys_a, sys_b, cloak_tid) = (30_000_142_u32, 30_002_187_u32, 11_370_u32);
     let (s_keep, s_purge, s_clear, s_new) = (100_993_001_i64, 100_993_002_i64, 100_993_003_i64, 100_993_004_i64);
     let (m1, m2, m3, m4, m5) = (100_993_101_i64, 100_993_102_i64, 100_993_103_i64, 100_993_104_i64, 100_993_105_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        for s in [s_keep, s_purge, s_clear, s_new] {
+            snap.items.insert(s, singleton_item(s, 587, 90_000_001, sys_a as i64, InventoryFlag::None));
+        }
+        for (m, s) in [(m1, s_keep), (m2, s_purge), (m3, s_clear), (m4, s_new), (m5, s_clear)] {
+            snap.items.insert(m, singleton_item(m, cloak_tid, 90_000_001, s, InventoryFlag::HiSlot0));
+        }
+    });
     for (s, m, d) in [(s_keep, m1, 10.0), (s_purge, m2, 25.0), (s_clear, m3, 30.0)] {
         ctx.seed_module_cooldown_entry_for_test(s, m, cloak_tid, cd_entry(now, d, sys_a));
     }

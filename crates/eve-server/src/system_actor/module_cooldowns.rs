@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use super::celestials::{clamp_tidi_factor_bits, BallparkHandle};
-use super::{BallOpsCtx, SystemActorState, SystemHandle, SystemRegistry, SystemView};
+use super::{BallOpsCtx, SystemActorState, SystemRegistry, SystemView};
 use eve_db::lock_rank::{
     held_lock_ranks, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_WORLD_INNER,
 };
@@ -1525,7 +1525,7 @@ impl SystemRegistry {
 
     /// Dispatches a cooldown mutation to `solar_system_id`, whether `Live`, `Loading`,
     /// `Stopping`, or `Cold` (`G1A-R3-P1-02`).
-    pub(crate) fn apply_cooldown_op_to_system(
+    pub(in crate::system_actor) fn apply_cooldown_op_to_system(
         &self,
         db: &WorldRepository,
         solar_system_id: SolarSystemId,
@@ -1656,13 +1656,15 @@ impl SystemRegistry {
         key: (i64, i64, u32),
         base_entry: Option<ModuleCooldownEntry>,
     ) -> Option<ModuleCooldownEntry> {
-        let gate = {
+        let Some(gate) = ({
             let guard = self
                 .cooldown_persist_gates
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             guard.get(&solar_system_id).cloned()
-        }?;
+        }) else {
+            return base_entry;
+        };
         if !gate.has_pending_transitions() {
             return base_entry;
         }
@@ -1718,6 +1720,7 @@ impl SystemRegistry {
         self.apply_cooldown_op_to_system(db, solar_system_id, op)
     }
 
+    #[cfg(test)]
     pub(crate) fn remove_cold_module_cooldown_key_across_systems(
         &self,
         db: &WorldRepository,
@@ -1778,6 +1781,7 @@ impl SystemRegistry {
         (retry_set, sys_ids)
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_cold_ship_module_cooldowns_in_db(&self, db: &WorldRepository, ship_id: i64) {
         self.clear_non_live_ship_module_cooldowns(db, &[], ship_id);
     }
@@ -1792,6 +1796,7 @@ impl SystemRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_all_cold_module_cooldowns_in_db(&self, db: &WorldRepository) {
         self.clear_all_non_live_module_cooldowns(db, &[]);
     }
