@@ -919,6 +919,14 @@ impl WorldRepository {
         self.writer.try_lock().ok().map(|w| f(&w.conn))
     }
 
+    /// Runs `f` with exclusive access to the backing SQLite connection if the writer mutex is uncontended.
+    pub fn try_with_sqlite_conn_mut<R>(
+        &self,
+        f: impl FnOnce(&mut rusqlite::Connection) -> R,
+    ) -> Option<R> {
+        self.writer.try_lock().ok().map(|mut w| f(&mut w.conn))
+    }
+
     /// Runs `f` with exclusive access to the backing SQLite connection under the writer lock.
     pub fn with_sqlite_conn<R>(&self, f: impl FnOnce(&mut rusqlite::Connection) -> R) -> R {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());

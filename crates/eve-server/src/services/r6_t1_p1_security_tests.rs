@@ -340,8 +340,9 @@ async fn issue_365_fighter_point_bomb_parses_ints_rejects_nan_and_activates_all_
             .insert(null_sys_id, -0.5);
     });
     for (idx, fid) in [fid1, fid2].into_iter().enumerate() {
-        fighter_test_helpers::insert_active_fighter(
+        fighter_test_helpers::insert_active_fighter_in_system(
             &ctx,
+            null_sys_id,
             fid,
             ActiveFighterSquadron {
                 ball_id: fid,

@@ -1749,17 +1749,7 @@ pub(crate) fn resolve_runtime_killer_char_id(ctx: &ServerContext, killer_id: i64
     if killer_id <= 0 {
         return 0;
     }
-    if let Some(cid) = ctx
-        .active_fighters
-        .read()
-        .ok()
-        .and_then(|af| {
-            af.get(&killer_id)
-                .or_else(|| af.values().find(|f| f.ball_id == killer_id || f.item_id == killer_id))
-                .map(|f| f.owner_char_id)
-        })
-        .filter(|&cid| cid > 0)
-    {
+    if let Some(cid) = ctx.systems.resolve_fighter_owner_char_id(killer_id) {
         return cid;
     }
     if let Some(cid) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {

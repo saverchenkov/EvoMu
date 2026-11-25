@@ -147,6 +147,10 @@ pub(crate) enum PostUnlockIntent {
         entries: Vec<ConditionCheckpointEntry>,
         written_out: Option<Arc<AtomicUsize>>,
     },
+    PruneLegacyFighterExtJson {
+        damage_fids: Vec<i64>,
+        tube_rearms: Vec<(i64, usize)>,
+    },
     DeactivationHook(DeferredDeactivationHookOp),
     TargetLockHook(DeferredTargetLockHookOp),
 }
@@ -1015,6 +1019,9 @@ fn apply_intent_in_snap(
             if !valid.is_empty() || written_out.is_some() {
                 sqlite_checkpoints.push((solar_system_id, valid, snap_written, written_out));
             }
+        }
+        PostUnlockIntent::PruneLegacyFighterExtJson { damage_fids, tube_rearms } => {
+            super::fighters_persistence::prune_migrated_ext_json_in_snap(snap, &damage_fids, &tube_rearms);
         }
         PostUnlockIntent::DeactivationHook(hook) => deferred_deact_hooks.push(hook),
         PostUnlockIntent::TargetLockHook(hook) => deferred_lock_hooks.push(hook),

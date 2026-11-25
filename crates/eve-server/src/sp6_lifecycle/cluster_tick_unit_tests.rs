@@ -1542,6 +1542,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
         target_lost_events: Vec::new(),
         cycle_actions: Vec::new(),
         condition_checkpoint: None,
+        fighter_checkpoint: None,
         broadcast: None,
         has_post_unlock_work: false,
     };

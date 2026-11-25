@@ -608,6 +608,31 @@ pub fn run_post_db_pre_finalize_hooks_sync(
         clear_ship_cloak_and_warp_settle(ctx, departing);
     }
 
+    if !is_logout
+        && departing.ship_id > 0
+        && departing.sys_id != 0
+        && next_ship == departing.ship_id
+    {
+        if let Some(next_sys) = next_sys_opt {
+            if next_sys != departing.sys_id {
+                if let Err(err) = ctx.systems.transfer_ship_fighter_tubes(
+                    departing.sys_id,
+                    next_sys,
+                    departing.ship_id,
+                ) {
+                    tracing::error!(
+                        char_id = spec.char_id,
+                        from_sys = departing.sys_id,
+                        to_sys = next_sys,
+                        ship_id = departing.ship_id,
+                        error = %err,
+                        "Failed to transfer ship fighter tubes across system transition"
+                    );
+                }
+            }
+        }
+    }
+
     if policy_matches(S::ConcordResponse, trigger, A::CleanupCombatStorageAndSyncConcord) {
         if exited_space_scene {
             prune_alsc_shipping_storage(ctx, spec.char_id);

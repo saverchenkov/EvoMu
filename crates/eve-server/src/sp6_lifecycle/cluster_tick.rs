@@ -1070,24 +1070,12 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
                 .and_then(|m| m.drone_ball_id)
                 .unwrap_or(item.item_id);
             if t.category_id == 87 {
-                let max_squadron_size = t
-                    .default_attributes
-                    .get(&2215)
-                    .copied()
-                    .map(|v| v as u32)
-                    .unwrap_or(9);
-                fighters.push(crate::router::context::ActiveFighterSquadron {
-                    ball_id,
-                    item_id: item.item_id,
-                    type_id: item.type_id,
-                    owner_char_id: item.owner_id,
-                    parent_ship_id: 0,
-                    tube_index: 0,
-                    squadron_size: (item.quantity.max(1) as u32).min(max_squadron_size),
-                    target_id: None,
-                    is_abandoned: true,
-                    mwd_active: false,
-                });
+                let max_sq = t.default_attributes.get(&2215).copied().map(|v| v as u32).unwrap_or(9);
+                fighters.push((item.location_id as u32, crate::system_actor::ActiveFighterSquadron {
+                    ball_id, item_id: item.item_id, type_id: item.type_id, owner_char_id: item.owner_id,
+                    parent_ship_id: 0, tube_index: 0, squadron_size: (item.quantity.max(1) as u32).min(max_sq),
+                    target_id: None, is_abandoned: true, mwd_active: false,
+                }));
                 continue;
             }
             if t.category_id != 18 {
@@ -1146,14 +1134,9 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
         });
     }
     if !fighters.is_empty() {
-        if let Ok(mut guard) = ctx.active_fighters.write() {
-            for f in fighters {
-                guard.insert(f.ball_id, f);
-            }
-        }
+        ctx.systems.seed_abandoned_fighters_by_system(fighters);
     }
 }
-
 
 /// Synchronously executes server-driven self-destruct when `now_unix >= detonate_at_unix`
 /// (`feat:lifecycle.self-destruct-server-timer`).

@@ -198,8 +198,9 @@ pub(super) async fn spawn_fighter_and_ship(
     fighter_type: u32,
     owner_char_id: i64,
 ) {
-    fighter_test_helpers::insert_active_fighter(
+    fighter_test_helpers::insert_active_fighter_in_system(
         ctx,
+        sys_id,
         fighter_id,
         squad_record(fighter_id, fighter_type, owner_char_id, parent_ship_id, sys_id, 3),
     );

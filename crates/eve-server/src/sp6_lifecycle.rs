@@ -1468,10 +1468,12 @@ pub fn safe_logoff_blocking_space_conditions(
         rt.active_drones_in_space
             .values()
             .any(|d| !d.is_abandoned && (d.owner_char_id == char_id || d.parent_ship_id == ship_id))
-    }) || ctx.active_fighters.read().is_ok_and(|af| {
-        af.values()
-            .any(|f| !f.is_abandoned && (f.owner_char_id == char_id || f.parent_ship_id == ship_id))
-    });
+    }) || ctx
+        .systems
+        .snapshot_fighters_for_system(sys_id)
+        .active_fighters
+        .values()
+        .any(|f| !f.is_abandoned && (f.owner_char_id == char_id || f.parent_ship_id == ship_id));
     if has_drones_or_fighters {
         conds.push("SAFE_LOGOFF_DRONES_IN_SPACE");
     }

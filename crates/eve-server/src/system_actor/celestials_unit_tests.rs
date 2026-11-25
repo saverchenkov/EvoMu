@@ -612,6 +612,8 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         post_unlock_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         completed_post_unlock_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        fighters_needs_hydration: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        fighter_ctx: Arc::new(Default::default()),
         event_tx,
         ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),

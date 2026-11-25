@@ -120,11 +120,9 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
             },
         );
     });
-    ctx.fighter_tube_loads
-        .write()
-        .unwrap()
-        .insert((ship_id, 2), fighter_in_ship);
-    ctx.active_fighters.write().unwrap().insert(
+    crate::services::fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 2, fighter_in_ship);
+    crate::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_in_ship,
         ActiveFighterSquadron {
             ball_id: fighter_in_ship,
@@ -139,7 +137,8 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
             mwd_active: false,
         },
     );
-    ctx.active_fighters.write().unwrap().insert(
+    crate::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_other_sys,
         ActiveFighterSquadron {
             ball_id: fighter_other_sys,
@@ -156,17 +155,17 @@ async fn step_returning_drones_and_abandon_fighters_cover_capacity_and_tube_clea
     );
 
     abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
-    assert!(ctx.active_fighters.read().unwrap()[&fighter_in_ship].is_abandoned);
-    assert_eq!(
-        ctx.active_fighters.read().unwrap()[&fighter_in_ship].parent_ship_id,
-        0
+    let in_ship_state = crate::services::fighter_test_helpers::active_fighter(&ctx, fighter_in_ship).unwrap();
+    assert!(in_ship_state.is_abandoned);
+    assert_eq!(in_ship_state.parent_ship_id, 0);
+    assert!(
+        !crate::services::fighter_test_helpers::active_fighter(&ctx, fighter_other_sys)
+            .unwrap()
+            .is_abandoned
     );
-    assert!(!ctx.active_fighters.read().unwrap()[&fighter_other_sys].is_abandoned);
-    assert!(!ctx
-        .fighter_tube_loads
-        .read()
-        .unwrap()
-        .contains_key(&(ship_id, 2)));
+    assert!(!crate::services::fighter_test_helpers::has_fighter_tube_load(
+        &ctx, ship_id, 2
+    ));
 }
 
 #[tokio::test]

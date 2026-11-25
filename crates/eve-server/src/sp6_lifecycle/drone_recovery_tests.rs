@@ -332,7 +332,8 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
             warp_end_ft: None,
         },
     );
-    ctx.active_fighters.write().unwrap().insert(
+    crate::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_id,
         ActiveFighterSquadron {
             ball_id: fighter_id,
@@ -360,7 +361,11 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
 
     abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
     assert_eq!(ctx.active_scanner_probes.read().unwrap()[&555_001].state, 0);
-    assert!(ctx.active_fighters.read().unwrap()[&fighter_id].is_abandoned);
+    assert!(
+        crate::services::fighter_test_helpers::active_fighter(&ctx, fighter_id)
+            .unwrap()
+            .is_abandoned
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&fighter_id].location_id, sys_id as i64);
     });
@@ -591,7 +596,8 @@ async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_f
     );
 
     // 4. Unobserved fighter/probe case in `abandon_drones_and_fighters_for_ship_sync` (`drone_return.rs:403, 431, 460`)
-    ctx.active_fighters.write().unwrap().insert(
+    crate::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         944_000_099,
         ActiveFighterSquadron {
             ball_id: 944_000_099,

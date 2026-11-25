@@ -172,7 +172,7 @@ async fn r6_t1_01_fighter_tube_merge_and_launch_hp_inflation_blocked() {
         snap.items.insert(700_004, make_item(700_004, char_id, carrier_id, tube0, fighter_type, 5));
         snap.items.insert(700_002, make_item(700_002, char_id, carrier_id, InventoryFlag::FighterBay, fighter_type, 50));
     });
-    ctx.fighter_tube_loads.write().unwrap().insert((carrier_id, 0), 700_001);
+    crate::services::fighter_test_helpers::set_fighter_tube_load(&ctx, carrier_id, 0, 700_001);
 
     let inv_bound = BoundObjectEntry {
         bound_id: 1,
@@ -214,7 +214,7 @@ async fn r6_t1_01_fighter_tube_merge_and_launch_hp_inflation_blocked() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(700_003, make_item(700_003, char_id, carrier_id, tube1, fighter_type, 45));
     });
-    ctx.fighter_tube_loads.write().unwrap().insert((carrier_id, 1), 700_003);
+    crate::services::fighter_test_helpers::set_fighter_tube_load(&ctx, carrier_id, 1, 700_003);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(make_ship_ball(carrier_id, DVec3::ZERO), CombatState::default())
@@ -231,10 +231,10 @@ async fn r6_t1_01_fighter_tube_merge_and_launch_hp_inflation_blocked() {
     .unwrap()
     .expect("LaunchFightersFromTubes should split reserve safely");
 
-    let sq = ctx
+    let sq = sys
+        .view()
+        .fighters
         .active_fighters
-        .read()
-        .unwrap()
         .values()
         .find(|s| s.parent_ship_id == carrier_id)
         .cloned()

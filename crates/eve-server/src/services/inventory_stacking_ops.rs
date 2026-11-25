@@ -102,13 +102,21 @@ fn snapshot_pre_balls(
         .collect()
 }
 
-fn snapshot_loaded_tube_items(ctx: &ServerContext) -> HashSet<i64> {
-    ctx.fighter_tube_loads
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .values()
-        .copied()
-        .collect()
+pub(crate) fn snapshot_loaded_tube_items(ctx: &ServerContext) -> HashSet<i64> {
+    let handles = ctx.systems.active_system_handles();
+    let mut out = HashSet::new();
+    let mut live_systems = HashSet::with_capacity(handles.len());
+    for (sys_id, handle) in handles {
+        if ctx.systems.ensure_live_fighters_hydrated_sync(sys_id, &handle).is_ok() {
+            live_systems.insert(sys_id);
+        }
+        out.extend(handle.view().fighters.tube_loads.values().map(|&(fid, _)| fid));
+    }
+    out.extend(crate::system_actor::read_all_cold_fighter_tube_items(
+        &ctx.db,
+        &live_systems,
+    ));
+    out
 }
 
 fn character_or_session_fallback(

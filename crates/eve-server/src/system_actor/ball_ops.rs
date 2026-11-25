@@ -33,14 +33,14 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     pub(in crate::system_actor) solar_system_id: SolarSystemId,
     pub(in crate::system_actor) ballpark: &'a mut Ballpark,
     pub(in crate::system_actor) actor_st: &'a mut SystemActorState,
-    ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-    scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
-    module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(in crate::system_actor) ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(in crate::system_actor) scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
+    pub(in crate::system_actor) module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     explicit_update_state_guards:
         Option<&'a Arc<RankedMutex<HashMap<(u64, i64), ExplicitUpdateStateGuard>, RANK_LEAF>>>,
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
     removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
-    post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
+    pub(in crate::system_actor) post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
 }
 
 impl<'a> BallOpsCtx<'a> {
@@ -752,7 +752,7 @@ fn clear_removed_ball_actor_state(
     }
 }
 
-fn remove_ball_in_actor(
+pub(in crate::system_actor) fn remove_ball_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     ball_id: BallId,
     preserve_own_db: bool,
@@ -764,6 +764,7 @@ fn remove_ball_in_actor(
         ball_id,
     );
     clear_removed_ball_actor_state(ctx, ball_id, preserve_own_db);
+    let _ = ctx.actor_st.clear_fighter_ball_and_track(ball_id);
     let removed = ctx.ballpark.remove_ball(ball_id);
     super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
     removed
@@ -1835,6 +1836,8 @@ mod tests {
             post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
             post_unlock_in_flight: Arc::new(AtomicUsize::new(0)),
             completed_post_unlock_seq: Arc::new(AtomicU64::new(0)),
+            fighters_needs_hydration: Arc::new(AtomicBool::new(false)),
+            fighter_ctx: Arc::new(Default::default()),
             event_tx,
             ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
             scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),

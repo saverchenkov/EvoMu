@@ -836,22 +836,25 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
     }
 
     let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
-    let candidate_fighter_items: Vec<(i64, bool)> = if let Ok(fighters) = ctx.active_fighters.read() {
-        fighters
-            .values()
-            .filter(|f| (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned)
-            .map(|f| {
-                (
-                    f.item_id,
-                    sys_handle_opt
-                        .as_ref()
-                        .is_some_and(|h| h.get_ball_position_sync(f.ball_id).is_some()),
-                )
-            })
-            .collect()
+    let fg_snap = if let Some(ref sys_handle) = sys_handle_opt {
+        let _ = ctx.systems.ensure_live_fighters_hydrated_sync(sys_id, sys_handle);
+        sys_handle.view().fighters.clone()
     } else {
-        Vec::new()
+        ctx.systems.snapshot_fighters_for_system(sys_id)
     };
+    let candidate_fighter_items: Vec<(i64, bool)> = fg_snap
+        .active_fighters
+        .values()
+        .filter(|f| (f.owner_char_id == char_id || f.parent_ship_id == ship_id) && !f.is_abandoned)
+        .map(|f| {
+            (
+                f.item_id,
+                sys_handle_opt
+                    .as_ref()
+                    .is_some_and(|h| h.get_ball_position_sync(f.ball_id).is_some()),
+            )
+        })
+        .collect();
     if candidate_fighter_items.is_empty() {
         return;
     }
@@ -865,35 +868,31 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
             .map(|&(iid, _)| iid)
             .collect()
     });
-    let mut abandoned_fighters = Vec::new();
-    if let Ok(mut fighters) = ctx.active_fighters.write() {
-        for f in fighters.values_mut() {
-            if in_sys_item_ids.contains(&f.item_id)
-                && (f.owner_char_id == char_id || f.parent_ship_id == ship_id)
-                && !f.is_abandoned
-            {
-                f.is_abandoned = true;
-                f.parent_ship_id = 0;
-                f.target_id = None;
-                abandoned_fighters.push((f.item_id, f.ball_id, f.tube_index));
+    let (abandoned_fighters, pos_updates): (Vec<(i64, i64, usize)>, Vec<(i64, i64, [f64; 3])>) =
+        if let Some(ab) = sys_handle_opt.as_ref().and_then(|sh| match sh.abandon_ship_fighters_sync(char_id, ship_id, in_sys_item_ids.clone()) {
+            Ok(ab) => Some((sh, ab)),
+            Err(err) => { tracing::warn!(solar_system_id = sys_id, char_id, ship_id, error = %err, "Live fighter abandon failed; retrying cold/guarded fallback"); None }
+        }) {
+            let (sys_handle, ab) = ab;
+            let mut pos_by_bid: std::collections::HashMap<i64, [f64; 3]> =
+                std::collections::HashMap::with_capacity(ab.abandoned_positions.len());
+            for (bid, pos_opt) in ab.abandoned_positions {
+                if let Some(pos) = pos_opt.or_else(|| sys_handle.get_ball_position_sync(bid)) { pos_by_bid.insert(bid, [pos.x, pos.y, pos.z]); }
             }
-        }
+            let fighters_vec: Vec<(i64, i64, usize)> = ab.abandoned.into_iter().map(|(bid, iid, tidx)| (iid, bid, tidx)).collect();
+            let updates: Vec<(i64, i64, [f64; 3])> = fighters_vec.iter().filter_map(|&(iid, bid, _)| pos_by_bid.get(&bid).map(|&arr| (iid, bid, arr))).collect();
+            (fighters_vec, updates)
+        } else {
+            let ab = match ctx.systems.abandon_fighters_in_cold_db(sys_id, char_id, ship_id, &in_sys_item_ids) {
+                Ok(v) => v,
+                Err(err) => { tracing::error!(solar_system_id = sys_id, char_id, ship_id, error = %err, "Failed to abandon fighters during session end"); Vec::new() }
+            };
+            (ab.into_iter().map(|(bid, iid, tidx)| (iid, bid, tidx)).collect(), Vec::new())
+        };
+    if sys_handle_opt.is_some() {
+        ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
     }
     if !abandoned_fighters.is_empty() {
-        if let Ok(mut loads) = ctx.fighter_tube_loads.write() {
-            for &(_, _, tidx) in &abandoned_fighters {
-                loads.remove(&(ship_id, tidx));
-            }
-        }
-        let mut pos_updates = Vec::new();
-        for &(iid, bid, _) in &abandoned_fighters {
-            if let Some(ref sys_handle) = sys_handle_opt {
-                sys_handle.try_stop_ball(bid);
-                if let Some(pos) = sys_handle.get_ball_position_sync(bid) {
-                    pos_updates.push((iid, bid, [pos.x, pos.y, pos.z]));
-                }
-            }
-        }
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
             for &(iid, bid, _) in &abandoned_fighters {
                 if let Some(it) = snap.items.get_mut(&iid) {

@@ -26,6 +26,8 @@ mod drones;
 pub use drones::*;
 #[cfg(any(test, feature = "testkit"))]
 mod test_seam;
+mod fighters; pub use fighters::*;
+mod fighters_persistence; pub(crate) use fighters_persistence::*;
 #[cfg(test)]
 pub(crate) use activation_ops::{
     apply_fit_projection_in_actor, apply_fit_projection_with_cycles_in_actor,
@@ -363,6 +365,7 @@ pub struct SystemRegistry {
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
+    pub(in crate::system_actor) fighter_persist: Arc<fighters_persistence::FighterPersistCoord>,
     /// When true, stargates whose destination solar system is not yet loaded start as `CLOSED (0)`
     /// (`#1080`) and transition `CLOSED -> ACTIVATING -> OPEN` once destination loads.
     lazy_stargate_activation: Arc<std::sync::atomic::AtomicBool>,
@@ -422,6 +425,7 @@ impl SystemRegistry {
             pending_notifications_opt: None,
             notify_tx_opt: None,
             cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
+            fighter_persist: Arc::new(fighters_persistence::FighterPersistCoord::default()),
             lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             physics_step_flags: RankedMutex::new(HashMap::new()),
@@ -1062,6 +1066,7 @@ impl SystemRegistry {
     pub(crate) fn prepare_system_activation(
         &self,
         solar_system_id: SolarSystemId,
+        generation: u64,
         wake_reason: &SystemWakeReason,
     ) -> Result<PreparedSystemActivation, SystemActivationError> {
         let sde_opt = self.sde.clone();
@@ -1162,6 +1167,14 @@ impl SystemRegistry {
         let dynamic_ball_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pending_destroyed_balls = PendingDestroyedOutbox::default();
         let initial_post_unlock_seq = db_opt.as_ref().map(|db| db.published_snapshot_arc().sp6_lifecycle.post_unlock_committed_seq.get(&solar_system_id).copied().unwrap_or(0)).unwrap_or(0);
+        let (initial_fighters, initial_fighters_needs_hydration) = self.prepare_initial_fighters_for_activation(solar_system_id, generation, db_read_safe, db_opt.as_ref(), &initial_ballpark, sde_opt.as_deref())?;
+        if !initial_fighters_needs_hydration && db_read_safe {
+            if let Some(ref db) = db_opt {
+                if let Some((damage_fids, tube_rearms)) = fighters_persistence::collect_legacy_ext_prune_targets(db, sde_opt.as_deref(), solar_system_id, &initial_fighters) {
+                    initial_post_unlock_ops.push(post_unlock::PostUnlockIntent::PruneLegacyFighterExtJson { damage_fids, tube_rearms });
+                }
+            }
+        }
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
@@ -1180,6 +1193,7 @@ impl SystemRegistry {
             pending_destroyed_balls: pending_destroyed_balls.clone(),
             warp_state: initial_warp_state,
             next_post_unlock_seq: initial_post_unlock_seq,
+            fighters: initial_fighters, fighters_lifecycle_gen: generation, fighters_needs_sqlite_hydration: initial_fighters_needs_hydration, fighters_persist: Arc::clone(&self.fighter_persist),
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
@@ -1283,27 +1297,11 @@ impl SystemRegistry {
         prepared: PreparedSystemActivation,
     ) -> (SystemHandle, bool) {
         let PreparedSystemActivation {
-            solar_system_id,
-            lazy_gates,
-            ball_positions,
-            scrambled_balls,
-            tethered_balls,
-            committed_warp_balls,
-            warp_stopped_at,
-            active_module_ships,
-            hibernated,
-            hibernated_since_unix,
-            idle_ticks,
-            dynamic_ball_count,
-            pending_destroyed_balls,
-            broadcast_seq_gate_actor,
-            tidi_factor_bits,
-            view_tx,
-            view_rx,
-            ballpark_shared,
-            actor_state_shared,
-            initial_post_unlock_ops,
-            staged_claims: _,
+            solar_system_id, lazy_gates, ball_positions, scrambled_balls, tethered_balls,
+            committed_warp_balls, warp_stopped_at, active_module_ships, hibernated,
+            hibernated_since_unix, idle_ticks, dynamic_ball_count, pending_destroyed_balls,
+            broadcast_seq_gate_actor, tidi_factor_bits, view_tx, view_rx,
+            ballpark_shared, actor_state_shared, initial_post_unlock_ops, staged_claims: _,
         } = prepared;
         let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
@@ -1314,6 +1312,7 @@ impl SystemRegistry {
         let module_deactivation_hook_actor = self.module_deactivation_hook.clone();
         let target_lock_completed_hook_actor = self.target_lock_completed_hook.clone();
         let post_unlock_actions_actor = self.post_unlock_actions.clone();
+        let db_opt_actor = self.db.clone();
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
         let warp_stopped_at_actor = warp_stopped_at.clone();
@@ -1516,16 +1515,18 @@ impl SystemRegistry {
                     post_unlock_in_flight_actor: &post_unlock_in_flight_actor,
                     completed_post_unlock_seq_actor: &completed_post_unlock_seq_actor,
                 };
-                if let Some(cmd) = protection::handle_protection_or_lifecycle_command(&mut exec_ctx, cmd) {
-                    if let Some(cmd) = activation_ops::handle_activation_and_movement_command(&mut exec_ctx, cmd) {
-                        if let Some(cmd) = cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, cmd) {
-                            if let Some(cmd) = ball_ops::handle_ball_ops_command(&mut exec_ctx, cmd) {
-                            if let Some(cmd) = drones::handle_drone_runtime_command(&mut exec_ctx, cmd) {
-                            let cmd_opt = {
-                                #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, cmd) }
-                                #[cfg(not(any(test, feature = "testkit")))] { Some(cmd) }
-                            };
-                            if let Some(cmd) = cmd_opt {
+                let cmd_opt = Some(cmd)
+                    .and_then(|c| protection::handle_protection_or_lifecycle_command(&mut exec_ctx, c))
+                    .and_then(|c| activation_ops::handle_activation_and_movement_command(&mut exec_ctx, c))
+                    .and_then(|c| cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, c))
+                    .and_then(|c| ball_ops::handle_ball_ops_command(&mut exec_ctx, c))
+                    .and_then(|c| drones::handle_drone_runtime_command(&mut exec_ctx, c))
+                    .and_then(|c| fighters::handle_fighter_runtime_command(&mut exec_ctx, c))
+                    .and_then(|c| {
+                        #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, c) }
+                        #[cfg(not(any(test, feature = "testkit")))] { Some(c) }
+                    });
+                if let Some(cmd) = cmd_opt {
                             let mut sync_protection_ball: Option<BallId> = None;
                             {
                                 let ballpark = &mut *exec_ctx.ballpark;
@@ -2142,11 +2143,6 @@ impl SystemRegistry {
                                     bid,
                                 );
                             }
-                            }
-                            }
-                            }
-                        }
-                    }
                 }
                 if let Some((dt, step_reply)) = pending_step {
                     Some(cycles_tackle::execute_pending_step_in_actor(
@@ -2370,11 +2366,29 @@ impl SystemRegistry {
                 }
             }
             post_unlock_tx_opt.send_shutdown();
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                post_unlock_worker_join,
-            )
-            .await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), post_unlock_worker_join).await;
+            if let Some(ref db) = db_opt_actor {
+                let (nh, dirty, sde, coord, lg, dirty_stamp) = {
+                    let st = actor_state_actor.read().unwrap_or_else(|e| e.into_inner());
+                    (st.fighters_needs_sqlite_hydration, st.is_fighters_dirty(), st.sde_opt.clone(), Arc::clone(&st.fighters_persist), st.fighters_lifecycle_gen, Arc::clone(&st.fighters_dirty_stamp))
+                };
+                let ok_to_flush = if !nh || !dirty {
+                    true
+                } else {
+                    match fighters_persistence::load_fighters_for_shutdown_sync(db, solar_system_id, sde.as_deref(), &coord, lg) {
+                        Ok(Some(loaded)) => { let mut st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner()); let _ = fighters::merge_missing_fighter_entries(&mut st, loaded, false, true); true }
+                        Ok(None) => false,
+                        Err(err) => { tracing::warn!(solar_system_id, error = %err, "SystemActor failed to hydrate fighters on shutdown; preserving dirty state"); false }
+                    }
+                };
+                if ok_to_flush {
+                    if let Some(snap) = actor_state_actor.read().unwrap_or_else(|e| e.into_inner()).take_fighter_checkpoint_snapshot() {
+                        if let Err(err) = fighters_persistence::persist_live_fighter_snapshot_sync(db, solar_system_id, &coord, &snap, &dirty_stamp, sde.as_deref(), true) {
+                            tracing::warn!(solar_system_id, error = %err, "SystemActor failed to flush fighter checkpoint on shutdown; keeping dirty flag");
+                        }
+                    }
+                }
+            }
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,
@@ -2385,43 +2399,26 @@ impl SystemRegistry {
             drop(shutdown_reply);
         });
 
+        let (fighters_needs_hydration, dirty_stamp) = {
+            let st = actor_state_shared.read().unwrap_or_else(|e| e.into_inner());
+            (Arc::new(std::sync::atomic::AtomicBool::new(st.fighters_needs_sqlite_hydration)), Arc::clone(&st.fighters_dirty_stamp))
+        };
+        let fighter_ctx = Arc::new(fighters_persistence::FighterHandleCtx {
+            dirty_stamp, persist: Arc::clone(&self.fighter_persist), db_opt: self.db.clone(), sde_opt: self.sde.clone(),
+        });
         let handle = SystemHandle {
-            solar_system_id,
-            cmd_tx,
-            post_unlock_tx: post_unlock_tx_handle,
-            post_unlock_worker_thread_id,
-            post_unlock_in_flight,
-            completed_post_unlock_seq,
-            event_tx,
-            ball_positions,
-            scrambled_balls,
-            tethered_balls,
-            committed_warp_balls,
-            warp_stopped_at,
-            active_module_ships,
-            ballpark: ballpark_shared,
-            actor_state: actor_state_shared,
-            view_tx,
-            view_rx,
-            last_auto_stepped_unix,
-            tidi_factor_bits,
-            sim_elapsed_secs_bits,
-            last_visible_stamp,
-            last_fx_stamp,
-            command_panics,
-            pending_destroyed_balls,
-            hibernated,
-            hibernated_since_unix,
-            idle_ticks,
-            dynamic_ball_count,
-            #[cfg(test)]
-            panic_next_command_for_test,
-            #[cfg(test)]
-            panic_on_command_countdown_for_test,
-            #[cfg(test)]
-            panic_after_destruction_for_test,
-            #[cfg(test)]
-            before_step_reply_hook_for_test,
+            solar_system_id, cmd_tx,
+            post_unlock_tx: post_unlock_tx_handle, post_unlock_worker_thread_id,
+            post_unlock_in_flight, completed_post_unlock_seq,
+            fighters_needs_hydration, fighter_ctx, event_tx,
+            ball_positions, scrambled_balls, tethered_balls, committed_warp_balls, warp_stopped_at, active_module_ships,
+            ballpark: ballpark_shared, actor_state: actor_state_shared, view_tx, view_rx,
+            last_auto_stepped_unix, tidi_factor_bits, sim_elapsed_secs_bits, last_visible_stamp, last_fx_stamp,
+            command_panics, pending_destroyed_balls, hibernated, hibernated_since_unix, idle_ticks, dynamic_ball_count,
+            #[cfg(test)] panic_next_command_for_test,
+            #[cfg(test)] panic_on_command_countdown_for_test,
+            #[cfg(test)] panic_after_destruction_for_test,
+            #[cfg(test)] before_step_reply_hook_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
@@ -2452,21 +2449,8 @@ pub(crate) fn apply_repair_combat_state_in_ballpark(
         || (cs.structure_hp - prev_h).abs() > 1e-6;
     let cloned = cs.clone();
     if hp_changed {
-        let ratio = |cur: f64, max: f64| {
-            if max > 0.0 {
-                (cur / max).clamp(0.0, 1.0)
-            } else {
-                1.0
-            }
-        };
-        bp.emit_damage_and_destruction_events(
-            ball_id,
-            grid_id,
-            ratio(cloned.shield_hp, cloned.max_shield_hp),
-            ratio(cloned.armor_hp, cloned.max_armor_hp),
-            ratio(cloned.structure_hp, cloned.max_structure_hp),
-            false,
-        );
+        let ratio = |cur: f64, max: f64| if max > 0.0 { (cur / max).clamp(0.0, 1.0) } else { 1.0 };
+        bp.emit_damage_and_destruction_events(ball_id, grid_id, ratio(cloned.shield_hp, cloned.max_shield_hp), ratio(cloned.armor_hp, cloned.max_armor_hp), ratio(cloned.structure_hp, cloned.max_structure_hp), false);
     }
     Some(cloned)
 }

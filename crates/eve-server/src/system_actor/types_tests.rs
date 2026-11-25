@@ -497,6 +497,23 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::RescheduleDroneMiner { .. } => "RescheduleDroneMiner",
             SystemCommand::SetDroneNextReadyUnix { .. } => "SetDroneNextReadyUnix",
             SystemCommand::ClearDroneRuntime { .. } => "ClearDroneRuntime",
+            SystemCommand::FlushFighterCheckpoint { .. } => "FlushFighterCheckpoint",
+            SystemCommand::LoadOrUnloadFighterTube { .. } => "LoadOrUnloadFighterTube",
+            SystemCommand::FighterLaunchOp { .. } => "FighterLaunchOp",
+            SystemCommand::FighterRecallOp { .. } => "FighterRecallOp",
+            SystemCommand::ApplyDamageToFighterSquadron { .. } => "ApplyDamageToFighterSquadron",
+            SystemCommand::AbandonOwnedFighters { .. } => "AbandonOwnedFighters",
+            SystemCommand::ClaimOrRestoreAbandonedFighterForScoop { .. } => {
+                "ClaimOrRestoreAbandonedFighterForScoop"
+            }
+            SystemCommand::MutateFighterAbilityState { .. } => "MutateFighterAbilityState",
+            SystemCommand::CleanupDestroyedFighter { .. } => "CleanupDestroyedFighter",
+            SystemCommand::ExtractShipFighterTubes { .. } => "ExtractShipFighterTubes",
+            SystemCommand::InsertShipFighterTubes { .. } => "InsertShipFighterTubes",
+            SystemCommand::SeedAbandonedFighters { .. } => "SeedAbandonedFighters",
+            SystemCommand::ReloadFighterStateClean { .. } => "ReloadFighterStateClean",
+            SystemCommand::MergeFighterState { .. } => "MergeFighterState",
+            SystemCommand::TestHelperFighterOp { .. } => "TestHelperFighterOp",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -863,6 +880,21 @@ fn system_command_all_variants_construct_and_match() {
             ship_id: 1,
             refund_paste: true,
         },
+        SystemCommand::FlushFighterCheckpoint { reply: oneshot::channel().0 },
+        SystemCommand::LoadOrUnloadFighterTube { op: crate::system_actor::FighterTubeOp::Unload { ship_id: 1, tube_index: 0 }, reply: oneshot::channel().0 },
+        SystemCommand::FighterLaunchOp { op: crate::system_actor::FighterLaunchActorOp::CommitSpawned { res_ids: vec![], spawns: vec![] }, reply: oneshot::channel().0 },
+        SystemCommand::FighterRecallOp { op: crate::system_actor::FighterRecallActorOp::CommitToTube { ship_id: 1, tube_index: 0, item_id: 2, type_id: 23_057, ball_id: 3, rearm_until_unix: 100 }, reply: oneshot::channel().0 },
+        SystemCommand::ApplyDamageToFighterSquadron { fighter_ball_id: 1, raw_damage: 100.0, sde: std::sync::Arc::new(eve_sde::SdeRegistry::default()), reply: oneshot::channel().0 },
+        SystemCommand::AbandonOwnedFighters { char_id: 1, ship_id: 2, filter_ids: None, db_in_sys_items: std::collections::HashSet::new(), clear_tubes: false, only_matching_sys_items: false, reply: oneshot::channel().0 },
+        SystemCommand::ClaimOrRestoreAbandonedFighterForScoop { op: crate::system_actor::FighterScoopActorOp::Claim { target_fighter_id: 1 }, reply: oneshot::channel().0 },
+        SystemCommand::MutateFighterAbilityState { op: crate::system_actor::FighterAbilityActorOp::RestoreMovementCooldown { fighter_ball_id: 1, slot_idx: 0, prev_cooldown: None }, reply: oneshot::channel().0 },
+        SystemCommand::CleanupDestroyedFighter { ball_id: 1, reply: oneshot::channel().0 },
+        SystemCommand::ExtractShipFighterTubes { ship_id: 1, reply: oneshot::channel().0 },
+        SystemCommand::InsertShipFighterTubes { ship_id: 1, transfer: crate::system_actor::ShipFighterTubeTransfer::default(), reply: oneshot::channel().0 },
+        SystemCommand::SeedAbandonedFighters { squadrons: Vec::new(), reply: oneshot::channel().0 },
+        SystemCommand::ReloadFighterStateClean { state: crate::system_actor::SystemFighterState::default(), reply: oneshot::channel().0 },
+        SystemCommand::MergeFighterState { state: crate::system_actor::SystemFighterState::default(), mark_dirty: false, clear_hydration: true, reply: oneshot::channel().0 },
+        SystemCommand::TestHelperFighterOp { op: crate::system_actor::FighterTestHelperOp::ClearAllActive, reply: oneshot::channel().0 },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -874,7 +906,7 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 102);
+    assert_eq!(tags.len(), 117);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -898,8 +930,14 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[97], "SetDroneNextReadyUnix");
     assert_eq!(tags[98], "ClearDroneRuntime");
     assert_eq!(tags[99], "CancelShipNaniteRepairs");
-    assert_eq!(tags[100], "ShutdownActor");
-    assert_eq!(tags[101], "TestAccess");
+    assert_eq!(tags[100], "FlushFighterCheckpoint");
+    assert_eq!(tags[111], "SeedAbandonedFighters");
+    assert_eq!(tags[112], "ReloadFighterStateClean");
+    assert_eq!(tags[113], "MergeFighterState");
+    assert_eq!(tags[114], "TestHelperFighterOp");
+    assert_eq!(tags[115], "ShutdownActor");
+    #[cfg(any(test, feature = "testkit"))]
+    assert_eq!(tags[116], "TestAccess");
 }
 
 #[test]
@@ -936,6 +974,15 @@ fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
     }
     .may_mutate_system_view());
     assert!(!SystemCommand::GetProtectionSnapshot {
+        ball_id: 1,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(!SystemCommand::FlushFighterCheckpoint {
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::CleanupDestroyedFighter {
         ball_id: 1,
         reply: oneshot::channel().0,
     }

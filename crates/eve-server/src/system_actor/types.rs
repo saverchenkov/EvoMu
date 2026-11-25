@@ -655,6 +655,16 @@ impl Drop for PendingDestroyedDeliveryGuard {
     }
 }
 
+/// Snapshot of dirty per-system fighter state tagged with lifecycle generation and monotonic
+/// revision so concurrent flushers cannot overwrite newer checkpoints or retired generations.
+#[derive(Debug, Clone)]
+pub struct FighterCheckpointSnapshot {
+    pub(crate) state: super::SystemFighterState,
+    pub(crate) lifecycle_gen: u64,
+    pub(crate) rev: u64,
+    pub(crate) dirty_stamp: u64,
+}
+
 /// Structured actor outbox produced by a single [`SystemActor`] step (`RFC-1 E-4`, `#919`).
 #[derive(Debug, Clone, Default)]
 pub struct StepOutput {
@@ -668,6 +678,7 @@ pub struct StepOutput {
     pub target_lost_events: Vec<(CharacterId, BallId)>,
     pub cycle_actions: Vec<PendingCycleAction>,
     pub condition_checkpoint: Option<Vec<ConditionCheckpointEntry>>,
+    pub fighter_checkpoint: Option<FighterCheckpointSnapshot>,
     pub broadcast: Option<TickBroadcast>,
     pub(crate) has_post_unlock_work: bool,
 }
@@ -892,6 +903,78 @@ pub(crate) struct SystemActorState {
     pub next_post_unlock_seq: u64,
     pub pending_item_qty_deltas: std::collections::VecDeque<(u64, ItemId, i32)>,
     pub pending_crystal_dmg_deltas: std::collections::VecDeque<(u64, ItemId, f64)>,
+    pub fighters: super::SystemFighterState,
+    pub(crate) fighters_dirty_stamp: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) fighters_needs_sqlite_hydration: bool,
+    pub(crate) fighters_rev: u64,
+    pub(crate) fighters_lifecycle_gen: u64,
+    pub(crate) fighters_persist: Arc<super::fighters_persistence::FighterPersistCoord>,
+    pub(crate) pending_launch_reservations: HashMap<i64, ((i64, usize), (i64, u32))>,
+    pub(crate) pending_recall_or_scoop_claims: HashMap<i64, super::PendingClaimedSquadron>,
+    pub(crate) fighters_removed_pre_hydration: HashSet<i64>,
+}
+
+impl SystemActorState {
+    #[inline]
+    pub(crate) fn is_fighters_dirty(&self) -> bool {
+        self.fighters_dirty_stamp.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+    #[inline]
+    pub(crate) fn mark_fighters_dirty(&mut self) {
+        self.fighters_rev = self.fighters_rev.saturating_add(1);
+        if (self.fighters_rev & 0xFFFF_FFFF) == 0 { self.fighters_rev = self.fighters_rev.saturating_add(1); }
+        let stamp = ((self.fighters_lifecycle_gen & 0xFFFF_FFFF) << 32) | (self.fighters_rev & 0xFFFF_FFFF);
+        self.fighters_dirty_stamp.store(stamp, std::sync::atomic::Ordering::Release);
+    }
+    #[inline]
+    pub(crate) fn clear_fighters_clean(&mut self) {
+        self.fighters_rev = self.fighters_rev.saturating_add(1);
+        self.fighters_dirty_stamp.store(0, std::sync::atomic::Ordering::Release);
+        self.fighters_removed_pre_hydration.clear();
+    }
+
+    pub(crate) fn clear_fighter_ball_and_track(&mut self, ball_id: i64) -> Option<super::ActiveFighterSquadron> {
+        let removed = self.fighters.clear_fighter_ball(ball_id);
+        if self.fighters_needs_sqlite_hydration {
+            if let Some(ref f) = removed { self.fighters_removed_pre_hydration.extend([ball_id, f.ball_id, f.item_id]); }
+            else { self.fighters_removed_pre_hydration.insert(ball_id); }
+            self.mark_fighters_dirty();
+        } else if removed.is_some() { self.mark_fighters_dirty(); }
+        removed
+    }
+
+    /// Clones durable fighter state (overlaying pre-commit claim reservations) together with its
+    /// `(lifecycle_gen, rev)` stamp while keeping `fighters_dirty = true` until SQLite commits.
+    /// Returns `None` when clean or awaiting SQLite hydration (`F2-R5-01`).
+    pub(crate) fn take_fighter_checkpoint_snapshot(&self) -> Option<FighterCheckpointSnapshot> {
+        let dirty_stamp = self.fighters_dirty_stamp.load(std::sync::atomic::Ordering::Acquire);
+        if dirty_stamp == 0 || self.fighters_needs_sqlite_hydration {
+            return None;
+        }
+        let mut snap = self.fighters.clone();
+        for (&rid, &(tube_key, tube_val)) in &self.pending_launch_reservations {
+            snap.active_fighters.remove(&rid);
+            snap.tube_loads.entry(tube_key).or_insert(tube_val);
+        }
+        for (&bid, claimed) in &self.pending_recall_or_scoop_claims {
+            snap.active_fighters.entry(bid).or_insert_with(|| claimed.squadron.clone());
+            for &(k, v) in &claimed.saved_charges {
+                snap.charge_state.entry(k).or_insert(v);
+            }
+            for &(k, v) in &claimed.saved_cooldowns {
+                snap.cooldown_state.entry(k).or_insert(v);
+            }
+            if claimed.accum_dmg > 0.0 {
+                snap.unit_damage_accum.entry(bid).or_insert(claimed.accum_dmg);
+            }
+        }
+        Some(FighterCheckpointSnapshot {
+            state: snap,
+            lifecycle_gen: self.fighters_lifecycle_gen,
+            rev: self.fighters_rev,
+            dirty_stamp,
+        })
+    }
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`
@@ -1613,6 +1696,76 @@ pub enum SystemCommand {
         clear_timers: bool,
         reply: oneshot::Sender<Result<usize, String>>,
     },
+    FlushFighterCheckpoint {
+        reply: oneshot::Sender<Option<FighterCheckpointSnapshot>>,
+    },
+    LoadOrUnloadFighterTube {
+        op: super::FighterTubeOp,
+        reply: oneshot::Sender<Result<Option<i64>, super::FighterActorError>>,
+    },
+    FighterLaunchOp {
+        op: super::FighterLaunchActorOp,
+        reply: oneshot::Sender<Result<super::FighterLaunchActorOut, super::FighterActorError>>,
+    },
+    FighterRecallOp {
+        op: super::FighterRecallActorOp,
+        reply: oneshot::Sender<Option<super::FighterRecallClaim>>,
+    },
+    ApplyDamageToFighterSquadron {
+        fighter_ball_id: i64,
+        raw_damage: f64,
+        sde: Arc<SdeRegistry>,
+        reply: oneshot::Sender<Option<super::FighterDamageOutcome>>,
+    },
+    AbandonOwnedFighters {
+        char_id: i64,
+        ship_id: i64,
+        filter_ids: Option<Vec<i64>>,
+        db_in_sys_items: HashSet<i64>,
+        clear_tubes: bool,
+        only_matching_sys_items: bool,
+        reply: oneshot::Sender<super::FighterAbandonActorResult>,
+    },
+    ClaimOrRestoreAbandonedFighterForScoop {
+        op: super::FighterScoopActorOp,
+        reply: oneshot::Sender<Result<Option<(i64, super::ActiveFighterSquadron)>, super::FighterActorError>>,
+    },
+    MutateFighterAbilityState {
+        op: super::FighterAbilityActorOp,
+        reply: oneshot::Sender<Result<super::FighterAbilityActorOut, super::FighterActorError>>,
+    },
+    CleanupDestroyedFighter {
+        ball_id: i64,
+        reply: oneshot::Sender<Option<super::ActiveFighterSquadron>>,
+    },
+    ExtractShipFighterTubes {
+        ship_id: i64,
+        reply: oneshot::Sender<super::ShipFighterTubeTransfer>,
+    },
+    InsertShipFighterTubes {
+        ship_id: i64,
+        transfer: super::ShipFighterTubeTransfer,
+        reply: oneshot::Sender<()>,
+    },
+    SeedAbandonedFighters {
+        squadrons: Vec<super::ActiveFighterSquadron>,
+        reply: oneshot::Sender<()>,
+    },
+    ReloadFighterStateClean {
+        state: super::SystemFighterState,
+        reply: oneshot::Sender<(u64, u64)>,
+    },
+    MergeFighterState {
+        state: super::SystemFighterState,
+        mark_dirty: bool,
+        clear_hydration: bool,
+        reply: oneshot::Sender<(u64, u64)>,
+    },
+    #[cfg(any(test, feature = "testkit"))]
+    TestHelperFighterOp {
+        op: super::FighterTestHelperOp,
+        reply: oneshot::Sender<super::FighterTestHelperOut>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1672,6 +1825,7 @@ impl SystemCommand {
                 | Self::IsBallScrambled { .. }
                 | Self::FlushPeerObserverUpdates { .. }
                 | Self::FlushConditionCheckpoint { .. }
+                | Self::FlushFighterCheckpoint { .. }
                 | Self::GetProtectionSnapshot { .. }
                 | Self::ShutdownActor { .. }
         )
@@ -1824,6 +1978,7 @@ pub struct SystemView {
     pub protection_registry: HashMap<BallId, ActorShipProtection>,
     pub fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
     pub asteroids: HashMap<BallId, AsteroidState>,
+    pub fighters: super::SystemFighterState,
 }
 
 impl Default for SystemView {
@@ -1871,6 +2026,7 @@ impl Default for SystemView {
             protection_registry: HashMap::new(),
             fit_projections: HashMap::new(),
             asteroids: HashMap::new(),
+            fighters: super::SystemFighterState::default(),
         }
     }
 }
@@ -1898,6 +2054,7 @@ struct ViewActorSnapshot {
     protection_registry: HashMap<BallId, ActorShipProtection>,
     fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
     asteroids: HashMap<BallId, AsteroidState>,
+    fighters: super::SystemFighterState,
 }
 
 impl SystemView {
@@ -1906,17 +2063,9 @@ impl SystemView {
     /// When `actor_state` is `None` (because the caller only holds `ballpark`), `previous`
     /// supplies the previously observed `sim_elapsed_secs` and active-module ship sets so
     /// synchronous ballpark-only mutations do not erase active module flags.
-    pub(crate) fn from_ballpark(
-        ballpark: &Ballpark,
-        actor_state: Option<&SystemActorState>,
-        tidi_factor: f64,
-        previous: Option<&SystemView>,
-    ) -> Self {
-        let mut cloaked_balls = HashSet::new();
-        let mut tethered_balls = HashSet::new();
-        let mut invulnerable_balls = HashSet::new();
-        let mut scrambled_balls = HashSet::new();
-        let mut warp_disrupted_balls = HashSet::new();
+    pub(crate) fn from_ballpark(ballpark: &Ballpark, actor_state: Option<&SystemActorState>, tidi_factor: f64, previous: Option<&SystemView>) -> Self {
+        let (mut cloaked_balls, mut tethered_balls, mut invulnerable_balls, mut scrambled_balls, mut warp_disrupted_balls) =
+            (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new());
 
         for (&ball_id, cs) in &ballpark.combat_states {
             if cs.has_any_cloak() {
@@ -2003,6 +2152,7 @@ impl SystemView {
                 protection_registry: st.protection_registry.clone(),
                 fit_projections: st.fit_projections.clone(),
                 asteroids: st.asteroids.clone(),
+                fighters: st.fighters.clone(),
             }
         } else if let Some(prev) = previous {
             ViewActorSnapshot {
@@ -2029,6 +2179,7 @@ impl SystemView {
                 protection_registry: prev.protection_registry.clone(),
                 fit_projections: prev.fit_projections.clone(),
                 asteroids: prev.asteroids.clone(),
+                fighters: prev.fighters.clone(),
             }
         } else {
             ViewActorSnapshot::default()
@@ -2085,6 +2236,7 @@ impl SystemView {
             protection_registry: actor.protection_registry,
             fit_projections: actor.fit_projections,
             asteroids: actor.asteroids,
+            fighters: actor.fighters,
         }
     }
 

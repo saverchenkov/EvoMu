@@ -29,10 +29,9 @@ use eve_db::sqlite_store::domain_rows::{from_checked_domain_json, to_checked_dom
 use eve_db::sqlite_store::system_checkpoint::{
     current_unix_secs, ensure_system_checkpoint_schema, has_any_system_checkpoints,
     load_all_checkpoints_for_kind, purge_crash_lost_checkpoints, replace_checkpoint_kinds_batch,
-    retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FIGHTERS, KIND_FLEET_EXTRAS,
-    KIND_MAP_LANDMARKS, KIND_MODULE_COOLDOWNS, KIND_MOON_PROBES,
-    KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS, KIND_SCAN_SIGNATURES,
-    KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
+    retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FLEET_EXTRAS, KIND_MAP_LANDMARKS,
+    KIND_MODULE_COOLDOWNS, KIND_MOON_PROBES, KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS,
+    KIND_SCAN_SIGNATURES, KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
 };
 use eve_db::{FleetRole, SessionChangeTimerRecord, WorldStateSnapshot};
 
@@ -378,14 +377,6 @@ impl PersistedSocialExtrasRuntimePayload {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum FighterCheckpointEntry {
-    Squadron(ActiveFighterSquadron),
-    Cooldown((i64, u32), u64),
-    Charge((i64, u32), u32),
-    TubeLoad((i64, usize), i64),
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum DurableTacticalEntry {
     LanceCasterLockUntil(u8, i64, u64),
     LanceVictimDebuffUntil(u8, i64, u64),
@@ -470,32 +461,6 @@ impl PersistedServerRuntimeState {
             .map(|(k, &v)| (k.clone(), v))
             .collect();
         character_scan_progress.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let (
-            active_fighters,
-            mut fighter_cooldown_state,
-            mut fighter_charge_state,
-            mut fighter_tube_loads,
-        ) = {
-            let fg = ctx.fighters.read().unwrap_or_else(|e| e.into_inner());
-            (
-                fg.active_fighters.clone(),
-                fg.cooldown_state
-                    .iter()
-                    .map(|(&k, &v)| (k, v))
-                    .collect::<Vec<_>>(),
-                fg.charge_state
-                    .iter()
-                    .map(|(&k, &v)| (k, v))
-                    .collect::<Vec<_>>(),
-                fg.tube_loads
-                    .iter()
-                    .map(|(&k, &v)| (k, v))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        fighter_cooldown_state.sort_by_key(|(k, _)| *k);
-        fighter_charge_state.sort_by_key(|(k, _)| *k);
-        fighter_tube_loads.sort_by_key(|(k, _)| *k);
 
         let mut module_reactivation_cooldowns: Vec<_> = ctx
             .module_reactivation_cooldowns
@@ -525,10 +490,10 @@ impl PersistedServerRuntimeState {
             active_moon_probes,
             scanned_signatures,
             character_scan_progress,
-            active_fighters,
-            fighter_cooldown_state,
-            fighter_charge_state,
-            fighter_tube_loads,
+            active_fighters: HashMap::new(),
+            fighter_cooldown_state: Vec::new(),
+            fighter_charge_state: Vec::new(),
+            fighter_tube_loads: Vec::new(),
             module_reactivation_cooldowns,
             phased_asteroid_fields,
             session_change_timers: HashMap::new(),
@@ -568,12 +533,20 @@ impl PersistedServerRuntimeState {
         *ctx.character_scan_progress
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.character_scan_progress.into_iter().collect();
+        if !self.active_fighters.is_empty()
+            || !self.fighter_cooldown_state.is_empty()
+            || !self.fighter_charge_state.is_empty()
+            || !self.fighter_tube_loads.is_empty()
         {
-            let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());
-            fg.active_fighters = self.active_fighters;
-            fg.cooldown_state = self.fighter_cooldown_state.into_iter().collect();
-            fg.charge_state = self.fighter_charge_state.into_iter().collect();
-            fg.tube_loads = self.fighter_tube_loads.into_iter().collect();
+            crate::system_actor::migrate_legacy_monolith_fighters_one_way(
+                &ctx.db,
+                Some(ctx.sde.as_ref()),
+                &ctx.systems,
+                self.active_fighters,
+                self.fighter_cooldown_state,
+                self.fighter_charge_state,
+                self.fighter_tube_loads,
+            );
         }
         *ctx.module_reactivation_cooldowns
             .write()
@@ -702,15 +675,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let fighters_snapshot = {
-        let fg = ctx.fighters.read().unwrap_or_else(|e| e.into_inner());
-        (
-            fg.active_fighters.clone(),
-            fg.cooldown_state.clone(),
-            fg.charge_state.clone(),
-            fg.tube_loads.clone(),
-        )
-    };
     let (sim_times_raw, durable_tac_raw) = {
         let tac = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
         let sim: Vec<_> = tac
@@ -769,32 +733,11 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
     let fleet_extras = PersistedFleetExtrasPayload::from_ctx(ctx);
     let social_extras = PersistedSocialExtrasRuntimePayload::from_ctx(ctx);
 
-    let (landmark_systems, fighter_systems, module_cooldown_systems) = ctx.db.with_snapshot(|snap| {
+    let (landmark_systems, module_cooldown_systems) = ctx.db.with_snapshot(|snap| {
         let l_sys: Vec<u32> = landmarks_raw
             .iter()
             .map(|(item_id, _, _, _, _)| resolve_entity_solar_system_id(snap, *item_id))
             .collect();
-        let mut f_sys = HashMap::new();
-        for sq in fighters_snapshot.0.values() {
-            f_sys
-                .entry(sq.parent_ship_id)
-                .or_insert_with(|| resolve_entity_solar_system_id(snap, sq.parent_ship_id));
-        }
-        for &(ship_id, _) in fighters_snapshot.1.keys() {
-            f_sys
-                .entry(ship_id)
-                .or_insert_with(|| resolve_entity_solar_system_id(snap, ship_id));
-        }
-        for &(ship_id, _) in fighters_snapshot.2.keys() {
-            f_sys
-                .entry(ship_id)
-                .or_insert_with(|| resolve_entity_solar_system_id(snap, ship_id));
-        }
-        for &(ship_id, _) in fighters_snapshot.3.keys() {
-            f_sys
-                .entry(ship_id)
-                .or_insert_with(|| resolve_entity_solar_system_id(snap, ship_id));
-        }
         let m_sys: Vec<u32> = module_cooldowns_raw
             .iter()
             .map(|((ship_id, _, _), entry)| {
@@ -803,7 +746,7 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
                     .unwrap_or_else(|| resolve_entity_solar_system_id(snap, *ship_id))
             })
             .collect();
-        (l_sys, f_sys, m_sys)
+        (l_sys, m_sys)
     });
 
     let mut moon_rows = Vec::with_capacity(moon_probes_raw.len());
@@ -856,44 +799,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         push_checked_row(&mut sim_rows, *sys_id, tag.to_string(), &((*tag, *sys_id), *sim_s));
     }
 
-    let mut fighter_rows = Vec::new();
-    for (&fid, sq) in &fighters_snapshot.0 {
-        let sys_id = *fighter_systems.get(&sq.parent_ship_id).unwrap_or(&CLUSTER_SYSTEM_ID);
-        push_checked_row(
-            &mut fighter_rows,
-            sys_id,
-            format!("sq|{fid}"),
-            &FighterCheckpointEntry::Squadron(sq.clone()),
-        );
-    }
-    for (&(ship_id, tid), &cd) in &fighters_snapshot.1 {
-        let sys_id = *fighter_systems.get(&ship_id).unwrap_or(&CLUSTER_SYSTEM_ID);
-        push_checked_row(
-            &mut fighter_rows,
-            sys_id,
-            format!("cd|{ship_id}|{tid}"),
-            &FighterCheckpointEntry::Cooldown((ship_id, tid), cd),
-        );
-    }
-    for (&(ship_id, tid), &ch) in &fighters_snapshot.2 {
-        let sys_id = *fighter_systems.get(&ship_id).unwrap_or(&CLUSTER_SYSTEM_ID);
-        push_checked_row(
-            &mut fighter_rows,
-            sys_id,
-            format!("ch|{ship_id}|{tid}"),
-            &FighterCheckpointEntry::Charge((ship_id, tid), ch),
-        );
-    }
-    for (&(ship_id, tube_idx), &fid) in &fighters_snapshot.3 {
-        let sys_id = *fighter_systems.get(&ship_id).unwrap_or(&CLUSTER_SYSTEM_ID);
-        push_checked_row(
-            &mut fighter_rows,
-            sys_id,
-            format!("tl|{ship_id}|{tube_idx}"),
-            &FighterCheckpointEntry::TubeLoad((ship_id, tube_idx), fid),
-        );
-    }
-
     let mut durable_tac_rows = Vec::with_capacity(durable_tac_raw.len());
     for (key, entry) in &durable_tac_raw {
         push_checked_row(&mut durable_tac_rows, CLUSTER_SYSTEM_ID, key.clone(), entry);
@@ -939,7 +844,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         (KIND_PHASED_ASTEROID_FIELDS, phased_rows),
         (KIND_MAP_LANDMARKS, landmark_rows),
         (KIND_SYSTEM_SIM_TIME, sim_rows),
-        (KIND_FIGHTERS, fighter_rows),
         (KIND_TACTICAL_DURABLE, durable_tac_rows),
         (KIND_MODULE_COOLDOWNS, module_cooldown_rows),
         (KIND_FLEET_EXTRAS, fleet_rows),
@@ -974,8 +878,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             load_all_checkpoints_for_kind::<(i64, String, f64, f64, f64)>(conn, KIND_MAP_LANDMARKS)?;
         let sim_times =
             load_all_checkpoints_for_kind::<((u8, u32), f64)>(conn, KIND_SYSTEM_SIM_TIME)?;
-        let fighters =
-            load_all_checkpoints_for_kind::<FighterCheckpointEntry>(conn, KIND_FIGHTERS)?;
         let durable_tac =
             load_all_checkpoints_for_kind::<DurableTacticalEntry>(conn, KIND_TACTICAL_DURABLE)?;
         let module_cooldowns = load_all_checkpoints_for_kind::<
@@ -994,7 +896,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             phased,
             landmarks,
             sim_times,
-            fighters,
             durable_tac,
             module_cooldowns,
             fleet_extras,
@@ -1009,7 +910,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         phased,
         landmarks,
         sim_times,
-        fighters,
         durable_tac,
         module_cooldowns,
         fleet_extras,
@@ -1035,30 +935,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
     *ctx.map_landmarks
         .write()
         .unwrap_or_else(|e| e.into_inner()) = landmarks.into_iter().map(|(_, _, v)| v).collect();
-
-    {
-        let mut fg = ctx.fighters.write().unwrap_or_else(|e| e.into_inner());
-        fg.active_fighters.clear();
-        fg.cooldown_state.clear();
-        fg.charge_state.clear();
-        fg.tube_loads.clear();
-        for (_, _, entry) in fighters {
-            match entry {
-                FighterCheckpointEntry::Squadron(sq) => {
-                    fg.active_fighters.insert(sq.ball_id, sq);
-                }
-                FighterCheckpointEntry::Cooldown(k, v) => {
-                    fg.cooldown_state.insert(k, v);
-                }
-                FighterCheckpointEntry::Charge(k, v) => {
-                    fg.charge_state.insert(k, v);
-                }
-                FighterCheckpointEntry::TubeLoad(k, v) => {
-                    fg.tube_loads.insert(k, v);
-                }
-            }
-        }
-    }
 
     let cur_db_key = db_ptr_key(&ctx.db);
     let cur_inst_key = ctx.instance_id as usize;
@@ -1213,6 +1089,11 @@ impl ServerContext {
 
         match load_checkpoints_into_ctx(self) {
             CheckpointLoadOutcome::Loaded => {
+                crate::system_actor::reload_live_fighters_from_db(
+                    &self.systems,
+                    &self.db,
+                    Some(self.sde.as_ref()),
+                );
                 self.retire_legacy_runtime_monolith_in_db();
                 return;
             }
@@ -1230,6 +1111,11 @@ impl ServerContext {
             self.persist_server_runtime_to_db();
         } else {
             PersistedServerRuntimeState::default().apply_to_ctx(self);
+            crate::system_actor::reload_live_fighters_from_db(
+                &self.systems,
+                &self.db,
+                Some(self.sde.as_ref()),
+            );
             self.retire_legacy_runtime_monolith_in_db();
         }
     }
@@ -1312,6 +1198,7 @@ impl ServerContext {
     /// social extras, and `QuasarGateway` into SQLite (`#592`).
     pub fn sync_runtime_to_db(&self) {
         self.systems.flush_all_condition_checkpoints_to_db();
+        self.systems.flush_all_fighter_checkpoints_to_db();
         self.persist_server_runtime_to_db();
         flush_combat_runtime_to_db(self);
         let _ = persist_social_state(self);

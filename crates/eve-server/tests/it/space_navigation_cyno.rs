@@ -780,6 +780,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .unwrap_err();
     assert_eq!(err_highsec.code, "AbilityDisallowedInHighSec");
 
+    let f3_sq = fighter_test_helpers::active_fighter(&ctx, f3_ball_id).expect("f3 active");
     let lowsec_sys = 30_000_012;
     let lowsec_handle = ctx.systems.get_or_spawn(lowsec_sys);
     let (_, f3_ball) = sys_handle
@@ -790,6 +791,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     let _ = lowsec_handle
         .spawn_ball_with_combat(f3_ball.clone(), ctx.build_type_combat_state(40362))
         .await;
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx, lowsec_sys, f3_ball_id, f3_sq.clone());
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = lowsec_sys;
     });
@@ -813,6 +815,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     let _ = nullsec_handle
         .spawn_ball_with_combat(f3_ball.clone(), ctx.build_type_combat_state(40362))
         .await;
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx, nullsec_sys, f3_ball_id, f3_sq);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = nullsec_sys;
     });
