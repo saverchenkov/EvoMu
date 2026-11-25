@@ -1491,7 +1491,7 @@ impl SystemHandle {
         written.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub(in crate::system_actor) async fn wait_for_post_unlock_barrier(&self) -> bool {
+    pub(crate) async fn wait_for_post_unlock_barrier(&self) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let item = post_unlock::PostUnlockWorkItem {
             db_opt: None,
