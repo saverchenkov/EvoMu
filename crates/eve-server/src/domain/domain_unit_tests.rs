@@ -4708,3 +4708,203 @@ mod fleets_tests {
         assert!(ctx.db.with_snapshot(|s| !s.fleets.contains_key(&fleet_id)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// D6: Transactional career reward credit & shared skill domain (#1193)
+// ---------------------------------------------------------------------------
+mod skills_and_reward_tx_tests {
+    use super::*;
+    use crate::domain::career_goals::credit_character_reward_tx;
+    use crate::domain::skills::{
+        apply_free_skill_points_to_skill, set_character_skill_level,
+    };
+    use eve_db::SkillQueueEntry;
+
+    #[test]
+    fn credit_character_reward_tx_commits_atomically_and_rolls_back_on_error() {
+        let ctx = shared_test_ctx();
+        let cid = 91_000_201_i64;
+        let corp_id = 98_000_201_i64;
+        let ts = 1_700_000_555_u64;
+        ctx.db.with_mut_snapshot(|snap| {
+            seed_char(snap, make_char(cid, 1, corp_id, None, 1_000));
+        });
+        ctx.db
+            .acquire_online_lock(1, 555_001, Some(cid), true, ts)
+            .expect("online lock");
+        let _ = ctx.drain_notifications_for_char(cid);
+
+        let (new_bal, new_sp) = credit_character_reward_tx(
+            &ctx.db,
+            "test_credit_reward",
+            cid,
+            IskCents::from_isk(2_500),
+            1_000.0,
+            40,
+            Some(("GMGiveIsk", "tx unit reward".to_string(), Some((10, cid, ts)))),
+        )
+        .expect("transactional reward succeeds");
+        assert_eq!(new_bal, IskCents::from_isk(3_500));
+        assert_eq!(new_sp, 1_000.0);
+
+        let notifs = ctx.drain_notifications_for_char(cid);
+        assert!(
+            notifs.iter().any(|n| n.event == "OnAccountChange"),
+            "credit_character_reward_tx must project OnAccountChange via delta commit listener: {notifs:?}"
+        );
+
+        let journal_count = ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&cid].balance, IskCents::from_isk(3_500));
+            assert_eq!(snap.characters[&cid].free_skill_points, 1_000.0);
+            assert_eq!(snap.corp_lp_balances[&(corp_id, 1_000_419)], 40);
+            let last = snap.wallet_journal.last().expect("journal entry");
+            assert_eq!(last.entry_type, "GMGiveIsk");
+            assert_eq!(last.balance_after, IskCents::from_isk(3_500));
+            snap.wallet_journal.len()
+        });
+
+        let missing = credit_character_reward_tx(
+            &ctx.db,
+            "test_credit_missing",
+            999_888_777,
+            IskCents::from_isk(100),
+            0.0,
+            0,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, "CharacterNotFound");
+
+        let overflow = credit_character_reward_tx(
+            &ctx.db,
+            "test_credit_overflow",
+            cid,
+            IskCents(i64::MAX),
+            500.0,
+            0,
+            Some(("GMGiveIsk", "should rollback".to_string(), None)),
+        )
+        .unwrap_err();
+        assert_eq!(overflow.code, "BalanceOverflow");
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&cid].balance, IskCents::from_isk(3_500));
+            assert_eq!(snap.characters[&cid].free_skill_points, 1_000.0);
+            assert_eq!(snap.wallet_journal.len(), journal_count);
+        });
+    }
+
+    #[test]
+    fn skills_domain_set_and_apply_free_sp_reconcile_queue_and_emit_updates() {
+        let ctx = shared_test_ctx();
+        let cid = 91_000_202_i64;
+        let corp_id = 98_000_202_i64;
+        let now = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = make_char(cid, 1, corp_id, None, 10_000);
+            ch.clone_grade = 2; // Omega so cap=5 works cleanly
+            ch.free_skill_points = 500.0;
+            seed_char(snap, ch);
+            snap.skills.entry(cid).or_default().insert(
+                3327,
+                TrainedSkillRecord {
+                    type_id: 3327,
+                    level: 1,
+                    skill_points: 250.0,
+                },
+            );
+            snap.skills.entry(cid).or_default().insert(
+                3300,
+                TrainedSkillRecord {
+                    type_id: 3300,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+            snap.skill_queues.insert(
+                cid,
+                vec![
+                    SkillQueueEntry {
+                        type_id: 3300,
+                        target_level: 1,
+                        start_sp: 0.0,
+                        end_sp: 250.0,
+                        duration_seconds: 600.0,
+                        started_at_unix: Some(now),
+                    },
+                    SkillQueueEntry {
+                        type_id: 3327,
+                        target_level: 2,
+                        start_sp: 250.0,
+                        end_sp: 1_415.0,
+                        duration_seconds: 1_200.0,
+                        started_at_unix: None,
+                    },
+                ],
+            );
+        });
+        ctx.db
+            .acquire_online_lock(1, 555_002, Some(cid), true, now)
+            .expect("online lock");
+        let _ = ctx.drain_notifications_for_char(cid);
+
+        // Negative checks before valid mutations
+        assert_eq!(
+            set_character_skill_level(&ctx, cid, 3300, 6).unwrap_err().code,
+            "InvalidSlashArgument"
+        );
+        assert_eq!(
+            set_character_skill_level(&ctx, cid, 999_999_999, 1).unwrap_err().code,
+            "SkillNotFound"
+        );
+        assert_eq!(
+            set_character_skill_level(&ctx, cid, 34, 1).unwrap_err().code,
+            "InvalidSkillType"
+        );
+        assert_eq!(
+            apply_free_skill_points_to_skill(&ctx, cid, None, 3300, -10.0)
+                .unwrap_err()
+                .code,
+            "InvalidSkillPointAmount"
+        );
+        assert_eq!(
+            apply_free_skill_points_to_skill(&ctx, cid, None, 3333, 250.0)
+                .unwrap_err()
+                .code,
+            "SkillNotInjected"
+        );
+
+        // Applying 500 free SP completes 3300 lvl 1 (250 SP), prunes (3300, 1), and starts next head (3327, 2)
+        let applied = apply_free_skill_points_to_skill(&ctx, cid, None, 3300, 500.0)
+            .expect("apply_free_skill_points_to_skill succeeds");
+        assert!((applied.new_skill_sp - 500.0).abs() < 1e-6);
+        assert!((applied.remaining_free_sp - 0.0).abs() < 1e-6);
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.skills[&cid][&3300].level, 1);
+            let q = &snap.skill_queues[&cid];
+            assert_eq!(q.len(), 1);
+            assert_eq!((q[0].type_id, q[0].target_level), (3327, 2));
+            assert!(q[0].started_at_unix.is_some());
+        });
+        let free_notifs = ctx.drain_notifications_for_char(cid);
+        assert!(free_notifs.iter().any(|n| n.event == "OnServerSkillsChanged"));
+        assert!(free_notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
+        assert_eq!(
+            apply_free_skill_points_to_skill(&ctx, cid, None, 3327, 100.0)
+                .unwrap_err()
+                .code,
+            "InsufficientFreeSP"
+        );
+
+        // Clearing 3327 via set_character_skill_level(..., 0) removes skill & empties remaining queue
+        let cleared = set_character_skill_level(&ctx, cid, 3327, 0)
+            .expect("set_character_skill_level(..., 0) removes skill");
+        assert_eq!(cleared.level, 0);
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.skills[&cid].contains_key(&3327));
+            assert!(!snap.skill_queues.contains_key(&cid));
+        });
+        let rm_notifs = ctx.drain_notifications_for_char(cid);
+        assert!(rm_notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
+        assert!(rm_notifs.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
+    }
+}

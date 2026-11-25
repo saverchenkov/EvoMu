@@ -886,7 +886,6 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             catch_up_skill_queue(ctx, char_id);
-            let now_ft = ctx.now_blueos_filetime_ticks();
 
             // V24 2-argument form: ApplyFreeSkillPoints(skill_type_id, points_to_apply)
             if args.len() >= 2 {
@@ -914,186 +913,17 @@ pub fn handle(
                         client_error: None,
                     }));
                 };
-                let skill_type = match validate_published_skill_type(&ctx.sde, skill_type_id) {
-                    Ok(t) => t,
-                    Err(e) => return Some(Err(e)),
-                };
-                let rank = skill_type
-                    .default_attributes
-                    .get(&attr_ids::SKILL_TIME_CONSTANT)
-                    .copied()
-                    .unwrap_or(1.0);
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let Some(ch_snap) = snap.characters.get(&char_id).cloned() else {
-                        return Err(BridgeRpcError {
-                            code: "CharacterNotFound".into(),
-                            message: format!("Character {char_id} not found"),
-                            client_error: None,
-                        });
-                    };
-                    if ch_snap.free_skill_points <= 0.0 {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientFreeSP".into(),
-                            message: "No unallocated free skill points available to apply".into(),
-                            client_error: None,
-                        });
-                    }
-                    let skills_map = snap.skills.entry(char_id).or_default();
-                    let Some(existing_skill) = skills_map.get(&skill_type_id).cloned() else {
-                        return Err(BridgeRpcError {
-                            code: "SkillNotInjected".into(),
-                            message: format!(
-                                "Skill {} ({skill_type_id}) must be injected before applying free skill points",
-                                skill_type.name
-                            ),
-                            client_error: None,
-                        });
-                    };
-                    check_skill_type_prerequisites(skill_type, |req_skill_id| {
-                        skills_map
-                            .get(&req_skill_id)
-                            .map(|s| s.level)
-                            .unwrap_or(0)
-                    })?;
-                    let max_lvl = if ch_snap.clone_grade <= 1 {
-                        alpha_skill_cap_for_character(&ctx.sde, ch_snap.race_id, skill_type_id)
-                    } else {
-                        5
-                    };
-                    let max_skill_sp = sp_for_skill_level(rank, max_lvl);
-                    let room_in_skill = (max_skill_sp - existing_skill.skill_points).max(0.0);
-                    if room_in_skill <= 0.0 {
-                        return Err(BridgeRpcError {
-                            code: "SkillAlreadyAtMaxSP".into(),
-                            message: format!(
-                                "Skill {} ({skill_type_id}) is already at maximum trainable SP ({max_skill_sp})",
-                                skill_type.name
-                            ),
-                            client_error: None,
-                        });
-                    }
-                    let alpha_total_room = if ch_snap.clone_grade <= 1 {
-                        let r = (5_000_000.0 - ch_snap.skill_points).max(0.0);
-                        if r <= 0.0 {
-                            return Err(BridgeRpcError {
-                                code: "AlphaCloneSpCapExceeded".into(),
-                                message: "Alpha clones cannot apply free skill points beyond 5,000,000 total SP".into(),
-                                client_error: None,
-                            });
-                        }
-                        r
-                    } else {
-                        f64::INFINITY
-                    };
-                    let applied = points_to_apply
-                        .min(ch_snap.free_skill_points)
-                        .min(room_in_skill)
-                        .min(alpha_total_room);
-                    let new_skill_sp = existing_skill.skill_points + applied;
-                    let mut achieved_lvl = existing_skill.level;
-                    for lvl in (existing_skill.level + 1)..=max_lvl {
-                        if new_skill_sp + 0.5 >= sp_for_skill_level(rank, lvl) {
-                            achieved_lvl = lvl;
-                        } else {
-                            break;
-                        }
-                    }
-                    skills_map.insert(
+                return Some(
+                    crate::domain::skills::apply_free_skill_points_to_skill(
+                        ctx,
+                        char_id,
+                        session.ship_id,
                         skill_type_id,
-                        TrainedSkillRecord {
-                            type_id: skill_type_id,
-                            level: achieved_lvl,
-                            skill_points: new_skill_sp,
-                        },
-                    );
-                    let train_mult = ctx.skill_training_multiplier();
-                    let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
-                        Some(effective_character_attributes(&ctx.sde, snap, char_id))
-                    } else {
-                        None
-                    };
-                    let mut remove_empty_queue = false;
-                    if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
-                        queue.retain_mut(|q| {
-                            if q.type_id != skill_type_id {
-                                return true;
-                            }
-                            if new_skill_sp + 0.5 >= q.end_sp {
-                                false
-                            } else {
-                                if new_skill_sp > q.start_sp {
-                                    let old_needed = (q.end_sp - q.start_sp).max(1.0);
-                                    q.start_sp = new_skill_sp;
-                                    q.duration_seconds = if let Some(attrs) = eff_attrs {
-                                        skill_queue_entry_duration_with_attrs(
-                                            ctx,
-                                            q.type_id,
-                                            q.start_sp,
-                                            q.end_sp,
-                                            ch_snap.clone_grade,
-                                            attrs,
-                                            q.duration_seconds,
-                                        )
-                                    } else {
-                                        q.duration_seconds
-                                            * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
-                                    };
-                                }
-                                true
-                            }
-                        });
-                        remove_empty_queue = queue.is_empty();
-                    }
-                    if remove_empty_queue {
-                        snap.skill_queues.remove(&char_id);
-                    }
-                    if !snap.paused_skill_queues.contains(&char_id) {
-                        if let Some(head) = snap.skill_queues.get_mut(&char_id).and_then(|q| q.first_mut()) {
-                            head.started_at_unix.get_or_insert(ctx.now_unix());
-                        }
-                    }
-                    snap.skill_history
-                        .entry(char_id)
-                        .or_default()
-                        .push(SkillHistoryEntry {
-                            log_date_ft: now_ft,
-                            // 307 = SkillEventSkillPointsApplied (evemu_Crucible EVE_Skills.h:35)
-                            event_type_id: 307,
-                            skill_type_id,
-                            skill_level: achieved_lvl,
-                            absolute_points: new_skill_sp,
-                        });
-                    let remaining_free = if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
-                        ch_mut.free_skill_points = (ch_mut.free_skill_points - applied).max(0.0);
-                        ch_mut.skill_points += applied;
-                        ch_mut.free_skill_points
-                    } else {
-                        0.0
-                    };
-                    Ok((new_skill_sp, remaining_free))
-                });
-                return match res {
-                    Ok((new_skill_sp, remaining_free)) => {
-                        if let Some(sid) = session.ship_id {
-                            ctx.invalidate_and_push_fit(sid);
-                        }
-                        super::jump_clone_names::emit_server_skills_changed(
-                            ctx,
-                            char_id,
-                            &[skill_type_id],
-                            None,
-                        );
-                        ctx.push_brain_update(char_id);
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(char_id),
-                            crate::router::notify_registry::OnFreeSkillPointsChanged {
-                                new_free_skill_points: remaining_free,
-                            },
-                        );
-                        Some(Ok(PyRep::Real(new_skill_sp)))
-                    }
-                    Err(e) => Some(Err(e)),
-                };
+                        points_to_apply,
+                    )
+                    .map(|applied| PyRep::Real(applied.new_skill_sp))
+                    .map_err(crate::services::domain_err_to_rpc),
+                );
             }
 
             let requested_sp_opt = args.first().and_then(|a| a.as_f64());
@@ -1350,6 +1180,7 @@ pub fn handle(
                 }));
             }
             let now_ft = ctx.now_blueos_filetime_ticks();
+            let now_unix = ctx.now_unix();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut injected_tids = Vec::with_capacity(raw_ids.len());
@@ -1436,25 +1267,24 @@ pub fn handle(
                         client_error: None,
                     })?;
 
-                    snap.skills.entry(char_id).or_default().insert(
-                        skill_type_id,
-                        TrainedSkillRecord {
-                            type_id: skill_type_id,
-                            level: 0,
-                            skill_points: 0.0,
-                        },
-                    );
-                    snap.skill_history
-                        .entry(char_id)
-                        .or_default()
-                        .push(SkillHistoryEntry {
-                            log_date_ft: now_ft,
-                            // 36 = SkillEventSkillInjected (CCP V24 / evemu)
-                            event_type_id: 36,
+                    crate::domain::skills::apply_character_skill_update_in_snap(
+                        ctx,
+                        snap,
+                        char_id,
+                        crate::domain::skills::CharacterSkillUpdate {
                             skill_type_id,
-                            skill_level: 0,
-                            absolute_points: 0.0,
-                        });
+                            new_level: 0,
+                            new_skill_points: 0.0,
+                            remove_when_zero: false,
+                            free_sp_delta: 0.0,
+                            // 36 = SkillEventSkillInjected (CCP V24 / evemu)
+                            history_event_type_id: Some(36),
+                            now_ft,
+                            now_unix,
+                            allow_rewind_start_sp: false,
+                        },
+                    )
+                    .map_err(crate::services::domain_err_to_rpc)?;
                     injected_tids.push(skill_type_id);
                 }
                 Ok(injected_tids)

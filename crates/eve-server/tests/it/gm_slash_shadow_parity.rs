@@ -129,7 +129,39 @@ async fn gm_giveisk_and_giveskill_update_shadow_client_over_wire() {
         "ShadowWallet balance must increment by 2.5M ISK without GetCashBalance refresh: pre={pre_isk}, post={post_isk}"
     );
 
-    // 2. `/giveskill <tid> 5` and `/giveskill <tid> 0` update ShadowClient skills via notifications (#1137, #1138).
+    let isk_me_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk me 500000".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(
+        isk_me_rep.dict_get("command"),
+        Some(&PyRep::String("/giveisk me 500000".into()))
+    );
+    harness.assert_shadow_converged();
+    let post_me_isk = harness
+        .shadow()
+        .and_then(|s| s.wallet.personal_balance_isk)
+        .expect("wallet balance after /giveisk me");
+    assert!(
+        (post_me_isk - (pre_isk + 3_000_000.0)).abs() < 0.01,
+        "ShadowWallet balance must increment cumulatively on /giveisk me: pre={pre_isk}, post={post_me_isk}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let j = snap
+            .wallet_journal
+            .last()
+            .expect("GMGiveIsk wallet journal row persisted");
+        assert_eq!(j.character_id, PILOT);
+        assert_eq!(j.entry_type, "GMGiveIsk");
+    });
+
+    // 2. `/giveskill <tid> 5`, `/setskill me <tid> 4`, and `/giveskill <tid> 0` update
+    //    ShadowClient skills via notifications (#1137, #1138, #1193).
     let grant_skill_cmd = format!("/giveskill {SKILL_MINMATAR_CRUISER} 5");
     let grant_skill_rep = harness
         .call_ok(
@@ -151,6 +183,29 @@ async fn gm_giveisk_and_giveskill_update_shadow_client_over_wire() {
             .and_then(|s| s.skills.get(&SKILL_MINMATAR_CRUISER).map(|(lvl, _)| *lvl)),
         Some(5),
         "/giveskill level 5 must update ShadowClient skills without calling GetSkills again"
+    );
+
+    let set_skill_me_cmd = format!("/setskill me {SKILL_MINMATAR_CRUISER} 4");
+    let set_skill_me_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(set_skill_me_cmd.clone())],
+            &kw,
+        )
+        .await;
+    assert_eq!(
+        set_skill_me_rep.dict_get("command"),
+        Some(&PyRep::String(set_skill_me_cmd))
+    );
+    harness.assert_shadow_converged();
+    assert_eq!(
+        harness
+            .shadow()
+            .and_then(|s| s.skills.get(&SKILL_MINMATAR_CRUISER).map(|(lvl, _)| *lvl)),
+        Some(4),
+        "/setskill me level 4 must downgrade ShadowClient skill level live"
     );
 
     let clear_skill_cmd = format!("/giveskill {SKILL_MINMATAR_CRUISER} 0");
@@ -176,6 +231,32 @@ async fn gm_giveisk_and_giveskill_update_shadow_client_over_wire() {
             .contains_key(&SKILL_MINMATAR_CRUISER),
         "/giveskill level 0 must remove skill from ShadowClient without calling GetSkills again"
     );
+
+    // 3. Invalid typed parser inputs reject cleanly over wire without mutating shadow state.
+    for (bad_cmd, expected_code) in [
+        ("/giveisk -5", "InvalidSlashArgument"),
+        ("/giveisk badtarget 100", "InvalidSlashArgument"),
+        ("/giveskill 3300 6", "InvalidSlashArgument"),
+        ("/giveskill 34 3", "InvalidSkillType"),
+    ] {
+        let err = harness
+            .call(
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(bad_cmd.into())],
+                &kw,
+            )
+            .await
+            .expect_err(&format!("expected {bad_cmd} to fail"));
+        assert_eq!(err.code, expected_code, "for {bad_cmd}: {err:?}");
+    }
+    harness.assert_shadow_converged();
+    let final_isk = harness
+        .shadow()
+        .and_then(|s| s.wallet.personal_balance_isk)
+        .expect("wallet balance unchanged after rejected commands");
+    assert!((final_isk - post_me_isk).abs() < 0.01);
 }
 
 /// Parity test staged for the `#1193` `/fit` family track (`character_gm_tools.rs:1544-1554` on

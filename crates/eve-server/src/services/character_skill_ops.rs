@@ -252,26 +252,30 @@ pub fn purchase_skills_direct_for_char(
         ch.version = ch.version.wrapping_add(1);
         let new_bal = ch.balance.0;
 
-        let skills_map = snap.skills.entry(char_id).or_default();
-        let hist = snap.skill_history.entry(char_id).or_default();
         let mut bought = Vec::new();
         for (sk_id, cost_c) in costs {
-            if !skills_map.contains_key(&sk_id) {
-                skills_map.insert(
-                    sk_id,
-                    eve_db::TrainedSkillRecord {
-                        type_id: sk_id,
-                        level: 0,
-                        skill_points: 0.0,
+            if !snap
+                .skills
+                .get(&char_id)
+                .is_some_and(|m| m.contains_key(&sk_id))
+            {
+                crate::domain::skills::apply_character_skill_update_in_snap(
+                    ctx,
+                    snap,
+                    char_id,
+                    crate::domain::skills::CharacterSkillUpdate {
+                        skill_type_id: sk_id,
+                        new_level: 0,
+                        new_skill_points: 0.0,
+                        remove_when_zero: false,
+                        free_sp_delta: 0.0,
+                        history_event_type_id: Some(36),
+                        now_ft,
+                        now_unix,
+                        allow_rewind_start_sp: false,
                     },
-                );
-                hist.push(SkillHistoryEntry {
-                    log_date_ft: now_ft,
-                    event_type_id: 36,
-                    skill_type_id: sk_id,
-                    skill_level: 0,
-                    absolute_points: 0.0,
-                });
+                )
+                .map_err(crate::services::domain_err_to_rpc)?;
             }
             if cost_c > 0 {
                 snap.next_entity_id += 1;

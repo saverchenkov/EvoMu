@@ -1185,3 +1185,211 @@ async fn slash_registry_batch4_gm_soak_commands_final_cutover_parity() {
         .expect("/season reset_goals succeeds with whitespace");
     assert_eq!(season_rep.dict_get("reset"), Some(&PyRep::Bool(true)));
 }
+
+#[test]
+fn typed_giveisk_and_setskill_argument_parsers_enforce_contract() {
+    let caller_cid = 90_000_001_i64;
+
+    // GiveIskArgs valid forms
+    assert_eq!(
+        GiveIskArgs::parse(caller_cid, "2500").expect("plain amount"),
+        GiveIskArgs {
+            target_char_id: caller_cid,
+            amount_cents: eve_db::IskCents::from_isk(2_500),
+        }
+    );
+    assert_eq!(
+        GiveIskArgs::parse(caller_cid, "  me   1000  ").expect("me target"),
+        GiveIskArgs {
+            target_char_id: caller_cid,
+            amount_cents: eve_db::IskCents::from_isk(1_000),
+        }
+    );
+    assert_eq!(
+        GiveIskArgs::parse(caller_cid, "SELF 42").expect("self target"),
+        GiveIskArgs {
+            target_char_id: caller_cid,
+            amount_cents: eve_db::IskCents::from_isk(42),
+        }
+    );
+    assert_eq!(
+        GiveIskArgs::parse(caller_cid, "90000002 500").expect("explicit char id"),
+        GiveIskArgs {
+            target_char_id: 90_000_002,
+            amount_cents: eve_db::IskCents::from_isk(500),
+        }
+    );
+
+    for bad in [
+        "",
+        "   ",
+        "me",
+        "0 100",
+        "-1 100",
+        "badtarget 100",
+        "100 200 300",
+        "10.5",
+        "notanumber",
+        "0",
+        "-5",
+        "me -5",
+    ] {
+        let err = GiveIskArgs::parse(caller_cid, bad)
+            .expect_err(&format!("expected GiveIskArgs::parse({bad:?}) to reject"));
+        assert_eq!(err.code, "InvalidSlashArgument", "for {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+
+    let overflow_err = GiveIskArgs::parse(caller_cid, "922337203685477580")
+        .expect_err("cent multiplication overflow must reject");
+    assert_eq!(overflow_err.code, "BalanceOverflow");
+    assert!(matches!(
+        overflow_err.client_error.as_deref(),
+        Some(ClientError::User {
+            key: UserErrorKey::SlashError,
+            ..
+        })
+    ));
+
+    // SetSkillArgs valid forms
+    assert_eq!(
+        SetSkillArgs::parse(caller_cid, "3300 5").expect("plain skill"),
+        SetSkillArgs {
+            target_char_id: caller_cid,
+            skill_type_id: 3300,
+            level: 5,
+        }
+    );
+    assert_eq!(
+        SetSkillArgs::parse(caller_cid, " me 3300 0 ").expect("me level 0"),
+        SetSkillArgs {
+            target_char_id: caller_cid,
+            skill_type_id: 3300,
+            level: 0,
+        }
+    );
+    assert_eq!(
+        SetSkillArgs::parse(caller_cid, "SELF 3333 3").expect("self level 3"),
+        SetSkillArgs {
+            target_char_id: caller_cid,
+            skill_type_id: 3333,
+            level: 3,
+        }
+    );
+    assert_eq!(
+        SetSkillArgs::parse(caller_cid, "90000002 3300 4").expect("explicit target"),
+        SetSkillArgs {
+            target_char_id: 90_000_002,
+            skill_type_id: 3300,
+            level: 4,
+        }
+    );
+
+    for bad in [
+        "",
+        "3300",
+        "0 3300 3",
+        "-7 3300 3",
+        "badtarget 3300 3",
+        "3300 3 extra",
+        "0 3",
+        "notanid 3",
+        "3300 -1",
+        "3300 6",
+        "3300 five",
+    ] {
+        let err = SetSkillArgs::parse(caller_cid, bad)
+            .expect_err(&format!("expected SetSkillArgs::parse({bad:?}) to reject"));
+        assert_eq!(err.code, "InvalidSlashArgument", "for {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn track2_wallet_and_skill_domain_parity_source_guard() {
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // 1. No `domain/gm_*.rs` shadow domain files exist; shared domain ops must live in real domains.
+    let domain_entries = fs::read_dir(src_root.join("domain")).expect("read src/domain");
+    for entry in domain_entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        assert!(
+            !name_str.starts_with("gm_"),
+            "forbidden GM-only domain module: domain/{name_str}"
+        );
+    }
+
+    // 2. `auth_cache.rs` delegates `/giveisk` and `/giveskill`/`/setskill` to shared domain ops
+    //    and retains zero direct wallet balance or trained-skill table mutations.
+    let auth_raw = fs::read_to_string(src_root.join("services/auth_cache.rs")).expect("auth_cache.rs");
+    let auth_prod = production_prefix(&auth_raw);
+    for forbidden in [
+        "reconcile_skill_queue_after_set_skill",
+        "ch.balance =",
+        "snap.skills",
+        "skills_map.insert",
+        "skills_map.remove",
+        "ch.skill_points =",
+    ] {
+        assert!(
+            !auth_prod.contains(forbidden),
+            "services/auth_cache.rs production code must not contain raw table edit `{forbidden}`"
+        );
+    }
+    assert!(
+        auth_prod.contains("credit_character_reward_tx("),
+        "dispatch_giveisk_slash must route through domain::career_goals::credit_character_reward_tx"
+    );
+    assert!(
+        auth_prod.contains("set_character_skill_level("),
+        "dispatch_setskill_slash must route through domain::skills::set_character_skill_level"
+    );
+
+    // 3. Shared domain functions have genuine non-GM gameplay callers.
+    for rel in [
+        "services/quasar_daily_goals.rs",
+        "services/quasar_career_goals.rs",
+    ] {
+        let raw = fs::read_to_string(src_root.join(rel)).expect(rel);
+        assert!(
+            production_prefix(&raw).contains("credit_character_reward_tx("),
+            "{rel} must call shared domain::career_goals::credit_character_reward_tx"
+        );
+    }
+
+    let char_skills_raw =
+        fs::read_to_string(src_root.join("services/character_skills.rs")).expect("character_skills.rs");
+    let char_skills_prod = production_prefix(&char_skills_raw);
+    assert!(
+        char_skills_prod.contains("apply_free_skill_points_to_skill("),
+        "character_skills.rs must call domain::skills::apply_free_skill_points_to_skill"
+    );
+    assert!(
+        char_skills_prod.contains("apply_character_skill_update_in_snap("),
+        "character_skills.rs must call domain::skills::apply_character_skill_update_in_snap"
+    );
+
+    for rel in [
+        "services/character_skills_helpers.rs",
+        "services/character_skill_ops.rs",
+    ] {
+        let raw = fs::read_to_string(src_root.join(rel)).expect(rel);
+        assert!(
+            production_prefix(&raw).contains("apply_character_skill_update_in_snap("),
+            "{rel} must call shared domain::skills::apply_character_skill_update_in_snap"
+        );
+    }
+}

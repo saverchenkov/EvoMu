@@ -768,22 +768,19 @@ impl DailyGoalManager {
         let isk_total = a_isk + if is_omega { o_isk } else { 0 };
         let em_total = a_em + if is_omega { o_em } else { 0 };
         let sp_total = a_sp + if is_omega { o_sp } else { 0.0 };
-        let credit_res = db.try_with_mut_snapshot(|snap| {
-            crate::domain::career_goals::credit_character_reward_in_snap(
-                snap,
-                character_id as i64,
-                IskCents::from_isk(isk_total),
-                sp_total,
-                em_total,
-                Some((
-                    "DailyGoalReward",
-                    format!("AIR Monthly Progress Track milestone {milestone}"),
-                    None,
-                )),
-            )
-            .map(|_| ())
-            .map_err(|e| e.message)
-        });
+        let credit_res = crate::domain::career_goals::credit_character_reward_tx(
+            db,
+            "daily_goal_monthly_milestone",
+            character_id as i64,
+            IskCents::from_isk(isk_total),
+            sp_total,
+            em_total,
+            Some((
+                "DailyGoalReward",
+                format!("AIR Monthly Progress Track milestone {milestone}"),
+                None,
+            )),
+        );
         if credit_res.is_err() {
             let mut map = self.monthly_progress.write().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = map.get_mut(&character_id) {
@@ -1134,22 +1131,19 @@ impl DailyGoalManager {
 
         let reward_cents = IskCents::from_isk(isk);
         let evermarks_reward = res_goal.template.effective_evermarks_reward();
-        let credit_res = db.try_with_mut_snapshot(|snap| {
-            crate::domain::career_goals::credit_character_reward_in_snap(
-                snap,
-                character_id as i64,
-                reward_cents,
-                sp,
-                evermarks_reward,
-                Some((
-                    "DailyGoalReward",
-                    format!("Daily goal reward ({})", res_goal.template.name_message),
-                    None,
-                )),
-            )
-            .map(|_| ())
-            .map_err(|e| e.message)
-        });
+        let credit_res = crate::domain::career_goals::credit_character_reward_tx(
+            db,
+            "daily_goal_reward",
+            character_id as i64,
+            reward_cents,
+            sp,
+            evermarks_reward,
+            Some((
+                "DailyGoalReward",
+                format!("Daily goal reward ({})", res_goal.template.name_message),
+                None,
+            )),
+        );
         if credit_res.is_err() {
             let mut map = self
                 .character_goals

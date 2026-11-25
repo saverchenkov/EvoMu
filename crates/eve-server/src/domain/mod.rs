@@ -10,6 +10,7 @@ pub mod corp_governance;
 pub mod fleets;
 pub mod mail;
 pub mod market_acl;
+pub mod skills;
 pub mod wars;
 
 #[cfg(test)]
@@ -115,5 +116,18 @@ impl DomainError {
 impl eve_db::FromWalError for DomainError {
     fn from_wal_error(err: String) -> Self {
         Self::internal("PersistenceFailure", err)
+    }
+}
+
+impl eve_db::FromTxError for DomainError {
+    fn from_tx_error(err: eve_db::TxError) -> Self {
+        match &err {
+            eve_db::TxError::NonFinite { .. } | eve_db::TxError::RowLimit { .. } => {
+                Self::invalid_input("ValidationError", err.to_string())
+            }
+            eve_db::TxError::Persist(_) | eve_db::TxError::Panicked { .. } => {
+                Self::internal("PersistenceFailure", err.to_string())
+            }
+        }
     }
 }
