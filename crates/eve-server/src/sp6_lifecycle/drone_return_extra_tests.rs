@@ -1936,15 +1936,14 @@ async fn scoop_claim_blocks_reconnect_and_abandon_and_destruction_respects_drone
         )
         .await
         .unwrap();
+    let mut recon_drone = make_drone_state(d_recon, d_recon, 2454, 0, 0, sys_id, false, 0);
+    recon_drone.original_owner_char_id = owner_char;
+    recon_drone.is_abandoned = true;
     drone_test_helpers::seed_active_drones(
         &ctx,
         [
-            make_drone_state(d_recon, d_recon, 2454, owner_char, owner_ship, sys_id, true, 0),
+            recon_drone,
             make_drone_state(d_ab, d_ab, 2454, owner_char, owner_ship, sys_id, false, 4),
-            make_drone_state(ball_kill_1, item_kill_1, 2454, owner_char, owner_ship, sys_id, false, 1),
-            make_drone_state(ball_kill_2, item_kill_2, 2454, owner_char, owner_ship, sys_id, false, 1),
-            make_drone_state(id_eq, id_eq, 2454, owner_char, owner_ship, sys_id, false, 1),
-            make_drone_state(d_dead_first, d_dead_first, 2454, owner_char, owner_ship, sys_id, false, 1),
         ],
     );
 
@@ -2019,6 +2018,7 @@ async fn scoop_claim_blocks_reconnect_and_abandon_and_destruction_respects_drone
     .expect("handled")
     .expect_err("after reconnect, third party scoop must fail with DroneOwnedByOther");
     assert_eq!(steal_err.code, "DroneOwnedByOther");
+    let _ = sys_handle.remove_active_drone(d_recon).await;
 
     // 2. Abandon-during-scoop race: while `try_atomic_scoop_drone` holds `ClaimReturnScoop` on `d_ab`,
     //    `CmdAbandonDrone` and `abandon_drones_on_warp_sync` must NOT mutate `d_ab` to abandoned.
@@ -2081,6 +2081,15 @@ async fn scoop_claim_blocks_reconnect_and_abandon_and_destruction_respects_drone
 
     // 3. Destroy-vs-scoop race after DB move_drone_item_to_bay_in_snap and before ConsumeScoop:
     //    (a) `cleanup_destroyed_player_drone_sync` preserves bay item & skips tombstoning.
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
+            make_drone_state(ball_kill_1, item_kill_1, 2454, owner_char, owner_ship, sys_id, false, 1),
+            make_drone_state(ball_kill_2, item_kill_2, 2454, owner_char, owner_ship, sys_id, false, 1),
+            make_drone_state(id_eq, id_eq, 2454, owner_char, owner_ship, sys_id, false, 1),
+            make_drone_state(d_dead_first, d_dead_first, 2454, owner_char, owner_ship, sys_id, false, 1),
+        ],
+    );
     ctx.db.with_mut_snapshot(|snap| {
         assert!(crate::services::combat_crimewatch::combat_npcs_drones::move_drone_item_to_bay_in_snap(
             snap, item_kill_1, ball_kill_1, sys_id, Some(owner_char), owner_ship, false,

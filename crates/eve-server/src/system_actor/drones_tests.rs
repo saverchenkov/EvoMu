@@ -608,6 +608,9 @@ async fn dirty_active_drone_checkpoint_prevents_hibernation_until_flushed() {
 
     let _ = release_tx.send(());
     holder.await.unwrap();
+    // Tick 1 triggers post-unlock active-drones SQLite flush after `step_manual` unlocks `actor_state`.
+    let _ = sys.step_manual(1.0).await.unwrap();
+    // Tick 2 observes `active_drones_checkpoint_dirty == false` inside `update_system_hibernation_flag`.
     let _ = sys.step_manual(1.0).await.unwrap();
     assert!(
         sys.is_hibernated(),
