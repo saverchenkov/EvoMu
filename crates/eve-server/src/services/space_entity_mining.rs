@@ -242,18 +242,19 @@ pub(crate) async fn handle_mine(
     drone_ids.dedup();
 
     // Reject drones already present in active_drone_miners for this ship/target (`NF-1`)
-    let drone_ball_ids: Vec<i64> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+    let drone_ball_ids: Vec<i64> = {
+        let view = handle.view();
         drone_ids
             .iter()
             .map(|did| {
-                rt.active_drones_in_space
+                view.active_drones_in_space
                     .values()
                     .find(|d| d.drone_item_id == *did || d.ball_id == *did)
                     .map(|d| d.ball_id)
                     .unwrap_or(*did)
             })
             .collect()
-    });
+    };
     let already_mining = {
         let view = handle.view();
         drone_ball_ids.iter().any(|bid| {
@@ -274,10 +275,11 @@ pub(crate) async fn handle_mine(
     for &did in &drone_ids {
         let is_owned = ctx.db.with_snapshot(|snap| {
             snap.items.get(&did).is_some_and(|i| i.owner_id == char_id)
-        }) || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.get(&did).is_some_and(|d| d.owner_char_id == char_id)
-                || rt.active_drones_in_space.values().any(|d| d.drone_item_id == did && d.owner_char_id == char_id)
-        });
+        }) || {
+            let view = handle.view();
+            view.active_drones_in_space.get(&did).is_some_and(|d| d.owner_char_id == char_id)
+                || view.active_drones_in_space.values().any(|d| d.drone_item_id == did && d.owner_char_id == char_id)
+        };
         if !is_owned {
             return Err(BridgeRpcError {
                 code: "InvalidDroneOwner".into(),
@@ -608,13 +610,13 @@ pub(crate) async fn handle_mine(
                 .unwrap_or(base_yield_m3);
             let d_units = ((d_yield_m3 / unit_vol).floor() as u64).max(1);
 
-            let drone_ball_id = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space
-                    .values()
-                    .find(|d| d.drone_item_id == d_item.item_id || d.ball_id == d_item.item_id)
-                    .map(|d| d.ball_id)
-            })
-            .unwrap_or(d_item.item_id);
+            let drone_ball_id = handle
+                .view()
+                .active_drones_in_space
+                .values()
+                .find(|d| d.drone_item_id == d_item.item_id || d.ball_id == d_item.item_id)
+                .map(|d| d.ball_id)
+                .unwrap_or(d_item.item_id);
 
             let _ = handle
                 .emit_destiny_event(
@@ -631,12 +633,17 @@ pub(crate) async fn handle_mine(
                 )
                 .await;
 
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                if let Some(d) = rt.active_drones_in_space.get_mut(&drone_ball_id) {
-                    d.activity_state = 2;
-                    d.target_id = Some(asteroid_id);
-                }
-            });
+            let _ = handle
+                .mutate_active_drones(move |drones, _, _| {
+                    if let Some(d) = drones.get_mut(&drone_ball_id) {
+                        d.activity_state = 2;
+                        d.target_id = Some(asteroid_id);
+                        (drone_ball_id > 0, ())
+                    } else {
+                        (false, ())
+                    }
+                })
+                .await;
             let _ = handle
                 .upsert_drone_miner(crate::system_actor::DroneMiningState {
                     drone_id: drone_ball_id,

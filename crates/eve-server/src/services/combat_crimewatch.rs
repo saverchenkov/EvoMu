@@ -352,35 +352,6 @@ impl Default for DroneBehaviorSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DroneSpaceState {
-    pub ball_id: i64,
-    pub drone_item_id: i64,
-    pub type_id: u32,
-    pub group_id: u32,
-    pub owner_char_id: i64,
-    pub original_owner_char_id: i64,
-    pub parent_ship_id: i64,
-    pub solar_system_id: u32,
-    pub target_id: Option<i64>,
-    pub activity_state: i64,
-    pub assist_char_id: Option<i64>,
-    pub guard_char_id: Option<i64>,
-    pub is_abandoned: bool,
-    pub is_sentry: bool,
-    pub bandwidth_used: f64,
-    pub max_velocity: f64,
-    pub optimal_range: f64,
-    pub damage_vector: DamageVector,
-    pub shield_repair_amount: f64,
-    pub armor_repair_amount: f64,
-    pub hull_repair_amount: f64,
-    pub web_speed_factor: f64,
-    pub neut_amount: f64,
-    pub ecm_strength: f64,
-    pub tp_sig_bonus_pct: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedNpcEntity {
     pub ball_id: i64,
     pub type_id: u32,
@@ -452,7 +423,6 @@ pub struct CombatRuntimeState {
     pub npc_timers: HashMap<i64, u64>,
     pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
     pub crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
-    pub active_drones_in_space: HashMap<i64, DroneSpaceState>,
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
@@ -470,7 +440,7 @@ pub struct CombatRuntimeState {
     pub(crate) extended_npc_weapon_runtime: crate::combat::npc_ai_weapons_loot::SharedExtendedNpcWeaponRuntime,
 }
 
-pub use crate::system_actor::DroneMiningState;
+pub use crate::system_actor::{DroneMiningState, DroneSpaceState};
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -486,7 +456,6 @@ struct PersistedCombatExtendedPayload {
     sentry_gun_aggression: Vec<((u32, i64), SentryAggressionState)>,
     crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
     crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
-    active_drones_in_space: HashMap<i64, DroneSpaceState>,
     npc_entities: HashMap<i64, ExtendedNpcEntity>,
     encounter_waves: HashMap<u32, EncounterWaveDirector>,
     behavior_debugging_active: std::collections::HashSet<i64>,
@@ -668,7 +637,6 @@ impl CombatRuntimeState {
             self.sentry_gun_aggression.clear();
             self.crimewatch_timer_states.clear();
             self.crimewatch_timer_triggered_at.clear();
-            self.active_drones_in_space.clear();
             self.npc_entities.clear();
             self.encounter_waves.clear();
             self.behavior_debugging_active.clear();
@@ -693,7 +661,6 @@ impl CombatRuntimeState {
             self.sentry_gun_aggression = ext.sentry_gun_aggression.into_iter().collect();
             self.crimewatch_timer_states = ext.crimewatch_timer_states;
             self.crimewatch_timer_triggered_at = ext.crimewatch_timer_triggered_at;
-            self.active_drones_in_space = ext.active_drones_in_space;
             self.npc_entities = ext.npc_entities;
             self.encounter_waves = ext.encounter_waves;
             self.behavior_debugging_active = ext.behavior_debugging_active;
@@ -721,7 +688,6 @@ impl CombatRuntimeState {
             || !self.sentry_gun_aggression.is_empty()
             || !self.crimewatch_timer_states.is_empty()
             || !self.crimewatch_timer_triggered_at.is_empty()
-            || !self.active_drones_in_space.is_empty()
             || !self.npc_entities.is_empty()
             || !self.encounter_waves.is_empty()
             || !self.behavior_debugging_active.is_empty()
@@ -755,7 +721,6 @@ impl CombatRuntimeState {
                     .collect(),
                 crimewatch_timer_states: self.crimewatch_timer_states.clone(),
                 crimewatch_timer_triggered_at: self.crimewatch_timer_triggered_at.clone(),
-                active_drones_in_space: self.active_drones_in_space.clone(),
                 npc_entities: self.npc_entities.clone(),
                 encounter_waves: self.encounter_waves.clone(),
                 behavior_debugging_active: self.behavior_debugging_active.clone(),
@@ -1001,7 +966,6 @@ fn merge_extended_payload_3way(
         sentry_gun_aggression: merge_pair_vec_3way(&base.sentry_gun_aggression, &db.sentry_gun_aggression, &ram.sentry_gun_aggression),
         crimewatch_timer_states: merge_map_3way(&base.crimewatch_timer_states, &db.crimewatch_timer_states, &ram.crimewatch_timer_states),
         crimewatch_timer_triggered_at: merge_map_3way(&base.crimewatch_timer_triggered_at, &db.crimewatch_timer_triggered_at, &ram.crimewatch_timer_triggered_at),
-        active_drones_in_space: merge_map_3way(&base.active_drones_in_space, &db.active_drones_in_space, &ram.active_drones_in_space),
         npc_entities: merge_map_3way(&base.npc_entities, &db.npc_entities, &ram.npc_entities),
         encounter_waves: merge_map_3way(&base.encounter_waves, &db.encounter_waves, &ram.encounter_waves),
         behavior_debugging_active: merge_set_3way(&base.behavior_debugging_active, &db.behavior_debugging_active, &ram.behavior_debugging_active),

@@ -538,9 +538,20 @@ pub async fn pulse_abyssal_automated_pylons(
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             for &kid in &killed_targets {
                 rt.npc_entities.remove(&kid);
-                rt.active_drones_in_space.remove(&kid);
             }
         });
+        let drone_kill_ids = killed_targets.clone();
+        let _ = sys_handle
+            .mutate_active_drones(move |drones, _, _| {
+                let mut dirty = false;
+                for kid in drone_kill_ids {
+                    if drones.remove(&kid).is_some() && kid > 0 {
+                        dirty = true;
+                    }
+                }
+                (dirty, ())
+            })
+            .await;
         for kid in killed_targets {
             let _ = crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(
                 &ctx.systems,

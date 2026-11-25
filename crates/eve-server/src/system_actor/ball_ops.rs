@@ -199,6 +199,10 @@ fn run_direct_ball_op_on_current_thread<R>(
         lock_guard.as_ref(),
         ticket,
     );
+    super::drones::flush_actor_active_drones_checkpoint_post_unlock(
+        handle.solar_system_id,
+        &handle.actor_state,
+    );
     out
 }
 
@@ -833,7 +837,7 @@ fn clear_removed_ball_actor_state(
         .external_active_modules
         .retain(|&(sid, _)| sid != ball_id);
     ctx.actor_st.protection_registry.remove(&ball_id);
-    super::drones::clear_drone_runtime_in_state(ctx.actor_st, ball_id);
+    super::drones::clear_removed_ball_drones_in_state(ctx.actor_st, ball_id);
     if let Some(removed_slot) = ctx.removed_checkpoint_ball.as_deref_mut() {
         *removed_slot = Some(ball_id);
     } else {

@@ -1803,14 +1803,24 @@ pub struct EdencomHostilityMeta {
 }
 
 impl EdencomHostilityMeta {
-    pub(crate) fn collect(ctx: &ServerContext, _solar_system_id: u32, ball_ids: &[i64]) -> Self {
+    pub(crate) fn collect(ctx: &ServerContext, solar_system_id: u32, ball_ids: &[i64]) -> Self {
         let mut drone_owner_cids: HashMap<i64, i64> = HashMap::new();
         let mut hostile_npc_ids: HashSet<i64> = HashSet::new();
-        with_combat_ephemeral(ctx, |rt| {
+        if let Some(sys_view) = ctx.systems.get_handle(solar_system_id).map(|h| h.view()) {
             for &id in ball_ids {
-                if let Some(d) = rt.active_drones_in_space.get(&id) {
+                if let Some(d) = sys_view.active_drones_in_space.get(&id) {
                     drone_owner_cids.insert(id, d.owner_char_id);
                 }
+            }
+        } else {
+            for &id in ball_ids {
+                if let Some((_, d)) = ctx.systems.find_active_drone(id) {
+                    drone_owner_cids.insert(id, d.owner_char_id);
+                }
+            }
+        }
+        with_combat_ephemeral(ctx, |rt| {
+            for &id in ball_ids {
                 if let Some(other_npc) = rt.npc_entities.get(&id) {
                     let hostile_arch = matches!(
                         other_npc.archetype.as_str(),

@@ -334,6 +334,7 @@ pub fn try_remove_ball_for_db(
                     let mut removed_ext = false;
                     if let Some(st) = st_opt.as_mut() {
                         st.protection_registry.remove(&ball_id);
+                        super::drones::clear_removed_ball_drones_in_state(st, ball_id);
                         let before = st.external_active_modules.len();
                         st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
                         removed_ext = st.external_active_modules.len() != before;
@@ -932,6 +933,10 @@ pub(crate) fn update_system_hibernation_flag(
         || !state.active_nanite_repairs.is_empty()
         || !state.active_drone_miners.is_empty()
         || state.fighters.active_fighters.values().any(|f| !f.is_abandoned)
+        || state
+            .active_drones_in_space
+            .values()
+            .any(|d| !d.is_abandoned || d.target_id.is_some())
         || state.pending_destroyed_balls.is_non_empty()
         || state
             .asteroids

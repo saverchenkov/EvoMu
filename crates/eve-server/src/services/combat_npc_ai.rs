@@ -527,10 +527,11 @@ pub fn is_candidate_hostile_to_edencom(
         return false;
     }
 
-    let drone_owner_opt = with_combat_ephemeral(ctx, |rt| {
-        rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
-    })
-    .or_else(|| {
+    let drone_owner_opt = ctx
+        .systems
+        .find_active_drone(cand_id)
+        .map(|(_, d)| d.owner_char_id)
+        .or_else(|| {
         ctx.db.with_snapshot(|snap| {
             snap.items
                 .get(&cand_id)
@@ -826,12 +827,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
     let mut non_npc_drones: Vec<(i64, Option<(u32, i64, Option<i64>, f64)>)> = Vec::new();
     if !cand_ball_ids.is_empty() {
+        let sys_view_opt = ctx.systems.get_handle(solar_system_id).map(|h| h.view());
         with_combat_ephemeral(ctx, |rt| {
             for cid in cand_ball_ids {
                 if !rt.npc_entities.contains_key(&cid) {
-                    let drone_info = rt
-                        .active_drones_in_space
-                        .get(&cid)
+                    let drone_info = sys_view_opt
+                        .as_ref()
+                        .and_then(|v| v.active_drones_in_space.get(&cid))
                         .map(|d| (d.type_id, d.activity_state, d.target_id, d.damage_vector.total()));
                     non_npc_drones.push((cid, drone_info));
                 }
@@ -991,16 +993,20 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         });
 
         if raws.iter().any(|r| r.is_player_drone && r.owner_cid.is_none()) {
-            let fallback_owners: HashMap<i64, i64> = with_combat_ephemeral(ctx, |rt| {
-                raws.iter()
-                    .filter(|r| r.is_player_drone && r.owner_cid.is_none())
-                    .filter_map(|r| {
-                        rt.active_drones_in_space
-                            .get(&r.cand_id)
-                            .map(|d| (r.cand_id, d.owner_char_id))
-                    })
-                    .collect()
-            });
+            let sys_view_opt = ctx.systems.get_handle(solar_system_id).map(|h| h.view());
+            let fallback_owners: HashMap<i64, i64> = sys_view_opt
+                .as_ref()
+                .map(|v| {
+                    raws.iter()
+                        .filter(|r| r.is_player_drone && r.owner_cid.is_none())
+                        .filter_map(|r| {
+                            v.active_drones_in_space
+                                .get(&r.cand_id)
+                                .map(|d| (r.cand_id, d.owner_char_id))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             if !fallback_owners.is_empty() {
                 ctx.db.with_snapshot(|snap| {
                     for r in &mut raws {

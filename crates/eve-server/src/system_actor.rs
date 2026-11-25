@@ -385,6 +385,26 @@ pub struct SystemRegistry {
     pub(crate) lifecycle_test_hooks: lifecycle_sm::LifecycleTestHooks,
     /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
     pub system_wide_effects: RankedRwLock<types::SystemWideEffectsState, RANK_LEAF>,
+    /// Tracks systems whose legacy `PersistedCombatCrimewatchState` drones were already imported.
+    pub(crate) migrated_legacy_drone_systems: RankedMutex<std::collections::HashSet<SolarSystemId>, RANK_LEAF>,
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) headless_test_rt: std::sync::OnceLock<tokio::runtime::Runtime>,
+}
+
+#[cfg(any(test, feature = "testkit"))]
+impl Drop for SystemRegistry {
+    fn drop(&mut self) {
+        if let Some(rt) = self.headless_test_rt.take() {
+            if let Ok(mut guard) = self.systems.write() {
+                guard.clear();
+            }
+            if tokio::runtime::Handle::try_current().is_ok() {
+                rt.shutdown_background();
+            } else {
+                drop(rt);
+            }
+        }
+    }
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -437,6 +457,9 @@ impl SystemRegistry {
             #[cfg(test)]
             lifecycle_test_hooks: Default::default(),
             system_wide_effects: RankedRwLock::new(types::SystemWideEffectsState::default()),
+            migrated_legacy_drone_systems: RankedMutex::new(std::collections::HashSet::new()),
+            #[cfg(any(test, feature = "testkit"))]
+            headless_test_rt: std::sync::OnceLock::new(),
         }
     }
 
@@ -1044,8 +1067,9 @@ impl SystemRegistry {
             return 0;
         }
         let mut total = 0usize;
-        for (_sys_id, handle) in self.active_system_handles() {
+        for (sys_id, handle) in self.active_system_handles() {
             total += handle.flush_dirty_condition_checkpoint_sync();
+            drones::flush_actor_active_drones_checkpoint_post_unlock(sys_id, &handle.actor_state);
         }
         total
     }
@@ -1109,6 +1133,8 @@ impl SystemRegistry {
         let mut initial_asteroid_templates = HashMap::new();
         let mut initial_warp_state = types::ActorWarpState::default();
         let mut initial_post_unlock_ops = post_unlock::PostUnlockOps::default();
+        let (initial_active_drones, initial_drones_dirty) =
+            drones::load_initial_active_drones_for_system(self, solar_system_id, db_read_safe);
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {
             if db_read_safe {
                 let first_sde_belt_ast_id =
@@ -1194,6 +1220,8 @@ impl SystemRegistry {
             warp_state: initial_warp_state,
             next_post_unlock_seq: initial_post_unlock_seq,
             fighters: initial_fighters, fighters_lifecycle_gen: generation, fighters_needs_sqlite_hydration: initial_fighters_needs_hydration, fighters_persist: Arc::clone(&self.fighter_persist),
+            active_drones_in_space: initial_active_drones,
+            active_drones_checkpoint_dirty: initial_drones_dirty,
             ..Default::default()
         };
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
@@ -1413,6 +1441,10 @@ impl SystemRegistry {
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
+            drones::flush_actor_active_drones_checkpoint_post_unlock(
+                solar_system_id,
+                &actor_state_actor,
+            );
             while let Some((cmd_batch, shutdown_requested)) =
                 post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0).await
             {
@@ -2339,6 +2371,10 @@ impl SystemRegistry {
                     }
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
+                drones::flush_actor_active_drones_checkpoint_post_unlock(
+                    solar_system_id,
+                    &actor_state_actor,
+                );
                 if shutdown_requested {
                     break;
                 }
@@ -2367,6 +2403,10 @@ impl SystemRegistry {
                     }
                 }
             }
+            drones::flush_actor_active_drones_checkpoint_post_unlock(
+                solar_system_id,
+                &actor_state_actor,
+            );
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,

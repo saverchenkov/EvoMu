@@ -6,7 +6,7 @@ use crate::router::notify_registry::{
     push_typed_session_notification, OnDroneControlLost, OnDroneStateChange,
 };
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::{with_combat_runtime, DroneSpaceState};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -78,14 +78,18 @@ pub async fn handle_cmd_return_bay(
     };
     let max_ctrl_range = crate::services::combat_crimewatch::combat_npcs_drones::compute_drone_control_range(ctx, char_id, ship_id);
 
-    let mut candidates: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.values().filter(|d| {
+    let mut candidates: Vec<DroneSpaceState> = sys_handle
+        .view()
+        .active_drones_in_space
+        .values()
+        .filter(|d| {
             d.solar_system_id == sys_id
                 && (d.parent_ship_id == ship_id || (d.owner_char_id == char_id && d.parent_ship_id == 0))
                 && !d.is_abandoned
                 && filter_drone_ids.as_ref().map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id)).unwrap_or(true)
-        }).cloned().collect()
-    });
+        })
+        .cloned()
+        .collect();
     candidates.sort_by_key(|d| d.ball_id);
 
     // Pre-validate all drone IDs before mutating any state
@@ -110,21 +114,25 @@ pub async fn handle_cmd_return_bay(
             continue;
         }
         if dist > 2_500.0 {
-            let still_controlled = with_mut_combat_runtime(ctx, |rt| {
-                if let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) {
-                    if !st.is_abandoned
-                        && st.solar_system_id == sys_id
-                        && (st.parent_ship_id == ship_id
-                            || (st.owner_char_id == char_id && st.parent_ship_id == 0))
-                    {
-                        st.parent_ship_id = ship_id;
-                        st.target_id = Some(ship_id);
-                        st.activity_state = 4;
-                        return true;
+            let target_bid = d.ball_id;
+            let still_controlled = sys_handle
+                .mutate_active_drones(move |drones, _, _| {
+                    if let Some(st) = drones.get_mut(&target_bid) {
+                        if !st.is_abandoned
+                            && st.solar_system_id == sys_id
+                            && (st.parent_ship_id == ship_id
+                                || (st.owner_char_id == char_id && st.parent_ship_id == 0))
+                        {
+                            st.parent_ship_id = ship_id;
+                            st.target_id = Some(ship_id);
+                            st.activity_state = 4;
+                            return (true, true);
+                        }
                     }
-                }
-                false
-            });
+                    (false, false)
+                })
+                .await
+                .unwrap_or(false);
             if !still_controlled {
                 continue;
             }
@@ -166,13 +174,11 @@ pub async fn handle_cmd_return_bay(
         }
 
         if !try_atomic_scoop_drone(ctx, &sys_handle, &d, ship_id).await {
-            let still_controlled = with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.get(&d.ball_id).is_some_and(|st| {
-                    !st.is_abandoned
-                        && st.solar_system_id == sys_id
-                        && (st.parent_ship_id == ship_id
-                            || (st.owner_char_id == char_id && st.parent_ship_id == 0))
-                })
+            let still_controlled = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
+                !st.is_abandoned
+                    && st.solar_system_id == sys_id
+                    && (st.parent_ship_id == ship_id
+                        || (st.owner_char_id == char_id && st.parent_ship_id == 0))
             });
             if still_controlled {
                 let _ = sys_handle.remove_module_cycle(d.ball_id, -d.ball_id).await;
@@ -245,30 +251,25 @@ pub(crate) async fn abandon_returning_drone_in_space(
     } else {
         drone.original_owner_char_id
     };
-    let restored = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
-        &ctx.db,
-        &*ctx.combat_ephemeral,
-        |snap, rt| {
-            if snap
+    let is_destroyed = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .is_recently_destroyed_item_id(bid)
+            || snap
                 .combat_crimewatch_state
-                .is_recently_destroyed_item_id(bid)
-                || snap
-                    .combat_crimewatch_state
-                    .is_recently_destroyed_item_id(item_id)
-            {
-                return false;
-            }
-            drone.is_abandoned = true;
-            drone.owner_char_id = 0;
-            drone.parent_ship_id = 0;
-            drone.target_id = None;
-            drone.activity_state = 0;
-            drone.assist_char_id = None;
-            drone.guard_char_id = None;
-            rt.active_drones_in_space.insert(bid, drone);
-            true
-        },
-    );
+                .is_recently_destroyed_item_id(item_id)
+    });
+    let restored = if is_destroyed {
+        false
+    } else {
+        drone.is_abandoned = true;
+        drone.owner_char_id = 0;
+        drone.parent_ship_id = 0;
+        drone.target_id = None;
+        drone.activity_state = 0;
+        drone.assist_char_id = None;
+        drone.guard_char_id = None;
+        sys_handle.upsert_active_drone(drone).await.is_ok()
+    };
     let _ = sys_handle.clear_drone_runtime(bid).await;
     let _ = sys_handle.remove_module_cycle(bid, -bid).await;
     if !restored {
@@ -317,9 +318,7 @@ pub(crate) async fn abandon_returning_drone_in_space(
             }
         });
     if !still_in_space {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.remove(&bid);
-        });
+        let _ = sys_handle.remove_active_drone(bid).await;
         return;
     }
     let _ = sys_handle
@@ -368,7 +367,7 @@ fn is_scoopable_controlled_drone(
             || (existing.parent_ship_id == 0 && d.owner_char_id > 0))
 }
 
-/// Atomically claims a drone from `rt.active_drones_in_space`, verifies live range,
+/// Atomically claims a drone from `SystemActor::active_drones_in_space`, verifies live range,
 /// parent ship validity, and remaining drone bay capacity, moves the item into `DroneBay`,
 /// or abandons the drone in space if its parent ship is no longer available in-system (`#437`).
 async fn try_atomic_scoop_drone(
@@ -377,7 +376,7 @@ async fn try_atomic_scoop_drone(
     d: &DroneSpaceState,
     target_ship_id: i64,
 ) -> bool {
-    let pre_not_destroyed = ctx.db.with_snapshot(|snap| {
+    let not_destroyed = ctx.db.with_snapshot(|snap| {
         !snap
             .combat_crimewatch_state
             .is_recently_destroyed_item_id(d.ball_id)
@@ -385,12 +384,10 @@ async fn try_atomic_scoop_drone(
                 .combat_crimewatch_state
                 .is_recently_destroyed_item_id(d.drone_item_id)
     });
-    let pre_ok = pre_not_destroyed
-        && with_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space
-                .get(&d.ball_id)
-                .is_some_and(|existing| is_scoopable_controlled_drone(existing, d, target_ship_id))
-        });
+    let pre_ok = not_destroyed
+        && sys_handle
+            .active_drone(d.ball_id)
+            .is_some_and(|existing| is_scoopable_controlled_drone(&existing, d, target_ship_id));
     if !pre_ok {
         return false;
     }
@@ -413,24 +410,15 @@ async fn try_atomic_scoop_drone(
         let _ = sys_handle
             .remove_module_cycle(d.ball_id, -d.ball_id)
             .await;
-        let should_purge = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
-            &ctx.db,
-            &*ctx.combat_ephemeral,
-            |snap, rt| {
-                if snap
+        let should_purge = ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .is_recently_destroyed_item_id(d.ball_id)
+                || snap
                     .combat_crimewatch_state
-                    .is_recently_destroyed_item_id(d.ball_id)
-                    || snap
-                        .combat_crimewatch_state
-                        .is_recently_destroyed_item_id(d.drone_item_id)
-                {
-                    rt.active_drones_in_space.remove(&d.ball_id);
-                    return true;
-                }
-                false
-            },
-        );
+                    .is_recently_destroyed_item_id(d.drone_item_id)
+        });
         if should_purge {
+            let _ = sys_handle.remove_active_drone(d.ball_id).await;
             let _ = sys_handle.clear_drone_runtime(d.ball_id).await;
             ctx.db.with_mut_snapshot(|snap| {
                 crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
@@ -451,13 +439,22 @@ async fn try_atomic_scoop_drone(
                 is_ship_available_for_scoop_in_snap(snap, target_ship_id, d.solar_system_id)
             });
         if !ship_valid {
-            let claimed = with_mut_combat_runtime(ctx, |rt| {
-                let st = rt.active_drones_in_space.get(&d.ball_id)?;
-                if !is_scoopable_controlled_drone(st, d, target_ship_id) {
-                    return None;
-                }
-                rt.active_drones_in_space.remove(&d.ball_id)
-            });
+            let target_bid = d.ball_id;
+            let d_snap = d.clone();
+            let claimed = sys_handle
+                .mutate_active_drones(move |drones, _, _| {
+                    let can_claim = drones
+                        .get(&target_bid)
+                        .is_some_and(|st| is_scoopable_controlled_drone(st, &d_snap, target_ship_id));
+                    if can_claim {
+                        (true, drones.remove(&target_bid))
+                    } else {
+                        (false, None)
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
             if let Some(claimed_drone) = claimed {
                 abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
             }
@@ -465,131 +462,140 @@ async fn try_atomic_scoop_drone(
         return false;
     }
 
+    let target_bid = d.ball_id;
+    let d_snap = d.clone();
+    let Some(existing) = sys_handle
+        .mutate_active_drones(move |drones, _, _| {
+            let can_claim = drones
+                .get(&target_bid)
+                .is_some_and(|st| is_scoopable_controlled_drone(st, &d_snap, target_ship_id));
+            if can_claim {
+                (true, drones.remove(&target_bid))
+            } else {
+                (false, None)
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+
     enum ScoopOutcome {
         Moved(Box<DroneSpaceState>),
-        BayFull,
+        BayFull(Box<DroneSpaceState>),
         ShipUnavailable(Box<DroneSpaceState>),
-        NotControlled,
         NotInSpace,
         ItemMissing,
         Destroyed,
     }
-    let outcome = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
-        &ctx.db,
-        &*ctx.combat_ephemeral,
-        |snap, rt| -> ScoopOutcome {
-            if snap
+    let outcome = ctx.db.with_mut_snapshot(|snap| -> ScoopOutcome {
+        if snap
+            .combat_crimewatch_state
+            .is_recently_destroyed_item_id(existing.ball_id)
+            || snap
                 .combat_crimewatch_state
-                .is_recently_destroyed_item_id(d.ball_id)
-                || snap
-                    .combat_crimewatch_state
-                    .is_recently_destroyed_item_id(d.drone_item_id)
-            {
-                let stale_item = rt
-                    .active_drones_in_space
-                    .remove(&d.ball_id)
-                    .map(|st| st.drone_item_id)
-                    .or(Some(d.drone_item_id));
-                crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
-                    snap,
-                    stale_item,
-                    d.ball_id,
-                );
-                return ScoopOutcome::Destroyed;
-            }
-            let Some(existing) = rt.active_drones_in_space.get(&d.ball_id).cloned() else {
-                return ScoopOutcome::NotControlled;
-            };
-            if !is_scoopable_controlled_drone(&existing, d, target_ship_id) {
-                return ScoopOutcome::NotControlled;
-            }
-            if crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
-                &snap.combat_crimewatch_state,
-                existing.ball_id,
-                existing.drone_item_id,
-            ) {
-                rt.active_drones_in_space.remove(&d.ball_id);
-                snap.combat_crimewatch_state
-                    .record_destroyed_item_id(existing.ball_id);
-                snap.combat_crimewatch_state
-                    .record_destroyed_item_id(existing.drone_item_id);
-                crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
-                    snap,
-                    Some(existing.drone_item_id),
-                    existing.ball_id,
-                );
-                return ScoopOutcome::Destroyed;
-            }
-            if snap.items.get(&existing.drone_item_id).is_some_and(|drone_item| {
-                drone_item.location_id != existing.solar_system_id as i64
-                    || drone_item.flag != eve_db::InventoryFlag::None
-            }) {
-                rt.active_drones_in_space.remove(&d.ball_id);
-                return ScoopOutcome::NotInSpace;
-            }
-            let ship_opt = is_ship_available_for_scoop_in_snap(
+                .is_recently_destroyed_item_id(existing.drone_item_id)
+        {
+            crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
                 snap,
-                target_ship_id,
-                existing.solar_system_id,
-            )
-            .then(|| snap.items.get(&target_ship_id))
-            .flatten();
-            let Some(sh) = ship_opt else {
-                let claimed = rt.active_drones_in_space.remove(&d.ball_id).unwrap_or(existing);
-                return ScoopOutcome::ShipUnavailable(Box::new(claimed));
-            };
-            if !snap.items.contains_key(&existing.drone_item_id) {
-                rt.active_drones_in_space.remove(&d.ball_id);
-                return ScoopOutcome::ItemMissing;
-            }
-            let drone_vol = ctx
-                .sde
-                .types
-                .get(&existing.type_id)
-                .map(|t| t.volume)
-                .unwrap_or(0.0);
-            let ship_cap = ctx
-                .sde
-                .types
-                .get(&sh.type_id)
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
-                .copied()
-                .unwrap_or(0.0);
-            let used_vol: f64 = snap
-                .items
-                .values()
-                .filter(|it| {
-                    it.item_id != existing.drone_item_id
-                        && it.location_id == target_ship_id
-                        && it.flag == eve_db::InventoryFlag::DroneBay
-                })
-                .map(|it| {
-                    ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0)
-                        * (it.quantity as f64)
-                })
-                .sum();
-            if ship_cap > 0.0 && used_vol + drone_vol > ship_cap + 1e-4 {
-                return ScoopOutcome::BayFull;
-            }
-            if !crate::services::combat_crimewatch::combat_npcs_drones::move_drone_item_to_bay_in_snap(
-                snap,
-                existing.drone_item_id,
+                Some(existing.drone_item_id),
                 existing.ball_id,
-                existing.solar_system_id,
-                None,
-                target_ship_id,
-                true,
-            ) {
-                rt.active_drones_in_space.remove(&d.ball_id);
-                return ScoopOutcome::NotInSpace;
-            }
-            let claimed = rt.active_drones_in_space.remove(&d.ball_id).unwrap_or(existing);
-            ScoopOutcome::Moved(Box::new(claimed))
-        },
-    );
+            );
+            return ScoopOutcome::Destroyed;
+        }
+        if crate::services::combat_crimewatch::combat_npcs_drones::is_recently_destroyed_in_persisted(
+            &snap.combat_crimewatch_state,
+            existing.ball_id,
+            existing.drone_item_id,
+        ) {
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(existing.ball_id);
+            snap.combat_crimewatch_state
+                .record_destroyed_item_id(existing.drone_item_id);
+            crate::services::combat_crimewatch::combat_npcs_drones::purge_destroyed_drone_from_snap(
+                snap,
+                Some(existing.drone_item_id),
+                existing.ball_id,
+            );
+            return ScoopOutcome::Destroyed;
+        }
+        if snap.items.get(&existing.drone_item_id).is_some_and(|drone_item| {
+            drone_item.location_id != existing.solar_system_id as i64
+                || drone_item.flag != eve_db::InventoryFlag::None
+        }) {
+            return ScoopOutcome::NotInSpace;
+        }
+        let ship_opt = is_ship_available_for_scoop_in_snap(
+            snap,
+            target_ship_id,
+            existing.solar_system_id,
+        )
+        .then(|| snap.items.get(&target_ship_id))
+        .flatten();
+        let Some(sh) = ship_opt else {
+            return ScoopOutcome::ShipUnavailable(Box::new(existing));
+        };
+        if !snap.items.contains_key(&existing.drone_item_id) {
+            return ScoopOutcome::ItemMissing;
+        }
+        let drone_vol = ctx
+            .sde
+            .types
+            .get(&existing.type_id)
+            .map(|t| t.volume)
+            .unwrap_or(0.0);
+        let ship_cap = ctx
+            .sde
+            .types
+            .get(&sh.type_id)
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
+            .copied()
+            .unwrap_or(0.0);
+        let used_vol: f64 = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.item_id != existing.drone_item_id
+                    && it.location_id == target_ship_id
+                    && it.flag == eve_db::InventoryFlag::DroneBay
+            })
+            .map(|it| {
+                ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0)
+                    * (it.quantity as f64)
+            })
+            .sum();
+        if ship_cap > 0.0 && used_vol + drone_vol > ship_cap + 1e-4 {
+            return ScoopOutcome::BayFull(Box::new(existing));
+        }
+        if !crate::services::combat_crimewatch::combat_npcs_drones::move_drone_item_to_bay_in_snap(
+            snap,
+            existing.drone_item_id,
+            existing.ball_id,
+            existing.solar_system_id,
+            None,
+            target_ship_id,
+            true,
+        ) {
+            return ScoopOutcome::NotInSpace;
+        }
+        ScoopOutcome::Moved(Box::new(existing))
+    });
     let claimed_drone = match outcome {
         ScoopOutcome::Moved(claimed) => *claimed,
-        ScoopOutcome::BayFull | ScoopOutcome::NotControlled => {
+        ScoopOutcome::BayFull(claimed) => {
+            let not_destroyed = ctx.db.with_snapshot(|snap| {
+                !snap
+                    .combat_crimewatch_state
+                    .is_recently_destroyed_item_id(claimed.ball_id)
+                    && !snap
+                        .combat_crimewatch_state
+                        .is_recently_destroyed_item_id(claimed.drone_item_id)
+            });
+            if not_destroyed {
+                let _ = sys_handle.upsert_active_drones(vec![*claimed], true).await;
+            }
             return false;
         }
         ScoopOutcome::NotInSpace => {
@@ -653,16 +659,14 @@ async fn try_atomic_scoop_drone(
 
 /// Periodic tick scoop for returning mobile drones (`activity_state == 4`).
 pub async fn step_returning_drones(ctx: &ServerContext) {
-    let returning_drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| d.activity_state == 4 && !d.is_abandoned)
-            .cloned()
-            .collect()
-    });
+    let returning_drones: Vec<(crate::system_actor::SystemHandle, DroneSpaceState)> = ctx
+        .systems
+        .all_active_drones()
+        .into_iter()
+        .filter(|(_, d)| d.activity_state == 4 && !d.is_abandoned)
+        .collect();
 
-    for d in returning_drones {
-        let sys_handle = ctx.systems.get_or_spawn(d.solar_system_id);
+    for (sys_handle, d) in returning_drones {
         let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
             continue;
         };
@@ -685,17 +689,24 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
             ship_bad || pilot_bad
         });
         if ship_ball.is_none() || ship_explicitly_invalid {
-            let claimed = with_mut_combat_runtime(ctx, |rt| {
-                let st = rt.active_drones_in_space.get(&d.ball_id)?;
-                if st.activity_state == 4
-                    && !st.is_abandoned
-                    && st.parent_ship_id == d.parent_ship_id
-                {
-                    rt.active_drones_in_space.remove(&d.ball_id)
-                } else {
-                    None
-                }
-            });
+            let target_bid = d.ball_id;
+            let parent_ship_id = d.parent_ship_id;
+            let claimed = sys_handle
+                .mutate_active_drones(move |drones, _, _| {
+                    let can_claim = drones.get(&target_bid).is_some_and(|st| {
+                        st.activity_state == 4
+                            && !st.is_abandoned
+                            && st.parent_ship_id == parent_ship_id
+                    });
+                    if can_claim {
+                        (true, drones.remove(&target_bid))
+                    } else {
+                        (false, None)
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
             if let Some(claimed_drone) = claimed {
                 abandon_returning_drone_in_space(ctx, &sys_handle, claimed_drone).await;
             }
@@ -718,36 +729,48 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
     ship_id: i64,
     sys_id: u32,
 ) {
-    let mut lost_balls = Vec::new();
-    with_mut_combat_runtime(ctx, |rt| {
-        for d in rt.active_drones_in_space.values_mut() {
-            if (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned {
-                d.parent_ship_id = 0;
-                d.target_id = None;
-                d.activity_state = 0;
-                lost_balls.push((d.ball_id, d.drone_item_id, d.type_id, d.solar_system_id));
+    let mut lost_balls: Vec<(crate::system_actor::SystemHandle, i64, i64, u32, u32)> = Vec::new();
+    for (_actor_sys_id, h) in ctx.systems.active_system_handles() {
+        let has_match = h.view().active_drones_in_space.values().any(|d| {
+            (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned
+        });
+        if !has_match {
+            continue;
+        }
+        if let Ok(rows) = h.mutate_active_drones_sync(move |drones, _, _| {
+            let mut changed = Vec::new();
+            for d in drones.values_mut() {
+                if (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned {
+                    d.parent_ship_id = 0;
+                    d.target_id = None;
+                    d.activity_state = 0;
+                    changed.push((d.ball_id, d.drone_item_id, d.type_id, d.solar_system_id));
+                }
+            }
+            (!changed.is_empty(), changed)
+        }) {
+            for (bid, did, tid, d_sys) in rows {
+                lost_balls.push((h.clone(), bid, did, tid, d_sys));
             }
         }
-    });
-    for (bid, did, tid, d_sys) in lost_balls {
+    }
+    for (sys_handle, bid, did, tid, d_sys) in lost_balls {
         let eff_sys = if d_sys > 0 { d_sys } else { sys_id };
         if eff_sys > 0 {
-            if let Some(ref sys_handle) = ctx.systems.get_or_spawn_if_runtime(eff_sys) {
-                let _ = sys_handle.remove_drone_miner_sync(bid);
-                sys_handle.try_remove_module_cycle(bid, -bid);
-                let _ = sys_handle.try_emit_destiny_event(
-                    bid,
-                    eve_destiny::DestinyEvent::OnDroneStateChange {
-                        drone_id: did,
-                        owner_id: 0,
-                        controller_id: 0,
-                        activity_state: 0,
-                        type_id: tid,
-                        controller_owner_id: 0,
-                        target_id: None,
-                    },
-                );
-            }
+            let _ = sys_handle.remove_drone_miner_sync(bid);
+            sys_handle.try_remove_module_cycle(bid, -bid);
+            let _ = sys_handle.try_emit_destiny_event(
+                bid,
+                eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: did,
+                    owner_id: 0,
+                    controller_id: 0,
+                    activity_state: 0,
+                    type_id: tid,
+                    controller_owner_id: 0,
+                    target_id: None,
+                },
+            );
         }
         emit_drone_control_lost_sync(ctx, eff_sys, char_id, did, tid);
     }
@@ -761,31 +784,38 @@ pub fn abandon_drones_on_warp_sync(
     ship_id: i64,
     sys_id: u32,
 ) {
-    let mut abandoned_drones = Vec::new();
-    with_mut_combat_runtime(ctx, |rt| {
-        for d in rt.active_drones_in_space.values_mut() {
-            if d.solar_system_id == sys_id
-                && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
-                && !d.is_abandoned
-            {
-                let notify_char_id = if d.owner_char_id > 0 {
-                    d.owner_char_id
-                } else {
-                    char_id
-                };
-                d.is_abandoned = true;
-                d.owner_char_id = 0;
-                d.parent_ship_id = 0;
-                d.target_id = None;
-                d.activity_state = 0;
-                d.assist_char_id = None;
-                d.guard_char_id = None;
-                abandoned_drones.push((d.ball_id, d.drone_item_id, d.type_id, notify_char_id));
-            }
-        }
-    });
+    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let abandoned_drones = if let Some(ref sys_handle) = sys_handle_opt {
+        sys_handle
+            .mutate_active_drones_sync(move |drones, _, _| {
+                let mut rows = Vec::new();
+                for d in drones.values_mut() {
+                    if d.solar_system_id == sys_id
+                        && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
+                        && !d.is_abandoned
+                    {
+                        let notify_char_id = if d.owner_char_id > 0 {
+                            d.owner_char_id
+                        } else {
+                            char_id
+                        };
+                        d.is_abandoned = true;
+                        d.owner_char_id = 0;
+                        d.parent_ship_id = 0;
+                        d.target_id = None;
+                        d.activity_state = 0;
+                        d.assist_char_id = None;
+                        d.guard_char_id = None;
+                        rows.push((d.ball_id, d.drone_item_id, d.type_id, notify_char_id));
+                    }
+                }
+                (!rows.is_empty(), rows)
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !abandoned_drones.is_empty() {
-        let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
         if let Some(ref sys_handle) = sys_handle_opt {
             let abandoned_bids: Vec<i64> = abandoned_drones.iter().map(|&(bid, _, _, _)| bid).collect();
             let _ = sys_handle.clear_drone_runtime_batch_sync(abandoned_bids);
@@ -921,16 +951,6 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
         .collect();
 
     for (owner_sys, m) in pending {
-        let valid = with_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.get(&m.drone_id).is_some_and(|d| {
-                !d.is_abandoned && d.solar_system_id == m.solar_system_id && d.owner_char_id == m.owner_char_id
-            })
-        });
-        if !valid {
-            let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            continue;
-        }
-
         let sys = if owner_sys.solar_system_id == m.solar_system_id {
             owner_sys.clone()
         } else if let Some(h) = ctx.systems.get_handle(m.solar_system_id) {
@@ -939,6 +959,13 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
             continue;
         };
+        let valid = sys.active_drone(m.drone_id).is_some_and(|d| {
+            !d.is_abandoned && d.solar_system_id == m.solar_system_id && d.owner_char_id == m.owner_char_id
+        });
+        if !valid {
+            let _ = owner_sys.remove_drone_miner(m.drone_id).await;
+            continue;
+        }
         let ship_pos = sys.get_ball_snapshot(m.ship_id).await.ok().flatten().map(|(_, b)| b.position);
         let drone_pos = sys.get_ball_snapshot(m.drone_id).await.ok().flatten().map(|(_, b)| b.position);
         let in_space = ctx.db.with_snapshot(|snap| {
@@ -951,9 +978,17 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
         let in_range = matches!((ship_pos, drone_pos), (Some(sp), Some(dp)) if sp.distance(dp) <= ctrl_range);
         if !in_space || !in_range {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            with_mut_combat_runtime(ctx, |rt| {
-                if let Some(d) = rt.active_drones_in_space.get_mut(&m.drone_id) { d.target_id = None; }
-            });
+            let did = m.drone_id;
+            let _ = sys
+                .mutate_active_drones(move |drones, _, _| {
+                    if let Some(d) = drones.get_mut(&did) {
+                        d.target_id = None;
+                        (true, ())
+                    } else {
+                        (false, ())
+                    }
+                })
+                .await;
             continue;
         }
 
@@ -985,12 +1020,18 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
 
         if hold_cap > 0.0 && (used_vol + needed_vol > hold_cap + 1e-4) {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            with_mut_combat_runtime(ctx, |rt| {
-                if let Some(d) = rt.active_drones_in_space.get_mut(&m.drone_id) {
-                    d.target_id = None;
-                    d.activity_state = 0;
-                }
-            });
+            let did = m.drone_id;
+            let _ = sys
+                .mutate_active_drones(move |drones, _, _| {
+                    if let Some(d) = drones.get_mut(&did) {
+                        d.target_id = None;
+                        d.activity_state = 0;
+                        (true, ())
+                    } else {
+                        (false, ())
+                    }
+                })
+                .await;
             let _ = sys.emit_destiny_event(m.drone_id, eve_destiny::DestinyEvent::OnDroneStateChange {
                 drone_id: m.drone_id, owner_id: m.owner_char_id, controller_id: m.ship_id,
                 activity_state: 0, type_id: 0, controller_owner_id: m.owner_char_id, target_id: None,
@@ -1003,12 +1044,18 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             Ok(e) => e,
             Err(_) => {
                 let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-                with_mut_combat_runtime(ctx, |rt| {
-                    if let Some(d) = rt.active_drones_in_space.get_mut(&m.drone_id) {
-                        d.target_id = None;
-                        d.activity_state = 0;
-                    }
-                });
+                let did = m.drone_id;
+                let _ = sys
+                    .mutate_active_drones(move |drones, _, _| {
+                        if let Some(d) = drones.get_mut(&did) {
+                            d.target_id = None;
+                            d.activity_state = 0;
+                            (true, ())
+                        } else {
+                            (false, ())
+                        }
+                    })
+                    .await;
                 let _ = sys.emit_destiny_event(m.drone_id, eve_destiny::DestinyEvent::OnDroneStateChange {
                     drone_id: m.drone_id, owner_id: m.owner_char_id, controller_id: m.ship_id,
                     activity_state: 0, type_id: 0, controller_owner_id: m.owner_char_id, target_id: None,
@@ -1049,12 +1096,18 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
 
         if extraction.depleted {
             let _ = owner_sys.remove_drone_miner(m.drone_id).await;
-            with_mut_combat_runtime(ctx, |rt| {
-                if let Some(d) = rt.active_drones_in_space.get_mut(&m.drone_id) {
-                    d.target_id = None;
-                    d.activity_state = 0;
-                }
-            });
+            let did = m.drone_id;
+            let _ = sys
+                .mutate_active_drones(move |drones, _, _| {
+                    if let Some(d) = drones.get_mut(&did) {
+                        d.target_id = None;
+                        d.activity_state = 0;
+                        (true, ())
+                    } else {
+                        (false, ())
+                    }
+                })
+                .await;
         } else {
             let _ = owner_sys.reschedule_drone_miner(m.drone_id, now_unix).await;
         }
@@ -1077,28 +1130,32 @@ pub async fn handle_cmd_abandon_drone(
     };
     let target_ids = extract_drone_target_ids(args, kwargs);
 
-    let mut abandoned_drones = Vec::new();
-    with_mut_combat_runtime(ctx, |rt| {
-        for d in rt.active_drones_in_space.values_mut() {
-            if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
-                let matches_filter = target_ids.is_empty()
-                    || target_ids.contains(&d.ball_id)
-                    || target_ids.contains(&d.drone_item_id);
-                if matches_filter {
-                    d.is_abandoned = true;
-                    d.owner_char_id = 0;
-                    d.parent_ship_id = 0;
-                    d.target_id = None;
-                    d.activity_state = 0;
-                    d.assist_char_id = None;
-                    d.guard_char_id = None;
-                    abandoned_drones.push((d.ball_id, d.drone_item_id, d.type_id));
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let target_ids_for_mut = target_ids;
+    let abandoned_drones = sys_handle
+        .mutate_active_drones(move |drones, _, _| {
+            let mut abandoned = Vec::new();
+            for d in drones.values_mut() {
+                if d.solar_system_id == sys_id && d.owner_char_id == char_id && !d.is_abandoned {
+                    let matches_filter = target_ids_for_mut.is_empty()
+                        || target_ids_for_mut.contains(&d.ball_id)
+                        || target_ids_for_mut.contains(&d.drone_item_id);
+                    if matches_filter {
+                        d.is_abandoned = true;
+                        d.owner_char_id = 0;
+                        d.parent_ship_id = 0;
+                        d.target_id = None;
+                        d.activity_state = 0;
+                        d.assist_char_id = None;
+                        d.guard_char_id = None;
+                        abandoned.push((d.ball_id, d.drone_item_id, d.type_id));
+                    }
                 }
             }
-        }
-    });
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            (!abandoned.is_empty(), abandoned)
+        })
+        .await
+        .unwrap_or_default();
     let _ = sys_handle
         .clear_drone_runtime_batch(abandoned_drones.iter().map(|&(bid, _, _)| bid).collect())
         .await;
@@ -1168,22 +1225,31 @@ pub async fn handle_cmd_reconnect_to_drones(
         ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
     }
     let (max_drones_allowed, ship_bw, _) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
-    let (mut cur_count, mut cur_bw) = with_combat_runtime(ctx, |rt| {
-        let active: Vec<&DroneSpaceState> = rt
-            .active_drones_in_space.values().filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned).collect();
-        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
-    });
-
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
-
-    let candidates: Vec<(i64, i64, f64, u32)> = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.values().filter(|d| {
+    let view = sys_handle.view();
+    let (mut cur_count, mut cur_bw) = {
+        let active: Vec<&DroneSpaceState> = view
+            .active_drones_in_space
+            .values()
+            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+            .collect();
+        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
+    };
+    let candidates: Vec<(i64, i64, f64, u32)> = view
+        .active_drones_in_space
+        .values()
+        .filter(|d| {
             d.solar_system_id == sys_id
-                && ((d.is_abandoned && d.original_owner_char_id == char_id) || (d.owner_char_id == char_id && d.parent_ship_id == 0))
-                && (target_ids.is_empty() || target_ids.contains(&d.ball_id) || target_ids.contains(&d.drone_item_id))
-        }).map(|d| (d.ball_id, d.drone_item_id, d.bandwidth_used, d.type_id)).collect()
-    });
+                && ((d.is_abandoned && d.original_owner_char_id == char_id)
+                    || (d.owner_char_id == char_id && d.parent_ship_id == 0))
+                && (target_ids.is_empty()
+                    || target_ids.contains(&d.ball_id)
+                    || target_ids.contains(&d.drone_item_id))
+        })
+        .map(|d| (d.ball_id, d.drone_item_id, d.bandwidth_used, d.type_id))
+        .collect();
+    drop(view);
+    let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
 
     let mut reconnected = Vec::new();
     let mut errors: HashMap<String, Vec<i64>> = HashMap::new();
@@ -1210,18 +1276,26 @@ pub async fn handle_cmd_reconnect_to_drones(
             continue;
         }
 
-        with_mut_combat_runtime(ctx, |rt| {
-            if let Some(d) = rt.active_drones_in_space.get_mut(&bid) {
-                d.is_abandoned = false;
-                d.owner_char_id = char_id;
-                d.parent_ship_id = ship_id;
-                d.activity_state = 0;
-                d.target_id = None;
-                cur_count += 1;
-                cur_bw += bw;
-                reconnected.push((bid, did, tid));
-            }
-        });
+        let updated = sys_handle
+            .mutate_active_drones(move |drones, _, _| {
+                if let Some(d) = drones.get_mut(&bid) {
+                    d.is_abandoned = false;
+                    d.owner_char_id = char_id;
+                    d.parent_ship_id = ship_id;
+                    d.activity_state = 0;
+                    d.target_id = None;
+                    (true, true)
+                } else {
+                    (false, false)
+                }
+            })
+            .await
+            .unwrap_or(false);
+        if updated {
+            cur_count += 1;
+            cur_bw += bw;
+            reconnected.push((bid, did, tid));
+        }
     }
 
     super::drone_reconnect_finish::finish_reconnect_drones(ctx, &sys_handle, char_id, ship_id, &reconnected)
@@ -1232,6 +1306,115 @@ pub async fn handle_cmd_reconnect_to_drones(
         .map(|(k, v)| (PyRep::String(k), PyRep::List(v.into_iter().map(PyRep::Integer).collect())))
         .collect();
     Ok(PyRep::Dict(errors_py))
+}
+
+/// Seeds abandoned [`DroneSpaceState`] entries for any persisted in-space drones (`category_id == 18`,
+/// `location_id` in `30_000_000..=34_000_000`) when a [`ServerContext`] initializes from SQLite
+/// (`feat:lifecycle.drones-in-space-persist-restart`).
+// parity: feat:lifecycle.drones-in-space-persist-restart
+pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
+    let mut drones = Vec::new();
+    let mut fighters = Vec::new();
+    ctx.db.with_snapshot(|snap| {
+        for item in snap.items.values() {
+            if !(30_000_000..=34_000_000).contains(&item.location_id) {
+                continue;
+            }
+            let Some(t) = ctx.sde.types.get(&item.type_id) else {
+                continue;
+            };
+            let ball_id = snap
+                .sp6_lifecycle
+                .space_object_meta
+                .get(&item.item_id)
+                .and_then(|m| m.drone_ball_id)
+                .unwrap_or(item.item_id);
+            if t.category_id == 87 {
+                let max_squadron_size = t
+                    .default_attributes
+                    .get(&2215)
+                    .copied()
+                    .map(|v| v as u32)
+                    .unwrap_or(9);
+                fighters.push(crate::router::context::ActiveFighterSquadron {
+                    ball_id,
+                    item_id: item.item_id,
+                    type_id: item.type_id,
+                    owner_char_id: item.owner_id,
+                    parent_ship_id: 0,
+                    tube_index: 0,
+                    squadron_size: (item.quantity.max(1) as u32).min(max_squadron_size),
+                    target_id: None,
+                    is_abandoned: true,
+                    mwd_active: false,
+                });
+                continue;
+            }
+            if t.category_id != 18 {
+                continue;
+            }
+            let attr = |aid: u16| -> Option<f64> {
+                item.dynamic_attributes
+                    .get(&aid)
+                    .or_else(|| t.default_attributes.get(&aid))
+                    .copied()
+            };
+            let bw_used = attr(1272).unwrap_or(5.0);
+            let max_vel = attr(37).unwrap_or(1_500.0);
+            let opt_range = attr(54).unwrap_or(5_000.0);
+            let dmg_mult = attr(64).unwrap_or(1.0);
+            let dmg_vec = eve_destiny::DamageVector {
+                em: attr(114).unwrap_or(0.0) * dmg_mult,
+                explosive: attr(116).unwrap_or(0.0) * dmg_mult,
+                kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
+                thermal: attr(118).unwrap_or(0.0) * dmg_mult,
+            };
+            drones.push(DroneSpaceState {
+                ball_id,
+                drone_item_id: item.item_id,
+                type_id: item.type_id,
+                group_id: t.group_id,
+                owner_char_id: 0,
+                original_owner_char_id: item.owner_id,
+                parent_ship_id: 0,
+                solar_system_id: item.location_id as u32,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: true,
+                is_sentry: max_vel < 1.0,
+                bandwidth_used: bw_used,
+                max_velocity: max_vel,
+                optimal_range: opt_range,
+                damage_vector: dmg_vec,
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            });
+        }
+    });
+    if !drones.is_empty() {
+        let mut by_sys: HashMap<u32, Vec<DroneSpaceState>> = HashMap::new();
+        for d in drones {
+            by_sys.entry(d.solar_system_id).or_default().push(d);
+        }
+        for (sys_id, sys_drones) in by_sys {
+            let handle = ctx.systems.wake_for_drone_seed(sys_id);
+            let _ = handle.upsert_active_drones_sync(sys_drones, true);
+        }
+    }
+    if !fighters.is_empty() {
+        if let Ok(mut guard) = ctx.active_fighters.write() {
+            for f in fighters {
+                guard.insert(f.ball_id, f);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

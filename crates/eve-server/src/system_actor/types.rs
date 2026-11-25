@@ -913,6 +913,8 @@ pub(crate) struct SystemActorState {
     pub(crate) pending_launch_reservations: HashMap<i64, ((i64, usize), (i64, u32))>,
     pub(crate) pending_recall_or_scoop_claims: HashMap<i64, super::PendingClaimedSquadron>,
     pub(crate) fighters_removed_pre_hydration: HashSet<i64>,
+    pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    pub(crate) active_drones_checkpoint_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1741,6 +1743,24 @@ pub enum SystemCommand {
         op: super::FighterTestHelperOp,
         reply: oneshot::Sender<super::FighterTestHelperOut>,
     },
+    UpsertActiveDrones {
+        drones: Vec<super::DroneSpaceState>,
+        only_if_absent: bool,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    ReserveDroneLaunches {
+        req: super::ReserveDroneLaunchesReq,
+        reply: oneshot::Sender<Result<super::ReserveDroneLaunchesOutcome, String>>,
+    },
+    FinalizeDroneLaunches {
+        mappings: Vec<(BallId, BallId, i64)>,
+        rollback_res_ids: Vec<BallId>,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    MutateActiveDrones {
+        op: super::ActiveDroneMutOp,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1945,6 +1965,7 @@ pub struct SystemView {
     pub pending_warp_finished: HashSet<BallId>,
     pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     pub drone_next_ready_unix: HashMap<BallId, u64>,
+    pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
     pub stargate_activation_states: BTreeMap<BallId, eve_destiny::StargateActivationState>,
     pub active_module_cycles: Vec<ActiveModuleCycle>,
     pub external_active_modules: HashSet<(BallId, ItemId)>,
@@ -1993,6 +2014,7 @@ impl Default for SystemView {
             pending_warp_finished: HashSet::new(),
             active_drone_miners: HashMap::new(),
             drone_next_ready_unix: HashMap::new(),
+            active_drones_in_space: HashMap::new(),
             stargate_activation_states: BTreeMap::new(),
             active_module_cycles: Vec::new(),
             external_active_modules: HashSet::new(),
@@ -2022,6 +2044,7 @@ struct ViewActorSnapshot {
     pending_warp_finished: HashSet<BallId>,
     active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     drone_next_ready_unix: HashMap<BallId, u64>,
+    active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
     active_module_cycles: Vec<ActiveModuleCycle>,
     external_active_modules: HashSet<(BallId, ItemId)>,
     active_nanite_repairs: Vec<ActiveNaniteRepair>,
@@ -2120,6 +2143,7 @@ impl SystemView {
                 pending_warp_finished: st.warp_state.pending_warp_finished.clone(),
                 active_drone_miners: st.active_drone_miners.clone(),
                 drone_next_ready_unix: st.drone_next_ready_unix.clone(),
+                active_drones_in_space: st.active_drones_in_space.clone(),
                 active_module_cycles: st.active_module_cycles.clone(),
                 external_active_modules: st.external_active_modules.clone(),
                 active_nanite_repairs: st.active_nanite_repairs.clone(),
@@ -2147,6 +2171,7 @@ impl SystemView {
                 pending_warp_finished: prev.pending_warp_finished.clone(),
                 active_drone_miners: prev.active_drone_miners.clone(),
                 drone_next_ready_unix: prev.drone_next_ready_unix.clone(),
+                active_drones_in_space: prev.active_drones_in_space.clone(),
                 active_module_cycles: prev.active_module_cycles.clone(),
                 external_active_modules: prev.external_active_modules.clone(),
                 active_nanite_repairs: prev.active_nanite_repairs.clone(),
@@ -2203,6 +2228,7 @@ impl SystemView {
             pending_warp_finished: actor.pending_warp_finished,
             active_drone_miners: actor.active_drone_miners,
             drone_next_ready_unix: actor.drone_next_ready_unix,
+            active_drones_in_space: actor.active_drones_in_space,
             stargate_activation_states: ballpark.stargate_activation_states.clone(),
             active_module_cycles: actor.active_module_cycles,
             external_active_modules: actor.external_active_modules,

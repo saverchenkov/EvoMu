@@ -36,6 +36,7 @@ pub const KIND_TACTICAL_DURABLE: &str = "tactical_durable";
 pub const KIND_MODULE_COOLDOWNS: &str = "module_reactivation_cooldowns";
 pub const KIND_FLEET_EXTRAS: &str = "fleet_extras";
 pub const KIND_SOCIAL_EXTRAS: &str = "social_extras";
+pub const KIND_ACTIVE_DRONES: &str = "active_drones";
 
 // Explicitly crash-lost runtime kinds (`#920`, `#899` §3.6).
 pub const KIND_MODULE_CYCLES: &str = "module_cycles";
@@ -134,6 +135,12 @@ pub const RUNTIME_KIND_CATALOG: &[RuntimeKindDescriptor] = &[
         policy: RuntimePersistencePolicy::Checkpointed,
         system_scoped: false,
         description: "Delayed local speakers, active social probe lists, forced corp/ship sync flags",
+    },
+    RuntimeKindDescriptor {
+        kind: KIND_ACTIVE_DRONES,
+        policy: RuntimePersistencePolicy::Checkpointed,
+        system_scoped: true,
+        description: "Active launched and abandoned drones in solar system space",
     },
     RuntimeKindDescriptor {
         kind: KIND_MODULE_CYCLES,
@@ -921,6 +928,7 @@ mod tests {
         assert!(is_kind_checkpointed(KIND_SHIP_CONDITION));
         assert!(is_kind_checkpointed(KIND_SCAN_SIGNATURES));
         assert!(is_kind_checkpointed(KIND_FLEET_EXTRAS));
+        assert!(is_kind_checkpointed(KIND_ACTIVE_DRONES));
         assert!(is_kind_crash_lost(KIND_MODULE_CYCLES));
         assert!(is_kind_crash_lost(KIND_TARGET_LOCKS));
         assert!(is_kind_crash_lost(KIND_NPCS));

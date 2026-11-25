@@ -928,14 +928,12 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     let ent2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr2)], &kw, None).await.expect("ent2");
     let p2_sys = ent2.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     assert!(origin_h.get_ball_snapshot(tr2).await.unwrap().is_some(), "Origin trace ball present before downtime evacuation");
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(space_drone, eve_server::services::combat_crimewatch::DroneSpaceState {
-            ball_id: space_drone, drone_item_id: space_drone, type_id: 2456, group_id: 100, owner_char_id: char2,
-            original_owner_char_id: char2, parent_ship_id: ship2, solar_system_id: p2_sys, target_id: None, activity_state: 0,
-            assist_char_id: None, guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
-            max_velocity: 400.0, optimal_range: 5_000.0, damage_vector: DamageVector::default(), shield_repair_amount: 0.0,
-            armor_repair_amount: 0.0, hull_repair_amount: 0.0, web_speed_factor: 1.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
+    eve_server::services::drone_test_helpers::seed_active_drone(&ctx, eve_server::services::combat_crimewatch::DroneSpaceState {
+        ball_id: space_drone, drone_item_id: space_drone, type_id: 2456, group_id: 100, owner_char_id: char2,
+        original_owner_char_id: char2, parent_ship_id: ship2, solar_system_id: p2_sys, target_id: None, activity_state: 0,
+        assist_char_id: None, guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+        max_velocity: 400.0, optimal_range: 5_000.0, damage_vector: DamageVector::default(), shield_repair_amount: 0.0,
+        armor_repair_amount: 0.0, hull_repair_amount: 0.0, web_speed_factor: 1.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
     });
 
     // Downtime outside 11:00 UTC window (10:55 UTC) must NOT evacuate active pocket; inside 11:00 UTC window (11:01 UTC) evacuates & destroys deployed drones
@@ -1371,7 +1369,6 @@ use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use eve_server::services::pve_special_sites::with_abyssal_state;
 use eve_server::system_actor::try_remove_ball_for_db;
 use glam::DVec3;
@@ -1533,19 +1530,21 @@ async fn test_abyssal_downtime_evacuation_purges_abandoned_and_orphaned_drones()
     ctx.dispatch_rpc(&mut sess1, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(bay_drone_id)])], &kw, None)
         .await
         .expect("LaunchDrones");
-    let abandoned_ball_id = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.keys().copied().next().expect("launched drone ball")
-    });
+    let abandoned_ball_id = eve_server::services::drone_test_helpers::active_drone_ids(&ctx)
+        .into_iter()
+        .next()
+        .expect("launched drone ball");
     ctx.dispatch_rpc(&mut sess1, "entity", None, "CmdAbandonDrone", &[PyRep::List(vec![PyRep::Integer(abandoned_ball_id)])], &kw, None)
         .await
         .expect("CmdAbandonDrone");
-    with_combat_runtime(&ctx, |rt| {
-        let d = &rt.active_drones_in_space[&abandoned_ball_id];
+    {
+        let d = eve_server::services::drone_test_helpers::active_drone(&ctx, abandoned_ball_id)
+            .expect("abandoned drone");
         assert!(d.is_abandoned);
         assert_eq!(d.owner_char_id, 0);
         assert_eq!(d.parent_ship_id, 0);
         assert_eq!(d.original_owner_char_id, char1);
-    });
+    }
 
     // Also place an orphaned drone item & ball (`owner_id = 0`) in `p_sys`
     ctx.db.with_mut_snapshot(|snap| {
@@ -1571,9 +1570,10 @@ async fn test_abyssal_downtime_evacuation_purges_abandoned_and_orphaned_drones()
     assert_eq!(dt_res.get("is1100UtcWindow"), Some(&1));
     assert!(dt_res.get("evacuatedAbyssalPilots").copied().unwrap_or(0) >= 1);
 
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&abandoned_ball_id), "Abandoned drone purged from active_drones_in_space");
-    });
+    assert!(
+        !eve_server::services::drone_test_helpers::has_active_drone(&ctx, abandoned_ball_id),
+        "Abandoned drone purged from active_drones_in_space"
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char1].solar_system_id, sys_id);
         assert!(!snap.items.contains_key(&abandoned_ball_id), "Abandoned drone item purged");
@@ -1582,7 +1582,7 @@ async fn test_abyssal_downtime_evacuation_purges_abandoned_and_orphaned_drones()
     });
     assert!(p_h.get_ball_snapshot(abandoned_ball_id).await.unwrap().is_none(), "Abandoned drone ball removed");
     assert!(p_h.get_ball_snapshot(orphan_drone_id).await.unwrap().is_none(), "Orphaned drone ball removed");
-    with_mut_combat_runtime(&ctx, |rt| rt.active_drones_in_space.clear());
+    eve_server::services::drone_test_helpers::clear_active_drones(&ctx);
 }
 
 #[tokio::test]

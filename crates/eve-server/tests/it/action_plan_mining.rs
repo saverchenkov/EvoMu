@@ -598,11 +598,12 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     ctx.advance_secs(c1_dur);
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, ctx.now_unix()).await;
     let active_after_full = ctx.systems.active_drone_miners_count();
-    let (idle_a, idle_b) = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let a = rt.active_drones_in_space.values().find(|d| d.drone_item_id == drone_a || d.ball_id == drone_a).map(|d| d.activity_state);
-        let b = rt.active_drones_in_space.values().find(|d| d.drone_item_id == drone_b || d.ball_id == drone_b).map(|d| d.activity_state);
+    let (idle_a, idle_b) = {
+        let drones = eve_server::services::drone_test_helpers::active_drones_matching(&ctx, |_| true);
+        let a = drones.iter().find(|d| d.drone_item_id == drone_a || d.ball_id == drone_a).map(|d| d.activity_state);
+        let b = drones.iter().find(|d| d.drone_item_id == drone_b || d.ball_id == drone_b).map(|d| d.activity_state);
         (a, b)
-    });
+    };
     assert_eq!(active_after_full, 0, "Both Mining Drone Is stop mining when SpecializedOreHold is full");
     assert_eq!((idle_a, idle_b), (Some(0), Some(0)), "Both Mining Drone Is return to idle activity_state == 0");
     assert_eq!(ctx.db.get_asteroid(veld_ast_id).unwrap().quantity, 49_214, "Asteroid quantity must be untouched when drone stops due to full hold");
@@ -619,7 +620,7 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
         for sid in [22541u32, 28374, 43702, 43703] { snap.skills.get_mut(&char_id).unwrap().insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 }); }
     });
     ctx.invalidate_ship_fitting(ship_id);
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| rt.active_drones_in_space.clear());
+    eve_server::services::drone_test_helpers::clear_active_drones(&ctx);
     ctx.dispatch_rpc(&mut sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(excavator_id), PyRep::Integer(ice_drone_id)])], &kw, None).await.expect("Launch Excavator + Ice Excavator");
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(rorq_core_id), PyRep::String("industrialCore".into())], &kw, None).await.expect("Activate Capital Industrial Core I");
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(excavator_id)]), PyRep::Integer(veld_ast_id)], &kw, None).await.expect("CmdMineRepeatedly Excavator");

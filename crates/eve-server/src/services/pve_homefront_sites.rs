@@ -2462,11 +2462,11 @@ fn validate_pilot_mining_capability(
     if has_online_miner_module {
         return Ok(());
     }
-    let has_mining_drone = with_combat_ephemeral(ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .any(|d| d.owner_char_id == char_id && d.group_id == 101)
-    });
+    let has_mining_drone = ctx
+        .systems
+        .all_active_drones()
+        .into_iter()
+        .any(|(_, d)| d.owner_char_id == char_id && d.group_id == 101);
     if has_mining_drone {
         return Ok(());
     }
@@ -2531,12 +2531,11 @@ fn validate_pilot_salvage_capability(
     });
 
     let drone_bonus = if mod_bonus_opt.is_none() {
-        with_combat_ephemeral(ctx, |rt| {
-            rt.active_drones_in_space
-                .values()
-                .any(|d| d.owner_char_id == char_id && d.type_id == 32_787)
-        })
-        .then_some(3.0)
+        ctx.systems
+            .all_active_drones()
+            .into_iter()
+            .any(|(_, d)| d.owner_char_id == char_id && d.type_id == 32_787)
+            .then_some(3.0)
     } else {
         None
     };

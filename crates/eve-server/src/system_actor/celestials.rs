@@ -1129,6 +1129,8 @@ impl SystemHandle {
                         protection_registry,
                         active_drone_miners,
                         drone_next_ready_unix,
+                        active_drones_in_space,
+                        active_drones_checkpoint_dirty,
                         db_opt,
                         sde_opt,
                         ..
@@ -1148,6 +1150,9 @@ impl SystemHandle {
                     protection_registry.remove(&ball_id);
                     active_drone_miners.remove(&ball_id);
                     drone_next_ready_unix.remove(&ball_id);
+                    if active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
+                        *active_drones_checkpoint_dirty = true;
+                    }
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
                     } else {
@@ -1202,6 +1207,10 @@ impl SystemHandle {
             remove_from_bp_and_st(&mut bp, &mut st)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
+        super::drones::flush_actor_active_drones_checkpoint_post_unlock(
+            self.solar_system_id,
+            &self.actor_state,
+        );
     }
 
     pub fn has_active_nanite_repair_sync(&self, ship_id: BallId, module_id: i64) -> bool {
@@ -2383,10 +2392,15 @@ impl SystemHandle {
     /// Asks the actor to flush all dirty condition checkpoint entries and commits them to
     /// `WorldRepository` via its ordered `post_unlock_worker` (`W1`, `W4`, `W6`, `#1170`, `#919`).
     pub async fn flush_condition_checkpoint(&self) -> Result<usize, String> {
-        super::protection::call_actor_reply(self, "FlushConditionCheckpoint", |reply| {
+        let count = super::protection::call_actor_reply(self, "FlushConditionCheckpoint", |reply| {
             SystemCommand::FlushConditionCheckpoint { reply }
         })
-        .await
+        .await?;
+        super::drones::flush_actor_active_drones_checkpoint_post_unlock(
+            self.solar_system_id,
+            &self.actor_state,
+        );
+        Ok(count)
     }
 
     async fn commit_destroyed_ball_hooks(

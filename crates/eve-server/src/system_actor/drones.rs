@@ -1,4 +1,5 @@
-//! Per-system repeating drone mining and drone combat cooldown state owned by `SystemActor` (`#1541`).
+//! Per-system active drones in space, repeating drone mining, and drone combat cooldown state
+//! owned by `SystemActor` (`#1541`).
 
 #![forbid(unsafe_code)]
 
@@ -7,8 +8,86 @@ use super::{
     ActorExecCtx, BallOpsCtx, SystemActorState, SystemCommand, SystemHandle, SystemRegistry,
     ACTOR_CMD_TIMEOUT,
 };
-use eve_destiny::BallId;
+use eve_destiny::{BallId, DamageVector};
+use eve_sde::SolarSystemId;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Runtime state for a launched or abandoned drone in solar-system space (`#1541` Track D2b).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DroneSpaceState {
+    pub ball_id: i64,
+    pub drone_item_id: i64,
+    pub type_id: u32,
+    pub group_id: u32,
+    pub owner_char_id: i64,
+    pub original_owner_char_id: i64,
+    pub parent_ship_id: i64,
+    pub solar_system_id: u32,
+    pub target_id: Option<i64>,
+    pub activity_state: i64,
+    pub assist_char_id: Option<i64>,
+    pub guard_char_id: Option<i64>,
+    pub is_abandoned: bool,
+    pub is_sentry: bool,
+    pub bandwidth_used: f64,
+    pub max_velocity: f64,
+    pub optimal_range: f64,
+    pub damage_vector: DamageVector,
+    pub shield_repair_amount: f64,
+    pub armor_repair_amount: f64,
+    pub hull_repair_amount: f64,
+    pub web_speed_factor: f64,
+    pub neut_amount: f64,
+    pub ecm_strength: f64,
+    pub tp_sig_bonus_pct: f64,
+}
+
+impl DroneSpaceState {
+    #[inline]
+    pub(crate) fn in_solar_system(self, solar_system_id: SolarSystemId) -> Self {
+        Self {
+            solar_system_id,
+            ..self
+        }
+    }
+}
+
+/// Request payload for atomic per-ship drone launch validation and reservation inside [`SystemActor`].
+#[derive(Debug, Clone)]
+pub struct ReserveDroneLaunchesReq {
+    pub ship_id: BallId,
+    pub max_drones_allowed: usize,
+    pub max_bandwidth: f64,
+    pub partial_ok: bool,
+    pub drones: Vec<(i64, DroneSpaceState)>,
+}
+
+/// Outcome of [`ReserveDroneLaunchesReq`] inside [`SystemActor`].
+#[derive(Debug, Clone)]
+pub struct ReserveDroneLaunchesOutcome {
+    pub kept_indices: Vec<usize>,
+    pub reserved_ids: Vec<BallId>,
+    pub per_item_errors: Vec<(i64, &'static str)>,
+    pub rejected_error: Option<&'static str>,
+}
+
+/// Closure executed atomically inside [`SystemActor`] to inspect or mutate active drones.
+/// Returning `true` marks `active_drones_in_space` dirty for SQLite checkpointing.
+pub(crate) type ActiveDroneMutOp = Box<
+    dyn FnOnce(
+            &mut HashMap<BallId, DroneSpaceState>,
+            &mut HashMap<BallId, DroneMiningState>,
+            &mut HashMap<BallId, u64>,
+        ) -> bool
+        + Send,
+>;
+
+#[derive(Default, serde::Deserialize)]
+struct LegacyActiveDronesPayload {
+    #[serde(default)]
+    active_drones_in_space: HashMap<i64, DroneSpaceState>,
+}
 
 /// Active repeating drone ore-mining loop state owned per-system by [`SystemActor`] (`#1541`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -107,6 +186,312 @@ pub(in crate::system_actor) fn clear_drone_runtime_in_state(
     actor_st.drone_next_ready_unix.remove(&ball_id);
 }
 
+/// Clears repeating mining state, combat cooldown, and any active-space drone entry on explicit ball removal.
+pub(in crate::system_actor) fn clear_removed_ball_drones_in_state(
+    actor_st: &mut SystemActorState,
+    ball_id: BallId,
+) {
+    clear_drone_runtime_in_state(actor_st, ball_id);
+    if actor_st.active_drones_in_space.remove(&ball_id).is_some() && ball_id > 0 {
+        actor_st.active_drones_checkpoint_dirty = true;
+    }
+}
+
+/// Captures a sorted post-unlock SQLite checkpoint batch when `active_drones_in_space` is dirty.
+pub(crate) fn take_dirty_active_drones_snapshot(
+    actor_st: &mut SystemActorState,
+) -> Option<(Arc<eve_db::WorldRepository>, Vec<(BallId, DroneSpaceState)>)> {
+    if !actor_st.active_drones_checkpoint_dirty {
+        return None;
+    }
+    actor_st.active_drones_checkpoint_dirty = false;
+    let db = actor_st.db_opt.as_ref().map(Arc::clone)?;
+    let mut entries: Vec<(BallId, DroneSpaceState)> = actor_st
+        .active_drones_in_space
+        .iter()
+        .filter(|(&bid, _)| bid > 0)
+        .map(|(&bid, d)| (bid, d.clone()))
+        .collect();
+    entries.sort_by_key(|(bid, _)| *bid);
+    Some((db, entries))
+}
+
+/// Flushes a captured `active_drones_in_space` snapshot for `solar_system_id` into SQLite
+/// `system_checkpoint` without holding any `Ballpark` or `SystemActorState` lock (`#1541` Rule 3).
+pub(crate) fn flush_active_drones_checkpoint_snapshot(
+    solar_system_id: SolarSystemId,
+    db: &Arc<eve_db::WorldRepository>,
+    entries: &[(BallId, DroneSpaceState)],
+) {
+    if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+        return;
+    }
+    let now_unix = db.clock().now_unix_secs();
+    let keyed: Vec<(String, &DroneSpaceState)> = entries
+        .iter()
+        .map(|(bid, d)| (bid.to_string(), d))
+        .collect();
+    let _ = db.with_sqlite_conn(|conn| {
+        eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+            conn,
+            solar_system_id,
+            eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+            &keyed,
+            now_unix,
+        )
+    });
+}
+
+/// Acquires `actor_state` briefly only to take a dirty active-drones snapshot, drops the lock,
+/// and commits to SQLite post-unlock.
+pub(crate) fn flush_actor_active_drones_checkpoint_post_unlock(
+    solar_system_id: SolarSystemId,
+    actor_state_lock: &super::RankedRwLock<SystemActorState, { super::RANK_ACTOR_STATE }>,
+) {
+    if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+        return;
+    }
+    let dirty_fast = actor_state_lock
+        .read()
+        .map(|st| st.active_drones_checkpoint_dirty)
+        .unwrap_or(false);
+    if !dirty_fast {
+        return;
+    }
+    let batch = {
+        let mut st = actor_state_lock.write().unwrap_or_else(|e| e.into_inner());
+        take_dirty_active_drones_snapshot(&mut st)
+    };
+    if let Some((db, entries)) = batch {
+        flush_active_drones_checkpoint_snapshot(solar_system_id, &db, &entries);
+    }
+}
+
+/// Loads `active_drones_in_space` for `solar_system_id` from SQLite `system_checkpoint`,
+/// with one-way legacy load fallback from `PersistedCombatCrimewatchState::extended_runtime_json`.
+pub(crate) fn load_initial_active_drones_for_system(
+    registry: &SystemRegistry,
+    solar_system_id: SolarSystemId,
+    db_read_safe: bool,
+) -> (HashMap<BallId, DroneSpaceState>, bool) {
+    let mut drones = HashMap::new();
+    let mut dirty = false;
+    if !db_read_safe {
+        return (drones, dirty);
+    }
+    let Some(ref db) = registry.db else {
+        return (drones, dirty);
+    };
+    if let Ok(rows) = db.with_sqlite_conn(|conn| {
+        eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
+            conn,
+            solar_system_id,
+            eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+        )
+    }) {
+        for (_, d) in rows {
+            let d = d.in_solar_system(solar_system_id);
+            drones.insert(d.ball_id, d);
+        }
+    }
+    if drones.is_empty() {
+        let already_migrated = registry
+            .migrated_legacy_drone_systems
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&solar_system_id);
+        if !already_migrated {
+            let ext_json = db.with_snapshot(|snap| {
+                snap.combat_crimewatch_state.extended_runtime_json.clone()
+            });
+            if !ext_json.is_empty() && ext_json.contains("active_drones_in_space") {
+                if let Ok(legacy) = serde_json::from_str::<LegacyActiveDronesPayload>(&ext_json) {
+                    for (bid, mut d) in legacy.active_drones_in_space {
+                        if d.solar_system_id == solar_system_id {
+                            d.ball_id = bid;
+                            drones.insert(bid, d);
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+            registry
+                .migrated_legacy_drone_systems
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(solar_system_id);
+        }
+    }
+    (drones, dirty)
+}
+
+fn upsert_active_drones_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    drones: Vec<DroneSpaceState>,
+    only_if_absent: bool,
+) -> Result<usize, String> {
+    let mut inserted = 0usize;
+    let mut any_persistent_change = false;
+    for d in drones {
+        let d = d.in_solar_system(ctx.solar_system_id);
+        let bid = d.ball_id;
+        if only_if_absent && ctx.actor_st.active_drones_in_space.contains_key(&bid) {
+            continue;
+        }
+        ctx.actor_st.active_drones_in_space.insert(bid, d);
+        inserted += 1;
+        if bid > 0 {
+            any_persistent_change = true;
+        }
+    }
+    if any_persistent_change {
+        ctx.actor_st.active_drones_checkpoint_dirty = true;
+    }
+    Ok(inserted)
+}
+
+fn reserve_drone_launches_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    req: ReserveDroneLaunchesReq,
+) -> Result<ReserveDroneLaunchesOutcome, String> {
+    let (cur_count, cur_bw) = {
+        let active: Vec<&DroneSpaceState> = ctx
+            .actor_st
+            .active_drones_in_space
+            .values()
+            .filter(|d| d.parent_ship_id == req.ship_id && !d.is_abandoned)
+            .collect();
+        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
+    };
+    let mut kept_indices = Vec::new();
+    let mut reserved_ids = Vec::new();
+    let mut per_item_errors = Vec::new();
+
+    if req.partial_ok {
+        if !req.drones.is_empty()
+            && (req.max_drones_allowed == 0 || cur_count >= req.max_drones_allowed)
+        {
+            return Ok(ReserveDroneLaunchesOutcome {
+                kept_indices,
+                reserved_ids,
+                per_item_errors,
+                rejected_error: Some("NoDroneManagementAbilitiesLeft"),
+            });
+        }
+        let mut sim_count = cur_count;
+        let mut sim_bw = cur_bw;
+        let mut first_error: Option<&'static str> = None;
+        let mut staged = Vec::with_capacity(req.drones.len());
+        for (idx, (source_item_id, st)) in req.drones.into_iter().enumerate() {
+            let st = st.in_solar_system(ctx.solar_system_id);
+            if sim_count + 1 > req.max_drones_allowed {
+                let code = "NoDroneManagementAbilitiesLeft";
+                per_item_errors.push((source_item_id, code));
+                first_error.get_or_insert(code);
+                continue;
+            }
+            if sim_bw + st.bandwidth_used > req.max_bandwidth + 1e-4 {
+                let code = "MaxBandwidthExceeded";
+                per_item_errors.push((source_item_id, code));
+                first_error.get_or_insert(code);
+                continue;
+            }
+            sim_count += 1;
+            sim_bw += st.bandwidth_used;
+            kept_indices.push(idx);
+            reserved_ids.push(st.ball_id);
+            staged.push(st);
+        }
+        if staged.is_empty() && !per_item_errors.is_empty() {
+            return Ok(ReserveDroneLaunchesOutcome {
+                kept_indices,
+                reserved_ids,
+                per_item_errors,
+                rejected_error: Some(first_error.unwrap_or("NoDroneManagementAbilitiesLeft")),
+            });
+        }
+        for st in staged {
+            ctx.actor_st.active_drones_in_space.insert(st.ball_id, st);
+        }
+    } else {
+        if cur_count + req.drones.len() > req.max_drones_allowed {
+            return Ok(ReserveDroneLaunchesOutcome {
+                kept_indices,
+                reserved_ids,
+                per_item_errors,
+                rejected_error: Some("NoDroneManagementAbilitiesLeft"),
+            });
+        }
+        let req_bw: f64 = req.drones.iter().map(|(_, d)| d.bandwidth_used).sum();
+        if cur_bw + req_bw > req.max_bandwidth + 1e-4 {
+            return Ok(ReserveDroneLaunchesOutcome {
+                kept_indices,
+                reserved_ids,
+                per_item_errors,
+                rejected_error: Some("MaxBandwidthExceeded"),
+            });
+        }
+        for (idx, (_, st)) in req.drones.into_iter().enumerate() {
+            let st = st.in_solar_system(ctx.solar_system_id);
+            kept_indices.push(idx);
+            reserved_ids.push(st.ball_id);
+            ctx.actor_st.active_drones_in_space.insert(st.ball_id, st);
+        }
+    }
+
+    Ok(ReserveDroneLaunchesOutcome {
+        kept_indices,
+        reserved_ids,
+        per_item_errors,
+        rejected_error: None,
+    })
+}
+
+fn finalize_drone_launches_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    mappings: Vec<(BallId, BallId, i64)>,
+    rollback_res_ids: Vec<BallId>,
+) -> Result<usize, String> {
+    let mut updated = 0usize;
+    for rid in rollback_res_ids {
+        if ctx.actor_st.active_drones_in_space.remove(&rid).is_some() {
+            updated += 1;
+            if rid > 0 {
+                ctx.actor_st.active_drones_checkpoint_dirty = true;
+            }
+        }
+    }
+    for (rid, bid, drone_item_id) in mappings {
+        if let Some(st) = ctx.actor_st.active_drones_in_space.remove(&rid) {
+            let mut st = st.in_solar_system(ctx.solar_system_id);
+            st.ball_id = bid;
+            st.drone_item_id = drone_item_id;
+            ctx.actor_st.drone_next_ready_unix.remove(&bid);
+            ctx.actor_st.active_drones_in_space.insert(bid, st);
+            updated += 1;
+            if bid > 0 {
+                ctx.actor_st.active_drones_checkpoint_dirty = true;
+            }
+        }
+    }
+    Ok(updated)
+}
+
+fn mutate_active_drones_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    op: ActiveDroneMutOp,
+) -> Result<(), String> {
+    let dirty = op(
+        &mut ctx.actor_st.active_drones_in_space,
+        &mut ctx.actor_st.active_drone_miners,
+        &mut ctx.actor_st.drone_next_ready_unix,
+    );
+    if dirty {
+        ctx.actor_st.active_drones_checkpoint_dirty = true;
+    }
+    Ok(())
+}
+
 pub(in crate::system_actor) fn handle_drone_runtime_command(
     exec_ctx: &mut ActorExecCtx<'_>,
     cmd: SystemCommand,
@@ -159,6 +544,38 @@ pub(in crate::system_actor) fn handle_drone_runtime_command(
                     clear_timers,
                 },
             );
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::UpsertActiveDrones {
+            drones,
+            only_if_absent,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = upsert_active_drones_in_actor(&mut ctx, drones, only_if_absent);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::ReserveDroneLaunches { req, reply } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = reserve_drone_launches_in_actor(&mut ctx, req);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::FinalizeDroneLaunches {
+            mappings,
+            rollback_res_ids,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = finalize_drone_launches_in_actor(&mut ctx, mappings, rollback_res_ids);
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::MutateActiveDrones { op, reply } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = mutate_active_drones_in_actor(&mut ctx, op);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -448,6 +865,182 @@ impl SystemHandle {
             clear_timers: true,
         })
     }
+
+    /// Returns the published [`DroneSpaceState`] for `ball_id` in this system, if active.
+    pub fn active_drone(&self, ball_id: BallId) -> Option<DroneSpaceState> {
+        self.view().active_drones_in_space.get(&ball_id).cloned()
+    }
+
+    /// Returns `true` when `ball_id` is present in this system's published `active_drones_in_space`.
+    pub fn has_active_drone(&self, ball_id: BallId) -> bool {
+        self.view().active_drones_in_space.contains_key(&ball_id)
+    }
+
+    /// Returns a snapshot of all published active drones in this solar system.
+    pub fn active_drones_snapshot(&self) -> HashMap<BallId, DroneSpaceState> {
+        self.view().active_drones_in_space.clone()
+    }
+
+    /// Inserts or replaces an active [`DroneSpaceState`] in this system actor.
+    pub async fn upsert_active_drone(&self, drone: DroneSpaceState) -> Result<(), String> {
+        self.upsert_active_drones(vec![drone], false).await.map(|_| ())
+    }
+
+    /// Synchronous bridge for [`Self::upsert_active_drone`].
+    pub fn upsert_active_drone_sync(&self, drone: DroneSpaceState) -> Result<(), String> {
+        self.upsert_active_drones_sync(vec![drone], false).map(|_| ())
+    }
+
+    /// Inserts or replaces a batch of [`DroneSpaceState`] entries inside this system actor.
+    pub async fn upsert_active_drones(
+        &self,
+        drones: Vec<DroneSpaceState>,
+        only_if_absent: bool,
+    ) -> Result<usize, String> {
+        if drones.is_empty() {
+            return Ok(0);
+        }
+        call_actor_result_with_deadline(self, "UpsertActiveDrones", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::UpsertActiveDrones {
+                drones,
+                only_if_absent,
+                reply,
+            }
+        })
+        .await
+    }
+
+    /// Synchronous bridge for [`Self::upsert_active_drones`].
+    pub fn upsert_active_drones_sync(
+        &self,
+        drones: Vec<DroneSpaceState>,
+        only_if_absent: bool,
+    ) -> Result<usize, String> {
+        if drones.is_empty() {
+            return Ok(0);
+        }
+        dispatch_actor_sync_with_deadline(
+            self,
+            "UpsertActiveDrones",
+            ACTOR_CMD_TIMEOUT,
+            (drones, only_if_absent),
+            |(drones, only_if_absent), reply| SystemCommand::UpsertActiveDrones {
+                drones,
+                only_if_absent,
+                reply,
+            },
+            |ctx, (drones, only_if_absent)| upsert_active_drones_in_actor(ctx, drones, only_if_absent),
+        )
+    }
+
+    /// Atomically checks active drone capacity/bandwidth and reserves negative ball IDs before DB tx.
+    pub async fn reserve_drone_launches(
+        &self,
+        req: ReserveDroneLaunchesReq,
+    ) -> Result<ReserveDroneLaunchesOutcome, String> {
+        call_actor_result_with_deadline(
+            self,
+            "ReserveDroneLaunches",
+            ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::ReserveDroneLaunches { req, reply },
+        )
+        .await
+    }
+
+    /// Commits `(res_id -> new_ball_id, new_item_id)` launches or rolls back reserved IDs on DB failure.
+    pub async fn finalize_drone_launches(
+        &self,
+        mappings: Vec<(BallId, BallId, i64)>,
+        rollback_res_ids: Vec<BallId>,
+    ) -> Result<usize, String> {
+        if mappings.is_empty() && rollback_res_ids.is_empty() {
+            return Ok(0);
+        }
+        call_actor_result_with_deadline(
+            self,
+            "FinalizeDroneLaunches",
+            ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::FinalizeDroneLaunches {
+                mappings,
+                rollback_res_ids,
+                reply,
+            },
+        )
+        .await
+    }
+
+    /// Executes an atomic closure over this system's active drones, mining states, and cooldown timers.
+    pub async fn mutate_active_drones<R: Send + 'static>(
+        &self,
+        op: impl FnOnce(
+                &mut HashMap<BallId, DroneSpaceState>,
+                &mut HashMap<BallId, DroneMiningState>,
+                &mut HashMap<BallId, u64>,
+            ) -> (bool, R)
+            + Send
+            + 'static,
+    ) -> Result<R, String> {
+        let (res_tx, mut res_rx) = tokio::sync::oneshot::channel::<R>();
+        let boxed: ActiveDroneMutOp = Box::new(move |drones, miners, timers| {
+            let (dirty, out) = op(drones, miners, timers);
+            let _ = res_tx.send(out);
+            dirty
+        });
+        call_actor_result_with_deadline(self, "MutateActiveDrones", ACTOR_CMD_TIMEOUT, |reply| {
+            SystemCommand::MutateActiveDrones { op: boxed, reply }
+        })
+        .await?;
+        res_rx
+            .try_recv()
+            .map_err(|_| format!("system {} active-drone mutation dropped result", self.solar_system_id))
+    }
+
+    /// Synchronous bridge for [`Self::mutate_active_drones`].
+    pub fn mutate_active_drones_sync<R: Send + 'static>(
+        &self,
+        op: impl FnOnce(
+                &mut HashMap<BallId, DroneSpaceState>,
+                &mut HashMap<BallId, DroneMiningState>,
+                &mut HashMap<BallId, u64>,
+            ) -> (bool, R)
+            + Send
+            + 'static,
+    ) -> Result<R, String> {
+        let (res_tx, mut res_rx) = tokio::sync::oneshot::channel::<R>();
+        let boxed: ActiveDroneMutOp = Box::new(move |drones, miners, timers| {
+            let (dirty, out) = op(drones, miners, timers);
+            let _ = res_tx.send(out);
+            dirty
+        });
+        dispatch_actor_sync_with_deadline(
+            self,
+            "MutateActiveDrones",
+            ACTOR_CMD_TIMEOUT,
+            boxed,
+            |op, reply| SystemCommand::MutateActiveDrones { op, reply },
+            mutate_active_drones_in_actor,
+        )?;
+        res_rx
+            .try_recv()
+            .map_err(|_| format!("system {} active-drone mutation dropped result", self.solar_system_id))
+    }
+
+    /// Removes and returns `ball_id` from `active_drones_in_space` inside this system actor.
+    pub async fn remove_active_drone(&self, ball_id: BallId) -> Result<Option<DroneSpaceState>, String> {
+        self.mutate_active_drones(move |drones, _, _| {
+            let removed = drones.remove(&ball_id);
+            (removed.as_ref().is_some_and(|d| d.ball_id > 0), removed)
+        })
+        .await
+    }
+
+    /// Synchronous bridge for [`Self::remove_active_drone`].
+    pub fn remove_active_drone_sync(&self, ball_id: BallId) -> Result<Option<DroneSpaceState>, String> {
+        self.mutate_active_drones_sync(move |drones, _, _| {
+            let removed = drones.remove(&ball_id);
+            (removed.as_ref().is_some_and(|d| d.ball_id > 0), removed)
+        })
+    }
 }
 
 impl SystemRegistry {
@@ -476,5 +1069,128 @@ impl SystemRegistry {
                 let _ = handle.clear_drone_miners().await;
             }
         }
+    }
+
+    /// Finds an active drone by `ball_id` across loaded solar system actors without waking cold systems.
+    pub fn find_active_drone(&self, ball_id: BallId) -> Option<(SystemHandle, DroneSpaceState)> {
+        for (_, handle) in self.active_system_handles() {
+            if let Some(d) = handle.active_drone(ball_id) {
+                return Some((handle, d));
+            }
+        }
+        None
+    }
+
+    /// Finds an active drone by `drone_item_id` (or `ball_id`) across loaded solar system actors.
+    pub fn find_active_drone_by_item(
+        &self,
+        drone_item_id: i64,
+    ) -> Option<(SystemHandle, DroneSpaceState)> {
+        for (_, handle) in self.active_system_handles() {
+            let view = handle.view();
+            if let Some(d) = view
+                .active_drones_in_space
+                .values()
+                .find(|d| d.drone_item_id == drone_item_id || d.ball_id == drone_item_id)
+            {
+                return Some((handle.clone(), d.clone()));
+            }
+        }
+        None
+    }
+
+    /// Collects `(SystemHandle, DroneSpaceState)` pairs across all currently loaded solar systems.
+    pub fn all_active_drones(&self) -> Vec<(SystemHandle, DroneSpaceState)> {
+        let mut out = Vec::new();
+        for (_, handle) in self.active_system_handles() {
+            let view = handle.view();
+            for d in view.active_drones_in_space.values() {
+                out.push((handle.clone(), d.clone()));
+            }
+        }
+        out
+    }
+
+    /// Returns the total active drones across all currently loaded solar system actors.
+    pub fn active_drones_count(&self) -> usize {
+        self.active_system_handles()
+            .into_iter()
+            .map(|(_, h)| h.view().active_drones_in_space.len())
+            .sum()
+    }
+
+    /// Removes and returns `ball_id` from whichever active solar system currently owns it.
+    pub fn remove_active_drone_across_systems_sync(&self, ball_id: BallId) -> Option<DroneSpaceState> {
+        for (_, handle) in self.active_system_handles() {
+            if handle.has_active_drone(ball_id) {
+                if let Ok(Some(removed)) = handle.remove_active_drone_sync(ball_id) {
+                    return Some(removed);
+                }
+            }
+        }
+        None
+    }
+
+    /// Clears all active drones across all currently loaded solar system actors.
+    pub fn clear_all_active_drones_sync(&self) {
+        for (_, handle) in self.active_system_handles() {
+            if !handle.view().active_drones_in_space.is_empty() {
+                let _ = handle.mutate_active_drones_sync(|drones, _, _| {
+                    let dirty = drones.keys().any(|&bid| bid > 0);
+                    drones.clear();
+                    (dirty, ())
+                });
+            }
+        }
+    }
+
+    /// Wakes `solar_system_id` for persisted drone seeding or test-helper seeding.
+    /// When running inside a synchronous unit `#[test]` with no active Tokio runtime, uses
+    /// `self.headless_test_rt` (owned by this registry, never global/static) under `testkit`.
+    pub(crate) fn wake_for_drone_seed(&self, solar_system_id: SolarSystemId) -> SystemHandle {
+        if let Some(handle) = self.get_handle(solar_system_id) {
+            return handle;
+        }
+        let reason = super::SystemWakeReason::ClusterTick(
+            super::ClusterTickWakeReason::Unclassified,
+        );
+        #[cfg(any(test, feature = "testkit"))]
+        if tokio::runtime::Handle::try_current().is_err() {
+            let rt = self.headless_test_rt.get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_time()
+                    .build()
+                    .expect("failed to build per-registry headless test runtime")
+            });
+            let _guard = rt.enter();
+            return self
+                .wake_with_reason(solar_system_id, reason)
+                .unwrap_or_else(|err| {
+                    panic!("failed to activate solar system {solar_system_id} for headless test seed: {err}")
+                });
+        }
+        self.wake_with_reason(solar_system_id, reason)
+            .unwrap_or_else(|err| {
+                panic!("failed to activate solar system {solar_system_id} for drone seed: {err}")
+            })
+    }
+
+    /// Async-friendly variant of [`Self::wake_for_drone_seed`] avoiding sync wait if already loading.
+    pub(crate) async fn wake_for_drone_seed_async(
+        &self,
+        solar_system_id: SolarSystemId,
+    ) -> SystemHandle {
+        if let Some(handle) = self.get_handle(solar_system_id) {
+            return handle;
+        }
+        let reason = super::SystemWakeReason::ClusterTick(
+            super::ClusterTickWakeReason::Unclassified,
+        );
+        self.wake_with_reason_async(solar_system_id, reason)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("failed to activate solar system {solar_system_id}: {err}")
+            })
     }
 }

@@ -1752,17 +1752,11 @@ pub(crate) fn resolve_runtime_killer_char_id(ctx: &ServerContext, killer_id: i64
     if let Some(cid) = ctx.systems.resolve_fighter_owner_char_id(killer_id) {
         return cid;
     }
-    if let Some(cid) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
-            .get(&killer_id)
-            .or_else(|| {
-                rt.active_drones_in_space
-                    .values()
-                    .find(|d| d.ball_id == killer_id || d.drone_item_id == killer_id)
-            })
-            .map(|d| d.owner_char_id)
-    })
-    .filter(|&cid| cid > 0)
+    if let Some(cid) = ctx
+        .systems
+        .find_active_drone_by_item(killer_id)
+        .map(|(_, d)| d.owner_char_id)
+        .filter(|&cid| cid > 0)
     {
         return cid;
     }

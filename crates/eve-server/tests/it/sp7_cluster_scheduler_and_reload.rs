@@ -16,7 +16,6 @@ use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta};
 use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_server::sp6_lifecycle::{
     handle_character_logoff_or_disconnect, record_wreck_or_container_meta_in_snap,
@@ -548,9 +547,8 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
     assert!(ds_ball.position.distance(DVec3::new(25_000.0, 3_000.0, 1_000.0)) < 1.0);
 
     // Verify abandoned `DroneSpaceState` was seeded into `active_drones_in_space` on SQLite restart
-    let drone_state = with_combat_runtime(&ctx2, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).map(|d| (d.drone_item_id, d.is_abandoned))
-    });
+    let drone_state = eve_server::services::drone_test_helpers::active_drone(&ctx2, drone_ball_id)
+        .map(|d| (d.drone_item_id, d.is_abandoned));
     assert_eq!(drone_state, Some((drone_item_id, true)));
 
     // Pilot 90_000_001 reconnects, loots the restarted wreck (`invbroker.LootAll`), scoops the restarted drone,

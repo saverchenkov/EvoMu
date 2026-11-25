@@ -979,7 +979,7 @@ async fn handle_cmd_unanchor(
             client_error: None,
         });
     }
-    match with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&target_id).map(|d| d.owner_char_id)) {
+    match sys_handle.active_drone(target_id).map(|d| d.owner_char_id) {
         Some(owner) => {
             if owner != char_id {
                 return Err(deny_access());
@@ -1025,9 +1025,9 @@ async fn handle_cmd_unanchor(
         .emit_destiny_event(target_id, eve_destiny::DestinyEvent::Stop { ball_id: target_id })
         .await;
 
-    let unanchored_drone = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.get(&target_id).is_some_and(|d| d.owner_char_id == char_id)
-    });
+    let unanchored_drone = sys_handle
+        .active_drone(target_id)
+        .is_some_and(|d| d.owner_char_id == char_id);
     ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         if snap.structures.contains_key(&target_id) {
             return Err(BridgeRpcError {
@@ -1077,14 +1077,17 @@ async fn handle_cmd_unanchor(
         });
         Ok(())
     })?;
-    let unanchored_drone = with_mut_combat_runtime(ctx, |rt| {
-        if let Some(d) = rt.active_drones_in_space.get_mut(&target_id) {
-            d.target_id = None;
-            true
-        } else {
-            false
-        }
-    });
+    let unanchored_drone = sys_handle
+        .mutate_active_drones(move |drones, _, _| {
+            if let Some(d) = drones.get_mut(&target_id) {
+                d.target_id = None;
+                (target_id > 0, true)
+            } else {
+                (false, false)
+            }
+        })
+        .await
+        .unwrap_or(false);
     crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, session.fleet_id, target_id);
 
     Ok(PyRep::keyval([
@@ -1263,20 +1266,19 @@ fn handle_get_extra_fleet_members(
     let extra_members: Vec<PyRep> = match fleet_id_opt {
         Some(fid) => {
             // Check if fleet has any attached NPC assistance entities or extra support members
-            with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space
-                    .values()
-                    .filter(|d| d.assist_char_id == Some(char_id) || d.guard_char_id == Some(char_id))
-                    .map(|d| {
-                        PyRep::keyval([
-                            ("fleetID", PyRep::Integer(fid)),
-                            ("extraMemberID", PyRep::Integer(d.ball_id)),
-                            ("memberTypeID", PyRep::Integer(d.type_id as i64)),
-                            ("role", PyRep::String(if d.assist_char_id.is_some() { "Assist".into() } else { "Guard".into() })),
-                        ])
-                    })
-                    .collect()
-            })
+            ctx.systems
+                .all_active_drones()
+                .into_iter()
+                .filter(|(_, d)| d.assist_char_id == Some(char_id) || d.guard_char_id == Some(char_id))
+                .map(|(_, d)| {
+                    PyRep::keyval([
+                        ("fleetID", PyRep::Integer(fid)),
+                        ("extraMemberID", PyRep::Integer(d.ball_id)),
+                        ("memberTypeID", PyRep::Integer(d.type_id as i64)),
+                        ("role", PyRep::String(if d.assist_char_id.is_some() { "Assist".into() } else { "Guard".into() })),
+                    ])
+                })
+                .collect()
         }
         None => Vec::new(),
     };

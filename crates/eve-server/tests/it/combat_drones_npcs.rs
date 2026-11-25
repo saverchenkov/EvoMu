@@ -711,11 +711,9 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     .await
     .expect("CmdReturnBay");
     assert_eq!(recalled, PyRep::Dict(vec![]));
-    with_combat_runtime(&ctx, |rt| {
-        for &bid in &launched_balls {
-            assert!(!rt.active_drones_in_space.contains_key(&bid));
-        }
-    });
+    for &bid in &launched_balls {
+        assert!(!eve_server::services::drone_test_helpers::has_active_drone(&ctx, bid));
+    }
 
     // 5. Launch Warden I (`23559` immobile sentry), 'Augmented' Ogre (`28288`), Berserker SW-900 (`23536`), Salvage Drone I (`32787`), and Mutated Hobgoblin (`2454`)
     ctx.db.with_mut_snapshot(|snap| {
@@ -916,17 +914,15 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
         PyRep::Dict(d) => assert!(d.is_empty(), "CmdReconnectToDrones returned errors: {d:?}"),
         other => panic!("Expected dict response from CmdReconnectToDrones, got {other:?}"),
     }
-    let (reconnected_count, reconnected_states) = with_combat_runtime(&ctx, |rt| {
-        let matching: Vec<_> = rt
-            .active_drones_in_space
-            .values()
-            .filter(|d| d.owner_char_id == char_id && !d.is_abandoned)
-            .collect();
+    let (reconnected_count, reconnected_states) = {
+        let matching = eve_server::services::drone_test_helpers::active_drones_matching(&ctx, |d| {
+            d.owner_char_id == char_id && !d.is_abandoned
+        });
         (
             matching.len(),
             matching.iter().map(|d| d.activity_state).collect::<Vec<_>>(),
         )
-    });
+    };
     assert_eq!(reconnected_count, 5, "Expected all 5 abandoned drones to be reconnected");
     for st in reconnected_states {
         assert_eq!(st, 0, "Reconnected drone activity_state must be 0 (idle)");
@@ -1448,12 +1444,10 @@ async fn tristan_v24_partial_drone_stack_launch_contract() {
         PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())])
     );
 
-    let active_hobs = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| d.parent_ship_id == tristan_a && !d.is_abandoned)
-            .count()
-    });
+    let active_hobs = eve_server::services::drone_test_helpers::active_drones_for_ship(&ctx, tristan_a)
+        .into_iter()
+        .filter(|d| !d.is_abandoned)
+        .count();
     assert_eq!(active_hobs, 5, "5 Hobgoblin I drones must be active in space");
     assert_eq!(
         ctx.db.with_snapshot(|s| s.items.get(&hob_stack_id).map(|i| i.quantity)),
