@@ -778,6 +778,16 @@ async fn crimewatch_timers_scale_sim_expiries_under_tidi_and_reemit_on_tidi_chan
     ctx.set_clock(std::sync::Arc::new(VirtualServerClock::with_fixed_base(base)));
     let idle_char_id = 90_000_009_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == 1)
+            .expect("account 1")
+            .clone();
+        acc.user_id = 9;
+        acc.username = "idle_pilot_9".into();
+        snap.accounts.insert(acc.username.clone(), acc);
+
         let mut ch = snap.characters[&char_id].clone();
         ch.character_id = idle_char_id;
         ch.user_id = 9;

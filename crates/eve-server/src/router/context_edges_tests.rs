@@ -882,6 +882,16 @@ async fn unanchored_and_anchored_invuln_notifications_track_virtual_server_clock
     let offset_ms = -300_000_i64;
     let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_anchored, offset_ms, 1.0);
     ctx.db.with_mut_snapshot(|snap| {
+        let mut acc = snap
+            .accounts
+            .values()
+            .find(|a| a.user_id == user_a)
+            .expect("user_a account")
+            .clone();
+        acc.user_id = char_b as u64;
+        acc.username = format!("invuln_{char_b}");
+        snap.accounts.insert(acc.username.clone(), acc);
+
         let mut ch = snap.characters[&char_a].clone();
         ch.character_id = char_b;
         ch.user_id = char_b as u64;
