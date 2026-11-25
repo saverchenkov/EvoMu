@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
@@ -810,7 +810,8 @@ fn handle_inner(
                 }
                 let dest_loc = ch
                     .station_id
-                    .or(ch.structure_id)
+                    .filter(|&id| id > 0)
+                    .or_else(|| ch.structure_id.filter(|&id| id > 0))
                     .unwrap_or(ch.home_station_id);
                 let list = store.redeem_tokens.entry(uid).or_default();
                 let mut claimed_toks = Vec::new();
@@ -827,33 +828,24 @@ fn handle_inner(
                         if super::implant_plugging::is_non_diminishing_injector(&ctx.sde, tok.type_id) {
                             added_non_dim_qty += i64::from(tok.quantity.max(0));
                         }
-                        snap.next_entity_id += 1;
-                        let item_id = snap.next_entity_id;
-                        let is_ship = ctx
-                            .sde
-                            .types
-                            .get(&tok.type_id)
-                            .is_some_and(|t| t.category_id == 6);
-                        snap.items.insert(
-                            item_id,
-                            InventoryItemRecord {
-                                item_id,
-                                type_id: tok.type_id,
-                                owner_id: cid,
-                                location_id: tok.station_id.unwrap_or(dest_loc),
-                                flag: InventoryFlag::Hangar,
-                                quantity: tok.quantity,
-                                singleton: is_ship,
-                                version: 1,
-                                dynamic_attributes: HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
-                            },
-                        );
+                        let granted = crate::domain::items::grant_item_in_snap(
+                            Some(&ctx.sde),
+                            snap,
+                            None,
+                            crate::domain::items::GrantItemRequest::explicit(
+                                cid,
+                                tok.station_id.unwrap_or(dest_loc),
+                                InventoryFlag::Hangar,
+                                tok.type_id,
+                                tok.quantity,
+                            )
+                            .with_singleton_policy(
+                                crate::domain::items::ItemSingletonPolicy::ShipOnlyFromSde,
+                            ),
+                        )
+                        .map_err(crate::services::domain_err_to_rpc)?;
                         claimed_toks.push(PyRep::Integer(tok.token_id));
-                        created_items.push(PyRep::Integer(item_id));
+                        created_items.push(PyRep::Integer(granted.item.item_id));
                     } else {
                         remaining.push(tok);
                     }

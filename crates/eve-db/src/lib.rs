@@ -71,7 +71,7 @@ pub use cow::{
 pub use missions::*;
 pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
 pub use gateway_tokens::QuasarVerifiedToken;
-pub use inventory::{ConsumeExactOptions, TransferItemSpec};
+pub use inventory::{ConsumeExactOptions, MintItemSpec, TransferItemSpec};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::{
     persist_failures_total, set_tx_error_hook, set_tx_poison_check_hook, tx_panics_total,

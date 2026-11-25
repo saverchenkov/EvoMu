@@ -1385,14 +1385,20 @@ pub fn handle_season_manager(
                 let mut enqueued_redeem = false;
                 let delivered_rep = if !client_driven && r_tid > 0 && r_qty > 0 {
                     if let Some(loc_id) = docked_location {
-                        snap.next_entity_id += 1;
-                        let reward_item_id = snap.next_entity_id;
-                        snap.items.insert(reward_item_id, eve_db::InventoryItemRecord {
-                            item_id: reward_item_id, type_id: r_tid, owner_id: char_id,
-                            location_id: loc_id, flag: eve_db::InventoryFlag::Hangar,
-                            quantity: r_qty, singleton: false, version: 1, ..Default::default()
-                        });
-                        PyRep::Integer(reward_item_id)
+                        let granted = crate::domain::items::grant_item_in_snap(
+                            None,
+                            snap,
+                            None,
+                            crate::domain::items::GrantItemRequest::explicit(
+                                char_id,
+                                loc_id,
+                                eve_db::InventoryFlag::Hangar,
+                                r_tid,
+                                r_qty,
+                            ),
+                        )
+                        .map_err(super::domain_err_to_rpc)?;
+                        PyRep::Integer(granted.item.item_id)
                     } else {
                         let tok_id = crate::services::account_services::enqueue_redeem_token_in_snapshot(
                             snap,

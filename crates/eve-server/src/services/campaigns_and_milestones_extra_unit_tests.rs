@@ -514,12 +514,19 @@ async fn deliver_login_reward_docked_claim_notification_toggle_and_milestone_sid
         overlay_texture_path: None,
     };
     ctx.db.with_mut_snapshot(|snap| {
+        let before_bpc_count = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == cid1 && i.type_id == 587 && i.is_blueprint_copy)
+            .count();
         let docked = deliver_login_reward(snap, uid1, cid1, Some(station_id), 42, now, &bpc_rw);
         assert!(docked.primary_id > 0);
         let spawned = docked.spawned_item.expect("docked delivery must spawn item");
         assert_eq!(spawned.item_id, docked.primary_id);
         assert_eq!(spawned.type_id, 587);
         assert_eq!(spawned.location_id, station_id);
+        assert_eq!(spawned.quantity, 1);
+        assert!(spawned.singleton);
         assert_eq!(spawned.blueprint_runs_remaining, Some(5));
         assert!(docked.expire_date_time.is_some());
         assert!(snap.items.contains_key(&docked.primary_id));
@@ -527,6 +534,21 @@ async fn deliver_login_reward_docked_claim_notification_toggle_and_milestone_sid
             snap.seasons_and_campaigns.login_reward_expiry.get(&docked.primary_id).copied(),
             docked.expire_date_time
         );
+        let minted_bpcs: Vec<_> = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == cid1 && i.type_id == 587 && i.is_blueprint_copy)
+            .collect();
+        assert_eq!(minted_bpcs.len() - before_bpc_count, 2);
+        for bpc in &minted_bpcs {
+            assert_eq!(bpc.quantity, 1);
+            assert!(bpc.singleton);
+            assert_eq!(bpc.blueprint_runs_remaining, Some(5));
+            assert_eq!(
+                snap.seasons_and_campaigns.login_reward_expiry.get(&bpc.item_id).copied(),
+                docked.expire_date_time
+            );
+        }
         assert!(snap.seasons_and_campaigns.auto_injected_rewards[&cid1].contains(&587));
 
         let undocked = deliver_login_reward(snap, uid1, cid1, None, 42, now, &bpc_rw);

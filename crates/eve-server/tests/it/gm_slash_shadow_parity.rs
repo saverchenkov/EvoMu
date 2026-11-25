@@ -541,3 +541,210 @@ async fn slash_structure_case_bypass_rejected_and_createccpevent_role_parity() {
         }
     }
 }
+
+#[tokio::test]
+async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_over_wire() {
+    use eve_db::InventoryFlag;
+    use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
+
+    let ctx = ServerContext::new();
+    let _guard = common::teardown_guard(&ctx);
+    let kw = HashMap::new();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acct) = snap.accounts.get_mut("demo") {
+            acct.role = u64::MAX;
+        }
+    });
+    let mut harness = common::new_wire_harness(&ctx, 119_321).with_shadow_enforcement(true);
+
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT)],
+            &kw,
+        )
+        .await;
+    harness.call_ok("account", None, "GetCashBalance", &[], &kw).await;
+    harness.call_ok("dogmaIM", None, "GetAllInfo", &[], &kw).await;
+    harness.call_ok("skillMgr2", None, "GetSkills", &[], &kw).await;
+
+    let station_id = harness
+        .shadow()
+        .and_then(|s| s.session.station_id)
+        .expect("docked station_id in ShadowClient");
+    harness.assert_shadow_converged();
+    let jita_loaded_before = ctx.systems.is_system_loaded(JITA);
+
+    // 1. Docked `/giveitem` (stackable mineral) and `/createitem` (single module -> singleton).
+    //    `OnItemChange` deltas populate `ShadowInventory` without calling `invbroker.List` on the
+    //    shared station container (where rival demo characters also own ships).
+    let hangar_trit = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 34 50".into())], &kw)
+        .await;
+    let hangar_trit_id = hangar_trit
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("hangar trit itemID");
+    assert_eq!(hangar_trit.dict_get("locationID"), Some(&PyRep::Integer(station_id)));
+
+    let hangar_mod = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/createitem me 484 1".into())], &kw)
+        .await;
+    let hangar_mod_id = hangar_mod
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("hangar module itemID");
+
+    assert_eq!(ctx.systems.is_system_loaded(JITA), jita_loaded_before);
+    assert!(!ctx.systems.is_system_loaded(PERIMETER));
+    harness.assert_shadow_converged();
+
+    {
+        let shadow = harness.shadow().unwrap();
+        let sh_trit = shadow
+            .inventory
+            .items
+            .get(&hangar_trit_id)
+            .expect("hangar Tritanium replicated to ShadowInventory");
+        assert_eq!(
+            (sh_trit.type_id, sh_trit.owner_id, sh_trit.location_id, sh_trit.flag_id, sh_trit.quantity, sh_trit.singleton),
+            (34, PILOT, station_id, InventoryFlag::Hangar as u16, 50, false)
+        );
+        let sh_mod = shadow
+            .inventory
+            .items
+            .get(&hangar_mod_id)
+            .expect("hangar single module replicated to ShadowInventory");
+        assert_eq!(
+            (sh_mod.type_id, sh_mod.owner_id, sh_mod.location_id, sh_mod.flag_id, sh_mod.quantity, sh_mod.singleton),
+            (484, PILOT, station_id, InventoryFlag::Hangar as u16, 1, true)
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                sh_trit,
+                &eve_testkit::shadow_client::ShadowItem::from_record(
+                    &snap.items[&hangar_trit_id],
+                    Some(&ctx.sde),
+                )
+            );
+            assert_eq!(
+                sh_mod,
+                &eve_testkit::shadow_client::ShadowItem::from_record(
+                    &snap.items[&hangar_mod_id],
+                    Some(&ctx.sde),
+                )
+            );
+        });
+    }
+
+    // 2. Undock into space and prime active ship cargo listing into ShadowInventory.
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    harness.call_ok("beyonce", None, "GetFormations", &[], &kw).await;
+    let ship_id = harness
+        .shadow()
+        .and_then(|s| s.session.ship_id)
+        .expect("undocked active ship_id");
+    let ship_bind = harness
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(ship_id), PyRep::None],
+            &kw,
+        )
+        .await;
+    let ship_bid = extract_bound_id_from_wire_rep(&ship_bind).expect("ship invbroker bound id");
+    harness.call_ok("invbroker", Some(ship_bid), "List", &[], &kw).await;
+    harness.assert_shadow_converged();
+
+    // 3. Undocked `/giveitem` (cargo stack), `/createitem` (assembled hull singleton),
+    //    and multi-ship `/giveitem` (packaged ship stack with singleton = false).
+    let cargo_trit = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 34 25".into())], &kw)
+        .await;
+    let cargo_trit_id = cargo_trit
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("cargo trit itemID");
+    assert_eq!(cargo_trit.dict_get("locationID"), Some(&PyRep::Integer(ship_id)));
+
+    let cargo_ship = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/createitem 587 1".into())], &kw)
+        .await;
+    let cargo_ship_id = cargo_ship
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("cargo ship itemID");
+
+    let cargo_ships_stack = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/giveitem 587 5".into())], &kw)
+        .await;
+    let cargo_ships_stack_id = cargo_ships_stack
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("cargo packaged ship stack itemID");
+    harness.assert_shadow_converged();
+
+    // 4. Verify invalid typed parser inputs reject cleanly without diverging ShadowInventory.
+    for bad_cmd in ["/giveitem badtarget 34", "/createitem 34 0"] {
+        let err = harness
+            .call_exchange("slash", None, "SlashCmd", &[PyRep::String(bad_cmd.into())], &kw)
+            .await
+            .result
+            .expect_err("invalid /giveitem args must reject over wire");
+        assert_eq!(err.code, "InvalidSlashArgument", "{bad_cmd}");
+    }
+    harness.assert_shadow_converged();
+
+    let shadow = harness.shadow().unwrap();
+    let sh_cargo_trit = shadow
+        .inventory
+        .items
+        .get(&cargo_trit_id)
+        .expect("cargo Tritanium replicated to ShadowInventory");
+    assert_eq!(
+        (sh_cargo_trit.type_id, sh_cargo_trit.location_id, sh_cargo_trit.flag_id, sh_cargo_trit.quantity, sh_cargo_trit.singleton),
+        (34, ship_id, InventoryFlag::Cargo as u16, 25, false)
+    );
+    let sh_cargo_ship = shadow
+        .inventory
+        .items
+        .get(&cargo_ship_id)
+        .expect("cargo ship replicated to ShadowInventory");
+    assert_eq!(
+        (sh_cargo_ship.type_id, sh_cargo_ship.location_id, sh_cargo_ship.flag_id, sh_cargo_ship.quantity, sh_cargo_ship.singleton),
+        (587, ship_id, InventoryFlag::Cargo as u16, 1, true)
+    );
+    let sh_cargo_ships = shadow
+        .inventory
+        .items
+        .get(&cargo_ships_stack_id)
+        .expect("cargo packaged ship stack replicated to ShadowInventory");
+    assert_eq!(
+        (sh_cargo_ships.type_id, sh_cargo_ships.location_id, sh_cargo_ships.flag_id, sh_cargo_ships.quantity, sh_cargo_ships.singleton),
+        (587, ship_id, InventoryFlag::Cargo as u16, 5, false)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&hangar_trit_id].quantity, 50);
+        assert_eq!(snap.items[&hangar_trit_id].location_id, station_id);
+        assert_eq!(snap.items[&hangar_trit_id].flag, InventoryFlag::Hangar);
+        assert!(snap.items[&hangar_mod_id].singleton);
+        assert_eq!(snap.items[&cargo_trit_id].quantity, 25);
+        assert_eq!(snap.items[&cargo_trit_id].location_id, ship_id);
+        assert_eq!(snap.items[&cargo_trit_id].flag, InventoryFlag::Cargo);
+        assert!(snap.items[&cargo_ship_id].singleton);
+        assert_eq!(snap.items[&cargo_ships_stack_id].quantity, 5);
+        assert!(!snap.items[&cargo_ships_stack_id].singleton);
+    });
+}

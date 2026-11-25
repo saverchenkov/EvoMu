@@ -13,6 +13,22 @@ const FLAG_ASSET_SAFETY: u16 = 36;
 const FLAG_LOCKED: u16 = 63;
 const FLAG_IMPOUNDED: u16 = 72;
 
+/// Specification for minting (or merging into an existing stack of) an inventory item
+/// inside [`WorldStateSnapshot`] (`#1193`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MintItemSpec {
+    pub type_id: u32,
+    pub owner_id: i64,
+    pub location_id: i64,
+    pub flag: InventoryFlag,
+    pub quantity: i32,
+    pub singleton: bool,
+    pub is_blueprint_copy: bool,
+    pub blueprint_runs_remaining: Option<i32>,
+    /// When `true` (and `!singleton && !is_blueprint_copy`), increments a matching clean stack instead of allocating a new item row.
+    pub merge_existing_stack: bool,
+}
+
 /// Options controlling centralized inventory consumption via [`WorldStateSnapshot::consume_exact_item_quantity`]
 /// and [`WorldStateSnapshot::consume_owner_items`].
 #[derive(Debug, Clone, Copy)]
@@ -583,52 +599,31 @@ impl WorldRepository {
             DbError::ValidationError(format!("Quantity {quantity} exceeds i32::MAX"))
         })?;
         self.try_with_mut_snapshot(|guard| {
-            // Check if existing clean stackable item exists at location/flag (ignoring singletons, BPCs, mutated, and courier cargo stacks)
-            let existing_id = guard
-                .items
-                .values()
-                .find(|it| {
-                    it.owner_id == owner_id
-                        && it.location_id == location_id
-                        && it.flag == flag
-                        && it.type_id == type_id
-                        && guard.is_clean_stackable_item(it)
-                })
-                .map(|it| it.item_id);
-            if let Some(existing_id) = existing_id {
-                let updated = {
-                    let existing = guard.items.get_mut(&existing_id).unwrap();
-                    existing.quantity = existing.quantity.checked_add(qty_i32).ok_or_else(|| {
-                        DbError::ValidationError("Stack quantity overflow".into())
-                    })?;
-                    existing.version += 1;
-                    existing.clone()
-                };
-                return Ok(updated);
+            let has_non_overflowing = !WorldStateSnapshot::is_flag_stack_ineligible(flag)
+                && guard.items.values().any(|it| {
+                    guard.is_merge_stack_candidate(it, owner_id, location_id, flag, type_id)
+                        && it.quantity.checked_add(qty_i32).is_some()
+                });
+            let has_overflowing = !WorldStateSnapshot::is_flag_stack_ineligible(flag)
+                && !has_non_overflowing
+                && guard.items.values().any(|it| {
+                    guard.is_merge_stack_candidate(it, owner_id, location_id, flag, type_id)
+                        && it.quantity.checked_add(qty_i32).is_none()
+                });
+            if has_overflowing {
+                return Err(DbError::ValidationError("Stack quantity overflow".into()));
             }
-
-            let mut item_id = guard.alloc_entity_id();
-            while guard.items.contains_key(&item_id) {
-                item_id = guard.alloc_entity_id();
-            }
-            debug_assert!(!guard.items.contains_key(&item_id));
-            let item = InventoryItemRecord {
-                item_id,
+            guard.mint_inventory_item_in_snap(MintItemSpec {
                 type_id,
                 owner_id,
                 location_id,
                 flag,
                 quantity: qty_i32,
                 singleton: false,
-                version: 1,
-                dynamic_attributes: std::collections::HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
                 is_blueprint_copy: false,
                 blueprint_runs_remaining: None,
-            };
-            guard.items.insert(item_id, item.clone());
-            Ok(item)
+                merge_existing_stack: true,
+            })
         })
     }
 }
@@ -2136,6 +2131,122 @@ impl WorldStateSnapshot {
             diffs.push((None, Some(new_item)));
         }
         diffs
+    }
+
+    fn is_merge_stack_candidate(
+        &self,
+        it: &InventoryItemRecord,
+        owner_id: i64,
+        location_id: i64,
+        flag: InventoryFlag,
+        type_id: u32,
+    ) -> bool {
+        it.owner_id == owner_id
+            && it.location_id == location_id
+            && it.flag == flag
+            && it.type_id == type_id
+            && self.is_clean_stackable_item(it)
+            && !Self::has_locked_flag_or_wrap_type(it)
+            && !self.is_item_or_ancestor_locked_or_impounded(it.item_id)
+            && !self.is_container_non_empty(it.item_id)
+    }
+
+    /// Mints (or merges onto an existing clean stack of) an inventory item using an
+    /// optional caller-supplied `explicit_item_id` (e.g. from `WorldTx::alloc_entity_id`).
+    pub fn mint_inventory_item_with_id_in_snap(
+        &mut self,
+        explicit_item_id: Option<i64>,
+        spec: MintItemSpec,
+    ) -> Result<InventoryItemRecord, DbError> {
+        if spec.quantity <= 0 {
+            return Err(DbError::ValidationError("Quantity must be positive".into()));
+        }
+        if spec.singleton && spec.quantity != 1 {
+            return Err(DbError::ValidationError(format!(
+                "Singleton item must have quantity == 1, got {}",
+                spec.quantity
+            )));
+        }
+        if spec.is_blueprint_copy && (!spec.singleton || spec.quantity != 1) {
+            return Err(DbError::ValidationError(format!(
+                "Blueprint copy must be a singleton with quantity == 1 (singleton={}, quantity={})",
+                spec.singleton, spec.quantity
+            )));
+        }
+        if spec.location_id <= 0 {
+            return Err(DbError::ValidationError(format!(
+                "Invalid destination location_id {}",
+                spec.location_id
+            )));
+        }
+        if spec.merge_existing_stack
+            && !spec.singleton
+            && !spec.is_blueprint_copy
+            && spec.blueprint_runs_remaining.is_none()
+            && !Self::is_flag_stack_ineligible(spec.flag)
+        {
+            let existing_id = self
+                .items
+                .values()
+                .find(|it| {
+                    self.is_merge_stack_candidate(
+                        it,
+                        spec.owner_id,
+                        spec.location_id,
+                        spec.flag,
+                        spec.type_id,
+                    ) && it.quantity.checked_add(spec.quantity).is_some()
+                })
+                .map(|it| it.item_id);
+            if let Some(existing_id) = existing_id {
+                let existing = self.items.get_mut(&existing_id).ok_or_else(|| {
+                    DbError::ValidationError(format!("Missing stack item {existing_id}"))
+                })?;
+                existing.quantity = existing.quantity.checked_add(spec.quantity).ok_or_else(|| {
+                    DbError::ValidationError("Stack quantity overflow".into())
+                })?;
+                existing.version = existing.version.saturating_add(1);
+                return Ok(existing.clone());
+            }
+        }
+        let item_id = if let Some(id) = explicit_item_id {
+            if id <= 0 || self.items.contains_key(&id) {
+                return Err(DbError::ValidationError(format!(
+                    "Invalid or colliding item ID {id}"
+                )));
+            }
+            self.next_entity_id = self.next_entity_id.max(id);
+            id
+        } else {
+            let mut id = self.alloc_entity_id();
+            while self.items.contains_key(&id) {
+                id = self.alloc_entity_id();
+            }
+            id
+        };
+        let item = InventoryItemRecord {
+            item_id,
+            type_id: spec.type_id,
+            owner_id: spec.owner_id,
+            location_id: spec.location_id,
+            flag: spec.flag,
+            quantity: spec.quantity,
+            singleton: spec.singleton,
+            version: 1,
+            is_blueprint_copy: spec.is_blueprint_copy,
+            blueprint_runs_remaining: spec.blueprint_runs_remaining,
+            ..InventoryItemRecord::default()
+        };
+        self.items.insert(item_id, item.clone());
+        Ok(item)
+    }
+
+    /// Mints (or merges onto a clean stack of) an inventory item using snapshot ID allocation.
+    pub fn mint_inventory_item_in_snap(
+        &mut self,
+        spec: MintItemSpec,
+    ) -> Result<InventoryItemRecord, DbError> {
+        self.mint_inventory_item_with_id_in_snap(None, spec)
     }
 }
 #[cfg(test)] #[path = "inventory_unit_tests.rs"] mod inventory_unit_tests;

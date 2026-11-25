@@ -330,34 +330,62 @@ pub(crate) fn deliver_login_reward(
     let reward_runs = rw
         .blueprint_runs
         .map(|r| i32::try_from(r).unwrap_or(i32::MAX));
-    if let Some(station_id) = docked_station_id {
-        snap.next_entity_id += 1;
-        let item_id = snap.next_entity_id;
-        let record = eve_db::InventoryItemRecord {
-            item_id,
-            type_id: rw.type_id,
-            owner_id: char_id,
-            location_id: station_id,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: reward_qty,
-            singleton: rw.blueprint_runs.is_some(),
-            version: 1,
-            dynamic_attributes: HashMap::new(),
-            source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0,
-            is_blueprint_copy: rw.blueprint_runs.is_some(),
-            blueprint_runs_remaining: reward_runs,
-        };
-        if let Some(exp_ft) = expire_date_time {
-            snap.seasons_and_campaigns
-                .login_reward_expiry
-                .insert(item_id, exp_ft);
-        }
-        snap.items.insert(item_id, record.clone());
-        DeliveredLoginReward {
-            primary_id: item_id,
-            spawned_item: Some(record),
-            expire_date_time,
+    if let Some(station_id) = docked_station_id.filter(|&id| id > 0) {
+        if rw.blueprint_runs.is_some() {
+            let mut first_item: Option<eve_db::InventoryItemRecord> = None;
+            for _ in 0..reward_qty {
+                let req = crate::domain::items::GrantItemRequest::explicit(
+                    char_id,
+                    station_id,
+                    eve_db::InventoryFlag::Hangar,
+                    rw.type_id,
+                    1,
+                )
+                .with_singleton(true)
+                .with_blueprint_copy(reward_runs);
+                let granted = crate::domain::items::grant_item_in_snap(None, snap, None, req)
+                    .expect("login reward BPC grant with quantity=1 and docked station");
+                if let Some(exp_ft) = expire_date_time {
+                    snap.seasons_and_campaigns
+                        .login_reward_expiry
+                        .insert(granted.item.item_id, exp_ft);
+                }
+                if first_item.is_none() {
+                    first_item = Some(granted.item);
+                }
+            }
+            let first = first_item.expect("reward_qty >= 1");
+            let primary_id = first.item_id;
+            DeliveredLoginReward {
+                primary_id,
+                spawned_item: Some(first),
+                expire_date_time,
+            }
+        } else {
+            let granted = crate::domain::items::grant_item_in_snap(
+                None,
+                snap,
+                None,
+                crate::domain::items::GrantItemRequest::explicit(
+                    char_id,
+                    station_id,
+                    eve_db::InventoryFlag::Hangar,
+                    rw.type_id,
+                    reward_qty,
+                ),
+            )
+            .expect("login reward grant with positive quantity and docked station");
+            let item_id = granted.item.item_id;
+            if let Some(exp_ft) = expire_date_time {
+                snap.seasons_and_campaigns
+                    .login_reward_expiry
+                    .insert(item_id, exp_ft);
+            }
+            DeliveredLoginReward {
+                primary_id: item_id,
+                spawned_item: Some(granted.item),
+                expire_date_time,
+            }
         }
     } else {
         let token_id = crate::services::account_services::enqueue_redeem_token_in_snapshot(

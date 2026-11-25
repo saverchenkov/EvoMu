@@ -8,7 +8,7 @@ use crate::services::project_discovery::{
     ACTIVE_PROJECT_ID, ISK_MULTIPLIERS, LOOT_CRATE_TYPE_ID, MIN_SUBMISSION_INTERVAL_SECS,
     NEEDED_LEVEL_FOR_SUPERIOR_CRATES, SUPERIOR_LOOT_CRATE_TYPE_ID,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
+use eve_db::WorldStateSnapshot;
 use eve_proto::{BridgeRpcError, PyRep};
 
 /// Default tutorial completion XP reward shared identically across `get_tutorial_xp_reward`
@@ -105,28 +105,23 @@ pub fn spawn_rank_reward_crate(
     char_id: i64,
     crate_type_id: u32,
 ) {
-    let station_id = snap
-        .characters
-        .get(&char_id)
-        .and_then(|c| c.station_id.or(Some(c.home_station_id)))
-        .filter(|&id| id > 0);
-    let Some(loc_id) = station_id else {
-        return;
-    };
-    snap.next_entity_id += 1;
-    let item_id = snap.next_entity_id;
-    snap.items.insert(
-        item_id,
-        InventoryItemRecord {
-            item_id,
-            type_id: crate_type_id,
+    let _ = crate::domain::items::grant_item_in_snap(
+        None,
+        snap,
+        None,
+        crate::domain::items::GrantItemRequest {
             owner_id: char_id,
-            location_id: loc_id,
-            flag: InventoryFlag::Hangar,
+            target_char_id: Some(char_id),
+            destination: crate::domain::items::GrantItemDestination::CharacterPolicy(
+                crate::domain::items::ItemDeliveryPolicy::DockedOrHomeHangar,
+            ),
+            type_id: crate_type_id,
             quantity: 1,
-            singleton: false,
-            version: 1,
-            ..Default::default()
+            singleton_policy: crate::domain::items::ItemSingletonPolicy::Fixed(false),
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+            merge_existing_stack: false,
+            require_sde_type: false,
         },
     );
 }

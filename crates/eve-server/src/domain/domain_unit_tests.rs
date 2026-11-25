@@ -4908,3 +4908,249 @@ mod skills_and_reward_tx_tests {
         assert!(rm_notifs.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// D7: Transactional shared item grant domain (#1193)
+// ---------------------------------------------------------------------------
+mod items_domain_tx_tests {
+    use super::*;
+    use crate::domain::items::{
+        grant_character_item_tx, grant_item_in_snap, GrantItemRequest, ItemDeliveryPolicy,
+        ItemSingletonPolicy,
+    };
+    use eve_db::InventoryFlag;
+
+    #[test]
+    fn grant_character_item_tx_handles_hangar_cargo_singletons_merge_and_rollback() {
+        let ctx = shared_test_ctx();
+        let cid = 91_000_203_i64;
+        let corp_id = 98_000_203_i64;
+        let cold_sys = 30_002_187_u32;
+        let ts = 1_700_000_777_u64;
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = make_char(cid, 1, corp_id, None, 10_000);
+            ch.solar_system_id = cold_sys;
+            ch.station_id = Some(60_003_760);
+            ch.active_ship_id = 0;
+            seed_char(snap, ch);
+        });
+        ctx.db
+            .acquire_online_lock(1, 555_002, Some(cid), true, ts)
+            .expect("online lock");
+        let _ = ctx.drain_notifications_for_char(cid);
+        assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+        let trit = grant_character_item_tx(
+            &ctx,
+            "test_grant_trit",
+            cid,
+            34,
+            50,
+            ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+            ItemSingletonPolicy::AutoFromSde,
+        )
+        .expect("grant trit in docked hangar");
+        assert_eq!(trit.location_id, 60_003_760);
+        assert_eq!(trit.flag, InventoryFlag::Hangar);
+        assert!(!trit.singleton);
+        assert_eq!(trit.item.quantity, 50);
+        assert!(
+            ctx.drain_notifications_for_char(cid)
+                .iter()
+                .any(|n| n.event == "OnItemChange")
+        );
+        assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+        let mod_grant = grant_character_item_tx(
+            &ctx,
+            "test_grant_module",
+            cid,
+            484,
+            1,
+            ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+            ItemSingletonPolicy::AutoFromSde,
+        )
+        .expect("single module auto-singleton");
+        assert!(mod_grant.singleton);
+
+        let ship_grant = grant_character_item_tx(
+            &ctx,
+            "test_grant_ship",
+            cid,
+            587,
+            1,
+            ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+            ItemSingletonPolicy::AutoFromSde,
+        )
+        .expect("ship auto-singleton");
+        assert!(ship_grant.singleton);
+
+        let bp_tid = ctx
+            .sde
+            .types
+            .iter()
+            .find(|(_, t)| t.category_id == 9)
+            .map(|(&id, _)| id)
+            .expect("SDE blueprint type");
+        let _ = ctx.drain_notifications_for_char(cid);
+        let bp_grant = grant_character_item_tx(
+            &ctx,
+            "test_grant_bp",
+            cid,
+            bp_tid,
+            1,
+            ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+            ItemSingletonPolicy::AutoFromSde,
+        )
+        .expect("blueprint grant");
+        assert!(!bp_grant.singleton);
+        let bp_notifs = ctx.drain_notifications_for_char(cid);
+        assert!(bp_notifs.iter().any(|n| n.event == "OnItemChange"));
+        assert!(bp_notifs.iter().any(|n| n.event == "OnBlueprintsUpdated"));
+
+        // Merge into existing clean hangar stack via shared grant_item_in_snap helper.
+        let merged = ctx
+            .db
+            .tx("test_merge_stack", |wtx| {
+                grant_item_in_snap(
+                    Some(&ctx.sde),
+                    wtx.snap,
+                    None,
+                    GrantItemRequest::explicit(cid, 60_003_760, InventoryFlag::Hangar, 34, 25)
+                        .with_merge_existing_stack(true),
+                )
+            })
+            .expect("stack merge succeeds");
+        assert_eq!(merged.item.item_id, trit.item.item_id);
+        assert_eq!(merged.item.quantity, 75);
+
+        // Undock character -> active ship cargo delivery without spawning cold solar systems (#1542).
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid).expect("char");
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_grant.item.item_id;
+        });
+        let cargo = grant_character_item_tx(
+            &ctx,
+            "test_grant_cargo",
+            cid,
+            34,
+            15,
+            ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+            ItemSingletonPolicy::AutoFromSde,
+        )
+        .expect("undocked cargo grant");
+        assert_eq!(cargo.location_id, ship_grant.item.item_id);
+        assert_eq!(cargo.flag, InventoryFlag::Cargo);
+        assert_eq!(cargo.item.quantity, 15);
+        assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+        let item_count_before = ctx.db.with_snapshot(|s| s.items.len());
+        assert_eq!(
+            grant_character_item_tx(
+                &ctx,
+                "bad_qty",
+                cid,
+                34,
+                0,
+                ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+                ItemSingletonPolicy::AutoFromSde,
+            )
+            .unwrap_err()
+            .code,
+            "InvalidQuantity"
+        );
+        assert_eq!(
+            grant_character_item_tx(
+                &ctx,
+                "bad_type",
+                cid,
+                999_999_999,
+                1,
+                ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+                ItemSingletonPolicy::AutoFromSde,
+            )
+            .unwrap_err()
+            .code,
+            "TypeNotFound"
+        );
+        assert_eq!(
+            grant_character_item_tx(
+                &ctx,
+                "missing_char",
+                999_888_777,
+                34,
+                1,
+                ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+                ItemSingletonPolicy::AutoFromSde,
+            )
+            .unwrap_err()
+            .code,
+            "CharacterNotFound"
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&cid).expect("char").active_ship_id = 0;
+        });
+        assert_eq!(
+            grant_character_item_tx(
+                &ctx,
+                "no_dest",
+                cid,
+                34,
+                1,
+                ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+                ItemSingletonPolicy::AutoFromSde,
+            )
+            .unwrap_err()
+            .code,
+            "InvalidDestinationLocation"
+        );
+        assert_eq!(ctx.db.with_snapshot(|s| s.items.len()), item_count_before);
+
+        // BF-1 & P2: multi-ship grants (qty > 1) mint packaged stacks (singleton = false),
+        // and station_id = Some(0) never masks a valid structure_id or home_station_id.
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid).expect("char");
+            ch.station_id = Some(0);
+            ch.structure_id = Some(1_000_000_000_001);
+            ch.home_station_id = 60_008_494;
+        });
+        let multi_ship = grant_character_item_tx(
+            &ctx,
+            "test_multi_ship",
+            cid,
+            587,
+            5,
+            ItemDeliveryPolicy::DockedHangarOrActiveShipCargo,
+            ItemSingletonPolicy::AutoFromSde,
+        )
+        .expect("multi-ship packaged grant succeeds");
+        assert!(!multi_ship.singleton);
+        assert_eq!(multi_ship.item.quantity, 5);
+        assert_eq!(multi_ship.location_id, 1_000_000_000_001);
+        assert_eq!(multi_ship.flag, InventoryFlag::Hangar);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&cid).expect("char").structure_id = Some(0);
+            let home_resolved = crate::domain::items::resolve_character_item_destination_in_snap(
+                snap,
+                cid,
+                ItemDeliveryPolicy::DockedOrHomeHangar,
+            )
+            .expect("falls back past Some(0) station/structure to home_station_id");
+            assert_eq!(home_resolved, (60_008_494, InventoryFlag::Hangar));
+
+            let ship_only_multi = grant_item_in_snap(
+                Some(&ctx.sde),
+                snap,
+                None,
+                GrantItemRequest::explicit(cid, 60_008_494, InventoryFlag::Hangar, 587, 3)
+                    .with_singleton_policy(ItemSingletonPolicy::ShipOnlyFromSde),
+            )
+            .expect("ShipOnlyFromSde multi-ship packaged grant");
+            assert!(!ship_only_multi.singleton);
+            assert_eq!(ship_only_multi.item.quantity, 3);
+        });
+    }
+}
