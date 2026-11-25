@@ -1017,8 +1017,8 @@ impl TwoServerContexts {
         let (left_sde, right_sde) = {
             let _env_guard = eve_db::lock_test_env_read();
             (
-                std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-                std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+                std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed()),
+                std::sync::Arc::new(eve_testkit::TestSde::with_canonical_seed()),
             )
         };
         let repos =

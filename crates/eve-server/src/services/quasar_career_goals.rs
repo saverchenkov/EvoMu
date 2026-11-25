@@ -547,7 +547,7 @@ pub fn default_career_goal_definitions_for_sde(sde: Option<&eve_sde::SdeRegistry
             .map(career_goal_def_from_sde)
             .collect();
     }
-    eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+    eve_sde::SdeRegistry::open_progression_resources_only(&eve_sde::SdeRegistry::default_db_path())
         .ok()
         .map(|reg| {
             reg.career_goal_definitions

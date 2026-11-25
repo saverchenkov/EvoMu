@@ -1134,7 +1134,9 @@ impl ServerContext {
                 .unwrap_or_else(|e| e.into_inner()) = Some(sink);
         }
         super::startup_seeds::run_startup_global_seeds(&ctx);
-        ctx.install_tx_post_commit_listener(); ctx.wire_module_deactivation_hook();
+        ctx.install_tx_post_commit_listener();
+        ctx.wire_module_deactivation_hook();
+        crate::router::dispatch::ensure_dispatch_tx_hooks_installed(&ctx.db);
         ctx
     }
 
@@ -1149,10 +1151,22 @@ impl ServerContext {
         )
     }
 
+    #[cfg(any(test, feature = "testkit"))]
+    fn canonical_test_sde() -> Arc<SdeRegistry> {
+        #[cfg(feature = "testkit")]
+        {
+            eve_testkit::TestSde::canonical_shared()
+        }
+        #[cfg(not(feature = "testkit"))]
+        {
+            Arc::new(SdeRegistry::with_canonical_seed())
+        }
+    }
+
     /// Initializes a `ServerContext` with the provided `WorldRepository` and seeds the NPC regional markets.
     #[cfg(any(test, feature = "testkit"))]
     pub fn with_repository(db: Arc<WorldRepository>) -> Self {
-        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+        let sde = Self::canonical_test_sde();
         Self::with_sde_and_repository(sde, db)
     }
 
@@ -1287,10 +1301,21 @@ impl ServerContext {
 
     /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`, `#877`).
     pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
-        let sde = match SdeRegistry::open(&cfg.sde_path) {
-            Ok(s) => Arc::new(s),
+        #[cfg(feature = "testkit")]
+        let open_sde = eve_testkit::TestSde::open_shared(&cfg.sde_path);
+        #[cfg(not(feature = "testkit"))]
+        let open_sde = SdeRegistry::open_shared(&cfg.sde_path);
+        let sde = match open_sde {
+            Ok(s) => s,
             Err(_) if cfg!(test) && cfg.sde_path == "data/evomu_sde.sqlite" => {
-                Arc::new(SdeRegistry::with_canonical_seed())
+                #[cfg(feature = "testkit")]
+                {
+                    eve_testkit::TestSde::canonical_shared()
+                }
+                #[cfg(not(feature = "testkit"))]
+                {
+                    Arc::new(SdeRegistry::with_canonical_seed())
+                }
             }
             Err(e) => return Err(e.to_string()),
         };
@@ -1413,14 +1438,15 @@ impl ServerContext {
     #[cfg(any(test, feature = "testkit"))]
     pub fn new() -> Self {
         let _env_read_guard = acquire_test_env_read_guard();
+        let sde = Self::canonical_test_sde();
         #[cfg(any(test, feature = "demo-seed"))]
         let db = {
             let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
-            if disable_demo { Arc::new(WorldRepository::new_empty()) } else { Arc::new(WorldRepository::with_demo_seed()) }
+            if disable_demo { Arc::new(WorldRepository::new_empty()) } else { Arc::new(WorldRepository::with_demo_seed_for_sde(&sde)) }
         };
         #[cfg(not(any(test, feature = "demo-seed")))]
         let db = Arc::new(WorldRepository::new_empty());
-        let ctx = Self::with_repository(db);
+        let ctx = Self::with_sde_and_repository(sde, db);
         #[cfg(any(test, feature = "demo-seed"))]
         let ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
         ctx

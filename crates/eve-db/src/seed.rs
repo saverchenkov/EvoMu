@@ -390,11 +390,20 @@ impl WorldRepository {
             .into_iter()
             .filter_map(|char_id| characters.get(&char_id).map(|ch| (char_id, ch.race_id)))
             .collect();
+        let demo_root_type_ids: Vec<TypeId> = demo_pilot_races
+            .iter()
+            .flat_map(|&(char_id, _)| {
+                items
+                    .values()
+                    .filter(move |item| item.owner_id == char_id)
+                    .map(|item| item.type_id)
+            })
+            .collect();
         let default_sde;
         let resolved_sde = match sde {
             Some(sde) => Some(sde),
             None => {
-                default_sde = Self::open_default_sde_shared();
+                default_sde = Self::open_skill_sde_subset_for_types(&demo_root_type_ids);
                 default_sde.as_deref()
             }
         };
@@ -584,26 +593,8 @@ impl WorldRepository {
         )
     }
 
-    /// Creates an ephemeral in-memory demo-seeded `WorldRepository` seeded from `sde` without
-    /// reading `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_DISABLE_DEMO_SEED`,
-    /// `EVOMU_SDE_PATH`, `CARGO_MANIFEST_DIR`, or the process-global `SDE_CACHE` (`#1583` BF-01).
-    pub fn with_demo_seed_in_memory_for_sde(sde: &eve_sde::SdeRegistry) -> Self {
-        Self::build_demo_repo_in_memory(Self::create_demo_snapshot_with_sde(Some(sde)))
-    }
-
-    /// Creates an ephemeral in-memory demo-seeded `WorldRepository` without consulting
-    /// `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, or `EVOMU_DISABLE_DEMO_SEED` (`#1583` PG-01).
-    ///
-    /// Note: this still calls [`Self::create_demo_snapshot`], which reads `EVOMU_SDE_PATH` /
-    /// `SdeRegistry::default_db_path()` and `SdeRegistry::open_shared()` (`SDE_CACHE`) to populate
-    /// racial starter skills (`#1582`); callers requiring full SDE/env isolation must use
-    /// [`Self::with_demo_seed_in_memory_for_sde`].
-    pub fn with_demo_seed_in_memory() -> Self {
-        Self::build_demo_repo_in_memory(Self::create_demo_snapshot())
-    }
-
-    pub fn with_demo_seed() -> Self {
-        let repo = Self::build_demo_repo_in_memory(Self::create_demo_snapshot());
+    fn finish_demo_repo(initial_snap: WorldStateSnapshot) -> Self {
+        let repo = Self::build_demo_repo_in_memory(initial_snap);
 
         #[cfg(any(test, feature = "legacy-json-snapshot"))]
         {
@@ -630,6 +621,33 @@ impl WorldRepository {
         }
         #[cfg(not(any(test, feature = "legacy-json-snapshot")))]
         repo
+    }
+
+    /// Creates an ephemeral in-memory demo-seeded `WorldRepository` seeded from `sde` without
+    /// reading `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_DISABLE_DEMO_SEED`,
+    /// `EVOMU_SDE_PATH`, or `CARGO_MANIFEST_DIR` (`#1583` BF-01).
+    pub fn with_demo_seed_in_memory_for_sde(sde: &eve_sde::SdeRegistry) -> Self {
+        Self::build_demo_repo_in_memory(Self::create_demo_snapshot_with_sde(Some(sde)))
+    }
+
+    /// Creates an ephemeral in-memory demo-seeded `WorldRepository` without consulting
+    /// `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, or `EVOMU_DISABLE_DEMO_SEED` (`#1583` PG-01).
+    ///
+    /// Note: this calls [`Self::create_demo_snapshot`], which reads `EVOMU_SDE_PATH` /
+    /// `SdeRegistry::default_db_path()` to populate racial starter skills (`#1582`); callers
+    /// requiring full SDE/env isolation must use [`Self::with_demo_seed_in_memory_for_sde`].
+    pub fn with_demo_seed_in_memory() -> Self {
+        Self::build_demo_repo_in_memory(Self::create_demo_snapshot())
+    }
+
+    /// Creates a demo-seeded `WorldRepository` using an already-loaded `SdeRegistry` while
+    /// preserving `EVOMU_SNAPSHOT_PATH` test overrides (`#1583` Track 14).
+    pub fn with_demo_seed_for_sde(sde: &eve_sde::SdeRegistry) -> Self {
+        Self::finish_demo_repo(Self::create_demo_snapshot_with_sde(Some(sde)))
+    }
+
+    pub fn with_demo_seed() -> Self {
+        Self::finish_demo_repo(Self::create_demo_snapshot())
     }
 }
 

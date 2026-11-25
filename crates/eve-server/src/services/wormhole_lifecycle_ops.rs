@@ -311,7 +311,10 @@ pub fn system_wormhole_profile_sde(
 }
 
 pub fn system_wormhole_profile(sys_id: SolarSystemId) -> (u8, bool, bool, &'static str) {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
+    if let Ok(sde) = eve_sde::SdeRegistry::open_for_wormhole_system(
+        &eve_sde::SdeRegistry::default_db_path(),
+        sys_id,
+    ) {
         return system_wormhole_profile_sde(&sde, sys_id);
     }
     let sde = eve_sde::SdeRegistry::with_canonical_seed();

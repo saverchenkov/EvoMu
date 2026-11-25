@@ -187,8 +187,6 @@ tokio::task_local! {
     static DISPATCH_TX_ERROR: std::cell::RefCell<Option<(String, String)>>;
 }
 
-static TX_HOOK_ONCE: std::sync::Once = std::sync::Once::new();
-
 fn dispatch_record_tx_error(err: &eve_db::TxError) {
     let (code, msg) = match err {
         eve_db::TxError::NonFinite { .. } | eve_db::TxError::RowLimit { .. } => {
@@ -213,11 +211,13 @@ fn dispatch_check_tx_poison() -> Option<String> {
         .flatten()
 }
 
-pub(crate) fn ensure_dispatch_tx_hooks_installed() {
-    TX_HOOK_ONCE.call_once(|| {
-        eve_db::set_tx_error_hook(Some(dispatch_record_tx_error));
-        eve_db::set_tx_poison_check_hook(Some(dispatch_check_tx_poison));
-    });
+pub(crate) fn ensure_dispatch_tx_hooks_installed(db: &eve_db::WorldRepository) {
+    if !db.has_tx_error_hook() {
+        db.set_tx_error_hook(Some(dispatch_record_tx_error));
+    }
+    if !db.has_tx_poison_check_hook() {
+        db.set_tx_poison_check_hook(Some(dispatch_check_tx_poison));
+    }
 }
 
 async fn maybe_with_dispatch_tx_error<F, R>(outer: bool, fut: F) -> R
@@ -331,7 +331,7 @@ impl ServerContext {
         caller_trace: Option<&str>,
         options: DispatchOptions,
     ) -> Result<PyRep, BridgeRpcError> {
-        ensure_dispatch_tx_hooks_installed();
+        ensure_dispatch_tx_hooks_installed(&self.db);
 
         let is_outer_tx_scope = DISPATCH_TX_ERROR.try_with(|_| ()).is_err();
         if is_outer_tx_scope {

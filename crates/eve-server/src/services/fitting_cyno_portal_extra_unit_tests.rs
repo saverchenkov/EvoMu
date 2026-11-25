@@ -1167,8 +1167,9 @@ async fn cyno_expiry_cleanup_inhibitor_deployable_types_and_jump_fuel_timer_path
         .await.unwrap().unwrap();
     let br_exp = ctx.now_unix() + 500;
     {
-        let mut st = cyno_state().write().unwrap();
-        st.bridges.insert((ctx.instance_id as usize, cyno_ship), ActiveJumpBridge {
+        let slot = cyno_state(&ctx);
+        let mut st = slot.state.write().unwrap();
+        st.bridges.insert(cyno_ship, ActiveJumpBridge {
             bridger_char_id: cyno_char,
             bridger_ship_id: cyno_ship,
             portal_module_id: 94_350_556,
@@ -1194,10 +1195,8 @@ async fn cyno_expiry_cleanup_inhibitor_deployable_types_and_jump_fuel_timer_path
 }
 
 #[test]
-fn purge_expired_beacons_and_bridges_respects_ctx_and_exact_expiry_boundary() {
+fn purge_expired_beacons_and_bridges_respects_exact_expiry_boundary() {
     let mut st = super::super::CynoPortalState::default();
-    let ctx_a = 101usize;
-    let ctx_b = 202usize;
     let mk_beacon = |id: i64, exp: u64| super::super::FleetModuleBeacon {
         beacon_id: id,
         char_id: 94_000_001,
@@ -1219,34 +1218,30 @@ fn purge_expired_beacons_and_bridges_respects_ctx_and_exact_expiry_boundary() {
         portal_ball_id: 94_000_400 + id,
     };
 
-    for (idx, &(ck, exp)) in [
-        (ctx_a, 999_u64),
-        (ctx_a, 1_000_u64),
-        (ctx_a, 1_001_u64),
-        (ctx_b, 500_u64),
-    ]
-    .iter()
-    .enumerate()
+    for (idx, exp) in [999_u64, 1_000_u64, 1_001_u64, 1_500_u64]
+        .iter()
+        .copied()
+        .enumerate()
     {
-        let key = (ck, 10 + idx as i64);
+        let key = 10 + idx as i64;
         st.beacons.insert(key, mk_beacon(idx as i64 + 1, exp));
         st.destroyed_beacons.insert(key, mk_beacon(idx as i64 + 10, exp));
         st.bridges.insert(key, mk_bridge(idx as i64 + 20, exp));
     }
 
-    super::super::purge_expired(&mut st, ctx_a, 1_000);
+    super::super::purge_expired(&mut st, 1_000);
     assert_eq!(st.beacons.len(), 2);
-    assert!(st.beacons.contains_key(&(ctx_a, 12)));
-    assert!(st.beacons.contains_key(&(ctx_b, 13)));
+    assert!(st.beacons.contains_key(&12));
+    assert!(st.beacons.contains_key(&13));
     assert_eq!(st.destroyed_beacons.len(), 2);
-    assert!(st.destroyed_beacons.contains_key(&(ctx_a, 12)));
-    assert!(st.destroyed_beacons.contains_key(&(ctx_b, 13)));
+    assert!(st.destroyed_beacons.contains_key(&12));
+    assert!(st.destroyed_beacons.contains_key(&13));
     assert_eq!(st.bridges.len(), 4);
 
-    super::super::purge_expired_bridges(&mut st, ctx_a, 1_000);
+    super::super::purge_expired_bridges(&mut st, 1_000);
     assert_eq!(st.bridges.len(), 2);
-    assert!(st.bridges.contains_key(&(ctx_a, 12)));
-    assert!(st.bridges.contains_key(&(ctx_b, 13)));
+    assert!(st.bridges.contains_key(&12));
+    assert!(st.bridges.contains_key(&13));
 }
 
 #[tokio::test]
@@ -1510,9 +1505,10 @@ async fn cyno_light_relocate_ship_relocate_caller_and_caller_in_space_pin_mutant
     // Expired bridge cleaned up on caller_in_space
     let exp_bridge_exp = now;
     {
-        let mut st = super::super::cyno_state().write().unwrap();
+        let slot = super::super::cyno_state(&ctx);
+        let mut st = slot.state.write().unwrap();
         st.bridges.insert(
-            (super::super::ctx_key(&ctx), ship_id),
+            ship_id,
             super::super::ActiveJumpBridge {
                 bridger_char_id: char_id,
                 bridger_ship_id: ship_id,
@@ -1539,9 +1535,10 @@ async fn cyno_light_relocate_ship_relocate_caller_and_caller_in_space_pin_mutant
 
     // Active bridge -> JumpPortalOpen
     {
-        let mut st = super::super::cyno_state().write().unwrap();
+        let slot = super::super::cyno_state(&ctx);
+        let mut st = slot.state.write().unwrap();
         st.bridges.insert(
-            (super::super::ctx_key(&ctx), ship_id),
+            ship_id,
             super::super::ActiveJumpBridge {
                 bridger_char_id: char_id,
                 bridger_ship_id: ship_id,
@@ -1875,10 +1872,10 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
         assert!(f.version > v0);
     });
     {
-        let ck = super::super::ctx_key(&ctx);
-        let st = super::super::cyno_state().read().unwrap();
-        assert!(!st.beacons.contains_key(&(ck, ship_a)));
-        assert!(!st.beacon_cycles.contains_key(&(ck, ship_a)));
+        let slot = super::super::cyno_state(&ctx);
+        let st = slot.state.read().unwrap();
+        assert!(!st.beacons.contains_key(&ship_a));
+        assert!(!st.beacon_cycles.contains_key(&ship_a));
     }
 
     // 2. Active cyno + P2-2 guard: rejected duplicate relight leaves active beacon_cycles intact.
@@ -1916,9 +1913,9 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
         "CannotLightCynoInSystem"
     );
     {
-        let ck = super::super::ctx_key(&ctx);
-        let st = super::super::cyno_state().read().unwrap();
-        assert_eq!(st.beacon_cycles.get(&(ck, ship_a)).copied(), Some((lowsec, mod_a)));
+        let slot = super::super::cyno_state(&ctx);
+        let st = slot.state.read().unwrap();
+        assert_eq!(st.beacon_cycles.get(&ship_a).copied(), Some((lowsec, mod_a)));
     }
     super::super::on_cyno_ship_destroyed(&ctx, ship_a);
     let _ = ctx.drain_notifications_for_char(char_a);
@@ -2072,5 +2069,124 @@ async fn cyno_exact_stack_rollback_preserves_id_and_diverged_or_destroyed_ship_r
             "ancestor-locked and singleton cyno fuel stacks must never satisfy fuel availability"
         );
     });
+}
+
+#[tokio::test]
+async fn cyno_portal_state_and_bridges_stay_isolated_across_two_contexts() {
+    let sde = shared_sde();
+    let left = ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::new(WorldRepository::new_empty()),
+    );
+    let right = ServerContext::with_sde_and_repository(
+        Arc::clone(&sde),
+        Arc::new(WorldRepository::new_empty()),
+    );
+    let now_l = left.now_unix();
+    let now_r = right.now_unix();
+    let shared_ship_id = 94_999_001_i64;
+    let bridge_ship_id = 94_999_002_i64;
+    let left_sys = 30_002_505_u32;
+    let right_sys = 30_000_142_u32;
+
+    {
+        let slot_l = super::super::cyno_state(&left);
+        let mut st_l = slot_l.state.write().unwrap();
+        st_l.beacons.insert(
+            shared_ship_id,
+            super::super::FleetModuleBeacon {
+                beacon_id: 888_001,
+                char_id: 94_000_111,
+                ship_id: shared_ship_id,
+                beacon_type_id: 21_094,
+                solar_system_id: left_sys,
+                position: DVec3::ZERO,
+                expires_at_unix: now_l + 600,
+            },
+        );
+        st_l.beacon_cycles
+            .insert(shared_ship_id, (left_sys, 94_555_001));
+        st_l.bridges.insert(
+            bridge_ship_id,
+            super::super::ActiveJumpBridge {
+                bridger_char_id: 94_000_112,
+                bridger_ship_id: bridge_ship_id,
+                portal_module_id: 94_555_002,
+                portal_module_type_id: 21_096,
+                origin_system_id: left_sys,
+                beacon: super::super::FleetModuleBeacon {
+                    beacon_id: 888_001,
+                    char_id: 94_000_111,
+                    ship_id: shared_ship_id,
+                    beacon_type_id: 21_094,
+                    solar_system_id: left_sys,
+                    position: DVec3::ZERO,
+                    expires_at_unix: now_l + 600,
+                },
+                distance_ly: 1.5,
+                expires_at_unix: now_l + 600,
+                portal_ball_id: 94_555_003,
+            },
+        );
+    }
+
+    assert!(super::super::is_ship_cyno_active(&left, shared_ship_id));
+    assert!(super::super::is_ship_cyno_active(&left, bridge_ship_id));
+    assert!(!super::super::is_ship_cyno_active(&right, shared_ship_id));
+    assert!(!super::super::is_ship_cyno_active(&right, bridge_ship_id));
+    assert_eq!(
+        super::super::active_cyno_beacon_counts(&left)
+            .get(&i64::from(left_sys))
+            .copied(),
+        Some(1)
+    );
+    assert!(super::super::active_cyno_beacon_counts(&right).is_empty());
+
+    // Register a distinct beacon under the identical `ship_id` on `right`, then destroy `left`'s ship.
+    {
+        let slot_r = super::super::cyno_state(&right);
+        let mut st_r = slot_r.state.write().unwrap();
+        st_r.beacons.insert(
+            shared_ship_id,
+            super::super::FleetModuleBeacon {
+                beacon_id: 888_002,
+                char_id: 94_000_222,
+                ship_id: shared_ship_id,
+                beacon_type_id: 21_094,
+                solar_system_id: right_sys,
+                position: DVec3::ZERO,
+                expires_at_unix: now_r + 600,
+            },
+        );
+    }
+
+    super::super::on_cyno_ship_destroyed(&left, shared_ship_id);
+    assert!(!super::super::is_ship_cyno_active(&left, shared_ship_id));
+    assert!(super::super::is_ship_cyno_active(&right, shared_ship_id));
+    assert_eq!(
+        super::super::active_cyno_beacon_counts(&right)
+            .get(&i64::from(right_sys))
+            .copied(),
+        Some(1)
+    );
+    assert!(
+        super::super::ship_cyno_activity_expiry_unix(&right, shared_ship_id) >= now_r + 600
+    );
+    assert!(
+        super::super::cyno_state(&left)
+            .state
+            .read()
+            .unwrap()
+            .destroyed_beacons
+            .contains_key(&shared_ship_id)
+    );
+    assert!(
+        !super::super::cyno_state(&right)
+            .state
+            .read()
+            .unwrap()
+            .destroyed_beacons
+            .contains_key(&shared_ship_id)
+    );
 }
 

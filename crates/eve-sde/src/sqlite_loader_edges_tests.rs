@@ -105,7 +105,7 @@ fn open_caching_invalid_schema_and_file_errors() {
         Err(SdeError::InvalidSchema(_))
     ));
 
-    // Cache hit returns cached entry even after an in-place same-length UPDATE when file size matches.
+    // Uncached SdeRegistry::open observes in-place updates directly; explicit SdeCache hits cache while file size matches.
     let db_ok = TempDb::new("cache_hit", |c| {
         c.execute(
             "INSERT INTO sde_categories VALUES (6, 'Ship', 1)",
@@ -113,16 +113,20 @@ fn open_caching_invalid_schema_and_file_errors() {
         )
         .unwrap();
     });
-    let r1 = SdeRegistry::open(&db_ok.path).expect("open 1");
+    let cache = SdeCache::new();
+    let r1 = cache.open(&db_ok.path).expect("cache open 1");
+    assert_eq!(r1.categories[&6].name, "Ship");
     {
         let conn = Connection::open(&db_ok.path).unwrap();
         conn.execute("UPDATE sde_categories SET name = 'Boat' WHERE category_id = 6", [])
             .unwrap();
     }
-    let r2 = SdeRegistry::open(&db_ok.path).expect("open 2");
+    let r_uncached = SdeRegistry::open(&db_ok.path).expect("uncached open reads updated DB");
+    assert_eq!(r_uncached.categories[&6].name, "Boat");
+    let r2 = cache.open(&db_ok.path).expect("cache open 2");
     assert_eq!(r2.categories[&6].name, "Ship");
 
-    // Rewriting file with a different byte size invalidates cache entry and reloads new data.
+    // Rewriting file with a different byte size invalidates SdeCache entry and reloads new data.
     {
         let conn = Connection::open(&db_ok.path).unwrap();
         let big_name = "X".repeat(8_192);
@@ -132,7 +136,7 @@ fn open_caching_invalid_schema_and_file_errors() {
         )
         .unwrap();
     }
-    let r3 = SdeRegistry::open(&db_ok.path).expect("open 3 after resize");
+    let r3 = cache.open(&db_ok.path).expect("cache open 3 after resize");
     assert_eq!(r3.categories[&6].name, "Boat");
     assert!(r3.categories.contains_key(&7));
     let _ = r1;
@@ -386,4 +390,60 @@ fn missing_required_tables_propagate_errors() {
             "dropping {table} must fail load_uncached"
         );
     }
+}
+
+#[test]
+fn targeted_sqlite_queries_load_only_requested_domains() {
+    let db = TempDb::new("targeted_queries", |c| {
+        c.execute_batch(
+            r#"
+            INSERT INTO sde_resources VALUES ('res:/a.fsdbinary', 'ab/a', 'md5', 42, 'cfsd', 1, 'spot');
+            INSERT INTO sde_races VALUES (2, 'Minmatar', 606, '{"3300":2}', 'desc');
+            INSERT INTO sde_types VALUES
+                (587, 25, 6, 'Rifter', 1.0, 1.0, 1.0, 1, 12500.0, 40.0, NULL, 2, NULL, NULL, NULL, 1, '{"182":3329,"277":1}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ''),
+                (3329, 257, 16, 'Minmatar Frigate', 1.0, 0.01, 0.0, 1, 50000.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{"182":3327,"277":1,"275":2}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ''),
+                (3327, 257, 16, 'Spaceship Command', 1.0, 0.01, 0.0, 1, 10000.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{"275":1}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ''),
+                (3300, 255, 16, 'Gunnery', 1.0, 0.01, 0.0, 1, 10000.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{"275":1}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ''),
+                (999001, 485, 6, 'Cap Ship', 1.0, 1.0, 1.0, 1, 0.0, 500.0, NULL, NULL, NULL, NULL, NULL, 1, '{"1547":4,"1785":1}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ''),
+                (30879, 920, 2, 'C6 Wolf-Rayet', 1.0, 1.0, 1.0, 1, 0.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ''),
+                (999002, 18, 4, 'Unrelated Ore', 1.0, 1.0, 1.0, 1, -5.0, 1.0, NULL, NULL, NULL, NULL, NULL, 1, '{}', '[]', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '');
+            INSERT INTO sde_regions VALUES (11000030, 'J-R', 0.0, 0.0, 0.0, NULL, 6);
+            INSERT INTO sde_constellations VALUES (21000290, 11000030, 'J-C', 0.0, 0.0, 0.0, NULL, 6);
+            INSERT INTO sde_solar_systems VALUES (31002580, 21000290, 11000030, 'Thera-ish', -1.0, 0.0, 0.0, 0.0, 1.0, '[]', 13);
+            INSERT INTO sde_solar_systems VALUES (30000142, 20000020, 10000002, 'Jita', 0.9, 0.0, 0.0, 0.0, 1.0, '[]', NULL);
+            "#,
+        )
+        .unwrap();
+    });
+
+    let skill_sub = SdeRegistry::open_races_and_skill_closure_for_types(&db.path, &[587])
+        .expect("open_races_and_skill_closure_for_types");
+    assert!(skill_sub.races.contains_key(&2));
+    assert!(skill_sub.types.contains_key(&587));
+    assert!(skill_sub.types.contains_key(&3329));
+    assert!(skill_sub.types.contains_key(&3327));
+    assert!(skill_sub.types.contains_key(&3300));
+    assert!(!skill_sub.types.contains_key(&999002));
+    assert!(skill_sub.solar_systems.is_empty());
+
+    let ships = SdeRegistry::load_ship_category_type_rows(&db.path).expect("ship rows");
+    assert_eq!(ships.len(), 2);
+    assert!(ships.contains(&(999001, 485, 4.0, 1.0)));
+
+    let prices = SdeRegistry::load_type_base_prices(&db.path).expect("base prices");
+    assert_eq!(prices.get(&587).copied(), Some(12500.0));
+    assert!(!prices.contains_key(&999001));
+    assert!(!prices.contains_key(&999002));
+
+    let prog = SdeRegistry::open_progression_resources_only(&db.path).expect("progression resources");
+    assert!(prog.resources.contains_key("res:/a.fsdbinary"));
+    assert!(prog.types.is_empty());
+
+    let wh = SdeRegistry::open_for_wormhole_system(&db.path, 31002580).expect("wormhole sys");
+    assert!(wh.solar_systems.contains_key(&31002580));
+    assert!(!wh.solar_systems.contains_key(&30000142));
+    assert!(wh.constellations.contains_key(&21000290));
+    assert!(wh.regions.contains_key(&11000030));
+    assert!(wh.types.contains_key(&30879));
+    assert!(!wh.types.contains_key(&587));
 }

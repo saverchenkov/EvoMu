@@ -372,9 +372,8 @@ async fn jump_to_fleet_beacon_relocates_capital_ship_with_fuel_cap_and_fatigue()
     spawn_ship(&ctx, origin_sys, carrier_id, 999_320, jumper_id, DVec3::ZERO, 0.0, 20_000.0).await;
 
     // Seed active fleet beacon in dest_sys
-    let ctx_k = ctx.instance_id as usize;
-    cyno_state().write().unwrap().beacons.insert(
-        (ctx_k, cyno_ship_id),
+    cyno_state(&ctx).state.write().unwrap().beacons.insert(
+        cyno_ship_id,
         FleetModuleBeacon {
             beacon_id,
             char_id: cyno_pilot_id,
@@ -544,9 +543,8 @@ async fn cyno_arrival_near_structure_ejects_at_250_ms_and_keeps_ballpark_protect
         )
         .await;
 
-    let ctx_k = ctx.instance_id as usize;
-    cyno_state().write().unwrap().beacons.insert(
-        (ctx_k, cyno_ship_id),
+    cyno_state(&ctx).state.write().unwrap().beacons.insert(
+        cyno_ship_id,
         FleetModuleBeacon {
             beacon_id,
             char_id: cyno_pilot_id,

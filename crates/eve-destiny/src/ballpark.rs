@@ -22,9 +22,18 @@ fn default_constellation_id() -> u32 {
 }
 
 fn capital_ship_catalog_fallback_or_default_db() -> std::sync::Arc<CapitalShipCatalog> {
-    eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path())
-        .map(|sde| capital_ship_catalog_for_sde(&sde))
-        .unwrap_or_else(|_| std::sync::Arc::new(CapitalShipCatalog::default_fallback()))
+    let mut catalog = CapitalShipCatalog::default_fallback();
+    if let Ok(rows) =
+        eve_sde::SdeRegistry::load_ship_category_type_rows(&eve_sde::SdeRegistry::default_db_path())
+    {
+        for (tid, gid, rig_size, is_cap_size) in rows {
+            catalog.type_to_group.insert(tid, gid);
+            if rig_size >= 4.0 || is_cap_size > 0.0 {
+                catalog.cap_groups.insert(gid);
+            }
+        }
+    }
+    std::sync::Arc::new(catalog)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,6 +21,9 @@ pub mod scenario;
 pub mod shadow_client;
 pub mod system_lifecycle_ratchet;
 pub mod test_fixture_ratchet;
+pub mod test_sde;
+
+pub use test_sde::TestSde;
 
 use std::fs::OpenOptions;
 use std::io::Write;

@@ -958,17 +958,7 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     fn test_poison_hook() -> Option<String> {
         POISON_MSG.with(|m| m.borrow().clone())
     }
-    struct HookResetGuard;
-    impl Drop for HookResetGuard {
-        fn drop(&mut self) {
-            crate::set_tx_error_hook(None);
-            crate::set_tx_poison_check_hook(None);
-        }
-    }
 
-    let _guard = HookResetGuard;
-    crate::set_tx_error_hook(Some(test_record_hook));
-    crate::set_tx_poison_check_hook(Some(test_poison_hook));
     RECORDED_TX_ERRORS.with(|v| v.borrow_mut().clear());
     POISON_MSG.with(|m| *m.borrow_mut() = None);
 
@@ -976,6 +966,15 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     let db_path = dir.join(format!("evomu_issue_874_hooks_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
     let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+    let repo_other = WorldRepository::new_empty();
+    assert!(!repo.has_tx_error_hook());
+    assert!(!repo.has_tx_poison_check_hook());
+    repo.set_tx_error_hook(Some(test_record_hook));
+    repo.set_tx_poison_check_hook(Some(test_poison_hook));
+    assert!(repo.has_tx_error_hook());
+    assert!(repo.has_tx_poison_check_hook());
+    assert!(!repo_other.has_tx_error_hook());
+    assert!(!repo_other.has_tx_poison_check_hook());
 
     // 1. User business errors inside `try_with_mut_snapshot` must NOT trigger `record_tx_error`.
     let user_err: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
@@ -1017,7 +1016,8 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
         "entity ID allocator must never reuse IDs from rolled-back try_with_mut_snapshot (pre={pre_fail_id}, alloc={allocated_during_fail}, post={post_fail_id})"
     );
 
-    // 3. When poison hook returns `Some(...)`, subsequent writes abort before running their closure.
+    // 3. When poison hook returns `Some(...)`, subsequent writes abort before running their closure
+    //    on `repo`, while `repo_other` (no hooks installed) continues committing cleanly.
     repo.with_sqlite_conn(|conn| {
         conn.execute_batch("DROP TRIGGER abort_notes_ins;").unwrap();
     });
@@ -1031,6 +1031,20 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     assert!(!closure_ran, "poisoned tx must short-circuit before running closure");
     assert!(poisoned_res.unwrap_err().contains("abort_note_persist"));
     assert!(!repo.with_snapshot(|s| s.char_notes.contains_key(&(90_000_001, 4))));
+    repo_other
+        .try_with_mut_snapshot(|snap| -> Result<(), String> {
+            snap.char_notes.insert((90_000_001, 5), "other repo unaffected".into());
+            Ok(())
+        })
+        .expect("repo_other must not inherit repo's poison hook");
+    assert_eq!(
+        repo_other.with_snapshot(|s| s.char_notes.get(&(90_000_001, 5)).cloned()),
+        Some("other repo unaffected".to_string())
+    );
+    repo.set_tx_error_hook(None);
+    repo.set_tx_poison_check_hook(None);
+    assert!(!repo.has_tx_error_hook());
+    assert!(!repo.has_tx_poison_check_hook());
 
     drop(repo);
     let _ = std::fs::remove_file(&db_path);

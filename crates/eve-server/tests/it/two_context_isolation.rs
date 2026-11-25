@@ -482,8 +482,17 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
         let st = h.hacking_states.get(&container_id).expect("right hacking state preserved");
         assert!(!st.unlocked);
     });
-    assert_eq!(
-        right.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.flag)),
-        Some(InventoryFlag::Locked)
+    assert!(
+        right.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.flag))
+            == Some(InventoryFlag::Locked)
     );
+
+    // 3. Per-WorldRepository cyno portal beacons/bridges isolation (`#1583` Track 14).
+    use eve_server::services::inventory_fitting::fitting_cyno_portal::{
+        is_ship_cyno_active, on_cyno_ship_destroyed,
+    };
+    assert!(!is_ship_cyno_active(left, ship_id));
+    assert!(!is_ship_cyno_active(right, ship_id));
+    on_cyno_ship_destroyed(left, ship_id);
+    assert!(!is_ship_cyno_active(right, ship_id));
 }

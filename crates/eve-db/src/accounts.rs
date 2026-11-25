@@ -324,7 +324,7 @@ impl WorldRepository {
         }
         let hashed_token = Self::hash_password_token(username, password_token);
         // Resolve SDE outside `try_with_mut_snapshot` to preserve lock ordering with test env guards.
-        let shared_sde = Self::open_default_sde_shared();
+        let shared_sde = Self::open_skill_sde_subset_for_types(&[587]);
         let default_gm_ship_skills = if let Some(sde) = shared_sde.as_deref() {
             Self::derived_skills_for_types(sde, [587])
         } else {

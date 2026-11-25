@@ -701,9 +701,10 @@ pub fn collect_live_market_adjusted_prices_with_sde(
 pub fn collect_live_market_adjusted_prices(
     snap: &eve_db::WorldStateSnapshot,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
-        let base_prices = sde_base_prices(&sde);
-        return collect_live_market_adjusted_prices_with_lookup(snap, Some(&sde), |tid| {
+    if let Ok(base_prices) =
+        eve_sde::SdeRegistry::load_type_base_prices(&eve_sde::SdeRegistry::default_db_path())
+    {
+        return collect_live_market_adjusted_prices_with_lookup(snap, None, |tid| {
             base_prices.get(&tid).copied()
         });
     }
@@ -727,9 +728,10 @@ pub fn compute_market_adjusted_price_from_snap(
     snap: &eve_db::WorldStateSnapshot,
     type_id: eve_sde::TypeId,
 ) -> Option<f64> {
-    if let Ok(sde) = eve_sde::SdeRegistry::open_shared(&eve_sde::SdeRegistry::default_db_path()) {
-        let base_prices = sde_base_prices(&sde);
-        return compute_market_adjusted_price_with_lookup(snap, Some(&sde), type_id, |tid| {
+    if let Ok(base_prices) =
+        eve_sde::SdeRegistry::load_type_base_prices(&eve_sde::SdeRegistry::default_db_path())
+    {
+        return compute_market_adjusted_price_with_lookup(snap, None, type_id, |tid| {
             base_prices.get(&tid).copied()
         });
     }

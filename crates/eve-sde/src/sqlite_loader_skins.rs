@@ -305,7 +305,7 @@ fn table_exists(conn: &Connection, table: &str) -> bool {
     .unwrap_or(false)
 }
 
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+pub(crate) fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
     let sql = format!("PRAGMA table_info({table})");
     let Ok(mut stmt) = conn.prepare(&sql) else {
         return false;
@@ -356,7 +356,7 @@ fn load_career_goals_table(conn: &Connection) -> Result<HashMap<u32, CareerGoalT
 }
 
 #[allow(clippy::type_complexity)]
-fn load_v24_progression_tables(
+pub(crate) fn load_v24_progression_tables(
     conn: &Connection,
 ) -> Result<
     (

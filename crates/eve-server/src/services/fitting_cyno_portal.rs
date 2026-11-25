@@ -11,7 +11,7 @@
 use super::*;
 use crate::router::notify_registry::{OnFleetJumpBeaconModuleChange, OnJumpTimersUpdated};
 use eve_destiny::{Ball, MovementMode};
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 
 #[path = "fitting_conduit_jump.rs"]
 pub(crate) mod fitting_conduit_jump;
@@ -58,16 +58,16 @@ pub fn is_ship_cyno_active(ctx: &ServerContext, ship_id: i64) -> bool {
     {
         sweep_expired_cyno_beacons(ctx);
     }
-    let key = ctx_key(ctx);
     let now_unix = ctx.now_unix_secs();
-    if let Ok(state) = cyno_state().read() {
-        for (&(k, _), b) in &state.beacons {
-            if k == key && b.ship_id == ship_id && b.expires_at_unix > now_unix {
+    let slot = cyno_state(ctx);
+    if let Ok(state) = slot.state.read() {
+        for b in state.beacons.values() {
+            if b.ship_id == ship_id && b.expires_at_unix > now_unix {
                 return true;
             }
         }
-        for (&(k, _), br) in &state.bridges {
-            if k == key && br.bridger_ship_id == ship_id && br.expires_at_unix > now_unix {
+        for br in state.bridges.values() {
+            if br.bridger_ship_id == ship_id && br.expires_at_unix > now_unix {
                 return true;
             }
         }
@@ -90,50 +90,53 @@ pub(crate) struct ActiveJumpBridge {
 }
 
 #[derive(Default)]
+pub(crate) struct CynoPortalSlot {
+    pub(crate) state: RwLock<CynoPortalState>,
+}
+
+#[derive(Default)]
 pub(crate) struct CynoPortalState {
-    pub(crate) beacons: HashMap<(usize, i64), FleetModuleBeacon>,
-    destroyed_beacons: HashMap<(usize, i64), FleetModuleBeacon>,
-    bridges: HashMap<(usize, i64), ActiveJumpBridge>,
-    beacon_cycles: HashMap<(usize, i64), (u32, i64)>,
+    pub(crate) beacons: HashMap<i64, FleetModuleBeacon>,
+    destroyed_beacons: HashMap<i64, FleetModuleBeacon>,
+    bridges: HashMap<i64, ActiveJumpBridge>,
+    beacon_cycles: HashMap<i64, (u32, i64)>,
 }
 
 pub(super) fn drain_expired_beacons(
     st: &mut CynoPortalState,
-    ctx_id: usize,
     now_unix: u64,
 ) -> (Vec<(i64, u32, i64, TypeId)>, Vec<(u32, i64, i64)>) {
     let mut expired_beacons = Vec::new();
     let mut expired_ship_keys = Vec::new();
-    st.beacons.retain(|&(ck, key_ship_id), b| {
-        if ck == ctx_id && b.expires_at_unix <= now_unix {
+    st.beacons.retain(|&key_ship_id, b| {
+        if b.expires_at_unix <= now_unix {
             expired_beacons.push((b.char_id, b.solar_system_id, b.beacon_id, b.beacon_type_id));
-            expired_ship_keys.push((ck, key_ship_id, b.ship_id));
+            expired_ship_keys.push((key_ship_id, b.ship_id));
             false
         } else {
             true
         }
     });
     let mut expired_cycles = Vec::new();
-    for (ck, key_ship_id, ship_id) in expired_ship_keys {
-        if let Some((sys_id, mod_id)) = st.beacon_cycles.remove(&(ck, key_ship_id)) {
+    for (key_ship_id, ship_id) in expired_ship_keys {
+        if let Some((sys_id, mod_id)) = st.beacon_cycles.remove(&key_ship_id) {
             expired_cycles.push((sys_id, key_ship_id, mod_id));
-        } else if let Some((sys_id, mod_id)) = st.beacon_cycles.remove(&(ck, ship_id)) {
+        } else if let Some((sys_id, mod_id)) = st.beacon_cycles.remove(&ship_id) {
             expired_cycles.push((sys_id, ship_id, mod_id));
         }
     }
     st.destroyed_beacons
-        .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+        .retain(|_, b| b.expires_at_unix > now_unix);
     (expired_beacons, expired_cycles)
 }
 
 #[cfg(test)]
-pub(super) fn purge_expired(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
-    let _ = drain_expired_beacons(st, ctx_id, now_unix);
+pub(super) fn purge_expired(st: &mut CynoPortalState, now_unix: u64) {
+    let _ = drain_expired_beacons(st, now_unix);
 }
 
-pub(super) fn purge_expired_bridges(st: &mut CynoPortalState, ctx_id: usize, now_unix: u64) {
-    st.bridges
-        .retain(|&(ck, _), b| ck != ctx_id || b.expires_at_unix > now_unix);
+pub(super) fn purge_expired_bridges(st: &mut CynoPortalState, now_unix: u64) {
+    st.bridges.retain(|_, b| b.expires_at_unix > now_unix);
 }
 
 pub fn is_covert_beacon_type(beacon_type_id: TypeId) -> bool {
@@ -159,25 +162,26 @@ pub(crate) fn effective_beacon_field_type(ctx: &ServerContext, beacon_type_id: T
     }
 }
 
+const CYNO_PORTAL_STATE_SLOT_KEY: &str = "fitting_cyno_portal_state";
+
 pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
-    let key = ctx_key(ctx);
     let now = ctx.now_unix_secs();
-    let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-    st.destroyed_beacons
-        .retain(|&(ck, _), b| ck != key || b.expires_at_unix > now);
+    let slot = cyno_state(ctx);
+    let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
+    st.destroyed_beacons.retain(|_, b| b.expires_at_unix > now);
     let mut removed_bridges = Vec::new();
-    st.bridges.retain(|&(k, _), br| {
-        if k == key && br.bridger_ship_id == ship_id {
+    st.bridges.retain(|_, br| {
+        if br.bridger_ship_id == ship_id {
             removed_bridges.push((br.origin_system_id, br.bridger_ship_id, br.portal_module_id, br.portal_ball_id));
             false
         } else {
             true
         }
     });
-    let matched: Vec<(usize, i64)> = st
+    let matched: Vec<i64> = st
         .beacons
         .iter()
-        .filter(|&(&(k, _), b)| k == key && b.ship_id == ship_id && b.expires_at_unix > now)
+        .filter(|&(_, b)| b.ship_id == ship_id && b.expires_at_unix > now)
         .map(|(&k, _)| k)
         .collect();
     for k in matched {
@@ -187,8 +191,8 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
         }
     }
     st.beacons
-        .retain(|&(k, _), b| !(k == key && b.ship_id == ship_id && b.expires_at_unix <= now));
-    let beacon_cycle = st.beacon_cycles.remove(&(key, ship_id));
+        .retain(|_, b| !(b.ship_id == ship_id && b.expires_at_unix <= now));
+    let beacon_cycle = st.beacon_cycles.remove(&ship_id);
     drop(st);
     if let Some((bsys, bmod)) = beacon_cycle {
         if bmod != 0 {
@@ -208,23 +212,19 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     }
 }
 
-pub(crate) fn cyno_state() -> &'static RwLock<CynoPortalState> {
-    static STATE: OnceLock<RwLock<CynoPortalState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(CynoPortalState::default()))
-}
-
-fn ctx_key(ctx: &ServerContext) -> usize {
-    ctx.instance_id as usize
+pub(crate) fn cyno_state(ctx: &ServerContext) -> std::sync::Arc<CynoPortalSlot> {
+    ctx.db
+        .get_or_init_transient_runtime_slot(CYNO_PORTAL_STATE_SLOT_KEY, CynoPortalSlot::default)
 }
 
 /// Active cynosural field beacon counts per solar system for `map.GetBeaconCount` (excludes covert cynos).
 pub(crate) fn active_cyno_beacon_counts(ctx: &ServerContext) -> HashMap<i64, i64> {
-    let key = ctx_key(ctx);
     let now_unix = ctx.now_unix();
     let mut counts = HashMap::new();
-    if let Ok(state) = cyno_state().read() {
-        for (&(k, _), b) in &state.beacons {
-            if k == key && b.expires_at_unix > now_unix && !is_covert_beacon_type(b.beacon_type_id) {
+    let slot = cyno_state(ctx);
+    if let Ok(state) = slot.state.read() {
+        for b in state.beacons.values() {
+            if b.expires_at_unix > now_unix && !is_covert_beacon_type(b.beacon_type_id) {
                 *counts.entry(i64::from(b.solar_system_id)).or_insert(0) += 1;
             }
         }
@@ -234,16 +234,16 @@ pub(crate) fn active_cyno_beacon_counts(ctx: &ServerContext) -> HashMap<i64, i64
 
 /// Returns the latest Unix expiry timestamp of any cyno beacon or jump bridge tied to `ship_id`.
 pub(crate) fn ship_cyno_activity_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u64 {
-    let key = ctx_key(ctx);
     let mut max_exp = 0_u64;
-    if let Ok(state) = cyno_state().read() {
-        for (&(k, _), b) in &state.beacons {
-            if k == key && b.ship_id == ship_id {
+    let slot = cyno_state(ctx);
+    if let Ok(state) = slot.state.read() {
+        for b in state.beacons.values() {
+            if b.ship_id == ship_id {
                 max_exp = max_exp.max(b.expires_at_unix);
             }
         }
-        for (&(k, _), br) in &state.bridges {
-            if k == key && br.bridger_ship_id == ship_id {
+        for br in state.bridges.values() {
+            if br.bridger_ship_id == ship_id {
                 max_exp = max_exp.max(br.expires_at_unix);
             }
         }
@@ -861,10 +861,11 @@ async fn light_cyno(
         duration_s,
     )?;
     let clear_cyno_claim = || {
-        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        if st.beacons.get(&(ctx_key(ctx), ship_id)).is_some_and(|b| b.beacon_id == -ship_id) {
-            st.beacons.remove(&(ctx_key(ctx), ship_id));
-            st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
+        let slot = cyno_state(ctx);
+        let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
+        if st.beacons.get(&ship_id).is_some_and(|b| b.beacon_id == -ship_id) {
+            st.beacons.remove(&ship_id);
+            st.beacon_cycles.remove(&ship_id);
         }
     };
     let (reserved_fuel, reserved_item_diffs, fuel_guard) = if fuel_qty > 0 {
@@ -940,11 +941,12 @@ async fn light_cyno(
         return Err(err(code, e));
     }
     ctx.emit_reserved_fuel_item_diffs("emit_cyno_fuel_diffs", char_id, &reserved_item_diffs, fuel_guard);
-    cyno_state()
+    cyno_state(ctx)
+        .state
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .beacon_cycles
-        .insert((ctx_key(ctx), ship_id), (sys_id, module_id));
+        .insert(ship_id, (sys_id, module_id));
 
     let ship_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);
     let spawn_radius = type_attr(ctx, mod_type, ATTR_CYNO_SPAWN_RADIUS);
@@ -993,11 +995,12 @@ async fn light_cyno(
         position,
         expires_at_unix,
     };
-    cyno_state()
+    cyno_state(ctx)
+        .state
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .beacons
-        .insert((ctx_key(ctx), ship_id), beacon);
+        .insert(ship_id, beacon);
     let mut cyno_sess = SessionState::new(0);
     cyno_sess.character_id = Some(char_id);
     cyno_sess.solar_system_id = Some(sys_id);
@@ -1029,7 +1032,7 @@ async fn light_cyno(
     ]))
 }
 
-/// Reserves the per-ship cyno slot in `cyno_state()` while draining expired beacons/cycles,
+/// Reserves the per-ship cyno slot in `cyno_state(ctx)` while draining expired beacons/cycles,
 /// cleaning up drained beacons and actor cycles even if `ship_id` already holds an active slot (`#1486`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reserve_cyno_beacon_slot_and_cleanup_expired(
@@ -1043,12 +1046,13 @@ pub(super) fn reserve_cyno_beacon_slot_and_cleanup_expired(
     duration_s: f64,
 ) -> Result<(), BridgeRpcError> {
     let (already_active, pre_expired_beacons, pre_expired_cycles) = {
-        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        let (exp_beacons, exp_cycles) = drain_expired_beacons(&mut st, ctx_key(ctx), now_reserve);
-        let already_active = st.beacons.contains_key(&(ctx_key(ctx), ship_id));
+        let slot = cyno_state(ctx);
+        let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
+        let (exp_beacons, exp_cycles) = drain_expired_beacons(&mut st, now_reserve);
+        let already_active = st.beacons.contains_key(&ship_id);
         if !already_active {
             st.beacons.insert(
-                (ctx_key(ctx), ship_id),
+                ship_id,
                 FleetModuleBeacon {
                     beacon_id: -ship_id,
                     char_id,
@@ -1104,24 +1108,25 @@ pub(super) fn cleanup_expired_beacons_and_cycles(
 }
 
 pub(crate) fn live_beacon(ctx: &ServerContext, cyno_char_id: i64, beacon_id: i64, sys_id: u32) -> Result<FleetModuleBeacon, BridgeRpcError> {
-    let (now, ctx_k) = (ctx.now_unix_secs(), ctx_key(ctx));
-    let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+    let now = ctx.now_unix_secs();
+    let slot = cyno_state(ctx);
+    let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
     let mut expired_for_char = None;
-    for (&(k, _), b) in &st.beacons {
-        if k == ctx_k && b.expires_at_unix <= now && b.char_id == cyno_char_id {
+    for b in st.beacons.values() {
+        if b.expires_at_unix <= now && b.char_id == cyno_char_id {
             expired_for_char = Some(b.beacon_id);
             break;
         }
     }
-    let (expired_beacons, expired_cycles) = drain_expired_beacons(&mut st, ctx_k, now);
+    let (expired_beacons, expired_cycles) = drain_expired_beacons(&mut st, now);
     let matched_b = st
         .beacons
-        .iter()
-        .find(|&(&(k, _), b)| {
-            k == ctx_k && b.char_id == cyno_char_id && (beacon_id == 0 || b.beacon_id == beacon_id) && (sys_id == 0 || b.solar_system_id == sys_id)
+        .values()
+        .find(|b| {
+            b.char_id == cyno_char_id && (beacon_id == 0 || b.beacon_id == beacon_id) && (sys_id == 0 || b.solar_system_id == sys_id)
         })
-        .or_else(|| st.beacons.iter().find(|&(&(k, _), b)| k == ctx_k && b.char_id == cyno_char_id))
-        .map(|(_, b)| b.clone());
+        .or_else(|| st.beacons.values().find(|b| b.char_id == cyno_char_id))
+        .cloned();
     drop(st);
     cleanup_expired_beacons_and_cycles(ctx, expired_beacons, expired_cycles);
     let Some(b) = matched_b else {
@@ -1418,14 +1423,15 @@ pub(crate) async fn caller_in_space(
     })?;
     let now = ctx.now_unix();
     let release_portal_mod = {
-        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        let slot = cyno_state(ctx);
+        let mut st = slot.state.write().unwrap_or_else(|e| e.into_inner());
         let pmod = st
             .bridges
-            .get(&(ctx_key(ctx), ship_id))
+            .get(&ship_id)
             .filter(|b| b.bridger_ship_id == ship_id && b.expires_at_unix <= now)
             .map(|b| b.portal_module_id);
         if pmod.is_some() {
-            st.bridges.remove(&(ctx_key(ctx), ship_id));
+            st.bridges.remove(&ship_id);
         }
         pmod
     };
@@ -1443,8 +1449,9 @@ pub(crate) async fn caller_in_space(
         ));
     }
     {
-        let st = cyno_state().read().unwrap_or_else(|e| e.into_inner());
-        if let Some(b) = st.bridges.get(&(ctx_key(ctx), ship_id)) {
+        let slot = cyno_state(ctx);
+        let st = slot.state.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = st.bridges.get(&ship_id) {
             if b.bridger_ship_id == ship_id && b.expires_at_unix > now {
                 return Err(err("JumpPortalOpen", "Cannot jump while own portal is open"));
             }
@@ -1672,20 +1679,20 @@ pub(crate) async fn resolve_fleet_beacon_or_destroyed(
         Err(e) if e.code == "CynoJammed" => Err(e),
         Err(e) if !is_deployable && cyno_char != 0 && beacon_id != 0 => {
             let now = ctx.now_unix_secs();
-            let ctx_k = ctx_key(ctx);
-            let destroyed_b = cyno_state()
+            let slot = cyno_state(ctx);
+            let destroyed_b = slot
+                .state
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
                 .destroyed_beacons
-                .iter()
-                .find(|&(&(k, _), b)| {
-                    k == ctx_k
-                        && b.char_id == cyno_char
+                .values()
+                .find(|b| {
+                    b.char_id == cyno_char
                         && b.beacon_id == beacon_id
                         && (target_sys == 0 || b.solar_system_id == target_sys)
                         && b.expires_at_unix > now
                 })
-                .map(|(_, b)| b.clone());
+                .cloned();
             if let Some(db_b) = destroyed_b {
                 check_cyno_jammer_for_beacon(ctx, &db_b)?;
                 Ok((db_b, true))
