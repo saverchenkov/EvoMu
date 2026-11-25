@@ -20,7 +20,7 @@ use eve_server::services::pve_exploration::{
 };
 use eve_testkit::client_harness::ClientHarness;
 use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
-use eve_testkit::scenario::ScenarioBackend as _;
+use eve_testkit::scenario::ScenarioWorldBackend as _;
 use glam::DVec3;
 use std::collections::HashMap;
 use std::path::Path;

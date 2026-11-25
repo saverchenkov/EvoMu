@@ -22,7 +22,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_testkit::client_harness::ClientHarness;
 use eve_testkit::legal_fixture::{assert_legal_fixture, FixtureSessionView, LegalFixtureExpectation};
-use eve_testkit::scenario::ScenarioBackend as _;
+use eve_testkit::scenario::ScenarioWorldBackend as _;
 use std::collections::HashMap;
 
 async fn assert_pilot_fixture_legal(
