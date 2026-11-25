@@ -1181,3 +1181,74 @@ async fn anchor_tidi_on_occupied_system_preserves_pre_anchor_delta_pins_autoscal
         Some(sim_b.as_ticks() + 100 * FILETIME_TICKS_PER_SEC)
     );
 }
+
+#[tokio::test]
+async fn backward_reanchor_resets_last_sim_activation_clamp_to_match_peek_sim_filetime() {
+    use crate::services::serverops_cluster::set_system_tidi_factor;
+
+    let base = 1_800_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+    });
+
+    // Seed higher `last_sim_activation_ft_by_system` via TiDi and same-tick read, then re-anchor backward (-300_000 ms).
+    let _ = set_system_tidi_factor(&ctx, sys_id, 0.50);
+    let wall_0 = ctx.now_machonet_wall_filetime();
+    let _ = ctx.now_system_sim_filetime(Some(sys_id));
+
+    let sim_clock = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 0.25);
+    let peek_0 = ctx
+        .peek_system_sim_filetime(sys_id)
+        .expect("backward re-anchored sim clock");
+    assert_eq!(sim_clock.sim_filetime(), peek_0);
+    assert_eq!(
+        peek_0,
+        wall_0.saturating_sub_secs(300),
+        "peek_system_sim_filetime must trail wall_0 by 300s"
+    );
+
+    // `now_system_sim_filetime` must NOT stay clamped +300s ahead at the pre-anchor activation stamp.
+    let now_0 = ctx.now_system_sim_filetime(Some(sys_id));
+    assert!(
+        now_0.as_ticks() >= peek_0.as_ticks() && now_0.as_ticks() <= peek_0.as_ticks() + 1,
+        "now_system_sim_filetime ({now_0:?}) must align with peek_0 ({peek_0:?}), not stale wall_0 ({wall_0:?})"
+    );
+    assert!(now_0.as_ticks() < wall_0.as_ticks());
+    let now_char = ctx.now_system_sim_filetime_for_char(char_id);
+    assert!(
+        now_char.as_ticks() >= peek_0.as_ticks() && now_char.as_ticks() <= peek_0.as_ticks() + 2
+    );
+    let exp_sim = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, ctx.now_unix_secs() + 40);
+    assert_eq!(exp_sim, peek_0.saturating_add_secs(10));
+
+    ctx.advance_secs(4);
+    let peek_1 = ctx.peek_system_sim_filetime(sys_id).unwrap();
+    assert_eq!(peek_1, peek_0.saturating_add_secs(1));
+    assert_eq!(ctx.now_system_sim_filetime(Some(sys_id)), peek_1);
+
+    // Pure 1.0x backward anchor bumps rebase_generation_by_system once (not 1 -> 2) and avoids stale clamp.
+    let pure_sys = 30_000_144_u32;
+    let pure_clock = ctx.anchor_system_sim_clock_with_offset_ms(pure_sys, -300_000, 1.0);
+    let pure_peek = ctx.peek_system_sim_filetime(pure_sys).unwrap();
+    assert_eq!(pure_clock.sim_filetime(), pure_peek);
+    let pure_now = ctx.now_system_sim_filetime(Some(pure_sys));
+    assert!(
+        pure_now.as_ticks() >= pure_peek.as_ticks() && pure_now.as_ticks() <= pure_peek.as_ticks() + 1
+    );
+    let gen = ctx
+        .systems
+        .cluster_nodes
+        .read()
+        .unwrap()
+        .rebase_generation_by_system
+        .get(&pure_sys)
+        .copied();
+    assert_eq!(gen, Some(1), "single anchor must bump rebase generation once");
+}

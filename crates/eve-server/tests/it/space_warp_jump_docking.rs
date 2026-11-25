@@ -5812,6 +5812,15 @@ async fn stargate_jump_between_tidi_systems_reemits_rescaled_crimewatch_timers()
         .iter()
         .position(|n| n.event == "DoSimClockRebase")
         .expect("DoSimClockRebase on 0.25x -> 1.0x jump");
+    let PyRep::Tuple(rebase_out_times) = &out_notifs[rebase_out_pos].args[0] else {
+        panic!("DoSimClockRebase out tuple");
+    };
+    let expected_1x_now = ctx.now_machonet_wallclock_filetime_ticks();
+    assert_eq!(
+        rebase_out_times[0].as_i64(),
+        Some(sim_from_0.as_ticks() + 5 * FILETIME_TICKS_PER_SEC)
+    );
+    assert_eq!(rebase_out_times[1].as_i64(), Some(expected_1x_now));
     let pvp_out_pos = out_notifs
         .iter()
         .position(|n| n.event == "OnPvpTimerUpdate")
@@ -5821,11 +5830,22 @@ async fn stargate_jump_between_tidi_systems_reemits_rescaled_crimewatch_timers()
         .position(|n| n.event == "OnCriminalTimerUpdate")
         .expect("re-emitted OnCriminalTimerUpdate (Suspect) on 0.25x -> 1.0x jump");
     assert!(rebase_out_pos < pvp_out_pos && rebase_out_pos < crim_out_pos);
-    let expected_1x_exp = ctx.now_machonet_wallclock_filetime_ticks() + 880 * FILETIME_TICKS_PER_SEC;
+    let expected_1x_exp = expected_1x_now + 880 * FILETIME_TICKS_PER_SEC;
     assert_eq!(out_notifs[pvp_out_pos].args[0].as_i64(), Some(202));
     assert_eq!(out_notifs[pvp_out_pos].args[1].as_i64(), Some(expected_1x_exp));
     assert_eq!(out_notifs[crim_out_pos].args[0].as_i64(), Some(304));
     assert_eq!(out_notifs[crim_out_pos].args[1].as_i64(), Some(expected_1x_exp));
+    let cloak_out = out_notifs
+        .iter()
+        .find(|n| n.event == "OnJumpCloakUpdated")
+        .expect("OnJumpCloakUpdated on 0.25x -> 1.0x jump");
+    let invuln_out = out_notifs
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("OnRestoringInvulnUpdated on 0.25x -> 1.0x jump");
+    let expected_1x_cloak = expected_1x_now + 60 * FILETIME_TICKS_PER_SEC;
+    assert!((expected_1x_cloak..=expected_1x_cloak + 5).contains(&cloak_out.args[1].as_i64().unwrap()));
+    assert!((expected_1x_cloak..=expected_1x_cloak + 5).contains(&invuln_out.args[1].as_i64().unwrap()));
 
     // Wait past 7s jump session change cooldown (868s left -> 868 * 0.25 = 217s sim) and jump back into 0.25x.
     ctx.advance_secs(12);
@@ -5841,6 +5861,7 @@ async fn stargate_jump_between_tidi_systems_reemits_rescaled_crimewatch_timers()
             .await
     );
     let _ = ctx.drain_notifications_for_char(char_id);
+    let wall_before_back = ctx.now_machonet_wallclock_filetime_ticks();
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -5855,10 +5876,22 @@ async fn stargate_jump_between_tidi_systems_reemits_rescaled_crimewatch_timers()
     .expect("CmdStargateJump from 1.0x back into 0.25x");
 
     let back_notifs = ctx.drain_notifications_for_char(char_id);
+    let sim_from_back = ctx
+        .peek_system_sim_filetime(gate.from_solar_system_id)
+        .expect("0.25x source sim clock on return");
+    assert_eq!(
+        back_notifs.iter().filter(|n| n.event == "DoSimClockRebase").count(),
+        1
+    );
     let rebase_back_pos = back_notifs
         .iter()
         .position(|n| n.event == "DoSimClockRebase")
         .expect("DoSimClockRebase on 1.0x -> 0.25x jump");
+    let PyRep::Tuple(rebase_back_times) = &back_notifs[rebase_back_pos].args[0] else {
+        panic!("DoSimClockRebase back tuple");
+    };
+    assert_eq!(rebase_back_times[0].as_i64(), Some(wall_before_back));
+    assert_eq!(rebase_back_times[1].as_i64(), Some(sim_from_back.as_ticks()));
     let pvp_back_pos = back_notifs
         .iter()
         .position(|n| n.event == "OnPvpTimerUpdate")
@@ -5868,12 +5901,132 @@ async fn stargate_jump_between_tidi_systems_reemits_rescaled_crimewatch_timers()
         .position(|n| n.event == "OnCriminalTimerUpdate")
         .expect("re-emitted OnCriminalTimerUpdate (Suspect) on 1.0x -> 0.25x jump");
     assert!(rebase_back_pos < pvp_back_pos && rebase_back_pos < crim_back_pos);
-    let sim_from_back = ctx
-        .peek_system_sim_filetime(gate.from_solar_system_id)
-        .expect("0.25x source sim clock on return");
     let expected_025x_exp = sim_from_back.as_ticks() + 217 * FILETIME_TICKS_PER_SEC;
     assert_eq!(back_notifs[pvp_back_pos].args[0].as_i64(), Some(202));
     assert_eq!(back_notifs[pvp_back_pos].args[1].as_i64(), Some(expected_025x_exp));
     assert_eq!(back_notifs[crim_back_pos].args[0].as_i64(), Some(304));
     assert_eq!(back_notifs[crim_back_pos].args[1].as_i64(), Some(expected_025x_exp));
+    let cloak_back = back_notifs
+        .iter()
+        .find(|n| n.event == "OnJumpCloakUpdated")
+        .expect("OnJumpCloakUpdated on 1.0x -> 0.25x jump");
+    let invuln_back = back_notifs
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("OnRestoringInvulnUpdated on 1.0x -> 0.25x jump");
+    let expected_back_cloak = sim_from_back.as_ticks() + 60 * FILETIME_TICKS_PER_SEC;
+    assert!(
+        (expected_back_cloak..=expected_back_cloak + 5)
+            .contains(&cloak_back.args[1].as_i64().unwrap()),
+        "OnJumpCloakUpdated must align with sim_from_back + 60s instead of inflated wallclock"
+    );
+    assert!(
+        (expected_back_cloak..=expected_back_cloak + 5)
+            .contains(&invuln_back.args[1].as_i64().unwrap()),
+        "OnRestoringInvulnUpdated must align with sim_from_back + 60s instead of inflated wallclock"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_from_dilated_space_into_offset_anchored_1x_system_aligns_rebase_and_timers() {
+    use eve_db::clock::FILETIME_TICKS_PER_SEC;
+    use eve_server::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
+    use eve_server::services::serverops_cluster::set_system_tidi_factor;
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_196_002_i64;
+    let ship_id = 101_196_002_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let src_beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+
+    // Source system runs at 0.25x TiDi; destination system runs at 1.0x with -300_000 ms clock offset.
+    set_system_tidi_factor(&ctx, gate.from_solar_system_id, 0.25);
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(gate.to_solar_system_id, -300_000, 1.0);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let t0 = ctx.now_unix();
+    let timer_exp = t0 + 900;
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        st.pvp_timer_until_unix = timer_exp;
+        st.suspect_flag_until_unix = timer_exp;
+    }
+    emit_crimewatch_timer_notifications(&ctx, char_id, t0);
+    ctx.advance_secs(20);
+    emit_crimewatch_timer_notifications(&ctx, char_id, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let sim_from_20 = ctx
+        .peek_system_sim_filetime(gate.from_solar_system_id)
+        .expect("0.25x source sim clock");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(src_beyonce_id),
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdStargateJump from 0.25x into 1.0x (-300_000 ms)");
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let sim_dest = ctx
+        .peek_system_sim_filetime(gate.to_solar_system_id)
+        .expect("-300_000 ms 1.0x destination sim clock");
+    assert_eq!(
+        notifs.iter().filter(|n| n.event == "DoSimClockRebase").count(),
+        1
+    );
+    let rebase_pos = notifs
+        .iter()
+        .position(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase into offset-anchored system");
+    let PyRep::Tuple(rebase_times) = &notifs[rebase_pos].args[0] else {
+        panic!("DoSimClockRebase tuple");
+    };
+    assert_eq!(rebase_times[0].as_i64(), Some(sim_from_20.as_ticks()));
+    assert_eq!(rebase_times[1].as_i64(), Some(sim_dest.as_ticks()));
+
+    let pvp_pos = notifs
+        .iter()
+        .position(|n| n.event == "OnPvpTimerUpdate")
+        .expect("re-emitted OnPvpTimerUpdate in -300_000 ms 1.0x system");
+    let crim_pos = notifs
+        .iter()
+        .position(|n| n.event == "OnCriminalTimerUpdate")
+        .expect("re-emitted OnCriminalTimerUpdate in -300_000 ms 1.0x system");
+    assert!(rebase_pos < pvp_pos && rebase_pos < crim_pos);
+    let expected_dest_exp = sim_dest.as_ticks() + 880 * FILETIME_TICKS_PER_SEC;
+    assert_eq!(notifs[pvp_pos].args[0].as_i64(), Some(202));
+    assert_eq!(notifs[pvp_pos].args[1].as_i64(), Some(expected_dest_exp));
+    assert_eq!(notifs[crim_pos].args[0].as_i64(), Some(304));
+    assert_eq!(notifs[crim_pos].args[1].as_i64(), Some(expected_dest_exp));
+
+    let cloak = notifs
+        .iter()
+        .find(|n| n.event == "OnJumpCloakUpdated")
+        .expect("OnJumpCloakUpdated");
+    let invuln = notifs
+        .iter()
+        .find(|n| n.event == "OnRestoringInvulnUpdated")
+        .expect("OnRestoringInvulnUpdated");
+    let expected_dest_cloak = sim_dest.as_ticks() + 60 * FILETIME_TICKS_PER_SEC;
+    assert!((expected_dest_cloak..=expected_dest_cloak + 5).contains(&cloak.args[1].as_i64().unwrap()));
+    assert!((expected_dest_cloak..=expected_dest_cloak + 5).contains(&invuln.args[1].as_i64().unwrap()));
 }
