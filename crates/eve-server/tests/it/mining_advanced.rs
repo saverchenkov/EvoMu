@@ -1805,7 +1805,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
         .await
         .expect("agentMgr.DoAction(Complete)");
     assert_eq!(complete_res.dict_get("missionID").and_then(|v| v.as_i64()), Some(mission_id as i64));
-    assert_eq!(ctx.db.with_snapshot(|snap| snap.active_missions.get(&(char_id, mission_id)).map(|m| m.state.clone())).as_deref(), Some("Completed"));
+    assert_eq!(ctx.db.with_snapshot(|snap| eve_server::services::mission_fixture::get(snap, char_id, mission_id).map(|m| m.state)).as_deref(), Some("Completed"));
     assert_eq!(ctx.db.with_snapshot(|snap| snap.items.get(&ore_item_id).map(|it| it.quantity).unwrap_or(0)), 0);
 
     let goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32);

@@ -1286,7 +1286,7 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
     let dest_station = keyval_get(&offer_res, "dropoffStationID").and_then(|v| v.as_i64());
     let dest_sys = dest_station.and_then(|st| ctx.sde.stations.get(&st).map(|s| s.solar_system_id));
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(90_000_002, mission_id as u32)) { m.npcs_remaining = 0; }
+        eve_server::services::mission_fixture::edit(snap, 90_000_002, mission_id as u32, |m| m.npcs_remaining = 0);
         if let Some(dest) = dest_station {
             if let Some(ch) = snap.characters.get_mut(&90_000_002) {
                 ch.station_id = Some(dest);

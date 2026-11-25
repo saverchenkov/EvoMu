@@ -341,9 +341,9 @@ async fn test_journey_missions() {
     let active_agent_id = acc_m.dict_get("agentID").and_then(|v| v.as_i64()).unwrap_or(agent_id);
     let agent_corp = ctx.sde.agents[&active_agent_id].corporation_id;
     let (isk_before, lp_before, standing_before) = ctx.db.with_mut_snapshot(|s| {
-        if let Some(m) = s.active_missions.get_mut(&(90_000_001, mid as u32)) {
+        eve_server::services::mission_fixture::edit(s, 90_000_001, mid as u32, |m| {
             m.npcs_remaining = 0;
-        }
+        });
         let ch = s.characters.get_mut(&90_000_001).unwrap();
         let isk = ch.balance.0;
         let lp = ch.loyalty_points.get(&agent_corp).copied().unwrap_or(0);
