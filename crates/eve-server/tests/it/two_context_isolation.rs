@@ -588,21 +588,11 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
                 },
             );
             snap.module_online_states.insert(CYNO_MOD_ID, true);
-            snap.fleets.insert(
-                CYNO_FLEET_ID,
-                eve_db::FleetRecord {
-                    fleet_id: CYNO_FLEET_ID,
-                    boss_id: CHAR_ID,
-                    members: vec![CHAR_ID],
-                    ..Default::default()
-                },
-            );
             if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
                 ch.station_id = None;
                 ch.structure_id = None;
                 ch.solar_system_id = lowsec_sys;
                 ch.active_ship_id = CYNO_SHIP_ID;
-                ch.fleet_id = Some(CYNO_FLEET_ID);
             }
         });
         crate::common::grant_legal_active_ship_skills(ctx, CHAR_ID);
@@ -644,6 +634,21 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
                 &HashMap::new(),
             )
             .await;
+        // Seed fleet after `SelectCharacterID` so `on_character_select` does not purge offline fleet state.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.fleets.insert(
+                CYNO_FLEET_ID,
+                eve_db::FleetRecord {
+                    fleet_id: CYNO_FLEET_ID,
+                    boss_id: CHAR_ID,
+                    members: vec![CHAR_ID],
+                    ..Default::default()
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+                ch.fleet_id = Some(CYNO_FLEET_ID);
+            }
+        });
         sess.role |= ROLE_GMH;
         sess.station_id = None;
         sess.structure_id = None;
