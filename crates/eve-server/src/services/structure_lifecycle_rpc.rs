@@ -262,7 +262,25 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         } else {
             snap.items
                 .values()
-                .filter(|i| (i.owner_id == char_id || i.owner_id == corp_id) && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
+                .filter(|i| {
+                    (i.owner_id == char_id || i.owner_id == corp_id)
+                        && i.location_id == ship_id
+                        && i.type_id == type_id
+                        && i.quantity >= 1
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
+                })
                 .map(|i| i.item_id)
                 .min()
                 .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?

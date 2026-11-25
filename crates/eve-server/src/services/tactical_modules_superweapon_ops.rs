@@ -106,9 +106,17 @@ fn collect_superweapon_fuel_stacks(
                 && i.type_id == fuel_tid
                 && matches!(i.flag as u16, 5 | 133)
                 && i.flag != eve_db::InventoryFlag::Locked
-                && !i.singleton
                 && i.quantity > 0
-                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                && snap
+                    .validate_item_for_consumption(
+                        i,
+                        &eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            i.owner_id,
+                            eve_db::ItemClassPolicy::StackableCommodity,
+                        ),
+                    )
+                    .is_ok()
         })
         .map(|i| {
             (

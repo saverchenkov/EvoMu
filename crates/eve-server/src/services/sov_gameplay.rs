@@ -442,7 +442,19 @@ pub async fn handle_anchor_mercenary_den_rpc(
                         && i.flag == InventoryFlag::Cargo
                         && i.type_id == TYPE_MERCENARY_DEN
                         && i.quantity >= 1
-                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
                 })
                 .map(|i| i.item_id)
                 .min()
@@ -1559,7 +1571,26 @@ pub async fn handle_anchor_sov_hub_rpc(
             first_arg
         } else {
             snap.items.values()
-                .filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
+                .filter(|i| {
+                    i.type_id == TYPE_SOVEREIGNTY_HUB
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && (i.owner_id == char_id || i.owner_id == corp_id)
+                        && i.quantity >= 1
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
+                })
                 .map(|i| i.item_id).min()
                 .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into(), client_error: None })?
         };

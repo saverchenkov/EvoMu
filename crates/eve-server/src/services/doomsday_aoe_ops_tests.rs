@@ -237,3 +237,58 @@ async fn test_dispatch_superweapon_aoe_rpc_cone_spatial_and_multipoint() {
         .db
         .with_snapshot(|s| s.superweapon_runtime.active_cycles.is_empty()));
 }
+
+#[tokio::test]
+async fn doomsday_aoe_skips_lower_id_bpc_and_consumes_valid_commodity_fuel() {
+    let (ctx, sess, _char_id, ship_id, sys_id, mod_id) = setup_titan_doomsday_ctx();
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 80.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+        )
+        .await;
+
+    let bpc_fuel_id = 550_000_000_i64;
+    let valid_fuel_id = 550_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut bpc = make_fighter_item(
+            bpc_fuel_id,
+            16274,
+            _char_id,
+            ship_id,
+            InventoryFlag::SpecializedFuelBay,
+            5_000,
+        );
+        bpc.is_blueprint_copy = true;
+        snap.items.insert(bpc_fuel_id, bpc);
+    });
+
+    let res = dispatch_superweapon_aoe_rpc(
+        &ctx,
+        &sess,
+        DoomsdayAoeMode::Cone,
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .expect("valid cargo commodity must succeed despite lower-ID BPC fuel");
+    assert_eq!(res.dict_get("fuelConsumed").and_then(|v| v.as_i64()), Some(1000));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 5_000);
+        assert_eq!(snap.items[&valid_fuel_id].quantity, 4_000);
+    });
+}

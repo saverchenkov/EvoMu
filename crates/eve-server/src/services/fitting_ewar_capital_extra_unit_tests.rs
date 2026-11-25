@@ -731,7 +731,7 @@ async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
         .unwrap();
     assert_eq!(sys.get_combat_state(target_id).await.unwrap().unwrap().tp_sig_multiplier, None);
 
-    // 2. commit_post_cycle_activation_effects fuel deduction exact boundary: avail==4 untouched, avail==5 consumed
+    // 2. commit_post_cycle_activation_effects fuel deduction exact boundary: avail==4 rejects with InsufficientFuel & untouched, avail==5 consumed
     let fuel_tid = 17888_u32;
     let fuel_id = 97_880_500_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -750,9 +750,12 @@ async fn target_painter_threshold_group_guard_and_fuel_boundary_kill_mutants() {
     });
     let mut def_short = DeferredPostCycleEffects::default();
     def_short.fuel_to_deduct = Some((fuel_tid, 5));
-    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, mod_id, &tp_fm, &tp_type, &tp_st_25, None, def_short)
-        .await
-        .unwrap();
+    let err_short = commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, mod_id, &tp_fm, &tp_type, &tp_st_25, None, def_short,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_short.code, "InsufficientFuel");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 4);
 
     ctx.db.with_mut_snapshot(|snap| {

@@ -382,24 +382,26 @@ pub async fn activate_interdiction_sphere_launcher(
             };
             let mut reloaded_qty = 0;
             if rem == 0 {
+                let mut cargo_probe_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                );
+                cargo_probe_opts.active_ship_id = Some(ship_id);
+                let is_cargo_probe = |i: &InventoryItemRecord| {
+                    i.owner_id == char_id
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && i.quantity > 0
+                        && snap.validate_item_for_consumption(i, &cargo_probe_opts).is_ok()
+                };
                 let cargo_probe_opt = snap
                     .items
                     .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == InventoryFlag::Cargo
-                            && i.quantity > 0
-                            && i.type_id == probe_type_id
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                    })
+                    .find(|i| is_cargo_probe(i) && i.type_id == probe_type_id)
                     .or_else(|| {
                         snap.items.values().find(|i| {
-                            i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && i.flag == InventoryFlag::Cargo
-                                && i.quantity > 0
-                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                            is_cargo_probe(i)
                                 && ctx
                                     .sde
                                     .types
@@ -416,20 +418,10 @@ pub async fn activate_interdiction_sphere_launcher(
                         .map(|t| t.volume.max(0.1))
                         .unwrap_or(probe_vol);
                     let r_cap = (launcher_cap / r_vol).floor().max(1.0) as i32;
-                    let take = if let Some((c_owner, c_avail)) = snap.items.get(&cargo_id).map(|c| (c.owner_id, c.quantity)) {
+                    let take = if let Some(c_avail) = snap.items.get(&cargo_id).map(|c| c.quantity) {
                         let req = c_avail.min(r_cap);
-                        if req > 0 {
-                            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
-                    Some(char_id),
-                    c_owner,
-                    eve_db::ItemClassPolicy::ExactAssembledItem,
-                );
-                            opts.active_ship_id = Some(ship_id);
-                            if snap.consume_exact_item_quantity(cargo_id, req, opts).is_ok() {
-                                req
-                            } else {
-                                0
-                            }
+                        if req > 0 && snap.consume_exact_item_quantity(cargo_id, req, cargo_probe_opts).is_ok() {
+                            req
                         } else {
                             0
                         }

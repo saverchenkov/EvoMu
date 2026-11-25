@@ -500,6 +500,9 @@ fn handle_take_offer(
                     && !snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
                     && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(it.flag)
                     && !it.is_blueprint_copy
+                    && it.blueprint_runs_remaining.is_none()
+                    && it.insured_payout_isk.is_finite()
+                    && it.insured_payout_isk <= 0.0
                     && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
                     && it.source_mutaplasmid_id.is_none()
                     && !is_active_ship

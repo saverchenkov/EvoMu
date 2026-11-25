@@ -1374,9 +1374,60 @@ async fn capital_module_fuel_rejects_non_commodity_stacks() {
         assert_eq!(err.code, "InsufficientFuel");
     }
 
+    let cap_id = 96_100_994_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cap_id,
+            InventoryItemRecord {
+                item_id: cap_id,
+                type_id: 263,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        let fuel = snap.items.get_mut(&fuel_item_id).unwrap();
+        fuel.insured_payout_isk = 0.0;
+        fuel.is_blueprint_copy = true;
+    });
+    let mut deferred_bpc = DeferredPostCycleEffects::default();
+    deferred_bpc.fuel_to_deduct = Some((fuel_tid, 250));
+    deferred_bpc.cap_booster_charge_id = Some(cap_id);
+    let err_bpc = commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, module_id, &fm, &siege_t, &mod_state, None, deferred_bpc,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_bpc.code, "InsufficientFuel");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fuel_item_id].quantity, 500);
+        assert_eq!(snap.items[&cap_id].quantity, 1);
+    });
+
     ctx.db.with_mut_snapshot(|snap| {
         let it = snap.items.get_mut(&fuel_item_id).unwrap();
-        it.insured_payout_isk = 0.0;
+        it.is_blueprint_copy = false;
+        it.quantity = 100;
+    });
+    let mut deferred_short = DeferredPostCycleEffects::default();
+    deferred_short.fuel_to_deduct = Some((fuel_tid, 250));
+    deferred_short.cap_booster_charge_id = Some(cap_id);
+    let err_short = commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, module_id, &fm, &siege_t, &mod_state, None, deferred_short,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_short.code, "InsufficientFuel");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fuel_item_id].quantity, 100);
+        assert_eq!(snap.items[&cap_id].quantity, 1);
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&fuel_item_id).unwrap().quantity = 500;
         assert_eq!(collect_ship_fuel_stacks(snap, ship_id, fuel_tid).len(), 1);
     });
     let ok_prep = prepare_ewar_and_capital_module(
@@ -1387,6 +1438,21 @@ async fn capital_module_fuel_rejects_non_commodity_stacks() {
     .expect("Some")
     .expect("valid commodity fuel allows Siege prep");
     assert_eq!(ok_prep.deferred_post_cycle.fuel_to_deduct, Some((fuel_tid, 250)));
+    commit_post_cycle_activation_effects(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        module_id,
+        &fm,
+        &siege_t,
+        &mod_state,
+        None,
+        ok_prep.deferred_post_cycle,
+    )
+    .await
+    .expect("valid commodity fuel commits cleanly");
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.items[&fuel_item_id].quantity), 250);
 }
 
 #[cfg(test)]

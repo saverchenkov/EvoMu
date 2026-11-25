@@ -1747,9 +1747,18 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                         Some((committed.autoload_diffs, committed.loaded_bank));
                 }
                 if let Some((fuel_type_id, fuel_qty_needed)) = deferred.fuel_to_deduct {
-                    let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
-                    let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
-                    if total_avail >= i64::from(fuel_qty_needed) && fuel_qty_needed > 0 {
+                    if fuel_qty_needed > 0 {
+                        let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
+                        let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
+                        if total_avail < i64::from(fuel_qty_needed) {
+                            return Err(BridgeRpcError {
+                                code: "InsufficientFuel".into(),
+                                message: format!(
+                                    "Insufficient fuel (type {fuel_type_id}): needed {fuel_qty_needed}, available {total_avail}"
+                                ),
+                                client_error: None,
+                            });
+                        }
                         let mut remaining = fuel_qty_needed;
                         for (_, fid, _) in stacks {
                             if remaining <= 0 {

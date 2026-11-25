@@ -986,6 +986,33 @@ async fn metenox_tick_rejects_non_commodity_reagents_without_minting_materials()
         assert_eq!(am.fuel_units_remaining, 0);
         assert_eq!(am.magmatic_gas_remaining, 0);
     });
+
+    // When a bay fuel item exists (even BPC) AND st.fuel_blocks = 100 with valid gas,
+    // Metenox must NOT fall back to unbacked st.fuel_blocks or mint free materials.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&metenox_id).unwrap().fuel_blocks = 100;
+        let gas = snap.items.get_mut(&mut_gas_id).unwrap();
+        gas.dynamic_attributes.clear();
+        gas.source_mutaplasmid_id = None;
+        snap.auto_moon_miners
+            .get_mut(&metenox_id)
+            .unwrap()
+            .last_cycle_unix = now - 7_200;
+    });
+    tick_all_metenox_moon_drills(&ctx, now - 7_200, now);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&metenox_id].fuel_blocks, 100);
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 100);
+        assert_eq!(snap.items[&mut_gas_id].quantity, 500);
+        let minted: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(minted, 0);
+        assert_eq!(snap.auto_moon_miners[&metenox_id].fuel_units_remaining, 0);
+    });
 }
 
 #[cfg(test)]

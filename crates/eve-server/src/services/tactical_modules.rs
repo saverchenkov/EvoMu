@@ -925,7 +925,22 @@ pub async fn handle_entosis_link_activation(
         let adm_val = snap.system_states.get(&sys_id).map(|st| crate::services::sov_services::calculate_adm(st.military_index, st.industrial_index, st.strategic_index)).unwrap_or(1.0);
         let vuln_item = snap.items.get(&target_id).and_then(|i| i.dynamic_attributes.get(&2110).copied()).unwrap_or(1.0) > 0.0;
         let vuln_struct = snap.structures.get(&target_id).map(|s| !matches!(s.state.as_str(), "ShieldReinforced" | "ArmorReinforced" | "Invulnerable")).unwrap_or(true);
-        let stront_id = snap.items.values().find(|i| i.location_id == ship_id && i.type_id == 16275 && i.quantity >= 1).map(|i| i.item_id);
+        let stront_opts = eve_db::ConsumeExactOptions {
+            policy: eve_db::ItemClassPolicy::StackableCommodity,
+            active_ship_id: Some(ship_id),
+            ..eve_db::ConsumeExactOptions::for_character_stack(char_id)
+        };
+        let stront_id = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && i.type_id == 16275
+                    && i.quantity >= 1
+                    && snap.validate_item_for_consumption(i, &stront_opts).is_ok()
+            })
+            .map(|i| i.item_id)
+            .min();
         (sg, side, vuln_item && vuln_struct, adm_val, stront_id)
     });
 

@@ -1453,25 +1453,34 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         .is_ok()
             };
 
-            let count_reagents = |snap_ref: &eve_db::WorldStateSnapshot| -> (u32, u32, u32) {
+            let count_reagents = |snap_ref: &eve_db::WorldStateSnapshot| -> (u32, u32, bool, u32) {
                 let st_fuel = snap_ref.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
                 let mut item_fuel = 0u32;
+                let mut has_any_bay_fuel_stack = false;
                 let mut gas = 0u32;
                 for it in snap_ref.items.values() {
+                    let is_fuel_block = it.location_id == structure_id
+                        && (st_owner_corp == 0 || it.owner_id == st_owner_corp)
+                        && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
+                        && it.quantity > 0
+                        && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136);
+                    if is_fuel_block {
+                        has_any_bay_fuel_stack = true;
+                    }
                     if is_eligible_reagent(snap_ref, it) {
                         let qty_u32 = u32::try_from(it.quantity).unwrap_or(0);
-                        if ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) {
+                        if is_fuel_block {
                             item_fuel = item_fuel.saturating_add(qty_u32);
                         } else if it.type_id == 81143 {
                             gas = gas.saturating_add(qty_u32);
                         }
                     }
                 }
-                let fuel = if item_fuel > 0 { item_fuel } else { st_fuel };
-                (fuel, item_fuel, gas)
+                let fuel = if has_any_bay_fuel_stack { item_fuel } else { st_fuel };
+                (fuel, item_fuel, has_any_bay_fuel_stack, gas)
             };
 
-            let (init_fuel, init_item_fuel, init_gas) = count_reagents(snap);
+            let (init_fuel, init_item_fuel, has_any_bay_fuel_stack, init_gas) = count_reagents(snap);
             let last_cycle_unix = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| AutoMoonMinerRecord {
                 structure_id, fuel_units_remaining: init_fuel, magmatic_gas_remaining: init_gas, efficiency,
                 cycle_duration_seconds: cycle_secs, last_cycle_unix: prev_unix, ore_type_id: primary_mat_tid,
@@ -1519,7 +1528,7 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                     }
                 }
-                if init_item_fuel == 0 && rem_fuel > 0 && rem_gas == 0 {
+                if !has_any_bay_fuel_stack && rem_fuel > 0 && rem_gas == 0 {
                     let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
                     if st_blocks >= rem_fuel {
                         if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
@@ -1527,14 +1536,14 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                         rem_fuel = 0;
                     }
-                } else if init_item_fuel > 0 && rem_fuel == 0 && rem_gas == 0 {
+                } else if has_any_bay_fuel_stack && rem_fuel == 0 && rem_gas == 0 {
                     if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
                         let remaining_item_fuel = init_item_fuel.saturating_sub(consumed_fuel);
                         st_mut.fuel_blocks = st_mut.fuel_blocks.saturating_sub(consumed_fuel).min(remaining_item_fuel);
                     }
                 }
                 if rem_fuel != 0 || rem_gas != 0 {
-                    let (after_fuel, _, after_gas) = count_reagents(snap);
+                    let (after_fuel, _, _, after_gas) = count_reagents(snap);
                     if let Some(am) = snap.auto_moon_miners.get_mut(&structure_id) {
                         am.fuel_units_remaining = after_fuel;
                         am.magmatic_gas_remaining = after_gas;
@@ -1566,7 +1575,7 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                 }
             }
 
-            let (after_fuel, _, after_gas) = count_reagents(snap);
+            let (after_fuel, _, _, after_gas) = count_reagents(snap);
             let (rem_cap_after, _) = metenox_output_bay_remaining_capacity(&ctx.sde, snap, structure_id);
             if let Some(am) = snap.auto_moon_miners.get_mut(&structure_id) {
                 am.fuel_units_remaining = after_fuel; am.magmatic_gas_remaining = after_gas;

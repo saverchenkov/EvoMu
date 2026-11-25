@@ -450,7 +450,16 @@ where
                         && i.flag != eve_db::InventoryFlag::Locked
                         && i.quantity > 0
                         && matches_fuel(i.type_id)
-                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions::for_owner_exact(
+                                    None,
+                                    i.owner_id,
+                                    eve_db::ItemClassPolicy::StackableCommodity,
+                                ),
+                            )
+                            .is_ok()
                 })
                 .map(|i| (if i.flag as u16 == 133 { 0 } else { 1 }, i.item_id, i.quantity))
                 .collect();

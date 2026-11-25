@@ -2358,3 +2358,67 @@ async fn emit_superweapon_fuel_diffs_cross_owner_transfer_scopes_clearance_bf148
     assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
+#[test]
+fn superweapon_fuel_skips_lower_id_bpc_and_consumes_valid_commodity() {
+    let ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_826_900_i64;
+    let mod_id = 100_826_905_i64;
+    let bpc_fuel_id = 100_826_901_i64;
+    let valid_fuel_id = 100_826_902_i64;
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+
+    setup_ship_and_module(&ctx, null_sys, char_id, ship_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            bpc_fuel_id,
+            InventoryItemRecord {
+                item_id: bpc_fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_fuel_id,
+            InventoryItemRecord {
+                item_id: valid_fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        let stacks = collect_superweapon_fuel_stacks(snap, ship_id, 16_274);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].1, valid_fuel_id);
+    });
+
+    check_superweapon_fuel_available(&ctx, ship_id, 16_274, 25_000, "superweapon")
+        .expect("check must succeed via valid Cargo stack");
+    let (_, _, _, diffs, guard) =
+        deduct_superweapon_fuel_with_diffs(&ctx, ship_id, 16_274, 25_000, "superweapon")
+            .expect("deduct must skip lower-ID BPC and consume valid commodity");
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs, guard);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 50_000);
+        assert_eq!(snap.items[&valid_fuel_id].quantity, 25_000);
+    });
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
+}
+
