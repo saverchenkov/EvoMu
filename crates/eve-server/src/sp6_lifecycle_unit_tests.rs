@@ -3,6 +3,7 @@
 use super::*;
 use crate::router::{ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, PersistedCombatHp, SafeLogoffEntry, WorldRepository,
 };
@@ -513,48 +514,50 @@ async fn safe_logoff_disconnect_reconnect_and_drone_lifecycle_work_end_to_end() 
         },
         make_combat_state(100.0, 100.0, 100.0, 0.0),
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        for (bid, did) in [(drone_ball_ok, drone_item_ok), (drone_ball_far, drone_item_far)] {
-            rt.active_drones_in_space.insert(
-                bid,
-                DroneSpaceState {
-                    ball_id: bid,
-                    drone_item_id: did,
-                    type_id: 2454,
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 1,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1000.0,
-                    optimal_range: 5000.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 0.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        }
-    });
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [(drone_ball_ok, drone_item_ok), (drone_ball_far, drone_item_far)]
+            .into_iter()
+            .map(|(bid, did)| DroneSpaceState {
+                ball_id: bid,
+                drone_item_id: did,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 1,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1000.0,
+                optimal_range: 5000.0,
+                damage_vector: DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            }),
+    );
 
     let _ = handle_cmd_abandon_drone(&ctx, &mut sess, &[], &HashMap::new())
         .await
         .unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space[&drone_ball_ok].is_abandoned
-            && rt.active_drones_in_space[&drone_ball_far].is_abandoned
-    }));
+    assert!(
+        drone_test_helpers::active_drone(&ctx, drone_ball_ok)
+            .unwrap()
+            .is_abandoned
+            && drone_test_helpers::active_drone(&ctx, drone_ball_far)
+                .unwrap()
+                .is_abandoned
+    );
 
     let rec_res = handle_cmd_reconnect_to_drones(&ctx, &mut sess, &[], &HashMap::new())
         .await
@@ -570,10 +573,14 @@ async fn safe_logoff_disconnect_reconnect_and_drone_lifecycle_work_end_to_end() 
         out_of_range,
         Some(PyRep::List(vec![PyRep::Integer(drone_ball_far)]))
     );
-    assert!(with_combat_runtime(&ctx, |rt| {
-        !rt.active_drones_in_space[&drone_ball_ok].is_abandoned
-            && rt.active_drones_in_space[&drone_ball_far].is_abandoned
-    }));
+    assert!(
+        !drone_test_helpers::active_drone(&ctx, drone_ball_ok)
+            .unwrap()
+            .is_abandoned
+            && drone_test_helpers::active_drone(&ctx, drone_ball_far)
+                .unwrap()
+                .is_abandoned
+    );
 }
 
 #[test]

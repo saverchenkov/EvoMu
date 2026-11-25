@@ -316,11 +316,9 @@ async fn drone_assist_guard_auto_aggression_return_scoop_damage_and_salvage() {
     assert_eq!(guarded.len(), 2);
 
     // 4. Aggressive self-defense branch when assist/guard clear
-    with_mut_combat_runtime(&ctx, |rt| {
-        for d in rt.active_drones_in_space.values_mut() {
-            d.assist_char_id = None;
-            d.guard_char_id = None;
-        }
+    crate::services::drone_test_helpers::update_active_drones(&ctx, |d| {
+        d.assist_char_id = None;
+        d.guard_char_id = None;
     });
     let aggro = step_drone_auto_aggression_and_assist(&ctx, sys_id, char_id, Some(target_c), None, None).await;
     assert_eq!(aggro.len(), 2);
@@ -511,17 +509,16 @@ async fn toctou_concurrent_launch_and_scoop_drones() {
     let ok1 = r1.as_ref().is_some_and(|r| r.is_ok());
     let ok2 = r2.as_ref().is_some_and(|r| r.is_ok());
     assert!(ok1 ^ ok2, "expected exactly 1 LaunchDrones to succeed with Drones=1, got r1={r1:?} r2={r2:?}");
-    let launched_count = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.values().filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned).count()
-    });
+    let launched_count = crate::services::drone_test_helpers::active_drones_for_ship(&ctx, ship_id)
+        .into_iter()
+        .filter(|d| !d.is_abandoned)
+        .count();
     assert_eq!(launched_count, 1);
 
     // Abandon the launched drone and race two nearby ships calling ScoopToDroneBay
-    let launched_ball_id = with_combat_runtime(&ctx, |rt| *rt.active_drones_in_space.keys().next().unwrap());
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(d) = rt.active_drones_in_space.get_mut(&launched_ball_id) {
-            d.is_abandoned = true;
-        }
+    let launched_ball_id = crate::services::drone_test_helpers::active_drone_ids(&ctx)[0];
+    crate::services::drone_test_helpers::update_active_drone(&ctx, launched_ball_id, |d| {
+        d.is_abandoned = true;
     });
     let char2 = char_id + 1;
     let ship2 = ship_id + 1;
@@ -976,7 +973,9 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
         .await.unwrap().unwrap();
     let PyRep::List(l_ids) = ok_launch else { panic!("expected list") };
     let launched_bid = l_ids[0].as_i64().unwrap();
-    let split_item_id = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&launched_bid].drone_item_id);
+    let split_item_id = crate::services::drone_test_helpers::active_drone(&ctx, launched_bid)
+        .unwrap()
+        .drone_item_id;
     assert_eq!(launched_bid, split_item_id, "launched drone ballID must equal drone itemID (#1008)");
     let slim = sys_handle.get_ball_slim_item(launched_bid).await.unwrap().unwrap();
     let PyRep::Object { args: slim_dict, .. } = slim else { panic!("expected SlimItem") };
@@ -992,7 +991,9 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
     assert!((launched_cs.structure_hp - 450.0).abs() < 1e-6);
     assert!((launched_cs.shield_hp - 320.0).abs() < 1e-6);
     assert!((launched_cs.armor_hp - 210.0).abs() < 1e-6);
-    let split_item_id = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&launched_bid].drone_item_id);
+    let split_item_id = crate::services::drone_test_helpers::active_drone(&ctx, launched_bid)
+        .unwrap()
+        .drone_item_id;
     ctx.db.with_snapshot(|snap| {
         let orig = &snap.items[&810_301];
         assert_eq!(orig.quantity, 2);
@@ -1022,29 +1023,30 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
         .await.unwrap().unwrap_err();
     assert_eq!(scoop_far.code, "OutOfScoopRange");
 
-    // Owned by other (not abandoned) -> DroneOwnedByOther and NOT removed from active_drones_in_space
+    // Owned by other (not abandoned) -> DroneOwnedByOther and NOT removed from active space drones
     let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(scoop_edge_x, 0.0, 0.0)).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        let d = rt.active_drones_in_space.get_mut(&launched_bid).unwrap();
+    crate::services::drone_test_helpers::update_active_drone(&ctx, launched_bid, |d| {
         d.owner_char_id = char_id + 99;
         d.is_abandoned = false;
-    });
+    })
+    .unwrap();
     let err_other = handle_npcs_drones(&ctx, &mut session, "ship", "ScoopToDroneBay", &[PyRep::Integer(launched_bid)], &kwargs)
         .await.unwrap().unwrap_err();
     assert_eq!(err_other.code, "DroneOwnedByOther");
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.contains_key(&launched_bid)));
+    assert!(crate::services::drone_test_helpers::has_active_drone(&ctx, launched_bid));
 
-    // Abandoned owned by other, but bay capacity exceeded -> InsufficientDroneBayCapacity AND active_drones_in_space rolled back!
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get_mut(&launched_bid).unwrap().is_abandoned = true;
-    });
+    // Abandoned owned by other, but bay capacity exceeded -> InsufficientDroneBayCapacity AND active space drones rolled back!
+    crate::services::drone_test_helpers::update_active_drone(&ctx, launched_bid, |d| {
+        d.is_abandoned = true;
+    })
+    .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(283, 1.0);
     });
     let err_cap = handle_npcs_drones(&ctx, &mut session, "ship", "ScoopToDroneBay", &[PyRep::Integer(launched_bid)], &kwargs)
         .await.unwrap().unwrap_err();
     assert_eq!(err_cap.code, "InsufficientDroneBayCapacity");
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.contains_key(&launched_bid)));
+    assert!(crate::services::drone_test_helpers::has_active_drone(&ctx, launched_bid));
 
     // Restore bay cap (remove dynamic 283) -> scoop succeeds, owner=char_id, location=ship_id, flag=DroneBay, version=2!
     ctx.db.with_mut_snapshot(|snap| {
@@ -1231,12 +1233,11 @@ async fn drone_web_preserves_pilot_throttle_clears_on_return_and_death_prevents_
     step_engaged_drones(&ctx, tick_ts).await;
     let engaged = step_drone_auto_aggression_and_assist(&ctx, sys_id, char_id, Some(target_id), None, None).await;
     assert!(engaged.is_empty());
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&web_bid));
-        let cb = rt.active_drones_in_space.get(&combat_bid).expect("abandoned drone remains in space");
-        assert!(cb.is_abandoned);
-        assert_eq!(cb.target_id, None);
-    });
+    assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, web_bid));
+    let cb = crate::services::drone_test_helpers::active_drone(&ctx, combat_bid)
+        .expect("abandoned drone remains in space");
+    assert!(cb.is_abandoned);
+    assert_eq!(cb.target_id, None);
     assert_eq!(sys_handle.drone_next_ready_unix(web_bid), None);
 }
 
@@ -1298,7 +1299,8 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     .await
     .unwrap()
     .expect("web engage succeeds");
-    let expected_range = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&web_bid].clone())
+    let expected_range = crate::services::drone_test_helpers::active_drone(&ctx, web_bid)
+        .unwrap()
         .effective_optimal_range(&ctx);
     assert!(expected_range > 0.0);
     {
@@ -1333,10 +1335,9 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     assert!((ball_after_assist.speed_fraction - 0.55).abs() < 1e-6);
     assert!((ball_after_assist.max_velocity - 300.0).abs() < 1e-3);
     assert!((cs_after_assist.web_velocity_multiplier - 1.0).abs() < 1e-6);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&web_bid].target_id, None);
-        assert_eq!(rt.active_drones_in_space[&web_bid].activity_state, 6);
-    });
+    let web_drone = crate::services::drone_test_helpers::active_drone(&ctx, web_bid).unwrap();
+    assert_eq!(web_drone.target_id, None);
+    assert_eq!(web_drone.activity_state, 6);
 
     // 3. Re-engage, then CmdGuard clears active drone_web cycle and resets target_id
     sys_handle.set_drone_next_ready_unix(web_bid, 0).await.unwrap();
@@ -1367,10 +1368,9 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
         !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
         "CmdGuard must clear drone_web cycle"
     );
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&web_bid].target_id, None);
-        assert_eq!(rt.active_drones_in_space[&web_bid].activity_state, 7);
-    });
+    let web_drone = crate::services::drone_test_helpers::active_drone(&ctx, web_bid).unwrap();
+    assert_eq!(web_drone.target_id, None);
+    assert_eq!(web_drone.activity_state, 7);
 
     // 4. Re-engage on target_a, move drone outside web range, step_engaged_drones clears web cycle
     sys_handle.set_drone_next_ready_unix(web_bid, 0).await.unwrap();

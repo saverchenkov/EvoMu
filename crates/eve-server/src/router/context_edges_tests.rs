@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::services::character_expert_systems::ExpertSystemRecord;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use crate::services::quasar_auth_user::QuasarIdentityStore;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, OwnerNoteRecord, SkillQueueEntry, TrainedSkillRecord,
@@ -374,9 +375,9 @@ fn get_or_rebuild_ship_fitting_cache_drones_structure_and_auto_offline() {
     });
 
     // Active vs abandoned space drones + avoiding duplicate drone_item_id
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            9_001,
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             DroneSpaceState {
                 ball_id: 9_001,
                 drone_item_id: drone_id,
@@ -404,9 +405,6 @@ fn get_or_rebuild_ship_fitting_cache_drones_structure_and_auto_offline() {
                 ecm_strength: 0.0,
                 tp_sig_bonus_pct: 0.0,
             },
-        );
-        rt.active_drones_in_space.insert(
-            9_002,
             DroneSpaceState {
                 ball_id: 9_002,
                 drone_item_id: 200_000_913,
@@ -434,8 +432,8 @@ fn get_or_rebuild_ship_fitting_cache_drones_structure_and_auto_offline() {
                 ecm_strength: 0.0,
                 tp_sig_bonus_pct: 0.0,
             },
-        );
-    });
+        ],
+    );
 
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
     // Over-CPU module was auto-offlined & deactivated in snapshot

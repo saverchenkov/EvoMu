@@ -667,37 +667,37 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     // and an explicit runtime flush; none may clobber DB-owned fields.
     with_mut_combat_runtime(&ctx, |rt| {
         rt.npc_timers.insert(char_id, 1_800_000_000);
-        rt.active_drones_in_space.insert(
-            77_001,
-            DroneSpaceState {
-                ball_id: 77_001,
-                drone_item_id: 77_001,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1_000.0,
-                optimal_range: 5_000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
     });
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: 77_001,
+            drone_item_id: 77_001,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_000.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     ctx.db.with_mut_snapshot(|snap| {
         with_mut_combat_runtime_in_snap(snap, |rt| {
             rt.npc_timers.insert(other_id, 1_800_000_100);
@@ -746,9 +746,7 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         assert_eq!(cw.npc_timers.get(&char_id), Some(&1_800_000_000));
         assert_eq!(cw.npc_timers.get(&other_id), Some(&1_800_000_100));
     });
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.contains_key(&77_001)
-    }));
+    assert!(crate::services::drone_test_helpers::has_active_drone(&ctx, 77_001));
 }
 
 #[test]

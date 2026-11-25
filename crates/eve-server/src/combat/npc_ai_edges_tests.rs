@@ -459,37 +459,37 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
     // 4. Direct test of handle_npc_ai_ball_destructions: empty vec, drone removal, extended NPC removal
     handle_npc_ai_ball_destructions(&ctx, sys_id, Vec::new());
 
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_ball,
+            drone_item_id: 500_991,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: char1,
+            original_owner_char_id: char1,
+            parent_ship_id: ship_ewar,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 800.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_ball,
-            DroneSpaceState {
-                ball_id: drone_ball,
-                drone_item_id: 500_991,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: char1,
-                original_owner_char_id: char1,
-                parent_ship_id: ship_ewar,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 800.0,
-                optimal_range: 5_000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
         rt.npc_entities.insert(
             ext_npc_ball,
             ExtendedNpcEntity {
@@ -586,8 +586,8 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
             ),
         ],
     );
+    assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_ball));
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&drone_ball));
         assert!(!rt.npc_entities.contains_key(&ext_npc_ball));
     });
     ctx.db.with_snapshot(|snap| {
@@ -653,9 +653,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            abandoned_drone,
+    crate::services::drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             DroneSpaceState {
                 ball_id: abandoned_drone,
                 drone_item_id: abandoned_drone,
@@ -683,9 +683,6 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
                 ecm_strength: 0.0,
                 tp_sig_bonus_pct: 0.0,
             },
-        );
-        rt.active_drones_in_space.insert(
-            active_drone,
             DroneSpaceState {
                 ball_id: active_drone,
                 drone_item_id: active_drone,
@@ -713,8 +710,8 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
                 ecm_strength: 0.0,
                 tp_sig_bonus_pct: 0.0,
             },
-        );
-    });
+        ],
+    );
 
     let sys_handle = ctx.systems.get_or_spawn(combat_sys);
     sys_handle.try_spawn_ball_with_combat(
@@ -854,7 +851,7 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     assert!(abd_shield_2 < abd_shield, "NPC should keep hitting abandoned drone");
     assert_no_combat_notifs("abandoned drone + undocked owner in same system");
 
-    // 3. Replace target with untracked/orphaned drone item (not in `active_drones_in_space`) -> zero notifications
+    // 3. Replace target with untracked/orphaned drone item (not in active space drones) -> zero notifications
     let _ = sys_handle.ballpark.write().unwrap().remove_ball(abandoned_drone);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(untracked_drone, drone_item(untracked_drone));

@@ -3,7 +3,8 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use crate::services::pve_abyssal_lifecycle::{
     collapse_abyssal_pocket_and_pod_pilot_at, evacuate_abyssal_pockets_for_downtime,
     evacuate_void_space_session_sync, random_offset_around_trace_origin, reconcile_abyssal_login,
@@ -264,43 +265,40 @@ async fn downtime_evacuation_drones_cleanup_and_highsec_tier_suspect_flag() {
         }
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        for (ball_id, item_id, owner_id, parent_ship) in [
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             (active_drone_ball, active_drone_item, char_id, ship_id),
             (orphan_drone_ball, orphan_drone_item, 888_888, 777_777),
-        ] {
-            rt.active_drones_in_space.insert(
-                ball_id,
-                DroneSpaceState {
-                    ball_id,
-                    drone_item_id: item_id,
-                    type_id: drone_type_id,
-                    group_id: 100,
-                    owner_char_id: owner_id,
-                    original_owner_char_id: owner_id,
-                    parent_ship_id: parent_ship,
-                    solar_system_id: abyss_sys,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 10.0,
-                    max_velocity: 3_000.0,
-                    optimal_range: 5_000.0,
-                    damage_vector: eve_destiny::DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 1.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        }
-    });
+        ]
+        .map(|(ball_id, item_id, owner_id, parent_ship)| DroneSpaceState {
+            ball_id,
+            drone_item_id: item_id,
+            type_id: drone_type_id,
+            group_id: 100,
+            owner_char_id: owner_id,
+            original_owner_char_id: owner_id,
+            parent_ship_id: parent_ship,
+            solar_system_id: abyss_sys,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 10.0,
+            max_velocity: 3_000.0,
+            optimal_range: 5_000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        }),
+    );
 
     // Tier 5 pocket originating in highsec -> triggers suspect flag on downtime evacuation
     with_abyssal_state(&ctx, |st| {

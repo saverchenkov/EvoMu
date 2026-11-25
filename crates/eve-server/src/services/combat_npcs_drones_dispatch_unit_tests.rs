@@ -365,9 +365,10 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
         "OutOfScoopRange"
     );
     let _ = sys_handle.set_ball_position(sen_ball_id, DVec3::ZERO).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get_mut(&sen_ball_id).unwrap().owner_char_id = pvp_victim;
-    });
+    crate::services::drone_test_helpers::update_active_drone(&ctx, sen_ball_id, |d| {
+        d.owner_char_id = pvp_victim;
+    })
+    .unwrap();
     assert_eq!(
         handle_npcs_drones(&ctx, &mut session, "ship", "ScoopDrone", &[PyRep::Integer(sen_ball_id)], &kw)
             .await

@@ -7,9 +7,8 @@ use super::{
 };
 use crate::router::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DroneSpaceState,
-};
+use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
@@ -127,40 +126,38 @@ async fn cmd_return_bay_and_step_returning_drones_cover_scoop_and_return() {
     spawn_ball(&ctx, sys_id, far_drone, 2454, DVec3::new(5_000.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, sentry_drone, 23561, DVec3::new(4_000.0, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        for (bid, is_sentry) in [(close_drone, false), (far_drone, false), (sentry_drone, true)] {
-            rt.active_drones_in_space.insert(
-                bid,
-                DroneSpaceState {
-                    ball_id: bid,
-                    drone_item_id: bid,
-                    type_id: if is_sentry { 23561 } else { 2454 },
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1_500.0,
-                    optimal_range: 5_000.0,
-                    damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 1.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        }
-    });
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [(close_drone, false), (far_drone, false), (sentry_drone, true)]
+            .into_iter()
+            .map(|(bid, is_sentry)| DroneSpaceState {
+                ball_id: bid,
+                drone_item_id: bid,
+                type_id: if is_sentry { 23561 } else { 2454 },
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry,
+                bandwidth_used: 5.0,
+                max_velocity: 1_500.0,
+                optimal_range: 5_000.0,
+                damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            }),
+    );
 
     let mut session = SessionState::default();
     session.user_id = Some(1);
@@ -196,10 +193,13 @@ async fn cmd_return_bay_and_step_returning_drones_cover_scoop_and_return() {
         assert!(!snap.item_positions.contains_key(&close_drone));
         assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&close_drone));
     });
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&close_drone));
-        assert_eq!(rt.active_drones_in_space[&far_drone].activity_state, 4);
-    });
+    assert!(!drone_test_helpers::has_active_drone(&ctx, close_drone));
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, far_drone)
+            .unwrap()
+            .activity_state,
+        4
+    );
     let recall_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
         recall_notifs.iter().any(|n| {
@@ -281,40 +281,36 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
         );
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        for bid in [d1, d2] {
-            rt.active_drones_in_space.insert(
-                bid,
-                DroneSpaceState {
-                    ball_id: bid,
-                    drone_item_id: bid,
-                    type_id: 2454,
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: Some(999),
-                    activity_state: 1,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1_500.0,
-                    optimal_range: 5_000.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 1.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        }
-    });
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [d1, d2].into_iter().map(|bid| DroneSpaceState {
+            ball_id: bid,
+            drone_item_id: bid,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: Some(999),
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        }),
+    );
 
     ctx.active_scanner_probes.write().unwrap().insert(
         555_001,
@@ -353,16 +349,14 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
     );
 
     disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&d1].parent_ship_id, 0);
-        assert!(!rt.active_drones_in_space[&d1].is_abandoned);
-    });
+    let d1_state = drone_test_helpers::active_drone(&ctx, d1).unwrap();
+    assert_eq!(d1_state.parent_ship_id, 0);
+    assert!(!d1_state.is_abandoned);
 
     abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&d1].is_abandoned);
-        assert_eq!(rt.active_drones_in_space[&d1].owner_char_id, 0);
-    });
+    let d1_state = drone_test_helpers::active_drone(&ctx, d1).unwrap();
+    assert!(d1_state.is_abandoned);
+    assert_eq!(d1_state.owner_char_id, 0);
 
     abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
     assert_eq!(ctx.active_scanner_probes.read().unwrap()[&555_001].state, 0);
@@ -678,10 +672,7 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
     };
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .insert(d_warp_ball, make_drone(d_warp_ball, d_warp_item));
-    });
+    drone_test_helpers::seed_active_drone(&ctx, make_drone(d_warp_ball, d_warp_item));
     sys_handle
         .set_drone_next_ready_unix(d_warp_ball, 9_999)
         .await
@@ -691,15 +682,13 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
 
     abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
 
-    with_combat_runtime(&ctx, |rt| {
-        let d = &rt.active_drones_in_space[&d_warp_ball];
-        assert!(d.is_abandoned);
-        assert_eq!(d.owner_char_id, 0);
-        assert_eq!(d.parent_ship_id, 0);
-        assert_eq!(d.activity_state, 0);
-        assert_eq!(d.target_id, None);
-        assert_eq!(d.assist_char_id, None);
-    });
+    let d = drone_test_helpers::active_drone(&ctx, d_warp_ball).unwrap();
+    assert!(d.is_abandoned);
+    assert_eq!(d.owner_char_id, 0);
+    assert_eq!(d.parent_ship_id, 0);
+    assert_eq!(d.activity_state, 0);
+    assert_eq!(d.target_id, None);
+    assert_eq!(d.assist_char_id, None);
     assert_eq!(sys_handle.drone_next_ready_unix(d_warp_ball), None);
 
     let warp_notifs = ctx.drain_notifications_for_char(char_id);
@@ -761,9 +750,7 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
     );
 
     // CmdAbandonDrone must follow the same safe notification ordering.
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(d_cmd, make_drone(d_cmd, d_cmd));
-    });
+    drone_test_helpers::seed_active_drone(&ctx, make_drone(d_cmd, d_cmd));
     let mut sess = SessionState {
         user_id: Some(1),
         character_id: Some(char_id),
@@ -799,10 +786,7 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
     let d_disc = d_warp_ball.max(d_cmd) + 100;
     let d_disc_item = d_warp_item.max(d_cmd) + 101;
     spawn_ball(&ctx, sys_id, d_disc, 2454, DVec3::new(700.0, 0.0, 0.0));
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .insert(d_disc, make_drone(d_disc, d_disc_item));
-    });
+    drone_test_helpers::seed_active_drone(&ctx, make_drone(d_disc, d_disc_item));
     let _ = ctx.drain_notifications_for_char(char_id);
     if let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(sys_id) {
         sys_handle.ballpark.write().unwrap().pending_events.clear();
@@ -810,14 +794,12 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
 
     disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
 
-    with_combat_runtime(&ctx, |rt| {
-        let d = &rt.active_drones_in_space[&d_disc];
-        assert!(!d.is_abandoned, "disconnect on warp preserves !is_abandoned for reconnect");
-        assert_eq!(d.owner_char_id, char_id);
-        assert_eq!(d.parent_ship_id, 0);
-        assert_eq!(d.activity_state, 0);
-        assert_eq!(d.target_id, None);
-    });
+    let d = drone_test_helpers::active_drone(&ctx, d_disc).unwrap();
+    assert!(!d.is_abandoned, "disconnect on warp preserves !is_abandoned for reconnect");
+    assert_eq!(d.owner_char_id, char_id);
+    assert_eq!(d.parent_ship_id, 0);
+    assert_eq!(d.activity_state, 0);
+    assert_eq!(d.target_id, None);
 
     let disc_notifs = ctx.drain_notifications_for_char(char_id);
     let d_state = disc_notifs

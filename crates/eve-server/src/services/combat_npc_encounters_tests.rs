@@ -1434,45 +1434,43 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
             )
             .await;
 
-        crate::services::combat_crimewatch::with_mut_combat_runtime(&d_ctx, |rt| {
-            for (did, owner, pship) in [(d_drone, d_char, d_ship), (d_drone2, d_char2, d_ship2)] {
-                rt.active_drones_in_space.insert(
-                    did,
-                    crate::services::combat_crimewatch::DroneSpaceState {
-                        ball_id: did,
-                        drone_item_id: did,
-                        type_id: 2_454,
-                        group_id: 100,
-                        owner_char_id: owner,
-                        original_owner_char_id: owner,
-                        parent_ship_id: pship,
-                        solar_system_id: d_sys,
-                        target_id: None,
-                        activity_state: 0,
-                        assist_char_id: None,
-                        guard_char_id: None,
-                        is_abandoned: false,
-                        is_sentry: false,
-                        bandwidth_used: 5.0,
-                        max_velocity: 1_000.0,
-                        optimal_range: 20_000.0,
-                        damage_vector: eve_destiny::DamageVector {
-                            em: 0.0,
-                            thermal: 200.0,
-                            kinetic: 0.0,
-                            explosive: 0.0,
-                        },
-                        shield_repair_amount: 0.0,
-                        armor_repair_amount: 0.0,
-                        hull_repair_amount: 0.0,
-                        web_speed_factor: 0.0,
-                        neut_amount: 0.0,
-                        ecm_strength: 0.0,
-                        tp_sig_bonus_pct: 0.0,
+        crate::services::drone_test_helpers::seed_active_drones(
+            &d_ctx,
+            [(d_drone, d_char, d_ship), (d_drone2, d_char2, d_ship2)].map(
+                |(did, owner, pship)| crate::services::combat_crimewatch::DroneSpaceState {
+                    ball_id: did,
+                    drone_item_id: did,
+                    type_id: 2_454,
+                    group_id: 100,
+                    owner_char_id: owner,
+                    original_owner_char_id: owner,
+                    parent_ship_id: pship,
+                    solar_system_id: d_sys,
+                    target_id: None,
+                    activity_state: 0,
+                    assist_char_id: None,
+                    guard_char_id: None,
+                    is_abandoned: false,
+                    is_sentry: false,
+                    bandwidth_used: 5.0,
+                    max_velocity: 1_000.0,
+                    optimal_range: 20_000.0,
+                    damage_vector: eve_destiny::DamageVector {
+                        em: 0.0,
+                        thermal: 200.0,
+                        kinetic: 0.0,
+                        explosive: 0.0,
                     },
-                );
-            }
-        });
+                    shield_repair_amount: 0.0,
+                    armor_repair_amount: 0.0,
+                    hull_repair_amount: 0.0,
+                    web_speed_factor: 0.0,
+                    neut_amount: 0.0,
+                    ecm_strength: 0.0,
+                    tp_sig_bonus_pct: 0.0,
+                },
+            ),
+        );
 
         let mut d_session = eve_machonet::SessionState::new(98_300);
         d_session.user_id = Some(1);

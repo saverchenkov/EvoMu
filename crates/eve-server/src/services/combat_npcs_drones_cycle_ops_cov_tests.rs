@@ -296,11 +296,14 @@ async fn step_engaged_drones_and_auto_aggression_cloaked_tethered_missing_and_de
         .await
         .unwrap();
     let d1 = make_drone_state(970_001, 971_001, 2_456, char_id, ship_id, sys_id, Some(target_ok));
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(d1.ball_id, d1.clone());
-    });
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, d1.clone());
     step_engaged_drones(&ctx, 1_000).await;
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&d1.ball_id].activity_state), 0);
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, d1.ball_id)
+            .unwrap()
+            .activity_state,
+        0
+    );
 
     // Untether parent; test missing target ball and cloaked target ball disengage
     sys_handle
@@ -382,15 +385,20 @@ async fn step_engaged_drones_and_auto_aggression_cloaked_tethered_missing_and_de
         .await
         .unwrap();
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(d_missing.ball_id, d_missing.clone());
-        rt.active_drones_in_space.insert(d_cloak.ball_id, d_cloak.clone());
-    });
+    crate::services::drone_test_helpers::seed_active_drones(&ctx, [d_missing.clone(), d_cloak.clone()]);
     step_engaged_drones(&ctx, 1_000).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&d_missing.ball_id].target_id, None);
-        assert_eq!(rt.active_drones_in_space[&d_cloak.ball_id].target_id, None);
-    });
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, d_missing.ball_id)
+            .unwrap()
+            .target_id,
+        None
+    );
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, d_cloak.ball_id)
+            .unwrap()
+            .target_id,
+        None
+    );
 
     // ECM drone volley via step_engaged_drones & TiDi cycle scaling
     sys_handle
@@ -414,8 +422,8 @@ async fn step_engaged_drones_and_auto_aggression_cloaked_tethered_missing_and_de
     let mut d_ecm = make_drone_state(970_001, 971_001, 23_707, char_id, ship_id, sys_id, Some(target_ok));
     d_ecm.damage_vector = DamageVector::default();
     d_ecm.ecm_strength = 500.0;
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, d_ecm.clone());
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(d_ecm.ball_id, d_ecm.clone());
         rt.drone_settings.entry(char_id).or_default().aggressive = true;
     });
     sys_handle
@@ -453,14 +461,17 @@ async fn step_engaged_drones_and_auto_aggression_cloaked_tethered_missing_and_de
     let mut sentry_kill = make_drone_state(970_002, 971_002, 23_561, char_id, ship_id, sys_id, None);
     sentry_kill.is_sentry = true;
     sentry_kill.damage_vector = DamageVector::new(0.0, 100.0, 0.0, 0.0);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.clear();
-        rt.active_drones_in_space.insert(sentry_kill.ball_id, sentry_kill.clone());
-    });
+    crate::services::drone_test_helpers::clear_active_drones(&ctx);
+    crate::services::drone_test_helpers::seed_active_drone(&ctx, sentry_kill.clone());
     // Cloaked target skipped by auto-aggression
     assert!(step_drone_auto_aggression_and_assist(&ctx, sys_id, char_id, Some(target_cloaked), None, None).await.is_empty());
     // Fragile target destroyed -> sentry does not orbit and target_id reset to None
     let engaged = step_drone_auto_aggression_and_assist(&ctx, sys_id, char_id, Some(target_fragile), None, None).await;
     assert_eq!(engaged, vec![sentry_kill.ball_id]);
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&sentry_kill.ball_id].target_id), None);
+    assert_eq!(
+        crate::services::drone_test_helpers::active_drone(&ctx, sentry_kill.ball_id)
+            .unwrap()
+            .target_id,
+        None
+    );
 }

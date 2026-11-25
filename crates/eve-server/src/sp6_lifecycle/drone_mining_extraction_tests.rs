@@ -2,9 +2,8 @@
 
 use super::*;
 use super::super::step_repeating_drone_mining;
-use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DroneMiningState, DroneSpaceState,
-};
+use crate::services::combat_crimewatch::{DroneMiningState, DroneSpaceState};
+use crate::services::drone_test_helpers;
 use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use glam::DVec3;
@@ -89,38 +88,36 @@ async fn repeating_drone_mining_extracts_ore_and_stops_on_depletion_or_full_hold
     spawn_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO);
     spawn_ball(&ctx, sys_id, drone_id, 32787, DVec3::new(1_800.0, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_id,
-            DroneSpaceState {
-                ball_id: drone_id,
-                drone_item_id: drone_id,
-                type_id: 32787,
-                group_id: 101,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: Some(asteroid_id),
-                activity_state: 1,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1_500.0,
-                optimal_range: 5_000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 1.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: 32787,
+            group_id: 101,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: Some(asteroid_id),
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     sys_handle
         .upsert_drone_miner(DroneMiningState {
             drone_id,
@@ -149,9 +146,12 @@ async fn repeating_drone_mining_extracts_ore_and_stops_on_depletion_or_full_hold
     // Cycle 2: depletes remaining 40 units and stops miner
     step_repeating_drone_mining(&ctx, 1_060).await;
     assert_eq!(sys_handle.active_drone_miner(drone_id), None);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space[&drone_id].activity_state, 0);
-    });
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, drone_id)
+            .unwrap()
+            .activity_state,
+        0
+    );
 }
 
 #[tokio::test]
@@ -229,40 +229,36 @@ async fn step_repeating_drone_mining_handles_out_of_range_and_full_cargo() {
     spawn_ball(&ctx, sys_id, far_drone_id, 32787, DVec3::new(500_000.0, 0.0, 0.0));
     spawn_ball(&ctx, sys_id, full_drone_id, 32787, DVec3::new(1_000.0, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        for did in [far_drone_id, full_drone_id] {
-            rt.active_drones_in_space.insert(
-                did,
-                DroneSpaceState {
-                    ball_id: did,
-                    drone_item_id: did,
-                    type_id: 32787,
-                    group_id: 101,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: Some(ast_id),
-                    activity_state: 1,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1_500.0,
-                    optimal_range: 5_000.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 1.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        }
-    });
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [far_drone_id, full_drone_id].into_iter().map(|did| DroneSpaceState {
+            ball_id: did,
+            drone_item_id: did,
+            type_id: 32787,
+            group_id: 101,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: Some(ast_id),
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        }),
+    );
     for (did, yield_u) in [(far_drone_id, 50u32), (full_drone_id, 10_000u32)] {
         sys_handle
             .upsert_drone_miner(DroneMiningState {
@@ -285,10 +281,16 @@ async fn step_repeating_drone_mining_handles_out_of_range_and_full_cargo() {
     super::step_repeating_drone_mining(&ctx, 1_000).await;
     assert_eq!(sys_handle.active_drone_miner(far_drone_id), None);
     assert_eq!(sys_handle.active_drone_miner(full_drone_id), None);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&far_drone_id].target_id.is_none());
-        assert_eq!(rt.active_drones_in_space[&full_drone_id].activity_state, 0);
-    });
+    assert!(drone_test_helpers::active_drone(&ctx, far_drone_id)
+        .unwrap()
+        .target_id
+        .is_none());
+    assert_eq!(
+        drone_test_helpers::active_drone(&ctx, full_drone_id)
+            .unwrap()
+            .activity_state,
+        0
+    );
 }
 
 #[tokio::test]
@@ -375,38 +377,36 @@ async fn repeating_drone_mining_respects_mining_yield_multiplier() {
     spawn_ball(&ctx, sys_id, ship_id, 587, DVec3::ZERO);
     spawn_ball(&ctx, sys_id, drone_id, 32787, DVec3::new(1_800.0, 0.0, 0.0));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            drone_id,
-            DroneSpaceState {
-                ball_id: drone_id,
-                drone_item_id: drone_id,
-                type_id: 32787,
-                group_id: 101,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: Some(asteroid_id),
-                activity_state: 1,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1_500.0,
-                optimal_range: 5_000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 1.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: 32787,
+            group_id: 101,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: Some(asteroid_id),
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     sys_handle
         .upsert_drone_miner(DroneMiningState {
             drone_id,

@@ -9,7 +9,8 @@ use crate::bug_reporting::{
 };
 use crate::router::{ActiveFighterSquadron, ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use crate::services::drone_test_helpers;
 use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord};
 use crate::services::pve_special_sites::{with_abyssal_state, AbyssalTraceRecord};
 use crate::sp6_lifecycle::*;
@@ -404,22 +405,29 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
     assert_eq!(handle_cmd_reconnect_to_drones(&ctx, &mut sess, &[], &HashMap::new()).await.unwrap_err().code, "NoSolarSystem");
     sess.solar_system_id = Some(sys_id);
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(910_001, DroneSpaceState {
-            ball_id: 910_001, drone_item_id: 910_001, type_id: 2454, group_id: 100,
-            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
-            solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None,
-            guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
-            max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
-            shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
-            web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
-        rt.active_drones_in_space.insert(910_002, DroneSpaceState {
-            ball_id: 910_002, drone_item_id: 910_002, bandwidth_used: 5.0, ..rt.active_drones_in_space[&910_001].clone()
-        });
-    });
+    let base_drone = DroneSpaceState {
+        ball_id: 910_001, drone_item_id: 910_001, type_id: 2454, group_id: 100,
+        owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
+        solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None,
+        guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+        max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
+        shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
+        web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
+    };
+    drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
+            base_drone.clone(),
+            DroneSpaceState {
+                ball_id: 910_002,
+                drone_item_id: 910_002,
+                bandwidth_used: 5.0,
+                ..base_drone
+            },
+        ],
+    );
     let _ = handle_cmd_abandon_drone(&ctx, &mut sess, &[PyRep::List(vec![PyRep::Integer(910_001)])], &HashMap::new()).await.unwrap();
-    with_combat_runtime(&ctx, |rt| assert!(rt.active_drones_in_space[&910_001].is_abandoned));
+    assert!(drone_test_helpers::active_drone(&ctx, 910_001).unwrap().is_abandoned);
     let _ = handle_cmd_abandon_drone(&ctx, &mut sess, &[], &HashMap::new()).await.unwrap();
 
     // Put drone 910_002 out of 250km range and drone 910_001 within range -> 910_002 OutOfRange, 910_001 reconnects (or InsufficientBandwidth on Rifter 0 bandwidth)

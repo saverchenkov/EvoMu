@@ -827,16 +827,16 @@ fn seed_persisted_abandoned_drones_classifies_sentry_mobile_and_fighter() {
 
     seed_persisted_abandoned_drones(&ctx);
 
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let s = rt.active_drones_in_space.get(&sentry_id).expect("sentry seeded");
-        assert!(s.is_abandoned);
-        assert!(s.is_sentry);
+    let s = crate::services::drone_test_helpers::active_drone(&ctx, sentry_id)
+        .expect("sentry seeded");
+    assert!(s.is_abandoned);
+    assert!(s.is_sentry);
 
-        let m = rt.active_drones_in_space.get(&mobile_ball_id).expect("mobile drone under drone_ball_id");
-        assert!(m.is_abandoned);
-        assert!(!m.is_sentry);
-        assert_eq!(m.drone_item_id, mobile_item_id);
-    });
+    let m = crate::services::drone_test_helpers::active_drone(&ctx, mobile_ball_id)
+        .expect("mobile drone under drone_ball_id");
+    assert!(m.is_abandoned);
+    assert!(!m.is_sentry);
+    assert_eq!(m.drone_item_id, mobile_item_id);
     let f = fighter_test_helpers::active_fighter(&ctx, fighter_id)
         .expect("fighter squadron seeded");
     assert!(f.is_abandoned);

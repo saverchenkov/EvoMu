@@ -365,40 +365,38 @@ mod w4_ops_pve_mut_extra_tests {
             snap.characters.insert(neu_char, nc);
         });
         let neu_drone = 666_002_i64;
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            for (did, owner, pship) in [(neg_drone, other_char, other_ship), (neu_drone, neu_char, 294_400_003)] {
-                rt.active_drones_in_space.insert(
-                    did,
-                    DroneSpaceState {
-                        ball_id: did,
-                        drone_item_id: did,
-                        type_id: 2454,
-                        group_id: 100,
-                        owner_char_id: owner,
-                        original_owner_char_id: owner,
-                        parent_ship_id: pship,
-                        solar_system_id: sys_id,
-                        target_id: None,
-                        activity_state: 0,
-                        assist_char_id: None,
-                        guard_char_id: None,
-                        is_abandoned: false,
-                        is_sentry: false,
-                        bandwidth_used: 5.0,
-                        max_velocity: 1000.0,
-                        optimal_range: 5000.0,
-                        damage_vector: DamageVector::default(),
-                        shield_repair_amount: 0.0,
-                        armor_repair_amount: 0.0,
-                        hull_repair_amount: 0.0,
-                        web_speed_factor: 0.0,
-                        neut_amount: 0.0,
-                        ecm_strength: 0.0,
-                        tp_sig_bonus_pct: 0.0,
-                    },
-                );
-            }
-        });
+        crate::services::drone_test_helpers::seed_active_drones(
+            &ctx,
+            [(neg_drone, other_char, other_ship), (neu_drone, neu_char, 294_400_003)].map(
+                |(did, owner, pship)| DroneSpaceState {
+                    ball_id: did,
+                    drone_item_id: did,
+                    type_id: 2454,
+                    group_id: 100,
+                    owner_char_id: owner,
+                    original_owner_char_id: owner,
+                    parent_ship_id: pship,
+                    solar_system_id: sys_id,
+                    target_id: None,
+                    activity_state: 0,
+                    assist_char_id: None,
+                    guard_char_id: None,
+                    is_abandoned: false,
+                    is_sentry: false,
+                    bandwidth_used: 5.0,
+                    max_velocity: 1000.0,
+                    optimal_range: 5000.0,
+                    damage_vector: DamageVector::default(),
+                    shield_repair_amount: 0.0,
+                    armor_repair_amount: 0.0,
+                    hull_repair_amount: 0.0,
+                    web_speed_factor: 0.0,
+                    neut_amount: 0.0,
+                    ecm_strength: 0.0,
+                    tp_sig_bonus_pct: 0.0,
+                },
+            ),
+        );
         assert!(is_candidate_hostile_to_edencom(&ctx, &edencom, neg_drone, ship_id));
         assert!(!is_candidate_hostile_to_edencom(&ctx, &edencom, neu_drone, ship_id));
     }
@@ -1073,38 +1071,36 @@ mod w4_ops_pve_mut_extra_tests {
                     },
                 )
                 .await;
-            with_mut_combat_ephemeral(&ctx, |rt| {
-                rt.active_drones_in_space.insert(
-                    did,
-                    crate::services::combat_crimewatch::DroneSpaceState {
-                        ball_id: did,
-                        drone_item_id: did,
-                        type_id,
-                        group_id: 100,
-                        owner_char_id: own,
-                        original_owner_char_id: own,
-                        parent_ship_id: if own == char_id { ship_id } else { ship_logi },
-                        solar_system_id: sys_id,
-                        target_id: None,
-                        activity_state: act,
-                        assist_char_id: None,
-                        guard_char_id: None,
-                        is_abandoned: false,
-                        is_sentry: false,
-                        bandwidth_used: 5.0,
-                        max_velocity: 400.0,
-                        optimal_range: 5_000.0,
-                        damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
-                        shield_repair_amount: 0.0,
-                        armor_repair_amount: 0.0,
-                        hull_repair_amount: 0.0,
-                        web_speed_factor: 0.0,
-                        neut_amount: 0.0,
-                        ecm_strength: 0.0,
-                        tp_sig_bonus_pct: 0.0,
-                    },
-                );
-            });
+            crate::services::drone_test_helpers::seed_active_drone(
+                &ctx,
+                crate::services::combat_crimewatch::DroneSpaceState {
+                    ball_id: did,
+                    drone_item_id: did,
+                    type_id,
+                    group_id: 100,
+                    owner_char_id: own,
+                    original_owner_char_id: own,
+                    parent_ship_id: if own == char_id { ship_id } else { ship_logi },
+                    solar_system_id: sys_id,
+                    target_id: None,
+                    activity_state: act,
+                    assist_char_id: None,
+                    guard_char_id: None,
+                    is_abandoned: false,
+                    is_sentry: false,
+                    bandwidth_used: 5.0,
+                    max_velocity: 400.0,
+                    optimal_range: 5_000.0,
+                    damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
+                    shield_repair_amount: 0.0,
+                    armor_repair_amount: 0.0,
+                    hull_repair_amount: 0.0,
+                    web_speed_factor: 0.0,
+                    neut_amount: 0.0,
+                    ecm_strength: 0.0,
+                    tp_sig_bonus_pct: 0.0,
+                },
+            );
         }
 
         // Spawn missing aggro archetypes + SleeperSentry in optimal_range + lethal Pirate killing ship_fragile

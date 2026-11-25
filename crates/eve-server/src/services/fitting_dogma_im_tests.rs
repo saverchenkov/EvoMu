@@ -2558,43 +2558,41 @@ async fn r2_p1_1_foreign_on_grid_item_get_info_returns_public_only_and_never_mut
             .await;
     }
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            victim_drone_id,
-            crate::services::combat_crimewatch::DroneSpaceState {
-                ball_id: victim_drone_id,
-                drone_item_id: victim_drone_id,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: victim_id,
-                original_owner_char_id: victim_id,
-                parent_ship_id: victim_ship,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 2_600.0,
-                optimal_range: 2_000.0,
-                damage_vector: eve_destiny::DamageVector {
-                    em: 0.0,
-                    thermal: 20.0,
-                    kinetic: 0.0,
-                    explosive: 0.0,
-                },
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        crate::services::combat_crimewatch::DroneSpaceState {
+            ball_id: victim_drone_id,
+            drone_item_id: victim_drone_id,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: victim_id,
+            original_owner_char_id: victim_id,
+            parent_ship_id: victim_ship,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 2_600.0,
+            optimal_range: 2_000.0,
+            damage_vector: eve_destiny::DamageVector {
+                em: 0.0,
+                thermal: 20.0,
+                kinetic: 0.0,
+                explosive: 0.0,
             },
-        );
-    });
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
 
     let mut caller_sess = SessionState::new(980_001);
     caller_sess.user_id = Some(caller_id as u64);

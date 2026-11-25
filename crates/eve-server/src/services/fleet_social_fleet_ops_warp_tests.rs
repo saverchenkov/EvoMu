@@ -1494,38 +1494,36 @@ async fn fleet_warp_runs_hooks_dungeon_exit_and_warp_bubble_interdiction() {
     })
     .await
     .unwrap();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            88_002,
-            crate::services::combat_crimewatch::DroneSpaceState {
-                ball_id: 88_002,
-                drone_item_id: 88_002,
-                type_id: 2454,
-                group_id: 100,
-                owner_char_id: 90_000_002,
-                original_owner_char_id: 90_000_002,
-                parent_ship_id: 100_000_002,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1000.0,
-                optimal_range: 5000.0,
-                damage_vector: eve_destiny::DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    crate::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        crate::services::combat_crimewatch::DroneSpaceState {
+            ball_id: 88_002,
+            drone_item_id: 88_002,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: 90_000_002,
+            original_owner_char_id: 90_000_002,
+            parent_ship_id: 100_000_002,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1000.0,
+            optimal_range: 5000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             90_000_002,
@@ -1601,9 +1599,11 @@ async fn fleet_warp_runs_hooks_dungeon_exit_and_warp_bubble_interdiction() {
 
     // Per-member hooks ran for wingmate 90_000_002: module stopped, drone abandoned, safe logoff aborted, dungeon exited.
     assert!(!sys.has_module_cycle(100_000_002, 77_002).await);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space[&88_002].is_abandoned);
-    });
+    assert!(
+        crate::services::drone_test_helpers::active_drone(&ctx, 88_002)
+            .unwrap()
+            .is_abandoned
+    );
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.sp6_lifecycle.safe_logoffs.contains_key(&90_000_002));
     });

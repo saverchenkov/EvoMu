@@ -5,7 +5,8 @@
 use super::combat_reconnect_npc_concord_security_tests::make_p1a_ctx_and_session;
 use crate::combat::death_pipeline::execute_death_pipeline_sync_inner;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use crate::services::combat_crimewatch::DroneSpaceState;
+use crate::services::drone_test_helpers;
 use crate::sp6_lifecycle::handle_cmd_return_bay;
 use crate::system_actor::{
     apply_overload_transition_to_cycle, cleanup_removed_module_cycle, handle_add_module_cycle,
@@ -61,40 +62,38 @@ async fn r7_tb_10_drone_recall_atomic_claim_prevents_resurrection_or_bay_overfil
         })
         .await
         .unwrap();
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.active_drones_in_space.insert(
-                did,
-                DroneSpaceState {
-                    ball_id: did,
-                    drone_item_id: did,
-                    type_id: 2456,
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1_500.0,
-                    optimal_range: 1_500.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 1.0,
-                    neut_amount: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                    ecm_strength: 0.0,
-                },
-            );
-        });
+        drone_test_helpers::seed_active_drone(
+            &ctx,
+            DroneSpaceState {
+                ball_id: did,
+                drone_item_id: did,
+                type_id: 2456,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1_500.0,
+                optimal_range: 1_500.0,
+                damage_vector: DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                tp_sig_bonus_pct: 0.0,
+                ecm_strength: 0.0,
+            },
+        );
     }
-    // Destroyed ghost drone exists only in snap.items at bay-bypassed state, NOT in active_drones_in_space
+    // Destroyed ghost drone exists only in snap.items at bay-bypassed state, NOT in active space drones
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             ghost,

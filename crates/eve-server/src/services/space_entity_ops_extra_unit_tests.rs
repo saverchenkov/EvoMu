@@ -5,8 +5,9 @@
 
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{
-    with_mut_combat_runtime, ContainerLifetimeEntry, DroneSpaceState,
+    ContainerLifetimeEntry, DroneSpaceState,
 };
+use crate::services::drone_test_helpers;
 use crate::services::space_entity_ops::handle;
 use eve_db::types::{FleetMemberRecord, FleetRecord, FleetRole};
 use eve_db::{
@@ -208,38 +209,36 @@ async fn entity_unanchor_behavior_debug_extra_fleet_members_and_shipping_unit_br
             },
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            777_001,
-            DroneSpaceState {
-                ball_id: 777_001,
-                drone_item_id: 777_001,
-                type_id: 2456,
-                group_id: 100,
-                owner_char_id: other_char,
-                original_owner_char_id: other_char,
-                parent_ship_id: 200,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 1,
-                assist_char_id: None,
-                guard_char_id: Some(char_id),
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 400.0,
-                optimal_range: 2000.0,
-                damage_vector: Default::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: 777_001,
+            drone_item_id: 777_001,
+            type_id: 2456,
+            group_id: 100,
+            owner_char_id: other_char,
+            original_owner_char_id: other_char,
+            parent_ship_id: 200,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: Some(char_id),
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 400.0,
+            optimal_range: 2000.0,
+            damage_vector: Default::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     let extra = call_ops(&ctx, &mut sess, "entity", "GetExtraFleetMembers", &[]).await.unwrap();
     assert!(matches!(extra, PyRep::List(ref v) if v.len() == 1));
 
