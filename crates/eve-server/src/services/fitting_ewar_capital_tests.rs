@@ -1723,7 +1723,7 @@ mod extra_unit_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_crystal_wear() {
-    use crate::services::tactical_modules::notify_emitters_seasons_tactical::handle_load_ammo;
+    use crate::services::notify_emitters_seasons_tactical::handle_load_ammo;
     use eve_machonet::SessionState;
     use eve_proto::PyRep;
 
@@ -1799,7 +1799,7 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
         snap.items.insert(damaged_crys_id, InventoryItemRecord {
             item_id: damaged_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
             flag: InventoryFlag::Cargo, quantity: 1, singleton: true,
-            dynamic_attributes: std::collections::BTreeMap::from([(3_u16, 0.75)]), ..Default::default()
+            dynamic_attributes: HashMap::from([(3_u16, 0.75)]), ..Default::default()
         });
     });
 

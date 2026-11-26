@@ -1863,9 +1863,10 @@ mod r3_charge_policy_tests {
         ctx.db.with_snapshot(|snap| {
             assert_eq!(snap.items[&one_round_id].quantity, 1);
         });
+        let race_charges = [one_round_id];
         let (r1, r2) = tokio::join!(
-            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 82, &[one_round_id]),
-            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 83, &[one_round_id]),
+            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 82, &race_charges),
+            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 83, &race_charges),
         );
         assert!(matches!((r1, r2), (Ok(_), Err(_)) | (Err(_), Ok(_))));
         ctx.db.with_snapshot(|snap| {

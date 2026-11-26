@@ -1704,7 +1704,7 @@ mod r5_shipcaster_policy_tests {
                 speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
             })
             .await;
-        let pad = deploy_fw_beacon_constructor(&ctx, &sess, ctor_id, pos).await.expect("deploy constructor");
+        let pad = deploy_fw_beacon_constructor(&ctx, &sess, ctor_id, DVec3::from_array(pos)).await.expect("deploy constructor");
         with_misc_state(&ctx, |st| {
             if let Some(p) = st.landing_pads.iter_mut().find(|p| p.item_id == pad.item_id) {
                 p.required_materials = BTreeMap::from([(mat_tid, 5)]);
