@@ -399,7 +399,7 @@ async fn test_mn18_mining_missions_market_and_goals() {
         })
         .await
         .unwrap();
-    let mut mined_mission_units = 0_i32;
+    let mut mined_mission_units = 0_i64;
     let mut pocket_depleted = false;
     for cycle in 0..32 {
         let cycle_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)

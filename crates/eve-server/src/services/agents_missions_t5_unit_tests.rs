@@ -955,7 +955,7 @@ async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_re
 
     let handle = ctx.systems.get_or_spawn(sys_id);
     let ship_cs = ctx.build_type_combat_state(587);
-    handle
+    let _ = handle
         .spawn_ball_with_combat(
             eve_destiny::Ball {
                 id: ship_id,
