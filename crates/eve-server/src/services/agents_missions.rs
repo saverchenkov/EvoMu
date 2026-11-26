@@ -166,7 +166,8 @@ async fn handle_agent_warp_to_location(
         ));
     }
     let is_subwarp_goto = parsed.is_goto && warp_dist_m < MIN_AGENT_WARP_DISTANCE_M;
-    let leave_entries: Vec<(i64, [f64; 3], [f64; 3])> = if is_subwarp_goto {
+    let (leave_entries, landing_positions): (Vec<(i64, [f64; 3], [f64; 3])>, Vec<DVec3>) =
+        if is_subwarp_goto {
         crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
         if matches!(current_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
             return Err(AgentWarpError::ShipAlreadyInWarp.into_rpc("Ship is already in warp",
@@ -203,7 +204,7 @@ async fn handle_agent_warp_to_location(
             raw_dest_pos,
         )
         .await?;
-        Vec::new()
+        (Vec::new(), vec![raw_dest_pos])
     } else if parsed.fleet {
         let mut fleet_kwargs = HashMap::new();
         for key in ["formationID", "formationSpacing", "formationSize"] {
@@ -245,16 +246,13 @@ async fn handle_agent_warp_to_location(
             Some(res) => res?,
             None => return Ok(PyRep::Bool(false)),
         };
-        let warp_count = match fleet_reply {
-            PyRep::KeyVal(kv) => kv.get("warpCount").and_then(|v| v.as_i64()).unwrap_or(0),
-            _ => 0,
-        };
+        let (warp_count, landing_positions) = extract_fleet_warp_outcome(&fleet_reply);
         if warp_count <= 0 {
             return Ok(PyRep::Bool(false));
         }
         // `handle_fleet_warp` already ran `on_warp_initiated_hooks` and
         // `on_warp_start_leave_dungeon_if_needed` for every warped fleet member.
-        Vec::new()
+        (Vec::new(), landing_positions)
     } else {
         if warp_dist_m < MIN_AGENT_WARP_DISTANCE_M {
             return Err(BridgeRpcError::warp_distance_too_short(format!(
@@ -316,35 +314,59 @@ async fn handle_agent_warp_to_location(
                 _ => None,
             })
             .unwrap_or(raw_dest_pos);
-        vec![(
-            char_id,
-            current_ball.position.to_array(),
-            adjusted_dest.to_array(),
-        )]
+        (
+            vec![(
+                char_id,
+                current_ball.position.to_array(),
+                adjusted_dest.to_array(),
+            )],
+            vec![adjusted_dest],
+        )
     };
 
-    if let WarpTarget::Dungeon {
-        mission_id,
-        anchor_pos,
-        ..
-    } = target
-    {
-        reconcile_stale_mission_npcs(ctx, &sys_handle, char_id, mission_id);
-        let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
-            ctx,
-            char_id,
-            sys_id,
+    match target {
+        WarpTarget::Dungeon {
+            mission_id,
             anchor_pos,
-            Some(mission_id),
-        );
-        agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
-            ctx,
-            &sys_handle,
-            char_id,
-            sys_id,
-            Some(mission_id),
-        )
-        .await;
+            ..
+        } => {
+            if landing_positions
+                .iter()
+                .any(|pos| pos.distance(anchor_pos) <= 200_000.0)
+            {
+                reconcile_stale_mission_npcs(ctx, &sys_handle, char_id, mission_id);
+                let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+                    ctx,
+                    char_id,
+                    sys_id,
+                    anchor_pos,
+                    Some(mission_id),
+                );
+                agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
+                    ctx,
+                    &sys_handle,
+                    char_id,
+                    sys_id,
+                    Some(mission_id),
+                )
+                .await;
+            }
+        }
+        WarpTarget::Bookmark { bookmark_id, .. } => {
+            for pos in &landing_positions {
+                agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+                    ctx,
+                    &sys_handle,
+                    char_id,
+                    sys_id,
+                    "bookmark",
+                    bookmark_id,
+                    *pos,
+                )
+                .await;
+            }
+        }
+        WarpTarget::StationOrCelestial { .. } => {}
     }
 
     for (warped_cid, start_pos, dest_pos) in leave_entries {
@@ -401,6 +423,26 @@ pub(super) fn reconcile_stale_mission_npcs(
             });
         }
     }
+}
+
+fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<DVec3>) {
+    let PyRep::KeyVal(kv) = fleet_reply else {
+        return (0, Vec::new());
+    };
+    let count = kv.get("warpCount").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mut positions = Vec::new();
+    if let Some(PyRep::List(entries)) = kv.get("landingPositions") {
+        for entry in entries {
+            if let PyRep::Tuple(elems) = entry {
+                if let [_, x, y, z] = elems.as_slice() {
+                    if let (Some(x), Some(y), Some(z)) = (x.as_f64(), y.as_f64(), z.as_f64()) {
+                        positions.push(DVec3::new(x, y, z));
+                    }
+                }
+            }
+        }
+    }
+    (count, positions)
 }
 
 /// Reclaims mission-scoped courier cargo, removes any mission bookmark and persisted mining
