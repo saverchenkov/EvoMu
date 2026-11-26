@@ -3200,13 +3200,15 @@ async fn test_reconnect_in_space_clears_emergency_warp_bubble_immunity() {
     );
 
     // Also verify Ballpark::set_mode clears is_emergency_warping on non-emergency mode transitions
-    {
-        let mut bp = sys.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().is_emergency_warping = true;
-        bp.combat_states.get_mut(&ship_id).unwrap().is_interdiction_nullified = false;
-        bp.set_mode(ship_id, MovementMode::Stop).unwrap();
-        assert!(!bp.combat_states[&ship_id].is_emergency_warping);
-    }
+    let emerg_after = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().is_emergency_warping = true;
+            bp.combat_states.get_mut(&ship_id).unwrap().is_interdiction_nullified = false;
+            bp.set_mode(ship_id, MovementMode::Stop).unwrap();
+            bp.combat_states[&ship_id].is_emergency_warping
+        })
+        .await;
+    assert!(!emerg_after);
 
     // Reconnected pilot inside active bubble must be blocked from initiating warp
     let warp_err = sys

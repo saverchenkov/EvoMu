@@ -258,16 +258,16 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     assert_eq!(regroup_res, PyRep::None);
 
     let handle = ctx.systems.get_or_spawn(SYS_ORIGIN);
-    let bp = handle.ballpark.read().unwrap();
-    let b2 = bp.balls.get(&ship2).expect("ship2 ball");
-    match b2.mode {
+    let b2_mode = handle
+        .test_with_ballpark_async(move |bp| bp.balls.get(&ship2).expect("ship2 ball").mode.clone())
+        .await;
+    match b2_mode {
         MovementMode::Follow { target_id, range } => {
             assert_eq!(target_id, ship1);
             assert_eq!(range, 1_000.0);
         }
         ref other => panic!("expected Follow mode, got {other:?}"),
     }
-    drop(bp);
 
     // 7. CmdGotoBookmark (BF-06): ownership check and warp vs subwarp
     let bm_far_id = 70_000_001;
@@ -327,13 +327,25 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     ctx.tactical_state.write().unwrap().lance_caster_lock_until.remove(&(ctx.instance_id as usize, ship1));
 
     // BF-01: Scrambled ship cannot initiate warp (>= 150km)
-    handle.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 2;
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 2;
+        })
+        .await;
     let scram_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(scram_err.code, "WarpScrambled");
-    handle.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 0;
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 0;
+        })
+        .await;
 
     // BF-BM-01: Missing ship ball returns ShipNotInSpace
-    handle.ballpark.write().unwrap().balls.remove(&ship1);
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.remove(&ship1);
+        })
+        .await;
     let no_ball_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(no_ball_err.code, "ShipNotInSpace");
     seed_in_space_ship(&ctx, C1, ship1, 638, SYS_ORIGIN, DVec3::ZERO);
@@ -341,24 +353,29 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     // Warp mode for far bookmark with dynamic warp speed
     ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.expect("CmdGotoBookmark far");
     let exp_warp_spd = eve_server::services::space_destiny::compute_ship_warp_speed_au_s(&ctx, 638);
-    let bp = handle.ballpark.read().unwrap();
-    let b1 = bp.balls.get(&ship1).expect("ship1 ball");
-    match b1.mode {
+    let b1_mode = handle
+        .test_with_ballpark_async(move |bp| bp.balls.get(&ship1).expect("ship1 ball").mode.clone())
+        .await;
+    match b1_mode {
         MovementMode::Warp { warp_speed_au_s, .. } => assert_eq!(warp_speed_au_s, exp_warp_spd, "dynamic warp speed"),
         ref other => panic!("Expected warp mode, got {other:?}"),
     }
-    drop(bp);
 
     // BF-BM-01: Already in warp returns ShipAlreadyInWarp
     let warp_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(warp_err.code, "ShipAlreadyInWarp");
 
     // Sub-warp for near bookmark (sets GotoDirection)
-    handle.ballpark.write().unwrap().balls.get_mut(&ship1).unwrap().mode = MovementMode::Stop;
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship1).unwrap().mode = MovementMode::Stop;
+        })
+        .await;
     ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_near_id)], &HashMap::new(), None).await.expect("CmdGotoBookmark near");
-    let bp = handle.ballpark.read().unwrap();
-    let b1 = bp.balls.get(&ship1).expect("ship1 ball");
-    assert!(matches!(b1.mode, MovementMode::GotoDirection { .. }), "Expected GotoDirection mode for < 150km bookmark");
+    let b1_mode_near = handle
+        .test_with_ballpark_async(move |bp| bp.balls.get(&ship1).expect("ship1 ball").mode.clone())
+        .await;
+    assert!(matches!(b1_mode_near, MovementMode::GotoDirection { .. }), "Expected GotoDirection mode for < 150km bookmark");
 }
 
 #[tokio::test]
@@ -691,11 +708,19 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
 
     // BF-03: Scrambled passenger must NOT be conduit jumped
     let orig_h = ctx.systems.get_or_spawn(sys_origin);
-    orig_h.ballpark.write().unwrap().combat_states.get_mut(&ship2_id).unwrap().warp_scramble_strength = 2;
+    orig_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship2_id).unwrap().warp_scramble_strength = 2;
+        })
+        .await;
     let _ = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None).await.expect("Carrier solo jump");
     let p2_sys = ctx.db.with_snapshot(|snap| snap.characters.get(&C2).unwrap().solar_system_id);
     assert_eq!(p2_sys, sys_origin, "Scrambled passenger must stay in origin");
-    orig_h.ballpark.write().unwrap().combat_states.get_mut(&ship2_id).unwrap().warp_scramble_strength = 0;
+    orig_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship2_id).unwrap().warp_scramble_strength = 0;
+        })
+        .await;
 
     // Reset carrier back to origin for eligible passenger conduit jump
     seed_in_space_ship(&ctx, C1, carrier_id, carrier_type, sys_origin, DVec3::ZERO);

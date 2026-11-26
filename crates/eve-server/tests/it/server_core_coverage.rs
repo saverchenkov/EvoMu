@@ -1660,9 +1660,11 @@ async fn lock_rank_enforcement_across_fixed_subsystems_and_inversion_panic() {
         }));
         assert!(leaf_cw.is_err(), "RANK_LEAF -> RANK_CRIMEWATCH must panic");
 
+        let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
+            eve_db::lock_rank::RankedRwLock::new(());
         let leaf_bp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _leaf = ctx.pending_notifications.read().unwrap();
-            let _ = sys.ballpark.read();
+            let _ = bp_lock.read();
         }));
         assert!(leaf_bp.is_err(), "RANK_LEAF -> RANK_BALLPARK must panic");
 

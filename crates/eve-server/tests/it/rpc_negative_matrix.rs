@@ -1434,26 +1434,28 @@ fn combat_sig(cs: &CombatState) -> ([u64; 4], [bool; 3], i32, i32, u32) {
     )
 }
 
-fn capture_ballpark_snapshot(ctx: &ServerContext, sys_id: SolarSystemId) -> BallparkCheckSnapshot {
+async fn capture_ballpark_snapshot(ctx: &ServerContext, sys_id: SolarSystemId) -> BallparkCheckSnapshot {
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let bp = sys.ballpark.read().expect("read ballpark");
-    let combat_keys = bp
-        .combat_states
-        .iter()
-        .map(|(&id, cs)| {
-            let sig = combat_sig(cs);
-            (id, sig.0, sig.1, sig.2, sig.3, sig.4)
-        })
-        .collect();
-    BallparkCheckSnapshot {
-        sys_id,
-        balls: bp.balls.clone(),
-        combat_keys,
-        combat_states: bp.combat_states.clone(),
-        warp_bubbles: bp.warp_bubble_mgr.clone(),
-        target_locks: bp.target_locks.clone(),
-        current_tick: bp.current_tick,
-    }
+    sys.test_with_ballpark_async(move |bp| {
+        let combat_keys = bp
+            .combat_states
+            .iter()
+            .map(|(&id, cs)| {
+                let sig = combat_sig(cs);
+                (id, sig.0, sig.1, sig.2, sig.3, sig.4)
+            })
+            .collect();
+        BallparkCheckSnapshot {
+            sys_id,
+            balls: bp.balls.clone(),
+            combat_keys,
+            combat_states: bp.combat_states.clone(),
+            warp_bubbles: bp.warp_bubble_mgr.clone(),
+            target_locks: bp.target_locks.clone(),
+            current_tick: bp.current_tick,
+        }
+    })
+    .await
 }
 
 fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 7] {
@@ -1492,7 +1494,7 @@ fn capture_warp_states(ctx: &ServerContext) -> BTreeMap<u32, eve_server::system_
         .collect()
 }
 
-fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
+async fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
     let db = fix.ctx.db.snapshot_tables();
     let bound_entries = fix
         .ctx
@@ -1525,8 +1527,8 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
     let ephemeral_counts = current_ephemeral_counts(&fix.ctx);
     let clock_unix = fix.ctx.clock().now_unix_secs();
     let ballparks = vec![
-        capture_ballpark_snapshot(&fix.ctx, SYS_JITA),
-        capture_ballpark_snapshot(&fix.ctx, fix.other_sys_id),
+        capture_ballpark_snapshot(&fix.ctx, SYS_JITA).await,
+        capture_ballpark_snapshot(&fix.ctx, fix.other_sys_id).await,
     ];
     let esi = capture_esi_baseline(&fix.ctx.esi_state);
     let crimewatch_b_state = fix.ctx.crimewatch.state_of(CHAR_B_ID);
@@ -1568,7 +1570,7 @@ fn capture_runtime_baseline(fix: &MatrixFixture) -> RuntimeBaseline {
     }
 }
 
-fn check_runtime_changed(
+async fn check_runtime_changed(
     fix: &MatrixFixture,
     base: &RuntimeBaseline,
 ) -> (bool, bool, bool) {
@@ -1621,14 +1623,28 @@ fn check_runtime_changed(
     let mut space_dirty = false;
     for bp_base in &base.ballparks {
         let sys = fix.ctx.systems.get_or_spawn(bp_base.sys_id);
-        let bp = sys.ballpark.read().expect("ballpark");
-        let cur_combat_changed = bp.combat_states.len() != bp_base.combat_keys.len()
+        let (balls_cur, combat_sigs_cur, warp_bubbles_cur, lock_sigs_cur, current_tick_cur) = sys
+            .test_with_ballpark_async(|bp| {
+                let combat_sigs: HashMap<BallId, ([u64; 4], [bool; 3], i32, i32, u32)> = bp
+                    .combat_states
+                    .iter()
+                    .map(|(&id, cs)| (id, combat_sig(cs)))
+                    .collect();
+                (
+                    bp.balls.clone(),
+                    combat_sigs,
+                    bp.warp_bubble_mgr.clone(),
+                    target_locks_sigs(&bp.target_locks),
+                    bp.current_tick,
+                )
+            })
+            .await;
+        let cur_combat_changed = combat_sigs_cur.len() != bp_base.combat_keys.len()
             || bp_base
                 .combat_keys
                 .iter()
                 .any(|(id, floats, bools, scram, core, gate)| {
-                    bp.combat_states.get(id).is_none_or(|cs| {
-                        let sig = combat_sig(cs);
+                    combat_sigs_cur.get(id).is_none_or(|sig| {
                         sig.0 != *floats
                             || sig.1 != *bools
                             || sig.2 != *scram
@@ -1636,11 +1652,11 @@ fn check_runtime_changed(
                             || sig.4 != *gate
                     })
                 });
-        if bp.balls != bp_base.balls
+        if balls_cur != bp_base.balls
             || cur_combat_changed
-            || bp.warp_bubble_mgr != bp_base.warp_bubbles
-            || target_locks_sigs(&bp.target_locks) != target_locks_sigs(&bp_base.target_locks)
-            || bp.current_tick != bp_base.current_tick
+            || warp_bubbles_cur != bp_base.warp_bubbles
+            || lock_sigs_cur != target_locks_sigs(&bp_base.target_locks)
+            || current_tick_cur != bp_base.current_tick
         {
             space_dirty = true;
             break;
@@ -1739,17 +1755,22 @@ async fn restore_world_state(
     if space_dirty {
         for bp_base in &base.ballparks {
             let sys = fix.ctx.systems.get_or_spawn(bp_base.sys_id);
-            {
-                let mut bp = sys.ballpark.write().expect("write ballpark");
-                bp.balls = bp_base.balls.clone();
-                bp.combat_states = bp_base.combat_states.clone();
-                bp.warp_bubble_mgr = bp_base.warp_bubbles.clone();
-                bp.target_locks = bp_base.target_locks.clone();
+            let balls = bp_base.balls.clone();
+            let combat_states = bp_base.combat_states.clone();
+            let warp_bubbles = bp_base.warp_bubbles.clone();
+            let target_locks = bp_base.target_locks.clone();
+            let current_tick = bp_base.current_tick;
+            sys.test_with_ballpark_mut_async(move |bp| {
+                bp.balls = balls;
+                bp.combat_states = combat_states;
+                bp.warp_bubble_mgr = warp_bubbles;
+                bp.target_locks = target_locks;
                 bp.pending_events.clear();
                 bp.observer_events.clear();
                 bp.scheduled_observer_events.clear();
-                bp.current_tick = bp_base.current_tick;
-            }
+                bp.current_tick = current_tick;
+            })
+            .await;
         }
         let sys_jita = fix.ctx.systems.get_or_spawn(SYS_JITA);
         let _ = sys_jita.set_warp_scramble_strength(fix.f_ship_id, 5).await;
@@ -1758,27 +1779,29 @@ async fn restore_world_state(
     }
 }
 
-fn find_system_gate_and_station(
+async fn find_system_gate_and_station(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> (Option<i64>, Option<DVec3>, Option<i64>, Option<DVec3>) {
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let bp = sys.ballpark.read().expect("read ballpark");
-    let mut gate = None;
-    let mut station = None;
-    for (&id, meta) in &bp.ball_slim_meta {
-        if meta.group_id == 10 && gate.is_none() {
-            gate = bp.balls.get(&id).map(|b| (id, b.position));
-        } else if meta.group_id == 15 && station.is_none() {
-            station = bp.balls.get(&id).map(|b| (id, b.position));
+    sys.test_with_ballpark_async(|bp| {
+        let mut gate = None;
+        let mut station = None;
+        for (&id, meta) in &bp.ball_slim_meta {
+            if meta.group_id == 10 && gate.is_none() {
+                gate = bp.balls.get(&id).map(|b| (id, b.position));
+            } else if meta.group_id == 15 && station.is_none() {
+                station = bp.balls.get(&id).map(|b| (id, b.position));
+            }
         }
-    }
-    (
-        gate.map(|x| x.0),
-        gate.map(|x| x.1),
-        station.map(|x| x.0),
-        station.map(|x| x.1),
-    )
+        (
+            gate.map(|x| x.0),
+            gate.map(|x| x.1),
+            station.map(|x| x.0),
+            station.map(|x| x.1),
+        )
+    })
+    .await
 }
 
 async fn bind_service_for_session(
@@ -2642,12 +2665,13 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         })
         .expect("seed negative matrix world");
 
-    let (jita_gate_opt, jita_gate_pos_opt, _, _) = find_system_gate_and_station(&ctx, SYS_JITA);
+    let (jita_gate_opt, jita_gate_pos_opt, _, _) =
+        find_system_gate_and_station(&ctx, SYS_JITA).await;
     let jita_gate_id = jita_gate_opt.expect("Jita stargate present");
     let jita_gate_pos = jita_gate_pos_opt.expect("Jita gate position");
 
     let (other_gate_opt, _, other_st_opt, other_st_pos_opt) =
-        find_system_gate_and_station(&ctx, other_sys_id);
+        find_system_gate_and_station(&ctx, other_sys_id).await;
     let other_gate_id = other_gate_opt.unwrap_or(other_station_id);
     let _other_st = other_st_opt.unwrap_or(other_station_id);
     let other_st_pos = other_st_pos_opt.unwrap_or(DVec3::ZERO);
@@ -2760,13 +2784,14 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         sys_other.set_ball_position(e_ship_id, e_ship_pos).await,
         "set E position"
     );
-    {
-        let mut bp = sys_other.ballpark.write().expect("write other bp");
-        bp.balls
-            .insert(e_space_ship_id, make_ball(e_space_ship_id, 587, other_st_pos));
-        bp.combat_states
-            .insert(e_space_ship_id, CombatState::default());
-    }
+    sys_other
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls
+                .insert(e_space_ship_id, make_ball(e_space_ship_id, 587, other_st_pos));
+            bp.combat_states
+                .insert(e_space_ship_id, CombatState::default());
+        })
+        .await;
     let _ = sys_other.set_warp_core_strength(e_ship_id, 1).await;
 
     // Place Corp F's Upwell structure > 250 km from F's gate position before tackle reconciliation.
@@ -2782,21 +2807,22 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
 
     // Seed space balls in Jita BEFORE scramble reconciliation so baseline combat_states already reflect tackle reconciliation.
     let sys_jita = ctx.systems.get_or_spawn(SYS_JITA);
-    {
-        let mut bp = sys_jita.ballpark.write().expect("write jita bp");
-        if let Some(st_ball) = bp.balls.get_mut(&CORP_F_STRUCTURE_ID) {
-            st_ball.position = f_struct_pos;
-        }
-        for (ball_id, type_id, pos) in [
-            (b_space_ship_id, 587u32, jita_gate_pos + DVec3::new(10_000.0, 0.0, 0.0)),
-            (d_space_ship_id, 587, jita_gate_pos + DVec3::new(20_000.0, 0.0, 0.0)),
-            (f_space_ship_id, 587, jita_gate_pos + DVec3::new(300_000.0, 0.0, 0.0)),
-            (f_pos_id, 12235, f_struct_pos),
-        ] {
-            bp.balls.insert(ball_id, make_ball(ball_id, type_id, pos));
-            bp.combat_states.insert(ball_id, CombatState::default());
-        }
-    }
+    sys_jita
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(st_ball) = bp.balls.get_mut(&CORP_F_STRUCTURE_ID) {
+                st_ball.position = f_struct_pos;
+            }
+            for (ball_id, type_id, pos) in [
+                (b_space_ship_id, 587u32, jita_gate_pos + DVec3::new(10_000.0, 0.0, 0.0)),
+                (d_space_ship_id, 587, jita_gate_pos + DVec3::new(20_000.0, 0.0, 0.0)),
+                (f_space_ship_id, 587, jita_gate_pos + DVec3::new(300_000.0, 0.0, 0.0)),
+                (f_pos_id, 12235, f_struct_pos),
+            ] {
+                bp.balls.insert(ball_id, make_ball(ball_id, type_id, pos));
+                bp.combat_states.insert(ball_id, CombatState::default());
+            }
+        })
+        .await;
 
     // Position F 1.2 km from Jita gate and scram + cloak it.
     let f_ship_pos = jita_gate_pos + DVec3::new(1_200.0, 0.0, 0.0);
@@ -3902,7 +3928,7 @@ fn note_or_json_b_slice(raw: Option<&String>, b_ids: &[i64]) -> Option<Value> {
 /// Used for Situation `"b"` RPCs whose typed access class sets `caller_scoped_mutation: true`
 /// so that mutations to the caller's own state (`CHAR_A_ID`) are permitted while Target B
 /// remains strictly invariant.
-fn target_b_state_mutated(
+async fn target_b_state_mutated(
     fix: &MatrixFixture,
     base: &RuntimeBaseline,
     cur_db: Option<&WorldTablesSnapshot>,
@@ -4104,20 +4130,32 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
     if space_dirty {
         for bp_base in &base.ballparks {
             let sys = fix.ctx.systems.get_or_spawn(bp_base.sys_id);
-            let bp = sys.ballpark.read().expect("ballpark");
-            for &bid in &b_balls {
-                if bp.balls.get(&bid) != bp_base.balls.get(&bid) {
+            let (cur_balls, cur_combat_sigs, cur_b_lock_sigs) = sys
+                .test_with_ballpark_async(move |bp| {
+                    let balls: Vec<(BallId, Option<Ball>)> = b_balls
+                        .iter()
+                        .map(|&bid| (bid, bp.balls.get(&bid).cloned()))
+                        .collect();
+                    let combat_sigs: Vec<(BallId, Option<([u64; 4], [bool; 3], i32, i32, u32)>)> = b_balls
+                        .iter()
+                        .map(|&bid| (bid, bp.combat_states.get(&bid).map(combat_sig)))
+                        .collect();
+                    let lock_sigs = target_locks_b_sigs(&bp.target_locks, &b_balls);
+                    (balls, combat_sigs, lock_sigs)
+                })
+                .await;
+            for (bid, cur_ball) in cur_balls {
+                if cur_ball.as_ref() != bp_base.balls.get(&bid) {
                     return true;
                 }
+            }
+            for (bid, cur_cs) in cur_combat_sigs {
                 let base_cs = bp_base.combat_states.get(&bid).map(combat_sig);
-                let cur_cs = bp.combat_states.get(&bid).map(combat_sig);
                 if base_cs != cur_cs {
                     return true;
                 }
             }
-            if target_locks_b_sigs(&bp.target_locks, &b_balls)
-                != target_locks_b_sigs(&bp_base.target_locks, &b_balls)
-            {
+            if cur_b_lock_sigs != target_locks_b_sigs(&bp_base.target_locks, &b_balls) {
                 return true;
             }
         }
@@ -6528,7 +6566,7 @@ async fn evaluate_negative_call(
         .as_ref()
         .is_some_and(|tables| tables.snapshot != runtime_baseline.db.snapshot);
     let (runtime_dirty, bound_dirty, space_dirty) =
-        check_runtime_changed(fix, runtime_baseline);
+        check_runtime_changed(fix, runtime_baseline).await;
     let world_mutated = db_dirty || runtime_dirty;
 
     if sit == Situation::NoChar {
@@ -6722,6 +6760,7 @@ async fn evaluate_negative_call(
                     bound_dirty,
                     space_dirty,
                 )
+                .await
             } else {
                 // Read-only Situation B allowlist entries and rejected calls require full invariance.
                 true
@@ -6823,7 +6862,7 @@ async fn run_situation_worker(
     if sit == Situation::A {
         assert_registry_allowlist_policy_parity(&fix.ctx.rpc_registry, &allowlist);
     }
-    let runtime_baseline = capture_runtime_baseline(&fix);
+    let runtime_baseline = capture_runtime_baseline(&fix).await;
     let kw = HashMap::new();
     let sit_code = sit.code();
     let mut observed = BTreeSet::new();

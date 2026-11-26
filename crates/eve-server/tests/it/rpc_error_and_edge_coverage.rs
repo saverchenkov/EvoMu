@@ -2353,13 +2353,30 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
     // 4. Primary root cause (#829): SlimItemMeta.corp_id must never be a faction ID (500001..=500030)
     // and SlimItem / AddBalls2 wire encoding for State Navy Cerberus must emit Caldari owner & valid corpID.
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let group_npc0 = group_npc_ids[0];
+    let (navy_ball, navy_meta, add_balls2, group_meta, gm_meta) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            let navy_ball_ref = bp.balls.get(&navy_npc_id).expect("Navy Cerberus ball in ballpark");
+            let navy_meta = bp
+                .ball_slim_meta
+                .get(&navy_npc_id)
+                .expect("Navy Cerberus SlimItemMeta in ballpark")
+                .clone();
+            let add_balls2 = eve_destiny::wire::encode_add_balls2_action(1, &[navy_ball_ref], Some(bp));
+            let group_meta = bp
+                .ball_slim_meta
+                .get(&group_npc0)
+                .expect("spawn_group NPC SlimItemMeta")
+                .clone();
+            let gm_meta = bp
+                .ball_slim_meta
+                .get(&gm_npc_id)
+                .expect("/spawn 52936 SlimItemMeta")
+                .clone();
+            (navy_ball_ref.clone(), navy_meta, add_balls2, group_meta, gm_meta)
+        })
+        .await;
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        let navy_ball = bp.balls.get(&navy_npc_id).expect("Navy Cerberus ball in ballpark");
-        let navy_meta = bp
-            .ball_slim_meta
-            .get(&navy_npc_id)
-            .expect("Navy Cerberus SlimItemMeta in ballpark");
         assert_eq!(navy_meta.owner_id, 500_001);
         assert!(
             !(500_001..=500_030).contains(&navy_meta.corp_id),
@@ -2376,14 +2393,13 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
             navy_meta.corp_id
         );
 
-        let slim_py = eve_destiny::wire::slim_item_dict(navy_ball, navy_meta);
+        let slim_py = eve_destiny::wire::slim_item_dict(&navy_ball, &navy_meta);
         assert_eq!(slim_py.dict_get("ownerID"), Some(&PyRep::Integer(500_001)));
         assert_eq!(
             slim_py.dict_get("corpID"),
             Some(&PyRep::Integer(navy_meta.corp_id))
         );
 
-        let add_balls2 = eve_destiny::wire::encode_add_balls2_action(1, &[navy_ball], Some(&bp));
         let wire_slim = match &add_balls2 {
             PyRep::Tuple(outer) => match &outer[1] {
                 PyRep::Tuple(act) => match &act[1] {
@@ -2412,13 +2428,9 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
         // Fallback corp_id = -1 must encode on the wire as PyRep::None (not -1 / faction ID)
         let mut fallback_meta = navy_meta.clone();
         fallback_meta.corp_id = -1;
-        let fallback_slim = eve_destiny::wire::slim_item_dict(navy_ball, &fallback_meta);
+        let fallback_slim = eve_destiny::wire::slim_item_dict(&navy_ball, &fallback_meta);
         assert_eq!(fallback_slim.dict_get("corpID"), Some(&PyRep::None));
 
-        let group_meta = bp
-            .ball_slim_meta
-            .get(&group_npc_ids[0])
-            .expect("spawn_group NPC SlimItemMeta");
         assert!(
             !(500_001..=500_030).contains(&group_meta.corp_id),
             "spawn_group NPC (faction {group_faction_id}) leaked faction ID into corp_id={}",
@@ -2432,10 +2444,6 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
             );
         }
 
-        let gm_meta = bp
-            .ball_slim_meta
-            .get(&gm_npc_id)
-            .expect("/spawn 52936 SlimItemMeta");
         assert!(
             !(500_001..=500_030).contains(&gm_meta.corp_id),
             "/spawn 52936 leaked faction ID into corp_id={}",
@@ -2449,10 +2457,9 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
     }
 
     let wh_handle = ctx.systems.get_or_spawn(wh_sys);
-    let wh_bp = wh_handle.ballpark.read().unwrap();
-    let tower_meta = wh_bp
-        .ball_slim_meta
-        .get(&tower_id)
+    let tower_meta = wh_handle
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&tower_id).cloned())
+        .await
         .expect("Sleeper sentry tower SlimItemMeta");
     assert!(
         !(500_001..=500_030).contains(&tower_meta.corp_id),

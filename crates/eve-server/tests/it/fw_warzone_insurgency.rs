@@ -2354,12 +2354,13 @@ async fn test_corruption_and_suppression_per_stage_effects() {
         .spawn_ball_with_combat(make_ball(ci_probe_ship, 621, DVec3::new(10_000.0, 0.0, 0.0)), base_cs)
         .await;
     let roamer_ids: Vec<i64> = sys_h.list_balls().await.unwrap().into_iter().filter(|b| b.type_id != 79_507 && b.id != ci_probe_ship).map(|b| b.id).collect();
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        for rid in roamer_ids {
-            bp.set_ball_position(rid, DVec3::new(900_000.0, 0.0, 0.0));
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            for rid in roamer_ids {
+                bp.set_ball_position(rid, DVec3::new(900_000.0, 0.0, 0.0));
+            }
+        })
+        .await;
     // Pin RNG deterministically before 79507's single turret volley (`resolve_turret_shot` rolls
     // `Q = 0.49 + u`, whereas `dmg_s0` uses un-rolled flat `88*4` damage; `TEST_MODE_DEFAULT_SEED`
     // yields `u ≈ 0.654`, `Q ≈ 1.144` so authentic 500-base SDE damage is compared cleanly).
@@ -2930,41 +2931,45 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
     assert!((insurgency_pvp_loot_drop_threshold(&ctx, front_sys, pir_cid, emp_cid, false) - 0.875).abs() < 1e-6);
 
     let roamer_pos = ball_after_roam.position;
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(pir_ship, roamer_pos + DVec3::new(10_000.0, 0.0, 0.0));
-        bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(13_000.0, 0.0, 0.0));
-        bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
-        bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(pir_ship, roamer_pos + DVec3::new(10_000.0, 0.0, 0.0));
+            bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(13_000.0, 0.0, 0.0));
+            bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
+            bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     {
         let n = get_npc_entity(&ctx, pir_bid).unwrap();
         assert!(!n.aggression_threat.contains_key(&pir_ship), "Roamer must not attack aligned Pirate militia unprovoked");
         assert_eq!(n.target_id, Some(rival_pir_ship), "Roamer must engage rival non-campaign Pirate militia pilot");
     }
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
-        bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(15_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
+            bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(15_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(get_npc_entity(&ctx, pir_bid).and_then(|n| n.target_id), Some(neu_ship), "Roamer must engage neutral pilot");
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
-        bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(15_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(900_000.0, 0.0, 0.0));
+            bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(15_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(get_npc_entity(&ctx, pir_bid).and_then(|n| n.target_id), Some(emp_ship), "Roamer must engage Empire militia pilot");
     // Move all pilots far away from Pirate roamer before testing Enforcers
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(900_000.0, 900_000.0, 0.0));
-        bp.set_ball_position(pir_ship, roamer_pos + DVec3::new(910_000.0, 900_000.0, 0.0));
-        bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(920_000.0, 900_000.0, 0.0));
-        bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(930_000.0, 900_000.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(emp_ship, roamer_pos + DVec3::new(900_000.0, 900_000.0, 0.0));
+            bp.set_ball_position(pir_ship, roamer_pos + DVec3::new(910_000.0, 900_000.0, 0.0));
+            bp.set_ball_position(neu_ship, roamer_pos + DVec3::new(920_000.0, 900_000.0, 0.0));
+            bp.set_ball_position(rival_pir_ship, roamer_pos + DVec3::new(930_000.0, 900_000.0, 0.0));
+        })
+        .await;
 
     // 4. Dynamic SDE tier escalation & targeting for Roaming Enforcers (group 4638) across Suppression 3..=5:
     let mut enf_tids_by_stage = Vec::new();
@@ -2993,13 +2998,14 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         (n.ball_id, n.spawn_position)
     };
     // Enforcer stays neutral to Empire militia & neutral pilots, and engages ALL pirate militias (`500_010` and `500_011`)!
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(emp_ship, enf_pos + DVec3::new(10_000.0, 0.0, 0.0));
-        bp.set_ball_position(neu_ship, enf_pos + DVec3::new(12_000.0, 0.0, 0.0));
-        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
-        bp.set_ball_position(pir_ship, enf_pos + DVec3::new(910_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(emp_ship, enf_pos + DVec3::new(10_000.0, 0.0, 0.0));
+            bp.set_ball_position(neu_ship, enf_pos + DVec3::new(12_000.0, 0.0, 0.0));
+            bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
+            bp.set_ball_position(pir_ship, enf_pos + DVec3::new(910_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(
         get_npc_entity(&ctx, enf_bid)
@@ -3008,10 +3014,11 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         None,
         "InsurgencyEnforcer must remain neutral to Empire and neutral pilots"
     );
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(13_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(13_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(
         get_npc_entity(&ctx, enf_bid)
@@ -3020,11 +3027,12 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         Some(rival_pir_ship),
         "InsurgencyEnforcer must engage rival pirate militia (`500_011` / `500_010`) at Suppression >= 3"
     );
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
-        bp.set_ball_position(pir_ship, enf_pos + DVec3::new(14_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(rival_pir_ship, enf_pos + DVec3::new(900_000.0, 0.0, 0.0));
+            bp.set_ball_position(pir_ship, enf_pos + DVec3::new(14_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(
         get_npc_entity(&ctx, enf_bid)
@@ -3037,11 +3045,12 @@ async fn test_insurgency_roamers_dynamic_sde_movement_targeting_and_despawn() {
         let ci = find_npc_entity_in_system(&ctx, front_sys, |n| n.type_id == 79_507).expect("CI Sentry 79507");
         (ci.ball_id, ci.spawn_position)
     };
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(pir_ship, ci_pos + DVec3::new(900_000.0, 0.0, 0.0));
-        bp.set_ball_position(rival_pir_ship, ci_pos + DVec3::new(8_000.0, 0.0, 0.0));
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(pir_ship, ci_pos + DVec3::new(900_000.0, 0.0, 0.0));
+            bp.set_ball_position(rival_pir_ship, ci_pos + DVec3::new(8_000.0, 0.0, 0.0));
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, front_sys);
     assert_eq!(get_npc_entity(&ctx, ci_bid).and_then(|n| n.target_id), Some(rival_pir_ship), "Counter-Insurgency Sentry Gun must engage rival pirate militia");
 
@@ -3553,10 +3562,11 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
     // 3. Move Capsule (`670`) within 10 km Vorton secondary arc range of `vic_ship`:
     //    - Under Safety Yellow, Vorton skips the Capsule secondary arc without Criminal/CONCORD.
     //    - Under Safety Red, Vorton secondary arc hits Capsule (`670`) and escalates to Criminal + CONCORD!
-    {
-        let mut bp = hs_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.set_ball_position(pod_ball, DVec3::new(3_500.0, 0.0, 0.0));
-    }
+    hs_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_position(pod_ball, DVec3::new(3_500.0, 0.0, 0.0));
+        })
+        .await;
     crate::fw_warzone_insurgency::fw_fast_forward_secs(&ctx, 10);
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&vorton_id);
@@ -3736,10 +3746,11 @@ async fn test_highsec_stage5_smartbomb_capsule_concord_and_corruption_reload_per
         );
 
         // (b) Move Capsule (`670`) into 6 km blast radius and fire second Smartbomb -> Criminal + CONCORD!
-        {
-            let mut bp = hs_h2.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            bp.set_ball_position(pod_vic_ball, DVec3::new(2_000.0, 0.0, 0.0));
-        }
+        hs_h2
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.set_ball_position(pod_vic_ball, DVec3::new(2_000.0, 0.0, 0.0));
+            })
+            .await;
         let sb_pod_res = rpc_call(&ctx2, &mut s2, "dogmaIM", "Activate", &[PyRep::Integer(sb_mod_id2)])
             .await
             .expect("Smartbomb Activate hitting Capsule in Highsec Stage 5");
@@ -3825,12 +3836,18 @@ async fn test_ci_sentry_grid_targeting_destruction_and_lowsec_sentry_separation(
     // Move roaming pirates/enforcers far away so we isolate `79_507` Counter-Insurgency Sentry Gun behavior:
     let all_balls = sys_h.list_balls().await.unwrap();
     let ci_ball_id = all_balls.iter().find(|b| b.type_id == 79_507).expect("79507 deployed").id;
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        for b in all_balls.iter().filter(|b| b.id != ci_ball_id && b.id < 100_000_300) {
-            bp.set_ball_position(b.id, DVec3::new(-900_000.0, 0.0, 0.0));
-        }
-    }
+    let move_ids: Vec<i64> = all_balls
+        .iter()
+        .filter(|b| b.id != ci_ball_id && b.id < 100_000_300)
+        .map(|b| b.id)
+        .collect();
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            for bid in move_ids {
+                bp.set_ball_position(bid, DVec3::new(-900_000.0, 0.0, 0.0));
+            }
+        })
+        .await;
     assert!(eve_server::services::security_mgr::has_active_counter_insurgency_sentries(&ctx, enemy_sys));
     assert!(eve_server::services::combat_npc_police::is_sentry_disabled_by_corruption(&ctx, enemy_sys));
     assert_eq!(

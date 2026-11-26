@@ -76,11 +76,16 @@ async fn test_belts_as_balls_depletion_and_respawn() {
         assert_eq!(ball.id as i64, ast.asteroid_id);
         assert!(ball.radius >= 60.0 && ball.radius <= 2_500.0);
 
-        let bp = sys_handle.ballpark.read().unwrap();
-        let meta = bp.ball_slim_meta.get(&ast.asteroid_id).expect("SlimItemMeta");
-        assert_eq!(meta.category_id, 25, "Asteroid category must be 25");
+        let ast_id = ast.asteroid_id;
+        let (meta_group_id, meta_category_id) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                let meta = bp.ball_slim_meta.get(&ast_id).expect("SlimItemMeta");
+                (meta.group_id, meta.category_id)
+            })
+            .await;
+        assert_eq!(meta_category_id, 25, "Asteroid category must be 25");
         let sde_type = ctx.sde.types.get(&ast.type_id).expect("SDE type");
-        assert_eq!(meta.group_id, sde_type.group_id);
+        assert_eq!(meta_group_id, sde_type.group_id);
 
         assert_eq!(ast.remaining_units, ast.initial_units);
         assert!(!ast.depleted);

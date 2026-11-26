@@ -479,11 +479,13 @@ async fn test_structure_board_eject_and_defense_acl_control() {
         snap.item_positions.insert(original_ship, [st_pos[0] + 1_000.0, st_pos[1], st_pos[2]]);
     });
     let sys_handle = ctx.systems.get_or_spawn(30_000_142);
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(b) = bp.balls.get_mut(&original_ship) {
-            b.position = DVec3::new(st_pos[0] + 1_000.0, st_pos[1], st_pos[2]);
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&original_ship) {
+                b.position = DVec3::new(st_pos[0] + 1_000.0, st_pos[1], st_pos[2]);
+            }
+        })
+        .await;
     rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
         .await
         .expect("Dock inside Upwell structure");
@@ -534,11 +536,13 @@ async fn test_structure_board_eject_and_defense_acl_control() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions.insert(gunner_ship, [st_pos[0] + 1_200.0, st_pos[1], st_pos[2]]);
     });
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(b) = bp.balls.get_mut(&gunner_ship) {
-            b.position = DVec3::new(st_pos[0] + 1_200.0, st_pos[1], st_pos[2]);
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&gunner_ship) {
+                b.position = DVec3::new(st_pos[0] + 1_200.0, st_pos[1], st_pos[2]);
+            }
+        })
+        .await;
     rpc(&ctx, &mut gunner_sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)]).await.unwrap();
 
     // Without defense ACL or corp role, gunner_char cannot board even after char_id ejects

@@ -428,12 +428,13 @@ fn phase1_sleeper_sentries_and_web<'a>(
         warp_session_to_anomaly(ctx, &mut sess, sentry_sys, &sentry_anom_id).await;
 
         let sentry_sys_handle = ctx.systems.get_or_spawn(sentry_sys);
-        let (sentry_bid, sentry_pos, sentry_sig) = {
-            let bp = sentry_sys_handle.ballpark.read().unwrap();
-            let b = bp.balls.values().find(|b| b.type_id == 30_462).expect("seeded Restless Sleeper Sentry");
-            let cs = bp.combat_states.get(&b.id).expect("sentry combat state");
-            (b.id, b.position, cs.signature_radius)
-        };
+        let (sentry_bid, sentry_pos, sentry_sig) = sentry_sys_handle
+            .test_with_ballpark_async(|bp| {
+                let b = bp.balls.values().find(|b| b.type_id == 30_462).expect("seeded Restless Sleeper Sentry");
+                let cs = bp.combat_states.get(&b.id).expect("sentry combat state");
+                (b.id, b.position, cs.signature_radius)
+            })
+            .await;
         let (opt_range, dmg_em, dmg_thm, dmg_kin, dmg_exp) = with_combat_runtime(ctx, |rt| {
             let e = rt.npc_entities.get(&sentry_bid).expect("sentry npc entity");
             (e.optimal_range, e.damage_vector.em, e.damage_vector.thermal, e.damage_vector.kinetic, e.damage_vector.explosive)
@@ -504,9 +505,10 @@ fn phase2_capital_escalations_and_downtime<'a>(
         let c5_sys = 31_002_001_u32;
         let c5_anom_id = format!("PVE-ANOM-{c5_sys}-1");
         let c5_handle = ctx.systems.get_or_spawn(c5_sys);
-        let count_avengers = |h: &eve_server::system_actor::SystemHandle| -> usize {
-            h.ballpark.read().unwrap().balls.values().filter(|b| b.type_id == 37_472).count()
-        };
+        async fn count_avengers(h: &eve_server::system_actor::SystemHandle) -> usize {
+            h.test_with_ballpark_async(|bp| bp.balls.values().filter(|b| b.type_id == 37_472).count())
+                .await
+        }
 
         let cap_specs = [
             (885_201_u64, 90_000_011_i64, 2011_u64, 640_000_011_i64, 19_720_u32, 3_usize),  // 1st Dread -> 3
@@ -533,13 +535,15 @@ fn phase2_capital_escalations_and_downtime<'a>(
             )
             .await;
             warp_session_to_anomaly(ctx, &mut csess, c5_sys, &c5_anom_id).await;
-            step_counts.push((count_avengers(&c5_handle), expected_av));
+            step_counts.push((count_avengers(&c5_handle).await, expected_av));
             if idx == 0 {
                 dread1_sess_opt = Some(csess);
             }
         }
 
-        let avenger_bid = c5_handle.ballpark.read().unwrap().balls.values().find(|b| b.type_id == 37_472).unwrap().id;
+        let avenger_bid = c5_handle
+            .test_with_ballpark_async(|bp| bp.balls.values().find(|b| b.type_id == 37_472).unwrap().id)
+            .await;
         let avenger_sig = c5_handle.get_combat_state(avenger_bid).await.unwrap().unwrap().signature_radius;
         let (av_web, av_scram, av_neut) = with_combat_runtime(ctx, |rt| {
             let e = rt.npc_entities.get(&avenger_bid).unwrap();
@@ -553,11 +557,11 @@ fn phase2_capital_escalations_and_downtime<'a>(
         boxed_rpc(ctx, &mut dread1_sess, "beyonce", Some(bey_c5), "CmdWarpToStuff", &warp_cel_args).await.unwrap();
         for _ in 0..10 {
             let _ = c5_handle.step_manual(10.0).await;
-            if count_avengers(&c5_handle) == 9 {
+            if count_avengers(&c5_handle).await == 9 {
                 break;
             }
         }
-        let avengers_after_warp_off = count_avengers(&c5_handle);
+        let avengers_after_warp_off = count_avengers(&c5_handle).await;
 
         ctx.advance_secs(86_400);
         boxed_tick_cluster(ctx).await;
@@ -565,7 +569,7 @@ fn phase2_capital_escalations_and_downtime<'a>(
             let s = reg.sites_by_system.get(&c5_sys).unwrap().iter().find(|s| s.site_id == c5_anom_id).unwrap();
             (s.dread_escalation_triggers, s.carrier_escalation_triggers)
         });
-        let avengers_after_dt = count_avengers(&c5_handle);
+        let avengers_after_dt = count_avengers(&c5_handle).await;
 
         Phase2CapEscalationsOutcome {
             step_counts,
@@ -612,10 +616,14 @@ fn phase3a_drifter_arithmos<'a>(ctx: &'a ServerContext) -> BoxFuture<'a, Phase3a
         .await;
         warp_session_to_anomaly(ctx, &mut c6_sess, c6_sys, &c6_anom_id).await;
         let c6_handle = ctx.systems.get_or_spawn(c6_sys);
-        let c6_initial_avengers = c6_handle.ballpark.read().unwrap().balls.values().filter(|b| b.type_id == 37_472).count();
+        let c6_initial_avengers = c6_handle
+            .test_with_ballpark_async(|bp| bp.balls.values().filter(|b| b.type_id == 37_472).count())
+            .await;
 
         clear_site_npcs_via_live_weapons(ctx, &mut c6_sess, c6_sys, &c6_anom_id, c6_guns).await;
-        let c6_avenger_ids: Vec<i64> = c6_handle.ballpark.read().unwrap().balls.values().filter(|b| b.type_id == 37_472).map(|b| b.id).collect();
+        let c6_avenger_ids: Vec<i64> = c6_handle
+            .test_with_ballpark_async(|bp| bp.balls.values().filter(|b| b.type_id == 37_472).map(|b| b.id).collect())
+            .await;
         for av_id in c6_avenger_ids {
             lock_and_fire_guns_until(ctx, &mut c6_sess, c6_sys, c6_guns, av_id, false).await;
         }

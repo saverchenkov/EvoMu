@@ -1879,11 +1879,12 @@ async fn test_1085_disconnect_persistence_guard_and_velocity_roundtrip() {
     let live_vel = DVec3::new(142.5, -28.0, 61.25);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     assert_set_ball_pos(&sys_handle, ship_id, live_pos, "set live pos").await;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let ball = bp.balls.get_mut(&ship_id).expect("live ship ball");
-        ball.velocity = live_vel;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let ball = bp.balls.get_mut(&ship_id).expect("live ship ball");
+            ball.velocity = live_vel;
+        })
+        .await;
 
     let disc = handle_character_logoff_or_disconnect_sync(&ctx, char_id)
         .expect("live undocked ball must produce DisconnectedShipEntry");

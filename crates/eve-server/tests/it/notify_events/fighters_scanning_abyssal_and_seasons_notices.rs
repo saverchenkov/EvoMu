@@ -166,14 +166,18 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     });
     ctx.invalidate_ship_fitting(carrier_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_lowsec);
-    let _ = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
+    let _ = sys_handle
+        .test_with_ballpark_mut_async(|bp| std::mem::take(&mut bp.pending_events))
+        .await;
     rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(phenom_id), PyRep::String("TitanPhenomenaGenerator".into()), PyRep::None, PyRep::Integer(1)]).await.expect("Phenomena");
     let phenom_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert!(
         !phenom_notifs.iter().any(|(e, _)| e == "OnSystemWideEffectStart"),
         "Phenomena Generators (43658) must not emit OnSystemWideEffectStart: {phenom_notifs:?}"
     );
-    let phenom_destiny = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
+    let phenom_destiny = sys_handle
+        .test_with_ballpark_mut_async(|bp| std::mem::take(&mut bp.pending_events))
+        .await;
     assert!(
         phenom_destiny.iter().any(|ev| matches!(
             ev,
@@ -183,7 +187,9 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
         "Phenomena activation must emit non-empty Destiny OnDbuffUpdated on BuffBar: {phenom_destiny:?}"
     );
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(phenom_id), PyRep::String("TitanPhenomenaGenerator".into())]).await.expect("Deactivate Phenomena");
-    let phenom_clear_destiny = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
+    let phenom_clear_destiny = sys_handle
+        .test_with_ballpark_mut_async(|bp| std::mem::take(&mut bp.pending_events))
+        .await;
     assert!(
         phenom_clear_destiny.iter().any(|ev| matches!(
             ev,

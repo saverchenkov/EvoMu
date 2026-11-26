@@ -5174,9 +5174,13 @@ async fn zarzakh_toll_rejections_never_load_lazy_zarzakh_gh_1429() {
         .expect("source system loaded");
     // Align ship ball mass with Rifter's SDE hull mass (<= 1.5M kg -> 10,000 ISK floor).
     if let Some(rifter_mass) = ctx.sde.types.get(&587).map(|t| t.mass).filter(|&m| m > 0.0) {
-        if let Some(ball) = src_h.ballpark.write().unwrap().balls.get_mut(&ship_id) {
-            ball.mass = rifter_mass;
-        }
+        src_h
+            .test_with_ballpark_mut_async(move |bp| {
+                if let Some(ball) = bp.balls.get_mut(&ship_id) {
+                    ball.mass = rifter_mass;
+                }
+            })
+            .await;
     }
     let v24_args = [
         PyRep::Integer(gate.stargate_id),

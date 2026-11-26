@@ -1640,12 +1640,18 @@ async fn e2e_workforce_mecha_tooling_anti_duplication_and_export_cascade() {
         assert_eq!(imports(snap, &ctx.sde, HUB_B), vec![(SYS_A, 0)]);
         assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
     });
-    {
-        let bp = sys_h.ballpark.read().unwrap();
-        assert!(!bp.balls.contains_key(&skyhook_temp));
-        assert!(!bp.balls.contains_key(&den_id));
-        assert!(!bp.balls.contains_key(&mto_ball_id));
-    }
+    let (has_skyhook, has_den, has_mto) = sys_h
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls.contains_key(&skyhook_temp),
+                bp.balls.contains_key(&den_id),
+                bp.balls.contains_key(&mto_ball_id),
+            )
+        })
+        .await;
+    assert!(!has_skyhook);
+    assert!(!has_den);
+    assert!(!has_mto);
     let destroy_notices = drain_notices(&mut rx);
     assert!(destroy_notices
         .iter()
@@ -1943,20 +1949,22 @@ async fn e2e_skyhook_zero_shield_in_theft_window_reinforces_and_destructs_or_rep
             .skyhook_theft_windows
             .insert(skyhook_b, (t_b + 5_000, t_b + 12_200));
     });
-    if let Ok(mut bp) = sys_h.ballpark.write() {
-        bp.combat_states.insert(
-            skyhook_b,
-            CombatState {
-                shield_hp: 0.0,
-                max_shield_hp: SKYHOOK_BASE_SHIELD_HP,
-                armor_hp: 0.0,
-                max_armor_hp: SKYHOOK_BASE_ARMOR_HP,
-                structure_hp: 4_000.0,
-                max_structure_hp: SKYHOOK_BASE_HULL_HP,
-                ..Default::default()
-            },
-        );
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.insert(
+                skyhook_b,
+                CombatState {
+                    shield_hp: 0.0,
+                    max_shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                    armor_hp: 0.0,
+                    max_armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                    structure_hp: 4_000.0,
+                    max_structure_hp: SKYHOOK_BASE_HULL_HP,
+                    ..Default::default()
+                },
+            );
+        })
+        .await;
 
     ctx.advance_secs(REPAIR_SHIELD_ARMOR_SECS);
     tick_skyhooks(&ctx, ctx.now_unix()).await;
@@ -1975,11 +1983,15 @@ async fn e2e_skyhook_zero_shield_in_theft_window_reinforces_and_destructs_or_rep
         assert_eq!(s.hull_hp, SKYHOOK_BASE_HULL_HP);
         assert_eq!(s.last_damage_unix, 0);
     });
-    let bp = sys_h.ballpark.read().unwrap();
-    let cs = &bp.combat_states[&skyhook_b];
-    assert_eq!(cs.shield_hp, SKYHOOK_BASE_SHIELD_HP);
-    assert_eq!(cs.armor_hp, SKYHOOK_BASE_ARMOR_HP);
-    assert_eq!(cs.structure_hp, SKYHOOK_BASE_HULL_HP);
+    let (shield_hp, armor_hp, structure_hp) = sys_h
+        .test_with_ballpark_async(move |bp| {
+            let cs = &bp.combat_states[&skyhook_b];
+            (cs.shield_hp, cs.armor_hp, cs.structure_hp)
+        })
+        .await;
+    assert_eq!(shield_hp, SKYHOOK_BASE_SHIELD_HP);
+    assert_eq!(armor_hp, SKYHOOK_BASE_ARMOR_HP);
+    assert_eq!(structure_hp, SKYHOOK_BASE_HULL_HP);
 }
 
 // parity: rpc:colonyResourcesMgr.GetMyCorporationSkyhooks
@@ -2370,9 +2382,18 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
         assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
         assert!(snap.sov_runtime.mercenary_dens.contains_key(&den_b));
     });
-    assert!(!sys_h.ballpark.read().unwrap().balls.contains_key(&skyhook_a));
-    assert!(!sys_h.ballpark.read().unwrap().balls.contains_key(&den_a));
-    assert!(!sys_h.ballpark.read().unwrap().balls.contains_key(&mto_ball_a));
+    let (has_skyhook_a, has_den_a, has_mto_a) = sys_h
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls.contains_key(&skyhook_a),
+                bp.balls.contains_key(&den_a),
+                bp.balls.contains_key(&mto_ball_a),
+            )
+        })
+        .await;
+    assert!(!has_skyhook_a);
+    assert!(!has_den_a);
+    assert!(!has_mto_a);
     assert!(ctx
         .pending_notifications
         .read()

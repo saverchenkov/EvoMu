@@ -466,9 +466,14 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
             let d = (p2_pos[i] - trace_origin[i]).abs();
             assert!((500.0..=5_000.0).contains(&d), "Downtime evacuation offset axis {i} must be 500..=5000m from trace origin, got {d}");
         }
-        if let Some(b) = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).ballpark.write().unwrap().balls.get_mut(&s2_id) {
-            b.mode = eve_destiny::MovementMode::Stop;
-        }
+        ctx.systems
+            .get_or_spawn(JITA_SYSTEM_ID)
+            .test_with_ballpark_mut_async(move |bp| {
+                if let Some(b) = bp.balls.get_mut(&s2_id) {
+                    b.mode = eve_destiny::MovementMode::Stop;
+                }
+            })
+            .await;
         let _ = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).set_ball_position(s2_id, glam::DVec3::from_array(trace_origin)).await;
         let dep2_b = call(&ctx, &mut sess_p2, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(920_002)]).await.expect("AbyssalEntranceDeployment P2 #2");
         let trace2_b = dep2_b.dict_get("traceBallID").and_then(|v| v.as_i64()).expect("traceBallID P2 #2");

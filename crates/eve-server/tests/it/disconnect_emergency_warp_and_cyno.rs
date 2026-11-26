@@ -343,8 +343,7 @@ async fn mid_tunnel_warp_preservation_gatecamp_bubble_interception_and_active_cy
     spawn_vessel(&ctx, sys_id, ship_id, 22_428, CHAR_PRIMARY, origin, 50_000.0).await;
 
     // 1. Committed mid-tunnel warp (`phase == WarpPhase::Cruising`) preserves destination and sets pre_warp_position = None
-    {
-        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    sys.test_with_ballpark_mut_async(move |bp| {
         let ball = bp.balls.get_mut(&ship_id).unwrap();
         ball.position = DVec3::new(0.0, 0.0, 500_000_000.0);
         ball.velocity = DVec3::new(0.0, 0.0, 500_000_000.0);
@@ -356,7 +355,8 @@ async fn mid_tunnel_warp_preservation_gatecamp_bubble_interception_and_active_cy
             phase: WarpPhase::Cruising,
             elapsed_warp_time: 5.0,
         };
-    }
+    })
+    .await;
     let warp_disc = handle_character_logoff_or_disconnect(&ctx, CHAR_PRIMARY)
         .await
         .expect("committed warp disconnect entry");
@@ -375,8 +375,7 @@ async fn mid_tunnel_warp_preservation_gatecamp_bubble_interception_and_active_cy
     }
 
     // 2. Gatecamp interdiction bubble intercepts disconnected warp without teleporting to destination
-    {
-        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    sys.test_with_ballpark_mut_async(move |bp| {
         let ball = bp.balls.get_mut(&ship_id).unwrap();
         ball.position = DVec3::new(0.0, 0.0, 1_900_000_000.0);
         ball.velocity = DVec3::ZERO;
@@ -385,7 +384,8 @@ async fn mid_tunnel_warp_preservation_gatecamp_bubble_interception_and_active_cy
             cs.warp_exit_invulnerable_remaining_ticks = 30;
         }
         bp.add_warp_bubble(99_888, DVec3::new(0.0, 0.0, 1_900_100_000.0), 20_000.0);
-    }
+    })
+    .await;
     let (stopped_pos, arrived) = sys.reconcile_disconnected_warp_sync(ship_id, committed_dest);
     assert!(arrived);
     assert!(

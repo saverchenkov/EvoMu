@@ -109,10 +109,11 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
         "Expected WarpPhase::Aligning, got {:?}",
         aligning_ball.mode
     );
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        let _ = bp.drain_observer_events(observer_id);
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let _ = bp.drain_observer_events(observer_id);
+        })
+        .await;
 
     // 2. Cancel pre-warp alignment via CmdStop -> succeeds, removes active_warps entry, restores mass, stays on origin grid.
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[], &kw, None)
@@ -122,10 +123,9 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
         !handle.is_active_warp(ship_id),
         "Cancelling WarpPhase::Aligning via CmdStop must remove ship from system active_warps"
     );
-    let obs_events = {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.drain_observer_events(observer_id)
-    };
+    let obs_events = handle
+        .test_with_ballpark_mut_async(move |bp| bp.drain_observer_events(observer_id))
+        .await;
     assert!(
         obs_events.iter().any(|ev| matches!(
             ev,
@@ -159,10 +159,11 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     .await
     .unwrap();
     assert!(handle.is_active_warp(ship_id));
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        let _ = bp.drain_observer_events(observer_id);
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let _ = bp.drain_observer_events(observer_id);
+        })
+        .await;
     let goto_target = DVec3::new(
         ship_ball0.position.x + 10_000.0,
         ship_ball0.position.y,
@@ -184,10 +185,9 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     .await
     .expect("CmdGotoPoint must cancel Aligning warp");
     assert!(!handle.is_active_warp(ship_id));
-    let goto_events = {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.drain_observer_events(observer_id)
-    };
+    let goto_events = handle
+        .test_with_ballpark_mut_async(move |bp| bp.drain_observer_events(observer_id))
+        .await;
     assert!(
         goto_events.iter().any(|ev| matches!(
             ev,
@@ -306,11 +306,12 @@ async fn active_warp_tunnel_rejects_all_subwarp_rpcs_and_prevents_slingshot_past
 
     // Anchor a 20 km warp disruption bubble centered on the destination gate so an un-nullified
     // warp MUST be caught at gate_pos.x - 20_000 m and never bypass it via mid-warp steering.
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.warp_bubble_mgr
-            .add_bubble(WarpBubble::new(bubble_id, gate_pos, bubble_radius));
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(bubble_id, gate_pos, bubble_radius));
+        })
+        .await;
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -689,11 +690,12 @@ async fn autopilot_approach_rpcs_during_warp_exit_deceleration_do_not_bypass_bub
     let gate_pos = DVec3::new(15.0 * AU_METERS, 0.0, 0.0);
     let bubble_radius = 20_000.0;
     spawn_beacon(&handle, dest_gate_id, gate_pos).await;
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.warp_bubble_mgr
-            .add_bubble(WarpBubble::new(bubble_id, gate_pos, bubble_radius));
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(bubble_id, gate_pos, bubble_radius));
+        })
+        .await;
 
     ctx.dispatch_rpc(
         &mut sess,

@@ -223,25 +223,25 @@ async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
     seed_cargo_item(&ctx, 710_100_099, FIL_T1_ELEC, char_id, ship_id, 8);
     let sys_h = ctx.systems.get_or_spawn(SYS_08_LASHESIH);
 
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = true; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = true; }).await;
     let e_cloak = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
     assert_eq!(e_cloak.code, "ShipIsCloaked");
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false; }).await;
 
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = true; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = true; }).await;
     let e_teth = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
     assert_eq!(e_teth.code, "ShipIsTethered");
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false; }).await;
 
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 2; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 2; }).await;
     let e_scram = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
     assert_eq!(e_scram.code, "WarpScrambled");
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0; }).await;
 
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().warp_exit_invulnerable_remaining_ticks = 8; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().warp_exit_invulnerable_remaining_ticks = 8; }).await;
     let e_inv = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
     assert_eq!(e_inv.code, "ShipInvulnerable");
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().warp_exit_invulnerable_remaining_ticks = 0; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship_id).unwrap().warp_exit_invulnerable_remaining_ticks = 0; }).await;
 
     ctx.crimewatch.write().unwrap().states.remove(&char_id);
     ctx.advance_secs(301);
@@ -510,11 +510,11 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
     let dep1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(725_100_001)], &kw, None).await.expect("dep1");
     let tr1 = dep1.dict_get("traceBallID").unwrap().as_i64().unwrap();
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship1).unwrap().is_cloaked = true; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship1).unwrap().is_cloaked = true; }).await;
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)], &kw, None).await.unwrap_err().code, "ShipIsCloaked");
-    { let mut bp = sys_h.ballpark.write().unwrap(); let cs = bp.combat_states.get_mut(&ship1).unwrap(); cs.is_cloaked = false; cs.is_tethered = true; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { let cs = bp.combat_states.get_mut(&ship1).unwrap(); cs.is_cloaked = false; cs.is_tethered = true; }).await;
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)], &kw, None).await.unwrap_err().code, "ShipIsTethered");
-    { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship1).unwrap().is_tethered = false; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { bp.combat_states.get_mut(&ship1).unwrap().is_tethered = false; }).await;
 
     ctx.advance_secs(1_250); // > 20m, < 30m: un-entered trace still valid
     let ent1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)], &kw, None).await.expect("enter at 1250s");
@@ -1079,7 +1079,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     sys_h.try_remove_ball(740_010_002);
 
     let _ = sys_h.set_ball_position(drone_id, DVec3::new(38_000.0, 0.0, 0.0)).await;
-    { let mut bp = sys_h.ballpark.write().unwrap(); let cs = bp.combat_states.get_mut(&drone_id).unwrap(); cs.shield_resonance = [0.0, 0.0, 0.0, 1.0]; }
+    sys_h.test_with_ballpark_mut_async(move |bp| { let cs = bp.combat_states.get_mut(&drone_id).unwrap(); cs.shield_resonance = [0.0, 0.0, 0.0, 1.0]; }).await;
     let _ = sys_h.spawn_ball(Ball {
         id: 740_010_003, type_id: AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, position: DVec3::ZERO, velocity: DVec3::ZERO,
         max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: 40_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
@@ -1142,11 +1142,12 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     });
     // BF-04 & R-ABYSS-PYLON-02: Room 1 spawns a seeded subset (<8) of clouds+pylons, and Suppressor kill unlocks conduit
     let p3_h = ctx.systems.get_or_spawn(p3_sys);
-    let r1_haz_cnt = {
-        let bp = p3_h.ballpark.read().unwrap();
-        (1..=3_i64).filter(|c| bp.balls.contains_key(&(1_898_000_000 + pid3 * 100 + 10 + c))).count()
-            + (1..=5_i64).filter(|py| bp.balls.contains_key(&(1_899_000_000 + pid3 * 100 + 10 + py))).count()
-    };
+    let r1_haz_cnt = p3_h
+        .test_with_ballpark_async(move |bp| {
+            (1..=3_i64).filter(|c| bp.balls.contains_key(&(1_898_000_000 + pid3 * 100 + 10 + c))).count()
+                + (1..=5_i64).filter(|py| bp.balls.contains_key(&(1_899_000_000 + pid3 * 100 + 10 + py))).count()
+        })
+        .await;
     assert!((2..=4).contains(&r1_haz_cnt), "Room spawns a varied subset of clouds+pylons ({r1_haz_cnt}), not all 8");
     let r1_npcs = with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].npc_ball_ids.clone());
     for &nid in &r1_npcs[1..] {
@@ -1154,11 +1155,10 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     }
     let last_npc = r1_npcs[0];
     let sup_pos = p3_h.get_ball_snapshot(1_899_000_000 + pid3 * 100 + 11).await.unwrap().unwrap().1.position;
-    {
-        let mut bp = p3_h.ballpark.write().unwrap();
+    p3_h.test_with_ballpark_mut_async(move |bp| {
         if let Some(b) = bp.balls.get_mut(&last_npc) { b.type_id = 47_847; b.position = sup_pos; }
         if let Some(cs) = bp.combat_states.get_mut(&last_npc) { cs.shield_hp = 0.0; cs.armor_hp = 0.0; cs.structure_hp = 10.0; }
-    }
+    }).await;
     let _ = pulse_abyssal_automated_pylons(&ctx, p3_sys).await;
     assert!(with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].cleared), "Suppressor kill unlocks room conduit");
     assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, last_npc), "Suppressor kill cleans NPC entity");
@@ -1837,8 +1837,7 @@ async fn test_parity_abyssal_automated_pylons_tick_and_conduit() {
     }
     let last_npc = r1_npcs[0];
     let sup_pos = p3_h.get_ball_snapshot(1_899_000_000 + pid3 * 100 + 11).await.unwrap().unwrap().1.position;
-    {
-        let mut bp = p3_h.ballpark.write().unwrap();
+    p3_h.test_with_ballpark_mut_async(move |bp| {
         if let Some(b) = bp.balls.get_mut(&last_npc) {
             b.type_id = 47_847;
             b.position = sup_pos;
@@ -1848,7 +1847,8 @@ async fn test_parity_abyssal_automated_pylons_tick_and_conduit() {
             cs.armor_hp = 0.0;
             cs.structure_hp = 10.0;
         }
-    }
+    })
+    .await;
     let _ = p3_h.try_step_full_tick(1.0);
     assert!(with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].cleared));
     let _ = evacuate_abyssal_pockets_for_downtime(&ctx);

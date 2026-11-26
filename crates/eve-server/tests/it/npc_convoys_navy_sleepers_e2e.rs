@@ -462,15 +462,17 @@ async fn test_e2e_npc_sleeper_ewar_by_wh_class_and_pochven_hypnosian_sleepers() 
     assert!(c1_sleeper > 0, "C1 Sleeper spawned");
     ctx.advance_secs(5);
     step_extended_npc_ai(&ctx, c1_sys).await;
-    let (scrambled_c1, cap_after_c1) = {
-        let bp = c1_h.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let scram = bp
-            .combat_states
-            .get(&pilot.ship_id)
-            .is_some_and(|c| c.warp_scramble_strength > 0);
-        let cap = bp.combat_states.get(&pilot.ship_id).map(|c| c.capacitor).unwrap_or(init_cap);
-        (scram, cap)
-    };
+    let pilot_ship_id = pilot.ship_id;
+    let (scrambled_c1, cap_after_c1) = c1_h
+        .test_with_ballpark_async(move |bp| {
+            let scram = bp
+                .combat_states
+                .get(&pilot_ship_id)
+                .is_some_and(|c| c.warp_scramble_strength > 0);
+            let cap = bp.combat_states.get(&pilot_ship_id).map(|c| c.capacitor).unwrap_or(init_cap);
+            (scram, cap)
+        })
+        .await;
     assert_eq!(scrambled_c1, false, "C1 Sleepers must NOT warp scram");
     assert!(cap_after_c1 <= init_cap, "C1 Sleeper updates target combat state");
 
@@ -514,15 +516,16 @@ async fn test_e2e_npc_sleeper_ewar_by_wh_class_and_pochven_hypnosian_sleepers() 
     assert!(c3_sleeper > 0, "C3 Sleeper spawned");
     ctx.advance_secs(5);
     step_extended_npc_ai(&ctx, c3_sys).await;
-    let (scrambled_c3, cur_cap_shield) = {
-        let bp = c3_h.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let scram = bp
-            .combat_states
-            .get(&cap_ship)
-            .is_some_and(|c| c.warp_scramble_strength > 0);
-        let sh = bp.combat_states.get(&cap_ship).map(|c| c.shield_hp).unwrap_or(init_cap_shield);
-        (scram, sh)
-    };
+    let (scrambled_c3, cur_cap_shield) = c3_h
+        .test_with_ballpark_async(move |bp| {
+            let scram = bp
+                .combat_states
+                .get(&cap_ship)
+                .is_some_and(|c| c.warp_scramble_strength > 0);
+            let sh = bp.combat_states.get(&cap_ship).map(|c| c.shield_hp).unwrap_or(init_cap_shield);
+            (scram, sh)
+        })
+        .await;
     assert_eq!(scrambled_c3, true, "C3+ Sleepers apply warp scram");
     assert!(cur_cap_shield < init_cap_shield, "C3+ Sleepers engage capital ship with live weapon fire");
 

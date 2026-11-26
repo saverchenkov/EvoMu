@@ -134,12 +134,14 @@ async fn r8b_494_495_cloak_warp_combat_guards_and_drone_locks_ecm_death_pipeline
     s1.ship_id = Some(ship1);
 
     // #494: Cloaked or mid-warp ship cannot activate AoE weapons or launch drones.
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().is_cloaked = true;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship1).unwrap().is_cloaked = true;
+    })
+    .await;
     assert!(call(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(sb_mod)]).await.is_err());
     assert!(call(&ctx, &mut s1, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(drone_item)])]).await.is_err());
 
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&ship1).unwrap().is_cloaked = false;
         bp.balls.get_mut(&ship1).unwrap().mode = MovementMode::Warp {
             origin: DVec3::ZERO,
@@ -149,11 +151,15 @@ async fn r8b_494_495_cloak_warp_combat_guards_and_drone_locks_ecm_death_pipeline
             phase: WarpPhase::Cruising,
             elapsed_warp_time: 1.0,
         };
-    }
+    })
+    .await;
     assert!(call(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(sb_mod)]).await.is_err());
     assert!(call(&ctx, &mut s1, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(drone_item)])]).await.is_err());
 
-    sys.ballpark.write().unwrap().balls.get_mut(&ship1).unwrap().mode = MovementMode::Stop;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.balls.get_mut(&ship1).unwrap().mode = MovementMode::Stop;
+    })
+    .await;
     let launch_rep = call(
         &ctx,
         &mut s1,
@@ -189,14 +195,17 @@ async fn r8b_494_495_cloak_warp_combat_guards_and_drone_locks_ecm_death_pipeline
     }
 
     // #495: Cloaked or tethered target rejected by `CmdEngage`.
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship2).unwrap().is_cloaked = true;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship2).unwrap().is_cloaked = true;
+    })
+    .await;
     assert!(call(&ctx, &mut s1, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(combat_drone_bid)]), PyRep::Integer(ship2)]).await.is_err());
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs2 = bp.combat_states.get_mut(&ship2).unwrap();
         cs2.is_cloaked = false;
         cs2.is_tethered = true;
-    }
+    })
+    .await;
     assert!(call(&ctx, &mut s1, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(combat_drone_bid)]), PyRep::Integer(ship2)]).await.is_err());
 
     // #495: EWAR-immune capital (`dread_id`) never loses locks to ECM drones.
@@ -221,14 +230,14 @@ async fn r8b_494_495_cloak_warp_combat_guards_and_drone_locks_ecm_death_pipeline
     assert_eq!(sys.get_target_locks(dread_id).await.unwrap().len(), 1);
 
     // #495: Drone kill runs full death pipeline (removes ship ball) and sets PvP weapons timer.
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs2 = bp.combat_states.get_mut(&ship2).unwrap();
         cs2.is_tethered = false;
         cs2.shield_hp = 0.0;
         cs2.armor_hp = 0.0;
         cs2.structure_hp = 1.0;
-    }
+    })
+    .await;
     call(&ctx, &mut s1, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(combat_drone_bid)]), PyRep::Integer(ship2)])
         .await
         .expect("engage 1-HP ship2");
@@ -302,7 +311,10 @@ async fn r8b_496_single_target_doomsday_locks_eligibility_immobilization_and_pvp
         "InvalidTarget"
     );
 
-    sys.ballpark.write().unwrap().combat_states.get_mut(&titan_id).unwrap().is_tethered = true;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&titan_id).unwrap().is_tethered = true;
+    })
+    .await;
     assert_eq!(
         activate_superweapon_or_lance(&ctx, c_titan, titan_id, null_sys, dd_mod_id, "Activate", Some(dummy_cap_id))
             .await
@@ -310,7 +322,10 @@ async fn r8b_496_single_target_doomsday_locks_eligibility_immobilization_and_pvp
             .code,
         "CantActivateWhileTethered"
     );
-    sys.ballpark.write().unwrap().combat_states.get_mut(&titan_id).unwrap().is_tethered = false;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&titan_id).unwrap().is_tethered = false;
+    })
+    .await;
 
     sys.add_target_lock(
         titan_id,
@@ -376,9 +391,15 @@ async fn r8b_497_520_store_vessel_guards_kinematics_and_agency_warp_interdiction
     sess.ship_id = Some(rifter_id);
 
     // #497: Scrambled, targeted, or active-module ship cannot StoreVessel into SMA.
-    sys.ballpark.write().unwrap().combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 2;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 2;
+    })
+    .await;
     assert_eq!(call(&ctx, &mut sess, "ship", "StoreVessel", &[PyRep::Integer(orca_id)]).await.unwrap_err().code, "WarpScrambled");
-    sys.ballpark.write().unwrap().combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 0;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 0;
+    })
+    .await;
 
     sys.add_target_lock(
         tackler_id,
@@ -449,13 +470,19 @@ async fn r8b_497_520_store_vessel_guards_kinematics_and_agency_warp_interdiction
             }
         }
     });
-    sys.ballpark.write().unwrap().combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 1;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 1;
+    })
+    .await;
     let scram_err = call(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[site_arg.clone()])
         .await
         .unwrap_err();
     // rpc-lint: allow error code check
     assert_eq!(scram_err.code, "WarpScrambled");
-    sys.ballpark.write().unwrap().combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 0;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&rifter_id).unwrap().warp_scramble_strength = 0;
+    })
+    .await;
 
     call(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[site_arg])
         .await

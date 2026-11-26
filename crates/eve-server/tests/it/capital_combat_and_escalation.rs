@@ -442,20 +442,26 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     };
     assert_eq!(enter_c5_1.dict_get("siteID").and_then(|v| v.as_str()), Some(site_id_c5.as_str()));
 
-    let avengers_1: Vec<(i64, f64, f64, f64, f64)> = {
-        let sys_handle = ctx.systems.get_or_spawn(c5_sys);
-        let bp = sys_handle.ballpark.read().expect("ballpark read lock");
-        with_combat_runtime(&ctx, |rt| {
-            rt.npc_entities
-                .values()
-                .filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472)
-                .map(|n| {
-                    let sig = bp.combat_states.get(&n.ball_id).map(|cs| cs.signature_radius).unwrap_or(0.0);
-                    (n.ball_id, sig, n.web_speed_factor, n.scram_strength, n.neut_amount)
+    let avenger_npcs: Vec<(i64, f64, f64, f64)> = with_combat_runtime(&ctx, |rt| {
+        rt.npc_entities
+            .values()
+            .filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472)
+            .map(|n| (n.ball_id, n.web_speed_factor, n.scram_strength, n.neut_amount))
+            .collect()
+    });
+    let avengers_1: Vec<(i64, f64, f64, f64, f64)> = ctx
+        .systems
+        .get_or_spawn(c5_sys)
+        .test_with_ballpark_async(move |bp| {
+            avenger_npcs
+                .into_iter()
+                .map(|(ball_id, web, scram, neut)| {
+                    let sig = bp.combat_states.get(&ball_id).map(|cs| cs.signature_radius).unwrap_or(0.0);
+                    (ball_id, sig, web, scram, neut)
                 })
                 .collect()
         })
-    };
+        .await;
     assert_eq!(avengers_1.len(), 3, "C5 Dreadnought escalation must spawn 3 Upgraded Avengers");
     for (_, sig, web, scram, neut) in &avengers_1 {
         assert_eq!(*sig, 30_000.0, "Upgraded Avenger must have 30,000m signature radius");
@@ -514,13 +520,14 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     assert_eq!(count_with_carrier, 9, "Carrier trigger in C5 site must spawn 3 Upgraded Avengers");
 
     // 4. Moving capital > 100 km from warp-in despawns its escalation NPCs
-    {
-        let sys_handle = ctx.systems.get_or_spawn(c5_sys);
-        let mut bp = sys_handle.ballpark.write().expect("ballpark write lock");
-        if let Some(b) = bp.balls.get_mut(&carrier_id) {
-            b.position = c5_site_pos + DVec3::new(150_000.0, 0.0, 0.0); // 150 km away from site
-        }
-    }
+    ctx.systems
+        .get_or_spawn(c5_sys)
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&carrier_id) {
+                b.position = c5_site_pos + DVec3::new(150_000.0, 0.0, 0.0); // 150 km away from site
+            }
+        })
+        .await;
     eve_server::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, c5_sys, 1.0).await;
     let count_after_despawn = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
@@ -831,15 +838,16 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     ctx.invalidate_ship_fitting(agg_ship_id);
 
     // Lock pod, set low HP so 1 shot destroys it, set Safety Red, and fire weapon via dogmaIM.Activate
-    {
-        let sys_handle = ctx.systems.get_or_spawn(highsec_sys);
-        let mut bp = sys_handle.ballpark.write().expect("ballpark write lock");
-        if let Some(cs) = bp.combat_states.get_mut(&vic_pod_id) {
-            cs.shield_hp = 0.0;
-            cs.armor_hp = 0.0;
-            cs.structure_hp = 1.0;
-        }
-    }
+    ctx.systems
+        .get_or_spawn(highsec_sys)
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&vic_pod_id) {
+                cs.shield_hp = 0.0;
+                cs.armor_hp = 0.0;
+                cs.structure_hp = 1.0;
+            }
+        })
+        .await;
     let mut agg_sess = make_sess(&ctx, aggressor_id, agg_ship_id, highsec_sys, None);
     let safety_rep = {
         let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);

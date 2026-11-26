@@ -590,7 +590,11 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         ammo.singleton = false;
         snap.items.insert(990_007_185, ammo);
     });
-    if let Ok(mut bp) = sys_handle2.ballpark.write() { let _ = bp.set_mode(ship2_id_re, MovementMode::Stop); }
+    sys_handle2
+        .test_with_ballpark_mut_async(move |bp| {
+            let _ = bp.set_mode(ship2_id_re, MovementMode::Stop);
+        })
+        .await;
     let _ = sys_handle2.set_ball_position(ship2_id_re, DVec3::new(180_500.0, 0.0, -80_000.0)).await;
     ctx2.dispatch_rpc(&mut sess2_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None).await.expect("AddTarget structure");
     let _ = sys_handle2.step_manual(10.0).await;

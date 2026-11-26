@@ -5956,7 +5956,12 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock to test tethered hangar repair rejection");
     move_ship(&ctx, &sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&st_id].position)) + DVec3::new(500.0, 0.0, 0.0)).await;
     let _ = ctx.systems.get_or_spawn(JITA).step_manual(1.0).await;
-    if let Ok(mut bp) = ctx.systems.get_or_spawn(JITA).ballpark.write() { bp.combat_states.entry(ship_id).or_default().is_tethered = true; }
+    ctx.systems
+        .get_or_spawn(JITA)
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.entry(ship_id).or_default().is_tethered = true;
+        })
+        .await;
     assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(hangar_mod)])]).await.expect_err("undocked hangar repair").code, "NotDockedInStructure");
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect("Re-dock after tethered hangar check");
@@ -5977,10 +5982,13 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     assert!(expected_tax_isk > 0.0);
 
     let jita_sys = ctx.systems.get_or_spawn(JITA);
-    if let Ok(mut bp) = jita_sys.ballpark.write() {
-        let cs = bp.combat_states.entry(ship_id).or_insert_with(eve_destiny::CombatState::default);
-        cs.max_shield_hp = 500.0; cs.shield_hp = 50.0;
-    }
+    jita_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.entry(ship_id).or_insert_with(eve_destiny::CombatState::default);
+            cs.max_shield_hp = 500.0;
+            cs.shield_hp = 50.0;
+        })
+        .await;
     let rep_res = rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("RepairItemsInStructure");
     let paid = rep_res.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!((paid - expected_tax_isk).abs() < 1e-2, "Upwell repair must charge only the structure owner tax");
