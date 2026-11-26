@@ -265,7 +265,16 @@ pub async fn handle_jettison_structure_fuel(
                 }
                 if is_block {
                     let rem_eligible = if has_any_bay_stack {
-                        Some(rules::available_structure_fuel_blocks(ctx, snap, structure_id))
+                        Some(
+                            snap.items
+                                .values()
+                                .filter(|i| {
+                                    is_eligible_fuel(snap, i)
+                                        && rules::is_fuel_block_type(ctx, i.type_id)
+                                })
+                                .filter_map(|i| u32::try_from(i.quantity).ok())
+                                .fold(0u32, u32::saturating_add),
+                        )
                     } else {
                         None
                     };

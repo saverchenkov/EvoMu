@@ -1273,3 +1273,152 @@ async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
         }));
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jettison_full_clean_fuel_bay_clears_fuel_blocks_drops_power_and_blocks_duplication() {
+    for (idx, use_three_arg) in [false, true].into_iter().enumerate() {
+        let mut ctx = test_ctx();
+        let (char_id, uid, corp_id) = ctx.db.with_snapshot(|s| {
+            let (&cid, ch) = s.characters.iter().next().unwrap();
+            (cid, ch.user_id, ch.corporation_id)
+        });
+        let _ = ctx
+            .db
+            .acquire_online_lock(uid, 20 + idx as u64, Some(char_id), false, ctx.now_unix());
+
+        let reg = Arc::make_mut(&mut ctx.sde);
+        reg.types.insert(
+            SERVICE_MOD_TYPE,
+            make_sde_type(SERVICE_MOD_TYPE, 1415, 66, 100.0, vec![(2110, 1.0)]),
+        );
+        reg.types.insert(
+            FUEL_BLOCK_TYPE,
+            make_sde_type(FUEL_BLOCK_TYPE, FUEL_GROUP_ID, 4, 5.0, vec![]),
+        );
+
+        let st_id = 1_030_000_000_200_i64 + idx as i64;
+        let svc_id = 901_200_i64 + idx as i64 * 10;
+        let clean_fuel_id = svc_id + 1;
+        let now = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&char_id).unwrap().structure_id = Some(st_id);
+            snap.characters.get_mut(&char_id).unwrap().station_id = None;
+            let corp = snap.corporations.entry(corp_id).or_default();
+            corp.corporation_id = corp_id;
+            corp.members.insert(char_id);
+            corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+            snap.structures.insert(
+                st_id,
+                UpwellStructureRecord {
+                    structure_id: st_id,
+                    type_id: CITADEL_TYPE,
+                    name: "Clean Full Bay Jettison".into(),
+                    solar_system_id: 30_000_142,
+                    owner_corp_id: corp_id,
+                    state: life::STATE_SHIELD_VULNERABLE.into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 10,
+                    shield_hp: 180_000.0,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                svc_id,
+                InventoryItemRecord {
+                    item_id: svc_id,
+                    type_id: SERVICE_MOD_TYPE,
+                    owner_id: corp_id,
+                    location_id: st_id,
+                    flag: InventoryFlag::ServiceSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                clean_fuel_id,
+                InventoryItemRecord {
+                    item_id: clean_fuel_id,
+                    type_id: FUEL_BLOCK_TYPE,
+                    owner_id: corp_id,
+                    location_id: st_id,
+                    flag: InventoryFlag::SpecializedFuelBay,
+                    quantity: 10,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(svc_id, true);
+            let mut ext = load_ext_state(snap);
+            ext.lifecycle.entry(st_id).or_default().online_modules.push(svc_id);
+            ext.lifecycle.entry(st_id).or_default().last_fuel_tick_unix =
+                Some(now.saturating_sub(3_601));
+            save_ext_state(snap, &ext);
+            assert_eq!(
+                life::power_state(&ctx, snap, &ext, &snap.structures[&st_id], now),
+                life::PowerState::FullPower
+            );
+        });
+
+        let mut s_dir = make_session(uid, char_id, corp_id, 0, 0);
+        s_dir.structure_id = Some(st_id);
+        let args = if use_three_arg {
+            vec![
+                PyRep::Integer(st_id),
+                PyRep::Integer(i64::from(FUEL_BLOCK_TYPE)),
+                PyRep::Integer(10),
+            ]
+        } else {
+            vec![PyRep::Integer(st_id)]
+        };
+        let rep = handle_jettison_structure_fuel(&ctx, &mut s_dir, &args)
+            .await
+            .expect("full clean fuel bay jettison must succeed");
+        if let PyRep::KeyVal(entries) = rep {
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|(k, _)| *k == "remainingFuelBlocks")
+                    .map(|(_, v)| v.clone()),
+                Some(PyRep::Integer(0))
+            );
+        }
+
+        let cargo_count_after_first = ctx.db.with_snapshot(|snap| {
+            assert!(!snap.items.contains_key(&clean_fuel_id));
+            assert_eq!(snap.structures[&st_id].fuel_blocks, 0);
+            let ext = load_ext_state(snap);
+            assert_eq!(
+                life::power_state(&ctx, snap, &ext, &snap.structures[&st_id], ctx.now_unix()),
+                life::PowerState::LowPower
+            );
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.owner_id == corp_id
+                        && i.type_id == FUEL_BLOCK_TYPE
+                        && i.flag == InventoryFlag::Cargo
+                })
+                .count()
+        });
+        assert_eq!(cargo_count_after_first, 1);
+
+        let err_second = handle_jettison_structure_fuel(&ctx, &mut s_dir, &args)
+            .await
+            .unwrap_err();
+        assert_eq!(err_second.code, "InsufficientStructureFuel");
+        ctx.db.with_snapshot(|snap| {
+            let cargo_count_after_second = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.owner_id == corp_id
+                        && i.type_id == FUEL_BLOCK_TYPE
+                        && i.flag == InventoryFlag::Cargo
+                })
+                .count();
+            assert_eq!(cargo_count_after_second, 1);
+            assert_eq!(snap.structures[&st_id].fuel_blocks, 0);
+        });
+    }
+}

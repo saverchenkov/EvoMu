@@ -391,16 +391,14 @@ pub async fn activate_scan_probe_launcher(
                 });
             }
         }
-        Ok(snap.items
-            .values()
-            .find(|i| {
-                i.location_id == ship_id
-                    && (i.flag as u16) == module_flag_id
-                    && i.item_id != module_id
-                    && i.quantity > 0
-                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 479)
-            })
-            .map(|i| (i.item_id, i.type_id, i.quantity)))
+        Ok(snap.items.values().filter(|i| {
+            i.location_id == ship_id
+                && (i.flag as u16) == module_flag_id
+                && i.item_id != module_id
+                && i.quantity > 0
+                && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(snap, Some(char_id), Some(ship_id), i)
+                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 479)
+        }).min_by_key(|i| i.item_id).map(|i| (i.item_id, i.type_id, i.quantity)))
     })?;
     let Some((charge_item_id, probe_type_id, loaded_qty)) = loaded_charge_opt else {
         return Err(BridgeRpcError {

@@ -2422,3 +2422,153 @@ async fn superweapon_fuel_skips_lower_id_bpc_and_consumes_valid_commodity() {
     assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn scan_probe_launcher_skips_bpc_and_courier_loaded_probes() {
+    use crate::services::space_docking_cloaking::space_probe_scanning::activate_scan_probe_launcher;
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 995_701_001_i64;
+    let core_launcher_id = 995_701_002_i64;
+    let bpc_probe_id = 995_701_010_i64;
+    let courier_probe_id = 995_701_011_i64;
+    let valid_probe_id = 995_701_012_i64;
+
+    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
+        probes.retain(|_, p| p.owner_char_id != char_id);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            core_launcher_id,
+            InventoryItemRecord {
+                item_id: core_launcher_id,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_probe_id,
+            InventoryItemRecord {
+                item_id: bpc_probe_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_probe_id,
+            InventoryItemRecord {
+                item_id: courier_probe_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(courier_probe_id, "courier_cargo:71".into());
+    });
+
+    let mut session = eve_machonet::SessionState::new(9799);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let hi0 = InventoryFlag::HiSlot0 as u16;
+    let kw = HashMap::new();
+
+    let empty_err = activate_scan_probe_launcher(
+        &ctx,
+        &session,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        core_launcher_id,
+        17_938,
+        hi0,
+        "launchForSelf",
+        None,
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(empty_err.code, "NoProbesLoaded");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            valid_probe_id,
+            InventoryItemRecord {
+                item_id: valid_probe_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 10,
+                ..Default::default()
+            },
+        );
+    });
+
+    let rep = activate_scan_probe_launcher(
+        &ctx,
+        &session,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        core_launcher_id,
+        17_938,
+        hi0,
+        "launchForSelf",
+        None,
+        &kw,
+    )
+    .await
+    .expect("valid probe launches without shadowing by lower-ID BPC/courier probes");
+    assert_eq!(rep.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_probe_id].quantity, 8);
+        assert_eq!(snap.items[&courier_probe_id].quantity, 8);
+        assert_eq!(snap.items[&valid_probe_id].quantity, 2);
+    });
+    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
+        probes.retain(|_, p| p.owner_char_id != char_id);
+    }
+}
+

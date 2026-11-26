@@ -219,7 +219,8 @@ pub async fn deploy_fw_beacon_constructor(
         Ok(())
     };
 
-    let pad = ctx.db.try_with_mut_snapshot(|snap| {
+    let mut pushed_pad_id: Option<i64> = None;
+    let pad = match ctx.db.try_with_mut_snapshot(|snap| {
         if !snap.fw_system_occupations.contains_key(&sys_id) {
             return Err(rpc_err(
                 "InvalidBeaconDeploymentSystem",
@@ -292,7 +293,7 @@ pub async fn deploy_fw_beacon_constructor(
             client_error: None,
         })?;
         snap.next_entity_id = alloc_id;
-        Ok::<LandingPadRecord, BridgeRpcError>(LandingPadRecord {
+        let pad = LandingPadRecord {
             item_id: alloc_id,
             type_id: c_tid,
             built_type_id,
@@ -304,14 +305,23 @@ pub async fn deploy_fw_beacon_constructor(
             position,
             required_materials,
             contributed_materials: BTreeMap::new(),
-        })
-    })?;
-
-    let pad = with_misc_state(ctx, |st| {
-        ensure_no_existing_beacon(st)?;
-        st.landing_pads.push(pad.clone());
-        Ok(pad)
-    })?;
+        };
+        with_misc_state(ctx, |st| -> Result<(), BridgeRpcError> {
+            ensure_no_existing_beacon(st)?;
+            st.landing_pads.push(pad.clone());
+            Ok(())
+        })?;
+        pushed_pad_id = Some(pad.item_id);
+        Ok::<LandingPadRecord, BridgeRpcError>(pad)
+    }) {
+        Ok(pad) => pad,
+        Err(e) => {
+            if let Some(id) = pushed_pad_id {
+                with_misc_state(ctx, |st| st.landing_pads.retain(|p| p.item_id != id));
+            }
+            return Err(e);
+        }
+    };
 
     persist_misc_state(ctx);
     spawn_or_replace_pad_ball(ctx, &pad).await;
@@ -1399,6 +1409,178 @@ mod r5_shipcaster_policy_tests {
             assert_eq!(snap.items[&bpc_ctor_id].quantity, 1);
             assert_eq!(snap.items[&courier_ctor_id].quantity, 1);
         });
+    }
+
+    #[tokio::test]
+    async fn deploy_fw_beacon_constructor_concurrent_deploy_and_persist_failure_rollback() {
+        let ctx = test_ctx();
+        let char_id: i64 = 90_000_001;
+        let ship_id: i64 = 995_810_001;
+        let lowsec_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .find(|s| {
+                let r = (s.security_status * 10.0).round() / 10.0;
+                s.solar_system_id < 30_100_000 && r > 0.0 && r < 0.45
+            })
+            .map(|s| s.solar_system_id)
+            .expect("lowsec system");
+        let comps = ctx.sde.shipcaster_sde_components().expect("comps");
+        let (&ctor_tid, ctor_spec) = comps.under_construction.iter().next().expect("underConstruction");
+        let ctor_faction = comps
+            .landing_pad_factions
+            .get(&ctor_spec.built_item_type_id)
+            .copied()
+            .unwrap_or(500_001) as i64;
+        let mut sess = auth_session(1, char_id, 98_000_001, lowsec_sys);
+        sess.ship_id = Some(ship_id);
+        sess.station_id = None;
+        with_misc_state(&ctx, |st| {
+            st.landing_pads.retain(|p| p.solar_system_id != lowsec_sys);
+        });
+
+        let ctor_a = 995_810_010_i64;
+        let ctor_b = 995_810_011_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.fw_system_occupations.insert(
+                lowsec_sys,
+                FwSystemOccupationRecord {
+                    solar_system_id: lowsec_sys,
+                    owner_faction_id: ctor_faction,
+                    occupier_faction_id: ctor_faction,
+                    victory_points: 0,
+                    victory_points_threshold: 3_000,
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.war_faction_id = Some(ctor_faction);
+            }
+            for cid in [ctor_a, ctor_b] {
+                snap.items.insert(
+                    cid,
+                    InventoryItemRecord {
+                        item_id: cid,
+                        type_id: ctor_tid,
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        let sys_h = ctx.systems.get_or_spawn(lowsec_sys);
+        let _ = sys_h
+            .spawn_ball(eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(100_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+
+        let pos = DVec3::new(100_500.0, 0.0, 0.0);
+        let (res_a, res_b) = tokio::join!(
+            deploy_fw_beacon_constructor(&ctx, &sess, ctor_a, pos),
+            deploy_fw_beacon_constructor(&ctx, &sess, ctor_b, pos),
+        );
+        let loser_id = match (res_a, res_b) {
+            (Ok(_), Err(e)) => {
+                assert_eq!(e.code, "BeaconAlreadyExistsInSystem");
+                ctor_b
+            }
+            (Err(e), Ok(_)) => {
+                assert_eq!(e.code, "BeaconAlreadyExistsInSystem");
+                ctor_a
+            }
+            other => panic!("expected exactly one Ok and one BeaconAlreadyExistsInSystem, got {other:?}"),
+        };
+        assert_eq!(
+            with_misc_state(&ctx, |st| {
+                st.landing_pads.iter().filter(|p| p.solar_system_id == lowsec_sys).count()
+            }),
+            1
+        );
+        assert_eq!(ctx.db.with_snapshot(|s| s.items[&loser_id].quantity), 1);
+
+        // SQLite commit-failure rollback must not retain a phantom LandingPadRecord in ClusterMiscRuntimeState.
+        let db_path = std::env::temp_dir().join(format!("evomu_r6_shipcaster_rb_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+        let repo = eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite");
+        let sql_ctx = ServerContext::with_sde_and_repository(
+            std::sync::Arc::clone(&ctx.sde),
+            std::sync::Arc::new(repo),
+        );
+        let rb_ctor_id = 995_820_001_i64;
+        sql_ctx.db.with_mut_snapshot(|snap| {
+            let base_ch = ctx.db.with_snapshot(|s| s.characters[&char_id].clone());
+            snap.characters.insert(char_id, base_ch);
+            snap.fw_system_occupations.insert(
+                lowsec_sys,
+                FwSystemOccupationRecord {
+                    solar_system_id: lowsec_sys,
+                    owner_faction_id: ctor_faction,
+                    occupier_faction_id: ctor_faction,
+                    victory_points: 0,
+                    victory_points_threshold: 3_000,
+                },
+            );
+            snap.items.insert(
+                rb_ctor_id,
+                InventoryItemRecord {
+                    item_id: rb_ctor_id,
+                    type_id: ctor_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        let sql_sys = sql_ctx.systems.get_or_spawn(lowsec_sys);
+        let _ = sql_sys
+            .spawn_ball(eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::new(100_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+        sql_ctx.db.with_sqlite_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER abort_shipcaster_item_del BEFORE DELETE ON items BEGIN SELECT RAISE(ABORT, 'inject_shipcaster_persist_fail'); END;",
+            )
+            .unwrap();
+        });
+        assert!(
+            deploy_fw_beacon_constructor(&sql_ctx, &sess, rb_ctor_id, pos)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            with_misc_state(&sql_ctx, |st| {
+                st.landing_pads.iter().filter(|p| p.solar_system_id == lowsec_sys).count()
+            }),
+            0
+        );
+        assert_eq!(sql_ctx.db.with_snapshot(|s| s.items[&rb_ctor_id].quantity), 1);
+        drop(sql_ctx);
+        let _ = std::fs::remove_file(&db_path);
     }
 }
 
