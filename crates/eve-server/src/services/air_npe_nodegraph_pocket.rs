@@ -112,6 +112,7 @@ pub(crate) fn spawn_or_get_npe_pocket(
         },
         action: DungeonTriggerAction::UnlockGate,
         fired: false,
+        ..Default::default()
     };
     let room = DungeonRuntimeRoom {
         room_index: 1,

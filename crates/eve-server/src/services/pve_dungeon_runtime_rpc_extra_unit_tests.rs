@@ -353,6 +353,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                                 },
                                 action: DungeonTriggerAction::UnlockGate,
                                 fired: false,
+                                ..Default::default()
                             },
                             DungeonTrigger {
                                 trigger_id: 2,
@@ -363,6 +364,7 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
                                 },
                                 action: DungeonTriggerAction::CompleteDungeon,
                                 fired: false,
+                                ..Default::default()
                             },
                         ],
                         spawned: true,
@@ -495,4 +497,272 @@ async fn approach_explicit_target_loot_wildcard_and_mwd_warp_boundary_checks() {
     with_dungeon_runtime_store(&ctx, |store| {
         assert!(store.instances[&inst_id].completed);
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_i4_locked_entry_gate_final_room_none_and_branching_gate_links() {
+    use crate::services::pve_dungeon_runtime::{
+        apply_dungeon_trigger_actions, has_runtime_gate_target, resolve_runtime_gate_in_snap, DungeonGateLink,
+    };
+    use crate::services::pve_exploration::handle_pve_exploration;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_222;
+    let ship_id: i64 = 1_040_000_222;
+    let (mut ctx, mut sess) = make_ctx_and_session(sys_id, char_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    sess.user_id = Some(uid);
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(uid, char_id as u64, Some(char_id), None, true, 1_785_000_000);
+    let mut sde = (*ctx.sde).clone();
+    sde.dungeons.insert(990_222, DungeonTemplate {
+        dungeon_id: 990_222, name: "Branching I4 Sanctum".into(), faction_id: Some(500_010), archetype_id: Some(20), difficulty: Some(2),
+    });
+    ctx.sde = Arc::new(sde);
+
+    let (inst_id, entry_gid, gate_a_id, gate_b_id) = (980_222i64, 88_900_001i64, 88_900_002i64, 88_900_003i64);
+    let (entry_pos, r1_pos, r2_pos, r2_land, r3_pos, r3_land, ga_pos, gb_pos) = (
+        [10_000_000.0, 0.0, 0.0], [11_000_000.0, 0.0, 0.0], [12_000_000.0, 0.0, 0.0], [12_010_000.0, 500.0, 0.0],
+        [13_000_000.0, 0.0, 0.0], [13_020_000.0, 0.0, -500.0], [11_005_000.0, 0.0, 0.0], [11_009_000.0, 0.0, 0.0],
+    );
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 990_222, dungeon_name: "Branching I4 Sanctum".into(),
+            category: "Deadspace".into(), archetype: "Deadspace".into(), solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r1_pos, entry_gate_ball_id: Some(entry_gid), entry_gate_pos: Some(entry_pos),
+            entry_gate_locked: true, current_room_index: 0,
+            rooms: vec![
+                DungeonRuntimeRoom {
+                    room_index: 1, room_id: 9221, room_name: "Fork Chamber".into(), position: r1_pos,
+                    gate_destination_pos: [11_001_000.0, 0.0, 0.0], gated: true, gate_ball_id: Some(gate_a_id),
+                    gate_locked: false, entered: true, spawned: true,
+                    gate_links: vec![
+                        DungeonGateLink { gate_ball_id: Some(gate_a_id), gate_position: ga_pos, target_room_index: 1, destination_pos: r2_land, locked: false, label: "East".into(), spawned: true, ..Default::default() },
+                        DungeonGateLink { gate_ball_id: Some(gate_b_id), gate_position: gb_pos, target_room_index: 2, destination_pos: r3_land, locked: true, label: "West".into(), spawned: true, ..Default::default() },
+                    ],
+                    ..Default::default()
+                },
+                DungeonRuntimeRoom { room_index: 2, room_id: 9222, room_name: "East".into(), position: r2_pos, gate_destination_pos: r2_land, gated: true, ..Default::default() },
+                DungeonRuntimeRoom { room_index: 3, room_id: 9223, room_name: "West Final".into(), position: r3_pos, gate_destination_pos: r3_land, gated: true, ..Default::default() },
+            ],
+            created_unix: 1_785_000_000, ..Default::default()
+        });
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, pos) in [(ship_id, 587u32, entry_pos), (entry_gid, 17831, entry_pos), (gate_a_id, 17831, ga_pos), (gate_b_id, 17831, gb_pos)] {
+        sys_handle.spawn_ball(Ball {
+            id: bid, type_id: tid, position: DVec3::from_array(pos), velocity: DVec3::ZERO,
+            max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }).await.unwrap();
+    }
+
+    // OWN-R5-03 + I4: locked entry gate rejects DNG-INST-<id> through ActivateAccelerationGate even if Room 1 gate_locked == false.
+    let dng_tag = format!("DNG-INST-{inst_id}");
+    assert!(has_runtime_gate_target(&ctx, sys_id, None, Some(&dng_tag)));
+    assert_eq!(handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::String(dng_tag.clone())], &HashMap::new()).await.unwrap().unwrap_err().code, "GateLocked");
+
+    assert_eq!(apply_dungeon_trigger_actions(&ctx, sys_id, inst_id, 0, vec![(1, DungeonTriggerAction::UnlockEntryGate)], char_id).await, 1);
+    let r1 = try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::String(dng_tag.clone())]).await.unwrap().unwrap();
+    assert_eq!(r1.dict_get("roomIndex").and_then(|v| v.as_i64()), Some(1));
+
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(gb_pos)).await;
+    assert_eq!(try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::Integer(gate_b_id)]).await.unwrap().unwrap_err().code, "GateLocked");
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(ga_pos)).await;
+    let ra = try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::Integer(gate_a_id)]).await.unwrap().unwrap();
+    assert_eq!(ra.dict_get("roomIndex").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(ra.dict_get("destinationX").and_then(|v| v.as_f64()), Some(r2_land[0]));
+
+    assert_eq!(apply_dungeon_trigger_actions(&ctx, sys_id, inst_id, 0, vec![(2, DungeonTriggerAction::UnlockGate)], char_id).await, 1);
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(gb_pos)).await;
+    let rb = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_b_id)], &HashMap::new()).await.unwrap().unwrap();
+    assert_eq!(rb.dict_get("roomIndex").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(rb.dict_get("destinationX").and_then(|v| v.as_f64()), Some(r3_land[0]));
+
+    // I4: final room DNG-INST-<id> returns None instead of fabricating a phantom gate.
+    assert!(!has_runtime_gate_target(&ctx, sys_id, None, Some(&dng_tag)));
+    assert!(ctx.db.with_snapshot(|s| resolve_runtime_gate_in_snap(s, sys_id, None, Some(&dng_tag))).is_none());
+    assert!(try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::String(dng_tag)]).await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_parse_extra_actions_from_pyrep_and_multi_action_execution() {
+    use crate::services::pve_dungeon_runtime::read_dungeon_runtime_store;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_333;
+    let ship_id: i64 = 1_040_000_333;
+    let (ctx, _sess) = make_ctx_and_session(sys_id, char_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(uid, char_id as u64, Some(char_id), None, true, 1_785_000_000);
+    let room_pos = [20_000_000.0, 0.0, 0.0];
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball(Ball {
+        id: ship_id, type_id: 587, position: DVec3::from_array(room_pos), velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await.unwrap();
+
+    let room_rep = PyRep::keyval([
+        ("roomName", PyRep::String("Multi Trigger Room".into())),
+        ("gateLocked", PyRep::Bool(false)),
+        ("objects", PyRep::List(vec![PyRep::keyval([
+            ("typeID", PyRep::Integer(i64::from(DEFAULT_CONTAINER_TYPE_ID))),
+            ("name", PyRep::String("Extra Cache".into())),
+            ("isContainer", PyRep::Bool(true)),
+            ("spawnOnTrigger", PyRep::Bool(true)),
+            ("offset", PyRep::List(vec![PyRep::Real(800.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+        ])])),
+        ("triggers", PyRep::List(vec![PyRep::keyval([
+            ("kind", PyRep::String("approach".into())),
+            ("radius", PyRep::Real(5_000.0)),
+            ("targetRoomIndex", PyRep::Integer(0)),
+            ("action", PyRep::String("LockGate".into())),
+            ("extraActions", PyRep::List(vec![
+                PyRep::keyval([("action", PyRep::String("SpawnObject".into())), ("actionObjectIndex", PyRep::Integer(0))]),
+                PyRep::keyval([("action", PyRep::String("GrantLoot".into())), ("targetObjectIndex", PyRep::Integer(0)), ("items", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(15)])]))]),
+                PyRep::keyval([("action", PyRep::String("SetObjective".into())), ("objectiveID", PyRep::Integer(7701)), ("title", PyRep::String("Parsed Multi".into())), ("completed", PyRep::Bool(true))]),
+                PyRep::keyval([("action", PyRep::String("TriggerMessage".into())), ("messageType", PyRep::Integer(1)), ("messageID", PyRep::Integer(9009))]),
+            ])),
+        ])])),
+    ]);
+    let room2_rep = PyRep::keyval([("roomName", PyRep::String("Next Room".into()))]);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut kw = HashMap::new();
+    kw.insert("position".into(), PyRep::List(vec![PyRep::Real(room_pos[0]), PyRep::Real(0.0), PyRep::Real(0.0)]));
+    let spawned = spawn_dungeon_instance(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &[PyRep::Integer(1), PyRep::List(vec![room_rep, room2_rep])],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let inst_id = spawned.dict_get("instanceID").unwrap().as_i64().unwrap();
+
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_id];
+        assert!(rt.rooms[0].objects[0].spawn_on_trigger && !rt.rooms[0].objects[0].spawned);
+        let t = &rt.rooms[0].triggers[0];
+        assert_eq!(t.action, DungeonTriggerAction::LockGate);
+        assert_eq!(t.target_room_index, Some(0));
+        assert_eq!(t.extra_actions.len(), 4);
+        assert_eq!(t.extra_actions[0], DungeonTriggerAction::SpawnObject { object_index: 0 });
+    });
+
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_id];
+        assert!(rt.rooms[0].gate_locked, "LockGate in primary action must survive trigger eval");
+        assert!(rt.rooms[0].objects[0].spawned);
+        assert_eq!(rt.objectives[0].objective_id, 7701);
+        assert_eq!(rt.active_objective_id, 7701);
+        assert_eq!(rt.last_completed_task_id, Some(7701));
+        assert_eq!(rt.completed_task_ids, vec![7701]);
+    });
+    ctx.db.with_snapshot(|s| assert!(s.items.values().any(|i| i.type_id == 34 && i.quantity == 15)));
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(notes.iter().any(|n| n.event == "OnDungeonTriggerMessage"));
+    let prog: Vec<(&str, Vec<PyRep>)> = notes
+        .iter()
+        .filter(|n| matches!(n.event.as_str(), "OnProgressionTaskCompleted" | "OnProgressionAdvanced"))
+        .map(|n| (n.event.as_str(), n.args.clone()))
+        .collect();
+    assert_eq!(
+        prog,
+        vec![
+            ("OnProgressionTaskCompleted", vec![PyRep::Integer(7701)]),
+            ("OnProgressionAdvanced", vec![PyRep::Integer(7701), PyRep::Integer(7701)]),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_r2_approach_spawn_on_trigger_object_and_negative_chance_bps() {
+    use crate::services::pve_dungeon_runtime::{
+        apply_dungeon_trigger_actions, read_dungeon_runtime_store, with_dungeon_runtime_store,
+    };
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_444;
+    let ship_id: i64 = 1_040_000_444;
+    let (ctx, _sess) = make_ctx_and_session(sys_id, char_id, ship_id);
+    let room_pos = [22_000_000.0, 0.0, 0.0];
+    let obj_pos = [room_pos[0] + 500.0, 0.0, 0.0];
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_id, type_id: 587, position: DVec3::from_array(obj_pos), velocity: DVec3::ZERO,
+            max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let room_rep = PyRep::keyval([
+        ("roomName", PyRep::String("OWN-P1-02 Room".into())),
+        ("gateLocked", PyRep::Bool(false)),
+        ("objects", PyRep::List(vec![PyRep::keyval([
+            ("typeID", PyRep::Integer(i64::from(DEFAULT_CONTAINER_TYPE_ID))),
+            ("name", PyRep::String("Delayed Beacon".into())),
+            ("spawnOnTrigger", PyRep::Bool(true)),
+            ("offset", PyRep::List(vec![PyRep::Real(500.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+        ])])),
+        ("triggers", PyRep::List(vec![
+            PyRep::keyval([
+                ("kind", PyRep::String("approach".into())),
+                ("targetObjectIndex", PyRep::Integer(0)),
+                ("radius", PyRep::Real(3_000.0)),
+                ("repeatable", PyRep::Bool(true)),
+                ("action", PyRep::String("TriggerMessage".into())),
+                ("messageType", PyRep::Integer(1)),
+                ("messageID", PyRep::Integer(9123)),
+            ]),
+            PyRep::keyval([
+                ("kind", PyRep::String("kill".into())),
+                ("action", PyRep::String("StartEscalation".into())),
+                ("chanceBps", PyRep::Integer(-500)),
+            ]),
+            PyRep::keyval([
+                ("kind", PyRep::String("kill".into())),
+                ("action", PyRep::String("StartEscalation".into())),
+                ("chanceBps", PyRep::Integer(15_000)),
+            ]),
+        ])),
+    ]);
+    let room2_rep = PyRep::keyval([("roomName", PyRep::String("Room Two".into()))]);
+    let mut kw = HashMap::new();
+    kw.insert("position".into(), PyRep::List(vec![PyRep::Real(room_pos[0]), PyRep::Real(0.0), PyRep::Real(0.0)]));
+    let spawned = spawn_dungeon_instance(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &[PyRep::Integer(1), PyRep::List(vec![room_rep, room2_rep])],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let inst_id = spawned.dict_get("instanceID").unwrap().as_i64().unwrap();
+
+    // P2-3: negative chanceBps clamps to 0, >10_000 clamps to 10_000.
+    read_dungeon_runtime_store(&ctx, |s| {
+        let trigs = &s.instances[&inst_id].rooms[0].triggers;
+        assert_eq!(trigs[1].action, DungeonTriggerAction::StartEscalation { target_dungeon_id: None, chance_bps: 0, target_title: None });
+        assert_eq!(trigs[2].action, DungeonTriggerAction::StartEscalation { target_dungeon_id: None, chance_bps: 10_000, target_title: None });
+    });
+
+    // OWN-P1-02: ship sits right on object[0] position, but spawn_on_trigger=true && !spawned -> must NOT fire.
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    // SpawnObject materializes objects[0]; OnApproach fires cleanly now.
+    assert_eq!(
+        apply_dungeon_trigger_actions(&ctx, sys_id, inst_id, 0, vec![(9, DungeonTriggerAction::SpawnObject { object_index: 0 })], char_id).await,
+        1
+    );
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+
+    // Destroyed target object must NOT match subsequent OnApproach.
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.get_mut(&inst_id).unwrap().rooms[0].objects[0].destroyed = true;
+    });
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
 }

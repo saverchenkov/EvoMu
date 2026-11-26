@@ -236,6 +236,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                                 duration_bits: 4.0_f64.to_bits(),
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 2,
@@ -246,6 +247,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                                 emitter_id: 77,
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 3,
@@ -254,6 +256,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                                 audio_url: "wise:/dungeon_alert_01".to_string(),
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 4,
@@ -263,6 +266,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                                 message_id: 5001,
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 5,
@@ -271,6 +275,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
                                 music_trigger_id: 909,
                             },
                             fired: false,
+                            ..Default::default()
                         },
                     ],
                     ..Default::default()

@@ -256,6 +256,7 @@ async fn test_dungeon_and_space_notifications() {
                                 duration_bits: 5.0_f64.to_bits(),
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 2,
@@ -266,6 +267,7 @@ async fn test_dungeon_and_space_notifications() {
                                 emitter_id: 12,
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 3,
@@ -274,6 +276,7 @@ async fn test_dungeon_and_space_notifications() {
                                 audio_url: "wise:/dungeon_alert_02".to_string(),
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 4,
@@ -283,6 +286,7 @@ async fn test_dungeon_and_space_notifications() {
                                 message_id: 4001,
                             },
                             fired: false,
+                            ..Default::default()
                         },
                         DungeonTrigger {
                             trigger_id: 5,
@@ -291,6 +295,7 @@ async fn test_dungeon_and_space_notifications() {
                                 music_trigger_id: 888,
                             },
                             fired: false,
+                            ..Default::default()
                         },
                     ],
                     ..Default::default()

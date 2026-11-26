@@ -595,6 +595,7 @@ async fn update_state_request_dungeon_trigger_unmatched_rpc_and_main_bank_unlink
                         },
                         action: eve_db::service_domains::pve_sites::DungeonTriggerAction::UnlockGate,
                         fired: false,
+                        ..Default::default()
                     }],
                     spawned: true,
                     cleared: false,

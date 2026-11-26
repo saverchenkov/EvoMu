@@ -119,17 +119,30 @@ pub(super) fn find_active_dungeon_id_at_position(
     })
 }
 
-pub(super) struct CompletedDungeonCleanup {
-    pub(super) dungeon_id: u32,
-    pub(super) recipient_char_id: i64,
-    pub(super) balls_to_remove: Vec<i64>,
-    pub(super) emit_completed: bool,
+pub(crate) struct CompletedDungeonCleanup {
+    pub(crate) dungeon_id: u32,
+    pub(crate) recipient_char_id: i64,
+    pub(crate) non_npc_balls_to_remove: Vec<i64>,
+    pub(crate) npc_balls_to_remove: Vec<i64>,
+    pub(crate) emit_completed: bool,
+    pub(crate) emit_failed: bool,
 }
 
 pub(super) fn apply_complete_dungeon_instance_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     instance_id: i64,
     char_id: i64,
+    force_full_despawn: bool,
+    now_unix: u64,
+) -> Option<CompletedDungeonCleanup> {
+    apply_finish_dungeon_instance_snap(snap, instance_id, char_id, false, force_full_despawn, now_unix)
+}
+
+pub(crate) fn apply_finish_dungeon_instance_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    instance_id: i64,
+    char_id: i64,
+    is_fail: bool,
     force_full_despawn: bool,
     now_unix: u64,
 ) -> Option<CompletedDungeonCleanup> {
@@ -141,51 +154,61 @@ pub(super) fn apply_complete_dungeon_instance_snap(
     if was_despawned {
         return None;
     }
-    let has_loot = !force_full_despawn
+    let has_loot = !is_fail
+        && !force_full_despawn
         && snap
             .dungeon_runtime
             .instances
             .get(&instance_id)
             .is_some_and(|i| has_unlooted_containers_in_snap(snap, i));
 
-    let mut balls_to_remove = Vec::new();
+    let mut non_npc_balls_to_remove = Vec::new();
+    let mut npc_balls_to_remove = Vec::new();
     let mut container_cleanup_ids = Vec::new();
     let mut result = None;
 
     if let Some(inst) = snap.dungeon_runtime.instances.get_mut(&instance_id) {
         let was_completed = inst.completed;
+        let was_finished = instance_is_finished(inst);
         let was_failed = inst.failed;
         record_dungeon_actor(inst, char_id);
-        if !was_failed {
+        if is_fail {
+            inst.failed = true;
+            inst.completed = false;
+        } else if !was_failed {
             inst.completed = true;
             inst.completed_unix.get_or_insert(now_unix);
         }
         for obj in &mut inst.objectives {
-            if !was_failed && obj.status != DungeonObjectiveStatus::Completed {
-                obj.status = DungeonObjectiveStatus::Completed;
+            if obj.status != DungeonObjectiveStatus::Completed {
+                if is_fail {
+                    obj.status = DungeonObjectiveStatus::Failed;
+                } else if !was_failed {
+                    obj.status = DungeonObjectiveStatus::Completed;
+                }
             }
         }
         if let Some(eg) = inst.entry_gate_ball_id.take() {
-            balls_to_remove.push(eg);
+            non_npc_balls_to_remove.push(eg);
         }
         for r in &mut inst.rooms {
-            balls_to_remove.extend(collect_all_room_gate_ids(r));
+            non_npc_balls_to_remove.extend(collect_all_room_gate_ids(r));
             r.gate_ball_id = None;
             for gl in &mut r.gate_links {
                 gl.gate_ball_id = None;
             }
             for grp in &mut r.npc_groups {
-                balls_to_remove.extend(grp.npc_ball_ids.drain(..));
+                npc_balls_to_remove.extend(grp.npc_ball_ids.drain(..));
                 grp.dead_npc_ball_ids.clear();
                 grp.npc_ball_meta.clear();
                 grp.npc_ball_tags.clear();
                 grp.npc_ball_names.clear();
                 grp.npc_ball_bounties.clear();
-                if !was_failed {
+                if !is_fail && !was_failed {
                     grp.cleared = true;
                 }
             }
-            if !was_failed {
+            if !is_fail && !was_failed {
                 r.cleared = true;
             }
             for obj in &mut r.objects {
@@ -195,7 +218,7 @@ pub(super) fn apply_complete_dungeon_instance_snap(
                     if obj.is_container {
                         container_cleanup_ids.push(obj.ball_id);
                     }
-                    balls_to_remove.push(obj.ball_id);
+                    non_npc_balls_to_remove.push(obj.ball_id);
                     obj.ball_id = 0;
                     obj.spawned = false;
                 }
@@ -212,12 +235,15 @@ pub(super) fn apply_complete_dungeon_instance_snap(
             inst.despawn_after_unix = Some(now_unix);
         }
         let recipient = resolve_dungeon_recipient(inst, char_id);
-        let emit_completed = !was_completed && !was_failed;
+        let emit_failed = is_fail && !was_finished && recipient > 0;
+        let emit_completed = !is_fail && !was_completed && !was_failed;
         result = Some(CompletedDungeonCleanup {
             dungeon_id: inst.dungeon_id,
             recipient_char_id: recipient,
-            balls_to_remove,
+            non_npc_balls_to_remove,
+            npc_balls_to_remove,
             emit_completed,
+            emit_failed,
         });
     }
 
@@ -328,9 +354,24 @@ pub(crate) fn expire_due_dungeon_loot_grace_sync(ctx: &ServerContext) -> usize {
         if let Some(done) = cleanup {
             swept += 1;
             if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
-                for bid in done.balls_to_remove {
-                    sys_handle.try_remove_ball(bid);
+                for bid in done
+                    .non_npc_balls_to_remove
+                    .iter()
+                    .chain(done.npc_balls_to_remove.iter())
+                {
+                    sys_handle.try_remove_ball(*bid);
                 }
+            }
+            if !done.npc_balls_to_remove.is_empty() {
+                crate::services::combat_crimewatch::with_mut_combat_runtime_with_locks(
+                    &ctx.db,
+                    &*ctx.combat_ephemeral,
+                    |rt| {
+                        for bid in &done.npc_balls_to_remove {
+                            rt.npc_entities.remove(bid);
+                        }
+                    },
+                );
             }
             finalize_completed_dungeon_effects_sync(
                 &ctx.db,
@@ -354,11 +395,8 @@ pub(crate) async fn expire_all_due_dungeon_loot_grace(ctx: &ServerContext) -> us
     let due = collect_due_loot_grace_instances(ctx, now_unix);
     let count = due.len();
     for (sys_id, inst_id) in due {
-        complete_dungeon_instance_core(
-            &ctx.systems,
-            &ctx.db,
-            Some(&ctx.pending_notifications),
-            Some(&ctx.notify_tx),
+        super::actions::complete_and_flush_instance(
+            super::actions::DungeonRuntimeDeps::from_ctx(ctx),
             sys_id,
             inst_id,
             0,

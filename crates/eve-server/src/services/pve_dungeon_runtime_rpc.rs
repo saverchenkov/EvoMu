@@ -6,13 +6,14 @@
 use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
 use crate::services::pve_dungeon_runtime::{
-    apply_dungeon_trigger_actions, complete_dungeon_instance_core, dist3,
-    has_unlooted_containers_in_snap, instance_is_finished, materialize_dungeon_room_entities,
-    on_dungeon_room_entered, prune_stale_despawned_instances, read_dungeon_runtime_store,
-    record_dungeon_actor, room_is_entered, unix_to_filetime_ticks, with_dungeon_runtime_store,
-    DungeonGateLink, DungeonInstanceId, DungeonNpcGroup, DungeonObjectiveStatus,
-    DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId,
-    DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities,
+    actions::{complete_and_flush_instance, execute_room_triggers_in_snap, DungeonRuntimeDeps},
+    dist3, has_unlooted_containers_in_snap, instance_is_finished,
+    materialize_dungeon_room_entities, on_dungeon_room_entered, prune_stale_despawned_instances,
+    read_dungeon_runtime_store, record_dungeon_actor, resolve_runtime_gate_in_snap,
+    room_is_entered, unix_to_filetime_ticks, with_dungeon_runtime_store, DungeonGateLink,
+    DungeonInstanceId, DungeonNpcGroup, DungeonObjectiveStatus, DungeonRuntimeInstance,
+    DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId, DungeonTrigger,
+    DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities, RuntimeGateMatch,
     DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
 };
 use eve_db::lock_rank::AnyRwLock;
@@ -33,129 +34,17 @@ pub async fn try_activate_dungeon_runtime_gate(
     let arg_int = args.first().and_then(|a| a.as_i64());
     let arg_str = args.first().and_then(|a| a.as_str()).map(str::trim);
 
-    let match_info = ctx.db.with_snapshot(|snap| {
-        for inst in snap.dungeon_runtime.instances.values() {
-            if instance_is_finished(inst)
-                || inst.solar_system_id != sys_id
-                || inst.category == "Flashpoint"
-            {
-                continue;
-            }
-            if let Some(gate_id) = arg_int {
-                if inst.entry_gate_ball_id == Some(gate_id) {
-                    return Some((
-                        inst.instance_id,
-                        0usize,
-                        inst.entry_gate_pos,
-                        inst.entry_gate_locked,
-                        gate_id,
-                        None,
-                    ));
-                }
-                for (r_idx, r) in inst.rooms.iter().enumerate() {
-                    if !r.gate_links.is_empty() {
-                        if let Some(gl) = r.gate_links.iter().find(|gl| gl.gate_ball_id == Some(gate_id)) {
-                            if gl.target_room_index < inst.rooms.len() {
-                                return Some((
-                                    inst.instance_id,
-                                    gl.target_room_index,
-                                    Some(gl.gate_position),
-                                    gl.locked,
-                                    gate_id,
-                                    (gl.destination_pos != [0.0, 0.0, 0.0])
-                                        .then_some(gl.destination_pos),
-                                ));
-                            }
-                        }
-                    } else if r.gate_ball_id == Some(gate_id) && r_idx + 1 < inst.rooms.len() {
-                        let gate_pos = Some([r.position[0] + 5_000.0, r.position[1], r.position[2]]);
-                        return Some((
-                            inst.instance_id,
-                            r_idx + 1,
-                            gate_pos,
-                            r.gate_locked,
-                            gate_id,
-                            None,
-                        ));
-                    }
-                }
-            }
-            if let Some(s) = arg_str {
-                if s == format!("DNG-INST-{}", inst.instance_id) {
-                    if inst.current_room_index == 0
-                        && (inst.entry_gate_pos.is_some() || inst.entry_gate_ball_id.is_some())
-                        && inst.rooms.first().is_some_and(|r| !r.entered)
-                    {
-                        return Some((
-                            inst.instance_id,
-                            0usize,
-                            inst.entry_gate_pos,
-                            inst.entry_gate_locked,
-                            inst.entry_gate_ball_id.unwrap_or(0),
-                            None,
-                        ));
-                    }
-                    let cur_pair = if inst.current_room_index == 0 {
-                        inst.rooms
-                            .first()
-                            .filter(|r| {
-                                r.room_index == 0
-                                    && (r.gate_ball_id.is_some()
-                                        || !r.gate_links.is_empty()
-                                        || (r.entered && inst.rooms.len() > 1))
-                            })
-                            .map(|r| (0usize, r))
-                    } else {
-                        let idx = inst
-                            .room_vec_index_by_room_index(inst.current_room_index)
-                            .unwrap_or(inst.current_room_index - 1);
-                        inst.rooms.get(idx).map(|r| (idx, r))
-                    };
-                    let Some((cur_idx, cur_room)) = cur_pair else {
-                        continue;
-                    };
-                    if !cur_room.gate_links.is_empty() {
-                        if let Some(gl) = cur_room
-                            .gate_links
-                            .iter()
-                            .find(|gl| gl.target_room_index < inst.rooms.len())
-                        {
-                            return Some((
-                                inst.instance_id,
-                                gl.target_room_index,
-                                Some(gl.gate_position),
-                                gl.locked,
-                                gl.gate_ball_id.unwrap_or(0),
-                                (gl.destination_pos != [0.0, 0.0, 0.0])
-                                    .then_some(gl.destination_pos),
-                            ));
-                        }
-                        continue;
-                    }
-                    if cur_idx + 1 < inst.rooms.len() {
-                        let gate_id = cur_room.gate_ball_id.unwrap_or(0);
-                        let gate_pos = Some([
-                            cur_room.position[0] + 5_000.0,
-                            cur_room.position[1],
-                            cur_room.position[2],
-                        ]);
-                        return Some((
-                            inst.instance_id,
-                            cur_idx + 1,
-                            gate_pos,
-                            cur_room.gate_locked,
-                            gate_id,
-                            None,
-                        ));
-                    }
-                    continue;
-                }
-            }
-        }
-        None
-    });
-
-    let (instance_id, target_room_idx, gate_pos_opt, gate_locked, gate_id, dest_override) = match_info?;
+    let RuntimeGateMatch {
+        instance_id,
+        source_room_vec_idx: _,
+        target_room_vec_idx: target_room_idx,
+        gate_position: gate_pos_opt,
+        locked: gate_locked,
+        gate_ball_id: gate_id,
+        dest_override,
+    } = ctx
+        .db
+        .with_snapshot(|snap| resolve_runtime_gate_in_snap(snap, sys_id, arg_int, arg_str))?;
 
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
@@ -397,6 +286,81 @@ fn parse_finite_vec3(rep: Option<&PyRep>, default: [f64; 3]) -> [f64; 3] {
     }
 }
 
+fn parse_dungeon_trigger_action(spec: &PyRep, fallback: &PyRep) -> DungeonTriggerAction {
+    let action_str = spec
+        .as_str()
+        .or_else(|| spec.dict_get("action").and_then(|v| v.as_str()))
+        .unwrap_or("UnlockGate");
+    let src = if spec.as_str().is_some() { fallback } else { spec };
+    let action_grp = src
+        .dict_get("actionGroup")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(2);
+    let action_obj_idx = src
+        .dict_get("actionObjectIndex")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(0);
+    match action_str {
+        "LockGate" => DungeonTriggerAction::LockGate,
+        "UnlockEntryGate" => DungeonTriggerAction::UnlockEntryGate,
+        "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
+        "DespawnNpcGroup" => DungeonTriggerAction::DespawnNpcGroup(action_grp),
+        "SpawnObject" => DungeonTriggerAction::SpawnObject { object_index: action_obj_idx },
+        "GrantLoot" => {
+            let items = match src.dict_get("items") {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list
+                    .iter()
+                    .take(32)
+                    .filter_map(|e| match e {
+                        PyRep::List(p) | PyRep::Tuple(p) if p.len() >= 2 => Some((
+                            u32::try_from(p[0].as_i64()?).ok()?,
+                            i32::try_from(p[1].as_i64()?).ok()?,
+                        )),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            DungeonTriggerAction::GrantLoot {
+                items,
+                target_object_index: src
+                    .dict_get("targetObjectIndex")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| usize::try_from(v).ok()),
+            }
+        }
+        "GrantReward" => DungeonTriggerAction::GrantReward {
+            isk: src.dict_get("isk").and_then(|v| v.as_i64()).unwrap_or(0),
+            lp: src.dict_get("lp").and_then(|v| v.as_i64()).unwrap_or(0),
+            corp_id: src.dict_get("corpID").or_else(|| src.dict_get("corpId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+            faction_id: src.dict_get("factionID").or_else(|| src.dict_get("factionId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+            standing_milli: src.dict_get("standingMilli").and_then(|v| v.as_i64()).and_then(|v| i32::try_from(v).ok()).unwrap_or(0),
+        },
+        "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
+        "FailDungeon" => DungeonTriggerAction::FailDungeon {
+            reason: src.dict_get("reason").and_then(|v| v.as_str()).unwrap_or("DungeonFailed").to_string(),
+        },
+        "SetObjective" => DungeonTriggerAction::SetObjective {
+            objective_id: src.dict_get("objectiveID").or_else(|| src.dict_get("objectiveId")).and_then(|v| v.as_i64()).unwrap_or(0),
+            objective_key: src.dict_get("objectiveKey").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            title: src.dict_get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            completed: src.dict_get("completed").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
+        "StartEscalation" => DungeonTriggerAction::StartEscalation {
+            target_dungeon_id: src.dict_get("targetDungeonID").or_else(|| src.dict_get("targetDungeonId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()),
+            chance_bps: src.dict_get("chanceBps").and_then(|v| v.as_i64()).map(|v| v.clamp(0, 10_000) as u16).unwrap_or(10_000),
+            target_title: src.dict_get("targetTitle").and_then(|v| v.as_str()).map(str::to_string),
+        },
+        "TriggerMessage" => DungeonTriggerAction::TriggerMessage {
+            message_type: src.dict_get("messageType").and_then(|v| v.as_i64()).unwrap_or(1),
+            message_id: src.dict_get("messageID").or_else(|| src.dict_get("messageId")).and_then(|v| v.as_i64()).unwrap_or(0),
+        },
+        _ => DungeonTriggerAction::UnlockGate,
+    }
+}
+
 fn parse_rooms_from_pyrep(
     ctx: &ServerContext,
     sys_id: u32,
@@ -485,6 +449,10 @@ fn parse_rooms_from_pyrep(
                         is_container,
                         loot_items,
                         spawned: false,
+                        spawn_on_trigger: o_rep
+                            .dict_get("spawnOnTrigger")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                         destructible: o_rep
                             .dict_get("destructible")
                             .and_then(|v| v.as_bool())
@@ -540,6 +508,10 @@ fn parse_rooms_from_pyrep(
                         spawn_immediately,
                         spawned: false,
                         cleared: false,
+                        repeatable: g_rep
+                            .dict_get("repeatable")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                         ..Default::default()
                     });
                 }
@@ -553,19 +525,14 @@ fn parse_rooms_from_pyrep(
                         .and_then(|v| v.as_str())
                         .unwrap_or("kill")
                         .to_ascii_lowercase();
-                    let action_str = t_rep
-                        .dict_get("action")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("UnlockGate");
-                    let action_grp = t_rep
-                        .dict_get("actionGroup")
-                        .and_then(|v| v.as_i64())
-                        .and_then(|v| u8::try_from(v).ok())
-                        .unwrap_or(2);
-                    let action = match action_str {
-                        "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
-                        "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
-                        _ => DungeonTriggerAction::UnlockGate,
+                    let action = parse_dungeon_trigger_action(t_rep, t_rep);
+                    let extra_actions = match t_rep.dict_get("extraActions") {
+                        Some(PyRep::List(list) | PyRep::Tuple(list)) => list
+                            .iter()
+                            .take(16)
+                            .map(|a_rep| parse_dungeon_trigger_action(a_rep, t_rep))
+                            .collect(),
+                        _ => Vec::new(),
                     };
                     let kind = match kind_str.as_str() {
                         "approach" => {
@@ -620,7 +587,22 @@ fn parse_rooms_from_pyrep(
                         trigger_id: u32::try_from(t_i + 1).unwrap_or(u32::MAX),
                         kind,
                         action,
+                        extra_actions,
                         fired: false,
+                        repeatable: t_rep
+                            .dict_get("repeatable")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        delay_secs: t_rep
+                            .dict_get("delaySecs")
+                            .and_then(|v| v.as_i64())
+                            .and_then(|v| u64::try_from(v).ok())
+                            .unwrap_or(0),
+                        target_room_index: t_rep
+                            .dict_get("targetRoomIndex")
+                            .and_then(|v| v.as_i64())
+                            .and_then(|v| usize::try_from(v).ok()),
+                        ..Default::default()
                     });
                 }
             }
@@ -967,6 +949,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     },
                     action: DungeonTriggerAction::SpawnNpcGroup(2),
                     fired: false,
+                    ..Default::default()
                 },
                 DungeonTrigger {
                     trigger_id: 2,
@@ -976,6 +959,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     },
                     action: DungeonTriggerAction::UnlockGate,
                     fired: false,
+                    ..Default::default()
                 },
             ],
             spawned: false,
@@ -1025,6 +1009,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     },
                     action: DungeonTriggerAction::SpawnNpcGroup(2),
                     fired: false,
+                    ..Default::default()
                 },
                 DungeonTrigger {
                     trigger_id: 2,
@@ -1034,6 +1019,7 @@ pub(crate) fn build_sde_deadspace_rooms(
                     },
                     action: DungeonTriggerAction::CompleteDungeon,
                     fired: false,
+                    ..Default::default()
                 },
             ],
             spawned: false,
@@ -1448,7 +1434,7 @@ fn matches_approach_trigger_parts(
     ship_pos: [f64; 3],
     target_id_opt: Option<i64>,
 ) -> bool {
-    if trig.fired {
+    if trig.fired || trig.armed_at_unix.is_some() {
         return false;
     }
     let DungeonTriggerKind::OnApproach {
@@ -1460,15 +1446,29 @@ fn matches_approach_trigger_parts(
     else {
         return false;
     };
-    let resolved_target_ball = (*target_ball_id).or_else(|| {
-        target_object_index
-            .and_then(|idx| objects.get(idx))
-            .map(|o| o.ball_id)
-    });
-    let obj_pos = resolved_target_ball
-        .and_then(|bid| objects.iter().find(|o| o.ball_id == bid))
-        .map(|o| o.position)
-        .unwrap_or(*anchor_pos);
+    let (resolved_target_ball, obj_pos) = if let Some(bid) = *target_ball_id {
+        if bid <= 0 {
+            return false;
+        }
+        if let Some(obj) = objects.iter().find(|o| o.ball_id == bid) {
+            if !obj.spawned || obj.destroyed {
+                return false;
+            }
+            (Some(bid), obj.position)
+        } else {
+            (Some(bid), *anchor_pos)
+        }
+    } else if let Some(idx) = *target_object_index {
+        let Some(obj) = objects.get(idx) else {
+            return false;
+        };
+        if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
+            return false;
+        }
+        (Some(obj.ball_id), obj.position)
+    } else {
+        (None, *anchor_pos)
+    };
     let effective_radius = radius_m.max(2_500.0);
     let within_radius = dist3(ship_pos, obj_pos) <= effective_radius;
     let explicit_target_close = target_id_opt.is_some()
@@ -1483,7 +1483,7 @@ fn matches_loot_trigger_parts(
     container_ball_id: i64,
     item_type_id: TypeId,
 ) -> bool {
-    if trig.fired {
+    if trig.fired || trig.armed_at_unix.is_some() || container_ball_id <= 0 {
         return false;
     }
     let DungeonTriggerKind::OnLoot {
@@ -1494,20 +1494,36 @@ fn matches_loot_trigger_parts(
     else {
         return false;
     };
-    let resolved_cont = (*trig_cont).or_else(|| {
-        target_object_index
-            .and_then(|idx| objects.get(idx))
-            .map(|o| o.ball_id)
-    });
+    let resolved_cont = if let Some(cid) = *trig_cont {
+        if cid <= 0 {
+            return false;
+        }
+        if objects.iter().any(|o| o.ball_id == cid && (!o.spawned || o.destroyed)) {
+            return false;
+        }
+        Some(cid)
+    } else if let Some(idx) = *target_object_index {
+        let Some(obj) = objects.get(idx) else {
+            return false;
+        };
+        if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
+            return false;
+        }
+        Some(obj.ball_id)
+    } else {
+        None
+    };
     let cont_ok = resolved_cont.is_none_or(|cid| cid == container_ball_id);
     let tid_ok = trig_tid.is_none_or(|tid| tid == item_type_id);
-    let room_has_cont = objects.iter().any(|o| o.ball_id == container_ball_id);
+    let room_has_cont = objects
+        .iter()
+        .any(|o| o.ball_id == container_ball_id && o.spawned && !o.destroyed);
     cont_ok && tid_ok && (resolved_cont.is_some() || room_has_cont)
 }
 
 /// Evaluates `OnApproach` triggers when a pilot issues an approach/orbit/goto/stop command or updates state.
 /// Performs read-only snapshot & trigger-distance checks first and ONLY opens a write transaction
-/// (`with_dungeon_runtime_store`) when at least one trigger actually transitions (`PVE-212`).
+/// when at least one trigger actually transitions (`PVE-212`).
 pub async fn on_dungeon_approach(
     ctx: &ServerContext,
     char_id: i64,
@@ -1524,6 +1540,7 @@ pub async fn on_dungeon_approach(
                         && room_is_entered(room)
                         && room.triggers.iter().any(|trig| {
                             !trig.fired
+                                && trig.armed_at_unix.is_none()
                                 && matches!(trig.kind, DungeonTriggerKind::OnApproach { .. })
                         })
                 })
@@ -1563,42 +1580,13 @@ pub async fn on_dungeon_approach(
         return 0;
     }
 
-    let mut pending_actions = Vec::new();
-    with_dungeon_runtime_store(ctx, |store| {
-        for inst in store.instances.values_mut() {
-            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
-                continue;
-            }
-            let mut any_fired = false;
-            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
-                if !room.spawned || !room_is_entered(room) {
-                    continue;
-                }
-                let room_objs = &room.objects;
-                let mut room_actions = Vec::new();
-                for trig in &mut room.triggers {
-                    if matches_approach_trigger_parts(room_objs, trig, ship_pos, target_id_opt) {
-                        trig.fired = true;
-                        any_fired = true;
-                        room_actions.push((trig.trigger_id, trig.action.clone()));
-                    }
-                }
-                if !room_actions.is_empty() {
-                    pending_actions.push((inst.instance_id, r_idx, room_actions));
-                }
-            }
-            if any_fired {
-                record_dungeon_actor(inst, char_id);
-            }
-        }
-    });
-
-    let mut total_fired = 0usize;
-    for (inst_id, r_idx, actions) in pending_actions {
-        total_fired +=
-            apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
-    }
-    total_fired
+    execute_room_triggers_in_snap(
+        DungeonRuntimeDeps::from_ctx(ctx),
+        Some(sys_id),
+        char_id,
+        |objs, trig| matches_approach_trigger_parts(objs, trig, ship_pos, target_id_opt),
+    )
+    .await
 }
 
 /// Evaluates `OnLoot` triggers when an item is looted from a container/wreck in space,
@@ -1651,64 +1639,18 @@ pub async fn on_dungeon_item_looted(
         (trigger_match, grace_done)
     });
     if has_matching_loot {
-        let mut pending_actions = Vec::new();
-
-        with_dungeon_runtime_store(ctx, |store| {
-            for inst in store.instances.values_mut() {
-                if instance_is_finished(inst) {
-                    continue;
-                }
-                if let Some(sys_id) = sys_id_opt {
-                    if inst.solar_system_id != sys_id {
-                        continue;
-                    }
-                }
-                let mut any_fired = false;
-                for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
-                    if !room.spawned || !room_is_entered(room) {
-                        continue;
-                    }
-                    let room_objs = &room.objects;
-                    let mut room_actions = Vec::new();
-                    for trig in &mut room.triggers {
-                        if matches_loot_trigger_parts(
-                            room_objs,
-                            trig,
-                            container_ball_id,
-                            item_type_id,
-                        ) {
-                            trig.fired = true;
-                            any_fired = true;
-                            room_actions.push((trig.trigger_id, trig.action.clone()));
-                        }
-                    }
-                    if !room_actions.is_empty() {
-                        pending_actions.push((
-                            inst.solar_system_id,
-                            inst.instance_id,
-                            r_idx,
-                            room_actions,
-                        ));
-                    }
-                }
-                if any_fired {
-                    record_dungeon_actor(inst, char_id);
-                }
-            }
-        });
-
-        for (sys_id, inst_id, r_idx, actions) in pending_actions {
-            let _ =
-                apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
-        }
+        let _ = execute_room_triggers_in_snap(
+            DungeonRuntimeDeps::from_ctx(ctx),
+            sys_id_opt,
+            char_id,
+            |objs, trig| matches_loot_trigger_parts(objs, trig, container_ball_id, item_type_id),
+        )
+        .await;
     }
 
     for (sys_id, inst_id) in loot_grace_finished {
-        complete_dungeon_instance_core(
-            &ctx.systems,
-            &ctx.db,
-            Some(&ctx.pending_notifications),
-            Some(&ctx.notify_tx),
+        complete_and_flush_instance(
+            DungeonRuntimeDeps::from_ctx(ctx),
             sys_id,
             inst_id,
             char_id,

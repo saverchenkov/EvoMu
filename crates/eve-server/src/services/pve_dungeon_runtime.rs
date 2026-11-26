@@ -3,6 +3,8 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "pve_dungeon_runtime_actions.rs"]
+pub(crate) mod actions;
 #[path = "pve_dungeon_runtime_ops.rs"]
 mod ops;
 
@@ -22,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 const POCKET_RADIUS_M: f64 = 200_000.0;
 pub(crate) const GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
-const ACCELERATION_GATE_TYPE_ID: u32 = 17831;
+pub(crate) const ACCELERATION_GATE_TYPE_ID: u32 = 17831;
 pub(crate) const DEFAULT_CONTAINER_TYPE_ID: u32 = 23;
 pub(crate) const DUNGEON_COMPLETION_LOOT_GRACE_SECS: u64 = 1_800;
 pub(crate) const COMPLETED_INSTANCE_RETENTION_SECS: u64 = 3_600;
@@ -89,19 +91,152 @@ pub(crate) fn room_is_entered(room: &DungeonRuntimeRoom) -> bool {
 }
 
 pub(crate) fn record_dungeon_actor(inst: &mut DungeonRuntimeInstance, char_id: i64) {
+    if char_id > 0 { inst.last_actor_char_id = char_id; }
+}
+
+pub(crate) fn record_room_actor(inst: &mut DungeonRuntimeInstance, room_vec_idx: usize, char_id: i64) {
     if char_id > 0 {
         inst.last_actor_char_id = char_id;
+        if let Some(room) = inst.rooms.get_mut(room_vec_idx) { room.last_actor_char_id = char_id; }
     }
 }
 
 pub(crate) fn resolve_dungeon_recipient(inst: &DungeonRuntimeInstance, actor_char_id: i64) -> i64 {
-    if actor_char_id > 0 {
-        actor_char_id
-    } else if inst.owner_char_id > 0 {
-        inst.owner_char_id
-    } else {
-        inst.last_actor_char_id
+    if actor_char_id > 0 { actor_char_id } else if inst.owner_char_id > 0 { inst.owner_char_id } else { inst.last_actor_char_id }
+}
+
+pub(crate) fn resolve_room_recipient(
+    inst: &DungeonRuntimeInstance, room_vec_idx: Option<usize>, actor_char_id: i64,
+) -> i64 {
+    if actor_char_id > 0 { return actor_char_id; }
+    if let Some(cid) = room_vec_idx.and_then(|i| inst.rooms.get(i)).map(|r| r.last_actor_char_id).filter(|&id| id > 0) {
+        return cid;
     }
+    resolve_dungeon_recipient(inst, 0)
+}
+
+pub(crate) fn wake_dungeon_system_handle(
+    systems: &crate::system_actor::SystemRegistry, sys_id: SolarSystemId,
+) -> crate::system_actor::SystemHandle {
+    systems.get_or_spawn(sys_id)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RoomGateSpec {
+    pub(crate) gate_ball_id: Option<i64>,
+    pub(crate) gate_position: [f64; 3],
+    pub(crate) target_room_vec_idx: usize,
+    pub(crate) destination_pos: Option<[f64; 3]>,
+    pub(crate) locked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RuntimeGateMatch {
+    pub(crate) instance_id: i64,
+    pub(crate) source_room_vec_idx: Option<usize>,
+    pub(crate) target_room_vec_idx: usize,
+    pub(crate) gate_position: Option<[f64; 3]>,
+    pub(crate) locked: bool,
+    pub(crate) gate_ball_id: i64,
+    pub(crate) dest_override: Option<[f64; 3]>,
+}
+
+/// Canonical per-room exit gate descriptor (`I4` / `OWN-R5-03`), supporting branching `gate_links`
+/// and linear `r_idx + 1` progression without inventing phantom gates in final rooms.
+pub(crate) fn collect_room_gate_specs(inst: &DungeonRuntimeInstance, room_vec_idx: usize) -> Vec<RoomGateSpec> {
+    let Some(room) = inst.rooms.get(room_vec_idx) else { return Vec::new() };
+    if !room.gate_links.is_empty() {
+        return room.gate_links.iter().filter(|gl| gl.target_room_index < inst.rooms.len()).map(|gl| RoomGateSpec {
+            gate_ball_id: gl.gate_ball_id, gate_position: gl.gate_position, target_room_vec_idx: gl.target_room_index,
+            destination_pos: (gl.destination_pos != [0.0, 0.0, 0.0]).then_some(gl.destination_pos), locked: gl.locked,
+        }).collect();
+    }
+    if room_vec_idx + 1 < inst.rooms.len() {
+        return vec![RoomGateSpec {
+            gate_ball_id: room.gate_ball_id,
+            gate_position: [room.position[0] + 5_000.0, room.position[1], room.position[2]],
+            target_room_vec_idx: room_vec_idx + 1,
+            destination_pos: None,
+            locked: room.gate_locked,
+        }];
+    }
+    Vec::new()
+}
+
+fn gate_match_from_spec(instance_id: i64, src_idx: usize, spec: RoomGateSpec, fallback_id: i64) -> RuntimeGateMatch {
+    RuntimeGateMatch {
+        instance_id, source_room_vec_idx: Some(src_idx), target_room_vec_idx: spec.target_room_vec_idx,
+        gate_position: Some(spec.gate_position), locked: spec.locked,
+        gate_ball_id: spec.gate_ball_id.unwrap_or(fallback_id), dest_override: spec.destination_pos,
+    }
+}
+
+/// Single authoritative gate lookup used by both `pve_exploration::ActivateAccelerationGate`
+/// dispatch and `try_activate_dungeon_runtime_gate` (`I4`, `OWN-R5-03`).
+pub(crate) fn resolve_runtime_gate_in_snap(
+    snap: &WorldStateSnapshot, sys_id: SolarSystemId, arg_int: Option<i64>, arg_str: Option<&str>,
+) -> Option<RuntimeGateMatch> {
+    let arg_str_trimmed = arg_str.map(str::trim).filter(|s| !s.is_empty());
+    for inst in snap.dungeon_runtime.instances.values() {
+        if instance_is_finished(inst) || inst.solar_system_id != sys_id || inst.category == "Flashpoint" { continue; }
+        if let Some(gate_id) = arg_int {
+            if inst.entry_gate_ball_id == Some(gate_id) && !inst.rooms.is_empty() {
+                return Some(RuntimeGateMatch {
+                    instance_id: inst.instance_id, source_room_vec_idx: None, target_room_vec_idx: 0,
+                    gate_position: inst.entry_gate_pos, locked: inst.entry_gate_locked, gate_ball_id: gate_id, dest_override: None,
+                });
+            }
+            for r_idx in 0..inst.rooms.len() {
+                if let Some(spec) = collect_room_gate_specs(inst, r_idx).into_iter().find(|s| s.gate_ball_id == Some(gate_id)) {
+                    return Some(gate_match_from_spec(inst.instance_id, r_idx, spec, gate_id));
+                }
+            }
+        }
+        if let Some(s) = arg_str_trimmed {
+            if s == format!("DNG-INST-{}", inst.instance_id) {
+                // `OWN-R5-03`: before entering (or outside 1-indexed Room 1), `DNG-INST-<id>` resolves entry gate.
+                let before_entry = inst.current_room_index == 0
+                    && (inst.entry_gate_pos.is_some() || inst.entry_gate_ball_id.is_some())
+                    && inst.rooms.first().is_some_and(|r| !r.entered || r.room_index > 0);
+                if before_entry {
+                    return Some(RuntimeGateMatch {
+                        instance_id: inst.instance_id, source_room_vec_idx: None, target_room_vec_idx: 0,
+                        gate_position: inst.entry_gate_pos, locked: inst.entry_gate_locked,
+                        gate_ball_id: inst.entry_gate_ball_id.unwrap_or(0), dest_override: None,
+                    });
+                }
+                let cur_idx = if inst.current_room_index == 0 {
+                    inst.rooms.first().filter(|r| r.room_index == 0 && (r.gate_ball_id.is_some() || !r.gate_links.is_empty() || (r.entered && inst.rooms.len() > 1))).map(|_| 0usize)
+                } else {
+                    inst.room_vec_index_by_room_index(inst.current_room_index)
+                        .or_else(|| inst.current_room_index.checked_sub(1).filter(|&i| i < inst.rooms.len()))
+                };
+                if let Some(spec) = cur_idx.and_then(|r_idx| collect_room_gate_specs(inst, r_idx).into_iter().next().map(|sp| (r_idx, sp))) {
+                    return Some(gate_match_from_spec(inst.instance_id, spec.0, spec.1, 0));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if `gate_ball_arg` or `gate_str_arg` maps to a runtime dungeon gate or Homefront outer gate (`I4`).
+pub fn has_runtime_gate_target(
+    ctx: &ServerContext, sys_id: SolarSystemId, gate_ball_arg: Option<i64>, gate_str_arg: Option<&str>,
+) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        resolve_runtime_gate_in_snap(snap, sys_id, gate_ball_arg, gate_str_arg).is_some()
+            || gate_ball_arg.is_some_and(|gate_id| {
+                snap.dungeon_runtime.homefront_runtimes.values().any(|r| {
+                    r.solar_system_id == sys_id && r.outer_gate_ball_id == gate_id && !r.completed && !r.failed
+                })
+            })
+    })
+}
+
+/// Evaluates and fires any armed delayed dungeon triggers whose `delay_secs` timer has elapsed.
+pub async fn tick_due_delayed_dungeon_triggers(ctx: &ServerContext) -> usize {
+    actions::tick_due_delayed_dungeon_triggers_impl(actions::DungeonRuntimeDeps::from_ctx(ctx)).await
 }
 
 pub(crate) fn prune_stale_despawned_instances(store: &mut DungeonRuntimeStore, now_unix: u64) {
@@ -1012,15 +1147,16 @@ pub(crate) struct MaterializedDungeonRoomEntities {
 }
 
 #[derive(Clone, Debug)]
-struct NpcSpawnOrder {
-    ball_id: i64,
-    type_id: u32,
-    pos: [f64; 3],
-    custom_name: Option<String>,
-    destructible: bool,
+pub(crate) struct NpcSpawnOrder {
+    pub(crate) ball_id: i64,
+    pub(crate) type_id: u32,
+    pub(crate) group_id: u8,
+    pub(crate) pos: [f64; 3],
+    pub(crate) custom_name: Option<String>,
+    pub(crate) destructible: bool,
 }
 
-fn npc_spawn_position(
+pub(crate) fn npc_spawn_position(
     room_pos: [f64; 3],
     grp_idx: usize,
     spawn_index: usize,
@@ -1043,10 +1179,11 @@ fn npc_spawn_position(
     }
 }
 
-fn plan_npc_group_spawns_in_snap(
+pub(crate) fn plan_npc_group_spawns_in_snap(
     snap: &mut WorldStateSnapshot,
     room: &mut DungeonRuntimeRoom,
     grp_idx: usize,
+    now_unix: u64,
     out_orders: &mut Vec<NpcSpawnOrder>,
 ) {
     let entries = room.npc_groups[grp_idx].effective_entries();
@@ -1059,58 +1196,68 @@ fn plan_npc_group_spawns_in_snap(
     let total_npcs: usize = entries.iter().map(|e| e.count.max(1)).sum();
     let alloc_ids: Vec<i64> = (0..total_npcs).map(|_| snap.alloc_entity_id()).collect();
     let room_pos = room.position;
-    let grp = &mut room.npc_groups[grp_idx];
-    grp.spawned = true;
-    grp.cleared = false;
+    let mut spawned_any = false;
+    {
+        let grp = &mut room.npc_groups[grp_idx];
+        grp.spawned = true;
+        grp.cleared = false;
+        grp.spawn_count = grp.spawn_count.saturating_add(1);
+        grp.spawn_started_unix = Some(now_unix);
 
-    let base_spawn_idx = usize::try_from(grp.kills_recorded)
-        .unwrap_or(0)
-        .saturating_add(grp.npc_ball_ids.len());
-    let mut id_iter = alloc_ids.into_iter();
-    let mut spawn_idx = 0usize;
-    for entry in entries {
-        let count = entry.count.max(1);
-        for sub_idx in 0..count {
-            let Some(npc_id) = id_iter.next() else {
-                break;
-            };
-            let offset_m = entry.relative_offsets_m.get(sub_idx).copied();
-            let cur_spawn_idx = base_spawn_idx + spawn_idx;
-            let pos = npc_spawn_position(room_pos, grp_idx, cur_spawn_idx, offset_m);
-            let destructible = entry.destructible.unwrap_or(true);
-            spawn_idx += 1;
-            grp.npc_ball_ids.push(npc_id);
-            grp.npc_ball_meta.insert(
-                npc_id,
-                DungeonSpawnedNpcMeta {
+        let base_spawn_idx = usize::try_from(grp.kills_recorded)
+            .unwrap_or(0)
+            .saturating_add(grp.npc_ball_ids.len());
+        let mut id_iter = alloc_ids.into_iter();
+        let mut spawn_idx = 0usize;
+        for entry in entries {
+            let count = entry.count.max(1);
+            for sub_idx in 0..count {
+                let Some(npc_id) = id_iter.next() else {
+                    break;
+                };
+                let offset_m = entry.relative_offsets_m.get(sub_idx).copied();
+                let cur_spawn_idx = base_spawn_idx + spawn_idx;
+                let pos = npc_spawn_position(room_pos, grp_idx, cur_spawn_idx, offset_m);
+                let destructible = entry.destructible.unwrap_or(true);
+                spawn_idx += 1;
+                spawned_any = true;
+                grp.npc_ball_ids.push(npc_id);
+                grp.npc_ball_meta.insert(
+                    npc_id,
+                    DungeonSpawnedNpcMeta {
+                        type_id: entry.type_id,
+                        offset_m,
+                        custom_loot: entry.custom_loot,
+                        destructible,
+                        spawn_index: cur_spawn_idx,
+                    },
+                );
+                if let Some(ref tag) = entry.tag {
+                    grp.npc_ball_tags.insert(npc_id, tag.clone());
+                }
+                if let Some(ref name) = entry.custom_name {
+                    grp.npc_ball_names.insert(npc_id, name.clone());
+                }
+                if let Some(bounty) = entry.bounty_isk_override {
+                    grp.npc_ball_bounties.insert(npc_id, bounty);
+                }
+                out_orders.push(NpcSpawnOrder {
+                    ball_id: npc_id,
                     type_id: entry.type_id,
-                    offset_m,
-                    custom_loot: entry.custom_loot,
+                    group_id: grp.group_id,
+                    pos,
+                    custom_name: entry.custom_name.clone(),
                     destructible,
-                    spawn_index: cur_spawn_idx,
-                },
-            );
-            if let Some(ref tag) = entry.tag {
-                grp.npc_ball_tags.insert(npc_id, tag.clone());
+                });
             }
-            if let Some(ref name) = entry.custom_name {
-                grp.npc_ball_names.insert(npc_id, name.clone());
-            }
-            if let Some(bounty) = entry.bounty_isk_override {
-                grp.npc_ball_bounties.insert(npc_id, bounty);
-            }
-            out_orders.push(NpcSpawnOrder {
-                ball_id: npc_id,
-                type_id: entry.type_id,
-                pos,
-                custom_name: entry.custom_name.clone(),
-                destructible,
-            });
         }
+    }
+    if spawned_any {
+        room.cleared = false;
     }
 }
 
-async fn spawn_object_ball(
+pub(crate) async fn spawn_object_ball(
     sys_handle: &crate::system_actor::SystemHandle,
     sde: &eve_sde::SdeRegistry,
     ball_id: i64,
@@ -1134,7 +1281,7 @@ async fn spawn_object_ball(
     }
 }
 
-async fn spawn_gate_ball(
+pub(crate) async fn spawn_gate_ball(
     sys_handle: &crate::system_actor::SystemHandle,
     ball_id: i64,
     pos: [f64; 3],
@@ -1146,31 +1293,6 @@ async fn spawn_gate_ball(
     let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
     ball.radius = 1_500.0;
     let _ = sys_handle.spawn_ball(ball).await;
-}
-
-async fn spawn_npc_orders(
-    sys_handle: &crate::system_actor::SystemHandle,
-    sde: &eve_sde::SdeRegistry,
-    orders: Vec<NpcSpawnOrder>,
-) {
-    for order in orders {
-        let ball = make_site_npc_ball(order.ball_id, order.type_id, DVec3::from_array(order.pos));
-        let mut cs = build_type_combat_state_from_sde(sde, order.type_id);
-        if !order.destructible {
-            cs.is_tethered = true;
-        }
-        if let Some(custom_name) = order.custom_name {
-            let mut meta = eve_destiny::SlimItemMeta::default();
-            if let Some(t) = sde.types.get(&order.type_id) {
-                meta.group_id = t.group_id;
-                meta.category_id = t.category_id;
-            }
-            meta.name = Some(custom_name);
-            let _ = sys_handle.spawn_ball_with_meta(ball, cs, meta).await;
-        } else {
-            let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
-        }
-    }
 }
 
 pub(crate) fn insert_container_and_loot_in_snap(
@@ -1260,7 +1382,7 @@ pub(crate) fn has_unlooted_containers_in_snap(
         .any(|it| it.quantity > 0 && live_containers.contains(&it.location_id))
 }
 
-fn collect_all_room_gate_ids(room: &DungeonRuntimeRoom) -> Vec<i64> {
+pub(crate) fn collect_all_room_gate_ids(room: &DungeonRuntimeRoom) -> Vec<i64> {
     let mut out = Vec::new();
     if let Some(gid) = room.gate_ball_id {
         out.push(gid);
@@ -1283,6 +1405,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
     instance_id: i64,
     room_vec_idx: usize,
 ) -> Result<MaterializedDungeonRoomEntities, BridgeRpcError> {
+    let now_unix = ctx.now_unix();
     let (gate_plans, obj_plans, npc_plans, obj_ids, npc_ids, gate_id_opt, already_spawned) =
         ctx.db.try_with_mut_snapshot(|snap| {
             let mut inst = snap
@@ -1325,7 +1448,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
             for oi in 0..obj_len {
                 let (skip_obj, needs_cont, bid, tid, pos, radius, destructible, loot_items) = {
                     let obj = &mut inst.rooms[room_vec_idx].objects[oi];
-                    if obj.destroyed {
+                    if obj.destroyed || (obj.spawn_on_trigger && !obj.spawned) {
                         (true, false, obj.ball_id, 0, [0.0; 3], 0.0, false, Vec::new())
                     } else {
                         if obj.ball_id <= 0 {
@@ -1427,6 +1550,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
                         snap,
                         &mut inst.rooms[room_vec_idx],
                         g_idx,
+                        now_unix,
                         &mut npc_plans,
                     );
                 }
@@ -1460,7 +1584,13 @@ pub(crate) async fn materialize_dungeon_room_entities(
         spawn_object_ball(&sys_handle, &ctx.sde, ball_id, type_id, pos, radius, destructible).await;
     }
     if !npc_plans.is_empty() {
-        spawn_npc_orders(&sys_handle, &ctx.sde, npc_plans).await;
+        actions::spawn_dungeon_npc_orders(
+            actions::DungeonRuntimeDeps::from_ctx(ctx),
+            sys_id,
+            &sys_handle,
+            npc_plans,
+        )
+        .await;
     }
     if already_spawned {
         let _ = reconcile_and_rematerialize_dungeon_instance(ctx, sys_id, instance_id).await;
@@ -1482,93 +1612,12 @@ pub async fn on_dungeon_room_entered(
     room_vec_idx: usize,
     char_id: i64,
 ) {
-    let now_unix = ctx.db.clock().now_unix_secs();
-    let needs_write = read_dungeon_runtime_store(ctx, |store| {
-        let Some(inst) = store.instances.get(&instance_id) else {
-            return false;
-        };
-        if instance_is_finished(inst) || inst.solar_system_id != sys_id {
-            return false;
-        }
-        let Some(room) = inst.rooms.get(room_vec_idx) else {
-            return false;
-        };
-        !room.entered || (char_id > 0 && inst.last_actor_char_id != char_id)
-    });
-    if !needs_write {
-        return;
-    }
-    let mut pending_actions = Vec::new();
-    let mut auto_complete_insts = Vec::new();
-    let mut auto_clear_notifies = Vec::new();
-    with_dungeon_runtime_store(ctx, |store| {
-        let Some(inst) = store.instances.get_mut(&instance_id) else {
-            return;
-        };
-        if instance_is_finished(inst) || inst.solar_system_id != sys_id {
-            return;
-        }
-        let total_rooms = inst.rooms.len();
-        let (room_actions, extra_clear_event, auto_complete) = {
-            let Some(room) = inst.rooms.get_mut(room_vec_idx) else {
-                return;
-            };
-            let was_entered = room.entered;
-            room.entered = true;
-            room.entered_unix.get_or_insert(now_unix);
-
-            if !was_entered
-                && room
-                    .npc_groups
-                    .iter()
-                    .any(|g| g.kills_recorded > 0 || !g.dead_npc_ball_ids.is_empty())
-            {
-                let cleared_group_ids: Vec<u8> = room
-                    .npc_groups
-                    .iter()
-                    .filter(|g| g.spawned && g.cleared && g.npc_ball_ids.is_empty())
-                    .map(|g| g.group_id)
-                    .collect();
-                evaluate_room_kill_triggers_and_clear(
-                    room,
-                    room_vec_idx,
-                    total_rooms,
-                    None,
-                    &cleared_group_ids,
-                )
-            } else {
-                (Vec::new(), None, false)
-            }
-        };
-        record_dungeon_actor(inst, char_id);
-        if !room_actions.is_empty() {
-            pending_actions.push((inst.instance_id, room_vec_idx, room_actions));
-        }
-        if auto_complete {
-            auto_complete_insts.push(inst.instance_id);
-        }
-        if let Some((tid, oid)) = extra_clear_event {
-            let evs = vec![(tid, oid)];
-            crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
-                inst, &evs,
-            );
-            let recip = resolve_dungeon_recipient(inst, char_id);
-            if recip > 0 {
-                auto_clear_notifies.push((recip, evs));
-            }
-        }
-    });
-    flush_room_kill_progression_effects(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        Some(&ctx.pending_notifications),
-        Some(&ctx.notify_tx),
+    actions::on_dungeon_room_entered_impl(
+        actions::DungeonRuntimeDeps::from_ctx(ctx),
         sys_id,
+        instance_id,
+        room_vec_idx,
         char_id,
-        auto_clear_notifies,
-        pending_actions,
-        auto_complete_insts,
     )
     .await;
 }
@@ -1682,6 +1731,7 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
                         npcs.push(NpcSpawnOrder {
                             ball_id: npc_id,
                             type_id,
+                            group_id: g.group_id,
                             pos,
                             custom_name: g
                                 .npc_ball_names
@@ -1706,7 +1756,13 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
         spawn_object_ball(&sys_handle, &ctx.sde, bid, tid, pos, radius, destructible).await;
     }
     if !npcs_to_spawn.is_empty() {
-        spawn_npc_orders(&sys_handle, &ctx.sde, npcs_to_spawn).await;
+        actions::spawn_dungeon_npc_orders(
+            actions::DungeonRuntimeDeps::from_ctx(ctx),
+            sys_id,
+            &sys_handle,
+            npcs_to_spawn,
+        )
+        .await;
     }
     count
 }
@@ -1718,14 +1774,12 @@ pub async fn despawn_completed_dungeon(
     instance_id: i64,
     char_id: i64,
 ) {
-    despawn_completed_dungeon_core(
-        &ctx.systems,
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        Some(&ctx.notify_tx),
+    actions::complete_and_flush_instance(
+        actions::DungeonRuntimeDeps::from_ctx(ctx),
         sys_id,
         instance_id,
         char_id,
+        true,
     )
     .await;
 }
@@ -1782,34 +1836,20 @@ pub(crate) async fn complete_dungeon_instance_core(
     char_id: i64,
     force_full_despawn: bool,
 ) {
-    let now_unix = db.clock().now_unix_secs();
-    let cleanup = db.with_mut_snapshot(|snap| {
-        ops::apply_complete_dungeon_instance_snap(
-            snap,
-            instance_id,
-            char_id,
-            force_full_despawn,
-            now_unix,
-        )
-    });
-
-    if let Some(done) = cleanup {
-        if let Some(sys_handle) = systems.get_handle(sys_id) {
-            for bid in done.balls_to_remove {
-                let _ = sys_handle.remove_ball(bid).await;
-            }
-        }
-        ops::finalize_completed_dungeon_effects_sync(
+    actions::complete_and_flush_instance(
+        actions::DungeonRuntimeDeps::from_parts(
+            systems,
             db,
+            None,
             pending_notifications,
             notify_tx,
-            sys_id,
-            done.dungeon_id,
-            done.recipient_char_id,
-            done.emit_completed,
-            now_unix,
-        );
-    }
+        ),
+        sys_id,
+        instance_id,
+        char_id,
+        force_full_despawn,
+    )
+    .await;
 }
 
 /// Finalizes any completed or failed dungeon instances whose `loot_grace_until_unix` has elapsed.
@@ -1832,11 +1872,8 @@ pub async fn expire_dungeon_loot_grace(ctx: &ServerContext, sys_id: SolarSystemI
             .collect()
     });
     for &inst_id in &expired_ids {
-        complete_dungeon_instance_core(
-            &ctx.systems,
-            &ctx.db,
-            Some(&ctx.pending_notifications),
-            Some(&ctx.notify_tx),
+        actions::complete_and_flush_instance(
+            actions::DungeonRuntimeDeps::from_ctx(ctx),
             sys_id,
             inst_id,
             0,
@@ -1847,140 +1884,24 @@ pub async fn expire_dungeon_loot_grace(ctx: &ServerContext, sys_id: SolarSystemI
     expired_ids.len()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn apply_dungeon_trigger_actions_core(
-    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
-    db: &std::sync::Arc<eve_db::WorldRepository>,
-    sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<
-        &dyn AnyRwLock<
-            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
-        >,
-    >,
-    notify_tx: Option<
-        &tokio::sync::broadcast::Sender<(
-            i64,
-            crate::router::cache_notifications::PendingMachoNotification,
-        )>,
-    >,
+#[cfg(test)]
+pub(crate) async fn apply_dungeon_trigger_actions(
+    ctx: &ServerContext,
     sys_id: SolarSystemId,
     instance_id: i64,
     room_vec_idx: usize,
     actions: Vec<(u32, DungeonTriggerAction)>,
     char_id: i64,
 ) -> usize {
-    let mut fired_count = 0usize;
-    let mut groups_to_spawn = Vec::new();
-    let mut complete_now = false;
-    let mut progression_events = Vec::new();
-    let mut recipient_char = char_id;
-    let mut notify_batch: Option<(i64, Vec<i64>, Vec<DungeonTriggerAction>)> = None;
-
-    with_dungeon_runtime_store_db(db, |store| {
-        let Some(inst) = store.instances.get_mut(&instance_id) else {
-            return;
-        };
-        if instance_is_finished(inst) {
-            return;
-        }
-        record_dungeon_actor(inst, char_id);
-        recipient_char = resolve_dungeon_recipient(inst, char_id);
-        if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
-            let room_id = room.room_id;
-            let obj_ids: Vec<i64> = room.objects.iter().map(|o| o.ball_id).collect();
-            let mut n_acts = Vec::new();
-            for (trig_id, act) in actions {
-                fired_count += 1;
-                let task_id = room_id * 100 + i64::from(trig_id);
-                let next_obj_id = match act {
-                    DungeonTriggerAction::UnlockGate => {
-                        room.gate_locked = false;
-                        for gl in &mut room.gate_links {
-                            gl.locked = false;
-                        }
-                        room_id * 10 + 9
-                    }
-                    DungeonTriggerAction::SpawnNpcGroup(grp_id) => {
-                        groups_to_spawn.push(grp_id);
-                        room_id * 10 + i64::from(grp_id)
-                    }
-                    DungeonTriggerAction::CompleteDungeon => {
-                        room.cleared = true;
-                        complete_now = true;
-                        room_id * 10 + 99
-                    }
-                    other => {
-                        n_acts.push(other);
-                        room_id * 10 + i64::from(trig_id)
-                    }
-                };
-                progression_events.push((task_id, next_obj_id));
-            }
-            if !n_acts.is_empty() {
-                notify_batch = Some((i64::from(inst.dungeon_id), obj_ids, n_acts));
-            }
-        }
-        crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
-            inst,
-            &progression_events,
-        );
-    });
-    if !progression_events.is_empty() && recipient_char > 0 {
-        crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(db, pending_notifications, notify_tx, recipient_char, &progression_events);
-    }
-    if let Some((did, obj_ids, n_acts)) = notify_batch {
-        if recipient_char > 0 {
-            crate::services::notify_emitters_channel_events::dispatch_dungeon_trigger_notify_actions(db, pending_notifications, notify_tx, recipient_char, did, &obj_ids, n_acts);
-        }
-    }
-
-    if !groups_to_spawn.is_empty() {
-        let spawn_list = db.with_mut_snapshot(|snap| {
-            let mut to_spawn = Vec::new();
-            if let Some(mut inst) = snap.dungeon_runtime.instances.remove(&instance_id) {
-                if !instance_is_finished(&inst) {
-                    if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
-                        for grp_id in &groups_to_spawn {
-                            if let Some(g_idx) = room
-                                .npc_groups
-                                .iter()
-                                .position(|g| g.group_id == *grp_id && !g.spawned)
-                            {
-                                plan_npc_group_spawns_in_snap(snap, room, g_idx, &mut to_spawn);
-                            }
-                        }
-                    }
-                }
-                snap.dungeon_runtime.instances.insert(instance_id, inst);
-            }
-            to_spawn
-        });
-
-        let sys_handle = systems.get_or_spawn(sys_id);
-        spawn_npc_orders(&sys_handle, sde, spawn_list).await;
-    }
-
-    if complete_now {
-        complete_dungeon_instance_core(
-            systems,
-            db,
-            pending_notifications,
-            notify_tx,
-            sys_id,
-            instance_id,
-            char_id,
-            false,
-        )
-        .await;
-    }
-
-    fired_count
-}
-
-pub(crate) async fn apply_dungeon_trigger_actions(
-    ctx: &ServerContext, sys_id: SolarSystemId, instance_id: i64, room_vec_idx: usize, actions: Vec<(u32, DungeonTriggerAction)>, char_id: i64,
-) -> usize {
-    apply_dungeon_trigger_actions_core(&ctx.systems, &ctx.db, &ctx.sde, Some(&ctx.pending_notifications), Some(&ctx.notify_tx), sys_id, instance_id, room_vec_idx, actions, char_id).await
+    actions::apply_dungeon_trigger_actions_impl(
+        actions::DungeonRuntimeDeps::from_ctx(ctx),
+        sys_id,
+        instance_id,
+        room_vec_idx,
+        actions,
+        char_id,
+    )
+    .await
 }
 
 /// Validates hull group and mass restrictions for a `DungeonRuntimeInstance` acceleration gate.
@@ -2005,165 +1926,13 @@ pub fn check_dungeon_runtime_gate_ship_allowed(sde: &eve_sde::SdeRegistry, dunge
 
 /// Evaluates `OnKill` triggers and room/dungeon completion when an NPC ball is destroyed in `sys_id`.
 pub async fn on_dungeon_npc_killed(ctx: &ServerContext, sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64) {
-    on_dungeon_npc_killed_core(&ctx.systems, &ctx.db, &ctx.sde, Some(&ctx.pending_notifications), Some(&ctx.notify_tx), sys_id, npc_ball_id, killer_char_id).await;
-}
-
-fn evaluate_room_kill_triggers_and_clear(
-    room: &mut DungeonRuntimeRoom,
-    r_idx: usize,
-    total_rooms: usize,
-    killed_npc_ball_id: Option<i64>,
-    matched_group_ids: &[u8],
-) -> (
-    Vec<(u32, DungeonTriggerAction)>,
-    Option<(i64, i64)>,
-    bool,
-) {
-    let all_spawned_dead = room
-        .npc_groups
-        .iter()
-        .filter(|g| g.spawned)
-        .all(|g| g.npc_ball_ids.is_empty());
-    let all_groups_spawned = room.npc_groups.iter().all(|g| g.spawned);
-
-    let mut room_actions = Vec::new();
-    for trig in &mut room.triggers {
-        if trig.fired {
-            continue;
-        }
-        if let DungeonTriggerKind::OnKill {
-            target_npc_group,
-            target_ball_id,
-        } = &trig.kind
-        {
-            let matches = if let Some(tbid) = target_ball_id {
-                killed_npc_ball_id.map_or_else(
-                    || {
-                        room.npc_groups
-                            .iter()
-                            .any(|g| g.dead_npc_ball_ids.contains(tbid))
-                    },
-                    |kid| *tbid == kid,
-                )
-            } else if let Some(tgrp) = target_npc_group {
-                matched_group_ids.contains(tgrp)
-            } else {
-                all_spawned_dead && all_groups_spawned
-            };
-            if matches {
-                trig.fired = true;
-                room_actions.push((trig.trigger_id, trig.action.clone()));
-            }
-        }
-    }
-
-    let spawns_more_npcs = room_actions
-        .iter()
-        .any(|(_, a)| matches!(a, DungeonTriggerAction::SpawnNpcGroup(_)));
-    let explicit_complete = room_actions
-        .iter()
-        .any(|(_, a)| matches!(a, DungeonTriggerAction::CompleteDungeon));
-    let had_room_actions = !room_actions.is_empty();
-
-    let any_unspawned_groups = room.npc_groups.iter().any(|g| !g.spawned);
-    let any_unfired_triggers = room.triggers.iter().any(|t| !t.fired);
-    let mut extra_clear_event = None;
-    let mut auto_complete = false;
-    if all_spawned_dead && !spawns_more_npcs && !any_unspawned_groups && !any_unfired_triggers {
-        let was_cleared = room.cleared;
-        room.cleared = true;
-        room.gate_locked = false;
-        for gl in &mut room.gate_links {
-            gl.locked = false;
-        }
-        if !was_cleared && !had_room_actions {
-            let tid = room.room_id * 100 + 99;
-            let oid = if r_idx + 1 < total_rooms {
-                room.room_id * 10 + 9
-            } else {
-                room.room_id * 10 + 99
-            };
-            extra_clear_event = Some((tid, oid));
-        }
-        if r_idx + 1 == total_rooms && !explicit_complete {
-            auto_complete = true;
-        }
-    }
-    (room_actions, extra_clear_event, auto_complete)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn flush_room_kill_progression_effects(
-    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
-    db: &std::sync::Arc<eve_db::WorldRepository>,
-    sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<
-        &dyn AnyRwLock<
-            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
-        >,
-    >,
-    notify_tx: Option<
-        &tokio::sync::broadcast::Sender<(
-            i64,
-            crate::router::cache_notifications::PendingMachoNotification,
-        )>,
-    >,
-    sys_id: SolarSystemId,
-    actor_char_id: i64,
-    auto_clear_notifies: Vec<(i64, Vec<(i64, i64)>)>,
-    pending_actions: Vec<(i64, usize, Vec<(u32, DungeonTriggerAction)>)>,
-    auto_complete_insts: Vec<i64>,
-) {
-    for (recip, evs) in auto_clear_notifies {
-        crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(
-            db,
-            pending_notifications,
-            notify_tx,
-            recip,
-            &evs,
-        );
-    }
-
-    for (inst_id, r_idx, actions) in pending_actions {
-        let _ = apply_dungeon_trigger_actions_core(
-            systems,
-            db,
-            sde,
-            pending_notifications,
-            notify_tx,
-            sys_id,
-            inst_id,
-            r_idx,
-            actions,
-            actor_char_id,
-        )
-        .await;
-    }
-
-    for inst_id in auto_complete_insts {
-        let still_clear = with_dungeon_runtime_store_db(db, |store| {
-            store.instances.get(&inst_id).is_some_and(|inst| {
-                !instance_is_finished(inst)
-                    && inst.rooms.last().is_some_and(|r| {
-                        r.npc_groups.iter().all(|g| g.spawned && g.npc_ball_ids.is_empty())
-                            && r.triggers.iter().all(|t| t.fired)
-                    })
-            })
-        });
-        if still_clear {
-            complete_dungeon_instance_core(
-                systems,
-                db,
-                pending_notifications,
-                notify_tx,
-                sys_id,
-                inst_id,
-                actor_char_id,
-                false,
-            )
-            .await;
-        }
-    }
+    actions::on_dungeon_npc_killed_impl(
+        actions::DungeonRuntimeDeps::from_ctx(ctx),
+        sys_id,
+        npc_ball_id,
+        killer_char_id,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2173,95 +1942,17 @@ pub async fn on_dungeon_npc_killed_core(
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
     sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
 ) {
-    if !has_dungeon_runtime_store_db(db) {
-        return;
-    }
-    let mut pending_actions = Vec::new();
-    let mut auto_complete_insts = Vec::new();
-    let mut auto_clear_notifies = Vec::new();
-
-    with_dungeon_runtime_store_db(db, |store| {
-        for inst in store.instances.values_mut() {
-            if instance_is_finished(inst) || inst.solar_system_id != sys_id {
-                continue;
-            }
-            let total_rooms = inst.rooms.len();
-            let mut extra_clear_event = None;
-            let mut matched_entered = false;
-            for (r_idx, room) in inst.rooms.iter_mut().enumerate() {
-                let mut matched_group_ids = Vec::new();
-                let mut any_removed = false;
-                for grp in &mut room.npc_groups {
-                    if let Some(pos) = grp.npc_ball_ids.iter().position(|&id| id == npc_ball_id) {
-                        grp.npc_ball_ids.remove(pos);
-                        if !grp.dead_npc_ball_ids.contains(&npc_ball_id) {
-                            grp.dead_npc_ball_ids.push(npc_ball_id);
-                        }
-                        grp.kills_recorded = grp.kills_recorded.saturating_add(1);
-                        grp.npc_ball_meta.remove(&npc_ball_id);
-                        grp.npc_ball_tags.remove(&npc_ball_id);
-                        grp.npc_ball_names.remove(&npc_ball_id);
-                        grp.npc_ball_bounties.remove(&npc_ball_id);
-                        any_removed = true;
-                        if grp.npc_ball_ids.is_empty() {
-                            grp.cleared = true;
-                            matched_group_ids.push(grp.group_id);
-                        }
-                    }
-                }
-                if !any_removed {
-                    continue;
-                }
-                if !room_is_entered(room) {
-                    // Invariant I1: remove the dead NPC ID so reconcile never resurrects it or
-                    // soft-locks future entry, but keep trigger/clear/completion effects inert.
-                    continue;
-                }
-                matched_entered = true;
-                let (room_actions, clear_evt, auto_complete) =
-                    evaluate_room_kill_triggers_and_clear(
-                        room,
-                        r_idx,
-                        total_rooms,
-                        Some(npc_ball_id),
-                        &matched_group_ids,
-                    );
-                if !room_actions.is_empty() {
-                    pending_actions.push((inst.instance_id, r_idx, room_actions));
-                }
-                if let Some(evt) = clear_evt {
-                    extra_clear_event = Some(evt);
-                }
-                if auto_complete {
-                    auto_complete_insts.push(inst.instance_id);
-                }
-            }
-            if matched_entered {
-                record_dungeon_actor(inst, killer_char_id);
-            }
-            if let Some((tid, oid)) = extra_clear_event {
-                let evs = vec![(tid, oid)];
-                crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
-                    inst, &evs,
-                );
-                let recip = resolve_dungeon_recipient(inst, killer_char_id);
-                if recip > 0 {
-                    auto_clear_notifies.push((recip, evs));
-                }
-            }
-        }
-    });
-    flush_room_kill_progression_effects(
-        systems,
-        db,
-        sde,
-        pending_notifications,
-        notify_tx,
+    actions::on_dungeon_npc_killed_impl(
+        actions::DungeonRuntimeDeps::from_parts(
+            systems,
+            db,
+            Some(sde),
+            pending_notifications,
+            notify_tx,
+        ),
         sys_id,
+        npc_ball_id,
         killer_char_id,
-        auto_clear_notifies,
-        pending_actions,
-        auto_complete_insts,
     )
     .await;
 }
@@ -2273,6 +1964,12 @@ pub use crate::services::pve_dungeon_runtime_rpc::{
 pub(crate) use ops::{
     expire_all_due_dungeon_loot_grace, expire_due_dungeon_loot_grace_sync,
 };
+
+/// Sweeps due dungeon loot-grace expiry and armed delayed triggers during cluster ticks.
+pub(crate) async fn tick_background_dungeon_runtime(ctx: &ServerContext) {
+    let _ = expire_all_due_dungeon_loot_grace(ctx).await;
+    let _ = tick_due_delayed_dungeon_triggers(ctx).await;
+}
 
 /// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons.
 pub async fn try_activate_dungeon_runtime_gate(

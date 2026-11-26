@@ -133,22 +133,30 @@ pub fn roll_escalation_chance(ctx: &ServerContext) -> bool {
     ctx.mechanic_rng.roll(0.20)
 }
 
-pub async fn create_escalation_expedition_core(
+#[allow(clippy::too_many_arguments)]
+pub async fn create_escalation_expedition_with_options_core(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     sde: &std::sync::Arc<eve_sde::SdeRegistry>,
     systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
     char_id: CharacterId,
     solar_system_id: SolarSystemId,
     source_dungeon_id: u32,
-    _dungeon_name: &str,
+    target_dungeon_id: Option<u32>,
+    target_title: Option<&str>,
     _pos: [f64; 3],
 ) -> Option<EscalatingPathEntry> {
-    let chain = ops::resolve_sde_escalation_chain(sde, source_dungeon_id, solar_system_id);
-    let exp_base_did = chain.dungeon_for_step(1);
-    let exp_name = sde
-        .dungeons
-        .get(&exp_base_did)
-        .map(|d| d.name.trim().to_string())
+    let chain_seed_did = target_dungeon_id
+        .filter(|&id| id > 0 && sde.dungeons.contains_key(&id))
+        .unwrap_or(source_dungeon_id);
+    let chain = ops::resolve_sde_escalation_chain(sde, chain_seed_did, solar_system_id);
+    let exp_base_did = target_dungeon_id
+        .filter(|&id| id > 0)
+        .unwrap_or_else(|| chain.dungeon_for_step(1));
+    let exp_name = target_title
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| sde.dungeons.get(&exp_base_did).map(|d| d.name.trim().to_string()))
         .unwrap_or_else(|| chain.expedition_name.clone());
     let total_steps = chain.total_steps;
     let dest_sys_id = find_escalation_destination_system_sde(sde, solar_system_id);
@@ -215,6 +223,30 @@ pub async fn create_escalation_expedition_core(
 
     spawn_expedition_site_instance_core(sde, systems, db, &entry).await;
     Some(entry)
+}
+
+pub async fn create_escalation_expedition_core(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    sde: &std::sync::Arc<eve_sde::SdeRegistry>,
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    char_id: CharacterId,
+    solar_system_id: SolarSystemId,
+    source_dungeon_id: u32,
+    _dungeon_name: &str,
+    pos: [f64; 3],
+) -> Option<EscalatingPathEntry> {
+    create_escalation_expedition_with_options_core(
+        db,
+        sde,
+        systems,
+        char_id,
+        solar_system_id,
+        source_dungeon_id,
+        None,
+        None,
+        pos,
+    )
+    .await
 }
 
 pub fn expedition_sig_id(instance_id: i64, step_index: u8) -> String {
