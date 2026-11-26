@@ -2315,6 +2315,8 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
         if m_sys != agent_sys {
             fly_stargates_to_fast(&ctx, &mut sess, m_sys).await;
         }
+        let sys_h = ctx.systems.get_or_spawn(m_sys);
+        let _ = sys_h.step_manual(65.0).await;
         if ctx
             .dispatch_rpc(
                 &mut sess,
@@ -2326,8 +2328,10 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
                 None,
             )
             .await
-            .is_err()
+            .is_ok()
         {
+            crate::pve_e2e_common::wait_for_warp_end(&ctx, m_sys, active_ship).await;
+        } else {
             let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
                 &ctx,
                 char_id,
@@ -2336,11 +2340,6 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
                 Some(mission_id),
             );
         }
-        let _ = ctx
-            .systems
-            .get_or_spawn(m_sys)
-            .set_movement_mode(active_ship, eve_destiny::MovementMode::Stop)
-            .await;
         let spawned_balls = ctx.db.with_snapshot(|s| {
             eve_server::services::mission_fixture::get(s, char_id, mission_id)
                 .map(|m| m.spawned_npc_ball_ids)

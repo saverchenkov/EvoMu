@@ -5,7 +5,7 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::mission_fixture::{self, MissionFixture};
-use eve_db::WorldRepository;
+use eve_db::{ServerClock, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -591,8 +591,18 @@ async fn pve_024_mission_failure_and_quit_apply_derived_faction_standings() {
         }
     });
 
+    ctx.db
+        .acquire_online_lock(1, 501, Some(char_fail), true, now)
+        .expect("online lock char_fail");
+    ctx.db
+        .acquire_online_lock(2, 502, Some(char_quit), true, now)
+        .expect("online lock char_quit");
+
     let mut sess_fail = docked_session(char_fail, sys_id, Some(st_id));
+    sess_fail.session_id = 501;
     let mut sess_quit = docked_session(char_quit, sys_id, Some(st_id));
+    sess_quit.session_id = 502;
+    sess_quit.user_id = Some(2);
     handle(
         &ctx,
         &mut sess_fail,

@@ -1370,9 +1370,16 @@ pub(crate) fn seed_resource_sites_in_activation(
     );
 
     let persisted_non_belt_asteroids: Vec<AsteroidRecord> = db.with_snapshot(|snap| {
+        let mission_ast_ids: std::collections::HashSet<i64> =
+            snap.missions.asteroid_entity_ids().collect();
         snap.asteroids
             .values()
-            .filter(|a| a.solar_system_id == sys_id && a.belt_id == 0 && a.quantity > 0)
+            .filter(|a| {
+                a.solar_system_id == sys_id
+                    && a.belt_id == 0
+                    && a.quantity > 0
+                    && !mission_ast_ids.contains(&a.asteroid_id)
+            })
             .cloned()
             .collect()
     });

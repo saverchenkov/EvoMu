@@ -1848,6 +1848,8 @@ async fn goto_location_v24_referring_agent_and_on_grid_vs_off_grid() {
     let agent_id = 3_012_050_i64;
     let other_agent_id = 3_008_416_i64;
 
+    let (mut sess, sys_h) =
+        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, DVec3::ZERO).await;
     let iid_876 = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
@@ -1862,9 +1864,7 @@ async fn goto_location_v24_referring_agent_and_on_grid_vs_off_grid() {
     });
     let site_origin = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_876);
     let off_grid_start = site_origin + DVec3::new(350_000.0, 0.0, 0.0);
-    let (mut sess, sys_h) =
-        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, off_grid_start).await;
-    });
+    assert!(sys_h.set_ball_position(ship_id, off_grid_start).await);
 
     // P2 #1: explicit non-matching mission_id or bound agent must NOT fall back to an unrelated mission.
     let bad_mid = handle(
@@ -2011,6 +2011,8 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     let char_a = 91_001_375_i64;
     let ship_a = 100_910_375_i64;
     let mid_a = 878_u32;
+    let (mut sess_a, sys_h) =
+        setup_undocked_pilot(&ctx, char_a, ship_a, inoue_sys_id, DVec3::ZERO).await;
     let iid_a = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
@@ -2025,14 +2027,11 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
             .instance_id
     });
     let origin_a = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_a);
-    let (mut sess_a, sys_h) = setup_undocked_pilot(
-        &ctx,
-        char_a,
-        ship_a,
-        inoue_sys_id,
-        origin_a + DVec3::new(350_000.0, 0.0, 0.0),
-    )
-    .await;
+    assert!(
+        sys_h
+            .set_ball_position(ship_a, origin_a + DVec3::new(350_000.0, 0.0, 0.0))
+            .await
+    );
     let _ = sys_h
         .modify_combat_state(ship_a, |cs| {
             cs.undock_invulnerable_remaining_ticks = 25;
@@ -2093,6 +2092,8 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     let ship_b = 100_910_376_i64;
     let cloak_mod_id = 100_910_399_i64;
     let mid_b = 879_u32;
+    let (mut sess_b, _) =
+        setup_undocked_pilot(&ctx, char_b, ship_b, inoue_sys_id, DVec3::ZERO).await;
     let iid_b = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
@@ -2106,14 +2107,11 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
             .instance_id
     });
     let origin_b = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_b);
-    let (mut sess_b, _) = setup_undocked_pilot(
-        &ctx,
-        char_b,
-        ship_b,
-        inoue_sys_id,
-        origin_b + DVec3::new(350_000.0, 0.0, 0.0),
-    )
-    .await;
+    assert!(
+        sys_h
+            .set_ball_position(ship_b, origin_b + DVec3::new(350_000.0, 0.0, 0.0))
+            .await
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             cloak_mod_id,

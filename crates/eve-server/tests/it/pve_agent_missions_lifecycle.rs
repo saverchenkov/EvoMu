@@ -826,6 +826,11 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     )
     .await
     .expect("Warp to combat mission pocket spawns wave");
+    ctx.systems
+        .get_or_spawn(sec_sys)
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await
+        .expect("stop warp before dock helper");
 
     let (expected_rem, mission_npc_ids) = ctx.db.with_snapshot(|s| {
         let m = eve_server::services::mission_fixture::get(s, char_id, chosen_mid).unwrap();

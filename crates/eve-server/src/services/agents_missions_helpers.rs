@@ -1180,7 +1180,7 @@ pub(super) fn apply_mission_penalty_standings(
     agent_delta: f64,
     corp_delta: f64,
     faction_pct: f64,
-    event_type_id: i32,
+    event_type_id: i64,
 ) -> Vec<(i64, f64, f64)> {
     let mut changes: Vec<(i64, f64, f64)> = Vec::new();
     let mut actual_corp_delta: Option<f64> = None;
