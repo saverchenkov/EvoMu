@@ -145,7 +145,10 @@ pub async fn create_escalation_expedition_with_options_core(
     target_title: Option<&str>,
     _pos: [f64; 3],
 ) -> Option<EscalatingPathEntry> {
-    let chain = ops::resolve_sde_escalation_chain(sde, source_dungeon_id, solar_system_id);
+    let chain_seed_did = target_dungeon_id
+        .filter(|&id| id > 0 && sde.dungeons.contains_key(&id))
+        .unwrap_or(source_dungeon_id);
+    let chain = ops::resolve_sde_escalation_chain(sde, chain_seed_did, solar_system_id);
     let exp_base_did = target_dungeon_id
         .filter(|&id| id > 0)
         .unwrap_or_else(|| chain.dungeon_for_step(1));

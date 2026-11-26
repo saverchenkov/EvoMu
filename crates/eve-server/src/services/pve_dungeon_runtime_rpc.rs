@@ -350,7 +350,7 @@ fn parse_dungeon_trigger_action(spec: &PyRep, fallback: &PyRep) -> DungeonTrigge
         },
         "StartEscalation" => DungeonTriggerAction::StartEscalation {
             target_dungeon_id: src.dict_get("targetDungeonID").or_else(|| src.dict_get("targetDungeonId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()),
-            chance_bps: src.dict_get("chanceBps").and_then(|v| v.as_i64()).and_then(|v| u16::try_from(v).ok()).unwrap_or(10_000),
+            chance_bps: src.dict_get("chanceBps").and_then(|v| v.as_i64()).map(|v| v.clamp(0, 10_000) as u16).unwrap_or(10_000),
             target_title: src.dict_get("targetTitle").and_then(|v| v.as_str()).map(str::to_string),
         },
         "TriggerMessage" => DungeonTriggerAction::TriggerMessage {
@@ -1446,15 +1446,29 @@ fn matches_approach_trigger_parts(
     else {
         return false;
     };
-    let resolved_target_ball = (*target_ball_id).or_else(|| {
-        target_object_index
-            .and_then(|idx| objects.get(idx))
-            .map(|o| o.ball_id)
-    });
-    let obj_pos = resolved_target_ball
-        .and_then(|bid| objects.iter().find(|o| o.ball_id == bid))
-        .map(|o| o.position)
-        .unwrap_or(*anchor_pos);
+    let (resolved_target_ball, obj_pos) = if let Some(bid) = *target_ball_id {
+        if bid <= 0 {
+            return false;
+        }
+        if let Some(obj) = objects.iter().find(|o| o.ball_id == bid) {
+            if !obj.spawned || obj.destroyed {
+                return false;
+            }
+            (Some(bid), obj.position)
+        } else {
+            (Some(bid), *anchor_pos)
+        }
+    } else if let Some(idx) = *target_object_index {
+        let Some(obj) = objects.get(idx) else {
+            return false;
+        };
+        if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
+            return false;
+        }
+        (Some(obj.ball_id), obj.position)
+    } else {
+        (None, *anchor_pos)
+    };
     let effective_radius = radius_m.max(2_500.0);
     let within_radius = dist3(ship_pos, obj_pos) <= effective_radius;
     let explicit_target_close = target_id_opt.is_some()
@@ -1469,7 +1483,7 @@ fn matches_loot_trigger_parts(
     container_ball_id: i64,
     item_type_id: TypeId,
 ) -> bool {
-    if trig.fired || trig.armed_at_unix.is_some() {
+    if trig.fired || trig.armed_at_unix.is_some() || container_ball_id <= 0 {
         return false;
     }
     let DungeonTriggerKind::OnLoot {
@@ -1480,14 +1494,30 @@ fn matches_loot_trigger_parts(
     else {
         return false;
     };
-    let resolved_cont = (*trig_cont).or_else(|| {
-        target_object_index
-            .and_then(|idx| objects.get(idx))
-            .map(|o| o.ball_id)
-    });
+    let resolved_cont = if let Some(cid) = *trig_cont {
+        if cid <= 0 {
+            return false;
+        }
+        if objects.iter().any(|o| o.ball_id == cid && (!o.spawned || o.destroyed)) {
+            return false;
+        }
+        Some(cid)
+    } else if let Some(idx) = *target_object_index {
+        let Some(obj) = objects.get(idx) else {
+            return false;
+        };
+        if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
+            return false;
+        }
+        Some(obj.ball_id)
+    } else {
+        None
+    };
     let cont_ok = resolved_cont.is_none_or(|cid| cid == container_ball_id);
     let tid_ok = trig_tid.is_none_or(|tid| tid == item_type_id);
-    let room_has_cont = objects.iter().any(|o| o.ball_id == container_ball_id);
+    let room_has_cont = objects
+        .iter()
+        .any(|o| o.ball_id == container_ball_id && o.spawned && !o.destroyed);
     cont_ok && tid_ok && (resolved_cont.is_some() || room_has_cont)
 }
 

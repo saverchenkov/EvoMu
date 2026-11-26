@@ -656,8 +656,113 @@ async fn t2a2_parse_extra_actions_from_pyrep_and_multi_action_execution() {
         assert!(rt.rooms[0].gate_locked, "LockGate in primary action must survive trigger eval");
         assert!(rt.rooms[0].objects[0].spawned);
         assert_eq!(rt.objectives[0].objective_id, 7701);
+        assert_eq!(rt.active_objective_id, 7701);
+        assert_eq!(rt.last_completed_task_id, Some(7701));
+        assert_eq!(rt.completed_task_ids, vec![7701]);
     });
     ctx.db.with_snapshot(|s| assert!(s.items.values().any(|i| i.type_id == 34 && i.quantity == 15)));
     let notes = ctx.drain_notifications_for_char(char_id);
     assert!(notes.iter().any(|n| n.event == "OnDungeonTriggerMessage"));
+    let prog: Vec<(&str, Vec<PyRep>)> = notes
+        .iter()
+        .filter(|n| matches!(n.event.as_str(), "OnProgressionTaskCompleted" | "OnProgressionAdvanced"))
+        .map(|n| (n.event.as_str(), n.args.clone()))
+        .collect();
+    assert_eq!(
+        prog,
+        vec![
+            ("OnProgressionTaskCompleted", vec![PyRep::Integer(7701)]),
+            ("OnProgressionAdvanced", vec![PyRep::Integer(7701), PyRep::Integer(7701)]),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_r2_approach_spawn_on_trigger_object_and_negative_chance_bps() {
+    use crate::services::pve_dungeon_runtime::{
+        apply_dungeon_trigger_actions, read_dungeon_runtime_store, with_dungeon_runtime_store,
+    };
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_444;
+    let ship_id: i64 = 1_040_000_444;
+    let (ctx, _sess) = make_ctx_and_session(sys_id, char_id, ship_id);
+    let room_pos = [22_000_000.0, 0.0, 0.0];
+    let obj_pos = [room_pos[0] + 500.0, 0.0, 0.0];
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_id, type_id: 587, position: DVec3::from_array(obj_pos), velocity: DVec3::ZERO,
+            max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let room_rep = PyRep::keyval([
+        ("roomName", PyRep::String("OWN-P1-02 Room".into())),
+        ("gateLocked", PyRep::Bool(false)),
+        ("objects", PyRep::List(vec![PyRep::keyval([
+            ("typeID", PyRep::Integer(i64::from(DEFAULT_CONTAINER_TYPE_ID))),
+            ("name", PyRep::String("Delayed Beacon".into())),
+            ("spawnOnTrigger", PyRep::Bool(true)),
+            ("offset", PyRep::List(vec![PyRep::Real(500.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+        ])])),
+        ("triggers", PyRep::List(vec![
+            PyRep::keyval([
+                ("kind", PyRep::String("approach".into())),
+                ("targetObjectIndex", PyRep::Integer(0)),
+                ("radius", PyRep::Real(3_000.0)),
+                ("repeatable", PyRep::Bool(true)),
+                ("action", PyRep::String("TriggerMessage".into())),
+                ("messageType", PyRep::Integer(1)),
+                ("messageID", PyRep::Integer(9123)),
+            ]),
+            PyRep::keyval([
+                ("kind", PyRep::String("kill".into())),
+                ("action", PyRep::String("StartEscalation".into())),
+                ("chanceBps", PyRep::Integer(-500)),
+            ]),
+            PyRep::keyval([
+                ("kind", PyRep::String("kill".into())),
+                ("action", PyRep::String("StartEscalation".into())),
+                ("chanceBps", PyRep::Integer(15_000)),
+            ]),
+        ])),
+    ]);
+    let room2_rep = PyRep::keyval([("roomName", PyRep::String("Room Two".into()))]);
+    let mut kw = HashMap::new();
+    kw.insert("position".into(), PyRep::List(vec![PyRep::Real(room_pos[0]), PyRep::Real(0.0), PyRep::Real(0.0)]));
+    let spawned = spawn_dungeon_instance(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &[PyRep::Integer(1), PyRep::List(vec![room_rep, room2_rep])],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let inst_id = spawned.dict_get("instanceID").unwrap().as_i64().unwrap();
+
+    // P2-3: negative chanceBps clamps to 0, >10_000 clamps to 10_000.
+    read_dungeon_runtime_store(&ctx, |s| {
+        let trigs = &s.instances[&inst_id].rooms[0].triggers;
+        assert_eq!(trigs[1].action, DungeonTriggerAction::StartEscalation { target_dungeon_id: None, chance_bps: 0, target_title: None });
+        assert_eq!(trigs[2].action, DungeonTriggerAction::StartEscalation { target_dungeon_id: None, chance_bps: 10_000, target_title: None });
+    });
+
+    // OWN-P1-02: ship sits right on object[0] position, but spawn_on_trigger=true && !spawned -> must NOT fire.
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    // SpawnObject materializes objects[0]; OnApproach fires cleanly now.
+    assert_eq!(
+        apply_dungeon_trigger_actions(&ctx, sys_id, inst_id, 0, vec![(9, DungeonTriggerAction::SpawnObject { object_index: 0 })], char_id).await,
+        1
+    );
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+
+    // Destroyed target object must NOT match subsequent OnApproach.
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.get_mut(&inst_id).unwrap().rooms[0].objects[0].destroyed = true;
+    });
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
 }

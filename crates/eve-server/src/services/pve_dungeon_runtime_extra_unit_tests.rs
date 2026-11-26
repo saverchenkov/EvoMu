@@ -1238,6 +1238,7 @@ async fn t2a2_public_dungeon_delayed_reward_escalation_and_notifications() {
         assert_eq!(rt.rooms[0].triggers[0].armed_by_char_id, Some(pilot_a));
     });
     ctx.db.with_snapshot(|s| assert_eq!(s.characters[&pilot_a].balance, bal_before));
+    let _ = ctx.drain_notifications_for_char(pilot_a);
 
     ctx.advance_secs(5);
     assert_eq!(tick_due_delayed_dungeon_triggers(&ctx).await, 1);
@@ -1259,11 +1260,26 @@ async fn t2a2_public_dungeon_delayed_reward_escalation_and_notifications() {
         let rt = &s.instances[&inst_id];
         assert!(rt.rooms[0].triggers[0].fired && rt.escalation_instance_id.is_some());
         assert_eq!(rt.objectives[0].status, DungeonObjectiveStatus::Completed);
+        assert_eq!(rt.active_objective_id, 8801);
+        assert_eq!(rt.last_completed_task_id, Some(8801));
+        assert_eq!(rt.completed_task_ids, vec![960102, 8801]);
     });
     let notes = ctx.drain_notifications_for_char(pilot_a);
     for ev in ["OnEscalatingPathChange", "OnEscalatingPathMessage", "OnDungeonTriggerMessage", "OnProgressionTaskCompleted"] {
         assert!(notes.iter().any(|n| n.event == ev), "missing {ev}");
     }
+    let prog: Vec<(&str, Vec<eve_proto::PyRep>)> = notes
+        .iter()
+        .filter(|n| matches!(n.event.as_str(), "OnProgressionTaskCompleted" | "OnProgressionAdvanced"))
+        .map(|n| (n.event.as_str(), n.args.clone()))
+        .collect();
+    assert_eq!(
+        prog,
+        vec![
+            ("OnProgressionTaskCompleted", vec![eve_proto::PyRep::Integer(8801)]),
+            ("OnProgressionAdvanced", vec![eve_proto::PyRep::Integer(8801), eve_proto::PyRep::Integer(8801)]),
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1375,4 +1391,241 @@ async fn t2a2_r1_lock_gate_pirate_archetype_despawn_purge_and_zero_based_cross_r
     despawn_completed_dungeon(&ctx, sys_id, inst_id, char_id).await;
     assert!(sys_handle.get_ball_snapshot(m2.npc_ids[0]).await.unwrap().is_none());
     assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&m2.npc_ids[0])));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_r2_set_objective_progression_final_room_lock_short_circuit_and_sde_reward() {
+    use crate::services::pve_dungeon_runtime_rpc::on_dungeon_approach;
+    use eve_db::types::IskCents;
+    use eve_destiny::{Ball, MovementMode};
+    use eve_proto::PyRep;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_030_801;
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("r2_pilot", "pw", char_id, "R2Pilot");
+    let mut sde_mut = (*shared_sde()).clone();
+    let (src_did, sde_reward_did, esc_did) = (990_801u32, 990_802u32, 990_803u32);
+    sde_mut.factions.insert(500_801, eve_sde::FactionInfo {
+        faction_id: 500_801, name: "SDE R2 Syndicate".into(), corporation_id: Some(1_000_801),
+        militia_corporation_id: None, solar_system_id: Some(sys_id), size_factor: 1.0, description: String::new(),
+    });
+    sde_mut.dungeons.insert(src_did, eve_sde::DungeonTemplate {
+        dungeon_id: src_did, name: "Hard Source".into(), faction_id: Some(500_801), archetype_id: Some(20), difficulty: Some(4),
+    });
+    sde_mut.dungeons.insert(sde_reward_did, eve_sde::DungeonTemplate {
+        dungeon_id: sde_reward_did, name: "Reward Site".into(), faction_id: Some(500_801), archetype_id: Some(20), difficulty: Some(2),
+    });
+    sde_mut.dungeons.insert(esc_did, eve_sde::DungeonTemplate {
+        dungeon_id: esc_did, name: "Target Citadel".into(), faction_id: Some(500_801), archetype_id: Some(31), difficulty: Some(2),
+    });
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde_mut), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_796_000_000)));
+    let ship_id = 1_030_000_801i64;
+    let r1_pos = [80_000_000.0, 0.0, 0.0];
+    let r2_pos = [81_000_000.0, 0.0, 0.0];
+    let bal_before = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&char_id).unwrap();
+        ch.solar_system_id = sys_id; ch.active_ship_id = ship_id; ch.balance
+    });
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(uid, char_id as u64, Some(char_id), None, true, 1_796_000_000);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball(Ball {
+        id: ship_id, type_id: 587, position: DVec3::from_array(r1_pos), velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await.unwrap();
+
+    // Part A: OWN-P1-01 (primary completed=false, primary completed=true, extra_actions SetObjective) + P2-4/P2-5 + P2-1 final-room LockGate.
+    let inst_a = 980_801i64;
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(inst_a, DungeonRuntimeInstance {
+            instance_id: inst_a, dungeon_id: src_did, dungeon_name: "R2 Obj".into(), category: "Deadspace".into(),
+            archetype: "Deadspace".into(), solar_system_id: sys_id, owner_char_id: char_id, base_position: r1_pos,
+            rooms: vec![DungeonRuntimeRoom {
+                room_index: 1, room_id: 9801, room_name: "Final Lock Chamber".into(), position: r1_pos, gate_destination_pos: r1_pos,
+                gated: false, gate_locked: false,
+                npc_groups: vec![DungeonNpcGroup { group_id: 1, wave: 1, npc_specs: vec![(48_090, 1)], spawn_immediately: true, ..Default::default() }],
+                triggers: vec![
+                    DungeonTrigger {
+                        trigger_id: 1, kind: DungeonTriggerKind::OnKill { target_npc_group: None, target_ball_id: None },
+                        action: DungeonTriggerAction::LockGate, ..Default::default()
+                    },
+                    DungeonTrigger {
+                        trigger_id: 2, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: r1_pos, radius_m: 3_000.0 },
+                        action: DungeonTriggerAction::SetObjective { objective_id: 9101, objective_key: "step1".into(), title: "Active Primary".into(), completed: false },
+                        repeatable: true, ..Default::default()
+                    },
+                    DungeonTrigger {
+                        trigger_id: 3, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: [r1_pos[0] + 10_000.0, 0.0, 0.0], radius_m: 3_000.0 },
+                        action: DungeonTriggerAction::SetObjective { objective_id: 9102, objective_key: "step2".into(), title: "Done Primary".into(), completed: true },
+                        ..Default::default()
+                    },
+                    DungeonTrigger {
+                        trigger_id: 4, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: [r1_pos[0] + 20_000.0, 0.0, 0.0], radius_m: 3_000.0 },
+                        action: DungeonTriggerAction::GrantReward { isk: 0, lp: 200, corp_id: 0, faction_id: 0, standing_milli: 150 },
+                        extra_actions: vec![DungeonTriggerAction::SetObjective { objective_id: 9103, objective_key: "step3".into(), title: "Extra Active".into(), completed: false }],
+                        ..Default::default()
+                    },
+                    DungeonTrigger {
+                        trigger_id: 5, kind: DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: [r1_pos[0] + 30_000.0, 0.0, 0.0], radius_m: 3_000.0 },
+                        action: DungeonTriggerAction::StartEscalation { target_dungeon_id: Some(esc_did), chance_bps: 10_000, target_title: None },
+                        extra_actions: vec![DungeonTriggerAction::SetObjective { objective_id: 9104, objective_key: "step4".into(), title: "Extra Done".into(), completed: true }],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            created_unix: 1_796_000_000, ..Default::default()
+        });
+    });
+
+    let m0 = materialize_dungeon_room_entities(&ctx, sys_id, inst_a, 0).await.unwrap();
+    on_dungeon_room_entered(&ctx, sys_id, inst_a, 0, char_id).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let drain_prog = || -> Vec<(String, Vec<PyRep>)> {
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| matches!(n.event.as_str(), "OnProgressionTaskCompleted" | "OnProgressionAdvanced"))
+            .map(|n| (n.event, n.args))
+            .collect()
+    };
+
+    // Case 1a: primary SetObjective { completed: false } from fresh state emits ONLY OnProgressionAdvanced(9101, 0).
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_a];
+        assert_eq!(rt.active_objective_id, 9101);
+        assert_eq!(rt.last_completed_task_id, None);
+        assert!(rt.completed_task_ids.is_empty());
+    });
+    assert_eq!(drain_prog(), vec![("OnProgressionAdvanced".into(), vec![PyRep::Integer(9101), PyRep::Integer(0)])]);
+
+    // Case 1b + P2-1: OnKill -> LockGate sets 980101; subsequent repeatable OnApproach preserves final-room LockGate & 980101 across tx.
+    on_dungeon_npc_killed(&ctx, sys_id, m0.npc_ids[0], char_id).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_a];
+        assert!(!rt.completed && rt.rooms[0].gate_locked, "P2-1: final room must not auto-complete while gate_locked");
+        assert_eq!(rt.active_objective_id, 9101);
+        assert_eq!(rt.last_completed_task_id, Some(980101));
+        assert_eq!(rt.completed_task_ids, vec![980101]);
+    });
+    assert_eq!(drain_prog(), vec![("OnProgressionAdvanced".into(), vec![PyRep::Integer(9101), PyRep::Integer(980101)])]);
+
+    // Case 2: primary SetObjective { completed: true } emits single TaskCompleted + Advanced and updates completed_task_ids.
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(r1_pos[0] + 10_000.0, 0.0, 0.0)).await;
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_a];
+        assert_eq!(rt.active_objective_id, 9102);
+        assert_eq!(rt.last_completed_task_id, Some(9102));
+        assert_eq!(rt.completed_task_ids, vec![980101, 9102]);
+    });
+    assert_eq!(drain_prog(), vec![
+        ("OnProgressionTaskCompleted".into(), vec![PyRep::Integer(9102)]),
+        ("OnProgressionAdvanced".into(), vec![PyRep::Integer(9102), PyRep::Integer(9102)]),
+    ]);
+
+    // Case 3a: SetObjective { completed: false } in extra_actions + P2-4 SDE faction LP/standing (zero Caldari fabrication!).
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(r1_pos[0] + 20_000.0, 0.0, 0.0)).await;
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_a];
+        assert_eq!(rt.active_objective_id, 9103);
+        assert_eq!(rt.last_completed_task_id, Some(9102));
+        assert_eq!(rt.completed_task_ids, vec![980101, 9102]);
+    });
+    assert_eq!(drain_prog(), vec![("OnProgressionAdvanced".into(), vec![PyRep::Integer(9103), PyRep::Integer(9102)])]);
+    ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&char_id];
+        assert_eq!(ch.loyalty_points.get(&1_000_801).copied(), Some(200));
+        assert_eq!(ch.loyalty_points.get(&1_000_002).copied(), None);
+        assert!(ch.standings.get(&500_801).copied().unwrap_or(0.0) > 0.0);
+        assert_eq!(ch.standings.get(&500_001).copied(), None);
+    });
+
+    // Case 3b: SetObjective { completed: true } in extra_actions + P2-5 explicit target_dungeon_id chain total_steps/template.
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(r1_pos[0] + 30_000.0, 0.0, 0.0)).await;
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_a];
+        assert!(rt.rooms[0].cleared && rt.rooms[0].gate_locked && rt.rooms[0].gate_explicitly_locked && !rt.completed);
+        assert_eq!(rt.active_objective_id, 9104);
+        assert_eq!(rt.last_completed_task_id, Some(9104));
+        assert_eq!(rt.completed_task_ids, vec![980101, 9102, 9104]);
+    });
+    assert_eq!(drain_prog(), vec![
+        ("OnProgressionTaskCompleted".into(), vec![PyRep::Integer(9104)]),
+        ("OnProgressionAdvanced".into(), vec![PyRep::Integer(9104), PyRep::Integer(9104)]),
+    ]);
+    with_pve_exploration_reg(&ctx, |reg| {
+        let e = &reg.escalations_by_char[&char_id][0];
+        assert_eq!(e.expedition_dungeon_id, esc_did);
+        assert_eq!(e.total_steps, 3);
+        assert_eq!(e.journal_entry_template_id, esc_did);
+    });
+    // Subsequent repeatable OnApproach after room.cleared=true still preserves final-room LockGate & !completed (P2-1).
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(r1_pos)).await;
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_a];
+        assert!(rt.rooms[0].cleared && rt.rooms[0].gate_locked && !rt.completed);
+    });
+
+    // P2-4 unknown dungeon with corp_id=0, faction_id=0 adds zero Caldari LP/standing.
+    with_dungeon_runtime_store(&ctx, |s| { s.instances.get_mut(&inst_a).unwrap().dungeon_id = 1; });
+    assert_eq!(
+        apply_dungeon_trigger_actions(&ctx, sys_id, inst_a, 0, vec![(77, DungeonTriggerAction::GrantReward { isk: 0, lp: 50, corp_id: 0, faction_id: 0, standing_milli: 100 })], char_id).await,
+        1
+    );
+    ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&char_id];
+        assert_eq!(ch.loyalty_points.get(&1_000_002), None);
+        assert_eq!(ch.standings.get(&500_001), None);
+    });
+
+    // Part B: P2-2 cross-room delayed short-circuit on FailDungeon.
+    let inst_b = 980_802i64;
+    with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(inst_b, DungeonRuntimeInstance {
+            instance_id: inst_b, dungeon_id: sde_reward_did, dungeon_name: "Short Circuit".into(), category: "Deadspace".into(),
+            archetype: "Deadspace".into(), solar_system_id: sys_id, owner_char_id: char_id, base_position: r1_pos,
+            rooms: vec![
+                DungeonRuntimeRoom {
+                    room_index: 1, room_id: 9811, room_name: "Fail R1".into(), position: r1_pos, gate_destination_pos: r2_pos,
+                    spawned: true, entered: true,
+                    triggers: vec![DungeonTrigger {
+                        trigger_id: 1, kind: DungeonTriggerKind::OnKill { target_npc_group: None, target_ball_id: None },
+                        action: DungeonTriggerAction::FailDungeon { reason: "Aborted".into() },
+                        delay_secs: 2, armed_at_unix: Some(1_796_000_000), armed_by_char_id: Some(char_id), ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                DungeonRuntimeRoom {
+                    room_index: 2, room_id: 9812, room_name: "PostFail R2".into(), position: r2_pos, gate_destination_pos: r2_pos,
+                    spawned: true, entered: true,
+                    triggers: vec![DungeonTrigger {
+                        trigger_id: 2, kind: DungeonTriggerKind::OnKill { target_npc_group: None, target_ball_id: None },
+                        action: DungeonTriggerAction::GrantReward { isk: 500_000, lp: 0, corp_id: 0, faction_id: 0, standing_milli: 0 },
+                        delay_secs: 2, armed_at_unix: Some(1_796_000_000), armed_by_char_id: Some(char_id), ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            created_unix: 1_796_000_000, ..Default::default()
+        });
+    });
+    ctx.advance_secs(2);
+    assert_eq!(tick_due_delayed_dungeon_triggers(&ctx).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_b];
+        assert!(rt.failed && !rt.completed);
+        assert!(rt.rooms[0].triggers[0].fired);
+        assert!(!rt.rooms[1].triggers[0].fired && rt.rooms[1].triggers[0].armed_at_unix.is_some());
+    });
+    ctx.db.with_snapshot(|s| assert_eq!(s.characters[&char_id].balance, bal_before, "post-fail room must not grant ISK"));
+    let _ = bal_before == IskCents::ZERO;
 }

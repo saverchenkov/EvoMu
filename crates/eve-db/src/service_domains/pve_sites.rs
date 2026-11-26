@@ -885,6 +885,8 @@ pub struct DungeonRuntimeRoom {
     pub entered_unix: Option<u64>,
     #[serde(default)]
     pub last_actor_char_id: i64,
+    #[serde(default)]
+    pub gate_explicitly_locked: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
