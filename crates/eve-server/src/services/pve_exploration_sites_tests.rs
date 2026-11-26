@@ -137,6 +137,9 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
     assert!(!loot_low.is_empty() && !loot_hi.is_empty());
 
     // Sleeper wave 1 (includes sentry) & wave 2 (no sentry) + sleeper wreck drop
+    // Second ServerContext starts before w1/w2 so its combat_ephemeral is cold behind &ctx.db.
+    let ctx_rehydrated =
+        ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), Arc::clone(&ctx.db));
     let w1_balls = spawn_sleeper_wave_in_system(&ctx, sys_id, 3, 1, DVec3::ZERO).await;
     let w2_balls = spawn_sleeper_wave_in_system(&ctx, sys_id, 3, 2, DVec3::new(1000.0, 0.0, 0.0)).await;
     assert_eq!(w1_balls.len(), 4);
@@ -146,7 +149,7 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
-        &ctx.combat_ephemeral,
+        &ctx_rehydrated.combat_ephemeral,
         sys_id,
         5,
         2,
@@ -154,15 +157,16 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
     )
     .await;
     assert_eq!(w3_balls.len(), 3);
+    // `w1` (4) + `w2` (3) were persisted to `&ctx.db` and rehydrated when `w3` (3) ran.
     assert_eq!(
-        npc_entity_count(&ctx),
+        npc_entity_count(&ctx_rehydrated),
         w1_balls.len() + w2_balls.len() + w3_balls.len()
     );
     assert!(w1_balls
         .iter()
         .chain(w2_balls.iter())
         .chain(w3_balls.iter())
-        .all(|&bid| has_npc_entity(&ctx, bid)));
+        .all(|&bid| has_npc_entity(&ctx_rehydrated, bid)));
 
     let sw_id = drop_sleeper_wreck_core(
         &ctx.db,

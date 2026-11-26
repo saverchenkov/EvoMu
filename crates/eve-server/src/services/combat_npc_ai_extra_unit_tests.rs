@@ -545,7 +545,8 @@ mod w4_ops_pve_mut_extra_tests {
         seed_npc_entity(&ctx, missing);
         update_npc_entity(&ctx, warp_npc, |w| {
             w.target_id = Some(ship_id);
-        });
+        })
+        .unwrap();
 
         update_npc_entity(&ctx, sle_healer, |h| {
             h.remote_armor_rep = 200.0;
@@ -557,13 +558,15 @@ mod w4_ops_pve_mut_extra_tests {
             h.web_range = 30_000.0;
             h.target_id = Some(cloak_ship); // triggers target switch -> resets entropic_cycles!
             h.entropic_cycles = 4;
-        });
+        })
+        .unwrap();
 
         update_npc_entity(&ctx, boss_id, |m_boss| {
             m_boss.drifter_overshield_hp = 0.0;
             m_boss.drifter_doomsday_fired = false;
             m_boss.damage_vector = DamageVector::new(10.0, 10.0, 10.0, 10.0);
-        });
+        })
+        .unwrap();
 
         step_extended_npc_ai(&ctx, sys_id).await;
 
@@ -835,18 +838,21 @@ mod w4_ops_pve_mut_extra_tests {
             t.target_id = Some(ship_id);
             t.threat_table.insert(ship_id, 500.0);
             t.entropic_cycles = 0;
-        });
+        })
+        .unwrap();
         update_npc_entity(&ctx, gate_gun, |gg| {
             gg.target_id = Some(ship_id);
             gg.threat_table.insert(ship_id, 500.0);
-        });
+        })
+        .unwrap();
         update_npc_entity(&ctx, drifter_shielded, |ds| {
             ds.target_id = Some(ship_id);
             ds.threat_table.insert(ship_id, 500.0);
             ds.drifter_overshield_hp = 5_000.0;
             ds.drifter_doomsday_fired = false;
             ds.damage_vector = DamageVector::new(10.0, 10.0, 10.0, 10.0);
-        });
+        })
+        .unwrap();
         let _ = sys_h
             .add_target_lock(
                 ship_id,

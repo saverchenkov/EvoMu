@@ -300,7 +300,7 @@ async fn spawn_threat_ai_step_and_destroy_specialized_npc_loot_and_bounties() {
         spawn_npc_entity_from_sde(&ctx, sys_id, 920_002, 1, DVec3::new(4_000.0, 0.0, 0.0)).await;
 
     // Record threat events (normal, EWAR 1.5x, logistics 1.3x) and verify Drifter overshield reduction
-    update_npc_entity(&ctx, drifter_id, |d| d.drifter_overshield_hp = 1_000.0);
+    update_npc_entity(&ctx, drifter_id, |d| d.drifter_overshield_hp = 1_000.0).unwrap();
     record_npc_threat_event(&ctx, drifter_id, ship_id, 300.0, false, false);
     record_npc_threat_event(&ctx, drifter_id, ship_id, 0.0, true, false);
     record_npc_threat_event(&ctx, drifter_id, ship_id, 0.0, false, true);
@@ -644,7 +644,7 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
         DVec3::new(1_000.0, 0.0, 0.0),
     )
     .await;
-    update_npc_entity(&ctx, stale_npc_id, |n| n.target_id = Some(999_888));
+    update_npc_entity(&ctx, stale_npc_id, |n| n.target_id = Some(999_888)).unwrap();
     step_extended_npc_ai(&ctx, stale_sys).await;
     assert_eq!(get_npc_entity(&ctx, stale_npc_id).unwrap().target_id, None);
 
