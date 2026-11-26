@@ -48,8 +48,45 @@ pub(crate) fn mission_site_origin_for_instance(
     DVec3::new(pos.x.round(), pos.y.round(), pos.z.round())
 }
 
-/// Matches the targeted mission on a `beyonce.CmdWarpToStuff` warp and materializes both its
-/// encounter NPCs and persisted mining asteroid using the already-loaded `handle` (`PVE-020`).
+/// Resolves an accepted mission target (`template_id` or `agent_id`) in `sys_id` to its canonical
+/// pocket origin (`site_origin_f64` -> attached `bookmark_id` -> `mission_site_origin_for_instance`).
+pub(crate) fn resolve_accepted_mission_warp_origin(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    target_id: i64,
+) -> Option<DVec3> {
+    let (inst_id, explicit_origin) = ctx.db.with_snapshot(|snap| {
+        let mut missions: Vec<&MissionInstance> = snap
+            .missions
+            .iter_by_character(char_id)
+            .filter(|m| {
+                m.solar_system_id == sys_id
+                    && m.state == MissionState::Accepted
+                    && (target_id == m.template_id as i64 || target_id == m.agent_id as i64)
+            })
+            .collect();
+        missions.sort_by_key(|m| m.template_id);
+        let m = missions.into_iter().next()?;
+        let origin = m.site_origin_f64().map(DVec3::from).or_else(|| {
+            m.bookmark_id
+                .and_then(|bid| snap.bookmarks.get(&bid))
+                .filter(|bm| {
+                    bm.solar_system_id == sys_id
+                        && bm.item_id.is_none()
+                        && bm.x.is_finite()
+                        && bm.y.is_finite()
+                        && bm.z.is_finite()
+                })
+                .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
+        });
+        Some((m.instance_id, origin))
+    })?;
+    Some(explicit_origin.unwrap_or_else(|| mission_site_origin_for_instance(ctx, sys_id, inst_id)))
+}
+
+/// Matches the targeted mission on a `beyonce.CmdWarpToStuff` / fleet warp and materializes both
+/// its encounter NPCs and persisted mining asteroid using the already-loaded `handle` (`PVE-020`).
 pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
@@ -59,12 +96,15 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
     target_id: i64,
     dest_pos: DVec3,
 ) {
+    let is_mission_stuff = matches!(stuff_type, "mission" | "dungeon" | "location");
     let matched_mission = ctx.db.with_snapshot(|snap| {
         let mut by_proximity = None;
         for m in snap.missions.iter_by_character(char_id) {
             if m.state != MissionState::Accepted || m.solar_system_id != sys_id {
                 continue;
             }
+            let explicit_mission_match = is_mission_stuff
+                && (target_id == i64::from(m.template_id) || target_id == m.agent_id);
             let Some(pocket_pos) = m
                 .site_origin_f64()
                 .map(DVec3::from)
@@ -74,13 +114,19 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
                         .filter(|bm| bm.solar_system_id == sys_id)
                         .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
                 })
+                .or_else(|| {
+                    explicit_mission_match
+                        .then(|| mission_site_origin_for_instance(ctx, sys_id, m.instance_id))
+                })
             else {
                 continue;
             };
             if dest_pos.distance(pocket_pos) > 200_000.0 {
                 continue;
             }
-            if stuff_type == "bookmark" && m.bookmark_id == Some(target_id) {
+            if (stuff_type == "bookmark" && m.bookmark_id == Some(target_id))
+                || explicit_mission_match
+            {
                 return Some((m.template_id, pocket_pos));
             }
             if by_proximity.is_none() {
@@ -106,6 +152,43 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
             Some(mid),
         )
         .await;
+    }
+}
+
+/// Materializes mission pockets for warped fleet members whose actual landing points reached within
+/// `200 km` of the pocket (`CmdWarpToStuff(..., fleet=true)` / direct `handle_fleet_warp`).
+pub(crate) async fn materialize_mission_pocket_on_fleet_warp(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    caller_char_id: i64,
+    sys_id: u32,
+    stuff_type: &str,
+    target_id: i64,
+    warped_landings: &[(i64, DVec3)],
+) {
+    for &(member_char_id, landing_pos) in warped_landings {
+        materialize_mission_pocket_on_cmd_warp(
+            ctx,
+            handle,
+            caller_char_id,
+            sys_id,
+            stuff_type,
+            target_id,
+            landing_pos,
+        )
+        .await;
+        if member_char_id != caller_char_id && stuff_type == "bookmark" {
+            materialize_mission_pocket_on_cmd_warp(
+                ctx,
+                handle,
+                member_char_id,
+                sys_id,
+                stuff_type,
+                target_id,
+                landing_pos,
+            )
+            .await;
+        }
     }
 }
 

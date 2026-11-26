@@ -1068,25 +1068,52 @@ async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_re
             "truncated low-cap warp must not materialize pocket NPCs in deep space"
         );
     });
-    agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
-        &ctx,
-        &handle,
-        char_id,
-        sys_id,
-        "bookmark",
-        bm_id,
-        pocket_pos + glam::DVec3::new(300_000.0, 0.0, 0.0),
-    )
-    .await;
+    let _ = handle.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+    let _ = handle.set_ball_position(ship_id, glam::DVec3::ZERO).await;
+    handle.try_update_combat_state(ship_id, |cs| {
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+    });
+    let bf1_bubble_id = 995_199_i64;
+    handle
+        .add_warp_bubble(
+            bf1_bubble_id,
+            pocket_pos - glam::DVec3::new(500_000.0, 0.0, 0.0),
+            20_000.0,
+        )
+        .await
+        .unwrap();
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("bookmark".into()), PyRep::Integer(bm_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bubble-dragged CmdWarpToStuff initiates partial warp");
+    match handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(pocket_pos) > 200_000.0,
+                "bubble must intercept CmdWarpToStuff >200 km short of pocket_pos, got {destination:?}"
+            );
+        }
+        other => panic!("expected Warp mode for bubble-dragged ship, got {other:?}"),
+    }
     ctx.db.with_snapshot(|snap| {
         assert!(
             mission_fixture::get(snap, char_id, mid_scoped)
                 .unwrap()
                 .spawned_npc_ball_ids
                 .is_empty(),
-            "bubble-dragged bookmark warp (>200km from pocket) must not materialize NPCs"
+            "bubble-dragged CmdWarpToStuff bookmark warp (>200km from pocket) must not materialize NPCs"
         );
     });
+    assert!(handle.remove_warp_bubble(bf1_bubble_id).await.unwrap());
 
     // 3. Full-cap 100 km range warp to bookmark must materialize NPCs around canonical `pocket_pos` (NOT 100 km dest_pos).
     let _ = handle.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
@@ -2050,4 +2077,528 @@ async fn own1_fleet_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius
             );
         }
     }
+}
+
+#[tokio::test]
+async fn own_r3_cmd_warp_to_stuff_mission_dungeon_and_fleet_bookmark_materialize() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let mut all_agents: Vec<i64> = ctx.sde.agents.keys().copied().collect();
+    all_agents.sort_unstable();
+    assert!(all_agents.len() >= 5);
+    let ag_solo_enc = all_agents[0];
+    let ag_solo_mine = all_agents[1];
+    let ag_fleet_enc = all_agents[2];
+    let ag_fleet_mine = all_agents[3];
+    let ag_fleet_direct = all_agents[4];
+
+    // Part 1: solo beyonce.CmdWarpToStuff("mission"|"dungeon", mid) resolves SplitMix64 site origin,
+    // stays bubble-safe (>200 km short -> no spawn), and materializes NPCs + asteroid on arrival.
+    let char_solo = 90_000_001_i64;
+    let ship_solo = 100_000_001_i64;
+    let mid_s_enc = 98_420_u32;
+    let mid_s_mine = 98_421_u32;
+    let ast_s_id = 995_701_i64;
+    let solo_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut solo_cs = ctx.build_type_combat_state(587);
+    solo_cs.capacitor = 250.0;
+    solo_cs.max_capacitor = 250.0;
+    solo_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_solo,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            solo_cs,
+        )
+        .await
+        .unwrap();
+
+    let (solo_enc_origin, solo_mine_origin) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_solo) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_solo;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_solo) {
+            ship.location_id = i64::from(sys_id);
+            ship.flag = eve_db::InventoryFlag::None;
+        }
+        mission_fixture::clear_character(snap, char_solo);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_solo, mid_s_enc, ag_solo_enc, sys_id)
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+        let enc_inst = snap
+            .missions
+            .get_by_character_template(char_solo, mid_s_enc)
+            .unwrap()
+            .instance_id;
+        let enc_origin = agents_missions_warp::mission_site_origin_for_instance(&ctx, sys_id, enc_inst);
+        snap.missions
+            .update_by_character_template(char_solo, mid_s_enc, |m| {
+                m.site_origin_m = Some([
+                    enc_origin.x.round() as i64,
+                    enc_origin.y.round() as i64,
+                    enc_origin.z.round() as i64,
+                ]);
+            })
+            .unwrap();
+
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_solo, mid_s_mine, ag_solo_mine, sys_id)
+                .asteroid_entity_id(Some(ast_s_id))
+                .required_delivery_type_id(Some(1230))
+                .required_delivery_qty(100),
+        );
+        let mine_inst = snap
+            .missions
+            .get_by_character_template(char_solo, mid_s_mine)
+            .unwrap()
+            .instance_id;
+        let mine_origin = agents_missions_warp::mission_site_origin_for_instance(&ctx, sys_id, mine_inst);
+        snap.asteroids.insert(
+            ast_s_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: ast_s_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (mine_origin.x + 8_000.0, mine_origin.y, mine_origin.z),
+                radius: 50.0,
+            },
+        );
+        snap.missions
+            .update_by_character_template(char_solo, mid_s_mine, |m| {
+                m.kind = eve_db::MissionKind::Mining;
+                m.site_origin_m = Some([
+                    mine_origin.x.round() as i64,
+                    mine_origin.y.round() as i64,
+                    mine_origin.z.round() as i64,
+                ]);
+            })
+            .unwrap();
+        (enc_origin, mine_origin)
+    });
+
+    let mut solo_sess = docked_session(char_solo, sys_id, None);
+    solo_sess.ship_id = Some(ship_solo);
+    let kw = HashMap::new();
+
+    let enc_dir = solo_enc_origin.normalize();
+    let mine_dir = solo_mine_origin.normalize();
+    let b_enc_id = 995_710_i64;
+    let b_mine_id = 995_711_i64;
+    solo_handle
+        .add_warp_bubble(b_enc_id, solo_enc_origin - enc_dir * 500_000.0, 20_000.0)
+        .await
+        .unwrap();
+    solo_handle
+        .add_warp_bubble(b_mine_id, solo_mine_origin - mine_dir * 500_000.0, 20_000.0)
+        .await
+        .unwrap();
+
+    for (stuff_type, mid_val, is_enc) in [
+        ("mission", i64::from(mid_s_enc), true),
+        ("dungeon", i64::from(mid_s_mine), false),
+    ] {
+        let _ = solo_handle.set_movement_mode(ship_solo, eve_destiny::MovementMode::Stop).await;
+        let _ = solo_handle.set_ball_position(ship_solo, glam::DVec3::ZERO).await;
+        solo_handle.try_update_combat_state(ship_solo, |cs| {
+            cs.capacitor = 250.0;
+            cs.max_capacitor = 250.0;
+        });
+        let _ = ctx
+            .dispatch_rpc(
+                &mut solo_sess,
+                "beyonce",
+                None,
+                "CmdWarpToStuff",
+                &[PyRep::String(stuff_type.into()), PyRep::Integer(mid_val)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("bubbled CmdWarpToStuff initiates");
+        if is_enc {
+            ctx.db.with_snapshot(|snap| {
+                assert!(mission_fixture::get(snap, char_solo, mid_s_enc).unwrap().spawned_npc_ball_ids.is_empty());
+            });
+        } else {
+            assert!(solo_handle.get_ball_snapshot(ast_s_id).await.unwrap().is_none());
+        }
+    }
+
+    assert!(solo_handle.remove_warp_bubble(b_enc_id).await.unwrap());
+    assert!(solo_handle.remove_warp_bubble(b_mine_id).await.unwrap());
+    for (stuff_type, mid_val, expected_origin, is_enc) in [
+        ("mission", i64::from(mid_s_enc), solo_enc_origin, true),
+        ("dungeon", i64::from(mid_s_mine), solo_mine_origin, false),
+    ] {
+        let _ = solo_handle.set_movement_mode(ship_solo, eve_destiny::MovementMode::Stop).await;
+        let _ = solo_handle.set_ball_position(ship_solo, glam::DVec3::ZERO).await;
+        solo_handle.try_update_combat_state(ship_solo, |cs| {
+            cs.capacitor = 250.0;
+            cs.max_capacitor = 250.0;
+        });
+        let _ = ctx
+            .dispatch_rpc(
+                &mut solo_sess,
+                "beyonce",
+                None,
+                "CmdWarpToStuff",
+                &[PyRep::String(stuff_type.into()), PyRep::Integer(mid_val)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("unblocked CmdWarpToStuff(mission|dungeon) succeeds");
+        match solo_handle.get_ball_snapshot(ship_solo).await.unwrap().unwrap().1.mode {
+            eve_destiny::MovementMode::Warp { destination, .. } => {
+                assert!(destination.distance(expected_origin) <= 1.0);
+            }
+            other => panic!("expected Warp mode, got {other:?}"),
+        }
+        if is_enc {
+            ctx.db.with_snapshot(|snap| {
+                assert_eq!(mission_fixture::get(snap, char_solo, mid_s_enc).unwrap().spawned_npc_ball_ids.len(), 2);
+            });
+        } else {
+            assert!(solo_handle.get_ball_snapshot(ast_s_id).await.unwrap().is_some());
+        }
+    }
+
+    // Part 2: beyonce.CmdWarpToStuff("bookmark", bm_id, {"fleet": True}) + direct handle_fleet_warp([bm_id])
+    // materialize encounter NPCs and mining asteroids via landingPositions while staying bubble-safe & idempotent.
+    let char_fc = 959_801_i64;
+    let char_wing = 959_802_i64;
+    let ship_fc = 959_811_i64;
+    let ship_wing = 959_812_i64;
+    let fleet_id = 959_820_i64;
+    let bm_f_enc = 959_830_i64;
+    let mid_f_enc = 98_422_u32;
+    let bm_f_mine = 959_831_i64;
+    let ast_f_mine = 959_832_i64;
+    let mid_f_mine = 98_423_u32;
+    let bm_f_direct = 959_833_i64;
+    let ast_f_direct = 959_834_i64;
+    let mid_f_direct = 98_424_u32;
+    let pos_f_enc = glam::DVec3::new(7.0e12, 0.0, 0.0);
+    let pos_f_mine = glam::DVec3::new(7.5e12, 0.0, 0.0);
+    let pos_f_direct = glam::DVec3::new(8.0e12, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let template_acc = snap.accounts.values().next().unwrap().clone();
+        let template_ch = snap.characters.values().next().unwrap().clone();
+        for (idx, (cid, sid)) in [(char_fc, ship_fc), (char_wing, ship_wing)].into_iter().enumerate() {
+            let uid = 959_850 + idx as u64;
+            let mut acc = template_acc.clone();
+            acc.user_id = uid;
+            acc.username = format!("own_r3_fleet_{idx}");
+            snap.accounts.insert(acc.username.clone(), acc);
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: i64::from(sys_id),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let mut ch = template_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+        }
+        snap.bookmarks.insert(
+            bm_f_enc,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_f_enc,
+                owner_id: char_fc,
+                solar_system_id: sys_id,
+                label: "OWN R3 Fleet Enc".into(),
+                x: pos_f_enc.x,
+                y: pos_f_enc.y,
+                z: pos_f_enc.z,
+                item_id: None,
+                memo: "Mission Pocket".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_fc, mid_f_enc, ag_fleet_enc, sys_id)
+                .bookmark_id(Some(bm_f_enc))
+                .site_origin_m(Some([pos_f_enc.x as i64, 0, 0]))
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+        for (bid, aid, mid_m, ag_id, origin) in [
+            (bm_f_mine, ast_f_mine, mid_f_mine, ag_fleet_mine, pos_f_mine),
+            (bm_f_direct, ast_f_direct, mid_f_direct, ag_fleet_direct, pos_f_direct),
+        ] {
+            snap.bookmarks.insert(
+                bid,
+                eve_db::BookmarkRecord {
+                    bookmark_id: bid,
+                    owner_id: char_fc,
+                    solar_system_id: sys_id,
+                    label: format!("OWN R3 Fleet Mine {mid_m}"),
+                    x: origin.x,
+                    y: origin.y,
+                    z: origin.z,
+                    item_id: None,
+                    memo: "Mission Pocket".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+            snap.asteroids.insert(
+                aid,
+                eve_db::AsteroidRecord {
+                    asteroid_id: aid,
+                    solar_system_id: sys_id,
+                    belt_id: 0,
+                    type_id: 1230,
+                    quantity: 5_000,
+                    initial_quantity: 5_000,
+                    position: (origin.x + 8_000.0, origin.y, origin.z),
+                    radius: 50.0,
+                },
+            );
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_fc, mid_m, ag_id, sys_id)
+                    .bookmark_id(Some(bid))
+                    .site_origin_m(Some([origin.x as i64, 0, 0]))
+                    .asteroid_entity_id(Some(aid))
+                    .required_delivery_type_id(Some(1230))
+                    .required_delivery_qty(100),
+            );
+            snap.missions
+                .update_by_character_template(char_fc, mid_m, |m| {
+                    m.kind = eve_db::MissionKind::Mining;
+                })
+                .unwrap();
+        }
+        let mut member_details = HashMap::new();
+        member_details.insert(
+            char_fc,
+            eve_db::FleetMemberRecord {
+                character_id: char_fc,
+                role: eve_db::FleetRole::FleetCommander,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        member_details.insert(
+            char_wing,
+            eve_db::FleetMemberRecord {
+                character_id: char_wing,
+                role: eve_db::FleetRole::SquadMember,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            fleet_id,
+            eve_db::FleetRecord {
+                fleet_id,
+                boss_id: char_fc,
+                members: vec![char_fc, char_wing],
+                member_details,
+                ..Default::default()
+            },
+        );
+    });
+
+    for (sid, offset) in [
+        (ship_fc, glam::DVec3::ZERO),
+        (ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+    ] {
+        let mut cs = ctx.build_type_combat_state(587);
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+        solo_handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: offset,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 2.0,
+                    mass: 1_067_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                cs,
+            )
+            .await
+            .unwrap();
+    }
+    let now = ctx.now_unix();
+    for (idx, cid) in [char_fc, char_wing].into_iter().enumerate() {
+        ctx.db
+            .acquire_online_lock(959_850 + idx as u64, 959_870 + idx as u64, Some(cid), true, now)
+            .expect("online lock");
+    }
+
+    let mut f_sess = docked_session(char_fc, sys_id, None);
+    f_sess.user_id = Some(959_850);
+    f_sess.session_id = 959_870;
+    f_sess.ship_id = Some(ship_fc);
+    f_sess.fleet_id = Some(fleet_id);
+    let mut fleet_kw = HashMap::new();
+    fleet_kw.insert("fleet".into(), PyRep::Bool(true));
+
+    let fb_enc_id = 959_840_i64;
+    let fb_mine_id = 959_841_i64;
+    solo_handle
+        .add_warp_bubble(fb_enc_id, pos_f_enc - glam::DVec3::new(500_000.0, 0.0, 0.0), 20_000.0)
+        .await
+        .unwrap();
+    solo_handle
+        .add_warp_bubble(fb_mine_id, pos_f_mine - glam::DVec3::new(500_000.0, 0.0, 0.0), 20_000.0)
+        .await
+        .unwrap();
+    for (bid, is_enc) in [(bm_f_enc, true), (bm_f_mine, false)] {
+        for (sid, offset) in [
+            (ship_fc, glam::DVec3::ZERO),
+            (ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+        ] {
+            let _ = solo_handle.set_movement_mode(sid, eve_destiny::MovementMode::Stop).await;
+            let _ = solo_handle.set_ball_position(sid, offset).await;
+            solo_handle.try_update_combat_state(sid, |cs| {
+                cs.capacitor = 250.0;
+                cs.max_capacitor = 250.0;
+            });
+        }
+        let _ = ctx
+            .dispatch_rpc(
+                &mut f_sess,
+                "beyonce",
+                None,
+                "CmdWarpToStuff",
+                &[
+                    PyRep::String("bookmark".into()),
+                    PyRep::Integer(bid),
+                    PyRep::Real(0.0),
+                ],
+                &fleet_kw,
+                None,
+            )
+            .await
+            .expect("bubbled fleet CmdWarpToStuff succeeds");
+        if is_enc {
+            ctx.db.with_snapshot(|snap| {
+                assert!(mission_fixture::get(snap, char_fc, mid_f_enc).unwrap().spawned_npc_ball_ids.is_empty());
+            });
+        } else {
+            assert!(solo_handle.get_ball_snapshot(ast_f_mine).await.unwrap().is_none());
+        }
+    }
+
+    assert!(solo_handle.remove_warp_bubble(fb_enc_id).await.unwrap());
+    assert!(solo_handle.remove_warp_bubble(fb_mine_id).await.unwrap());
+    let mut enc_first_bids = Vec::new();
+    for (run_idx, (bid, is_enc)) in [
+        (bm_f_enc, true),
+        (bm_f_enc, true), // verify idempotence on repeat fleet bookmark warp
+        (bm_f_mine, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (sid, offset, cap) in [
+            (ship_fc, glam::DVec3::ZERO, 10.0),
+            (ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0), 250.0),
+        ] {
+            let _ = solo_handle.set_movement_mode(sid, eve_destiny::MovementMode::Stop).await;
+            let _ = solo_handle.set_ball_position(sid, offset).await;
+            solo_handle.try_update_combat_state(sid, |cs| {
+                cs.capacitor = cap;
+                cs.max_capacitor = 250.0;
+            });
+        }
+        let _ = ctx
+            .dispatch_rpc(
+                &mut f_sess,
+                "beyonce",
+                None,
+                "CmdWarpToStuff",
+                &[
+                    PyRep::String("bookmark".into()),
+                    PyRep::Integer(bid),
+                    PyRep::Real(0.0),
+                ],
+                &fleet_kw,
+                None,
+            )
+            .await
+            .expect("fleet CmdWarpToStuff(bookmark) succeeds");
+        if is_enc {
+            let bids = ctx.db.with_snapshot(|snap| {
+                mission_fixture::get(snap, char_fc, mid_f_enc).unwrap().spawned_npc_ball_ids
+            });
+            assert_eq!(bids.len(), 2);
+            if run_idx == 0 {
+                enc_first_bids = bids;
+            } else {
+                assert_eq!(bids, enc_first_bids);
+            }
+        } else {
+            assert!(solo_handle.get_ball_snapshot(ast_f_mine).await.unwrap().is_some());
+        }
+    }
+
+    // Direct handle_fleet_warp([bm_f_direct]) path must also materialize mission pocket.
+    for (sid, offset) in [
+        (ship_fc, glam::DVec3::ZERO),
+        (ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+    ] {
+        let _ = solo_handle.set_movement_mode(sid, eve_destiny::MovementMode::Stop).await;
+        let _ = solo_handle.set_ball_position(sid, offset).await;
+        solo_handle.try_update_combat_state(sid, |cs| {
+            cs.capacitor = 250.0;
+            cs.max_capacitor = 250.0;
+        });
+    }
+    let _ = crate::services::fleet_social::fleet_social_fleet_ops::handle_fleet_warp(
+        &ctx,
+        &f_sess,
+        &[PyRep::Integer(bm_f_direct)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("direct handle_fleet_warp(bm) succeeds");
+    assert!(solo_handle.get_ball_snapshot(ast_f_direct).await.unwrap().is_some());
 }

@@ -1377,6 +1377,7 @@ pub(crate) async fn handle_fleet_warp(
         .map(|(_, b)| b.position);
     let now_unix = ctx.now_unix();
     let mut dest_is_bookmark = false;
+    let mut dest_is_mission = false;
     let dest_pos = if let Some(pos) = explicit_dest {
         pos
     } else if let Ok(Some((_, b))) = sys.get_ball_snapshot(dest_id).await {
@@ -1426,6 +1427,11 @@ pub(crate) async fn handle_fleet_warp(
         .and_then(|s| s.stations.iter().find(|st| st.station_id == dest_id))
     {
         DVec3::new(st.position.x, st.position.y, st.position.z)
+    } else if let Some(m_pos) = crate::services::agents_missions::agents_missions_warp::resolve_accepted_mission_warp_origin(
+        ctx, char_id, sys_id, dest_id,
+    ) {
+        dest_is_mission = true;
+        m_pos
     } else {
         DVec3::new(150_000_000.0, 0.0, 0.0)
     };
@@ -1465,6 +1471,7 @@ pub(crate) async fn handle_fleet_warp(
         .unwrap_or(DVec3::X);
     let anchor_pos = dest_pos - fleet_warp_dir * min_range;
     let mut warped_members = Vec::new();
+    let mut warped_landings = Vec::new();
     let mut landing_positions = Vec::new();
     let mut ess_bubble_blocked = false;
     let mut deadspace_blocked = false;
@@ -1649,6 +1656,7 @@ pub(crate) async fn handle_fleet_warp(
         .is_ok()
         {
             warped_members.push(PyRep::Integer(member_char_id));
+            warped_landings.push((member_char_id, landing));
             landing_positions.push(PyRep::Tuple(vec![
                 PyRep::Integer(member_char_id),
                 PyRep::Real(landing.x),
@@ -1684,6 +1692,20 @@ pub(crate) async fn handle_fleet_warp(
                 char_id: opt_out_cid,
             },
         );
+    }
+
+    if (dest_is_bookmark || dest_is_mission) && !warped_landings.is_empty() {
+        let stuff_type = if dest_is_bookmark { "bookmark" } else { "mission" };
+        crate::services::agents_missions::agents_missions_warp::materialize_mission_pocket_on_fleet_warp(
+            ctx,
+            &sys,
+            char_id,
+            sys_id,
+            stuff_type,
+            dest_id,
+            &warped_landings,
+        )
+        .await;
     }
 
     Some(Ok(PyRep::keyval([
