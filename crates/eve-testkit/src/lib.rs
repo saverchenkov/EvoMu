@@ -22,6 +22,7 @@ pub mod shadow_client;
 pub mod system_lifecycle_ratchet;
 pub mod test_fixture_ratchet;
 pub mod test_sde;
+pub mod unmapped_custom_info_ratchet;
 
 pub use test_sde::TestSde;
 

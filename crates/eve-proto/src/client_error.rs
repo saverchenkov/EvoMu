@@ -2058,6 +2058,12 @@ impl BridgeRpcError {
     /// Converts this [`BridgeRpcError`] into a typed [`ClientError`] without parsing or scraping
     /// `self.message`.
     pub fn to_client_error(&self, service: &str, method: &str) -> ClientError {
+        self.to_client_error_mapped(service, method).client_error
+    }
+
+    /// Converts this [`BridgeRpcError`] into a typed [`ClientError`] and reports whether the
+    /// final unmapped `_ => CustomInfo` fallback fired (`#1195`).
+    pub fn to_client_error_mapped(&self, service: &str, method: &str) -> ClientErrorMapping {
         let is_slash_rpc =
             matches!(service.trim(), "slash" | "publicQaToolsServer") && method == "SlashCmd";
 
@@ -2073,127 +2079,191 @@ impl BridgeRpcError {
                 }
             );
             if !is_slash_rpc || is_typed_slash {
-                return (**typed).clone();
+                return ClientErrorMapping {
+                    client_error: (**typed).clone(),
+                    used_unmapped_custom_info_fallback: false,
+                };
             }
         }
 
         let err_msg = format!("{}: {}", self.code, self.message);
-        match self.code.as_str() {
-            "UnimplementedRPC" => ClientError::Unimplemented {
-                service: service.to_string(),
-                method: method.to_string(),
-            },
-            "InternalError" | "DatabasePersistenceError" => ClientError::Internal(err_msg),
+        let (client_error, used_unmapped_custom_info_fallback) = match self.code.as_str() {
+            "UnimplementedRPC" => (
+                ClientError::Unimplemented {
+                    service: service.to_string(),
+                    method: method.to_string(),
+                },
+                false,
+            ),
+            "InternalError" | "DatabasePersistenceError" => (ClientError::Internal(err_msg), false),
             "FakeItemNotFound" | "CharacterNotAtStation" => {
-                ClientError::Internal(self.code.clone())
+                (ClientError::Internal(self.code.clone()), false)
             }
             "InvalidBoundObject"
             | "BoundObjectNotOwned"
             | "BoundObjectOwnershipViolation"
             | "BindAuthorizationDenied"
-            | "UnMachoDestination" => ClientError::SessionMismatch(err_msg),
-            "SlashError" => ClientError::user_with_args(
-                UserErrorKey::SlashError,
-                [("reason", UserErrorArg::Str(self.message.clone()))],
+            | "UnMachoDestination" => (ClientError::SessionMismatch(err_msg), false),
+            "SlashError" => (
+                ClientError::user_with_args(
+                    UserErrorKey::SlashError,
+                    [("reason", UserErrorArg::Str(self.message.clone()))],
+                ),
+                false,
             ),
-            "UnknownSlashCommand" | "InvalidSlashArgument" | "InvalidSlashArguments" => {
+            "UnknownSlashCommand" | "InvalidSlashArgument" | "InvalidSlashArguments" => (
                 ClientError::user_with_args(
                     UserErrorKey::SlashError,
                     [("reason", UserErrorArg::Str(err_msg))],
-                )
-            }
-            _ if is_slash_rpc => ClientError::user_with_args(
-                UserErrorKey::SlashError,
-                [("reason", UserErrorArg::Str(err_msg))],
+                ),
+                false,
             ),
-            "MaxOpenOrdersReached" => ClientError::User {
-                key: UserErrorKey::MarketExceededOrderCount,
-                args: UserErrorKey::MarketExceededOrderCount.default_args(),
-            },
+            _ if is_slash_rpc => (
+                ClientError::user_with_args(
+                    UserErrorKey::SlashError,
+                    [("reason", UserErrorArg::Str(err_msg))],
+                ),
+                false,
+            ),
+            "MaxOpenOrdersReached" => (
+                ClientError::User {
+                    key: UserErrorKey::MarketExceededOrderCount,
+                    args: UserErrorKey::MarketExceededOrderCount.default_args(),
+                },
+                false,
+            ),
             "OutsideDockingPerimeter" | "DockingApproach" => {
-                ClientError::user(UserErrorKey::DockingApproach)
+                (ClientError::user(UserErrorKey::DockingApproach), false)
             }
             "WarpDistanceTooShort" | "WarpTooShort" => {
-                ClientError::user(UserErrorKey::WarpTooShort)
+                (ClientError::user(UserErrorKey::WarpTooShort), false)
             }
             "InvalidWarpDestination" | "WarpDestinationGone" => {
-                ClientError::user(UserErrorKey::WarpDestinationGone)
+                (ClientError::user(UserErrorKey::WarpDestinationGone), false)
             }
-            "TargetOutOfRange" => ClientError::User {
-                key: UserErrorKey::TargetTooFar,
-                args: UserErrorKey::TargetTooFar.default_args(),
-            },
-            "TargetingFailed" => ClientError::user(UserErrorKey::UnableToTarget),
-            "CantActivateInWarp" | "DeniedActivateInWarp" => {
-                ClientError::user(UserErrorKey::DeniedActivateInWarp)
-            }
-            "NoChargesLoaded" | "NoAmmoLoaded" => ClientError::User {
-                key: UserErrorKey::NoCharges,
-                args: UserErrorKey::NoCharges.default_args(),
-            },
-            "QuantumCoreRequired" => ClientError::User {
-                key: UserErrorKey::CannotUseFittingInStructureWithoutDeed,
-                args: UserErrorKey::CannotUseFittingInStructureWithoutDeed.default_args(),
-            },
-            "ShipAlreadyInWarp" | "ShipInWarp" => ClientError::user(UserErrorKey::ShipInWarp),
-            "NotEnoughCapacitor" => ClientError::User {
-                key: UserErrorKey::NotEnoughEnergy,
-                args: UserErrorKey::NotEnoughEnergy.default_args(),
-            },
-            "ShipNotInSpace" => ClientError::user(UserErrorKey::CantShipNotPresent),
-            "FittingValidationFailed" => ClientError::user_with_args(
-                UserErrorKey::ModuleFitFailed,
-                [
-                    ("moduleName", UserErrorArg::Str("Module".to_owned())),
-                    ("reason", UserErrorArg::Str(self.message.clone())),
-                ],
+            "TargetOutOfRange" => (
+                ClientError::User {
+                    key: UserErrorKey::TargetTooFar,
+                    args: UserErrorKey::TargetTooFar.default_args(),
+                },
+                false,
             ),
-            "CannotFitStackedModule" => {
-                ClientError::user(UserErrorKey::CannotPerformOnMultipleItems)
+            "TargetingFailed" => (ClientError::user(UserErrorKey::UnableToTarget), false),
+            "CantActivateInWarp" | "DeniedActivateInWarp" => {
+                (ClientError::user(UserErrorKey::DeniedActivateInWarp), false)
             }
-            "InvalidTarget" => ClientError::User {
-                key: UserErrorKey::InvalidTargetForModule,
-                args: UserErrorKey::InvalidTargetForModule.default_args(),
-            },
-            "InventoryNotAccessible" => ClientError::user(UserErrorKey::AccessDenied),
+            "NoChargesLoaded" | "NoAmmoLoaded" => (
+                ClientError::User {
+                    key: UserErrorKey::NoCharges,
+                    args: UserErrorKey::NoCharges.default_args(),
+                },
+                false,
+            ),
+            "QuantumCoreRequired" => (
+                ClientError::User {
+                    key: UserErrorKey::CannotUseFittingInStructureWithoutDeed,
+                    args: UserErrorKey::CannotUseFittingInStructureWithoutDeed.default_args(),
+                },
+                false,
+            ),
+            "ShipAlreadyInWarp" | "ShipInWarp" => {
+                (ClientError::user(UserErrorKey::ShipInWarp), false)
+            }
+            "NotEnoughCapacitor" => (
+                ClientError::User {
+                    key: UserErrorKey::NotEnoughEnergy,
+                    args: UserErrorKey::NotEnoughEnergy.default_args(),
+                },
+                false,
+            ),
+            "ShipNotInSpace" => (ClientError::user(UserErrorKey::CantShipNotPresent), false),
+            "FittingValidationFailed" => (
+                ClientError::user_with_args(
+                    UserErrorKey::ModuleFitFailed,
+                    [
+                        ("moduleName", UserErrorArg::Str("Module".to_owned())),
+                        ("reason", UserErrorArg::Str(self.message.clone())),
+                    ],
+                ),
+                false,
+            ),
+            "CannotFitStackedModule" => (
+                ClientError::user(UserErrorKey::CannotPerformOnMultipleItems),
+                false,
+            ),
+            "InvalidTarget" => (
+                ClientError::User {
+                    key: UserErrorKey::InvalidTargetForModule,
+                    args: UserErrorKey::InvalidTargetForModule.default_args(),
+                },
+                false,
+            ),
+            "InventoryNotAccessible" => (ClientError::user(UserErrorKey::AccessDenied), false),
             "MustBeDockedAtStartStation" | "MustBeDocked" => {
-                ClientError::user(UserErrorKey::MustBeDocked)
+                (ClientError::user(UserErrorKey::MustBeDocked), false)
             }
-            "StructureNotDockable" => ClientError::user(UserErrorKey::NotDockable),
-            "StructureServiceAccessDenied" => ClientError::User {
-                key: UserErrorKey::StructureServiceUnavailable,
-                args: UserErrorKey::StructureServiceUnavailable.default_args(),
-            },
-            "WeaponsTimerActive" => ClientError::user(UserErrorKey::CantDockAfterAggression),
-            "CannotJumpWithWeaponsTimer" => {
-                ClientError::user(UserErrorKey::CantJumpAfterAggression)
+            "StructureNotDockable" => (ClientError::user(UserErrorKey::NotDockable), false),
+            "StructureServiceAccessDenied" => (
+                ClientError::User {
+                    key: UserErrorKey::StructureServiceUnavailable,
+                    args: UserErrorKey::StructureServiceUnavailable.default_args(),
+                },
+                false,
+            ),
+            "WeaponsTimerActive" => {
+                (ClientError::user(UserErrorKey::CantDockAfterAggression), false)
             }
-            "InvalidContractState" => ClientError::user(UserErrorKey::ConContractNotOutstanding),
-            "ModuleNotFound" => ClientError::user(UserErrorKey::ItemNotFound),
-            "OwnershipOrLocationViolation" => {
-                ClientError::user(UserErrorKey::CantDoThatWithSomeoneElsesStuff)
-            }
-            "ContractOwnershipViolation" => ClientError::user(UserErrorKey::AccessDenied),
+            "CannotJumpWithWeaponsTimer" => (
+                ClientError::user(UserErrorKey::CantJumpAfterAggression),
+                false,
+            ),
+            "InvalidContractState" => (
+                ClientError::user(UserErrorKey::ConContractNotOutstanding),
+                false,
+            ),
+            "ModuleNotFound" => (ClientError::user(UserErrorKey::ItemNotFound), false),
+            "OwnershipOrLocationViolation" => (
+                ClientError::user(UserErrorKey::CantDoThatWithSomeoneElsesStuff),
+                false,
+            ),
+            "ContractOwnershipViolation" => (ClientError::user(UserErrorKey::AccessDenied), false),
             "InsufficientRole"
             | "GM_InsufficientRole"
             | "UserError: GM_InsufficientRole"
             | "InsufficientRoles"
             | "GMRoleRequired"
-            | "GmRoleRequired" => ClientError::user(UserErrorKey::InsufficientRoles),
-            "CustomInfo" => ClientError::CustomInfo(self.message.clone()),
-            "CustomNotify" => ClientError::CustomNotify(self.message.clone()),
+            | "GmRoleRequired" => (ClientError::user(UserErrorKey::InsufficientRoles), false),
+            "CustomInfo" => (ClientError::CustomInfo(self.message.clone()), false),
+            "CustomNotify" => (ClientError::CustomNotify(self.message.clone()), false),
             _ => {
                 if let Some(key) = UserErrorKey::from_code(&self.code) {
-                    ClientError::User {
-                        key,
-                        args: key.default_args_with_message(&self.message),
-                    }
+                    (
+                        ClientError::User {
+                            key,
+                            args: key.default_args_with_message(&self.message),
+                        },
+                        false,
+                    )
                 } else {
-                    ClientError::CustomInfo(err_msg)
+                    (ClientError::CustomInfo(err_msg), true)
                 }
             }
+        };
+        ClientErrorMapping {
+            client_error,
+            used_unmapped_custom_info_fallback,
         }
     }
+}
+
+/// Result of mapping a [`BridgeRpcError`] onto the `:26000` wire [`ClientError`],
+/// distinguishing explicit client mappings from the unmapped `_ => CustomInfo` fallback (`#1195`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientErrorMapping {
+    pub client_error: ClientError,
+    /// `true` iff no explicit `BridgeRpcError.client_error`, table arm, or
+    /// `UserErrorKey::from_code` matched and conversion fell through to `_ => CustomInfo`.
+    pub used_unmapped_custom_info_fallback: bool,
 }
 
 

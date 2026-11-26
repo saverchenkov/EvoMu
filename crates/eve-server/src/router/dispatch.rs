@@ -1610,6 +1610,11 @@ impl ServerContext {
                     )
                 }
             };
+            let result = crate::router::rpc_fault_policy::apply_rpc_fault_policy(
+                effective_service,
+                method,
+                result,
+            );
             return result;
         }
 

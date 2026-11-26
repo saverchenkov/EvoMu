@@ -706,3 +706,97 @@ fn gh1195_t1_targeting_warp_phase_and_activate_in_warp_map_without_custom_info()
         assert_ne!(wire_key, "CustomInfo");
     }
 }
+
+#[test]
+fn to_client_error_mapped_flags_only_unmapped_custom_info_fallback() {
+    let unmapped = BridgeRpcError {
+        code: "CompletelyUnknownInternalCode".into(),
+        message: "something went wrong".into(),
+        client_error: None,
+    };
+    let mapped_unmapped = unmapped.to_client_error_mapped("dogmaIM", "Activate");
+    assert!(mapped_unmapped.used_unmapped_custom_info_fallback);
+    assert_eq!(
+        mapped_unmapped.client_error,
+        ClientError::CustomInfo("CompletelyUnknownInternalCode: something went wrong".into())
+    );
+    assert_eq!(
+        unmapped.to_client_error("dogmaIM", "Activate"),
+        mapped_unmapped.client_error
+    );
+
+    let explicit_custom_info = BridgeRpcError::custom_info("modal text");
+    let mapped_explicit = explicit_custom_info.to_client_error_mapped("dogmaIM", "Activate");
+    assert!(!mapped_explicit.used_unmapped_custom_info_fallback);
+    assert_eq!(
+        mapped_explicit.client_error,
+        ClientError::CustomInfo("modal text".into())
+    );
+
+    let typed_with_unknown_code = BridgeRpcError::with_client_error(
+        "UnlistedDomainTag",
+        "ignored detail",
+        ClientError::CustomInfo("explicit modal".into()),
+    );
+    assert!(
+        !typed_with_unknown_code
+            .to_client_error_mapped("ship", "GetDirtTimestamp")
+            .used_unmapped_custom_info_fallback
+    );
+
+    let code_custom_info = BridgeRpcError {
+        code: "CustomInfo".into(),
+        message: "raw custom info".into(),
+        client_error: None,
+    };
+    let mapped_code_info = code_custom_info.to_client_error_mapped("ship", "GetDirtTimestamp");
+    assert!(!mapped_code_info.used_unmapped_custom_info_fallback);
+    assert_eq!(
+        mapped_code_info.client_error,
+        ClientError::CustomInfo("raw custom info".into())
+    );
+
+    let code_custom_notify = BridgeRpcError {
+        code: "CustomNotify".into(),
+        message: "raw custom notify".into(),
+        client_error: None,
+    };
+    let mapped_code_notify = code_custom_notify.to_client_error_mapped("ship", "GetDirtTimestamp");
+    assert!(!mapped_code_notify.used_unmapped_custom_info_fallback);
+    assert_eq!(
+        mapped_code_notify.client_error,
+        ClientError::CustomNotify("raw custom notify".into())
+    );
+
+    for &key in UserErrorKey::ALL {
+        let untyped_known_key = BridgeRpcError {
+            code: key.as_str().into(),
+            message: "msg".into(),
+            client_error: None,
+        };
+        let mapped = untyped_known_key.to_client_error_mapped("dogmaIM", "Activate");
+        assert!(
+            !mapped.used_unmapped_custom_info_fallback,
+            "UserErrorKey::{key:?} must not count as an unmapped fallback"
+        );
+    }
+
+    // rpc-lint: allow test iterates real slash services paired below with synthetic error code
+    for svc in ["slash", " slash ", "publicQaToolsServer"] {
+        let slash_err = BridgeRpcError {
+            // rpc-lint: allow synthetic unmapped error code tested against slash.SlashCmd fallback
+            code: "CompletelyUnknownInternalCode".into(),
+            message: "bad command".into(),
+            client_error: None,
+        };
+        let mapped = slash_err.to_client_error_mapped(svc, "SlashCmd");
+        assert!(!mapped.used_unmapped_custom_info_fallback);
+        assert!(matches!(
+            mapped.client_error,
+            ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            }
+        ));
+    }
+}

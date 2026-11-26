@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use eve_proto::PyRep;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +29,10 @@ const MAX_TRACKED_SESSIONS: usize = 512;
 const MAX_ARGS_REPR_LEN: usize = 160;
 const MAX_UNAUTH_WARN_KEYS: usize = 64;
 const UNAUTH_WARN_RATE_LIMIT_SECS: u64 = 10;
+pub const MAX_UNMAPPED_CUSTOM_INFO_KEYS: usize = 1_024;
+pub const UNMAPPED_CUSTOM_INFO_OVERFLOW_KEY: &str = "<overflow>";
+const MAX_INDIVIDUAL_UNMAPPED_CUSTOM_INFO_KEYS: usize =
+    MAX_UNMAPPED_CUSTOM_INFO_KEYS.saturating_sub(1);
 
 fn is_valid_rpc_latency_segment(segment: &str) -> bool {
     !segment.is_empty()
@@ -399,6 +403,8 @@ pub struct FlightRecorder {
     user_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
     quasar_unauth_warn_times: RwLock<HashMap<(Option<IpAddr>, &'static str), u64>>,
     quasar_unauth_warn_fallback_unix: AtomicU64,
+    unmapped_custom_info_fallback_total: AtomicU64,
+    unmapped_custom_info_fallback_counts: RwLock<BTreeMap<String, u64>>,
 }
 
 impl Default for FlightRecorder {
@@ -433,6 +439,8 @@ impl FlightRecorder {
             user_handshakes: RwLock::new(HashMap::new()),
             quasar_unauth_warn_times: RwLock::new(HashMap::new()),
             quasar_unauth_warn_fallback_unix: AtomicU64::new(0),
+            unmapped_custom_info_fallback_total: AtomicU64::new(0),
+            unmapped_custom_info_fallback_counts: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -1178,6 +1186,52 @@ impl FlightRecorder {
             gateway_request_count,
             handshake,
         }
+    }
+
+    /// Records an unmapped [`eve_proto::BridgeRpcError`] fallback to wire `CustomInfo` (`#1195`).
+    ///
+    /// Increments the total instance fallback counter and a bounded per-`"{service}.{method}:{code}"`
+    /// map (`<= MAX_UNMAPPED_CUSTOM_INFO_KEYS`, spilling excess distinct keys into
+    /// [`UNMAPPED_CUSTOM_INFO_OVERFLOW_KEY`]), returning the updated count for that bucket.
+    pub fn record_unmapped_custom_info_fallback(
+        &self,
+        service: &str,
+        method: &str,
+        code: &str,
+    ) -> u64 {
+        self.unmapped_custom_info_fallback_total
+            .fetch_add(1, Ordering::Relaxed);
+        let key = format!("{service}.{method}:{code}");
+        let mut counts = self
+            .unmapped_custom_info_fallback_counts
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = if counts.contains_key(&key)
+            || counts.len() < MAX_INDIVIDUAL_UNMAPPED_CUSTOM_INFO_KEYS
+        {
+            counts.entry(key).or_insert(0)
+        } else {
+            counts
+                .entry(UNMAPPED_CUSTOM_INFO_OVERFLOW_KEY.to_owned())
+                .or_insert(0)
+        };
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    /// Total count of unmapped `BridgeRpcError -> CustomInfo` wire fallbacks recorded on this
+    /// instance (`#1195`).
+    pub fn unmapped_custom_info_fallback_total(&self) -> u64 {
+        self.unmapped_custom_info_fallback_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of per-`"{service}.{method}:{code}"` unmapped `CustomInfo` fallback counts (`#1195`).
+    pub fn unmapped_custom_info_fallback_counts(&self) -> BTreeMap<String, u64> {
+        self.unmapped_custom_info_fallback_counts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 

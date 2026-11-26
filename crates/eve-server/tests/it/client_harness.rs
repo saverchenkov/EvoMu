@@ -804,3 +804,255 @@ async fn test_client_harness_enforces_read_only_no_commit_contract_live_wire() {
     .expect_err("default Ratcheted ClientHarness must panic on read_rpc_committed");
     assert!(panic_err.is_panic());
 }
+
+fn decode_wire_user_error_key(wire_body: &PyRep) -> String {
+    let PyRep::Tuple(parts) = wire_body else {
+        panic!("expected Macho ErrorResponse tuple, got {wire_body:?}");
+    };
+    assert_eq!(
+        parts.get(1),
+        Some(&PyRep::Integer(eve_proto::MACHONETERR_WRAPPEDEXCEPTION)),
+        "expected MACHONETERR_WRAPPEDEXCEPTION wire wrapper"
+    );
+    let PyRep::Tuple(inner) = parts.get(2).expect("error payload inner tuple") else {
+        panic!("expected inner ErrorResponse tuple, got {:?}", parts.get(2));
+    };
+    let PyRep::Bytes(raw) = inner.first().expect("marshaled exception bytes") else {
+        panic!("expected marshaled exception Bytes, got {:?}", inner.first());
+    };
+    let PyRep::ObjectEx { header, .. } =
+        eve_proto::marshal::decode(raw).expect("decode wrapped exception ObjectEx")
+    else {
+        panic!("expected ObjectEx exception");
+    };
+    let PyRep::Tuple(h) = header.as_ref() else {
+        panic!("expected ObjectEx header tuple");
+    };
+    assert_eq!(
+        h.first(),
+        Some(&PyRep::Token("eveexceptions.UserError".into())),
+        "expected eveexceptions.UserError, got {:?}",
+        h.first()
+    );
+    let PyRep::Tuple(u_args) = h.get(1).expect("UserError header args") else {
+        panic!("expected UserError header args tuple");
+    };
+    u_args
+        .first()
+        .and_then(PyRep::as_str)
+        .expect("UserError key string")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn test_fault_policy_wire_delivery_dogma_load_ammo_and_beyonce_warp_in_warp() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.seed_demo_world_fixtures();
+    crate::common::pin_clock(&ctx);
+    let mut pilot =
+        crate::common::gm_pilot_in_space(&ctx, 70_130, 90_070_130, 587, 30_000_142).await;
+    assert_eq!(
+        ctx.flight_recorder.unmapped_custom_info_fallback_total(),
+        0,
+        "clean space bootstrap must record zero unmapped CustomInfo fallbacks"
+    );
+
+    let kw = HashMap::new();
+    let load_err = {
+        let mut harness = crate::common::borrow_wire_harness(&ctx, &mut pilot.sess);
+        harness
+            .call(
+                "dogmaIM",
+                None,
+                "LoadAmmo",
+                &[
+                    PyRep::Integer(pilot.ship_id),
+                    PyRep::List(Vec::new()),
+                    PyRep::List(vec![PyRep::Integer(999_999_999)]),
+                ],
+                &kw,
+            )
+            .await
+            .expect_err("dogmaIM.LoadAmmo missing charge must fail with ItemNotFound")
+    };
+    assert_eq!(load_err.code, "ItemNotFound");
+    assert!(!load_err.used_unmapped_custom_info_fallback);
+    assert_eq!(decode_wire_user_error_key(&load_err.wire_body), "ItemNotFound");
+
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    sys.set_movement_mode(
+        pilot.ship_id,
+        eve_destiny::MovementMode::Warp {
+            origin: eve_destiny::DVec3::ZERO,
+            destination: eve_destiny::DVec3::new(10_000_000.0, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 10_000_000.0,
+            elapsed_warp_time: 1.0,
+            phase: eve_destiny::WarpPhase::Cruising,
+        },
+    )
+    .await
+    .expect("put pilot ship in cruising warp");
+
+    let warp_err = {
+        let mut harness = crate::common::borrow_wire_harness(&ctx, &mut pilot.sess);
+        harness
+            .call(
+                "beyonce",
+                Some(pilot.beyonce),
+                "CmdWarpToStuff",
+                &[PyRep::String("item".into()), PyRep::Integer(60_003_760)],
+                &kw,
+            )
+            .await
+            .expect_err("beyonce.CmdWarpToStuff while warping must fail with ShipAlreadyInWarp")
+    };
+    assert_eq!(warp_err.code, "ShipAlreadyInWarp");
+    assert!(!warp_err.used_unmapped_custom_info_fallback);
+    assert_eq!(decode_wire_user_error_key(&warp_err.wire_body), "ShipInWarp");
+    assert_eq!(
+        ctx.flight_recorder.unmapped_custom_info_fallback_total(),
+        0,
+        "policy-mapped LoadAmmo and CmdWarpToStuff must not count as unmapped CustomInfo fallbacks"
+    );
+}
+
+#[tokio::test]
+async fn test_unmapped_custom_info_fallback_wire_telemetry_and_harness_gate() {
+    use eve_proto::BridgeRpcError;
+    use eve_server::router::rpc_registry::{
+        rpc_entry_with_caller, RpcCallerClass, RpcDispatchHandler, RpcEntry, RpcRegistry,
+    };
+    use eve_testkit::client_harness::ContractValidationMode;
+    use eve_testkit::unmapped_custom_info_ratchet::UnmappedCustomInfoRatchet;
+
+    fn test_unmapped_handler(
+        _ctx: &ServerContext,
+        _session: &mut SessionState,
+        _service: &str,
+        _method: &str,
+        _args: &[PyRep],
+        _kwargs: &HashMap<String, PyRep>,
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        Some(Err(BridgeRpcError {
+            code: "SyntheticUnmappedWireCode".into(),
+            message: "SyntheticUnmappedWireCode".into(),
+            client_error: None,
+        }))
+    }
+
+    static TEST_UNMAPPED_SLICE: &[RpcEntry] = &[rpc_entry_with_caller(
+        // rpc-lint: allow synthetic unmapped fault telemetry wire test RPC
+        "testUnmappedFaultSvc",
+        "TriggerUnmapped",
+        RpcCallerClass::PreAuth,
+        RpcDispatchHandler::Sync(test_unmapped_handler),
+    )];
+
+    let mut server = ServerContext::new();
+    server.rpc_registry = Arc::new(RpcRegistry::from_slices(&[TEST_UNMAPPED_SLICE]));
+    let ctx = Arc::new(server);
+    crate::common::pin_clock(&ctx);
+
+    let kw = HashMap::new();
+    let expected_key = "testUnmappedFaultSvc.TriggerUnmapped:SyntheticUnmappedWireCode";
+
+    // 1. ReportOnly records fallback violation and FlightRecorder telemetry without panicking.
+    let mut report_harness = crate::common::new_wire_harness(&ctx, 70_131)
+        .with_mode(ContractValidationMode::ReportOnly);
+    let report_out = report_harness
+        .call_exchange(
+            // rpc-lint: allow synthetic unmapped fault telemetry wire test RPC
+            "testUnmappedFaultSvc",
+            None,
+            "TriggerUnmapped",
+            &[],
+            &kw,
+        )
+        .await;
+    let report_err = report_out
+        .result
+        .expect_err("synthetic RPC must return wire ErrorResponse");
+    assert_eq!(report_err.code, "SyntheticUnmappedWireCode");
+    assert!(report_err.used_unmapped_custom_info_fallback);
+    assert!(
+        report_out
+            .violations
+            .contains(&format!("unmapped_custom_info_fallback: {expected_key}")),
+        "expected unmapped_custom_info_fallback violation, got {:?}",
+        report_out.violations
+    );
+    assert_eq!(ctx.flight_recorder.unmapped_custom_info_fallback_total(), 1);
+    assert_eq!(
+        ctx.flight_recorder
+            .unmapped_custom_info_fallback_counts()
+            .get(expected_key)
+            .copied(),
+        Some(1)
+    );
+
+    // 2. Default Ratcheted mode panics on unallowlisted fallback while FlightRecorder still counts.
+    let ctx_panic = Arc::clone(&ctx);
+    let panic_err = tokio::spawn(async move {
+        let mut h = crate::common::new_wire_harness(&ctx_panic, 70_132);
+        let res = h
+            .call(
+                // rpc-lint: allow synthetic unmapped fault telemetry wire test RPC
+                "testUnmappedFaultSvc",
+                None,
+                "TriggerUnmapped",
+                &[],
+                &HashMap::new(),
+            )
+            .await;
+        assert!(res.is_err());
+    })
+    .await
+    .expect_err("Ratcheted ClientHarness must panic on unallowlisted wire CustomInfo fallback");
+    assert!(panic_err.is_panic());
+    assert_eq!(ctx.flight_recorder.unmapped_custom_info_fallback_total(), 2);
+
+    // 3. Ratcheted with explicit ratchet entry permits it, whereas Strict still panics.
+    let allowlist = UnmappedCustomInfoRatchet {
+        version: 1,
+        description: "synthetic wire test allowlist".into(),
+        allowed_fallbacks: std::collections::BTreeSet::from([expected_key.to_owned()]),
+    };
+    let mut allowed_harness =
+        crate::common::new_wire_harness(&ctx, 70_133).with_unmapped_custom_info_ratchet(allowlist.clone());
+    let allowed_err = allowed_harness
+        .call(
+            // rpc-lint: allow synthetic unmapped fault telemetry wire test RPC
+            "testUnmappedFaultSvc",
+            None,
+            "TriggerUnmapped",
+            &[],
+            &kw,
+        )
+        .await
+        .expect_err("allowlisted fallback is returned cleanly in Ratcheted mode");
+    assert!(allowed_err.used_unmapped_custom_info_fallback);
+    assert_eq!(ctx.flight_recorder.unmapped_custom_info_fallback_total(), 3);
+
+    let ctx_strict = Arc::clone(&ctx);
+    let strict_err = tokio::spawn(async move {
+        let mut h = crate::common::new_wire_harness(&ctx_strict, 70_134)
+            .with_mode(ContractValidationMode::Strict)
+            .with_unmapped_custom_info_ratchet(allowlist);
+        let res = h
+            .call(
+                // rpc-lint: allow synthetic unmapped fault telemetry wire test RPC
+                "testUnmappedFaultSvc",
+                None,
+                "TriggerUnmapped",
+                &[],
+                &HashMap::new(),
+            )
+            .await;
+        assert!(res.is_err());
+    })
+    .await
+    .expect_err("Strict ClientHarness must reject even allowlisted wire CustomInfo fallback");
+    assert!(strict_err.is_panic());
+    assert_eq!(ctx.flight_recorder.unmapped_custom_info_fallback_total(), 4);
+}
