@@ -30,6 +30,13 @@ pub(crate) struct DeferredPostCycleEffects {
     pub burst_jammer_plan: Option<super::fitting_module_cycles::PreparedBurstJammerPlan>,
 }
 
+pub(crate) fn is_wear_only_non_singleton_crystal(item: &eve_db::InventoryItemRecord) -> bool {
+    !item.singleton && item.quantity == 1 && item.source_mutaplasmid_id.is_none()
+        && item.insured_payout_isk.is_finite() && item.insured_payout_isk == 0.0
+        && !item.dynamic_attributes.is_empty()
+        && item.dynamic_attributes.keys().all(|k| *k == eve_sde::attr_ids::DAMAGE || *k == eve_sde::attr_ids::HP_STRUCT)
+}
+
 fn is_weapon_autoload_stack_consumable(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -59,12 +66,14 @@ fn is_weapon_autoload_stack_consumable(
     let Some(ct) = ctx.sde.types.get(&item.type_id) else {
         return false;
     };
-    let is_crystal_singleton =
-        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663) && item.quantity == 1 && item.singleton;
-    if item.singleton && !is_crystal_singleton {
+    let is_crystal_type = matches!(ct.group_id, 86 | 374 | 375 | 482 | 663);
+    let is_crystal_exact = is_crystal_type
+        && item.quantity == 1
+        && (item.singleton || is_wear_only_non_singleton_crystal(item));
+    if item.singleton && !is_crystal_exact {
         return false;
     }
-    let policy = if is_crystal_singleton {
+    let policy = if is_crystal_exact {
         eve_db::ItemClassPolicy::ExactAssembledItem
     } else {
         eve_db::ItemClassPolicy::StackableCommodity
@@ -267,13 +276,15 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     let is_crystal_type = ctx.sde.types.get(&stack_pre.type_id).is_some_and(|ct| {
         matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
     });
-    let is_single_crystal_move =
-        is_crystal_type && stack_pre.quantity == 1 && stack_pre.singleton;
+    let is_single_crystal_move = is_crystal_type
+        && stack_pre.quantity == 1
+        && (stack_pre.singleton || is_wear_only_non_singleton_crystal(&stack_pre));
     if is_single_crystal_move && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
         let (tid, tf, _) = plan.slot_allocations[0];
         let mut moved = stack_pre.clone();
         if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
             st.flag = tf;
+            st.singleton = true;
             st.version += 1;
             st.dynamic_attributes = pre_dynamic_attributes.clone();
             st.source_mutaplasmid_id = pre_source_mutaplasmid_id;

@@ -1859,5 +1859,23 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
         snap.items.insert(pkg_crys_id, InventoryItemRecord { item_id: pkg_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() });
     });
     handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(pkg_crys_id)]).expect("clean 1-unit packaged crystal loads and unpacks");
-    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&pkg_crys_id].flag, snap.items[&pkg_crys_id].singleton, snap.items[&damaged_crys_id].flag), (InventoryFlag::HiSlot2, true, InventoryFlag::Cargo)); });
+    let (bad_ns_attr_crys_id, worn_ns_crys_id) = (96_103_018_i64, 96_103_019_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!((snap.items[&pkg_crys_id].flag, snap.items[&pkg_crys_id].singleton, snap.items[&damaged_crys_id].flag), (InventoryFlag::HiSlot2, true, InventoryFlag::Cargo));
+        snap.items.remove(&pkg_crys_id); snap.items.remove(&damaged_crys_id); snap.module_active_charges.remove(&laser_id);
+        snap.items.insert(bad_ns_attr_crys_id, InventoryItemRecord { item_id: bad_ns_attr_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, dynamic_attributes: HashMap::from([(999_u16, 1.0)]), ..Default::default() });
+    });
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().is_none());
+    let mut d_attr = DeferredPostCycleEffects::default(); d_attr.weapon_autoload = Some(PendingWeaponAutoload { cargo_stack_id: bad_ns_attr_crys_id, ammo_type_id: crystal_tid, owner_id: char_id, total_take: 1, slot_allocations: vec![(laser_id, InventoryFlag::HiSlot2, 1)], consume_one_round_per_slot: false });
+    assert_eq!(commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, laser_id, &laser_fm, &laser_t_ref, &laser_state, None, d_attr).await.unwrap_err().code, "NoCharges");
+    assert_eq!(handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(bad_ns_attr_crys_id)]).unwrap_err().code, "InventoryError");
+    ctx.db.with_mut_snapshot(|snap| { snap.items.insert(worn_ns_crys_id, InventoryItemRecord { item_id: worn_ns_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, dynamic_attributes: HashMap::from([(eve_sde::attr_ids::DAMAGE, 0.5)]), ..Default::default() }); });
+    let mut d_worn = DeferredPostCycleEffects::default(); d_worn.weapon_autoload = Some(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().expect("wear-only non-singleton crystal planned"));
+    assert_eq!(d_worn.weapon_autoload.as_ref().unwrap().cargo_stack_id, worn_ns_crys_id);
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, laser_id, &laser_fm, &laser_t_ref, &laser_state, None, d_worn).await.expect("wear-only non-singleton crystal autoload commits");
+    ctx.db.with_mut_snapshot(|snap| { let l = snap.items.get_mut(&worn_ns_crys_id).unwrap(); assert_eq!((l.flag, l.singleton, l.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::HiSlot2, true, Some(&0.5))); l.flag = InventoryFlag::Cargo; l.singleton = false; snap.module_active_charges.remove(&laser_id); });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(worn_ns_crys_id)]).expect("wear-only non-singleton crystal loads via handle_load_ammo");
+    ctx.db.with_mut_snapshot(|snap| { let l = snap.items.get_mut(&worn_ns_crys_id).unwrap(); assert_eq!((l.flag, l.singleton, l.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::HiSlot2, true, Some(&0.5))); l.singleton = false; snap.items.insert(pkg_crys_id, InventoryItemRecord { item_id: pkg_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() }); });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(pkg_crys_id)]).expect("unloading worn crystal normalizes singleton");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&worn_ns_crys_id].flag, snap.items[&worn_ns_crys_id].singleton, snap.items[&worn_ns_crys_id].dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::Cargo, true, Some(&0.5))); });
 }

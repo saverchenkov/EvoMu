@@ -978,8 +978,11 @@ pub(crate) fn handle_load_ammo(
             matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
         });
         let is_single_crystal_move = is_crystal_type
-            && pre_source.singleton
             && pre_source.quantity == 1
+            && (pre_source.singleton
+                || crate::services::inventory_fitting::fitting_ewar_capital::is_wear_only_non_singleton_crystal(
+                    &pre_source,
+                ))
             && mod_allocations.len() == 1
             && total_needed == 1;
         let policy = if is_single_crystal_move {
@@ -1019,6 +1022,14 @@ pub(crate) fn handle_load_ammo(
                 if let Some(pi) = snap.items.get_mut(&pid) {
                     let pre = pi.clone();
                     pi.flag = InventoryFlag::Cargo;
+                    if pi.quantity == 1
+                        && !pi.dynamic_attributes.is_empty()
+                        && ctx.sde.types.get(&pi.type_id).is_some_and(|ct| {
+                            matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
+                        })
+                    {
+                        pi.singleton = true;
+                    }
                     pi.version += 1;
                     diffs.push((Some(pre), Some(pi.clone())));
                 }

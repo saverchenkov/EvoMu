@@ -1165,7 +1165,6 @@ fn handle_import_export_with_planet(
 
         let customs_office_loc_id = orbital_id_opt.unwrap_or(planet_id);
         let commodity_opts = eve_db::ConsumeExactOptions {
-            policy: eve_db::ItemClassPolicy::StackableCommodity,
             active_ship_id: ship_id_opt,
             ..eve_db::ConsumeExactOptions::for_character_commodity(char_id)
         };
