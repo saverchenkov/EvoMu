@@ -892,14 +892,14 @@ async fn t3a_insufficient_role_handlers_emit_typed_facts() {
         } if *required_role_mask == service_roles::ROLE_GM_MASK && *actual_role_mask == session.role
     ));
 
-    let mut no_role_session = session.clone();
-    no_role_session.role = 0;
+    let mut player_sess = session.clone();
+    player_sess.role = service_roles::ROLE_PLAYER_DEFAULT;
     let fsd_err = services::notify_emitters_operations_nodegraph::reload_operations_fsd_data(
         &ctx,
-        &no_role_session,
+        &player_sess,
         char_id,
     )
-    .expect_err("role=0 reload_operations_fsd_data must fail");
+    .expect_err("ROLE_PLAYER_DEFAULT reload_operations_fsd_data must fail");
     let (facts, _) = assert_rejected_wire_facts(
         "operationsManager",
         "process_client_event",
@@ -911,10 +911,10 @@ async fn t3a_insufficient_role_handlers_emit_typed_facts() {
     assert_eq!(
         facts,
         &RejectionFacts::InsufficientRole {
-            required_role_mask: service_roles::ROLE_GM_DEFAULT
+            required_role_mask: service_roles::ROLE_GM_MASK
                 | service_roles::ROLE_CONTENT
                 | service_roles::ROLE_PROGRAMMER,
-            actual_role_mask: no_role_session.role,
+            actual_role_mask: player_sess.role,
             action: "reload_fsd_data".into(),
         }
     );
@@ -1080,9 +1080,8 @@ async fn t3a_ship_not_in_space_handlers_emit_typed_facts() {
     .expect("handled")
     .expect_err("docked LockFromBroadcast must fail with ShipNotInSpace");
     let (facts, _) = assert_rejected_wire_facts(
-        "fleetObjectHandler",
-        // rpc-lint: allow existing fleet_social_finder_tactical::handle_fleet_watchlist_ops test method
-        "LockFromBroadcast",
+        "fleet_social_finder_tactical",
+        "handle_fleet_watchlist_ops",
         Some(char_id),
         &lock_err,
         CODE_SHIP_NOT_IN_SPACE,
@@ -1358,14 +1357,14 @@ async fn t3a_module_not_found_handlers_emit_typed_facts() {
         CODE_MODULE_NOT_FOUND,
         UserErrorKey::ItemNotFound,
     );
-    assert!(matches!(
+    assert_eq!(
         facts,
-        RejectionFacts::ModuleNotFound {
-            module_id,
-            owner_entity_id: Some(owner),
-            ..
-        } if *module_id == missing_mod_id && *owner == titan_ship_id
-    ));
+        &RejectionFacts::ModuleNotFound {
+            module_id: missing_mod_id,
+            owner_entity_id: Some(titan_ship_id),
+            type_id: None,
+        }
+    );
 }
 
 #[tokio::test]
@@ -1505,9 +1504,12 @@ async fn t3a_fitting_validation_failed_and_burned_out_godma_handlers() {
         RejectionFacts::FittingValidationFailed {
             ship_id: Some(sid),
             item_id: Some(iid),
+            module_type_id: Some(mtid),
             reason,
-            ..
-        } if *sid == ship_id && *iid == cargo_mod_id && !reason.is_empty()
+        } if *sid == ship_id
+            && *iid == cargo_mod_id
+            && *mtid == i64::from(low_mod.0)
+            && !reason.is_empty()
     ));
 
     // 2. Fitted overloaded/missing-skill module SetModuleOnline -> carries module_type_id
@@ -1565,15 +1567,16 @@ async fn t3a_fitting_validation_failed_and_burned_out_godma_handlers() {
         CODE_FITTING_VALIDATION_FAILED,
         UserErrorKey::ModuleFitFailed,
     );
-    assert!(args.iter().any(|(k, _)| k == "moduleName"));
+    assert!(args.iter().any(|(k, v)| k == "moduleName" && v == &PyRep::String(low_mod.1.clone())));
     assert!(args.iter().any(|(k, _)| k == "reason"));
     assert!(matches!(
         facts,
         RejectionFacts::FittingValidationFailed {
             ship_id: Some(sid),
             item_id: Some(iid),
+            module_type_id: Some(mtid),
             ..
-        } if *sid == ship_id && *iid == cargo_mod_id
+        } if *sid == ship_id && *iid == cargo_mod_id && *mtid == i64::from(low_mod.0)
     ));
 
     // 4. ModuleBurnedOut branch must remain untouched
@@ -1662,7 +1665,15 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
         CODE_INVALID_TARGET,
         UserErrorKey::InvalidTargetGroup,
     );
-    assert!(args.iter().any(|(k, v)| k == "groupName" && v == &PyRep::String("Silo".into())));
+    let tritanium_group = ctx
+        .sde
+        .types
+        .get(&34)
+        .and_then(|t| ctx.sde.groups.get(&t.group_id))
+        .map(|g| g.name.clone())
+        .expect("Tritanium SDE group exists");
+    assert_eq!(tritanium_group, "Mineral");
+    assert!(args.iter().any(|(k, v)| k == "groupName" && v == &PyRep::String(tritanium_group.clone())));
     assert_eq!(
         facts,
         &RejectionFacts::InvalidTarget {
@@ -1694,9 +1705,9 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
         Some(char_id),
         &missing_err,
         CODE_INVALID_TARGET,
-        UserErrorKey::InvalidTargetGroup,
+        UserErrorKey::ItemNotFound,
     );
-    assert!(args.iter().any(|(k, v)| k == "groupName" && v == &PyRep::String("Silo".into())));
+    assert!(args.is_empty(), "missing target ItemNotFound must not fabricate groupName: {args:?}");
     assert_eq!(
         facts,
         &RejectionFacts::InvalidTarget {

@@ -713,9 +713,13 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         ));
     }
 
-    let is_burned = ctx
-        .db
-        .with_snapshot(|s| is_module_burned_out(ctx, s.items.get(&module_id)));
+    let (is_burned, snap_mod_type_id) = ctx.db.with_snapshot(|s| {
+        let item = s.items.get(&module_id);
+        (
+            is_module_burned_out(ctx, item),
+            item.map(|i| i.type_id).unwrap_or(0),
+        )
+    });
     if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
         return Err(err(
             "ModuleBurnedOut",
@@ -742,16 +746,21 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         })
         .map(|m| m.type_id);
     if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
+        let eff_mod_type_id = if mod_type_id > 0 {
+            mod_type_id
+        } else {
+            snap_mod_type_id
+        };
         let module_name = ctx
             .sde
             .types
-            .get(&mod_type_id)
+            .get(&eff_mod_type_id)
             .map(|t| t.name.as_str())
             .unwrap_or("Module");
         return Err(BridgeRpcError::fitting_validation_failed(
             Some(ship_id),
             Some(module_id),
-            (mod_type_id > 0).then_some(i64::from(mod_type_id)),
+            (eff_mod_type_id > 0).then_some(i64::from(eff_mod_type_id)),
             module_name,
             e,
         ));
@@ -979,7 +988,7 @@ pub async fn handle_dogma_set_module_online(
         return Err(BridgeRpcError::fitting_validation_failed(
             Some(ship_id),
             Some(module_id),
-            fit.modules.get(&module_id).map(|m| i64::from(m.type_id)),
+            (eff_mod_type_id > 0).then_some(i64::from(eff_mod_type_id)),
             module_name,
             e,
         ));

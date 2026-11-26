@@ -516,7 +516,7 @@ pub(crate) fn reload_operations_fsd_data(
     session: &SessionState,
     char_id: i64,
 ) -> Result<PyRep, BridgeRpcError> {
-    let allowed = service_roles::ROLE_GM_DEFAULT | service_roles::ROLE_CONTENT | service_roles::ROLE_PROGRAMMER;
+    let allowed = service_roles::ROLE_GM_MASK | service_roles::ROLE_CONTENT | service_roles::ROLE_PROGRAMMER;
     if (session.role & allowed) == 0 {
         return Err(BridgeRpcError::insufficient_role(
             allowed,

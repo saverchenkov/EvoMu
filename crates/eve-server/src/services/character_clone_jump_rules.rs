@@ -980,7 +980,7 @@ pub async fn activate_clone_vat_bay(
         BridgeRpcError::module_not_found(
             module_id,
             Some(ship_id),
-            Some(i64::from(mod_type_id)),
+            (mod_type_id > 0).then_some(i64::from(mod_type_id)),
             false,
             "Module type unknown",
         )
