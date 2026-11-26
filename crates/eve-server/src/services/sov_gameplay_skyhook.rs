@@ -507,7 +507,19 @@ pub async fn handle_anchor_skyhook_rpc(
                         && i.flag == InventoryFlag::Cargo
                         && i.type_id == TYPE_ORBITAL_SKYHOOK
                         && i.quantity >= 1
-                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
                 })
                 .map(|i| i.item_id)
                 .min()
@@ -523,7 +535,11 @@ pub async fn handle_anchor_skyhook_rpc(
         snap.consume_exact_item_quantity(
             item_id,
             1,
-            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), item_owner),
+            eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                item_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
         )
         .map_err(|e| BridgeRpcError {
             code: "InventoryError".into(),

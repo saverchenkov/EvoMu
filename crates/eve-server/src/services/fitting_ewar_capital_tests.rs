@@ -1294,6 +1294,595 @@ async fn phenomena_generator_uses_destiny_dbuffs_and_clears_across_lifecycle_tra
     assert!(!emit_system_wide_effect_start(&ctx, sys_id, Some(char_id), 6753, module_id, 43658));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capital_module_fuel_rejects_non_commodity_stacks() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 96_100_990_i64;
+    let ship_id = 96_100_991_i64;
+    let module_id = 96_100_992_i64;
+    let fuel_item_id = 96_100_993_i64;
+    let fuel_tid = 16_273_u32;
+
+    let mut siege_t = synth_mod_type(20_280, 515, "Siege Module II", vec![]);
+    siege_t.default_attributes.insert(713, f64::from(fuel_tid));
+    siege_t.default_attributes.insert(714, 250.0);
+    let fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 11_567, &ctx.sde);
+    let fm = eve_dogma::FittedModule {
+        item_id: module_id,
+        type_id: 20_280,
+        flag_id: InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: None,
+        charge_quantity: 0,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let mod_state = eve_dogma::DogmaItemState::from_sde(char_id, 20_280, &ctx.sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fuel_item_id,
+            InventoryItemRecord {
+                item_id: fuel_item_id,
+                type_id: fuel_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mutators: [fn(&mut InventoryItemRecord); 4] = [
+        |it| it.is_blueprint_copy = true,
+        |it| {
+            it.is_blueprint_copy = false;
+            it.singleton = true;
+        },
+        |it| {
+            it.singleton = false;
+            it.dynamic_attributes.insert(9, 10.0);
+            it.source_mutaplasmid_id = Some(47_812);
+        },
+        |it| {
+            it.dynamic_attributes.clear();
+            it.source_mutaplasmid_id = None;
+            it.insured_payout_isk = 500.0;
+        },
+    ];
+    for modify in mutators {
+        ctx.db.with_mut_snapshot(|snap| {
+            modify(snap.items.get_mut(&fuel_item_id).unwrap());
+            assert!(collect_ship_fuel_stacks(snap, ship_id, fuel_tid).is_empty());
+        });
+        let err = prepare_ewar_and_capital_module(
+            &ctx, &sys, sys_id, char_id, ship_id, 485, module_id, &fm, &siege_t, &mod_state,
+            &fit, None, false, false, false, &HashMap::new(),
+        )
+        .await
+        .expect("Some")
+        .err()
+        .expect("non-commodity fuel must fail Siege prep");
+        assert_eq!(err.code, "InsufficientFuel");
+    }
+
+    let cap_id = 96_100_994_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cap_id,
+            InventoryItemRecord {
+                item_id: cap_id,
+                type_id: 263,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        let fuel = snap.items.get_mut(&fuel_item_id).unwrap();
+        fuel.insured_payout_isk = 0.0;
+        fuel.is_blueprint_copy = true;
+    });
+    let mut deferred_bpc = DeferredPostCycleEffects::default();
+    deferred_bpc.fuel_to_deduct = Some((fuel_tid, 250));
+    deferred_bpc.cap_booster_charge_id = Some(cap_id);
+    let err_bpc = commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, module_id, &fm, &siege_t, &mod_state, None, deferred_bpc,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_bpc.code, "InsufficientFuel");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fuel_item_id].quantity, 500);
+        assert_eq!(snap.items[&cap_id].quantity, 1);
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let it = snap.items.get_mut(&fuel_item_id).unwrap();
+        it.is_blueprint_copy = false;
+        it.quantity = 100;
+    });
+    let mut deferred_short = DeferredPostCycleEffects::default();
+    deferred_short.fuel_to_deduct = Some((fuel_tid, 250));
+    deferred_short.cap_booster_charge_id = Some(cap_id);
+    let err_short = commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, module_id, &fm, &siege_t, &mod_state, None, deferred_short,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_short.code, "InsufficientFuel");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fuel_item_id].quantity, 100);
+        assert_eq!(snap.items[&cap_id].quantity, 1);
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&fuel_item_id).unwrap().quantity = 500;
+        assert_eq!(collect_ship_fuel_stacks(snap, ship_id, fuel_tid).len(), 1);
+    });
+    let ok_prep = prepare_ewar_and_capital_module(
+        &ctx, &sys, sys_id, char_id, ship_id, 485, module_id, &fm, &siege_t, &mod_state, &fit,
+        None, false, false, false, &HashMap::new(),
+    )
+    .await
+    .expect("Some")
+    .expect("valid commodity fuel allows Siege prep");
+    assert_eq!(ok_prep.deferred_post_cycle.fuel_to_deduct, Some((fuel_tid, 250)));
+    commit_post_cycle_activation_effects(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        module_id,
+        &fm,
+        &siege_t,
+        &mod_state,
+        None,
+        ok_prep.deferred_post_cycle,
+    )
+    .await
+    .expect("valid commodity fuel commits cleanly");
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.items[&fuel_item_id].quantity), 250);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_cycle_charges_and_weapon_autoload_reject_bpc_and_courier_items() {
+    use crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge;
+
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 96_101_990_i64;
+    let ship_id = 96_101_991_i64;
+    let mod_id = 96_101_992_i64;
+    let station_id = 60_003_760_i64;
+
+    // Type 484 = 125mm Gatling AutoCannon I (charge group 83), Type 178 = Nuclear S (compatible projectile ammo)
+    let mut mod_t = ctx.sde.types.get(&484).expect("autocannon type").clone();
+    mod_t.capacity = 2.5;
+    let fm = eve_dogma::FittedModule {
+        item_id: mod_id,
+        type_id: 484,
+        flag_id: InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: Some(178),
+        charge_quantity: 5,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let mod_state = eve_dogma::DogmaItemState::from_sde(char_id, 484, &ctx.sde);
+
+    let bpc_cap_id = 96_102_001_i64;
+    let courier_anc_id = 96_102_002_i64;
+    let bpc_turret_id = 96_102_003_i64;
+    let bpc_cargo_ammo_id = 96_102_004_i64;
+    let courier_ammo_hold_id = 96_102_005_i64;
+    let valid_turret_id = 96_102_006_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_cap_id,
+            InventoryItemRecord {
+                item_id: bpc_cap_id,
+                type_id: 263,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 3,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_anc_id,
+            InventoryItemRecord {
+                item_id: courier_anc_id,
+                type_id: 263,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot1,
+                quantity: 4,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(courier_anc_id, "courier_cargo:88".into());
+        snap.items.insert(
+            bpc_turret_id,
+            InventoryItemRecord {
+                item_id: bpc_turret_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 5,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_cargo_ammo_id,
+            InventoryItemRecord {
+                item_id: bpc_cargo_ammo_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_ammo_hold_id,
+            InventoryItemRecord {
+                item_id: courier_ammo_hold_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedAmmoHold,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(courier_ammo_hold_id, "courier_cargo:89".into());
+        snap.items.insert(
+            valid_turret_id,
+            InventoryItemRecord {
+                item_id: valid_turret_id,
+                type_id: 178,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 5,
+                ..Default::default()
+            },
+        );
+        snap.module_active_charges.insert(mod_id, 178);
+    });
+
+    // Shared cycle charge predicate must reject BPC & courier stacks and accept clean commodity stack
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&bpc_cap_id],
+        ));
+        assert!(!is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&courier_anc_id],
+        ));
+        assert!(!is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&bpc_turret_id],
+        ));
+        assert!(is_valid_loaded_assembled_charge(
+            snap,
+            Some(char_id),
+            Some(ship_id),
+            &snap.items[&valid_turret_id],
+        ));
+    });
+
+    // plan_weapon_autoload skips BPC Cargo and courier_cargo SpecializedAmmoHold stacks
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, mod_id, &mod_t)
+        .expect("autoload query ok")
+        .is_none());
+
+    // Even if a PendingWeaponAutoload directly targets a BPC or courier stack, commit rejects it atomically
+    for bad_stack in [bpc_cargo_ammo_id, courier_ammo_hold_id] {
+        let mut d = DeferredPostCycleEffects::default();
+        d.weapon_autoload = Some(PendingWeaponAutoload {
+            cargo_stack_id: bad_stack,
+            ammo_type_id: 178,
+            owner_id: char_id,
+            total_take: 10,
+            slot_allocations: vec![(mod_id, InventoryFlag::HiSlot0, 10)],
+            consume_one_round_per_slot: true,
+        });
+        let err = commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "NoCharges");
+    }
+
+    // commit_post_cycle_activation_effects surfaces explicit Err for BPC/courier cap booster, ancillary, and turret charges
+    let mut d_cap = DeferredPostCycleEffects::default();
+    d_cap.cap_booster_charge_id = Some(bpc_cap_id);
+    assert_eq!(
+        commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_cap,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoChargesLoaded"
+    );
+
+    let mut d_anc = DeferredPostCycleEffects::default();
+    d_anc.ancillary_charge_to_consume = Some((courier_anc_id, 1));
+    assert_eq!(
+        commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_anc,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoChargesLoaded"
+    );
+
+    let mut d_turret = DeferredPostCycleEffects::default();
+    d_turret.turret_charge_consumptions = vec![(mod_id, bpc_turret_id)];
+    assert_eq!(
+        commit_post_cycle_activation_effects(
+            &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_turret,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NoChargesLoaded"
+    );
+
+    // None of the invalid stacks or module_active_charges were touched
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_cap_id].quantity, 3);
+        assert_eq!(snap.items[&courier_anc_id].quantity, 4);
+        assert_eq!(snap.items[&bpc_turret_id].quantity, 5);
+        assert_eq!(snap.items[&bpc_cargo_ammo_id].quantity, 50);
+        assert_eq!(snap.items[&courier_ammo_hold_id].quantity, 50);
+        assert_eq!(snap.module_active_charges.get(&mod_id), Some(&178));
+    });
+
+    // Valid assembled turret charge consumes cleanly
+    let mut d_ok = DeferredPostCycleEffects::default();
+    d_ok.turret_charge_consumptions = vec![(mod_id, valid_turret_id)];
+    commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, mod_id, &fm, &mod_t, &mod_state, None, d_ok,
+    )
+    .await
+    .expect("valid turret charge commits cleanly");
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.items[&valid_turret_id].quantity), 4);
+}
+
 #[cfg(test)]
 #[path = "fitting_ewar_capital_extra_unit_tests.rs"]
 mod extra_unit_tests;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_crystal_wear() {
+    use crate::services::notify_emitters_seasons_tactical::handle_load_ammo;
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+
+    let mut sde = (*shared_sde()).clone();
+    let (mut crystal_t, crystal_tid) = (sde.types.get(&178).expect("ammo template").clone(), 99_886_u32);
+    crystal_t.type_id = crystal_tid; crystal_t.group_id = 86; crystal_t.category_id = 8; crystal_t.volume = 1.0;
+    let mut script_t = crystal_t.clone();
+    script_t.type_id = 29_011; script_t.group_id = 910;
+    sde.types.insert(crystal_tid, crystal_t); sde.types.insert(29_011, script_t);
+    let mut laser_t = synth_mod_type(99_053, 53, "Heavy Beam Laser I", vec![]);
+    laser_t.capacity = 1.0; laser_t.default_attributes.insert(604, 86.0); sde.types.insert(99_053, laser_t);
+    let mut rsb_t = synth_mod_type(99_290, 290, "Remote Sensor Booster II", vec![]);
+    rsb_t.capacity = 1.0; rsb_t.default_attributes.insert(604, 910.0); sde.types.insert(99_290, rsb_t);
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 96_103_001_i64;
+    let ship_id = 96_103_002_i64;
+    let (ac1, ac2, laser_id) = (96_103_003_i64, 96_103_004_i64, 96_103_005_i64);
+    let (mut_ammo_id, ins_ammo_id, valid_ammo_id, bad_crys_id, damaged_crys_id) =
+        (96_103_010_i64, 96_103_011_i64, 96_103_012_i64, 96_103_013_i64, 96_103_014_i64);
+    let (bad_ns_ins_crys_id, bad_ns_mut_crys_id, pkg_crys_id) =
+        (96_103_015_i64, 96_103_016_i64, 96_103_017_i64);
+    let mut mod_t = ctx.sde.types.get(&484).expect("autocannon").clone();
+    mod_t.capacity = 0.005;
+    let fm = eve_dogma::FittedModule {
+        item_id: ac1, type_id: 484, flag_id: InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Online, charge_type_id: Some(178),
+        charge_quantity: 1, damage_hp: 0.0, max_hp: 40.0, dynamic_attribute_overrides: HashMap::new(),
+    };
+    let mod_state = eve_dogma::DogmaItemState::from_sde(char_id, 484, &ctx.sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().expect("seed char").clone();
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id, type_id: 587, owner_id: char_id, location_id: sys_id as i64,
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+        for (mid, tid, fl) in [
+            (ac1, 484, InventoryFlag::HiSlot0),
+            (ac2, 484, InventoryFlag::HiSlot1),
+            (laser_id, 99_053, InventoryFlag::HiSlot2),
+        ] {
+            snap.items.insert(mid, InventoryItemRecord {
+                item_id: mid, type_id: tid, owner_id: char_id, location_id: ship_id,
+                flag: fl, quantity: 1, singleton: true, ..Default::default()
+            });
+        }
+        snap.weapon_banks.insert(ship_id, HashMap::from([(ac1, vec![ac1, ac2])]));
+        snap.items.insert(mut_ammo_id, InventoryItemRecord {
+            item_id: mut_ammo_id, type_id: 178, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 20, source_mutaplasmid_id: Some(60_001), ..Default::default()
+        });
+        snap.items.insert(ins_ammo_id, InventoryItemRecord {
+            item_id: ins_ammo_id, type_id: 178, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::SpecializedAmmoHold, quantity: 20, insured_payout_isk: 500.0, ..Default::default()
+        });
+        snap.items.insert(bad_crys_id, InventoryItemRecord {
+            item_id: bad_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 2, insured_payout_isk: 200.0, ..Default::default()
+        });
+        snap.items.insert(bad_ns_ins_crys_id, InventoryItemRecord {
+            item_id: bad_ns_ins_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 1, insured_payout_isk: 200.0, ..Default::default()
+        });
+        snap.items.insert(bad_ns_mut_crys_id, InventoryItemRecord {
+            item_id: bad_ns_mut_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 1, source_mutaplasmid_id: Some(60_002), ..Default::default()
+        });
+    });
+
+    let laser_t_ref = ctx.sde.types.get(&99_053).expect("laser type").clone();
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, ac1, &mod_t).unwrap().is_none());
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().is_none());
+    let laser_fm = eve_dogma::FittedModule { item_id: laser_id, type_id: 99_053, flag_id: InventoryFlag::HiSlot2 as u16, state: eve_dogma::ModuleState::Online, charge_type_id: Some(crystal_tid), charge_quantity: 1, damage_hp: 0.0, max_hp: 40.0, dynamic_attribute_overrides: HashMap::new() };
+    let laser_state = eve_dogma::DogmaItemState::from_sde(char_id, 99_053, &ctx.sde);
+    for (bad, slot_id, mt, qty, mid, ms) in [
+        (mut_ammo_id, ac1, &mod_t, 2, &fm, &mod_state), (ins_ammo_id, ac1, &mod_t, 2, &fm, &mod_state),
+        (bad_crys_id, laser_id, &laser_t_ref, 1, &laser_fm, &laser_state),
+        (bad_ns_ins_crys_id, laser_id, &laser_t_ref, 1, &laser_fm, &laser_state),
+        (bad_ns_mut_crys_id, laser_id, &laser_t_ref, 1, &laser_fm, &laser_state),
+    ] {
+        let mut d = DeferredPostCycleEffects::default();
+        d.weapon_autoload = Some(PendingWeaponAutoload {
+            cargo_stack_id: bad, ammo_type_id: if slot_id == ac1 { 178 } else { crystal_tid }, owner_id: char_id,
+            total_take: qty * if slot_id == ac1 { 2 } else { 1 },
+            slot_allocations: if slot_id == ac1 { vec![(ac1, InventoryFlag::HiSlot0, qty), (ac2, InventoryFlag::HiSlot1, qty)] } else { vec![(laser_id, InventoryFlag::HiSlot2, qty)] },
+            consume_one_round_per_slot: false,
+        });
+        assert_eq!(commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, slot_id, mid, mt, ms, None, d).await.unwrap_err().code, "NoCharges");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(valid_ammo_id, InventoryItemRecord { item_id: valid_ammo_id, type_id: 178, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 10, ..Default::default() });
+    });
+    let plan = plan_weapon_autoload(&ctx, char_id, ship_id, ac1, &mod_t).unwrap().expect("valid stack planned");
+    assert_eq!(plan.cargo_stack_id, valid_ammo_id);
+    let mut d_ok = DeferredPostCycleEffects::default();
+    d_ok.weapon_autoload = Some(plan);
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, ac1, &fm, &mod_t, &mod_state, None, d_ok).await.expect("valid bank autoload commits");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&valid_ammo_id].quantity, snap.items[&mut_ammo_id].quantity, snap.items[&ins_ammo_id].quantity), (6, 20, 20)); });
+    let mut sess = SessionState::new(711);
+    sess.user_id = Some(1); sess.character_id = Some(char_id); sess.ship_id = Some(ship_id); sess.solar_system_id = Some(sys_id);
+    for bad_crys in [bad_crys_id, bad_ns_ins_crys_id, bad_ns_mut_crys_id] {
+        assert_eq!(handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(bad_crys)]).unwrap_err().code, "InventoryError");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(damaged_crys_id, InventoryItemRecord { item_id: damaged_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, dynamic_attributes: HashMap::from([(3_u16, 0.75)]), ..Default::default() });
+    });
+    let mut d_crys = DeferredPostCycleEffects::default();
+    d_crys.weapon_autoload = Some(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().expect("damaged crystal planned"));
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, laser_id, &laser_fm, &laser_t_ref, &laser_state, None, d_crys).await.expect("damaged crystal autoload commits");
+    ctx.db.with_mut_snapshot(|snap| {
+        let loaded = snap.items.get_mut(&damaged_crys_id).unwrap();
+        assert_eq!((loaded.flag, loaded.singleton, loaded.dynamic_attributes.get(&3)), (InventoryFlag::HiSlot2, true, Some(&0.75)));
+        loaded.flag = InventoryFlag::Cargo; snap.module_active_charges.remove(&laser_id);
+    });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(damaged_crys_id)]).expect("single damaged crystal loads in-place");
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!((snap.items[&damaged_crys_id].flag, snap.items[&damaged_crys_id].singleton, snap.items[&damaged_crys_id].dynamic_attributes.get(&3), snap.items[&bad_crys_id].quantity), (InventoryFlag::HiSlot2, true, Some(&0.75), 2));
+        snap.items.insert(pkg_crys_id, InventoryItemRecord { item_id: pkg_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() });
+    });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(pkg_crys_id)]).expect("clean 1-unit packaged crystal loads and unpacks");
+    let (bad_ns_attr_crys_id, worn_ns_crys_id) = (96_103_018_i64, 96_103_019_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!((snap.items[&pkg_crys_id].flag, snap.items[&pkg_crys_id].singleton, snap.items[&damaged_crys_id].flag), (InventoryFlag::HiSlot2, true, InventoryFlag::Cargo));
+        snap.items.remove(&pkg_crys_id); snap.items.remove(&damaged_crys_id); snap.module_active_charges.remove(&laser_id);
+        snap.items.insert(bad_ns_attr_crys_id, InventoryItemRecord { item_id: bad_ns_attr_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, dynamic_attributes: HashMap::from([(999_u16, 1.0)]), ..Default::default() });
+    });
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().is_none());
+    let mut d_attr = DeferredPostCycleEffects::default(); d_attr.weapon_autoload = Some(PendingWeaponAutoload { cargo_stack_id: bad_ns_attr_crys_id, ammo_type_id: crystal_tid, owner_id: char_id, total_take: 1, slot_allocations: vec![(laser_id, InventoryFlag::HiSlot2, 1)], consume_one_round_per_slot: false });
+    assert_eq!(commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, laser_id, &laser_fm, &laser_t_ref, &laser_state, None, d_attr).await.unwrap_err().code, "NoCharges");
+    assert_eq!(handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(bad_ns_attr_crys_id)]).unwrap_err().code, "InventoryError");
+    ctx.db.with_mut_snapshot(|snap| { snap.items.insert(worn_ns_crys_id, InventoryItemRecord { item_id: worn_ns_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, dynamic_attributes: HashMap::from([(eve_sde::attr_ids::DAMAGE, 0.5)]), ..Default::default() }); });
+    let mut d_worn = DeferredPostCycleEffects::default(); d_worn.weapon_autoload = Some(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().expect("wear-only non-singleton crystal planned"));
+    assert_eq!(d_worn.weapon_autoload.as_ref().unwrap().cargo_stack_id, worn_ns_crys_id);
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, laser_id, &laser_fm, &laser_t_ref, &laser_state, None, d_worn).await.expect("wear-only non-singleton crystal autoload commits");
+    ctx.db.with_mut_snapshot(|snap| { let l = snap.items.get_mut(&worn_ns_crys_id).unwrap(); assert_eq!((l.flag, l.singleton, l.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::HiSlot2, true, Some(&0.5))); l.flag = InventoryFlag::Cargo; l.singleton = false; snap.module_active_charges.remove(&laser_id); });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(worn_ns_crys_id)]).expect("wear-only non-singleton crystal loads via handle_load_ammo");
+    ctx.db.with_mut_snapshot(|snap| { let l = snap.items.get_mut(&worn_ns_crys_id).unwrap(); assert_eq!((l.flag, l.singleton, l.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::HiSlot2, true, Some(&0.5))); l.singleton = false; snap.items.insert(pkg_crys_id, InventoryItemRecord { item_id: pkg_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() }); });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(pkg_crys_id)]).expect("unloading worn crystal normalizes singleton");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&worn_ns_crys_id].flag, snap.items[&worn_ns_crys_id].singleton, snap.items[&worn_ns_crys_id].dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::Cargo, true, Some(&0.5))); });
+    let (rsb_id, bad_ins_s_id, bad_mut_s_id, clean_s_id) = (96_103_006_i64, 96_103_020_i64, 96_103_021_i64, 96_103_022_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(rsb_id, InventoryItemRecord { item_id: rsb_id, type_id: 99_290, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, ..Default::default() });
+        snap.items.insert(bad_ins_s_id, InventoryItemRecord { item_id: bad_ins_s_id, type_id: 29_011, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, insured_payout_isk: 100.0, ..Default::default() });
+        snap.items.insert(bad_mut_s_id, InventoryItemRecord { item_id: bad_mut_s_id, type_id: 29_011, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, source_mutaplasmid_id: Some(60_003), ..Default::default() });
+        snap.items.insert(clean_s_id, InventoryItemRecord { item_id: clean_s_id, type_id: 29_011, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default() });
+    });
+    for bad_s in [bad_ins_s_id, bad_mut_s_id] { assert_eq!(handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(rsb_id), PyRep::Integer(bad_s)]).unwrap_err().code, "InventoryError"); }
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(rsb_id), PyRep::Integer(clean_s_id)]).expect("clean singleton script loads");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&clean_s_id].flag, snap.items[&clean_s_id].singleton), (InventoryFlag::MedSlot0, true)); });
+}

@@ -276,6 +276,12 @@ pub fn register_item_delivery_and_definitions(
                 if allowed_qty < batch_size {
                     return Some(10); // quantity_too_high
                 }
+                let deliver_opts = eve_db::ConsumeExactOptions {
+                    policy: eve_db::ItemClassPolicy::StackableCommodity,
+                    required_location_id: Some(char_loc),
+                    required_flag: Some(eve_db::InventoryFlag::Hangar),
+                    ..eve_db::ConsumeExactOptions::for_character_stack(cid as i64)
+                };
                 let chosen = if let Some(iid) = item_id {
                     let Some(item) = snap.items.get(&iid) else {
                         return Some(8); // item_not_found_at_location
@@ -311,14 +317,9 @@ pub fn register_item_delivery_and_definitions(
                     snap.items
                         .values()
                         .filter(|item| {
-                            item.owner_id == cid as i64
-                                && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
-                                && item.type_id == target_type_id
-                                && !item.singleton
-                                && !snap.is_container_non_empty(item.item_id)
+                            item.type_id == target_type_id
                                 && item.quantity >= (batch_size as i32)
-                                && item.flag == eve_db::InventoryFlag::Hangar
-                                && item.location_id == char_loc
+                                && snap.validate_item_for_consumption(item, &deliver_opts).is_ok()
                         })
                         .map(|item| item.item_id)
                         .min()
@@ -329,12 +330,7 @@ pub fn register_item_delivery_and_definitions(
                 if let Some(avail_qty) = snap.items.get(&iid).map(|it| it.quantity) {
                     let take = ((avail_qty.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
                     if take > 0 {
-                        let opts = eve_db::ConsumeExactOptions {
-                            required_location_id: Some(char_loc),
-                            required_flag: Some(eve_db::InventoryFlag::Hangar),
-                            ..eve_db::ConsumeExactOptions::for_character_stack(cid as i64)
-                        };
-                        if snap.consume_exact_item_quantity(iid, take as i32, opts).is_ok() {
+                        if snap.consume_exact_item_quantity(iid, take as i32, deliver_opts).is_ok() {
                             delivered_units = take;
                             consumed_loc = char_loc;
                             found = true;

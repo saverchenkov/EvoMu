@@ -909,6 +909,258 @@ async fn matured_pending_role_grant_authorizes_structure_extraction_and_metenox_
     assert_eq!(ctx.db.tx_commit_count(), commits_before);
 }
 
+#[tokio::test]
+async fn metenox_tick_rejects_non_commodity_reagents_without_minting_materials() {
+    let ctx = make_ctx();
+    let corp_id = 1_000_009;
+    let metenox_id = 1_000_000_000_799_i64;
+    let sys_id = 30_002_537_u32;
+    let moon = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .unwrap();
+    let bpc_fuel_id = 950_701_i64;
+    let mut_gas_id = 950_702_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            metenox_id,
+            UpwellStructureRecord {
+                structure_id: metenox_id,
+                type_id: 81826,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Metenox Policy Gate".into(),
+                state: "ShieldVulnerable".into(),
+                position: [moon.position.x + 200.0, moon.position.y, moon.position.z],
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_fuel_id,
+            InventoryItemRecord {
+                item_id: bpc_fuel_id,
+                type_id: 4247,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::StructureFuel,
+                quantity: 100,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mut_gas_id,
+            InventoryItemRecord {
+                item_id: mut_gas_id,
+                type_id: 81143,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::StructureFuel,
+                quantity: 500,
+                singleton: false,
+                dynamic_attributes: HashMap::from([(9, 1.0)]),
+                source_mutaplasmid_id: Some(47_812),
+                ..Default::default()
+            },
+        );
+    });
+
+    let now = ctx.now_unix();
+    tick_all_metenox_moon_drills(&ctx, now - 7_200, now);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 100);
+        assert_eq!(snap.items[&mut_gas_id].quantity, 500);
+        let minted: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(minted, 0);
+        let am = &snap.auto_moon_miners[&metenox_id];
+        assert_eq!(am.fuel_units_remaining, 0);
+        assert_eq!(am.magmatic_gas_remaining, 0);
+    });
+
+    // When a bay fuel item exists (even BPC) AND st.fuel_blocks = 100 with valid gas,
+    // Metenox must NOT fall back to unbacked st.fuel_blocks or mint free materials.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&metenox_id).unwrap().fuel_blocks = 100;
+        let gas = snap.items.get_mut(&mut_gas_id).unwrap();
+        gas.dynamic_attributes.clear();
+        gas.source_mutaplasmid_id = None;
+        snap.auto_moon_miners
+            .get_mut(&metenox_id)
+            .unwrap()
+            .last_cycle_unix = now - 7_200;
+    });
+    tick_all_metenox_moon_drills(&ctx, now - 7_200, now);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&metenox_id].fuel_blocks, 100);
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 100);
+        assert_eq!(snap.items[&mut_gas_id].quantity, 500);
+        let minted: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(minted, 0);
+        assert_eq!(snap.auto_moon_miners[&metenox_id].fuel_units_remaining, 0);
+    });
+}
+
+#[tokio::test]
+async fn metenox_tick_and_inspect_enforce_atomic_reagents_and_foreign_bay_isolation() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let metenox_id = 1_000_000_000_899_i64;
+    let sys_id = 30_002_537_u32;
+    let moon = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .unwrap();
+    let fuel_per_cycle = metenox_fuel_per_cycle(&ctx.sde);
+    let foreign_fuel_id = 950_801_i64;
+    let valid_gas_id = 950_802_i64;
+    let valid_fuel_id = 950_803_i64;
+    let bpc_gas_id = 950_804_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        snap.corporations
+            .entry(corp_id)
+            .or_default()
+            .member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        snap.structures.insert(
+            metenox_id,
+            UpwellStructureRecord {
+                structure_id: metenox_id,
+                type_id: 81826,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Metenox Atomic Test".into(),
+                state: "ShieldVulnerable".into(),
+                position: [moon.position.x + 200.0, moon.position.y, moon.position.z],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_fuel_id,
+            InventoryItemRecord {
+                item_id: foreign_fuel_id,
+                type_id: 4247,
+                owner_id: corp_id + 55,
+                location_id: metenox_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_gas_id,
+            InventoryItemRecord {
+                item_id: valid_gas_id,
+                type_id: 81143,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 500,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Foreign-owner-only fuel stack alongside st.fuel_blocks = 100 must yield 0 fuel in inspect & tick.
+    let now = ctx.now_unix();
+    let insp_foreign = ctx
+        .db
+        .with_snapshot(|snap| {
+            crate::services::mining_advanced::mining_compression::inspect_metenox_drill(
+                &ctx.sde,
+                snap,
+                metenox_id,
+                char_id,
+                0.40,
+                now,
+            )
+        })
+        .expect("inspect");
+    assert_eq!(insp_foreign.total_struct_fuel, 0);
+    assert_eq!(insp_foreign.total_struct_gas, 500);
+    tick_all_metenox_moon_drills(&ctx, now - 7_200, now);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&metenox_id].fuel_blocks, 100);
+        assert_eq!(snap.items[&foreign_fuel_id].quantity, 50);
+        assert_eq!(snap.items[&valid_gas_id].quantity, 500);
+    });
+
+    // 2. BPC gas alongside valid corp fuel must show 0 gas in inspect_metenox_drill and leave valid fuel untouched.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&foreign_fuel_id);
+        snap.items.remove(&valid_gas_id);
+        snap.items.insert(
+            valid_fuel_id,
+            InventoryItemRecord {
+                item_id: valid_fuel_id,
+                type_id: 4247,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: fuel_per_cycle as i32 * 2,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_gas_id,
+            InventoryItemRecord {
+                item_id: bpc_gas_id,
+                type_id: 81143,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 500,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.auto_moon_miners.get_mut(&metenox_id).unwrap().last_cycle_unix = now - 7_200;
+    });
+    let insp_bpc = ctx
+        .db
+        .with_snapshot(|snap| {
+            crate::services::mining_advanced::mining_compression::inspect_metenox_drill(
+                &ctx.sde,
+                snap,
+                metenox_id,
+                char_id,
+                0.40,
+                now,
+            )
+        })
+        .expect("inspect bpc gas");
+    assert_eq!(insp_bpc.total_struct_fuel, fuel_per_cycle * 2);
+    assert_eq!(insp_bpc.total_struct_gas, 0);
+    tick_all_metenox_moon_drills(&ctx, now - 7_200, now);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&valid_fuel_id].quantity, fuel_per_cycle as i32 * 2);
+        assert_eq!(snap.items[&bpc_gas_id].quantity, 500);
+    });
+}
+
 #[cfg(test)]
 #[path = "mining_advanced_extra_unit_tests.rs"]
 mod extra_unit_tests;

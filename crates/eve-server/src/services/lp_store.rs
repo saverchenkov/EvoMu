@@ -463,15 +463,29 @@ fn handle_take_offer(
         for (req_tid, needed) in aggregated_req_items {
             let mut matching_ids = Vec::new();
             let mut available: i32 = 0;
+            let expected_owner = if is_corp_take {
+                ch.corporation_id
+            } else {
+                char_id
+            };
+            let actor = if expected_owner == char_id {
+                Some(char_id)
+            } else {
+                None
+            };
+            let req_opts = eve_db::ConsumeExactOptions {
+                reject_blueprint_copy: true,
+                active_ship_id: Some(ch.active_ship_id),
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    actor,
+                    expected_owner,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
+            };
             for it in snap.items.values() {
                 if it.quantity <= 0 || it.type_id != req_tid {
                     continue;
                 }
-                let owner_matches = if is_corp_take {
-                    it.owner_id == ch.corporation_id
-                } else {
-                    it.owner_id == char_id
-                };
                 let loc_and_flag_matches = if let Some((is_ceo, roles)) = corp_access {
                     it.location_id == delivery_loc_id
                         && corp_lp_flag_take_authorized(is_ceo, roles, it.flag)
@@ -486,25 +500,9 @@ fn handle_take_offer(
                 };
                 let is_active_ship =
                     Some(it.item_id) == active_ship_id || it.item_id == ch.active_ship_id;
-                let has_contained_items = snap.items.values().any(|child| {
-                    child.item_id != it.item_id
-                        && child.location_id == it.item_id
-                        && child.quantity > 0
-                });
-                let is_courier_cargo = snap
-                    .item_custom_names
-                    .get(&it.item_id)
-                    .is_some_and(|name| name.starts_with("courier_cargo:"));
-                if owner_matches
-                    && loc_and_flag_matches
-                    && !snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
-                    && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(it.flag)
-                    && !it.is_blueprint_copy
-                    && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
-                    && it.source_mutaplasmid_id.is_none()
+                if loc_and_flag_matches
                     && !is_active_ship
-                    && !has_contained_items
-                    && !is_courier_cargo
+                    && snap.validate_item_for_consumption(it, &req_opts).is_ok()
                 {
                     available = available.saturating_add(it.quantity);
                     matching_ids.push(it.item_id);
@@ -662,7 +660,11 @@ fn handle_take_offer(
                     continue;
                 }
                 let actor = if it_owner == char_id { Some(char_id) } else { None };
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(actor, it_owner);
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    actor,
+                    it_owner,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                );
                 opts.reject_blueprint_copy = true;
                 opts.active_ship_id = Some(ch.active_ship_id);
                 if snap.consume_exact_item_quantity(iid, take, opts).is_ok() {
@@ -1457,3 +1459,122 @@ mod lp_store_tests;
 #[cfg(test)]
 #[path = "lp_store_edges2_tests.rs"]
 mod lp_store_edges2_tests;
+
+#[cfg(test)]
+mod r5_lp_policy_tests {
+    use super::*;
+    use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
+        make_fighter_ctx_and_session, make_fighter_item,
+    };
+    use eve_db::{CorporationRecord, InventoryFlag, IskCents};
+    use std::collections::HashMap;
+
+    #[test]
+    fn lp_take_offer_prefilter_and_consume_share_exact_policy_for_dynamic_attrs() {
+        let (ctx, mut session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+        let kw = HashMap::new();
+        let station_id = 60_003_760_i64;
+        let player_corp = 98_050_001_i64;
+        let npc_corp = 1_000_035_i64;
+        session.station_id = Some(station_id);
+        session.corporation_id = Some(player_corp);
+
+        let damaged_id = 905_001_i64;
+        let mutated_id = 905_002_i64;
+        let bpc_id = 905_003_i64;
+        let courier_id = 905_004_i64;
+        let clean_id = 905_005_i64;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            register_lp_store_offer(
+                snap,
+                LPOffer {
+                    offer_id: 777_501,
+                    corp_id: npc_corp,
+                    type_id: 34,
+                    quantity: 100,
+                    lp_cost: 500,
+                    isk_cost: IskCents::from_isk(1_000),
+                    ak_cost: 0,
+                    req_items: vec![(35, 10)],
+                    min_standing: Some(1.0),
+                },
+            );
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.corporation_id = player_corp;
+                c.station_id = Some(station_id);
+                c.balance = IskCents::from_isk(1_000_000);
+                c.loyalty_points.insert(npc_corp, 5_000);
+                c.standings.insert(npc_corp, 5.0);
+            }
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = player_corp;
+            corp.name = "LP Policy Corp".into();
+            corp.ticker = "LPPC".into();
+            corp.ceo_id = char_id;
+            snap.corporations.insert(player_corp, corp);
+            snap.items
+                .retain(|_, it| !(it.owner_id == char_id && it.type_id == 35));
+
+            let mut damaged = make_fighter_item(damaged_id, 35, char_id, station_id, InventoryFlag::Hangar, 10);
+            damaged.dynamic_attributes.insert(3, 0.0);
+            snap.items.insert(damaged_id, damaged);
+
+            let mut mutated = make_fighter_item(mutated_id, 35, char_id, station_id, InventoryFlag::Hangar, 10);
+            mutated.dynamic_attributes.insert(9, 1.5);
+            mutated.source_mutaplasmid_id = Some(47_812);
+            snap.items.insert(mutated_id, mutated);
+
+            let mut bpc = make_fighter_item(bpc_id, 35, char_id, station_id, InventoryFlag::Hangar, 10);
+            bpc.is_blueprint_copy = true;
+            snap.items.insert(bpc_id, bpc);
+
+            let courier = make_fighter_item(courier_id, 35, char_id, station_id, InventoryFlag::Hangar, 10);
+            snap.items.insert(courier_id, courier);
+            snap.item_custom_names
+                .insert(courier_id, "courier_cargo:777".into());
+        });
+
+        let err = handle(
+            &ctx,
+            &mut session,
+            "LPStoreMgr",
+            "TakeOfferForCharacter",
+            &[PyRep::Integer(npc_corp), PyRep::Integer(777_501), PyRep::Integer(1)],
+            &kw,
+        )
+        .expect("handled")
+        .unwrap_err();
+        assert_eq!(err.code, "MissingRequiredItems");
+        ctx.db.with_snapshot(|snap| {
+            for id in [damaged_id, mutated_id, bpc_id, courier_id] {
+                assert_eq!(snap.items[&id].quantity, 10);
+            }
+            assert_eq!(snap.characters[&char_id].loyalty_points.get(&npc_corp), Some(&5_000));
+        });
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                clean_id,
+                make_fighter_item(clean_id, 35, char_id, station_id, InventoryFlag::Hangar, 10),
+            );
+        });
+        let ok = handle(
+            &ctx,
+            &mut session,
+            "LPStoreMgr",
+            "TakeOfferForCharacter",
+            &[PyRep::Integer(npc_corp), PyRep::Integer(777_501), PyRep::Integer(1)],
+            &kw,
+        )
+        .expect("handled")
+        .expect("clean stack fulfills offer");
+        assert!(ok.dict_get("deliveredItemID").is_some());
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.items.contains_key(&clean_id));
+            for id in [damaged_id, mutated_id, bpc_id, courier_id] {
+                assert_eq!(snap.items[&id].quantity, 10);
+            }
+        });
+    }
+}

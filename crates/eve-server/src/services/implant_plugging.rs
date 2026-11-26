@@ -1008,10 +1008,18 @@ pub fn inject_skillpoints(
 
         // Locate an owned, unlocked, reachable Skill Injector
         let requested_item_id = args.first().and_then(|a| a.as_i64());
+        let inj_opts = eve_db::ConsumeExactOptions {
+            active_ship_id: current_ship,
+            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                char_id,
+                eve_db::ItemClassPolicy::StackableCommodity,
+            )
+        };
         let injector_info = snap
             .items
             .values()
-            .find(|i| {
+            .filter(|i| {
                 let matches_req = requested_item_id.map(|req| req == i.item_id).unwrap_or(true);
                 matches_req
                     && (i.type_id == TYPE_LARGE_SKILL_INJECTOR
@@ -1020,7 +1028,9 @@ pub fn inject_skillpoints(
                         || is_non_diminishing_injector(&ctx.sde, i.type_id))
                     && i.quantity >= 1
                     && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                    && snap.validate_item_for_consumption(i, &inj_opts).is_ok()
             })
+            .min_by_key(|i| i.item_id)
             .map(|i| (i.item_id, i.type_id));
 
         let Some((item_id, type_id)) = injector_info else {
@@ -1068,14 +1078,7 @@ pub fn inject_skillpoints(
             }
         };
 
-        snap.consume_exact_item_quantity(
-            item_id,
-            1,
-            eve_db::ConsumeExactOptions {
-                active_ship_id: current_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
-            },
-        )
+        snap.consume_exact_item_quantity(item_id, 1, inj_opts)
         .map_err(|e| BridgeRpcError {
             code: "SkillInjectorLocked".into(),
             message: e.to_string(),
@@ -1089,6 +1092,7 @@ pub fn inject_skillpoints(
                     is_non_diminishing_injector(&ctx.sde, it.type_id)
                         && it.quantity > 0
                         && snap.is_item_consumable_by(it, char_id, current_dock, current_ship)
+                        && snap.validate_item_for_consumption(it, &inj_opts).is_ok()
                 })
                 .map(|it| it.quantity as i64)
                 .sum()

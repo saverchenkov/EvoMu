@@ -50,13 +50,18 @@ fn loaded_charge_sde_damage(
         .items
         .values()
         .filter(|it| {
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                st_owner_corp,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
+            opts.reject_fitted = false;
             it.location_id == structure_id
                 && it.flag == mod_item.flag
-                && it.owner_id == st_owner_corp
                 && it.item_id != mod_item.item_id
                 && it.quantity > 0
-                && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
+                && snap.validate_item_for_consumption(it, &opts).is_ok()
         })
         .map(|it| (it.item_id, it.type_id))
         .collect();
@@ -284,10 +289,17 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 let Some((charge_iid, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, st_owner_corp, &mod_item) else {
                     continue;
                 };
-                if let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
-                    opts.reject_fitted = false;
-                    let _ = snap.consume_exact_item_quantity(charge_iid, 1, opts);
+                let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) else {
+                    continue;
+                };
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    c_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                );
+                opts.reject_fitted = false;
+                if snap.consume_exact_item_quantity(charge_iid, 1, opts).is_err() {
+                    continue;
                 }
                 cur_cap = (cur_cap - cap_need).max(0.0);
                 ext.structure_cap_state.insert(structure_id, (cur_cap, now_unix));
@@ -663,7 +675,15 @@ fn consume_structure_charge_in_snap(
             continue;
         }
         if ct.group_id == req_charge_group {
-            candidates.push((it.item_id, it.type_id, in_slot));
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                st_owner_corp,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
+            opts.reject_fitted = false;
+            if snap.validate_item_for_consumption(it, &opts).is_ok() {
+                candidates.push((it.item_id, it.type_id, in_slot));
+            }
         } else if in_slot {
             wrong_group_seen = true;
         }
@@ -681,11 +701,24 @@ fn consume_structure_charge_in_snap(
             format!("Standup weapon requires ammo of charge group {req_charge_group}"),
         ));
     };
-    if let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) {
-        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
-        opts.reject_fitted = false;
-        let _ = snap.consume_exact_item_quantity(charge_iid, 1, opts);
-    }
+    let c_owner = snap
+        .items
+        .get(&charge_iid)
+        .map(|it| it.owner_id)
+        .ok_or_else(|| {
+            BridgeRpcError::no_charges_loaded(
+                module_type_id as i64,
+                format!("Standup weapon requires ammo of charge group {req_charge_group}"),
+            )
+        })?;
+    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+        None,
+        c_owner,
+        eve_db::ItemClassPolicy::ExactAssembledItem,
+    );
+    opts.reject_fitted = false;
+    snap.consume_exact_item_quantity(charge_iid, 1, opts)
+        .map_err(|e| BridgeRpcError::no_charges_loaded(module_type_id as i64, e.to_string()))?;
     Ok(charge_tid)
 }
 
@@ -1125,4 +1158,118 @@ pub async fn handle_structure_module_activate(
 
 #[cfg(test)] #[path = "structure_weapons_ops_tests.rs"]
 mod structure_weapons_ops_tests;
+
+#[cfg(test)]
+mod r3_weapon_charge_policy_tests {
+    use super::*;
+
+    #[test]
+    fn standup_charges_skip_lower_id_bpc_and_reject_bpc_only_slots() {
+        let mut ctx = ServerContext::new();
+        let mod_tid = 999_801_u32;
+        let charge_tid = 999_802_u32;
+        {
+            let reg = std::sync::Arc::make_mut(&mut ctx.sde);
+            let mut mod_rec = reg.types.values().next().unwrap().clone();
+            mod_rec.type_id = mod_tid;
+            mod_rec.group_id = 1327;
+            mod_rec.category_id = 66;
+            mod_rec.default_attributes.clear();
+            mod_rec.default_attributes.insert(604, 83.0);
+            mod_rec.default_attributes.insert(64, 1.0);
+            reg.types.insert(mod_tid, mod_rec);
+
+            let mut ch_rec = reg.types.values().next().unwrap().clone();
+            ch_rec.type_id = charge_tid;
+            ch_rec.group_id = 83;
+            ch_rec.category_id = 8;
+            ch_rec.default_attributes.clear();
+            ch_rec.default_attributes.insert(114, 250.0);
+            reg.types.insert(charge_tid, ch_rec);
+        }
+
+        let sid = 10_000_997_100_i64;
+        let corp_id = 98_752_i64;
+        let mod_id = 980_001_i64;
+        let bpc_charge_id = 980_002_i64;
+        let good_charge_id = 980_003_i64;
+        let mod_rec = eve_db::InventoryItemRecord {
+            item_id: mod_id,
+            type_id: mod_tid,
+            owner_id: corp_id,
+            location_id: sid,
+            flag: InventoryFlag::HiSlot0,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        };
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(mod_id, mod_rec.clone());
+            snap.items.insert(
+                bpc_charge_id,
+                eve_db::InventoryItemRecord {
+                    item_id: bpc_charge_id,
+                    type_id: charge_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 5,
+                    singleton: false,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+
+            // BPC-only slot must not return damage or succeed consumption.
+            assert!(loaded_charge_sde_damage(&ctx, snap, sid, corp_id, &mod_rec).is_none());
+            assert!(consume_structure_charge_in_snap(
+                &ctx,
+                snap,
+                sid,
+                corp_id,
+                mod_id,
+                mod_tid,
+                InventoryFlag::HiSlot0,
+                83,
+            )
+            .is_err());
+            assert_eq!(snap.items[&bpc_charge_id].quantity, 5);
+
+            // With higher-ID valid sibling, skips BPC and consumes valid charge.
+            snap.items.insert(
+                good_charge_id,
+                eve_db::InventoryItemRecord {
+                    item_id: good_charge_id,
+                    type_id: charge_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 3,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+            let (chosen_iid, dmg) =
+                loaded_charge_sde_damage(&ctx, snap, sid, corp_id, &mod_rec).expect("valid charge");
+            assert_eq!(chosen_iid, good_charge_id);
+            assert!((dmg.em - 250.0).abs() < 1e-6);
+
+            let consumed_tid = consume_structure_charge_in_snap(
+                &ctx,
+                snap,
+                sid,
+                corp_id,
+                mod_id,
+                mod_tid,
+                InventoryFlag::HiSlot0,
+                83,
+            )
+            .expect("consumes valid charge");
+            assert_eq!(consumed_tid, charge_tid);
+            assert_eq!(snap.items[&bpc_charge_id].quantity, 5);
+            assert_eq!(snap.items[&good_charge_id].quantity, 2);
+        });
+    }
+}
 

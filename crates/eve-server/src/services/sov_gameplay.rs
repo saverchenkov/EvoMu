@@ -442,7 +442,19 @@ pub async fn handle_anchor_mercenary_den_rpc(
                         && i.flag == InventoryFlag::Cargo
                         && i.type_id == TYPE_MERCENARY_DEN
                         && i.quantity >= 1
-                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
                 })
                 .map(|i| i.item_id)
                 .min()
@@ -455,7 +467,11 @@ pub async fn handle_anchor_mercenary_den_rpc(
         snap.consume_exact_item_quantity(
             item_id,
             1,
-            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+            eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                char_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            ),
         )
         .map_err(|e| BridgeRpcError {
             code: "InventoryError".into(),
@@ -1257,8 +1273,56 @@ pub async fn dispatch_special_structure_attack(
     tick: u64,
     charges: &[i64],
 ) -> Result<PyRep, BridgeRpcError> {
-    let rep = if st_type_id == TYPE_MERCENARY_DEN {
-        apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await?
+    if st_type_id != TYPE_MERCENARY_DEN
+        && st_type_id != crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+        && !is_fw_ins
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidSpecialStructure".into(),
+            message: format!("Structure {structure_id} is not a special target"),
+            client_error: None,
+        });
+    }
+    let charge_opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    let mut charge_counts: std::collections::BTreeMap<i64, i32> = std::collections::BTreeMap::new();
+    for &cid in charges {
+        let entry = charge_counts.entry(cid).or_insert(0);
+        *entry = entry.checked_add(1).ok_or_else(|| {
+            BridgeRpcError::no_charges_loaded(0, format!("Charge {cid} count overflow"))
+        })?;
+    }
+    let (consumed_backups, consumed_cnames): (Vec<(eve_db::InventoryItemRecord, i32)>, Vec<(i64, String)>) =
+        if !charge_counts.is_empty() {
+            ctx.db.try_with_mut_snapshot(|snap| {
+                let mut backups = Vec::with_capacity(charge_counts.len());
+                let mut cnames = Vec::new();
+                for (&cid, &needed) in &charge_counts {
+                    let pre_rec = snap
+                        .items
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))?;
+                    if let Some(pre_cname) = snap.item_custom_names.get(&cid).cloned() {
+                        cnames.push((cid, pre_cname));
+                    }
+                    snap.consume_exact_item_quantity(cid, needed, charge_opts.clone())
+                        .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
+                    backups.push((pre_rec, needed));
+                }
+                Ok::<_, BridgeRpcError>((backups, cnames))
+            })?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+    let dmg_res = if st_type_id == TYPE_MERCENARY_DEN {
+        apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await
     } else if st_type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
         let q = volley_dmg.max(0.0) * 0.25;
         sov_gameplay_skyhook::apply_skyhook_weapon_damage_with_attacker(
@@ -1269,30 +1333,33 @@ pub async fn dispatch_special_structure_attack(
             q,
             q,
             char_id,
-        )?
-    } else if is_fw_ins {
-        crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await?
+        )
     } else {
-        return Err(BridgeRpcError {
-            code: "InvalidSpecialStructure".into(),
-            message: format!("Structure {structure_id} is not a special target"),
-            client_error: None,
-        });
+        crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        for cid in charges {
-            if let Some(owner_id) = snap.items.get(cid).map(|ch| ch.owner_id) {
-                let opts = eve_db::ConsumeExactOptions {
-                    reject_fitted: false,
-                    ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
-                };
-                let _ = snap.consume_exact_item_quantity(*cid, 1, opts);
+    let rep = match dmg_res {
+        Ok(rep) => rep,
+        Err(e) => {
+            if !consumed_backups.is_empty() {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let absent_cnames: Vec<(i64, i64, String)> = consumed_cnames.iter().filter(|(iid, _)| !snap.items.contains_key(iid))
+                        .filter_map(|(iid, cname)| consumed_backups.iter().find(|(p, _)| p.item_id == *iid).map(|(p, _)| (*iid, p.owner_id, cname.clone())))
+                        .collect();
+                    snap.rollback_restore_consumed_stacks(&consumed_backups);
+                    for (iid, expected_owner, cname) in absent_cnames {
+                        if snap.items.get(&iid).is_some_and(|it| it.owner_id == expected_owner) { snap.item_custom_names.insert(iid, cname); }
+                    }
+                });
             }
+            return Err(e);
         }
+    };
+    ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(s) = snap.structures.get_mut(&structure_id) {
             s.last_damage_tick = tick;
         }
-    });
+        Ok::<(), BridgeRpcError>(())
+    })?;
     Ok(rep)
 }
 
@@ -1551,12 +1618,35 @@ pub async fn handle_anchor_sov_hub_rpc(
             first_arg
         } else {
             snap.items.values()
-                .filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
+                .filter(|i| {
+                    i.type_id == TYPE_SOVEREIGNTY_HUB
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && (i.owner_id == char_id || i.owner_id == corp_id)
+                        && i.quantity >= 1
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
+                })
                 .map(|i| i.item_id).min()
                 .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into(), client_error: None })?
         };
         if let Some(hub_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), hub_owner);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                hub_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.active_ship_id = Some(ship_id);
             snap.consume_exact_item_quantity(item_id, 1, opts).map_err(|e| BridgeRpcError {
                 code: "ItemLockedInContractOrJob".into(),
@@ -1596,5 +1686,207 @@ mod sov_gameplay_tests;
 #[cfg(test)]
 #[path = "sov_gameplay_edges2_tests.rs"]
 mod sov_gameplay_edges2_tests;
+
+#[cfg(test)]
+mod r3_charge_policy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_special_structure_attack_rejects_bpc_charge_without_damage() {
+        let ctx = ServerContext::new();
+        let char_id = 90_000_001_i64;
+        let den_id = 1_099_000_111_i64;
+        let bpc_charge_id = 1_099_000_112_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(1_099_000_100, InventoryItemRecord {
+                item_id: 1_099_000_100, type_id: 587, owner_id: char_id,
+                location_id: 30_000_142, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+            });
+            snap.structures.insert(
+                den_id,
+                UpwellStructureRecord {
+                    structure_id: den_id,
+                    type_id: TYPE_MERCENARY_DEN,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    name: "BPC Test Den".into(),
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    shield_hp: 5_000.0,
+                    armor_hp: 5_000.0,
+                    hull_hp: 5_000.0,
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime.mercenary_dens.insert(
+                den_id,
+                PersistedMercenaryDen {
+                    den_id,
+                    owner_char_id: char_id,
+                    solar_system_id: 30_000_142,
+                    skyhook_id: 1_099_000_110,
+                    planet_id: 40_000_001,
+                    type_id: TYPE_MERCENARY_DEN,
+                    enabled: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_charge_id,
+                InventoryItemRecord {
+                    item_id: bpc_charge_id,
+                    type_id: 200,
+                    owner_id: char_id,
+                    location_id: 1_099_000_100,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 2,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let err = dispatch_special_structure_attack(
+            &ctx,
+            char_id,
+            den_id,
+            TYPE_MERCENARY_DEN,
+            false,
+            1_000.0,
+            77,
+            &[bpc_charge_id],
+        )
+        .await
+        .expect_err("BPC weapon charge must fail before dealing damage");
+        assert!(!err.message.is_empty());
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.structures[&den_id].last_damage_tick, 0);
+            assert_eq!(snap.items[&bpc_charge_id].quantity, 2);
+        });
+
+        // R4-04: Foreign-owned charge rejects before dealing damage; valid charge stays intact if target damage fails.
+        let foreign_charge_id = 1_099_000_113_i64;
+        let valid_charge_id = 1_099_000_114_i64;
+        let dead_den_id = 1_099_000_115_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                foreign_charge_id,
+                InventoryItemRecord {
+                    item_id: foreign_charge_id,
+                    type_id: 200,
+                    owner_id: char_id + 99,
+                    location_id: 1_099_000_100,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 2,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                valid_charge_id,
+                InventoryItemRecord {
+                    item_id: valid_charge_id,
+                    type_id: 200,
+                    owner_id: char_id,
+                    location_id: 1_099_000_100,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 3,
+                    ..Default::default()
+                },
+            );
+            snap.structures.insert(
+                dead_den_id,
+                UpwellStructureRecord {
+                    structure_id: dead_den_id,
+                    type_id: TYPE_MERCENARY_DEN,
+                    owner_corp_id: 98_000_001,
+                    solar_system_id: 30_000_142,
+                    name: "Destroyed Den".into(),
+                    state: "Destroyed".into(),
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx,
+                char_id,
+                den_id,
+                TYPE_MERCENARY_DEN,
+                false,
+                1_000.0,
+                78,
+                &[foreign_charge_id],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "NoChargesLoaded"
+        );
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx,
+                char_id,
+                dead_den_id,
+                TYPE_MERCENARY_DEN,
+                false,
+                1_000.0,
+                79,
+                &[valid_charge_id],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "StructureDestroyed"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.items[&foreign_charge_id].quantity, 2);
+            assert_eq!(snap.items[&valid_charge_id].quantity, 3);
+        });
+
+        // R7-04: Duplicate cid against 1-round stack rejects before damage, concurrent 1-round race consumes once, and failed damage restores 1-round stack.
+        let one_round_id = 1_099_000_116_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                one_round_id,
+                InventoryItemRecord {
+                    item_id: one_round_id, type_id: 200, owner_id: char_id,
+                    location_id: 1_099_000_100, flag: InventoryFlag::HiSlot0, quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 80, &[one_round_id, one_round_id],
+            ).await.unwrap_err().code,
+            "NoChargesLoaded"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.items[&one_round_id].quantity, 1);
+        });
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx, char_id, dead_den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 81, &[one_round_id],
+            ).await.unwrap_err().code,
+            "StructureDestroyed"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&one_round_id].quantity, 1);
+        });
+        let race_charges = [one_round_id];
+        let (r1, r2) = tokio::join!(
+            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 82, &race_charges),
+            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 83, &race_charges),
+        );
+        assert!(matches!((r1, r2), (Ok(_), Err(_)) | (Err(_), Ok(_))));
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.items.contains_key(&one_round_id));
+            assert_eq!(snap.structures[&den_id].shield_hp, 4_000.0);
+        });
+    }
+}
 
 

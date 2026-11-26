@@ -388,14 +388,25 @@ pub async fn handle(
             let current_ship = session.ship_id;
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let lic_opts = eve_db::ConsumeExactOptions {
+                    reject_blueprint_copy: true,
+                    active_ship_id: current_ship,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        char_id,
+                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                    )
+                };
                 let license_item_id = snap
                     .items
                     .values()
-                    .find(|i| {
+                    .filter(|i| {
                         i.type_id == requested_skin_id
                             && i.quantity >= 1
                             && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                            && snap.validate_item_for_consumption(i, &lic_opts).is_ok()
                     })
+                    .min_by_key(|i| i.item_id)
                     .map(|i| i.item_id);
                 let Some(item_id) = license_item_id else {
                     return Err(BridgeRpcError {
@@ -407,14 +418,7 @@ pub async fn handle(
                     });
                 };
 
-                snap.consume_exact_item_quantity(
-                    item_id,
-                    1,
-                    eve_db::ConsumeExactOptions {
-                        active_ship_id: current_ship,
-                        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
-                    },
-                )
+                snap.consume_exact_item_quantity(item_id, 1, lic_opts)
                 .map_err(|e| BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: e.to_string(),

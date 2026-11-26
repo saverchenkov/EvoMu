@@ -30,6 +30,13 @@ pub(crate) struct DeferredPostCycleEffects {
     pub burst_jammer_plan: Option<super::fitting_module_cycles::PreparedBurstJammerPlan>,
 }
 
+pub(crate) fn is_wear_only_non_singleton_crystal(item: &eve_db::InventoryItemRecord) -> bool {
+    !item.singleton && item.quantity == 1 && item.source_mutaplasmid_id.is_none()
+        && item.insured_payout_isk.is_finite() && item.insured_payout_isk == 0.0
+        && !item.dynamic_attributes.is_empty()
+        && item.dynamic_attributes.keys().all(|k| *k == eve_sde::attr_ids::DAMAGE || *k == eve_sde::attr_ids::HP_STRUCT)
+}
+
 fn is_weapon_autoload_stack_consumable(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -59,9 +66,28 @@ fn is_weapon_autoload_stack_consumable(
     let Some(ct) = ctx.sde.types.get(&item.type_id) else {
         return false;
     };
-    let is_crystal_singleton =
-        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663) && item.quantity == 1;
-    if item.singleton && !is_crystal_singleton {
+    let is_crystal_type = matches!(ct.group_id, 86 | 374 | 375 | 482 | 663);
+    let is_crystal_exact = is_crystal_type
+        && item.quantity == 1
+        && (item.singleton || is_wear_only_non_singleton_crystal(item));
+    if item.singleton && !is_crystal_exact {
+        return false;
+    }
+    let policy = if is_crystal_exact {
+        eve_db::ItemClassPolicy::ExactAssembledItem
+    } else {
+        eve_db::ItemClassPolicy::StackableCommodity
+    };
+    let opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        active_ship_id: Some(ship_id),
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            policy,
+        )
+    };
+    if snap.validate_item_for_consumption(item, &opts).is_err() {
         return false;
     }
     ServerContext::is_charge_compatible_with_weapon(mod_type, ct)
@@ -175,6 +201,35 @@ pub(crate) struct CommittedWeaponAutoload {
     pub created_slot_charges: Vec<(i64, i64)>,
 }
 
+fn consume_cycle_assembled_charge(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    mod_type_id: u32,
+    charge_id: i64,
+    qty: i32,
+) -> Result<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
+    let pre = snap.items.get(&charge_id).cloned().ok_or_else(|| {
+        BridgeRpcError::no_charges_loaded(
+            mod_type_id as i64,
+            format!("Loaded charge {charge_id} not found"),
+        )
+    })?;
+    let opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        active_ship_id: Some(ship_id),
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            Some(char_id),
+            char_id,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    let post = snap
+        .consume_exact_item_quantity(charge_id, qty, opts)
+        .map_err(|e| BridgeRpcError::no_charges_loaded(mod_type_id as i64, e.to_string()))?;
+    Ok((pre, post))
+}
+
 pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     ctx: &ServerContext,
     snap: &mut eve_db::WorldStateSnapshot,
@@ -218,11 +273,18 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     let pre_dynamic_attributes = stack_pre.dynamic_attributes.clone();
     let pre_source_mutaplasmid_id = stack_pre.source_mutaplasmid_id;
 
-    if stack_pre.singleton && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
+    let is_crystal_type = ctx.sde.types.get(&stack_pre.type_id).is_some_and(|ct| {
+        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
+    });
+    let is_single_crystal_move = is_crystal_type
+        && stack_pre.quantity == 1
+        && (stack_pre.singleton || is_wear_only_non_singleton_crystal(&stack_pre));
+    if is_single_crystal_move && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
         let (tid, tf, _) = plan.slot_allocations[0];
         let mut moved = stack_pre.clone();
         if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
             st.flag = tf;
+            st.singleton = true;
             st.version += 1;
             st.dynamic_attributes = pre_dynamic_attributes.clone();
             st.source_mutaplasmid_id = pre_source_mutaplasmid_id;
@@ -233,15 +295,18 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
         loaded_bank.push(tid);
         created_slot_charges.push((tid, plan.cargo_stack_id));
     } else {
-        if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
-            if st.quantity > plan.total_take {
-                st.quantity -= plan.total_take;
-                st.version += 1;
-            } else {
-                snap.items.remove(&plan.cargo_stack_id);
-            }
-        }
-        let post_stack = snap.items.get(&plan.cargo_stack_id).cloned();
+        let stack_opts = eve_db::ConsumeExactOptions {
+            reject_fitted: false,
+            active_ship_id: Some(ship_id),
+            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                plan.owner_id,
+                eve_db::ItemClassPolicy::StackableCommodity,
+            )
+        };
+        let post_stack = snap
+            .consume_exact_item_quantity(plan.cargo_stack_id, plan.total_take, stack_opts)
+            .map_err(|_| BridgeRpcError::no_charges(mod_type.type_id as i64))?;
         autoload_diffs.push((Some(stack_pre), post_stack));
         for &(tid, tf, give) in &plan.slot_allocations {
             if give <= 0 {
@@ -255,10 +320,8 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
                 location_id: ship_id,
                 flag: tf,
                 quantity: give,
-                singleton: false,
+                singleton: is_crystal_type && give == 1,
                 version: 1,
-                dynamic_attributes: pre_dynamic_attributes.clone(),
-                source_mutaplasmid_id: pre_source_mutaplasmid_id,
                 ..Default::default()
             };
             snap.items.insert(cid, new_rec.clone());
@@ -273,18 +336,14 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     let mut final_slot_charges = Vec::with_capacity(created_slot_charges.len());
     if plan.consume_one_round_per_slot {
         for (tid, cid) in created_slot_charges {
-            if let Some(pre) = snap.items.get(&cid).cloned() {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                opts.reject_fitted = false;
-                if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
-                    if post.is_none() {
-                        snap.module_active_charges.remove(&tid);
-                    } else {
-                        final_slot_charges.push((tid, cid));
-                    }
-                    cycle_consume_diffs.push((pre, post));
-                }
+            let (pre, post) =
+                consume_cycle_assembled_charge(snap, char_id, ship_id, mod_type.type_id, cid, 1)?;
+            if post.is_none() {
+                snap.module_active_charges.remove(&tid);
+            } else {
+                final_slot_charges.push((tid, cid));
             }
+            cycle_consume_diffs.push((pre, post));
         }
     } else {
         final_slot_charges = created_slot_charges;
@@ -358,9 +417,17 @@ fn collect_ship_fuel_stacks(
                 && i.type_id == fuel_type_id
                 && matches!(i.flag as u16, 5 | 133)
                 && i.flag != eve_db::InventoryFlag::Locked
-                && !i.singleton
                 && i.quantity > 0
-                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                && snap
+                    .validate_item_for_consumption(
+                        i,
+                        &eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            i.owner_id,
+                            eve_db::ItemClassPolicy::StackableCommodity,
+                        ),
+                    )
+                    .is_ok()
         })
         .map(|i| (if (i.flag as u16) == 133 { 0 } else { 1 }, i.item_id, i.quantity))
         .collect();
@@ -1735,9 +1802,18 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                         Some((committed.autoload_diffs, committed.loaded_bank));
                 }
                 if let Some((fuel_type_id, fuel_qty_needed)) = deferred.fuel_to_deduct {
-                    let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
-                    let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
-                    if total_avail >= i64::from(fuel_qty_needed) && fuel_qty_needed > 0 {
+                    if fuel_qty_needed > 0 {
+                        let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
+                        let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
+                        if total_avail < i64::from(fuel_qty_needed) {
+                            return Err(BridgeRpcError {
+                                code: "InsufficientFuel".into(),
+                                message: format!(
+                                    "Insufficient fuel (type {fuel_type_id}): needed {fuel_qty_needed}, available {total_avail}"
+                                ),
+                                client_error: None,
+                            });
+                        }
                         let mut remaining = fuel_qty_needed;
                         for (_, fid, _) in stacks {
                             if remaining <= 0 {
@@ -1750,47 +1826,62 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                             if take <= 0 {
                                 continue;
                             }
-                            let opts =
-                                eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                            let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                                None,
+                                pre.owner_id,
+                                eve_db::ItemClassPolicy::StackableCommodity,
+                            );
                             if let Ok(post) = snap.consume_exact_item_quantity(fid, take, opts) {
                                 remaining -= take;
                                 diffs.push((pre, post));
                             }
                         }
+                        if remaining > 0 {
+                            return Err(BridgeRpcError {
+                                code: "InsufficientFuel".into(),
+                                message: format!(
+                                    "Insufficient fuel (type {fuel_type_id}): needed {fuel_qty_needed}, remaining {remaining}"
+                                ),
+                                client_error: None,
+                            });
+                        }
                     }
                 }
                 if let Some(cid) = deferred.cap_booster_charge_id {
-                    if let Some(pre) = snap.items.get(&cid).cloned() {
-                        let mut opts =
-                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                        opts.reject_fitted = false;
-                        if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
-                            diffs.push((pre, post));
-                        }
-                    }
+                    let (pre, post) = consume_cycle_assembled_charge(
+                        snap,
+                        char_id,
+                        ship_id,
+                        mod_type.type_id,
+                        cid,
+                        1,
+                    )?;
+                    diffs.push((pre, post));
                 }
                 if let Some((cid, qty)) = deferred.ancillary_charge_to_consume {
-                    if let Some(pre) = snap.items.get(&cid).cloned() {
-                        let mut opts =
-                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                        opts.reject_fitted = false;
-                        if let Ok(post) = snap.consume_exact_item_quantity(cid, qty, opts) {
-                            diffs.push((pre, post));
-                        }
-                    }
+                    let (pre, post) = consume_cycle_assembled_charge(
+                        snap,
+                        char_id,
+                        ship_id,
+                        mod_type.type_id,
+                        cid,
+                        qty,
+                    )?;
+                    diffs.push((pre, post));
                 }
                 for (turret_id, charge_id) in deferred.turret_charge_consumptions {
-                    if let Some(pre) = snap.items.get(&charge_id).cloned() {
-                        let mut opts =
-                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                        opts.reject_fitted = false;
-                        if let Ok(post) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
-                            if post.is_none() {
-                                snap.module_active_charges.remove(&turret_id);
-                            }
-                            diffs.push((pre, post));
-                        }
+                    let (pre, post) = consume_cycle_assembled_charge(
+                        snap,
+                        char_id,
+                        ship_id,
+                        mod_type.type_id,
+                        charge_id,
+                        1,
+                    )?;
+                    if post.is_none() {
+                        snap.module_active_charges.remove(&turret_id);
                     }
+                    diffs.push((pre, post));
                 }
                 Ok((committed_autoload_info, diffs))
             },

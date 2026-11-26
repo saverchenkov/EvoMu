@@ -1438,34 +1438,13 @@ pub(crate) fn inspect_metenox_drill(
             client_error: None,
         });
     }
-    let matches_reagent_owner = |item_owner_id: i64| -> bool {
-        if st_owner_corp != 0 { item_owner_id == st_owner_corp } else { item_owner_id == char_id || item_owner_id == caller_corp }
-    };
-    let item_fuel_blocks: u32 = snap.items.values()
-        .filter(|it| {
-            it.location_id == structure_id
-                && matches_reagent_owner(it.owner_id)
-                && it.quantity > 0
-                && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
-                && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
-        })
-        .fold(0u32, |acc, it| {
-            acc.saturating_add(u32::try_from(it.quantity).unwrap_or(0))
-        });
-    let total_struct_fuel = if item_fuel_blocks > 0 { item_fuel_blocks } else { st.fuel_blocks };
-    let total_struct_gas: u32 = snap.items.values()
-        .filter(|it| {
-            it.location_id == structure_id
-                && matches_reagent_owner(it.owner_id)
-                && it.quantity > 0
-                && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
-                && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                && it.type_id == 81143
-        })
-        .fold(0u32, |acc, it| {
-            acc.saturating_add(u32::try_from(it.quantity).unwrap_or(0))
-        });
+    let (total_struct_fuel, _, _, total_struct_gas) = super::collect_metenox_reagent_counts(
+        sde,
+        snap,
+        structure_id,
+        st_owner_corp,
+        Some((char_id, caller_corp)),
+    );
     let Some(moon_id) = super::resolve_structure_moon_id(sde, st_sys_id, st.position) else {
         return Err(BridgeRpcError { code: "NoMoonInSystem".into(), message: format!("No SDE moon celestial found in system {st_sys_id}"), client_error: None });
     };

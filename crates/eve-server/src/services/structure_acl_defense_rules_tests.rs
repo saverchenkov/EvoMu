@@ -1361,6 +1361,381 @@ fn are_corps_at_war_in_snap_honors_ally_expiry_and_alliance_allies() {
     });
 }
 
+#[test]
+fn consume_structure_fuel_blocks_rejects_non_commodity_bay_stacks() {
+    let mut ctx = test_ctx();
+    let st_tid = 35_832_u32;
+    let fuel_tid = 4247_u32;
+    clone_type_with(&mut ctx.sde, 35_832, st_tid, 1657, 65, &[]);
+    clone_type_with(&mut ctx.sde, 34, fuel_tid, 1136, 4, &[]);
+    seed_char_and_corp(&ctx, 7491, 98_749, 30_000_142, true);
+    let sid = 10_000_995_999_i64;
+    let bad_fuel_id = 81_991_i64;
+    let good_fuel_id = 81_992_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: st_tid,
+                owner_corp_id: 98_749,
+                solar_system_id: 30_000_142,
+                name: "Fuel Policy Citadel".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 30,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bad_fuel_id,
+            InventoryItemRecord {
+                item_id: bad_fuel_id,
+                type_id: fuel_tid,
+                owner_id: 98_749,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 30,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 10));
+        assert_eq!(snap.items[&bad_fuel_id].quantity, 30);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 30);
+
+        snap.items.get_mut(&bad_fuel_id).unwrap().is_blueprint_copy = false;
+        snap.items.get_mut(&bad_fuel_id).unwrap().singleton = true;
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 10));
+        assert_eq!(snap.structures[&sid].fuel_blocks, 30);
+
+        snap.items.insert(
+            good_fuel_id,
+            InventoryItemRecord {
+                item_id: good_fuel_id,
+                type_id: fuel_tid,
+                owner_id: 98_749,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 15));
+        assert!(consume_structure_fuel_blocks(&ctx, snap, sid, 10));
+        assert!(!snap.items.contains_key(&good_fuel_id));
+        assert_eq!(snap.items[&bad_fuel_id].quantity, 30);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 0);
+    });
+}
+
+#[test]
+fn structure_fuel_lifecycle_and_fit_move_align_with_consume_policy() {
+    let ctx = test_ctx();
+    let char_id = 7501_i64;
+    let corp_id = 98_750_i64;
+    let sys_id = 30_000_142_u32;
+    let sid = 10_000_996_100_i64;
+    let svc_tid = 35_878_u32; // Standup Manufacturing Plant I
+    let fuel_tid = 4247_u32;
+    seed_char_and_corp(&ctx, char_id, corp_id, sys_id, true);
+    let online_cost = service_module_online_fuel_cost(&ctx, 35_825, svc_tid);
+    assert!(online_cost > 0);
+    let per_hour = ctx
+        .sde
+        .types
+        .get(&svc_tid)
+        .and_then(|t| t.default_attributes.get(&life::ATTR_SERVICE_FUEL_PER_HOUR))
+        .copied()
+        .unwrap_or(0.0);
+    let mod_burn = (per_hour * service_module_fuel_multiplier(&ctx, 35_825, svc_tid))
+        .round()
+        .max(1.0) as u32;
+    assert!(mod_burn > 0);
+
+    let bpc_fuel_id = 82_001_i64;
+    let valid_fuel_id = 82_002_i64;
+    let installed_svc_id = 82_003_i64;
+    let to_fit_svc_id = 82_004_i64;
+    let foreign_fuel_id = 82_005_i64;
+    let base_now = 1_700_000_000_u64;
+    let profile = life::structure_profile(&ctx, 35_825).expect("raitaru profile");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = Some(sid);
+        }
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_825,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Fuel Alignment Raitaru".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: mod_burn + 1_000,
+                shield_hp: profile.shield_hp,
+                armor_hp: profile.armor_hp,
+                hull_hp: profile.hull_hp,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            installed_svc_id,
+            InventoryItemRecord {
+                item_id: installed_svc_id,
+                type_id: svc_tid,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(installed_svc_id, true);
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.insert(
+            sid,
+            crate::services::station_structure::structure_upwell_ops::StructureLifecycleState {
+                last_fuel_tick_unix: Some(base_now),
+                online_modules: vec![installed_svc_id],
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+
+        snap.items.insert(
+            bpc_fuel_id,
+            InventoryItemRecord {
+                item_id: bpc_fuel_id,
+                type_id: fuel_tid,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 1_000,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_fuel_id,
+            InventoryItemRecord {
+                item_id: valid_fuel_id,
+                type_id: fuel_tid,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: mod_burn as i32,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            to_fit_svc_id,
+            InventoryItemRecord {
+                item_id: to_fit_svc_id,
+                type_id: svc_tid,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_fuel_id,
+            InventoryItemRecord {
+                item_id: foreign_fuel_id,
+                type_id: fuel_tid,
+                owner_id: corp_id + 99,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+
+        let st = snap.structures[&sid].clone();
+        assert_eq!(available_structure_fuel_blocks(&ctx, snap, sid), mod_burn);
+        assert_eq!(
+            life::estimated_fuel_expires_unix(&ctx, snap, &st, base_now),
+            Some(base_now + 3_600)
+        );
+    });
+
+    // Advance 5 hours: only 1 hour (`mod_burn`) is affordable; 1000 BPC blocks and foreign-owner blocks must NOT inflate `affordable`
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let _ = life::sync_structure(&ctx, snap, &mut ext, sid, base_now + 5 * 3_600);
+        assert!(!snap.items.contains_key(&valid_fuel_id));
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 1_000);
+        assert_eq!(snap.items[&foreign_fuel_id].quantity, 500);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 0);
+        assert_eq!(snap.module_online_states.get(&installed_svc_id), Some(&false));
+        assert_eq!(
+            ext.lifecycle.get(&sid).and_then(|l| l.low_power_since_unix),
+            Some(base_now + 2 * 3_600)
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    // Stale `st.fuel_blocks = 500` alongside BPC bay stack must still be treated as 0 blocks in fit_move
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&sid).unwrap().fuel_blocks = 500;
+    });
+    let mut sess = make_session(char_id, corp_id, sys_id, Some(sid), u64::MAX);
+    let err_fit = crate::services::station_structure::structure_lifecycle_rpc::handle_structure_fit_move(
+        &ctx,
+        &mut sess,
+        to_fit_svc_id,
+        sid,
+        InventoryFlag::ServiceSlot1,
+        Some(true),
+    )
+    .expect_err("explicit online with only BPC bay blocks must fail");
+    assert_eq!(err_fit.code, "InsufficientStructureFuelToOnline");
+
+    let ok_fit = crate::services::station_structure::structure_lifecycle_rpc::handle_structure_fit_move(
+        &ctx,
+        &mut sess,
+        to_fit_svc_id,
+        sid,
+        InventoryFlag::ServiceSlot1,
+        None,
+    )
+    .expect("implicit online fits offline instead of free onlining");
+    assert_eq!(ok_fit.dict_get("online"), Some(&PyRep::Bool(false)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.module_online_states.get(&to_fit_svc_id), Some(&false));
+    });
+}
+
+#[test]
+fn structure_no_core_skips_bpc_core_and_installs_valid_sibling() {
+    let ctx = test_ctx();
+    let corp_id = 98_751_i64;
+    let sid = 10_000_996_200_i64;
+    let core_tid = life::structure_profile(&ctx, 35_832)
+        .and_then(|p| p.core_type_id)
+        .expect("Astrahus core type");
+    let bpc_core_id = 82_101_i64;
+    let good_core_id = 82_102_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Core Test Citadel".into(),
+                position: [0.0, 0.0, 0.0],
+                state: life::STATE_NO_CORE.into(),
+                quantum_core_installed: false,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_core_id,
+            InventoryItemRecord {
+                item_id: bpc_core_id,
+                type_id: core_tid,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::StructureDeedBay,
+                quantity: 1,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            good_core_id,
+            InventoryItemRecord {
+                item_id: good_core_id,
+                type_id: core_tid,
+                owner_id: corp_id,
+                location_id: sid,
+                flag: InventoryFlag::StructureDeedBay,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+
+        let mut ext = load_ext_state(snap);
+        let _ = life::sync_structure(&ctx, snap, &mut ext, sid, 1_700_000_000);
+        assert!(snap.structures[&sid].quantum_core_installed);
+        assert!(snap.items.contains_key(&bpc_core_id));
+        assert!(!snap.items.contains_key(&good_core_id));
+    });
+}
+
+#[test]
+fn fuel_state_rejects_foreign_only_bay_stack_without_unbacked_fallback() {
+    let mut ctx = test_ctx();
+    let st_tid = 35_832_u32;
+    let fuel_tid = 4247_u32;
+    clone_type_with(&mut ctx.sde, 35_832, st_tid, 1657, 65, &[]);
+    clone_type_with(&mut ctx.sde, 34, fuel_tid, 1136, 4, &[]);
+    let corp_id = 98_752_i64;
+    let sid = 10_000_996_300_i64;
+    let foreign_fuel_id = 82_201_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: st_tid,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Foreign Bay Fuel Test".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 30,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_fuel_id,
+            InventoryItemRecord {
+                item_id: foreign_fuel_id,
+                type_id: fuel_tid,
+                owner_id: corp_id + 1,
+                location_id: sid,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(available_structure_fuel_blocks(&ctx, snap, sid), 0);
+        assert!(!consume_structure_fuel_blocks(&ctx, snap, sid, 1));
+        assert_eq!(snap.items[&foreign_fuel_id].quantity, 5);
+        assert_eq!(snap.structures[&sid].fuel_blocks, 30);
+    });
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;

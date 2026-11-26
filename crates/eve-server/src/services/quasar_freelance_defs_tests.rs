@@ -601,4 +601,36 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
     let closed_rsp = call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest", closed_req, now);
     assert_eq!(closed_rsp.status_code, STATUS_OK);
     assert_eq!(WireMessage::decode(&closed_rsp.payload.unwrap().value).unwrap().fields[0].field_number, 3);
+
+    // Auto-select delivery skips lower-ID BPC stack and consumes valid commodity stack
+    let pid_bpc = 604i64;
+    let uuid_bpc = corp_projects::freelance_uuid(now, pid_bpc).to_vec();
+    db.with_mut_snapshot(|s| {
+        s.corp_projects.insert(pid_bpc, CorpProjectRecord { project_id: pid_bpc, corporation_id: corp_id, name: "Policy Auto".into(), target_quantity: 10, current_quantity: 0, isk_per_unit: eve_db::IskCents(0), escrow_remaining: eve_db::IskCents(0) });
+        s.alliance_war_state.project_meta.insert(pid_bpc, ("DeliverItem".into(), true, false));
+        let mut det = PersistedProjectDetails::default();
+        det.creator_id = cid;
+        det.created_unix = now;
+        det.status = "Active".into();
+        det.filter_id = Some(999_124);
+        det.batch_size = 10;
+        det.max_per_character = Some(10);
+        det.uuid_bytes = uuid_bpc.clone();
+        det.committed_participants.push(cid);
+        s.alliance_war_state.project_details.insert(pid_bpc, det);
+        s.items.insert(910_090, InventoryItemRecord { item_id: 910_090, type_id: 999_124, owner_id: cid, location_id: station_id, flag: InventoryFlag::Hangar, quantity: 10, is_blueprint_copy: true, ..Default::default() });
+        s.items.insert(910_091, InventoryItemRecord { item_id: 910_091, type_id: 999_124, owner_id: cid, location_id: station_id, flag: InventoryFlag::Hangar, quantity: 10, ..Default::default() });
+    });
+    let auto_req = pb::message("eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest")
+        .set("project.uuid", uuid_bpc)
+        .set("delivery_location.station.sequential", station_id as u64)
+        .set("quantity", 10u32)
+        .must_encode();
+    let auto_rsp = call(&router, &player, "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", auto_req, now);
+    assert_eq!(auto_rsp.status_code, STATUS_OK);
+    assert_eq!(WireMessage::decode(&auto_rsp.payload.unwrap().value).unwrap().fields[0].field_number, 1);
+    db.with_snapshot(|s| {
+        assert_eq!(s.items[&910_090].quantity, 10);
+        assert!(!s.items.contains_key(&910_091));
+    });
 }

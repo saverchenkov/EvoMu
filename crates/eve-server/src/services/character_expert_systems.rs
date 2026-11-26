@@ -298,8 +298,13 @@ pub fn handle(
                     item_id,
                     1,
                     eve_db::ConsumeExactOptions {
+                        reject_blueprint_copy: true,
                         active_ship_id: session.ship_id,
-                        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(
+                            Some(char_id),
+                            char_id,
+                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                        )
                     },
                 )
                 .map_err(|e| BridgeRpcError {

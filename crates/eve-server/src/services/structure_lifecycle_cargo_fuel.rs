@@ -153,8 +153,32 @@ pub async fn handle_jettison_structure_fuel(
                     s.fuel_blocks = s.fuel_blocks.saturating_sub(moved_blocks);
                 }
             } else {
+                let fuel_owner_for = |i: &eve_db::InventoryItemRecord| -> i64 {
+                    if st.owner_corp_id != 0 {
+                        st.owner_corp_id
+                    } else {
+                        i.owner_id
+                    }
+                };
+                let is_eligible_fuel = |snap_ref: &eve_db::WorldStateSnapshot, i: &eve_db::InventoryItemRecord| -> bool {
+                    i.location_id == structure_id
+                        && rules::is_structure_fuel_flag(i.flag)
+                        && i.quantity > 0
+                        && snap_ref
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions::for_owner_exact(
+                                    None,
+                                    fuel_owner_for(i),
+                                    eve_db::ItemClassPolicy::StackableCommodity,
+                                ),
+                            )
+                            .is_ok()
+                };
+                let (has_any_bay_stack, avail_blocks, _) =
+                    rules::collect_structure_fuel_block_state(ctx, snap, structure_id);
                 let default_tid = snap.items.values()
-                    .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
+                    .filter(|i| is_eligible_fuel(snap, i) && rules::is_fuel_block_type(ctx, i.type_id))
                     .min_by_key(|i| i.item_id).map(|i| i64::from(i.type_id)).unwrap_or(4247);
                 let rpc = crate::router::RpcArgs::positional(args);
                 let (fuel_tid, req_qty) = if args.len() >= 3 {
@@ -165,7 +189,7 @@ pub async fn handle_jettison_structure_fuel(
                 } else if args.len() == 2 {
                     (default_tid, rpc.req_non_negative_i64(1, "quantity")?)
                 } else {
-                    (default_tid, i64::from(st.fuel_blocks))
+                    (default_tid, i64::from(avail_blocks))
                 };
                 let fuel_tid_u32 = u32::try_from(fuel_tid).map_err(|_| err("InvalidArgument", format!("Invalid fuel typeID {fuel_tid}")))?;
                 if !rules::is_valid_structure_fuel_bay_item(ctx, fuel_tid_u32) {
@@ -186,7 +210,7 @@ pub async fn handle_jettison_structure_fuel(
                     (qty_u32, qty_i32)
                 };
                 let mut bay_matching: Vec<i64> = snap.items.values()
-                    .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.type_id == fuel_tid_u32 && i.quantity > 0)
+                    .filter(|i| is_eligible_fuel(snap, i) && i.type_id == fuel_tid_u32)
                     .map(|i| i.item_id).collect();
                 bay_matching.sort_unstable();
                 let matching_qty: u32 = bay_matching
@@ -195,11 +219,13 @@ pub async fn handle_jettison_structure_fuel(
                     .filter_map(|i| u32::try_from(i.quantity).ok())
                     .fold(0, u32::saturating_add);
                 let is_block = rules::is_fuel_block_type(ctx, fuel_tid_u32);
+                let unbacked_blocks = if is_block && !has_any_bay_stack {
+                    st.fuel_blocks
+                } else {
+                    0
+                };
                 let avail_for_tid = if is_block {
-                    let backed_all: u32 = snap.items.values()
-                        .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
-                        .filter_map(|i| u32::try_from(i.quantity).ok()).fold(0, u32::saturating_add);
-                    matching_qty.saturating_add(st.fuel_blocks.saturating_sub(backed_all)).min(st.fuel_blocks)
+                    matching_qty.saturating_add(unbacked_blocks)
                 } else {
                     matching_qty
                 };
@@ -209,10 +235,13 @@ pub async fn handle_jettison_structure_fuel(
                 let mut rem = req_qty_u32;
                 for iid in bay_matching {
                     if rem == 0 { break; }
-                    let Some((it_owner, avail)) = snap
+                    let Some(fuel_owner) = snap.items.get(&iid).map(fuel_owner_for) else {
+                        continue;
+                    };
+                    let Some(avail) = snap
                         .items
                         .get(&iid)
-                        .map(|it| (it.owner_id, u32::try_from(it.quantity).unwrap_or(0)))
+                        .and_then(|it| u32::try_from(it.quantity).ok())
                     else {
                         continue;
                     };
@@ -222,15 +251,35 @@ pub async fn handle_jettison_structure_fuel(
                     else {
                         continue;
                     };
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
-                    opts.reject_singleton = true;
+                    let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        fuel_owner,
+                        eve_db::ItemClassPolicy::StackableCommodity,
+                    );
                     if snap.consume_exact_item_quantity(iid, take_i32, opts).is_ok() {
                         rem -= take;
                     }
                 }
+                if (!is_block && rem > 0) || (is_block && rem > unbacked_blocks) {
+                    return Err(err("InsufficientStructureFuel", format!("Cannot jettison {req_qty} of type {fuel_tid_u32} from structure {structure_id} (unconsumed remainder: {rem})")));
+                }
                 if is_block {
+                    let rem_eligible = if has_any_bay_stack {
+                        Some(
+                            snap.items
+                                .values()
+                                .filter(|i| {
+                                    is_eligible_fuel(snap, i)
+                                        && rules::is_fuel_block_type(ctx, i.type_id)
+                                })
+                                .filter_map(|i| u32::try_from(i.quantity).ok())
+                                .fold(0u32, u32::saturating_add),
+                        )
+                    } else {
+                        None
+                    };
                     if let Some(s) = snap.structures.get_mut(&structure_id) {
-                        s.fuel_blocks = s.fuel_blocks.saturating_sub(req_qty_u32);
+                        s.fuel_blocks = rem_eligible.unwrap_or_else(|| s.fuel_blocks.saturating_sub(req_qty_u32));
                     }
                 }
                 snap.next_entity_id += 1;

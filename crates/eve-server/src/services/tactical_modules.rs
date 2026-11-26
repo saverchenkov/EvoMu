@@ -925,7 +925,22 @@ pub async fn handle_entosis_link_activation(
         let adm_val = snap.system_states.get(&sys_id).map(|st| crate::services::sov_services::calculate_adm(st.military_index, st.industrial_index, st.strategic_index)).unwrap_or(1.0);
         let vuln_item = snap.items.get(&target_id).and_then(|i| i.dynamic_attributes.get(&2110).copied()).unwrap_or(1.0) > 0.0;
         let vuln_struct = snap.structures.get(&target_id).map(|s| !matches!(s.state.as_str(), "ShieldReinforced" | "ArmorReinforced" | "Invulnerable")).unwrap_or(true);
-        let stront_id = snap.items.values().find(|i| i.location_id == ship_id && i.type_id == 16275 && i.quantity >= 1).map(|i| i.item_id);
+        let stront_opts = eve_db::ConsumeExactOptions {
+            policy: eve_db::ItemClassPolicy::StackableCommodity,
+            active_ship_id: Some(ship_id),
+            ..eve_db::ConsumeExactOptions::for_character_stack(char_id)
+        };
+        let stront_id = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && i.type_id == 16275
+                    && i.quantity >= 1
+                    && snap.validate_item_for_consumption(i, &stront_opts).is_ok()
+            })
+            .map(|i| i.item_id)
+            .min();
         (sg, side, vuln_item && vuln_struct, adm_val, stront_id)
     });
 
@@ -956,6 +971,7 @@ pub async fn handle_entosis_link_activation(
                 stront_item_id,
                 1,
                 eve_db::ConsumeExactOptions {
+                    policy: eve_db::ItemClassPolicy::StackableCommodity,
                     active_ship_id: Some(ship_id),
                     ..eve_db::ConsumeExactOptions::for_character_stack(char_id)
                 },
@@ -1099,19 +1115,30 @@ pub async fn activate_command_burst(
     let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
         let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
         let is_slot_burst_charge = |i: &eve_db::InventoryItemRecord| {
+            let opts = eve_db::ConsumeExactOptions {
+                reject_fitted: false,
+                active_ship_id: Some(ship_id),
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    i.owner_id,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                )
+            };
             i.location_id == ship_id
                 && i.item_id != module_id
                 && Some(i.flag) == mod_flag
                 && i.quantity > 0
                 && is_valid_charge_type(i.type_id)
+                && snap.validate_item_for_consumption(i, &opts).is_ok()
         };
         // Prefer an exact match with `charge_tid_opt`, falling back to any compatible burst charge
         // physically loaded in the module's slot if `charge_tid_opt` held a stale cached type ID.
         if let Some(found) = snap
             .items
             .values()
-            .find(|i| is_slot_burst_charge(i) && charge_tid_opt.is_none_or(|req| i.type_id == req))
-            .or_else(|| snap.items.values().find(|i| is_slot_burst_charge(i)))
+            .filter(|i| is_slot_burst_charge(i) && charge_tid_opt.is_none_or(|req| i.type_id == req))
+            .min_by_key(|i| i.item_id)
+            .or_else(|| snap.items.values().filter(|i| is_slot_burst_charge(i)).min_by_key(|i| i.item_id))
         {
             (Some(found.type_id), Some(found.item_id))
         } else {
@@ -1268,6 +1295,33 @@ pub async fn activate_command_burst(
         }
         affected_ships.push((member_char_id, member_ship_id));
     }
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let exhausted = if let Some(cid) = charge_item_id_opt {
+            let owner = snap.items.get(&cid).map(|ci| ci.owner_id).ok_or_else(|| {
+                BridgeRpcError::no_charges_loaded(
+                    mod_type.type_id as i64,
+                    "Command Burst module charge is missing",
+                )
+            })?;
+            let opts = eve_db::ConsumeExactOptions {
+                reject_fitted: false,
+                active_ship_id: Some(ship_id),
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                )
+            };
+            snap.consume_exact_item_quantity(cid, 1, opts)
+                .map_err(|e| BridgeRpcError::no_charges_loaded(mod_type.type_id as i64, e.to_string()))?
+                .is_none()
+        } else {
+            true
+        };
+        snap.module_active_states.insert(module_id);
+        if exhausted { snap.module_active_charges.remove(&module_id); } else { snap.module_active_charges.insert(module_id, c_tid); }
+        Ok(())
+    })?;
     let concord_suppressed = crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -1294,19 +1348,6 @@ pub async fn activate_command_burst(
     let dbuff_id_reps: Vec<PyRep> = raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect();
     let affected_ship_reps: Vec<PyRep> = affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect();
     let affected_member_reps: Vec<PyRep> = affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_active_states.insert(module_id);
-        let exhausted = charge_item_id_opt.is_some_and(|cid| {
-            let Some(owner) = snap.items.get(&cid).map(|ci| ci.owner_id) else {
-                return true;
-            };
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), owner);
-            opts.reject_fitted = false;
-            opts.active_ship_id = Some(ship_id);
-            matches!(snap.consume_exact_item_quantity(cid, 1, opts), Ok(None))
-        });
-        if exhausted { snap.module_active_charges.remove(&module_id); } else { snap.module_active_charges.insert(module_id, c_tid); }
-    });
     for &(member_cid, member_sid) in &affected_ships {
         let _ = ctx.invalidate_and_push_fit(member_sid);
         ctx.emit_typed(
@@ -1826,4 +1867,198 @@ pub(crate) mod tactical_test_helpers {
 #[cfg(test)]
 #[path = "tactical_modules_tests.rs"]
 mod tactical_modules_tests;
+
+#[cfg(test)]
+mod r3_command_burst_policy_tests {
+    use super::*;
+    use eve_destiny::{MovementMode, SlimItemMeta};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_burst_rejects_bpc_charge_without_applying_dbuffs_and_skips_lower_id_bpc() {
+        let mut ctx = ServerContext::new();
+        let mod_tid = 999_895_u32;
+        let charge_tid = 999_896_u32;
+        {
+            let sde = Arc::make_mut(&mut ctx.sde);
+            let mut m = sde.types.values().next().unwrap().clone();
+            m.type_id = mod_tid;
+            m.group_id = 1770;
+            m.category_id = 7;
+            m.name = "Shield Command Burst I".into();
+            m.default_attributes.clear();
+            m.default_attributes.insert(604, 1769.0);
+            sde.types.insert(mod_tid, m);
+
+            let mut c = sde.types.values().next().unwrap().clone();
+            c.type_id = charge_tid;
+            c.group_id = 1769;
+            c.category_id = 8;
+            c.name = "Shield Extension Charge".into();
+            c.default_attributes.clear();
+            c.default_attributes.insert(2468, 1001.0);
+            c.default_attributes.insert(2596, 10.0);
+            sde.types.insert(charge_tid, c);
+        }
+
+        let char_id = 90_000_001_i64;
+        let sys_id = 30_000_142_u32;
+        let ship_id = 1_990_001_i64;
+        let mod_id = 1_990_002_i64;
+        let bpc_charge_id = 1_990_003_i64;
+        let good_charge_id = 1_990_004_i64;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                *ch = eve_db::CharacterRecord {
+                    solar_system_id: sys_id,
+                    station_id: None,
+                    structure_id: None,
+                    active_ship_id: ship_id,
+                    clone_grade: 2,
+                    ..ch.clone()
+                };
+            }
+            for (sk, lvl) in [(3350_u32, 5_u8), (3351, 4)] {
+                snap.skills.entry(char_id).or_default().insert(
+                    sk,
+                    eve_db::TrainedSkillRecord {
+                        type_id: sk,
+                        level: lvl,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+            snap.items.insert(
+                ship_id,
+                eve_db::InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: i64::from(sys_id),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_id,
+                eve_db::InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: mod_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_charge_id,
+                eve_db::InventoryItemRecord {
+                    item_id: bpc_charge_id,
+                    type_id: charge_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 5,
+                    singleton: false,
+                    is_blueprint_copy: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys
+            .spawn_ball_with_meta(
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 100.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                eve_destiny::CombatState::new(),
+                SlimItemMeta::default(),
+            )
+            .await;
+
+        let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).expect("fit");
+        let mod_type = ctx.sde.types.get(&mod_tid).unwrap().clone();
+        let mod_state = DogmaItemState::from_sde(char_id, mod_tid, &ctx.sde);
+
+        let err = activate_command_burst(
+            &ctx,
+            &sys,
+            char_id,
+            ship_id,
+            sys_id,
+            mod_id,
+            &mod_type,
+            &mod_state,
+            Some(charge_tid),
+            &fit,
+        )
+        .await
+        .expect_err("BPC-only command burst charge must fail before dbuffs");
+        assert!(
+            ctx.scanners_superweapons
+                .with_ship_dbuffs(|db| db.get(&ship_id).is_none_or(Vec::is_empty)),
+            "failed burst charge must apply zero dbuffs (err={err:?})"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&bpc_charge_id].quantity, 5);
+            assert!(!snap.module_active_states.contains(&mod_id));
+        });
+
+        // Adding valid sibling allows burst while leaving lower-ID BPC untouched.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                good_charge_id,
+                eve_db::InventoryItemRecord {
+                    item_id: good_charge_id,
+                    type_id: charge_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 3,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        activate_command_burst(
+            &ctx,
+            &sys,
+            char_id,
+            ship_id,
+            sys_id,
+            mod_id,
+            &mod_type,
+            &mod_state,
+            Some(charge_tid),
+            &fit,
+        )
+        .await
+        .expect("valid higher-ID burst charge activates cleanly");
+        assert!(ctx
+            .scanners_superweapons
+            .with_ship_dbuffs(|db| db.get(&ship_id).is_some_and(|v| !v.is_empty())));
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&bpc_charge_id].quantity, 5);
+            assert_eq!(snap.items[&good_charge_id].quantity, 2);
+        });
+    }
+}
 

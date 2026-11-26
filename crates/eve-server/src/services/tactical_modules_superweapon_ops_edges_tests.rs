@@ -2358,3 +2358,340 @@ async fn emit_superweapon_fuel_diffs_cross_owner_transfer_scopes_clearance_bf148
     assert_eq!(active_fuel_reserve_count(&ctx), 0);
 }
 
+#[tokio::test]
+async fn superweapon_fuel_skips_lower_id_bpc_and_consumes_valid_commodity() {
+    let ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_826_900_i64;
+    let mod_id = 100_826_905_i64;
+    let bpc_fuel_id = 100_826_901_i64;
+    let valid_fuel_id = 100_826_902_i64;
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+
+    setup_ship_and_module(&ctx, null_sys, char_id, ship_id, titan_tid, mod_id, dd_tid, DVec3::ZERO);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            bpc_fuel_id,
+            InventoryItemRecord {
+                item_id: bpc_fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
+                singleton: false,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_fuel_id,
+            InventoryItemRecord {
+                item_id: valid_fuel_id,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        let stacks = collect_superweapon_fuel_stacks(snap, ship_id, 16_274);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].1, valid_fuel_id);
+    });
+
+    check_superweapon_fuel_available(&ctx, ship_id, 16_274, 25_000, "superweapon")
+        .expect("check must succeed via valid Cargo stack");
+    let (_, _, _, diffs, guard) =
+        deduct_superweapon_fuel_with_diffs(&ctx, ship_id, 16_274, 25_000, "superweapon")
+            .expect("deduct must skip lower-ID BPC and consume valid commodity");
+    emit_superweapon_fuel_item_diffs(&ctx, char_id, &diffs, guard);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_fuel_id].quantity, 50_000);
+        assert_eq!(snap.items[&valid_fuel_id].quantity, 25_000);
+    });
+    assert_eq!(active_fuel_reserve_count(&ctx), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scan_probe_launcher_skips_bpc_and_courier_loaded_probes() {
+    use crate::services::space_probe_scanning::activate_scan_probe_launcher;
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 995_701_001_i64;
+    let core_launcher_id = 995_701_002_i64;
+    let bpc_probe_id = 995_701_010_i64;
+    let courier_probe_id = 995_701_011_i64;
+    let valid_probe_id = 995_701_012_i64;
+
+    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
+        probes.retain(|_, p| p.owner_char_id != char_id);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            core_launcher_id,
+            InventoryItemRecord {
+                item_id: core_launcher_id,
+                type_id: 17_938,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bpc_probe_id,
+            InventoryItemRecord {
+                item_id: bpc_probe_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                is_blueprint_copy: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_probe_id,
+            InventoryItemRecord {
+                item_id: courier_probe_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 8,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(courier_probe_id, "courier_cargo:71".into());
+    });
+
+    let mut session = eve_machonet::SessionState::new(9799);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let hi0 = InventoryFlag::HiSlot0 as u16;
+    let kw = HashMap::new();
+
+    let empty_err = activate_scan_probe_launcher(
+        &ctx,
+        &session,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        core_launcher_id,
+        17_938,
+        hi0,
+        "launchForSelf",
+        None,
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(empty_err.code, "NoProbesLoaded");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            valid_probe_id,
+            InventoryItemRecord {
+                item_id: valid_probe_id,
+                type_id: 30_013,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 10,
+                ..Default::default()
+            },
+        );
+    });
+
+    let rep = activate_scan_probe_launcher(
+        &ctx,
+        &session,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        core_launcher_id,
+        17_938,
+        hi0,
+        "launchForSelf",
+        None,
+        &kw,
+    )
+    .await
+    .expect("valid probe launches without shadowing by lower-ID BPC/courier probes");
+    assert_eq!(rep.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_probe_id].quantity, 8);
+        assert_eq!(snap.items[&courier_probe_id].quantity, 8);
+        assert_eq!(snap.items[&valid_probe_id].quantity, 2);
+    });
+    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
+        probes.retain(|_, p| p.owner_char_id != char_id);
+    };
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn survey_probe_launcher_reload_enforces_stackable_commodity_and_rejects_bad_stacks() {
+    use crate::services::inventory_fitting::fitting_module_cycles::activate_survey_probe_launcher;
+
+    let mut ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 995_702_001_i64;
+    let launcher_id = 995_702_002_i64;
+    let probe_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 492)
+        .map(|t| t.type_id)
+        .unwrap_or(21_819);
+    let mut mod_t = ctx
+        .sde
+        .types
+        .get(&17_938)
+        .or_else(|| ctx.sde.types.values().next())
+        .expect("template type")
+        .clone();
+    mod_t.type_id = 33_270;
+    mod_t.group_id = 1226;
+    mod_t.category_id = 7;
+    mod_t.capacity = 20.0;
+    let mut p_t = mod_t.clone();
+    p_t.type_id = probe_tid;
+    p_t.group_id = 492;
+    p_t.category_id = 8;
+    p_t.volume = 5.0;
+    p_t.capacity = 0.0;
+    Arc::make_mut(&mut ctx.sde).types.insert(probe_tid, p_t);
+
+    let (bpc_id, cour_id, sing_id, mut_id, ins_id, valid_cargo_id) = (
+        995_702_010_i64,
+        995_702_011_i64,
+        995_702_012_i64,
+        995_702_013_i64,
+        995_702_014_i64,
+        995_702_020_i64,
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id, type_id: 587, owner_id: char_id, location_id: sys_id as i64,
+                flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        snap.items.insert(
+            launcher_id,
+            InventoryItemRecord {
+                item_id: launcher_id, type_id: 33_270, owner_id: char_id, location_id: ship_id,
+                flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        for (iid, flag, qty, singleton, bpc, ins, mut_id_opt, cname) in [
+            (bpc_id, InventoryFlag::Cargo, 10, false, true, 0.0, None, ""),
+            (cour_id, InventoryFlag::SpecializedAmmoHold, 10, false, false, 0.0, None, "courier_cargo:52"),
+            (sing_id, InventoryFlag::Cargo, 1, true, false, 0.0, None, ""),
+            (mut_id, InventoryFlag::Cargo, 10, false, false, 0.0, Some(60_001), ""),
+            (ins_id, InventoryFlag::SpecializedAmmoHold, 10, false, false, 750.0, None, ""),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid, type_id: probe_tid, owner_id: char_id, location_id: ship_id,
+                    flag, quantity: qty, singleton, is_blueprint_copy: bpc,
+                    insured_payout_isk: ins, source_mutaplasmid_id: mut_id_opt, ..Default::default()
+                },
+            );
+            if !cname.is_empty() {
+                snap.item_custom_names.insert(iid, cname.into());
+            }
+        }
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let hi0 = InventoryFlag::HiSlot0 as u16;
+    let err = activate_survey_probe_launcher(&ctx, &sys_handle, sys_id, char_id, ship_id, launcher_id, hi0, &mod_t, None, true)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NoProbesLoaded");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&bpc_id].quantity, 10);
+        assert_eq!(snap.items[&cour_id].quantity, 10);
+        assert_eq!(snap.items[&sing_id].quantity, 1);
+        assert_eq!(snap.items[&mut_id].quantity, 10);
+        assert_eq!(snap.items[&ins_id].quantity, 10);
+        assert!(snap.items.values().all(|i| i.location_id != ship_id || i.flag != InventoryFlag::HiSlot0 || i.item_id == launcher_id));
+    });
+
+    // Partial reload from larger valid Cargo stack skips lower-ID bad stacks and leaves exact remainder.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            valid_cargo_id,
+            InventoryItemRecord {
+                item_id: valid_cargo_id, type_id: probe_tid, owner_id: char_id, location_id: ship_id,
+                flag: InventoryFlag::Cargo, quantity: 10, ..Default::default()
+            },
+        );
+    });
+    activate_survey_probe_launcher(&ctx, &sys_handle, sys_id, char_id, ship_id, launcher_id, hi0, &mod_t, None, true)
+        .await
+        .expect("partial reload from valid Cargo stack launches 1 survey probe");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&valid_cargo_id].quantity, 6);
+        let slot_probe = snap.items.values().find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != launcher_id).expect("reloaded slot probe");
+        assert_eq!(slot_probe.type_id, probe_tid);
+        assert_eq!(slot_probe.quantity, 3);
+        assert!(!slot_probe.singleton);
+    });
+}
+

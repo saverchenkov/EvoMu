@@ -108,6 +108,30 @@ fn is_structure_ammo_bay(item: &InventoryItemRecord, st_corp_id: i64, mod_flag: 
             ))
 }
 
+fn is_eligible_standup_charge(
+    snap: &WorldStateSnapshot,
+    st_corp_id: i64,
+    module_id: i64,
+    item: &InventoryItemRecord,
+) -> bool {
+    let expected_owner = if st_corp_id != 0 {
+        st_corp_id
+    } else {
+        item.owner_id
+    };
+    let opts = eve_db::ConsumeExactOptions {
+        reject_fitted: false,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(
+            None,
+            expected_owner,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        )
+    };
+    item.item_id != module_id
+        && item.quantity > 0
+        && snap.validate_item_for_consumption(item, &opts).is_ok()
+}
+
 fn find_structure_charge_type(
     ctx: &ServerContext,
     structure_id: i64,
@@ -121,18 +145,22 @@ fn find_structure_charge_type(
     ctx.db.with_snapshot(|snap| {
         let matches_item = |i: &&InventoryItemRecord| {
             (i.location_id == structure_id || i.location_id == module_id)
-                && i.owner_id == st_corp_id
-                && i.item_id != module_id
                 && i.quantity >= min_qty
-                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                && is_eligible_standup_charge(snap, st_corp_id, module_id, i)
                 && (i.location_id == module_id || is_structure_ammo_bay(i, st_corp_id, mod_flag))
                 && preferred_type.is_none_or(|pt| i.type_id == pt)
                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == charge_group)
         };
         snap.items
             .values()
-            .find(|i| (i.location_id == module_id || i.flag == mod_flag) && matches_item(i))
-            .or_else(|| snap.items.values().find(matches_item))
+            .filter(|i| (i.location_id == module_id || i.flag == mod_flag) && matches_item(i))
+            .min_by_key(|i| i.item_id)
+            .or_else(|| {
+                snap.items
+                    .values()
+                    .filter(matches_item)
+                    .min_by_key(|i| i.item_id)
+            })
             .map(|i| i.type_id)
     })
 }
@@ -147,28 +175,29 @@ fn consume_structure_charge(
     qty_needed: i32,
 ) -> bool {
     ctx.db.with_mut_snapshot(|snap| {
+        let is_eligible_charge = |i: &eve_db::InventoryItemRecord| {
+            i.type_id == charge_tid
+                && i.quantity >= qty_needed
+                && is_eligible_standup_charge(snap, st_corp_id, module_id, i)
+        };
         let candidate_id = snap
             .items
             .values()
-            .find(|i| {
+            .filter(|i| {
                 (i.location_id == structure_id || i.location_id == module_id)
-                    && i.owner_id == st_corp_id
-                    && i.item_id != module_id
                     && (i.location_id == module_id || i.flag == mod_flag)
-                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                    && i.type_id == charge_tid
-                    && i.quantity >= qty_needed
+                    && is_eligible_charge(i)
             })
+            .min_by_key(|i| i.item_id)
             .or_else(|| {
-                snap.items.values().find(|i| {
-                    i.location_id == structure_id
-                        && i.owner_id == st_corp_id
-                        && i.item_id != module_id
-                        && is_structure_ammo_bay(i, st_corp_id, mod_flag)
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                        && i.type_id == charge_tid
-                        && i.quantity >= qty_needed
-                })
+                snap.items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == structure_id
+                            && is_structure_ammo_bay(i, st_corp_id, mod_flag)
+                            && is_eligible_charge(i)
+                    })
+                    .min_by_key(|i| i.item_id)
             })
             .map(|i| i.item_id);
         let Some(cid) = candidate_id else {
@@ -177,7 +206,11 @@ fn consume_structure_charge(
         let Some(c_owner) = snap.items.get(&cid).map(|it| it.owner_id) else {
             return false;
         };
-        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+            None,
+            c_owner,
+            eve_db::ItemClassPolicy::ExactAssembledItem,
+        );
         opts.reject_fitted = false;
         snap.consume_exact_item_quantity(cid, qty_needed, opts).is_ok()
     })
@@ -656,15 +689,16 @@ pub async fn try_activate_standup_weapon(
             return None;
         }
         let online = snap.module_online_states.get(&module_id).copied().unwrap_or(false);
+        let st_corp_id = snap.structures.get(&structure_id).map_or(0, |s| s.owner_corp_id);
         let charge_tid = snap
             .items
             .values()
-            .find(|i| {
-                i.location_id == structure_id
-                    && i.flag == item_rec.flag
-                    && i.item_id != module_id
-                    && i.quantity > 0
+            .filter(|i| {
+                (i.location_id == module_id
+                    || (i.location_id == structure_id && i.flag == item_rec.flag))
+                    && is_eligible_standup_charge(snap, st_corp_id, module_id, i)
             })
+            .min_by_key(|i| i.item_id)
             .map(|i| i.type_id);
         let ext = load_ext_state(snap);
         let active_gunner = ext.active_pilot_by_structure.get(&structure_id).copied();
@@ -910,10 +944,18 @@ pub async fn try_activate_standup_weapon(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Err(e) = crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
-                ctx, char_id, structure_id, sys_id, tid, target_ball.type_id == 670,
-            ) {
-                return Some(Err(e));
+            if !(32_000_000..=33_000_000).contains(&sys_id) {
+                if let Err(e) =
+                    crate::services::combat_crimewatch::crimewatch_timers::precheck_pvp_aggression_safety(
+                        ctx,
+                        char_id,
+                        sys_id,
+                        tid,
+                        target_ball.type_id == 670,
+                    )
+                {
+                    return Some(Err(e));
+                }
             }
             if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, bomb_tid, 1) {
                 return Some(Err(
@@ -924,6 +966,18 @@ pub async fn try_activate_standup_weapon(
                         "No guided bombs remaining in structure",
                     ),
                 ));
+            }
+            if let Err(e) =
+                crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+                    ctx,
+                    char_id,
+                    structure_id,
+                    sys_id,
+                    tid,
+                    target_ball.type_id == 670,
+                )
+            {
+                return Some(Err(e));
             }
             commit_unified_structure_cap(ctx, sys_handle, structure_id, cur_cap - cap_need, now_unix).await;
 
@@ -1164,3 +1218,350 @@ pub async fn try_activate_standup_weapon(
 #[cfg(test)]
 #[path = "structure_standup_weapons_tests.rs"]
 mod structure_standup_weapons_tests;
+
+#[cfg(test)]
+mod r6_standup_weapon_policy_tests {
+    use super::*;
+    use crate::services::combat_crimewatch::set_char_safety_level;
+    use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository};
+    use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta, TargetLock};
+    use eve_sde::{InvType, SdeRegistry};
+    use glam::DVec3;
+    use std::sync::{Arc, OnceLock};
+
+    fn test_sde() -> Arc<SdeRegistry> {
+        static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+        Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+    }
+
+    fn mk_type(base: &InvType, type_id: u32, group_id: u32, cat: u32, attrs: &[(u16, f64)]) -> InvType {
+        let mut t = base.clone();
+        t.type_id = type_id;
+        t.group_id = group_id;
+        t.category_id = cat;
+        t.default_attributes.clear();
+        t.effect_ids.clear();
+        for &(k, v) in attrs {
+            t.default_attributes.insert(k, v);
+        }
+        t
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn standup_guided_bomb_and_pdb_skip_bpc_courier_preserve_aggression_and_check_safety() {
+        let mut ctx = ServerContext::with_sde_and_repository(
+            test_sde(),
+            Arc::new(WorldRepository::with_demo_seed()),
+        );
+        let base_inv = ctx.sde.types.values().next().expect("seed type").clone();
+        let gbl_tid = 995_501_u32;
+        let bomb_a_tid = 995_502_u32;
+        let bomb_b_tid = 995_503_u32;
+        let pdb_tid = 995_504_u32;
+        let flak_a_tid = 995_505_u32;
+        let flak_b_tid = 995_506_u32;
+        {
+            let sde = Arc::make_mut(&mut ctx.sde);
+            sde.types.insert(
+                gbl_tid,
+                mk_type(&base_inv, gbl_tid, GROUP_STANDUP_GUIDED_BOMB_LAUNCHER, 66, &[(6, 200.0), (73, 20_000.0), (54, 300_000.0)]),
+            );
+            for btid in [bomb_a_tid, bomb_b_tid] {
+                sde.types.insert(
+                    btid,
+                    mk_type(&base_inv, btid, GROUP_STANDUP_GUIDED_BOMB, 8, &[(37, 5_000.0), (281, 60_000.0), (99, 25_000.0), (114, 1_500.0)]),
+                );
+            }
+            sde.types.insert(
+                pdb_tid,
+                mk_type(
+                    &base_inv,
+                    pdb_tid,
+                    GROUP_STANDUP_POINT_DEFENSE_BATTERY,
+                    66,
+                    &[(6, 100.0), (73, 12_000.0), (54, 15_000.0), (158, 10_000.0), (64, 5.0), (56, 1.0)],
+                ),
+            );
+            for ftid in [flak_a_tid, flak_b_tid] {
+                sde.types.insert(
+                    ftid,
+                    mk_type(&base_inv, ftid, GROUP_STANDUP_FLAK_AMMO, 8, &[(114, 100.0)]),
+                );
+            }
+        }
+
+        let null_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .find(|s| s.solar_system_id < 31_000_000 && s.security_status < 0.0)
+            .map(|s| s.solar_system_id)
+            .unwrap_or(30_004_759);
+        let low_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .find(|s| s.solar_system_id < 31_000_000 && s.security_status > 0.0 && s.security_status < 0.45)
+            .map(|s| s.solar_system_id)
+            .unwrap_or(30_002_537);
+
+        let char_id = 90_000_001_i64;
+        let victim_id = 90_000_002_i64;
+        let corp_id = 98_555_i64;
+        let sid = 10_000_995_501_i64;
+        let gbl_id = 995_501_001_i64;
+        let pdb_id = 995_501_002_i64;
+        let bpc_bomb_id = 995_501_010_i64;
+        let courier_bomb_id = 995_501_011_i64;
+        let valid_bomb_id = 995_501_012_i64;
+        let bpc_flak_id = 995_501_020_i64;
+        let valid_flak_id = 995_501_021_i64;
+        let target_id = 995_501_099_i64;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: TYPE_KEEPSTAR,
+                    owner_corp_id: corp_id,
+                    solar_system_id: null_sys,
+                    name: "Policy Keepstar".into(),
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    ..Default::default()
+                },
+            );
+            for (mid, tid, flag) in [
+                (gbl_id, gbl_tid, InventoryFlag::HiSlot0),
+                (pdb_id, pdb_tid, InventoryFlag::HiSlot1),
+            ] {
+                snap.items.insert(
+                    mid,
+                    InventoryItemRecord {
+                        item_id: mid,
+                        type_id: tid,
+                        owner_id: corp_id,
+                        location_id: sid,
+                        flag,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+                snap.module_online_states.insert(mid, true);
+            }
+            snap.items.insert(
+                bpc_bomb_id,
+                InventoryItemRecord {
+                    item_id: bpc_bomb_id,
+                    type_id: bomb_a_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                courier_bomb_id,
+                InventoryItemRecord {
+                    item_id: courier_bomb_id,
+                    type_id: bomb_a_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 2,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(courier_bomb_id, "courier_cargo:99".into());
+            snap.items.insert(
+                bpc_flak_id,
+                InventoryItemRecord {
+                    item_id: bpc_flak_id,
+                    type_id: flak_a_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot1,
+                    quantity: 5,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            let mut ext = load_ext_state(snap);
+            ext.active_pilot_by_structure.insert(sid, char_id);
+            ext.lifecycle.entry(sid).or_default().online_modules.extend([gbl_id, pdb_id]);
+            save_ext_state(snap, &ext);
+        });
+
+        let st_ball = Ball {
+            id: sid,
+            type_id: TYPE_KEEPSTAR,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e12,
+            radius: 10_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let mut st_cs = CombatState::new();
+        st_cs.capacitor = 50_000.0;
+        st_cs.max_capacitor = 50_000.0;
+        let t_ball = Ball {
+            id: target_id,
+            type_id: 587,
+            position: DVec3::new(15_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let mut t_cs = CombatState::new();
+        t_cs.shield_hp = 20_000.0;
+        t_cs.max_shield_hp = 20_000.0;
+        let t_meta = SlimItemMeta {
+            owner_id: victim_id,
+            char_id: Some(victim_id),
+            corp_id: 98_999,
+            alliance_id: -1,
+            group_id: 25,
+            category_id: 6,
+            ..Default::default()
+        };
+
+        let sys_null = ctx.systems.get_or_spawn(null_sys);
+        let _ = sys_null
+            .spawn_ball_with_meta(st_ball.clone(), st_cs.clone(), SlimItemMeta::default())
+            .await;
+        let _ = sys_null.spawn_ball_with_meta(t_ball.clone(), t_cs.clone(), t_meta.clone()).await;
+        let _ = sys_null
+            .add_target_lock(
+                sid,
+                TargetLock {
+                    target_id,
+                    lock_time_ms: 1.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+
+        // 1. Only BPC + courier_cargo bombs exist -> fails charge lookup & records ZERO crimewatch aggression.
+        assert!(
+            try_activate_standup_weapon(&ctx, &sys_null, char_id, sid, null_sys, gbl_id, Some(target_id), &st_ball)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        {
+            let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+            assert!(cw.states.get(&char_id).is_none_or(|s| s.pvp_timer_until_unix == 0 && s.weapon_timer_until_unix == 0));
+        }
+
+        // 2. Adding higher-ID valid bomb_b & flak_b must NOT be shadowed by lower-ID BPC/courier bomb_a / flak_a.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                valid_bomb_id,
+                InventoryItemRecord {
+                    item_id: valid_bomb_id,
+                    type_id: bomb_b_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::SpecializedAmmoHold,
+                    quantity: 2,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                valid_flak_id,
+                InventoryItemRecord {
+                    item_id: valid_flak_id,
+                    type_id: flak_b_tid,
+                    owner_id: corp_id,
+                    location_id: sid,
+                    flag: InventoryFlag::SpecializedAmmoHold,
+                    quantity: 3,
+                    ..Default::default()
+                },
+            );
+        });
+        assert!(
+            try_activate_standup_weapon(&ctx, &sys_null, char_id, sid, null_sys, gbl_id, Some(target_id), &st_ball)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            try_activate_standup_weapon(&ctx, &sys_null, char_id, sid, null_sys, pdb_id, None, &st_ball)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&bpc_bomb_id].quantity, 1);
+            assert_eq!(snap.items[&courier_bomb_id].quantity, 2);
+            assert_eq!(snap.items[&valid_bomb_id].quantity, 1);
+            assert_eq!(snap.items[&bpc_flak_id].quantity, 5);
+            assert_eq!(snap.items[&valid_flak_id].quantity, 2);
+        });
+
+        // 3. Lowsec Safety Green on unmapped pod target -> precheck rejects BEFORE consuming valid bomb or setting aggression.
+        set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
+        ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).states.clear();
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ext = load_ext_state(snap);
+            ext.standup_module_cycle_until_unix.remove(&gbl_id);
+            save_ext_state(snap, &ext);
+            if let Some(st) = snap.structures.get_mut(&sid) {
+                st.solar_system_id = low_sys;
+            }
+        });
+        let sys_low = ctx.systems.get_or_spawn(low_sys);
+        let _ = sys_low
+            .spawn_ball_with_meta(st_ball.clone(), st_cs, SlimItemMeta::default())
+            .await;
+        let pod_id = 995_501_100_i64;
+        let pod_ball = Ball {
+            id: pod_id,
+            type_id: 670,
+            position: DVec3::new(15_000.0, 0.0, 0.0),
+            ..t_ball
+        };
+        let _ = sys_low
+            .spawn_ball_with_meta(pod_ball, t_cs, SlimItemMeta { owner_id: 0, char_id: None, corp_id: 98_999, ..t_meta })
+            .await;
+        let _ = sys_low
+            .add_target_lock(
+                sid,
+                TargetLock {
+                    target_id: pod_id,
+                    lock_time_ms: 1.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+        let err_safety = try_activate_standup_weapon(&ctx, &sys_low, char_id, sid, low_sys, gbl_id, Some(pod_id), &st_ball)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err_safety.code, "CantDoInCurrentSafetyLevel");
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&valid_bomb_id].quantity, 1);
+        });
+        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+        assert!(cw.states.get(&char_id).is_none_or(|s| s.pvp_timer_until_unix == 0 && s.weapon_timer_until_unix == 0));
+    }
+}

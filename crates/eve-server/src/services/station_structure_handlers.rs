@@ -196,13 +196,17 @@ pub fn handle_upgrade_gantry(
             })
             .unwrap_or(2233);
         let is_valid_upgrade_item = |u: &eve_db::InventoryItemRecord| -> bool {
+            let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                (u.owner_id == char_id).then_some(char_id),
+                u.owner_id,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             (u.type_id == target_tid || u.type_id == 2233 || u.type_id == 3963)
                 && u.location_id == ship_id
                 && u.flag == eve_db::InventoryFlag::Cargo
                 && (u.owner_id == char_id || u.owner_id == char_corp)
                 && u.quantity >= 1
-                && u.flag != eve_db::InventoryFlag::Locked
-                && !snap.is_item_locked_in_contract_or_job(u.item_id)
+                && snap.validate_item_for_consumption(u, &opts).is_ok()
         };
         let up_item_opt = if let Some(arg_iid) = upgrade_item_arg.filter(|&id| id != planet_id) {
             let u = snap.items.get(&arg_iid).ok_or_else(|| BridgeRpcError {
@@ -223,7 +227,8 @@ pub fn handle_upgrade_gantry(
         } else {
             snap.items
                 .values()
-                .find(|u| is_valid_upgrade_item(u))
+                .filter(|u| is_valid_upgrade_item(u))
+                .min_by_key(|u| u.item_id)
                 .map(|u| u.item_id)
         };
         let Some(up_iid) = up_item_opt else {
@@ -237,7 +242,11 @@ pub fn handle_upgrade_gantry(
             snap.consume_exact_item_quantity(
                 up_iid,
                 1,
-                eve_db::ConsumeExactOptions::for_owner_exact((u_owner == char_id).then_some(char_id), u_owner),
+                eve_db::ConsumeExactOptions::for_owner_exact(
+                    (u_owner == char_id).then_some(char_id),
+                    u_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                ),
             )
             .map_err(|e| err("CustomsOfficeItemLocked", e.to_string()))?;
         }

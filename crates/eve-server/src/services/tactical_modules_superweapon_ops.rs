@@ -106,9 +106,17 @@ fn collect_superweapon_fuel_stacks(
                 && i.type_id == fuel_tid
                 && matches!(i.flag as u16, 5 | 133)
                 && i.flag != eve_db::InventoryFlag::Locked
-                && !i.singleton
                 && i.quantity > 0
-                && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                && snap
+                    .validate_item_for_consumption(
+                        i,
+                        &eve_db::ConsumeExactOptions::for_owner_exact(
+                            None,
+                            i.owner_id,
+                            eve_db::ItemClassPolicy::StackableCommodity,
+                        ),
+                    )
+                    .is_ok()
         })
         .map(|i| {
             (
@@ -210,7 +218,11 @@ fn deduct_superweapon_fuel_with_diffs(
                 if took <= 0 {
                     continue;
                 }
-                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                let opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    pre.owner_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                );
                 snap.validate_item_for_consumption(&pre, &opts)
                     .map_err(|e| e.to_string())?;
                 let Some((pre_rec, taken)) = snap.reserve_consume_stack_for_rollback(fid, took)

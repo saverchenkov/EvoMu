@@ -1231,18 +1231,31 @@ pub fn handle(
                     }
 
                     // R-SKB-01: Injection strictly requires an owned, reachable skillbook item to consume
+                    let book_opts = eve_db::ConsumeExactOptions {
+                        reject_blueprint_copy: true,
+                        active_ship_id: current_ship,
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(
+                            Some(char_id),
+                            char_id,
+                            eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                        )
+                    };
                     let book_item = if let Some(item) = snap.items.get(&raw_id) {
-                        if item.owner_id == char_id && snap.is_item_consumable_by(item, char_id, current_dock, current_ship) {
+                        if item.owner_id == char_id
+                            && snap.is_item_consumable_by(item, char_id, current_dock, current_ship)
+                            && snap.validate_item_for_consumption(item, &book_opts).is_ok()
+                        {
                             Some(item.item_id)
                         } else {
                             None
                         }
                     } else {
-                        snap.items.values().find(|i| {
+                        snap.items.values().filter(|i| {
                             i.type_id == skill_type_id
                                 && i.owner_id == char_id
                                 && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
-                        }).map(|i| i.item_id)
+                                && snap.validate_item_for_consumption(i, &book_opts).is_ok()
+                        }).min_by_key(|i| i.item_id).map(|i| i.item_id)
                     };
 
                     let Some(item_id) = book_item else {
@@ -1253,14 +1266,7 @@ pub fn handle(
                         });
                     };
 
-                    snap.consume_exact_item_quantity(
-                        item_id,
-                        1,
-                        eve_db::ConsumeExactOptions {
-                            active_ship_id: current_ship,
-                            ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
-                        },
-                    )
+                    snap.consume_exact_item_quantity(item_id, 1, book_opts)
                     .map_err(|e| BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: e.to_string(),
@@ -1443,4 +1449,94 @@ pub(crate) const RPCS: &[RpcEntry] = &[
 
 #[cfg(test)] #[path = "character_skills_unit_tests.rs"] mod character_skills_unit_tests;
 #[cfg(test)] #[path = "character_skills_edges2_tests.rs"] mod character_skills_edges2_tests;
+
+#[cfg(test)]
+mod r3_skillbook_policy_tests {
+    use super::*;
+
+    #[test]
+    fn inject_skillbook_rejects_explicit_bpc_and_skips_lower_id_bpc_and_courier() {
+        let ctx = ServerContext::new();
+        let char_id = 90_000_001_i64;
+        let station_id = 60_003_760_i64;
+        let skill_tid = ctx
+            .sde
+            .types
+            .values()
+            .find(|t| {
+                t.category_id == 16
+                    && t.published
+                    && t.default_attributes.get(&182).is_none()
+                    && !ctx.db.with_snapshot(|s| {
+                        s.skills.get(&char_id).is_some_and(|m| m.contains_key(&t.type_id))
+                    })
+            })
+            .map(|t| t.type_id)
+            .expect("untrained category-16 skill without prereqs");
+
+        let bpc_book = 962_001_i64;
+        let courier_book = 962_002_i64;
+        let valid_book = 962_003_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = Some(station_id);
+            }
+            for (iid, bpc) in [(bpc_book, true), (courier_book, false), (valid_book, false)] {
+                snap.items.insert(
+                    iid,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid,
+                        type_id: skill_tid,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: false,
+                        is_blueprint_copy: bpc,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+            snap.item_custom_names
+                .insert(courier_book, format!("courier_cargo:{char_id}:77"));
+        });
+
+        let mut sess = SessionState::new(934);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.station_id = Some(station_id);
+        let kw = HashMap::new();
+
+        // Explicit BPC skillbook must be rejected without granting the skill.
+        assert!(handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "InjectSkillIntoBrain",
+            &[PyRep::Integer(bpc_book)],
+            &kw,
+        )
+        .unwrap()
+        .is_err());
+
+        // Type-based auto-select must skip lower-ID BPC and courier skillbooks and consume valid_book.
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "InjectSkillIntoBrain",
+            &[PyRep::Integer(i64::from(skill_tid))],
+            &kw,
+        )
+        .unwrap()
+        .expect("skips BPC/courier and injects valid skillbook");
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.skills.get(&char_id).is_some_and(|m| m.contains_key(&skill_tid)));
+            assert!(snap.items.contains_key(&bpc_book));
+            assert!(snap.items.contains_key(&courier_book));
+            assert!(!snap.items.contains_key(&valid_book));
+        });
+    }
+}
 

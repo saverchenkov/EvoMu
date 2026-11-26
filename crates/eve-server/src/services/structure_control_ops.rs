@@ -1186,6 +1186,11 @@ fn resolve_structure_weapon_tick(
     primary_locked: bool,
     dt: f64,
 ) -> std::collections::HashMap<i64, DamageVector> {
+    let st_owner_corp = snap
+        .structures
+        .get(&structure_id)
+        .map(|s| s.owner_corp_id)
+        .unwrap_or(0);
     let mut ext = load_ext_state(snap);
     let mut damage_by_ship: std::collections::HashMap<i64, DamageVector> =
         std::collections::HashMap::new();
@@ -1214,6 +1219,17 @@ fn resolve_structure_weapon_tick(
                 .items
                 .values()
                 .filter(|c| {
+                    let expected_owner = if st_owner_corp != 0 {
+                        st_owner_corp
+                    } else {
+                        c.owner_id
+                    };
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                        None,
+                        expected_owner,
+                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                    );
+                    opts.reject_fitted = false;
                     c.location_id == structure_id
                         && c.flag == w.flag
                         && c.item_id != w.item_id
@@ -1223,6 +1239,7 @@ fn resolve_structure_weapon_tick(
                             .types
                             .get(&c.type_id)
                             .is_some_and(|ct| ct.group_id == charge_group)
+                        && snap.validate_item_for_consumption(c, &opts).is_ok()
                 })
                 .min_by_key(|c| c.item_id)
                 .map(|c| (c.item_id, c.type_id, c.quantity));
@@ -1255,10 +1272,25 @@ fn resolve_structure_weapon_tick(
                 }
                 continue;
             }
-            if let Some(c_owner) = snap.items.get(&charge_item_id).map(|c| c.owner_id) {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
-                opts.reject_fitted = false;
-                let _ = snap.consume_exact_item_quantity(charge_item_id, capped as i32, opts);
+            let Some(c_owner) = snap.items.get(&charge_item_id).map(|c| c.owner_id) else {
+                continue;
+            };
+            let expected_owner = if st_owner_corp != 0 {
+                st_owner_corp
+            } else {
+                c_owner
+            };
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                expected_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
+            opts.reject_fitted = false;
+            if snap
+                .consume_exact_item_quantity(charge_item_id, capped as i32, opts)
+                .is_err()
+            {
+                continue;
             }
             ext.weapon_cooldowns.insert(w.item_id, new_rem);
             dirty_ext = true;
@@ -1659,4 +1691,102 @@ pub fn reject_if_controlling_structure(
 #[cfg(test)]
 #[path = "structure_control_ops_tests.rs"]
 mod structure_control_ops_tests;
+
+#[cfg(test)]
+mod r5_control_weapon_policy_tests {
+    use super::*;
+    use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+
+    #[test]
+    fn resolve_structure_weapon_tick_rejects_foreign_owned_weapon_charges() {
+        let mut ctx = ServerContext::with_sde_and_repository(
+            std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+            std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        );
+        let base_inv = ctx.sde.types.get(&587).expect("seed type").clone();
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut wtype = base_inv.clone();
+        wtype.type_id = 995_401;
+        wtype.category_id = 66;
+        wtype.group_id = 1330; // PDB
+        wtype.default_attributes.clear();
+        wtype.effect_ids.clear();
+        wtype.default_attributes.insert(604, 1559.0);
+        wtype.default_attributes.insert(51, 3_000.0);
+        wtype.default_attributes.insert(54, 40_000.0);
+        wtype.default_attributes.insert(158, 10_000.0);
+        sde.types.insert(995_401, wtype);
+        let mut ctype = base_inv;
+        ctype.type_id = 995_402;
+        ctype.category_id = 8;
+        ctype.group_id = 1559;
+        ctype.default_attributes.clear();
+        ctype.effect_ids.clear();
+        ctype.default_attributes.insert(114, 100.0);
+        sde.types.insert(995_402, ctype);
+
+        let corp_id = 98_500_i64;
+        let sid = 10_000_995_401_i64;
+        let weapon_id = 995_401_001_i64;
+        let foreign_charge_id = 995_401_002_i64;
+        let weapon = InventoryItemRecord {
+            item_id: weapon_id,
+            type_id: 995_401,
+            owner_id: corp_id,
+            location_id: sid,
+            flag: InventoryFlag::HiSlot0,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        };
+        let target = HostileTargetInfo {
+            ship_id: 995_401_099,
+            pilot_id: 90_000_099,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            sig_radius: 40.0,
+            dist_m: 1_000.0,
+        };
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: corp_id,
+                    solar_system_id: 30_000_142,
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(weapon_id, weapon.clone());
+            snap.items.insert(
+                foreign_charge_id,
+                InventoryItemRecord {
+                    item_id: foreign_charge_id,
+                    type_id: 995_402,
+                    owner_id: corp_id + 77,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 5,
+                    ..Default::default()
+                },
+            );
+            let dmg = resolve_structure_weapon_tick(
+                &ctx,
+                snap,
+                sid,
+                DVec3::ZERO,
+                &[weapon],
+                &[target],
+                0,
+                false,
+                4.0,
+            );
+            assert!(dmg.is_empty());
+            assert_eq!(snap.items[&foreign_charge_id].quantity, 5);
+        });
+    }
+}
 

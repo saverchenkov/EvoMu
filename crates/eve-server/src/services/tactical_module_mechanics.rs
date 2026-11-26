@@ -205,17 +205,24 @@ pub async fn activate_interdiction_sphere_launcher(
     let loaded_charge_opt = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .find(|i| {
+            .filter(|i| {
                 i.location_id == ship_id
                     && (i.flag as u16) == m.flag_id
                     && i.item_id != module_id
                     && i.quantity > 0
+                    && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(
+                        snap,
+                        Some(char_id),
+                        Some(ship_id),
+                        i,
+                    )
                     && ctx
                         .sde
                         .types
                         .get(&i.type_id)
                         .is_some_and(|t| matches!(t.group_id, 548 | 4088))
             })
+            .min_by_key(|i| i.item_id)
             .map(|i| (i.item_id, i.type_id))
     });
     let Some((charge_item_id, probe_type_id)) = loaded_charge_opt else {
@@ -314,17 +321,27 @@ pub async fn activate_interdiction_sphere_launcher(
                     ci.quantity = max_probes_in_launcher;
                     ci.version += 1;
                 }
+                let merge_opts = eve_db::ConsumeExactOptions {
+                    active_ship_id: Some(ship_id),
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        char_id,
+                        eve_db::ItemClassPolicy::StackableCommodity,
+                    )
+                };
                 let existing_cargo_id = snap
                     .items
                     .values()
-                    .find(|i| {
+                    .filter(|i| {
                         i.owner_id == char_id
                             && i.location_id == ship_id
                             && i.flag == InventoryFlag::Cargo
                             && i.type_id == cur_tid
-                            && !i.singleton
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                            && i.quantity > 0
+                            && i.quantity.checked_add(excess).is_some()
+                            && snap.validate_item_for_consumption(i, &merge_opts).is_ok()
                     })
+                    .min_by_key(|i| i.item_id)
                     .map(|i| i.item_id);
                 if let Some(cid) = existing_cargo_id {
                     if let Some(c_item) = snap.items.get_mut(&cid) {
@@ -355,7 +372,11 @@ pub async fn activate_interdiction_sphere_launcher(
                 }
             }
             let mut rem = if let Some(c_owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
-                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    c_owner,
+                    eve_db::ItemClassPolicy::ExactAssembledItem,
+                );
                 opts.reject_fitted = false;
                 opts.active_ship_id = Some(ship_id);
                 match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {
@@ -378,30 +399,36 @@ pub async fn activate_interdiction_sphere_launcher(
             };
             let mut reloaded_qty = 0;
             if rem == 0 {
+                let mut cargo_probe_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                );
+                cargo_probe_opts.active_ship_id = Some(ship_id);
+                let is_cargo_probe = |i: &InventoryItemRecord| {
+                    i.owner_id == char_id
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && i.quantity > 0
+                        && snap.validate_item_for_consumption(i, &cargo_probe_opts).is_ok()
+                };
                 let cargo_probe_opt = snap
                     .items
                     .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == InventoryFlag::Cargo
-                            && i.quantity > 0
-                            && i.type_id == probe_type_id
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                    })
+                    .filter(|i| is_cargo_probe(i) && i.type_id == probe_type_id)
+                    .min_by_key(|i| i.item_id)
                     .or_else(|| {
-                        snap.items.values().find(|i| {
-                            i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && i.flag == InventoryFlag::Cargo
-                                && i.quantity > 0
-                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                                && ctx
-                                    .sde
-                                    .types
-                                    .get(&i.type_id)
-                                    .is_some_and(|t| matches!(t.group_id, 548 | 4088))
-                        })
+                        snap.items
+                            .values()
+                            .filter(|i| {
+                                is_cargo_probe(i)
+                                    && ctx
+                                        .sde
+                                        .types
+                                        .get(&i.type_id)
+                                        .is_some_and(|t| matches!(t.group_id, 548 | 4088))
+                            })
+                            .min_by_key(|i| i.item_id)
                     })
                     .map(|i| (i.item_id, i.type_id));
                 if let Some((cargo_id, reload_tid)) = cargo_probe_opt {
@@ -412,16 +439,10 @@ pub async fn activate_interdiction_sphere_launcher(
                         .map(|t| t.volume.max(0.1))
                         .unwrap_or(probe_vol);
                     let r_cap = (launcher_cap / r_vol).floor().max(1.0) as i32;
-                    let take = if let Some((c_owner, c_avail)) = snap.items.get(&cargo_id).map(|c| (c.owner_id, c.quantity)) {
+                    let take = if let Some(c_avail) = snap.items.get(&cargo_id).map(|c| c.quantity) {
                         let req = c_avail.min(r_cap);
-                        if req > 0 {
-                            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
-                            opts.active_ship_id = Some(ship_id);
-                            if snap.consume_exact_item_quantity(cargo_id, req, opts).is_ok() {
-                                req
-                            } else {
-                                0
-                            }
+                        if req > 0 && snap.consume_exact_item_quantity(cargo_id, req, cargo_probe_opts).is_ok() {
+                            req
                         } else {
                             0
                         }
@@ -1417,4 +1438,283 @@ pub fn apply_overheat_rack_and_damage_on_cycle(
 #[cfg(test)]
 #[path = "tactical_module_mechanics_tests.rs"]
 mod tactical_module_mechanics_tests;
+
+#[cfg(test)]
+mod r6_probe_policy_tests {
+    use super::*;
+    use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, WorldRepository};
+    use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
+    use eve_dogma::{FittedModule, ModuleState};
+    use eve_sde::SdeRegistry;
+    use glam::DVec3;
+    use std::collections::HashMap;
+    use std::sync::{Arc, OnceLock};
+
+    fn test_sde() -> Arc<SdeRegistry> {
+        static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+        Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interdiction_launcher_skips_bpc_courier_loaded_probes_and_blocks_bad_cargo_merge() {
+        let mut sde = (*test_sde()).clone();
+        let base = sde.types.get(&587).expect("seed type").clone();
+        let dictor_ship_tid = 995_601_u32;
+        let launcher_tid = 995_602_u32;
+        let disrupt_probe_tid = 22_778_u32;
+
+        let mut dictor_t = base.clone();
+        dictor_t.type_id = dictor_ship_tid;
+        dictor_t.group_id = 541;
+        dictor_t.category_id = 6;
+        dictor_t.capacity = 30.0;
+        dictor_t.default_attributes.clear();
+        dictor_t.effect_ids.clear();
+        dictor_t.default_attributes.insert(38, 30.0);
+        sde.types.insert(dictor_ship_tid, dictor_t);
+
+        let mut launcher_t = base.clone();
+        launcher_t.type_id = launcher_tid;
+        launcher_t.group_id = 589;
+        launcher_t.category_id = 7;
+        launcher_t.capacity = 15.0;
+        launcher_t.default_attributes.clear();
+        launcher_t.effect_ids.clear();
+        launcher_t.default_attributes.insert(51, 5_000.0);
+        launcher_t.default_attributes.insert(5561, 1.0);
+        sde.types.insert(launcher_tid, launcher_t.clone());
+
+        let mut probe_t = base;
+        probe_t.type_id = disrupt_probe_tid;
+        probe_t.group_id = 548;
+        probe_t.category_id = 8;
+        probe_t.volume = 5.0;
+        probe_t.default_attributes.clear();
+        probe_t.effect_ids.clear();
+        probe_t.default_attributes.insert(103, 20_000.0);
+        probe_t.default_attributes.insert(281, 120_000.0);
+        probe_t.default_attributes.insert(9, 1_000.0);
+        sde.types.insert(disrupt_probe_tid, probe_t);
+
+        let ctx = ServerContext::with_sde_and_repository(
+            Arc::new(sde),
+            Arc::new(WorldRepository::with_demo_seed()),
+        );
+        let null_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+            .min_by_key(|s| s.solar_system_id)
+            .map(|s| s.solar_system_id)
+            .unwrap_or(30_004_759);
+
+        let char_id = 90_000_001_i64;
+        let ship_id = 995_601_001_i64;
+        let mod_id = 995_601_002_i64;
+        let bpc_loaded_id = 995_601_010_i64;
+        let courier_loaded_id = 995_601_011_i64;
+        let valid_loaded_id = 995_601_012_i64;
+        let bpc_cargo_id = 995_601_020_i64;
+        let courier_cargo_id = 995_601_021_i64;
+
+        let fitted_mod = FittedModule {
+            item_id: mod_id,
+            type_id: launcher_tid,
+            flag_id: InventoryFlag::HiSlot0 as u16,
+            state: ModuleState::Online,
+            charge_type_id: Some(disrupt_probe_tid),
+            charge_quantity: 4,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            dynamic_attribute_overrides: HashMap::new(),
+        };
+
+        ctx.db.with_mut_snapshot(|snap| {
+            let seed_ch = snap.characters[&char_id].clone();
+            snap.characters.insert(
+                char_id,
+                CharacterRecord {
+                    station_id: None,
+                    structure_id: None,
+                    solar_system_id: null_sys,
+                    active_ship_id: ship_id,
+                    ..seed_ch
+                },
+            );
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: dictor_ship_tid,
+                    owner_id: char_id,
+                    location_id: null_sys as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: launcher_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_loaded_id,
+                InventoryItemRecord {
+                    item_id: bpc_loaded_id,
+                    type_id: disrupt_probe_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                courier_loaded_id,
+                InventoryItemRecord {
+                    item_id: courier_loaded_id,
+                    type_id: disrupt_probe_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 2,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(courier_loaded_id, "courier_cargo:10".into());
+            snap.items.insert(
+                valid_loaded_id,
+                InventoryItemRecord {
+                    item_id: valid_loaded_id,
+                    type_id: disrupt_probe_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 4,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_cargo_id,
+                InventoryItemRecord {
+                    item_id: bpc_cargo_id,
+                    type_id: disrupt_probe_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                courier_cargo_id,
+                InventoryItemRecord {
+                    item_id: courier_cargo_id,
+                    type_id: disrupt_probe_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 2,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(courier_cargo_id, "courier_cargo:11".into());
+        });
+
+        let sys_null = ctx.systems.get_or_spawn(null_sys);
+        sys_null
+            .spawn_ball_with_meta(
+                Ball {
+                    id: ship_id,
+                    type_id: dictor_ship_tid,
+                    position: DVec3::new(1_000.0, 2_000.0, 3_000.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_500_000.0,
+                    radius: 60.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+                SlimItemMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        activate_interdiction_sphere_launcher(
+            &ctx,
+            &sys_null,
+            null_sys,
+            char_id,
+            ship_id,
+            dictor_ship_tid,
+            mod_id,
+            &fitted_mod,
+            &launcher_t,
+            "useMissiles",
+            None,
+        )
+        .await
+        .expect("valid loaded probe fires cleanly despite lower-ID BPC/courier shadows");
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&valid_loaded_id].quantity, 2);
+            assert_eq!(snap.items[&bpc_loaded_id].quantity, 1);
+            assert_eq!(snap.items[&courier_loaded_id].quantity, 2);
+            assert_eq!(snap.items[&bpc_cargo_id].quantity, 1);
+            assert_eq!(snap.items[&courier_cargo_id].quantity, 2);
+            assert!(snap.items.values().any(|i| {
+                i.location_id == ship_id
+                    && i.flag == InventoryFlag::Cargo
+                    && i.type_id == disrupt_probe_tid
+                    && i.item_id != bpc_cargo_id
+                    && i.item_id != courier_cargo_id
+                    && i.quantity == 1
+            }));
+        });
+
+        // Removing the valid probe leaves only BPC + courier shadows -> NoProbesLoaded.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&valid_loaded_id);
+        });
+        let db_key = tactical_modules::db_ptr_key(&ctx.db);
+        ctx.tactical_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .launcher_last_fire
+            .remove(&(db_key, mod_id));
+        let err = activate_interdiction_sphere_launcher(
+            &ctx,
+            &sys_null,
+            null_sys,
+            char_id,
+            ship_id,
+            dictor_ship_tid,
+            mod_id,
+            &fitted_mod,
+            &launcher_t,
+            "useMissiles",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "NoProbesLoaded");
+    }
+}
 

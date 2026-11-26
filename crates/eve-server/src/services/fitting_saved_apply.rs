@@ -1712,6 +1712,32 @@ fn validate_and_apply_fitting_with_options(
                 {
                     continue;
                 }
+                let stack_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    char_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                );
+                let whole_singleton_opts = eve_db::ConsumeExactOptions {
+                    reject_blueprint_copy: true,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        char_id,
+                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                    )
+                };
+                let is_valid_fit_stack =
+                    |snap_ref: &eve_db::WorldStateSnapshot, it: &eve_db::InventoryItemRecord| -> bool {
+                        if it.singleton {
+                            it.quantity == 1
+                                && snap_ref
+                                    .validate_item_for_consumption(it, &whole_singleton_opts)
+                                    .is_ok()
+                        } else {
+                            snap_ref
+                                .validate_item_for_consumption(it, &stack_opts)
+                                .is_ok()
+                        }
+                    };
                 let preferred_ids = options
                     .preferred_items_by_type
                     .and_then(|map| map.get(&tid));
@@ -1726,7 +1752,7 @@ fn validate_and_apply_fitting_with_options(
                             && i.type_id != 60
                             && i.quantity > 0
                             && !snap.is_item_in_alsc_lock(i.item_id)
-                            && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
+                            && is_valid_fit_stack(snap, i)
                     })
                     .map(|i| (i.item_id, i.quantity))
                     .collect();
@@ -1735,8 +1761,8 @@ fn validate_and_apply_fitting_with_options(
                     (!is_preferred, item_id)
                 });
                 let total_avail: i64 = matching_stacks.iter().map(|(_, q)| *q as i64).sum();
-                if total_avail < req_qty as i64 {
-                    *missing.entry(tid).or_insert(0) += (req_qty as i64) - total_avail;
+                if total_avail == 0 {
+                    *missing.entry(tid).or_insert(0) += req_qty as i64;
                     ship_failed = true;
                     continue;
                 }
@@ -1777,6 +1803,13 @@ fn validate_and_apply_fitting_with_options(
                     }
                     let take = avail.min(to_consume);
                     if take == avail && (!is_mod || take == 1) {
+                        if !snap
+                            .items
+                            .get(&cid)
+                            .is_some_and(|it| is_valid_fit_stack(snap, it))
+                        {
+                            continue;
+                        }
                         if let Ok(mut moved) = snap.transfer_inventory_item(
                             cid,
                             eve_db::TransferItemSpec::move_whole(
@@ -1802,11 +1835,7 @@ fn validate_and_apply_fitting_with_options(
                         }
                     } else {
                         if snap
-                            .consume_exact_item_quantity(
-                                cid,
-                                take,
-                                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
-                            )
+                            .consume_exact_item_quantity(cid, take, stack_opts.clone())
                             .is_err()
                         {
                             continue;
@@ -2035,5 +2064,246 @@ pub fn dna_to_fitting(dna: &str) -> Result<(TypeId, Vec<(TypeId, i32)>), String>
 #[cfg(test)]
 #[path = "fitting_saved_apply_tests.rs"]
 mod fitting_saved_apply_tests;
+
+#[cfg(test)]
+mod r5_fit_apply_policy_tests {
+    use super::*;
+    use eve_db::{CharacterRecord, InventoryItemRecord, SavedFittingRecord, WorldRepository};
+    use eve_sde::SdeRegistry;
+    use std::sync::{Arc, OnceLock};
+
+    fn test_sde() -> Arc<SdeRegistry> {
+        static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+        Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+    }
+
+    #[tokio::test]
+    async fn handle_fit_ships_rejects_bpc_and_courier_in_both_whole_and_split_branches() {
+        let ctx = ServerContext::with_sde_and_repository(
+            test_sde(),
+            Arc::new(WorldRepository::with_demo_seed()),
+        );
+        let char_id = 96_050_001_i64;
+        let station_id = 60_003_760_i64;
+        let ship_id = 96_050_100_i64;
+        let mod_bpc_id = 96_050_201_i64;
+        let mod_courier_id = 96_050_202_i64;
+        let ammo_exact_bpc_id = 96_050_203_i64;
+        let ammo_split_courier_id = 96_050_204_i64;
+        let clean_mod_id = 96_050_205_i64;
+        let clean_ammo_id = 96_050_206_i64;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            let seed = snap.characters.values().next().cloned().expect("seed char");
+            snap.characters.insert(
+                char_id,
+                CharacterRecord {
+                    character_id: char_id,
+                    user_id: 1,
+                    name: "FitApplyPolicyPilot".into(),
+                    corporation_id: 1_000_009,
+                    station_id: Some(station_id),
+                    solar_system_id: 30_000_142,
+                    active_ship_id: ship_id,
+                    ..seed
+                },
+            );
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_bpc_id,
+                InventoryItemRecord {
+                    item_id: mod_bpc_id,
+                    type_id: 484,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_courier_id,
+                InventoryItemRecord {
+                    item_id: mod_courier_id,
+                    type_id: 484,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(mod_courier_id, "courier_cargo:51".into());
+            snap.items.insert(
+                ammo_exact_bpc_id,
+                InventoryItemRecord {
+                    item_id: ammo_exact_bpc_id,
+                    type_id: 178,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 5,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                ammo_split_courier_id,
+                InventoryItemRecord {
+                    item_id: ammo_split_courier_id,
+                    type_id: 178,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 10,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(ammo_split_courier_id, "courier_cargo:52".into());
+            snap.saved_fittings.insert(
+                502,
+                SavedFittingRecord {
+                    fitting_id: 502,
+                    owner_id: char_id,
+                    ship_type_id: 587,
+                    name: "Policy Fit".into(),
+                    description: "R5 policy check".into(),
+                    items: vec![
+                        (484, InventoryFlag::HiSlot0, 1),
+                        (178, InventoryFlag::Cargo, 5),
+                    ],
+                },
+            );
+        });
+
+        let mut session = SessionState::default();
+        session.user_id = Some(1);
+        session.character_id = Some(char_id);
+        session.corporation_id = Some(1_000_009);
+        session.station_id = Some(station_id);
+        session.solar_system_id = Some(30_000_142);
+        session.ship_id = Some(ship_id);
+
+        let res = handle_fit_ships(
+            &ctx,
+            &mut session,
+            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(502)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("FitShips tuple");
+        match res {
+            PyRep::Tuple(parts) if parts.len() == 2 => {
+                assert_eq!(parts[1], PyRep::Integer(ship_id));
+                match &parts[0] {
+                    PyRep::List(entries) => {
+                        assert_eq!(entries.len(), 2);
+                        assert!(entries.contains(&PyRep::Tuple(vec![
+                            PyRep::Integer(484),
+                            PyRep::Integer(1),
+                        ])));
+                        assert!(entries.contains(&PyRep::Tuple(vec![
+                            PyRep::Integer(178),
+                            PyRep::Integer(5),
+                        ])));
+                    }
+                    other => panic!("expected missing list, got {other:?}"),
+                }
+            }
+            other => panic!("expected FitShips tuple, got {other:?}"),
+        }
+        ctx.db.with_snapshot(|snap| {
+            for (id, qty) in [
+                (mod_bpc_id, 1),
+                (mod_courier_id, 1),
+                (ammo_exact_bpc_id, 5),
+                (ammo_split_courier_id, 10),
+            ] {
+                assert_eq!(snap.items[&id].location_id, station_id);
+                assert_eq!(snap.items[&id].flag, InventoryFlag::Hangar);
+                assert_eq!(snap.items[&id].quantity, qty);
+            }
+        });
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                clean_mod_id,
+                InventoryItemRecord {
+                    item_id: clean_mod_id,
+                    type_id: 484,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                clean_ammo_id,
+                InventoryItemRecord {
+                    item_id: clean_ammo_id,
+                    type_id: 178,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 8,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let ok = handle_fit_ships(
+            &ctx,
+            &mut session,
+            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(502)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("handled")
+        .expect("clean fit");
+        assert_eq!(ok, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&clean_mod_id].location_id, ship_id);
+            assert_eq!(snap.items[&clean_mod_id].flag, InventoryFlag::HiSlot0);
+            assert_eq!(snap.items[&clean_ammo_id].location_id, station_id);
+            assert_eq!(snap.items[&clean_ammo_id].flag, InventoryFlag::Hangar);
+            assert_eq!(snap.items[&clean_ammo_id].quantity, 3);
+            assert!(snap.items.values().any(|i| {
+                i.location_id == ship_id
+                    && i.flag == InventoryFlag::Cargo
+                    && i.type_id == 178
+                    && i.quantity == 5
+            }));
+            for (id, qty) in [
+                (mod_bpc_id, 1),
+                (mod_courier_id, 1),
+                (ammo_exact_bpc_id, 5),
+                (ammo_split_courier_id, 10),
+            ] {
+                assert_eq!(snap.items[&id].location_id, station_id);
+                assert_eq!(snap.items[&id].flag, InventoryFlag::Hangar);
+                assert_eq!(snap.items[&id].quantity, qty);
+            }
+        });
+    }
+}
 
 

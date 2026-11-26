@@ -262,13 +262,35 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         } else {
             snap.items
                 .values()
-                .filter(|i| (i.owner_id == char_id || i.owner_id == corp_id) && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
+                .filter(|i| {
+                    (i.owner_id == char_id || i.owner_id == corp_id)
+                        && i.location_id == ship_id
+                        && i.type_id == type_id
+                        && i.quantity >= 1
+                        && snap
+                            .validate_item_for_consumption(
+                                i,
+                                &eve_db::ConsumeExactOptions {
+                                    active_ship_id: Some(ship_id),
+                                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                                        Some(char_id),
+                                        i.owner_id,
+                                        eve_db::ItemClassPolicy::ExactAssembledItem,
+                                    )
+                                },
+                            )
+                            .is_ok()
+                })
                 .map(|i| i.item_id)
                 .min()
                 .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?
         };
         if let Some(pre_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
-            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), pre_owner);
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                pre_owner,
+                eve_db::ItemClassPolicy::ExactAssembledItem,
+            );
             opts.active_ship_id = Some(ship_id);
             let _ = snap.consume_exact_item_quantity(item_id, 1, opts)
                 .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -1052,6 +1074,23 @@ fn check_module_fits_structure(mod_type: &eve_sde::InvType, st_type_id: u32, st_
     Ok(())
 }
 
+fn consume_service_online_fuel_or_err(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    structure_id: i64,
+    online_fuel: u32,
+) -> Result<(), BridgeRpcError> {
+    use crate::services::structure_acl_defense_rules as rules;
+    if rules::consume_structure_fuel_blocks(ctx, snap, structure_id, online_fuel) {
+        return Ok(());
+    }
+    let cur = rules::available_structure_fuel_blocks(ctx, snap, structure_id);
+    Err(err(
+        "InsufficientStructureFuelToOnline",
+        format!("Onlining service module requires {online_fuel} fuel blocks (bay has {cur})"),
+    ))
+}
+
 /// Handles fitting or unfitting a module/rig on an Upwell structure (`feat:structures.structure-fitting`,
 /// `feat:structures.fitting-state-locks`, `feat:structures.service-modules`).
 pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState, item_id: i64, new_loc: i64, flag: InventoryFlag, explicit_online: Option<bool>) -> Result<PyRep, BridgeRpcError> {
@@ -1209,7 +1248,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         if is_service {
             rules::sync_seeded_structure_fuel_bay(ctx, snap, structure_id);
         }
-        let avail_fuel = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
+        let avail_fuel = rules::available_structure_fuel_blocks(ctx, snap, structure_id);
         let online_fuel = rules::service_module_online_fuel_cost(ctx, st.type_id, src.type_id);
         if is_service && explicit_online == Some(true) {
             if profile.core_type_id.is_some() && !st.quantum_core_installed {
@@ -1224,7 +1263,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 return Err(err("InsufficientStructureFuelToOnline", format!("Onlining service module requires {online_fuel} fuel blocks (bay has {avail_fuel})")));
             }
         }
-        let will_online = if online && is_service {
+        let mut will_online = if online && is_service {
             (profile.core_type_id.is_none() || st.quantum_core_installed) && avail_fuel >= online_fuel
         } else {
             online && !matches!(flag_u16, 92..=94)
@@ -1234,7 +1273,11 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             snap.consume_exact_item_quantity(
                 item_id,
                 1,
-                eve_db::ConsumeExactOptions::for_owner_exact(fit_actor, src.owner_id),
+                eve_db::ConsumeExactOptions::for_owner_exact(
+                    fit_actor,
+                    src.owner_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                ),
             )
             .map_err(|e| err("InventoryError", e.to_string()))?;
             snap.next_entity_id += 1;
@@ -1273,11 +1316,21 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         snap.module_online_states.insert(fitted_id, will_online);
         if is_service {
             if will_online {
-                let _ = rules::consume_structure_fuel_blocks(ctx, snap, structure_id, online_fuel);
-                let lf = ext.lifecycle.entry(structure_id).or_default();
-                lf.last_fuel_tick_unix.get_or_insert(now);
-                if !lf.online_modules.contains(&fitted_id) {
-                    lf.online_modules.push(fitted_id);
+                let consumed = if explicit_online == Some(true) {
+                    consume_service_online_fuel_or_err(ctx, snap, structure_id, online_fuel)?;
+                    true
+                } else {
+                    rules::consume_structure_fuel_blocks(ctx, snap, structure_id, online_fuel)
+                };
+                if consumed {
+                    let lf = ext.lifecycle.entry(structure_id).or_default();
+                    lf.last_fuel_tick_unix.get_or_insert(now);
+                    if !lf.online_modules.contains(&fitted_id) {
+                        lf.online_modules.push(fitted_id);
+                    }
+                } else {
+                    will_online = false;
+                    snap.module_online_states.insert(fitted_id, false);
                 }
             }
             let max_before = life::effective_max_shield(ctx, snap, &profile, structure_id, life::PowerState::LowPower);
@@ -1369,10 +1422,7 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
             if !was_online {
                 rules::sync_seeded_structure_fuel_bay(ctx, snap, structure_id);
                 let online_fuel = rules::service_module_online_fuel_cost(ctx, st.type_id, item.type_id);
-                if !rules::consume_structure_fuel_blocks(ctx, snap, structure_id, online_fuel) {
-                    let cur = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
-                    return Err(err("InsufficientStructureFuelToOnline", format!("Onlining service module {module_id} requires {online_fuel} fuel blocks (bay has {cur})")));
-                }
+                consume_service_online_fuel_or_err(ctx, snap, structure_id, online_fuel)?;
                 let lf = ext.lifecycle.entry(structure_id).or_default();
                 lf.last_fuel_tick_unix.get_or_insert(now);
                 lf.online_modules.push(module_id);

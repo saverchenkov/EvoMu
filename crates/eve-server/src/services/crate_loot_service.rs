@@ -216,8 +216,13 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &SessionState, args: &[
             crate_id,
             1,
             eve_db::ConsumeExactOptions {
+                reject_blueprint_copy: true,
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -306,8 +311,13 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args:
             crate_id,
             1,
             eve_db::ConsumeExactOptions {
+                reject_blueprint_copy: true,
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -386,7 +396,11 @@ where
             actual_to_open,
             eve_db::ConsumeExactOptions {
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -451,8 +465,13 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
             crate_id,
             1,
             eve_db::ConsumeExactOptions {
+                reject_blueprint_copy: true,
                 active_ship_id: active_ship,
-                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+                ..eve_db::ConsumeExactOptions::for_owner_exact(
+                    Some(char_id),
+                    crate_item.owner_id,
+                    eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                )
             },
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
@@ -686,6 +705,104 @@ mod qty_tests {
         );
         let notifs = ctx.drain_notifications_for_char(cid);
         assert!(notifs.iter().any(|n| n.event == "OnCrateLootSpawned"));
+    }
+
+    #[test]
+    fn crate_claims_reject_non_commodity_stack_and_bpc_courier_crates() {
+        let ctx = ServerContext::new();
+        let cid = 90_000_001_i64;
+        let station_id = 60_003_760_i64;
+        let mut sess = SessionState::new(932);
+        sess.user_id = Some(1);
+        sess.character_id = Some(cid);
+        sess.station_id = Some(station_id);
+
+        let specs = get_crate_specs(&ctx);
+        let (&loot_crate_tid, _) = specs
+            .iter()
+            .find(|(_, s)| !s.items.is_empty())
+            .expect("SDE crate with fixedLootItems");
+
+        let singleton_crate_id = 941_001_i64;
+        let bpc_crate_id = 941_002_i64;
+        let courier_crate_id = 941_003_i64;
+        let before_items = ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = Some(station_id);
+            }
+            snap.items.insert(
+                singleton_crate_id,
+                InventoryItemRecord {
+                    item_id: singleton_crate_id,
+                    type_id: loot_crate_tid,
+                    owner_id: cid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                bpc_crate_id,
+                InventoryItemRecord {
+                    item_id: bpc_crate_id,
+                    type_id: loot_crate_tid,
+                    owner_id: cid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 2,
+                    singleton: false,
+                    is_blueprint_copy: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                courier_crate_id,
+                InventoryItemRecord {
+                    item_id: courier_crate_id,
+                    type_id: loot_crate_tid,
+                    owner_id: cid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 2,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+            snap.item_custom_names
+                .insert(courier_crate_id, format!("courier_cargo:{cid}:901"));
+            let mut ext = load_cosmetics_ui_state(snap);
+            ext.opened_crates.insert(bpc_crate_id, ctx.now_unix());
+            ext.opened_crates.insert(courier_crate_id, ctx.now_unix());
+            save_cosmetics_ui_state(snap, &ext);
+            snap.items.len()
+        });
+
+        for bad_stack_id in [singleton_crate_id, bpc_crate_id, courier_crate_id] {
+            assert!(
+                handle_crate_service(
+                    &ctx,
+                    &sess,
+                    "ClaimLootFromCrateStack",
+                    &[PyRep::Integer(bad_stack_id), PyRep::Integer(1)],
+                )
+                .unwrap()
+                .is_err(),
+                "ClaimLootFromCrateStack must reject crate {bad_stack_id}"
+            );
+        }
+        for bad_claim_id in [bpc_crate_id, courier_crate_id] {
+            assert!(
+                handle_crate_service(&ctx, &sess, "ClaimLoot", &[PyRep::Integer(bad_claim_id)])
+                    .unwrap()
+                    .is_err(),
+                "ClaimLoot must reject BPC/courier crate {bad_claim_id}"
+            );
+        }
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items.len(), before_items);
+        });
     }
 }
 

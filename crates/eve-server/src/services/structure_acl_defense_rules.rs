@@ -1009,82 +1009,144 @@ pub fn sync_seeded_structure_fuel_bay(
     // are kept in sync on deposits, withdrawals, and consumption.
 }
 
+fn is_bay_fuel_block_item(
+    ctx: &ServerContext,
+    structure_id: i64,
+    i: &eve_db::InventoryItemRecord,
+) -> bool {
+    i.location_id == structure_id
+        && is_structure_fuel_flag(i.flag)
+        && i.quantity > 0
+        && is_fuel_block_type(ctx, i.type_id)
+}
+
+fn is_eligible_fuel_block_stack(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    st_owner_corp: i64,
+    structure_id: i64,
+    i: &eve_db::InventoryItemRecord,
+) -> bool {
+    let expected_owner = if st_owner_corp != 0 {
+        st_owner_corp
+    } else {
+        i.owner_id
+    };
+    is_bay_fuel_block_item(ctx, structure_id, i)
+        && snap
+            .validate_item_for_consumption(
+                i,
+                &eve_db::ConsumeExactOptions::for_owner_exact(
+                    None,
+                    expected_owner,
+                    eve_db::ItemClassPolicy::StackableCommodity,
+                ),
+            )
+            .is_ok()
+}
+
+pub(crate) fn collect_structure_fuel_block_state(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+) -> (bool, u32, Vec<i64>) {
+    let (st_owner_corp, st_blocks) = snap
+        .structures
+        .get(&structure_id)
+        .map(|s| (s.owner_corp_id, s.fuel_blocks))
+        .unwrap_or((0, 0));
+    let mut has_any_bay_stack = false;
+    let mut eligible_bay_blocks: u32 = 0;
+    let mut item_ids: Vec<i64> = Vec::new();
+    for i in snap.items.values() {
+        if is_bay_fuel_block_item(ctx, structure_id, i) {
+            has_any_bay_stack = true;
+            if is_eligible_fuel_block_stack(ctx, snap, st_owner_corp, structure_id, i) {
+                eligible_bay_blocks =
+                    eligible_bay_blocks.saturating_add(u32::try_from(i.quantity).unwrap_or(0));
+                item_ids.push(i.item_id);
+            }
+        }
+    }
+    let avail = if has_any_bay_stack { eligible_bay_blocks } else { st_blocks };
+    (has_any_bay_stack, avail, item_ids)
+}
+
+pub fn available_structure_fuel_blocks(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+) -> u32 {
+    collect_structure_fuel_block_state(ctx, snap, structure_id).1
+}
+
 pub fn consume_structure_fuel_blocks(
     ctx: &ServerContext,
     snap: &mut WorldStateSnapshot,
     structure_id: i64,
     amount: u32,
 ) -> bool {
-    let bay_blocks: u32 = snap
-        .items
-        .values()
-        .filter(|i| {
-            i.location_id == structure_id
-                && is_structure_fuel_flag(i.flag)
-                && i.quantity > 0
-                && is_fuel_block_type(ctx, i.type_id)
-        })
-        .filter_map(|i| u32::try_from(i.quantity).ok())
-        .fold(0u32, u32::saturating_add);
-    let st_blocks = snap.structures.get(&structure_id).map(|s| s.fuel_blocks).unwrap_or(0);
-    let avail = if bay_blocks > 0 { bay_blocks } else { st_blocks };
+    let st_owner_corp = snap
+        .structures
+        .get(&structure_id)
+        .map(|s| s.owner_corp_id)
+        .unwrap_or(0);
+    let (has_any_bay_stack, avail, mut item_ids) =
+        collect_structure_fuel_block_state(ctx, snap, structure_id);
     if avail < amount {
         return false;
     }
     if amount == 0 {
         return true;
     }
-    let mut item_ids: Vec<i64> = snap
-        .items
-        .values()
-        .filter(|i| {
-            i.location_id == structure_id
-                && is_structure_fuel_flag(i.flag)
-                && i.quantity > 0
-                && is_fuel_block_type(ctx, i.type_id)
-        })
-        .map(|i| i.item_id)
-        .collect();
-    item_ids.sort_unstable();
     let mut rem = amount;
-    for iid in item_ids {
-        if rem == 0 {
-            break;
-        }
-        let Some((it_owner, avail)) = snap
-            .items
-            .get(&iid)
-            .map(|it| (it.owner_id, u32::try_from(it.quantity).unwrap_or(0)))
-        else {
-            continue;
-        };
-        let take = rem.min(avail);
-        let Ok(take_i32) = ItemQty::try_from_u32(take).and_then(ItemQty::try_into_stack_i32) else {
-            continue;
-        };
-        let mut fuel_opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
-        fuel_opts.reject_singleton = true;
-        if snap.consume_exact_item_quantity(iid, take_i32, fuel_opts).is_ok() {
-            rem -= take;
-        }
-    }
-    if let Some(st) = snap.structures.get_mut(&structure_id) {
-        if bay_blocks > 0 {
-            let rem_bay: u32 = snap
+    if has_any_bay_stack {
+        item_ids.sort_unstable();
+        for iid in item_ids {
+            if rem == 0 {
+                break;
+            }
+            let Some((it_owner, avail)) = snap
                 .items
-                .values()
-                .filter(|i| {
-                    i.location_id == structure_id
-                        && is_structure_fuel_flag(i.flag)
-                        && i.quantity > 0
-                        && is_fuel_block_type(ctx, i.type_id)
-                })
-                .filter_map(|i| u32::try_from(i.quantity).ok())
-                .fold(0u32, u32::saturating_add);
-            st.fuel_blocks = rem_bay;
-        } else {
-            st.fuel_blocks = st.fuel_blocks.saturating_sub(amount);
+                .get(&iid)
+                .map(|it| (it.owner_id, u32::try_from(it.quantity).unwrap_or(0)))
+            else {
+                continue;
+            };
+            let take = rem.min(avail);
+            let Ok(take_i32) =
+                ItemQty::try_from_u32(take).and_then(ItemQty::try_into_stack_i32)
+            else {
+                continue;
+            };
+            let fuel_owner = if st_owner_corp != 0 {
+                st_owner_corp
+            } else {
+                it_owner
+            };
+            let fuel_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                None,
+                fuel_owner,
+                eve_db::ItemClassPolicy::StackableCommodity,
+            );
+            if snap.consume_exact_item_quantity(iid, take_i32, fuel_opts).is_ok() {
+                rem -= take;
+            }
         }
+        if rem > 0 {
+            return false;
+        }
+        let rem_bay: u32 = snap
+            .items
+            .values()
+            .filter(|i| is_eligible_fuel_block_stack(ctx, snap, st_owner_corp, structure_id, i))
+            .filter_map(|i| u32::try_from(i.quantity).ok())
+            .fold(0u32, u32::saturating_add);
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.fuel_blocks = rem_bay;
+        }
+    } else if let Some(st) = snap.structures.get_mut(&structure_id) {
+        st.fuel_blocks = st.fuel_blocks.saturating_sub(amount);
     }
     true
 }
