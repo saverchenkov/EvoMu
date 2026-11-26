@@ -504,6 +504,8 @@ async fn t2a3_pyrep_parser_all_10_kinds_start_timer_and_bounds() {
             PyRep::keyval([("kind", PyRep::String("or".into())), ("clauses", PyRep::List(vec![PyRep::keyval([("kind", PyRep::String("approach".into()))]), PyRep::keyval([("kind", PyRep::String("loot".into()))])]))]),
             deep_and,
             PyRep::keyval([("kind", PyRep::String("timer".into())), ("timerID", PyRep::String("__reserved".into())), ("delaySecs", PyRep::Integer(4)), ("triggerDelaySecs", PyRep::Integer(2)), ("action", PyRep::String("StartTimer".into())), ("actionTargetRoomIndex", PyRep::Integer(1))]),
+            PyRep::keyval([("kind", PyRep::String("timer".into())), ("timerID", PyRep::String("__internal_probe".into())), ("delaySecs", PyRep::Integer(1)), ("action", PyRep::String("TriggerMessage".into())), ("messageID", PyRep::Integer(9909))]),
+            PyRep::keyval([("kind", PyRep::String("approach".into())), ("delaySecs", PyRep::Integer(3)), ("timerID", PyRep::String("p_extra".into())), ("extraActions", PyRep::List(vec![PyRep::String("StartTimer".into())]))]),
         ])),
     ]);
     let res = spawn_dungeon_instance(&ctx, char_id, Some(sys_id), &[PyRep::Integer(1), PyRep::List(vec![room_rep])], &HashMap::new()).await.unwrap();
@@ -529,10 +531,28 @@ async fn t2a3_pyrep_parser_all_10_kinds_start_timer_and_bounds() {
             };
         }
         assert!(matches!(cur, DungeonTriggerKind::OnKill { .. }), "depth > 4 must cap safely to OnKill");
-        assert!(matches!(&r.triggers[7].kind, DungeonTriggerKind::OnTimer { delay_secs: 4, timer_id: None, .. }), "P2-3: __-prefixed OnTimer timerID must be stripped");
+        assert!(matches!(&r.triggers[7].kind, DungeonTriggerKind::OnTimer { delay_secs: 4, timer_id: Some(t), .. } if t.is_empty()), "BF-R2-01: __-prefixed OnTimer timerID must keep inert empty sentinel");
         assert!(matches!(&r.triggers[7].action, DungeonTriggerAction::StartTimer { timer_id, delay_secs: 4 } if timer_id.is_empty()), "P2-3: __-prefixed StartTimer timerID must be stripped");
         assert_eq!(r.triggers[7].delay_secs, 2, "explicit triggerDelaySecs must still work");
         assert_eq!(r.triggers[7].target_room_index, Some(1), "explicit actionTargetRoomIndex must still work");
+        assert!(matches!(&r.triggers[8].kind, DungeonTriggerKind::OnTimer { delay_secs: 1, timer_id: Some(t), .. } if t.is_empty()));
+        assert_eq!(r.triggers[9].delay_secs, 0, "P2-01: extraActions StartTimer shorthand must consume wrapper delaySecs");
+    });
+
+    // BF-R2-01 runtime proof: __-prefixed OnTimer never falls back to unnamed room-entry timer nor touches internal __ keys.
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.get_mut(&inst_id).unwrap().rooms[0].armed_timers.insert("__internal_probe".into(), 0);
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(5);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnDungeonTriggerMessage"), "BF-R2-01: __-prefixed OnTimer must never fire after delaySecs");
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_id].rooms[0];
+        assert!(!r.triggers[7].fired && r.triggers[7].armed_at_unix.is_none());
+        assert!(!r.triggers[8].fired && r.triggers[8].armed_at_unix.is_none());
+        assert_eq!(r.armed_timers.get("__internal_probe").copied(), Some(0), "BF-R2-01: internal __ keys must stay untouched");
     });
 
     // BF-02 E2E: PyRep-parsed StartTimer(3s), OnTimer(3s), and OnRoomEntered(targetRoomIndex: 1) execute without 2x delay or misrouting.
@@ -557,7 +577,6 @@ async fn t2a3_pyrep_parser_all_10_kinds_start_timer_and_bounds() {
         assert!(r0.gate_locked);
     });
     let _ = ctx.drain_notifications_for_char(char_id);
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
     ctx.advance_secs(2);
     sys_h.step_manual(1.0).await.unwrap();
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnDungeonTriggerMessage"));
@@ -748,5 +767,106 @@ async fn t2a3_p2_empty_system_tick_prekill_group0_and_reserved_timer_id() {
         let rm = &s.instances[&inst_id].rooms[0];
         assert!(!rm.gate_locked, "group_id == 0 pre-entry kill replay must match OnKillCount(Some(0))");
         assert!(!rm.armed_timers.contains_key("__bad"), "__-prefixed StartTimer must be ignored");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_delayed_repeatable_named_timer_cleanup_and_rearm_bf_r2_02() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_090i64, 991_012i64);
+    let r_pos = [51_000_000.0, 0.0, 0.0];
+    let (ctx, _, ship_id) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r2_02", DVec3::ZERO).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut del_t = t2_trig(1, DungeonTriggerKind::OnTimer { delay_secs: 2, timer_id: Some("rep_del".into()), after_group_cleared: None }, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9201 }, true);
+    del_t.delay_secs = 4;
+    let mut r0 = t2_room(1, 9911, r_pos, vec![
+        del_t,
+        t2_trig(2, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: r_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "rep_del".into(), delay_secs: 2 }, true),
+    ]);
+    r0.spawned = true;
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+
+    for cycle in 1..=2 {
+        assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(r_pos)).await);
+        assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+        assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+        assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+        ctx.advance_secs(2);
+        sys_h.step_manual(1.0).await.unwrap();
+        read_dungeon_runtime_store(&ctx, |s| {
+            let rm = &s.instances[&inst_id].rooms[0];
+            assert!(rm.triggers[0].armed_at_unix.is_some(), "cycle {cycle}: delayed trigger must arm on TimerTick");
+            assert!(!rm.armed_timers.contains_key("rep_del"), "BF-R2-02: TimerTick arming must clean up rep_del");
+        });
+
+        let _ = ctx.drain_notifications_for_char(char_id);
+        ctx.advance_secs(4);
+        assert_eq!(tick_due_delayed_dungeon_triggers(&ctx).await, 1, "cycle {cycle}: delayed repeatable OnTimer fires");
+        assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+        read_dungeon_runtime_store(&ctx, |s| {
+            let rm = &s.instances[&inst_id].rooms[0];
+            assert!(!rm.armed_timers.contains_key("__latch:0:0:root:timer:rep_del"), "BF-R2-02: latch must clear so future StartTimer re-arms");
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_npc_damaged_shield_only_depletion_bf_r2_03() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_100i64, 991_013i64);
+    let r_pos = [52_000_000.0, 0.0, 0.0];
+    let (ctx, _, _) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r2_03", DVec3::from_array(r_pos)).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut r0 = t2_room(1, 9921, r_pos, vec![
+        t2_trig(1, DungeonTriggerKind::OnNpcDamaged {
+            target_npc_group: Some(1), target_tag: None, target_ball_id: None,
+            hull_or_shield_below_pct: 50, on_first_attack: false,
+        }, DungeonTriggerAction::UnlockGate, false),
+    ]);
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    r0.npc_groups = vec![DungeonNpcGroup { group_id: 1, wave: 1, npc_specs: vec![(48_090, 1)], spawn_immediately: true, ..Default::default() }];
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+    let npc_id = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.unwrap().npc_ids[0];
+
+    for _ in 0..32 {
+        let (shield_pct, step) = {
+            let view = sys_h.view();
+            let cs = view.combat_states.get(&npc_id).expect("npc combat state");
+            assert!(cs.max_shield_hp > 0.0);
+            let sp = ((cs.shield_hp / cs.max_shield_hp) * 100.0).round() as u8;
+            (sp, (cs.max_shield_hp * 0.08).max(1.0))
+        };
+        if shield_pct <= 35 {
+            break;
+        }
+        let _ = sys_h.apply_damage_with_attacker(npc_id, DamageVector { em: step, thermal: step, kinetic: step, explosive: step }, Some(char_id)).await.unwrap();
+    }
+    {
+        let view = sys_h.view();
+        let cs = view.combat_states.get(&npc_id).expect("npc combat state");
+        let total_max = (cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp).max(1.0);
+        let total_pct = (((cs.shield_hp + cs.armor_hp + cs.structure_hp) / total_max) * 100.0).round() as u8;
+        assert!(cs.shield_hp / cs.max_shield_hp <= 0.5 && cs.shield_hp > 0.5 && cs.armor_hp == cs.max_armor_hp && cs.structure_hp == cs.max_structure_hp && total_pct > 50);
+    }
+    sys_h.step_manual(1.0).await.unwrap();
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rm = &s.instances[&inst_id].rooms[0];
+        assert!(rm.triggers[0].fired && !rm.gate_locked, "BF-R2-03: shield-only depletion <= 50% must fire OnNpcDamaged");
     });
 }

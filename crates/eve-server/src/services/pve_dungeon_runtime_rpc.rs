@@ -544,17 +544,27 @@ fn parse_rooms_from_pyrep(
             if let Some(PyRep::List(trigs) | PyRep::Tuple(trigs)) = r_rep.dict_get("triggers") {
                 for (t_i, t_rep) in trigs.iter().take(64).enumerate() {
                     let action = parse_dungeon_trigger_action(t_rep, t_rep);
+                    let mut extra_uses_wrapper_start_timer_delay = false;
                     let extra_actions = match t_rep.dict_get("extraActions") {
                         Some(PyRep::List(list) | PyRep::Tuple(list)) => list
                             .iter()
                             .take(16)
-                            .map(|a_rep| parse_dungeon_trigger_action(a_rep, t_rep))
+                            .map(|a_rep| {
+                                let parsed = parse_dungeon_trigger_action(a_rep, t_rep);
+                                if matches!(parsed, DungeonTriggerAction::StartTimer { .. })
+                                    && a_rep.dict_get("delaySecs").is_none()
+                                {
+                                    extra_uses_wrapper_start_timer_delay = true;
+                                }
+                                parsed
+                            })
                             .collect(),
                         _ => Vec::new(),
                     };
                     let kind = parse_dungeon_trigger_kind(t_rep, &objects, room_pos, 0);
                     let delay_consumed_by_payload = matches!(kind, DungeonTriggerKind::OnTimer { .. })
-                        || matches!(action, DungeonTriggerAction::StartTimer { .. });
+                        || matches!(action, DungeonTriggerAction::StartTimer { .. })
+                        || extra_uses_wrapper_start_timer_delay;
                     let target_room_consumed_by_kind = matches!(kind, DungeonTriggerKind::OnRoomEntered { .. });
                     triggers.push(DungeonTrigger {
                         trigger_id: u32::try_from(t_i + 1).unwrap_or(u32::MAX),
@@ -1451,8 +1461,13 @@ fn parse_dungeon_trigger_kind(
                 .dict_get("timerID")
                 .or_else(|| t_rep.dict_get("timerId"))
                 .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty() && !s.starts_with("__"))
-                .map(str::to_string),
+                .map(|s| {
+                    if s.is_empty() || s.starts_with("__") {
+                        String::new()
+                    } else {
+                        s.to_string()
+                    }
+                }),
             after_group_cleared: t_rep.dict_get("afterGroupCleared").and_then(|v| v.as_i64()).and_then(|v| u8::try_from(v).ok()),
         },
         "room_entered" | "onroomentered" | "roomentered" | "enter" => DungeonTriggerKind::OnRoomEntered {

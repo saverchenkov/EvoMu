@@ -38,6 +38,7 @@ pub(crate) enum DungeonEvent<'a> {
         group_id: Option<u8>,
         npc_tag: Option<&'a str>,
         total_pct: u8,
+        shield_pct: Option<u8>,
         hull_pct: u8,
         shield_or_armor_depleted: bool,
         damaged_at_all: bool,
@@ -94,7 +95,11 @@ fn collect_due_named_timers(
 ) {
     match kind {
         DungeonTriggerKind::OnTimer { timer_id: Some(ref tid), .. } => {
-            if armed_timers.get(tid).is_some_and(|&due| now_unix >= due) && !out_expired.contains(tid) {
+            if !tid.is_empty()
+                && !tid.starts_with("__")
+                && armed_timers.get(tid).is_some_and(|&due| now_unix >= due)
+                && !out_expired.contains(tid)
+            {
                 out_expired.push(tid.clone());
             }
         }
@@ -133,11 +138,15 @@ fn reset_repeatable_trigger_state(
     match kind {
         DungeonTriggerKind::OnTimer { delay_secs, timer_id, after_group_cleared } => {
             if let Some(tid) = timer_id {
-                if consume_timers && armed_timers.get(tid).is_some_and(|&due| now_unix >= due) {
-                    armed_timers.remove(&format!("__latch:{r_idx}:{t_idx}:{path}:timer:{tid}"));
-                    if !out_expired_named.contains(tid) {
-                        out_expired_named.push(tid.clone());
-                    }
+                if tid.is_empty() || tid.starts_with("__") {
+                    return;
+                }
+                armed_timers.remove(&format!("__latch:{r_idx}:{t_idx}:{path}:timer:{tid}"));
+                if consume_timers
+                    && armed_timers.get(tid).is_some_and(|&due| now_unix >= due)
+                    && !out_expired_named.contains(tid)
+                {
+                    out_expired_named.push(tid.clone());
                 }
             } else if after_group_cleared.is_none() {
                 let unnamed_latch = format!("__latch:{r_idx}:{t_idx}:{path}:unnamed_timer");
@@ -378,6 +387,9 @@ fn eval_leaf_outcome(
                 return LeafOccurrence::Irrelevant;
             }
             if let Some(tid) = timer_id {
+                if tid.is_empty() || tid.starts_with("__") {
+                    return LeafOccurrence::Irrelevant;
+                }
                 let subject = format!("timer:{tid}");
                 if armed_timers.get(tid).is_some_and(|&due| now_unix >= due) {
                     LeafOccurrence::Active { subject, discrete_event: false }
@@ -445,6 +457,7 @@ fn eval_leaf_outcome(
                 group_id,
                 npc_tag,
                 total_pct,
+                shield_pct,
                 hull_pct,
                 shield_or_armor_depleted,
                 damaged_at_all,
@@ -463,6 +476,7 @@ fn eval_leaf_outcome(
             } else {
                 *damaged_at_all
                     && (*total_pct <= *hull_or_shield_below_pct
+                        || shield_pct.is_some_and(|sp| sp <= *hull_or_shield_below_pct)
                         || (*shield_or_armor_depleted && *hull_pct <= *hull_or_shield_below_pct))
             };
             let subject = format!("npc:{npc_ball_id}");
@@ -657,6 +671,9 @@ fn evaluate_room_triggers_in_inst(
         }
         any_hit = true;
         if delay > 0 {
+            if is_timer_tick {
+                collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
+            }
             let t = &mut inst.rooms[r_idx].triggers[t_idx];
             t.armed_at_unix = Some(now_unix);
             t.armed_by_char_id = (actor_char_id > 0).then_some(actor_char_id);
@@ -1341,6 +1358,9 @@ pub(crate) async fn tick_dungeon_runtime_system_step_impl(deps: DungeonRuntimeDe
                                 let total_max = (cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp).max(1.0);
                                 let total_cur = (cs.shield_hp + cs.armor_hp + cs.structure_hp).max(0.0);
                                 let total_pct = ((total_cur / total_max) * 100.0).clamp(0.0, 100.0).round() as u8;
+                                let shield_pct = (cs.max_shield_hp > 0.0).then(|| {
+                                    ((cs.shield_hp / cs.max_shield_hp) * 100.0).clamp(0.0, 100.0).round() as u8
+                                });
                                 let hull_pct = ((cs.structure_hp / cs.max_structure_hp.max(1.0)) * 100.0).clamp(0.0, 100.0).round() as u8;
                                 let depleted_sa = cs.shield_hp + cs.armor_hp <= 0.5;
                                 let damaged = total_cur + 0.5 < total_max;
@@ -1349,6 +1369,7 @@ pub(crate) async fn tick_dungeon_runtime_system_step_impl(deps: DungeonRuntimeDe
                                     group_id: Some(g.group_id),
                                     npc_tag: g.npc_ball_tags.get(&bid).map(String::as_str),
                                     total_pct,
+                                    shield_pct,
                                     hull_pct,
                                     shield_or_armor_depleted: depleted_sa,
                                     damaged_at_all: damaged,
@@ -1358,7 +1379,7 @@ pub(crate) async fn tick_dungeon_runtime_system_step_impl(deps: DungeonRuntimeDe
                                         && trigger_needs_eval_dryrun(&t.kind, inst, r, ri, ti, &ev, now_unix)
                                 });
                                 if hit {
-                                    dmg.push((inst.instance_id, ri, bid, g.group_id, g.npc_ball_tags.get(&bid).cloned(), total_pct, hull_pct, depleted_sa, damaged));
+                                    dmg.push((inst.instance_id, ri, bid, g.group_id, g.npc_ball_tags.get(&bid).cloned(), total_pct, shield_pct, hull_pct, depleted_sa, damaged));
                                 }
                             }
                         }
@@ -1393,7 +1414,7 @@ pub(crate) async fn tick_dungeon_runtime_system_step_impl(deps: DungeonRuntimeDe
             finalize_terminal_in_snap(snap, inst, cid, now_unix, &mut ie);
             merge_effects(&mut effects, ie);
         }
-        for (iid, ri, bid, gid, tag_opt, total_pct, hull_pct, depleted_sa, damaged) in dmg_hits {
+        for (iid, ri, bid, gid, tag_opt, total_pct, shield_pct, hull_pct, depleted_sa, damaged) in dmg_hits {
             let Some(mut inst) = snap.dungeon_runtime.instances.remove(&iid) else { continue };
             if instance_is_finished(&inst) || inst.solar_system_id != sys_id {
                 snap.dungeon_runtime.instances.insert(iid, inst);
@@ -1406,6 +1427,7 @@ pub(crate) async fn tick_dungeon_runtime_system_step_impl(deps: DungeonRuntimeDe
                 group_id: Some(gid),
                 npc_tag: tag_opt.as_deref(),
                 total_pct,
+                shield_pct,
                 hull_pct,
                 shield_or_armor_depleted: depleted_sa,
                 damaged_at_all: damaged,
