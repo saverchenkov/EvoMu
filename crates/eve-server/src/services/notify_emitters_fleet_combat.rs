@@ -372,10 +372,14 @@ pub(crate) async fn handle_set_password(
         }
         if let Some((sys_id, ref sb_opt, cloaked, ref cb_opt)) = in_space_balls {
             if item.location_id == i64::from(sys_id) {
-                let (_, sb) = sb_opt.as_ref().ok_or_else(|| BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Active ship is not spawned in space".into(),
-                    client_error: None,
+                let (_, sb) = sb_opt.as_ref().ok_or_else(|| {
+                    BridgeRpcError::ship_not_in_space(
+                        session.ship_id.unwrap_or(0),
+                        Some(char_id),
+                        Some(sys_id),
+                        "configure_container_password",
+                        "Active ship is not spawned in space",
+                    )
                 })?;
                 if cloaked || matches!(sb.mode, eve_destiny::MovementMode::Warp { .. }) {
                     return Err(BridgeRpcError {

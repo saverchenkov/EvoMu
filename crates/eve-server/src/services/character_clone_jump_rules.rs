@@ -897,11 +897,13 @@ fn collect_clone_vat_bay_fuel_stacks(
         });
     }
     let Some(mod_it) = s.items.get(&module_id) else {
-        return Err(BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Module {module_id} not found"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::module_not_found(
+            module_id,
+            Some(ship_id),
+            None,
+            false,
+            format!("Module {module_id} not found"),
+        ));
     };
     if mod_it.location_id != ship_id || mod_it.owner_id != char_id {
         return Err(BridgeRpcError {
@@ -974,10 +976,14 @@ pub async fn activate_clone_vat_bay(
             client_error: None,
         });
     }
-    let mod_type = ctx.sde.types.get(&mod_type_id).ok_or_else(|| BridgeRpcError {
-        code: "ModuleNotFound".into(),
-        message: "Module type unknown".into(),
-        client_error: None,
+    let mod_type = ctx.sde.types.get(&mod_type_id).ok_or_else(|| {
+        BridgeRpcError::module_not_found(
+            module_id,
+            Some(ship_id),
+            (mod_type_id > 0).then_some(i64::from(mod_type_id)),
+            false,
+            "Module type unknown",
+        )
     })?;
     let (duration_ms, fuel_qty) = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
         let ev = fit.evaluated_context(&ctx.sde);

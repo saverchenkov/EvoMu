@@ -837,11 +837,13 @@ pub async fn try_activate_observatory_gate(
     let sys = ctx.systems.get_or_spawn(sys_id);
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id) else {
-        return Some(Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not in space".into(),
-            client_error: None,
-        }));
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "fob_gate_activate",
+            "Active ship ball is not in space",
+        )));
     };
     let Some(gate_ball) = all_balls.iter().find(|b| b.id == gate_id) else {
         return Some(Err(BridgeRpcError {

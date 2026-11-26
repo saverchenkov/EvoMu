@@ -250,11 +250,13 @@ pub(super) async fn handle_bookmarks(
                 if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
                     (ball.position.x, ball.position.y, ball.position.z)
                 } else {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipNotInSpace".into(),
-                        message: "Cannot bookmark in-space position when ship ball is absent".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(BridgeRpcError::ship_not_in_space(
+                        ship_id,
+                        Some(char_id),
+                        Some(sys_id),
+                        "bookmark_in_space",
+                        "Cannot bookmark in-space position when ship ball is absent",
+                    )));
                 }
             } else {
                 (0.0, 0.0, 0.0)

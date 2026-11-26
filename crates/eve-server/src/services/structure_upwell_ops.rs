@@ -980,7 +980,12 @@ fn handle_move_eject_time_gm(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     if !session.has_gm_role() {
-        return Err(err("InsufficientRole", "structureAssetSafety.MoveEjectTimeGM requires GM role"));
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "structureAssetSafety.MoveEjectTimeGM",
+            "structureAssetSafety.MoveEjectTimeGM requires GM role",
+        ));
     }
     let rpc = crate::router::RpcArgs::positional(args);
     let wrap_id = rpc.req_positive_i64(0, "wrapID")?;

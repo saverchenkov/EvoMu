@@ -161,11 +161,12 @@ pub fn handle(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "objectCaching.InvalidateCachedObjects requires GM/Admin role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "objectCaching.InvalidateCachedObjects",
+                    "objectCaching.InvalidateCachedObjects requires GM/Admin role",
+                )));
             }
             let mut invalidated = 0i64;
             match args.first() {

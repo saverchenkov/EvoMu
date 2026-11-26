@@ -155,6 +155,31 @@ pub(crate) fn record_call_if_cluster_service(ctx: &ServerContext, service: &str)
 }
 
 /// Handles cluster management and operational RPCs targeting `machoNet` and cluster infrastructure services.
+const SESSION_MGR_GM_MASK: u64 =
+    eve_machonet::service_roles::ROLE_GM_MASK | eve_db::service_roles::ROLE_ADMIN;
+
+fn session_mgr_insufficient_role(session: &SessionState, method: &str) -> BridgeRpcError {
+    BridgeRpcError::insufficient_role(
+        SESSION_MGR_GM_MASK,
+        session.role,
+        format!("sessionMgr.{method}"),
+        "UserError: GM_InsufficientRole",
+    )
+}
+
+fn macho_gm_insufficient_role(
+    session: &SessionState,
+    action: &str,
+    message: &str,
+) -> BridgeRpcError {
+    BridgeRpcError::insufficient_role(
+        eve_machonet::service_roles::ROLE_GM_MASK,
+        session.role,
+        action,
+        message,
+    )
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -183,11 +208,7 @@ pub fn handle(
             return Some(Err(e));
         }
         if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
-            return Some(Err(BridgeRpcError {
-                code: "InsufficientRole".into(),
-                message: "UserError: GM_InsufficientRole".into(),
-                client_error: None,
-            }));
+            return Some(Err(session_mgr_insufficient_role(session, method)));
         }
     }
 
@@ -471,11 +492,7 @@ pub fn handle(
                 return Some(Err(e));
             }
             if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "UserError: GM_InsufficientRole".into(),
-                    client_error: None,
-                }));
+                return Some(Err(session_mgr_insufficient_role(session, "EndAllGameSessions")));
             }
             let target_sessions: Vec<(u64, u64, Option<i64>)> = ctx.db.with_snapshot(|snap| {
                 snap.sessions
@@ -524,11 +541,10 @@ pub fn handle(
                 return Some(Err(e));
             }
             if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "UserError: GM_InsufficientRole".into(),
-                    client_error: None,
-                }));
+                return Some(Err(session_mgr_insufficient_role(
+                    session,
+                    "RemoveSessionsFromServer",
+                )));
             }
             let node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if node_id != 0 && node_id != 1i64 {
@@ -813,11 +829,11 @@ fn handle_macho_net(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "machoNet.GetMetrics requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(macho_gm_insufficient_role(
+                    session,
+                    "machoNet.GetMetrics",
+                    "machoNet.GetMetrics requires GM role",
+                )));
             }
             let (mut cr_entries, mut cs_entries, mut nr_entries, sent_count) = {
                 let state = ctx.cluster_state.read().unwrap();
@@ -948,11 +964,11 @@ fn handle_macho_net(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "machoNet.SetConnectionProperty requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(macho_gm_insufficient_role(
+                    session,
+                    "machoNet.SetConnectionProperty",
+                    "machoNet.SetConnectionProperty requires GM role",
+                )));
             }
             let key = if let Some(k) = args.first().and_then(|a| a.as_str()) {
                 k.to_string()
@@ -1014,11 +1030,11 @@ fn handle_macho_net(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "machoNet.GracefulShutdown requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(macho_gm_insufficient_role(
+                    session,
+                    "machoNet.GracefulShutdown",
+                    "machoNet.GracefulShutdown requires GM role",
+                )));
             }
             let origin_node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let shutdown_reason = args
@@ -1053,11 +1069,11 @@ fn handle_macho_net(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "GM role required for cluster lifecycle operations".into(),
-                    client_error: None,
-                }));
+                return Some(Err(macho_gm_insufficient_role(
+                    session,
+                    "machoNet.GracefulShutdownStarted",
+                    "GM role required for cluster lifecycle operations",
+                )));
             }
             ctx.cluster_state.write().unwrap().shutdown_in_progress = true;
             Some(Ok(PyRep::None))
@@ -1068,11 +1084,11 @@ fn handle_macho_net(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "GM role required for cluster lifecycle operations".into(),
-                    client_error: None,
-                }));
+                return Some(Err(macho_gm_insufficient_role(
+                    session,
+                    "machoNet.GracefulShutdownComplete",
+                    "GM role required for cluster lifecycle operations",
+                )));
             }
             let node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let mut state = ctx.cluster_state.write().unwrap();
@@ -1087,11 +1103,11 @@ fn handle_macho_net(
                 return Some(Err(e));
             }
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "machoNet.TerminateAllClients requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(macho_gm_insufficient_role(
+                    session,
+                    "machoNet.TerminateAllClients",
+                    "machoNet.TerminateAllClients requires GM role",
+                )));
             }
             let reason = args
                 .first()
@@ -1532,7 +1548,7 @@ fn handle_session_attribute_update(
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_auth(session)?;
     if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
-        return Err(session_attr_err("InsufficientRole", "UserError: GM_InsufficientRole"));
+        return Err(session_mgr_insufficient_role(session, method));
     }
 
     let (target_sid, rest) = if let Some(PyRep::Integer(sid)) = args.first() {

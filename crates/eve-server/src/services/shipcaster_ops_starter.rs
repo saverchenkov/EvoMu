@@ -320,8 +320,11 @@ pub async fn check_proximity(
         .map_err(|e| rpc_err("DestinyQueryFailed", &e))?
         .map(|(_, b)| b)
         .ok_or_else(|| {
-            rpc_err(
-                "ShipNotInSpace",
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                None,
+                Some(sys.solar_system_id),
+                "shipcaster_jump",
                 "Active ship ball is not in space in this solar system",
             )
         })?;
@@ -361,8 +364,11 @@ pub async fn prevalidate_shipcaster_jump(
         .await
         .map_err(|e| rpc_err("DestinyQueryFailed", &e))?
     else {
-        return Err(rpc_err(
-            "ShipNotInSpace",
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(origin_sys),
+            "shipcaster_jump",
             "Active ship ball not in space in origin solar system",
         ));
     };

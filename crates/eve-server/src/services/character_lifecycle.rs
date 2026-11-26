@@ -40,18 +40,20 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+const PRIVILEGED_GM_ROLE_MASK: u64 = eve_machonet::service_roles::ROLE_GMH
+    | eve_machonet::service_roles::ROLE_GML
+    | eve_machonet::service_roles::ROLE_GMS
+    | eve_machonet::service_roles::ROLE_ADMIN;
+
 fn has_privileged_gm_role(session: &SessionState) -> bool {
-    (session.role
-        & (eve_machonet::service_roles::ROLE_GMH
-            | eve_machonet::service_roles::ROLE_GML
-            | eve_machonet::service_roles::ROLE_GMS
-            | eve_machonet::service_roles::ROLE_ADMIN))
-        != 0
+    (session.role & PRIVILEGED_GM_ROLE_MASK) != 0
 }
 
-fn insufficient_gm_role_err(rpc: &str) -> BridgeRpcError {
-    err(
-        "InsufficientRole",
+fn insufficient_gm_role_err(session: &SessionState, rpc: &str) -> BridgeRpcError {
+    BridgeRpcError::insufficient_role(
+        PRIVILEGED_GM_ROLE_MASK,
+        session.role,
+        rpc,
         format!("{rpc} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"),
     )
 }
@@ -250,6 +252,7 @@ pub fn handle(
         ("charUnboundMgr", "GetQAStarterSystemIDs") => {
             if !has_privileged_gm_role(session) {
                 return Some(Err(insufficient_gm_role_err(
+                    session,
                     "charUnboundMgr.GetQAStarterSystemIDs",
                 )));
             }
@@ -369,6 +372,7 @@ fn handle_toggle_validation(
     };
     if !has_privileged_gm_role(session) {
         return Some(Err(insufficient_gm_role_err(
+            session,
             "charUnboundMgr.ToggleValidation",
         )));
     }

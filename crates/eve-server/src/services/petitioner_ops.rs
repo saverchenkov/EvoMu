@@ -245,7 +245,12 @@ fn handle_petitioner(
                     return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
                 if pet.petitioner_cid != cid && !session.has_gm_role() {
-                    return Err(err("InsufficientRole", "Cannot cancel another player's petition"));
+                    return Err(BridgeRpcError::insufficient_role(
+                        eve_machonet::service_roles::ROLE_GM_MASK,
+                        session.role,
+                        "cancel_petition",
+                        "Cannot cancel another player's petition",
+                    ));
                 }
                 if pet.status.eq_ignore_ascii_case("closed") || pet.status.eq_ignore_ascii_case("cancelled") {
                     return Err(err("PetitionClosed", "Cannot cancel a closed petition"));
@@ -264,7 +269,12 @@ fn handle_petitioner(
                     return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
                 if pet.petitioner_cid != cid && !session.has_gm_role() {
-                    return Err(err("InsufficientRole", "Cannot delete another player's petition"));
+                    return Err(BridgeRpcError::insufficient_role(
+                        eve_machonet::service_roles::ROLE_GM_MASK,
+                        session.role,
+                        "delete_petition",
+                        "Cannot delete another player's petition",
+                    ));
                 }
                 if !pet.status.eq_ignore_ascii_case("closed") && !pet.status.eq_ignore_ascii_case("cancelled") {
                     return Err(err("PetitionNotClosed", "Cannot delete an active petition"));

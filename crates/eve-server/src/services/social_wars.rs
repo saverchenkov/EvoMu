@@ -263,17 +263,17 @@ fn handle_war_registry_gm_rpc(
     method: &str,
     params: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if (session.role
-        & (eve_machonet::service_roles::ROLE_GMH
-            | eve_machonet::service_roles::ROLE_GML
-            | eve_machonet::service_roles::ROLE_GMS
-            | eve_machonet::service_roles::ROLE_ADMIN))
-        == 0
-    {
-        return err(
-            "InsufficientRole",
+    let required_gm_mask = eve_machonet::service_roles::ROLE_GMH
+        | eve_machonet::service_roles::ROLE_GML
+        | eve_machonet::service_roles::ROLE_GMS
+        | eve_machonet::service_roles::ROLE_ADMIN;
+    if (session.role & required_gm_mask) == 0 {
+        return Some(Err(BridgeRpcError::insufficient_role(
+            required_gm_mask,
+            session.role,
+            format!("warRegistry.{method}"),
             format!("warRegistry.{method} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"),
-        );
+        )));
     }
     let call = match parse_war_gm_call(method, params) {
         Ok(c) => c,

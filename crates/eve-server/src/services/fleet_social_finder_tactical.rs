@@ -414,10 +414,12 @@ pub async fn handle_fleet_watchlist_ops(
         let in_space = session.station_id.is_none()
             && (session.structure_id.is_none() || session.structure_id == session.ship_id);
         let Some(caller_sys) = session.solar_system_id.filter(|&s| s > 0 && in_space) else {
-            return Some(Err(BridgeRpcError::with_client_error(
-                "ShipNotInSpace",
+            return Some(Err(BridgeRpcError::ship_not_in_space(
+                session.ship_id.unwrap_or(0),
+                session.character_id,
+                session.solar_system_id,
+                "lock_broadcast_target",
                 "Must be in space to lock broadcast target",
-                eve_proto::ClientError::user(eve_proto::UserErrorKey::CantShipNotPresent),
             )));
         };
         let target_in_sys = ctx.db.with_snapshot(|snap| {

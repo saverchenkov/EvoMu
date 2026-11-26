@@ -485,8 +485,10 @@ pub fn handle(
                 )));
             };
             if target_cid != char_id && !session.has_gm_role() {
-                return Some(Err(rpc_err(
-                    "InsufficientRole",
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "complete_operation_category",
                     "Cannot complete operation category for another character",
                 )));
             }
@@ -1358,8 +1360,10 @@ pub fn handle(
                         | "objective_completed"
                 )
             {
-                return Some(Err(rpc_err(
-                    "InsufficientRole",
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "advance_air_npe",
                     "GM role required to advance or complete AIR NPE",
                 )));
             }

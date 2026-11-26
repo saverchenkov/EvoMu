@@ -326,11 +326,13 @@ pub(crate) async fn handle_bookmark_static_location(
                 });
                 (ship_type, (ball.position.x, ball.position.y, ball.position.z))
             } else {
-                return Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Cannot bookmark active ship when absent from ballpark".into(),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ent_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "bookmark_in_space",
+                    "Cannot bookmark active ship when absent from ballpark",
+                ));
             }
         } else {
             let coords = validate_dynamic_entity_bookmark_coords(
@@ -383,11 +385,13 @@ pub(crate) async fn handle_bookmark_static_location(
             });
             (ship_type, (ball.position.x, ball.position.y, ball.position.z))
         } else {
-            return Err(BridgeRpcError {
-                code: "ShipNotInSpace".into(),
-                message: "Cannot bookmark in-space position when ship ball is absent".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "bookmark_in_space",
+                "Cannot bookmark in-space position when ship ball is absent",
+            ));
         }
     } else {
         (5, (0.0, 0.0, 0.0))

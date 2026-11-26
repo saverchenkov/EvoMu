@@ -713,9 +713,15 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         ));
     }
 
-    let is_burned = ctx
-        .db
-        .with_snapshot(|s| is_module_burned_out(ctx, s.items.get(&module_id)));
+    let (is_burned, snap_mod_type_id) = ctx.db.with_snapshot(|s| {
+        let item = s.items.get(&module_id);
+        (
+            is_module_burned_out(ctx, item),
+            item.filter(|i| i.owner_id == char_id)
+                .map(|i| i.type_id)
+                .unwrap_or(0),
+        )
+    });
     if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
         return Err(err(
             "ModuleBurnedOut",
@@ -742,7 +748,23 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         })
         .map(|m| m.type_id);
     if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
-        return Err(err("FittingValidationFailed", e));
+        let eff_mod_type_id = if mod_type_id > 0 {
+            mod_type_id
+        } else {
+            snap_mod_type_id
+        };
+        let module_name = (eff_mod_type_id > 0)
+            .then(|| ctx.sde.types.get(&eff_mod_type_id))
+            .flatten()
+            .map(|t| t.name.as_str())
+            .unwrap_or("Module");
+        return Err(BridgeRpcError::fitting_validation_failed(
+            Some(ship_id),
+            Some(module_id),
+            (eff_mod_type_id > 0).then_some(i64::from(eff_mod_type_id)),
+            module_name,
+            e,
+        ));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let offline_mod_ids = fit
@@ -905,7 +927,10 @@ pub async fn handle_dogma_set_module_online(
     let (owns_ship, mod_type_id, was_fitted_in_db) = ctx.db.with_snapshot(|s| {
         let owns = s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id);
         let mod_it = s.items.get(&module_id);
-        let mtid = mod_it.map(|m| m.type_id).unwrap_or(0);
+        let mtid = mod_it
+            .filter(|i| i.owner_id == char_id)
+            .map(|m| m.type_id)
+            .unwrap_or(0);
         let fitted = mod_it.is_some_and(|m| {
             m.location_id == ship_id
                 && matches!(m.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171)
@@ -954,12 +979,22 @@ pub async fn handle_dogma_set_module_online(
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
     let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
-        let code = if e.starts_with("ModuleBurnedOut") {
-            "ModuleBurnedOut"
-        } else {
-            "FittingValidationFailed"
-        };
-        return Err(err(code, e));
+        if e.starts_with("ModuleBurnedOut") {
+            return Err(err("ModuleBurnedOut", e));
+        }
+        let eff_mod_type_id = fit.modules.get(&module_id).map(|m| m.type_id).unwrap_or(mod_type_id);
+        let module_name = (eff_mod_type_id > 0)
+            .then(|| ctx.sde.types.get(&eff_mod_type_id))
+            .flatten()
+            .map(|t| t.name.as_str())
+            .unwrap_or("Module");
+        return Err(BridgeRpcError::fitting_validation_failed(
+            Some(ship_id),
+            Some(module_id),
+            (eff_mod_type_id > 0).then_some(i64::from(eff_mod_type_id)),
+            module_name,
+            e,
+        ));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let committed_mod_type_id = ctx.db.try_with_mut_snapshot(|snap| {
@@ -972,15 +1007,21 @@ pub async fn handle_dogma_set_module_online(
         let mut resolved_type_id = 0_u32;
         if was_fitted_in_db {
             let mod_it = snap.items.get(&module_id).ok_or_else(|| {
-                err(
-                    "ModuleNotFound",
+                BridgeRpcError::module_not_found(
+                    module_id,
+                    Some(ship_id),
+                    None,
+                    false,
                     format!("Module {module_id} no longer fitted on ship {ship_id}"),
                 )
             })?;
             let flag_u16 = mod_it.flag as u16;
             if mod_it.location_id != ship_id || !matches!(flag_u16, 11..=34 | 92..=99 | 125..=132 | 164..=171) {
-                return Err(err(
-                    "ModuleNotFound",
+                return Err(BridgeRpcError::module_not_found(
+                    module_id,
+                    Some(ship_id),
+                    Some(i64::from(mod_it.type_id)),
+                    false,
                     format!("Module {module_id} is not fitted on ship {ship_id}"),
                 ));
             }

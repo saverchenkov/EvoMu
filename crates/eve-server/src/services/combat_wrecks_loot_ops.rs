@@ -138,11 +138,13 @@ pub(super) async fn handle_loot_all(
         _ => sys_handle.get_ball_snapshot(active_ball_id).await.ok().flatten(),
     };
     let Some((_, sb)) = ship_ball_opt else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not present in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "loot_all",
+            "Active ship ball is not present in space",
+        ));
     };
     let Ok(Some((_, wb))) = sys_handle.get_ball_snapshot(wreck_id).await else {
         return Err(BridgeRpcError {
@@ -180,11 +182,13 @@ pub(super) async fn handle_loot_all(
         if let Some(ch) = snap.characters.get(&char_id) {
             let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
             if entry_db_state.is_some_and(|e| cur_db_state != e) {
-                return Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "loot_all",
+                    format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
+                ));
             }
         }
         let Some(live_wreck) = snap.items.get(&wreck_id).cloned() else {

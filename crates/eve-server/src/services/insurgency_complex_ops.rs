@@ -617,11 +617,13 @@ pub async fn activate_outpost_raid_gate_in_space(
         )
         .await?;
     let Some(sb) = validated.ball else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball not found in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "insurgency_complex_gate",
+            "Active ship ball not found in space",
+        ));
     };
     crate::services::fw_gameplay::check_gate_tackle_and_nav_locks(ctx, &sys_handle, ship_id, &sb).await?;
     let gate_pos = sys_handle
