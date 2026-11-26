@@ -261,7 +261,7 @@ pub(crate) fn step_guided_missiles_in_actor(
             ballpark,
         );
         if effective_dmg.total() > 0.0 {
-            let reinf_sh = depot_reinf_shadow.as_deref_mut().map(|(m, seq)| (&mut **m, *seq));
+            let reinf_sh = depot_reinf_shadow.as_mut().map(|(m, seq)| (&mut **m, *seq));
             super::cycles::apply_resolved_weapon_damage(
                 m.attacker_ship_id,
                 Some(m.char_id).filter(|&c| c > 0),

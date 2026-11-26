@@ -253,13 +253,13 @@ pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
     for cycle in &sys_cycles {
         let cycle_key = (cycle.ship_id, cycle.started_at_unix, cycle.mod_type_id);
         let already_restored = restored_shadow
-            .as_deref()
+            .as_ref()
             .is_some_and(|(cyc_sh, _, _)| cyc_sh.contains_key(&cycle_key));
         if now_unix >= cycle.immobilize_until_unix && !cycle.mobility_restored {
             if already_restored {
                 continue;
             }
-            if let Some((cyc_sh, _, seq)) = restored_shadow.as_deref_mut() {
+            if let Some((cyc_sh, _, seq)) = restored_shadow.as_mut() {
                 cyc_sh.insert(cycle_key, *seq);
             }
             base_scramble_strengths.insert(cycle.ship_id, cycle.orig_warp_scramble_strength);
@@ -304,13 +304,13 @@ pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
     for sup in &sys_suppressions {
         let sup_key = (sup.ship_id, sup.suppressed_until_unix);
         let already_restored = restored_shadow
-            .as_deref()
+            .as_ref()
             .is_some_and(|(_, sup_sh, _)| sup_sh.contains_key(&sup_key));
         if now_unix >= sup.suppressed_until_unix {
             if already_restored {
                 continue;
             }
-            if let Some((_, sup_sh, seq)) = restored_shadow.as_deref_mut() {
+            if let Some((_, sup_sh, seq)) = restored_shadow.as_mut() {
                 sup_sh.insert(sup_key, *seq);
             }
             base_scramble_strengths.insert(sup.ship_id, sup.orig_warp_scramble_strength);

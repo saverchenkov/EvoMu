@@ -651,7 +651,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
         sde_opt,
         db_opt,
         dt,
-        shadows_seq.as_deref_mut().map(|(sh, seq)| (&mut sh.rack_heat_pending, *seq)),
+        shadows_seq.as_mut().map(|(sh, seq)| (&mut sh.rack_heat_pending, *seq)),
         post_unlock,
     );
 
@@ -767,7 +767,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     let mut local_heat_dmg: HashMap<i64, (f64, bool)> = shadows_seq
-        .as_deref()
+        .as_ref()
         .map_or_else(HashMap::new, |(sh, _)| sh.build_pending_overheat_dmg());
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // If the source ship was destroyed / removed from space mid-cycle (or decloaked by proximity/physics), cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
@@ -1030,7 +1030,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                         pending_cycle_actions,
                         &mut destroyed_balls,
                         pending_destroyed_outbox,
-                        shadows_seq.as_deref_mut().map(|(sh, seq)| (&mut sh.depot_reinforced_until, *seq)),
+                        shadows_seq.as_mut().map(|(sh, seq)| (&mut sh.depot_reinforced_until, *seq)),
                         post_unlock,
                     );
                 }
@@ -1193,7 +1193,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                     &mut burned_out,
                     &mut burned_ship_modules,
                     Some(&mut local_heat_dmg),
-                    shadows_seq.as_deref().map(|(sh, _)| &sh.rack_heat_pending),
+                    shadows_seq.as_ref().map(|(sh, _)| &sh.rack_heat_pending),
                     post_unlock,
                 );
                 if burned_out {
@@ -1401,7 +1401,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                             pending_cycle_actions,
                             &mut destroyed_balls,
                             pending_destroyed_outbox,
-                            shadows_seq.as_deref_mut().map(|(sh, seq)| (&mut sh.depot_reinforced_until, *seq)),
+                            shadows_seq.as_mut().map(|(sh, seq)| (&mut sh.depot_reinforced_until, *seq)),
                             post_unlock,
                         );
                     }

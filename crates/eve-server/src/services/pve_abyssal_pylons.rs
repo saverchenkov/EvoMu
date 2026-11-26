@@ -1034,7 +1034,7 @@ fn diff_and_update_tombstone_shadow<V: Copy + PartialEq>(
         .copied()
         .filter(|k| !curr.contains_key(k))
         .collect();
-    if let Some((sh, seq)) = shadow.as_deref_mut() {
+    if let Some((sh, seq)) = shadow.as_mut() {
         for &(k, v) in &upserts {
             sh.insert(k, (Some(v), *seq));
         }
@@ -1052,8 +1052,8 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
     defer_ship_death_to_step_hook: bool,
-    mut boundary_ticks_shadow: Option<(&mut HashMap<i64, (Option<u32>, u64)>, u64)>,
-    mut active_clouds_shadow: Option<(&mut HashMap<i64, (Option<TypeId>, u64)>, u64)>,
+    boundary_ticks_shadow: Option<(&mut HashMap<i64, (Option<u32>, u64)>, u64)>,
+    active_clouds_shadow: Option<(&mut HashMap<i64, (Option<TypeId>, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Vec<i64> {
     let mut suppressor_destroyed = Vec::new();
@@ -1135,12 +1135,54 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                     }
                 }
             }
-            active_clouds = snap.abyssal_state.active_clouds.clone();
-            boundary_ticks = snap.abyssal_state.boundary_ticks.clone();
+            let belongs_to_other_abyssal_or_arena_space = |bid: i64| -> bool {
+                let raw_id = bid.abs();
+                if ballpark.balls.contains_key(&raw_id) {
+                    return false;
+                }
+                if let Some(it) = snap.items.get(&raw_id) {
+                    if (32_000_001..=32_999_999).contains(&(it.location_id as u32))
+                        && it.location_id != i64::from(solar_system_id)
+                    {
+                        return true;
+                    }
+                }
+                if snap.characters.values().any(|ch| {
+                    ch.active_ship_id == raw_id
+                        && ch.station_id.is_none()
+                        && ch.structure_id.is_none()
+                        && (32_000_001..=32_999_999).contains(&ch.solar_system_id)
+                        && ch.solar_system_id != solar_system_id
+                }) {
+                    return true;
+                }
+                snap.abyssal_state.pockets.values().any(|p| {
+                    !p.completed
+                        && !p.collapsed_destroyed
+                        && p.abyssal_solar_system_id != solar_system_id
+                        && (p.ship_id == raw_id
+                            || p.fleet_ship_ids.contains(&raw_id)
+                            || p.ship_room.contains_key(&raw_id))
+                })
+            };
+            active_clouds = snap
+                .abyssal_state
+                .active_clouds
+                .iter()
+                .filter(|&(&bid, _)| !belongs_to_other_abyssal_or_arena_space(bid))
+                .map(|(&bid, &tid)| (bid, tid))
+                .collect();
+            boundary_ticks = snap
+                .abyssal_state
+                .boundary_ticks
+                .iter()
+                .filter(|&(&bid, _)| !belongs_to_other_abyssal_or_arena_space(bid))
+                .map(|(&bid, &cnt)| (bid, cnt))
+                .collect();
         });
     }
-    overlay_tombstone_shadow(&mut boundary_ticks, boundary_ticks_shadow.as_deref().map(|(sh, _)| &**sh));
-    overlay_tombstone_shadow(&mut active_clouds, active_clouds_shadow.as_deref().map(|(sh, _)| &**sh));
+    overlay_tombstone_shadow(&mut boundary_ticks, boundary_ticks_shadow.as_ref().map(|(sh, _)| &**sh));
+    overlay_tombstone_shadow(&mut active_clouds, active_clouds_shadow.as_ref().map(|(sh, _)| &**sh));
     let prev_boundary_ticks = boundary_ticks.clone();
     let prev_active_clouds = active_clouds.clone();
 

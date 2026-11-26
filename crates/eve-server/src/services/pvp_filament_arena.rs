@@ -1031,7 +1031,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
             continue;
         }
         let effective_prev_tick = match arena_hazard_ticks_shadow
-            .as_deref()
+            .as_ref()
             .and_then(|(sh, _)| sh.get(&cand.ship_id).copied())
         {
             Some((v_opt, _)) => v_opt,
@@ -1040,7 +1040,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
         let outside_sphere = ship_pos.distance(cand.center) > PROVING_ARENA_BOUNDARY_RADIUS_M;
         if !outside_sphere && !cand.exceeded_timer {
             if effective_prev_tick.is_some() {
-                if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_deref_mut() {
+                if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_mut() {
                     sh.insert(cand.ship_id, (None, *seq));
                 }
                 hazard_tick_removes.push(cand.ship_id);
@@ -1052,7 +1052,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
         let rem_dmg =
             PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * f64::from(next_tick - 1));
         if let Some((_, true, _)) = ballpark.apply_true_damage_to_ball(cand.ship_id, rem_dmg) {
-            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_deref_mut() {
+            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_mut() {
                 sh.insert(cand.ship_id, (None, *seq));
             }
             hazard_tick_removes.push(cand.ship_id);
@@ -1066,7 +1066,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
                 will_run_step_hook: cand.will_run_step_hook,
             });
         } else {
-            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_deref_mut() {
+            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_mut() {
                 sh.insert(cand.ship_id, (Some(next_tick), *seq));
             }
             hazard_tick_upserts.push((cand.ship_id, next_tick));

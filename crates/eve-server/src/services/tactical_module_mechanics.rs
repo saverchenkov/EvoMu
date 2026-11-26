@@ -1084,7 +1084,7 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
         return;
     }
     let mut ship_ids: Vec<BallId> = ship_rack_heat.keys().copied().collect();
-    if let Some((sh, _)) = rack_heat_pending.as_deref() {
+    if let Some((sh, _)) = rack_heat_pending.as_ref() {
         for &sid in sh.keys() {
             if !ship_ids.contains(&sid) {
                 ship_ids.push(sid);
@@ -1100,7 +1100,7 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
     for sid in ship_ids {
         let eval = evaluate_ship_thermodynamics(sid, sde_opt, db_opt);
         let pending_heat = rack_heat_pending
-            .as_deref()
+            .as_ref()
             .and_then(|(sh, _)| sh.get(&sid).map(|&(h, _)| h));
         let (runtime_heat, needs_legacy_cleanup) = if let Some(h) = pending_heat {
             let has_legacy = db_opt.as_ref().is_some_and(|db| {
@@ -1159,7 +1159,7 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
             ship_rack_heat.remove(&sid);
         }
         if (changed || needs_legacy_cleanup) && db_opt.is_some() {
-            if let Some((sh, seq)) = rack_heat_pending.as_deref_mut() {
+            if let Some((sh, seq)) = rack_heat_pending.as_mut() {
                 sh.insert(sid, (heat_snap, *seq));
             }
             post_unlock.push(PostUnlockIntent::RackHeatPersist(RackHeatPersistDbOp {

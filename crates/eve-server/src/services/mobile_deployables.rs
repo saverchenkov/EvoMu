@@ -1156,7 +1156,7 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
     damage: DamageVector,
     ballpark: &mut eve_destiny::Ballpark,
     now_unix: u64,
-    mut depot_reinf_shadow: Option<(&mut HashMap<BallId, (u64, u64)>, u64)>,
+    mut depot_reinf_shadow: Option<(&mut std::collections::HashMap<BallId, (u64, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
     let db = db_opt.as_ref()?;
@@ -1176,7 +1176,7 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
         let rec_opt = state.deployables.get(&ball_id).cloned();
 
         let shadow_reinf = depot_reinf_shadow
-            .as_deref()
+            .as_ref()
             .and_then(|(sh, _)| sh.get(&ball_id).map(|&(u, _)| u));
         let db_reinf = rec_opt.as_ref().and_then(|r| r.reinforced_until_unix);
         let effective_reinf = match (db_reinf, shadow_reinf) {
@@ -1208,7 +1208,7 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
                     if resisted_shield_dmg + 1e-6 >= damage_to_threshold {
                         cs.shield_hp = shield_threshold;
                         let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
-                        if let Some((sh, seq)) = depot_reinf_shadow.as_deref_mut() {
+                        if let Some((sh, seq)) = depot_reinf_shadow.as_mut() {
                             sh.insert(ball_id, (reinf_until, *seq));
                         }
                         post_unlock.push(PostUnlockIntent::MobileDeployable(

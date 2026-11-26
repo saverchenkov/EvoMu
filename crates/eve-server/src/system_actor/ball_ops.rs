@@ -763,7 +763,7 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     actor_st: &mut SystemActorState,
-    ball_positions: &Arc<RankedRwLock<HashMap<BallId, (DVec3, MovementMode)>, RANK_LEAF>>,
+    ball_positions: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: &Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     module_deactivation_hook: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     post_unlock_ops: &mut super::post_unlock::PostUnlockOps,

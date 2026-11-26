@@ -1208,11 +1208,17 @@ pub(in crate::system_actor) fn apply_post_commit_op_to_ballpark(
             slim_meta,
         } => {
             let bid = ball.id;
+            let has_combat_state = combat_state.is_some();
             if let Some(cs) = combat_state {
                 bp.combat_states.insert(bid, cs);
             }
-            bp.add_ball(ball);
+            if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
+                bp.mark_ball_non_free(bid, false);
+            }
             bp.set_ball_slim_meta(bid, slim_meta);
+            if bp.add_ball(ball) && !has_combat_state {
+                bp.combat_states.remove(&bid);
+            }
         }
         PostCommitBallparkOp::RemoveBall { ball_id } => {
             let _ = bp.remove_ball(ball_id);
@@ -1699,11 +1705,11 @@ impl Drop for PostUnlockShutdownGuard { fn drop(&mut self) { self.send_shutdown(
 #[derive(Clone)]
 pub(in crate::system_actor) struct PostCommitActorTargets {
     pub solar_system_id: SolarSystemId,
-    pub ballpark: Arc<RankedRwLock<eve_destiny::Ballpark, RANK_BALLPARK>>,
+    pub ballpark: Arc<super::celestials::BallparkHandle>,
     pub actor_state: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
-    pub ball_positions: Arc<RankedRwLock<HashMap<BallId, (DVec3, eve_destiny::MovementMode)>, RANK_LEAF>>,
+    pub ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub scrambled_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
-    pub view_tx: Arc<tokio::sync::watch::Sender<SystemView>>,
+    pub view_tx: Arc<tokio::sync::watch::Sender<Arc<SystemView>>>,
     pub tidi_factor_bits: Arc<AtomicU64>,
     pub module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     pub post_unlock_in_flight: Arc<AtomicUsize>,
@@ -1856,7 +1862,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
         impl Drop for WorkerDoneGuard { fn drop(&mut self) { if let Some(tx) = self.0.take() { let _ = tx.send(()); } } }
         let _done_guard = WorkerDoneGuard(Some(done_tx));
         let _ = worker_thread_id.set(std::thread::current().id());
-        let mut process_item = |item: PostUnlockWorkItem| {
+        let process_item = |item: PostUnlockWorkItem| {
             let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard, work_seq } = item;

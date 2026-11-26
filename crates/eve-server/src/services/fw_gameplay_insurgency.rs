@@ -629,7 +629,7 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
     }
 
     let shadow_entry = fob_shadow
-        .as_deref()
+        .as_ref()
         .and_then(|(sh, _)| sh.get(&ball_id).copied());
 
     let prep = if let Some(sh) = shadow_entry.filter(|sh| {
@@ -703,7 +703,7 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
             } else {
                 0
             };
-            if let Some((sh, seq)) = fob_shadow.as_deref_mut() {
+            if let Some((sh, seq)) = fob_shadow.as_mut() {
                 sh.insert(
                     ball_id,
                     PendingFobStateShadow {
@@ -744,7 +744,7 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
                 let hr = (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0);
                 (applied, destroyed, cs.structure_hp, 0.0, 0.0, hr)
             };
-            if let Some((sh, seq)) = fob_shadow.as_deref_mut() {
+            if let Some((sh, seq)) = fob_shadow.as_mut() {
                 sh.insert(
                     ball_id,
                     PendingFobStateShadow {
