@@ -121,6 +121,50 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_ratchet_never_allowlists_amended_1195_live_client_codes() {
+        const FORBIDDEN_AMENDED_1195_CODES: [&str; 27] = [
+            "QuantumCoreRequiredFitting",
+            "QuantumCoreRequiredRepair",
+            "QuantumCoreRequiredService",
+            "ShipAlreadyInWarp",
+            "ShipInWarp",
+            "CantActivateInWarp",
+            "NoAmmoLoaded",
+            "NotEnoughCapacitor",
+            "ShipNotInSpace",
+            "FittingValidationFailed",
+            "CannotFitStackedModule",
+            "InvalidTarget",
+            "TargetingFailed",
+            "InventoryNotAccessible",
+            "MustBeDockedAtStartStation",
+            "StructureNotDockable",
+            "StructureServiceAccessDenied",
+            "WeaponsTimerActive",
+            "CannotJumpWithWeaponsTimer",
+            "InvalidContractState",
+            "ContractOwnershipViolation",
+            "ModuleNotFound",
+            "OwnershipOrLocationViolation",
+            "InsufficientRole",
+            "GMRoleRequired",
+            "GmRoleRequired",
+            "InsufficientRoles",
+        ];
+        let ratchet = UnmappedCustomInfoRatchet::load_default()
+            .expect("checked-in unmapped_custom_info_ratchet.json must parse and validate");
+        for entry in &ratchet.allowed_fallbacks {
+            let (_, code) = entry
+                .split_once(':')
+                .unwrap_or_else(|| panic!("expected service.method:code in {entry:?}"));
+            assert!(
+                !FORBIDDEN_AMENDED_1195_CODES.contains(&code),
+                "ratchet must never allowlist amended #1195 live-client code {code:?} (entry {entry:?})"
+            );
+        }
+    }
+
+    #[test]
     fn validate_schema_rejects_bad_versions_and_malformed_keys() {
         let bad_version = UnmappedCustomInfoRatchet {
             version: 2,
