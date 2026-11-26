@@ -932,3 +932,425 @@ async fn history_lookup_recovers_career_plausible_missions_and_completed_courier
         Some(&PyRep::Integer(i64::from(details.cargo_type_id)))
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_respawn() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let kw = HashMap::new();
+    let pocket_pos = glam::DVec3::new(5.0e12, 0.0, 0.0);
+    let bm_id = 995_101_i64;
+    let mid_scoped = 98_201_u32;
+    let mid_legacy = 98_202_u32;
+    let agent_id = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.solar_system_id == Some(sys_id))
+        .map(|a| a.agent_id)
+        .unwrap_or(3_018_601);
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_cs = ctx.build_type_combat_state(587);
+    handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ship_cs,
+        )
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(sys_id);
+            ship.flag = eve_db::InventoryFlag::None;
+        }
+        mission_fixture::clear_character(snap, char_id);
+        snap.bookmarks.insert(
+            bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "BF1 Pocket".into(),
+                x: pocket_pos.x,
+                y: pocket_pos.y,
+                z: pocket_pos.z,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid_scoped, agent_id, sys_id)
+                .bookmark_id(Some(bm_id))
+                .site_origin_m(Some([pocket_pos.x as i64, 0, 0]))
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+        // Legacy mission with no known pocket origin or bookmark must not trigger on unrelated warps.
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid_legacy, agent_id, sys_id)
+                .bookmark_id(None)
+                .site_origin_m(None)
+                .npcs_remaining(1)
+                .initial_wave_count(Some(1))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+    });
+
+    // 1. Unscoped stargate/station warp must NOT materialize legacy `known_origin == None` mission.
+    let st_pos = ctx
+        .sde
+        .stations
+        .get(&st_id)
+        .map(|s| s.position)
+        .unwrap_or(glam::DVec3::ZERO);
+    agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+        &ctx, &handle, char_id, sys_id, "item", st_id, st_pos,
+    )
+    .await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(mission_fixture::get(snap, char_id, mid_legacy).unwrap().spawned_npc_ball_ids.is_empty());
+        assert!(mission_fixture::get(snap, char_id, mid_scoped).unwrap().spawned_npc_ball_ids.is_empty());
+    });
+
+    // 2. Low-cap truncated CmdWarpToStuff("bookmark", bm_id) stopping > 200 km short AND explicit
+    //    bubble-dragged bookmark warp (> 200 km from pocket_pos) must NOT spawn NPCs.
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+    handle.try_update_combat_state(ship_id, |cs| {
+        cs.capacitor = 0.01;
+        cs.max_capacitor = 250.0;
+    });
+    assert!(
+        (handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 0.01).abs() < 1e-6
+    );
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("bookmark".into()), PyRep::Integer(bm_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("low-cap CmdWarpToStuff initiates partial warp");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            mission_fixture::get(snap, char_id, mid_scoped)
+                .unwrap()
+                .spawned_npc_ball_ids
+                .is_empty(),
+            "truncated low-cap warp must not materialize pocket NPCs in deep space"
+        );
+    });
+    agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+        &ctx,
+        &handle,
+        char_id,
+        sys_id,
+        "bookmark",
+        bm_id,
+        pocket_pos + glam::DVec3::new(300_000.0, 0.0, 0.0),
+    )
+    .await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            mission_fixture::get(snap, char_id, mid_scoped)
+                .unwrap()
+                .spawned_npc_ball_ids
+                .is_empty(),
+            "bubble-dragged bookmark warp (>200km from pocket) must not materialize NPCs"
+        );
+    });
+
+    // 3. Full-cap 100 km range warp to bookmark must materialize NPCs around canonical `pocket_pos` (NOT 100 km dest_pos).
+    let _ = handle.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+    let _ = handle.set_ball_position(ship_id, glam::DVec3::ZERO).await;
+    handle.try_update_combat_state(ship_id, |cs| {
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+    });
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[
+                PyRep::String("bookmark".into()),
+                PyRep::Integer(bm_id),
+                PyRep::Real(100_000.0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("100km CmdWarpToStuff succeeds");
+    let first_bids = ctx.db.with_snapshot(|snap| {
+        assert!(
+            mission_fixture::get(snap, char_id, mid_legacy)
+                .unwrap()
+                .spawned_npc_ball_ids
+                .is_empty()
+        );
+        mission_fixture::get(snap, char_id, mid_scoped)
+            .unwrap()
+            .spawned_npc_ball_ids
+    });
+    assert_eq!(first_bids.len(), 2);
+    for &bid in &first_bids {
+        let (_, b) = handle.get_ball_snapshot(bid).await.unwrap().expect("npc ball spawned");
+        assert!(
+            (b.position.distance(pocket_pos) - 4_500.0).abs() < 1.0,
+            "100km range warp must anchor NPC wave around canonical pocket_pos, got dist={}",
+            b.position.distance(pocket_pos)
+        );
+    }
+
+    // 4. Simulate ballpark eviction removing NPC balls; subsequent CmdWarpToStuff must reconcile & respawn.
+    for &bid in &first_bids {
+        let _ = handle.remove_ball(bid).await;
+    }
+    let _ = handle.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+    let _ = handle.set_ball_position(ship_id, glam::DVec3::ZERO).await;
+    handle.try_update_combat_state(ship_id, |cs| {
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+    });
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("bookmark".into()), PyRep::Integer(bm_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("post-eviction CmdWarpToStuff succeeds");
+    let respawned_bids = ctx.db.with_snapshot(|snap| {
+        mission_fixture::get(snap, char_id, mid_scoped)
+            .unwrap()
+            .spawned_npc_ball_ids
+    });
+    assert_eq!(respawned_bids.len(), 2);
+    assert_ne!(respawned_bids, first_bids);
+    for &bid in &respawned_bids {
+        assert!(handle.get_ball_snapshot(bid).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test]
+async fn bf2_pocket_spawned_mission_npcs_preserve_sde_ewar_reps_and_uses_synthetic_false() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let mid = 98_203_u32;
+    let pocket_pos = glam::DVec3::new(10_000_000.0, 0.0, 0.0);
+
+    // Real SDE NPCs: 34155 ("Burner Jaguar": web + scram + turrets) & 34154 ("Burner Burst": remote shield rep)
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid, 3_018_601, sys_id)
+                .site_origin_m(Some([pocket_pos.x as i64, 0, 0]))
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155, 34_154])),
+        );
+    });
+
+    let spawned = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        &ctx,
+        char_id,
+        sys_id,
+        pocket_pos,
+        Some(mid),
+    );
+    assert_eq!(spawned, 2);
+
+    let bids = ctx.db.with_snapshot(|snap| {
+        mission_fixture::get(snap, char_id, mid)
+            .unwrap()
+            .spawned_npc_ball_ids
+    });
+    assert_eq!(bids.len(), 2);
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let expected_corp =
+        crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
+            &ctx, 500_002,
+        );
+    let slim0 = handle.get_ball_slim_item(bids[0]).await.unwrap().expect("slim0");
+    assert_eq!(slim0.dict_get("name"), Some(&PyRep::String("Burner Jaguar".into())));
+    assert_eq!(slim0.dict_get("ownerID"), Some(&PyRep::Integer(500_002)));
+    assert_eq!(slim0.dict_get("corpID"), Some(&PyRep::Integer(expected_corp)));
+
+    let slim1 = handle.get_ball_slim_item(bids[1]).await.unwrap().expect("slim1");
+    assert_eq!(slim1.dict_get("name"), Some(&PyRep::String("Burner Burst".into())));
+    assert_eq!(slim1.dict_get("ownerID"), Some(&PyRep::Integer(500_002)));
+    assert_eq!(slim1.dict_get("corpID"), Some(&PyRep::Integer(expected_corp)));
+
+    let e0 = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let e0 = rt.npc_entities[&bids[0]].clone();
+        assert_eq!(e0.type_id, 34_155);
+        assert!(e0.web_speed_factor < 0.0, "expected SDE web factor, got {}", e0.web_speed_factor);
+        assert!(e0.scram_strength >= 2.0, "expected SDE scram strength, got {}", e0.scram_strength);
+        assert!(e0.scram_range >= 10_000.0, "expected SDE scram range, got {}", e0.scram_range);
+
+        let e1 = &rt.npc_entities[&bids[1]];
+        assert_eq!(e1.type_id, 34_154);
+        assert!(e1.remote_shield_rep >= 100.0, "expected SDE remote shield rep, got {}", e1.remote_shield_rep);
+        assert!(e1.remote_rep_range >= 20_000.0, "expected SDE remote rep range, got {}", e1.remote_rep_range);
+        assert!(e1.bounty_isk >= 10_000.0);
+        e0
+    });
+    let wrt0 = crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
+        &ctx, sys_id, &e0,
+    );
+    assert!(
+        !wrt0.uses_synthetic_legacy,
+        "pocket-spawned SDE mission NPC must initialize uses_synthetic_legacy == false"
+    );
+}
+
+#[tokio::test]
+async fn bf4_clamped_penalty_and_journal_expiry_penalties() {
+    let ctx = test_ctx();
+    let clock = Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_400_000));
+    ctx.set_clock(clock);
+
+    let caldari_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 1
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+                && ctx
+                    .sde
+                    .npc_corporations
+                    .get(&a.corporation_id)
+                    .and_then(|c| c.faction_id)
+                    == Some(500_001)
+        })
+        .min_by_key(|a| a.agent_id)
+        .expect("Caldari L1 stationed agent")
+        .clone();
+    let sys_id = caldari_ag.solar_system_id.unwrap();
+    let st_id = caldari_ag.station_id.unwrap();
+    let char_id = 90_000_001_i64;
+    let kw = HashMap::new();
+
+    // 1. Clamped -10.0 agent/corp/faction standings emit zero changes and zero standing transactions.
+    let changes = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.clear();
+            ch.standings.insert(caldari_ag.agent_id, -10.0);
+            ch.standings.insert(caldari_ag.corporation_id, -10.0);
+            ch.standings.insert(500_001, -10.0);
+        }
+        snap.standing_transactions.remove(&char_id);
+        apply_mission_penalty_standings(
+            &ctx,
+            snap,
+            char_id,
+            caldari_ag.agent_id,
+            caldari_ag.corporation_id,
+            Some(500_001),
+            -0.10,
+            -0.10,
+            -0.5,
+            84,
+        )
+    });
+    assert!(changes.is_empty(), "clamped -10.0 penalty must not push zero-delta notifications");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.standing_transactions
+                .get(&char_id)
+                .is_none_or(|txs| txs.is_empty()),
+            "clamped -10.0 penalty must not insert zero-delta standing transactions"
+        );
+    });
+
+    // 2. GetMyJournalDetails expiry sweep of Accepted mission applies unified penalties + post-commit notify.
+    let exp_mid = 98_204_u32;
+    let now = ctx.now_unix();
+    move_demo_character(&ctx, char_id, sys_id, Some(st_id));
+    ctx.db
+        .acquire_online_lock(1, 503, Some(char_id), true, now)
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.clear();
+            ch.standings.insert(caldari_ag.agent_id, 1.0);
+            ch.standings.insert(caldari_ag.corporation_id, 1.0);
+            ch.standings.insert(500_001, 1.0);
+        }
+        snap.standing_transactions.remove(&char_id);
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, exp_mid, caldari_ag.agent_id, sys_id)
+                .origin_station_id(Some(st_id))
+                .offered_at_unix(now.saturating_sub(200))
+                .offer_expiry_unix(now + 100)
+                .accepted_at_unix(Some(now.saturating_sub(100)))
+                .accept_expiry_unix(Some(now.saturating_sub(5))),
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut sess = docked_session(char_id, sys_id, Some(st_id));
+    sess.session_id = 503;
+    let _ = handle(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[], &kw)
+        .await
+        .unwrap()
+        .expect("GetMyJournalDetails succeeds");
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(notes.iter().any(|n| n.event == "OnStandingsModified"));
+    assert!(notes.iter().any(|n| n.event == "OnAgentMissionObjectivesFailed"));
+    assert!(notes.iter().any(|n| n.event == "OnAgentMissionChange"));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(mission_fixture::latest_history(snap, char_id, exp_mid).as_deref(), Some("Failed"));
+        let ch = &snap.characters[&char_id];
+        assert!(ch.standings[&caldari_ag.agent_id] < 1.0);
+        assert!(ch.standings[&caldari_ag.corporation_id] < 1.0);
+        assert!(ch.standings[&500_001] < 1.0);
+        let txs = &snap.standing_transactions[&char_id];
+        assert!(txs.iter().any(|tx| tx.from_id == caldari_ag.agent_id && tx.event_type_id == 84));
+        assert!(txs.iter().any(|tx| tx.from_id == caldari_ag.corporation_id && tx.event_type_id == 84));
+        assert!(txs.iter().any(|tx| tx.from_id == 500_001 && tx.event_type_id == 84));
+    });
+}

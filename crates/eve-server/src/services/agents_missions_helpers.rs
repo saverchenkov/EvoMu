@@ -1169,6 +1169,31 @@ pub fn reclaim_courier_cargo(
     }
 }
 
+pub(super) fn resolve_agent_corp_and_faction(
+    ctx: &ServerContext,
+    char_id: i64,
+    agent_id: i64,
+    sys_id: u32,
+    station_id: Option<i64>,
+    is_storyline: bool,
+) -> (i64, Option<i64>) {
+    let corp_id = ctx
+        .sde
+        .agents
+        .get(&agent_id)
+        .map(|a| a.corporation_id)
+        .unwrap_or_else(|| {
+            resolve_agent_and_corp_for_system(ctx, char_id, sys_id, station_id, is_storyline).1
+        });
+    let faction_id = ctx
+        .sde
+        .npc_corporations
+        .get(&corp_id)
+        .and_then(|c| c.faction_id)
+        .map(i64::from);
+    (corp_id, faction_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_mission_penalty_standings(
     ctx: &ServerContext,
@@ -1190,35 +1215,37 @@ pub(super) fn apply_mission_penalty_standings(
             let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
             let next = (cur + corp_delta).clamp(-10.0, 10.0);
             let delta = next - cur;
-            ch.standings.insert(corp_id, next);
-            changes.push((corp_id, next, delta));
-            actual_corp_delta = Some(delta);
+            if delta.abs() > 1e-9 {
+                ch.standings.insert(corp_id, next);
+                changes.push((corp_id, next, delta));
+                actual_corp_delta = Some(delta);
+            }
         }
         if agent_delta.abs() > 1e-9 && agent_id > 0 {
             let cur_ag = ch.standings.get(&agent_id).copied().unwrap_or(0.0);
             let next_ag = (cur_ag + agent_delta).clamp(-10.0, 10.0);
             let delta_ag = next_ag - cur_ag;
-            ch.standings.insert(agent_id, next_ag);
-            changes.push((agent_id, next_ag, delta_ag));
-            actual_agent_delta = Some(delta_ag);
+            if delta_ag.abs() > 1e-9 {
+                ch.standings.insert(agent_id, next_ag);
+                changes.push((agent_id, next_ag, delta_ag));
+                actual_agent_delta = Some(delta_ag);
+            }
         }
     }
-    if let Some(delta_ag) = actual_agent_delta {
-        if delta_ag.abs() > 1e-9 {
-            let ev_id = snap.alloc_entity_id();
-            snap.standing_transactions
-                .entry(char_id)
-                .or_default()
-                .push(StandingTransactionRecord {
-                    event_id: ev_id,
-                    from_id: agent_id,
-                    to_id: char_id,
-                    modification: delta_ag,
-                    event_type_id,
-                });
-        }
+    if let Some(delta_ag) = actual_agent_delta.filter(|d| d.abs() > 1e-9) {
+        let ev_id = snap.alloc_entity_id();
+        snap.standing_transactions
+            .entry(char_id)
+            .or_default()
+            .push(StandingTransactionRecord {
+                event_id: ev_id,
+                from_id: agent_id,
+                to_id: char_id,
+                modification: delta_ag,
+                event_type_id,
+            });
     }
-    if let Some(delta_corp) = actual_corp_delta {
+    if let Some(delta_corp) = actual_corp_delta.filter(|d| d.abs() > 1e-9) {
         let ev_id = snap.alloc_entity_id();
         snap.standing_transactions
             .entry(char_id)

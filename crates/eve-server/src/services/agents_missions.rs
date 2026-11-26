@@ -329,28 +329,7 @@ async fn handle_agent_warp_to_location(
         ..
     } = target
     {
-        // Reconcile stale mission NPC ball IDs if system ballpark restarted/evicted since accept.
-        let stale_ids = ctx.db.with_snapshot(|snap| {
-            snap.missions
-                .get_by_character_template(char_id, mission_id)
-                .filter(|m| m.npcs_remaining() > 0 && !m.spawned_npc_ball_ids().is_empty())
-                .map(|m| m.spawned_npc_ball_ids().to_vec())
-        });
-        if let Some(npc_ids) = stale_ids {
-            let any_alive = npc_ids
-                .iter()
-                .any(|&npc_id| sys_handle.get_ball_position_sync(npc_id).is_some());
-            if !any_alive {
-                ctx.db.with_mut_snapshot(|snap| {
-                    let _ = snap.missions
-                        .update_by_character_template(char_id, mission_id, |m| {
-                            if let Some(enc) = m.encounter_mut() {
-                                enc.spawned_npc_ball_ids.clear();
-                            }
-                        });
-                });
-            }
-        }
+        reconcile_stale_mission_npcs(ctx, &sys_handle, char_id, mission_id);
         let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
             ctx,
             char_id,
@@ -390,6 +369,38 @@ fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
         .and_then(|ea| (ea.missions_count > 0).then_some(ea.missions_count as usize))
         .unwrap_or(3)
         .max(2)
+}
+
+/// Clears stale `spawned_npc_ball_ids` when none of a mission's previously spawned NPCs
+/// remain alive in the target system's ballpark (e.g., after system eviction/restart).
+pub(super) fn reconcile_stale_mission_npcs(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    mission_id: u32,
+) {
+    let stale_ids = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_character_template(char_id, mission_id)
+            .filter(|m| m.npcs_remaining() > 0 && !m.spawned_npc_ball_ids().is_empty())
+            .map(|m| m.spawned_npc_ball_ids().to_vec())
+    });
+    if let Some(npc_ids) = stale_ids {
+        let any_alive = npc_ids
+            .iter()
+            .any(|&npc_id| sys_handle.get_ball_position_sync(npc_id).is_some());
+        if !any_alive {
+            ctx.db.with_mut_snapshot(|snap| {
+                let _ = snap
+                    .missions
+                    .update_by_character_template(char_id, mission_id, |m| {
+                        if let Some(enc) = m.encounter_mut() {
+                            enc.spawned_npc_ball_ids.clear();
+                        }
+                    });
+            });
+        }
+    }
 }
 
 /// Reclaims mission-scoped courier cargo, removes any mission bookmark and persisted mining
@@ -1019,9 +1030,15 @@ pub async fn handle_with_bound(
                 .filter(|b| b.service == "agentMgr" && b.object_id > 0)
                 .map(|b| b.object_id);
             let now = ctx.now_unix();
-            let (missions, research, expired_cleanups) = ctx.db.with_mut_snapshot(|snap| {
+            let (
+                missions,
+                research,
+                expired_cleanups,
+                expired_standing_changes,
+                expired_failed_agents,
+            ) = ctx.db.with_mut_snapshot(|snap| {
                 // Sweep and transition any expired offers or accepted missions (feat:pve.mission-expiration)
-                let expired_updates: Vec<(u32, MissionState, bool)> = snap
+                let expired_updates: Vec<(u32, i64, u32, Option<i64>, MissionState, bool)> = snap
                     .missions
                     .iter_by_character(char_id)
                     .filter_map(|m| {
@@ -1029,18 +1046,37 @@ pub async fn handle_with_bound(
                             && m.offer_expiry_unix > 0
                             && now > m.offer_expiry_unix
                         {
-                            Some((m.template_id, MissionState::Expired, false))
+                            Some((
+                                m.template_id,
+                                m.agent_id,
+                                m.solar_system_id,
+                                m.station_id,
+                                MissionState::Expired,
+                                false,
+                            ))
                         } else if m.state == MissionState::Accepted
                             && m.accept_expiry_unix.is_some_and(|exp| exp > 0 && now > exp)
                         {
-                            Some((m.template_id, MissionState::Failed, true))
+                            Some((
+                                m.template_id,
+                                m.agent_id,
+                                m.solar_system_id,
+                                m.station_id,
+                                MissionState::Failed,
+                                true,
+                            ))
                         } else {
                             None
                         }
                     })
                     .collect();
                 let mut expired_cleanups = Vec::with_capacity(expired_updates.len());
-                for (mid, target_state, zero_npcs) in expired_updates {
+                let mut expired_standing_changes = Vec::new();
+                let mut expired_failed_agents = Vec::new();
+                let char_station_id = snap.characters.get(&char_id).and_then(|c| c.station_id);
+                for (mid, m_agent_id, m_sys_id, m_station_id, target_state, zero_npcs) in
+                    expired_updates
+                {
                     expired_cleanups.push(finalize_mission_state_cleanup(
                         snap,
                         char_id,
@@ -1049,6 +1085,29 @@ pub async fn handle_with_bound(
                         zero_npcs,
                         now,
                     ));
+                    if target_state == MissionState::Failed && m_agent_id > 0 {
+                        let (corp_id, faction_id) = resolve_agent_corp_and_faction(
+                            ctx,
+                            char_id,
+                            m_agent_id,
+                            m_sys_id,
+                            m_station_id.or(char_station_id),
+                            false,
+                        );
+                        expired_standing_changes.extend(apply_mission_penalty_standings(
+                            ctx,
+                            snap,
+                            char_id,
+                            m_agent_id,
+                            corp_id,
+                            faction_id,
+                            -0.10,
+                            -0.10,
+                            -0.5,
+                            84,
+                        ));
+                        expired_failed_agents.push(m_agent_id);
+                    }
                 }
 
                 let mut active: Vec<MissionInstance> = snap
@@ -1175,8 +1234,28 @@ pub async fn handle_with_bound(
                         ])
                     })
                     .collect::<Vec<PyRep>>();
-                (mission_list, research_list, expired_cleanups)
+                (
+                    mission_list,
+                    research_list,
+                    expired_cleanups,
+                    expired_standing_changes,
+                    expired_failed_agents,
+                )
             });
+            notify_standing_changes(ctx, char_id, &expired_standing_changes);
+            for agent_id in expired_failed_agents {
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnAgentMissionObjectivesFailed { agent_id },
+                );
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnAgentMissionChange {
+                        action: "failed".into(),
+                        agent_id,
+                    },
+                );
+            }
             for (clean_sys, ast_id, ball_ids) in expired_cleanups {
                 if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
                     if let Some(handle) = ctx.systems.get_handle(clean_sys) {

@@ -59,34 +59,43 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
     target_id: i64,
     dest_pos: DVec3,
 ) {
-    let warp_mission_id = ctx.db.with_snapshot(|snap| {
-        snap.missions
-            .iter_by_character(char_id)
-            .find(|m| {
-                if m.state != MissionState::Accepted || m.solar_system_id != sys_id {
-                    return false;
-                }
-                if stuff_type == "bookmark" && m.bookmark_id == Some(target_id) {
-                    return true;
-                }
-                let pocket_pos = m
-                    .site_origin_f64()
-                    .map(DVec3::from)
-                    .or_else(|| {
-                        m.bookmark_id
-                            .and_then(|bid| snap.bookmarks.get(&bid))
-                            .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
-                    });
-                pocket_pos.is_some_and(|p| dest_pos.distance(p) <= 200_000.0)
-            })
-            .map(|m| m.template_id)
+    let matched_mission = ctx.db.with_snapshot(|snap| {
+        let mut by_proximity = None;
+        for m in snap.missions.iter_by_character(char_id) {
+            if m.state != MissionState::Accepted || m.solar_system_id != sys_id {
+                continue;
+            }
+            let Some(pocket_pos) = m
+                .site_origin_f64()
+                .map(DVec3::from)
+                .or_else(|| {
+                    m.bookmark_id
+                        .and_then(|bid| snap.bookmarks.get(&bid))
+                        .filter(|bm| bm.solar_system_id == sys_id)
+                        .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
+                })
+            else {
+                continue;
+            };
+            if dest_pos.distance(pocket_pos) > 200_000.0 {
+                continue;
+            }
+            if stuff_type == "bookmark" && m.bookmark_id == Some(target_id) {
+                return Some((m.template_id, pocket_pos));
+            }
+            if by_proximity.is_none() {
+                by_proximity = Some((m.template_id, pocket_pos));
+            }
+        }
+        by_proximity
     });
-    if let Some(mid) = warp_mission_id {
+    if let Some((mid, pocket_pos)) = matched_mission {
+        super::agents_missions::reconcile_stale_mission_npcs(ctx, handle, char_id, mid);
         let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
             ctx,
             char_id,
             sys_id,
-            dest_pos,
+            pocket_pos,
             Some(mid),
         );
         super::agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
@@ -97,10 +106,6 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
             Some(mid),
         )
         .await;
-    } else {
-        let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
-            ctx, char_id, sys_id, dest_pos,
-        );
     }
 }
 

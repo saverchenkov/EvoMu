@@ -263,6 +263,23 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
                 .expect("accepted mission after pocket warp")
                 .spawned_npc_ball_ids()[0]
         });
+        ctx.dispatch_rpc(
+            session,
+            "beyonce",
+            Some(cur_b_id),
+            "CmdFollowBall",
+            &[PyRep::Integer(npc_ball_id), PyRep::Real(500.0)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..50 {
+            let _ = perim_handle.step_manual(1.0).await.unwrap();
+        }
+        ctx.dispatch_rpc(session, "beyonce", Some(cur_b_id), "CmdStop", &[], &empty, None)
+            .await
+            .unwrap();
         if let Some(ship_id) = session.ship_id {
             let _ = perim_handle
                 .add_target_lock(

@@ -405,6 +405,11 @@ async fn test_review_r8_regressions() {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
 
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdFollowBall", &[PyRep::Integer(s1_npc_0), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    for _ in 0..50 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     let _ = jita_handle
         .add_target_lock(
             100_000_001,
@@ -418,7 +423,7 @@ async fn test_review_r8_regressions() {
         )
         .await;
     let mut fw1_destroyed = false;
-    for shot in 0..10 {
+    for shot in 0..80 {
         if shot > 0 {
             for _ in 0..5 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
@@ -489,7 +494,7 @@ async fn test_review_r8_regressions() {
             },
         )
         .await;
-    for _ in 0..10 {
+    for _ in 0..80 {
         for _ in 0..5 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
@@ -523,6 +528,11 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
+    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdFollowBall", &[PyRep::Integer(s2_npc_1001), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    for _ in 0..50 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     let _ = jita_handle
         .add_target_lock(
             100_000_002,
@@ -536,7 +546,7 @@ async fn test_review_r8_regressions() {
         )
         .await;
     let mut fws2_destroyed = false;
-    for shot in 0..10 {
+    for shot in 0..80 {
         if shot > 0 {
             for _ in 0..5 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();

@@ -1877,6 +1877,7 @@ impl WorldStateSnapshot {
             || self.missions.contains_instance_id(candidate)
             || self.missions.contains_history_id(candidate)
             || self.missions.contains_spawned_npc_id(candidate)
+            || self.missions.contains_asteroid_entity_id(candidate)
             || crate::service_domains::entity_kv::Ns::ALL.iter().any(|&ns| {
                 self.entity_kv
                     .range(crate::service_domains::entity_kv::EntityKvKey {

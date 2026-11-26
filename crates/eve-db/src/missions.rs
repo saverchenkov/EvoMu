@@ -888,6 +888,11 @@ impl MissionInstanceStore {
             .filter_map(|inst| inst.asteroid_entity_id)
     }
 
+    /// Returns `true` if `asteroid_id` is referenced by any active mission's `asteroid_entity_id`.
+    pub fn contains_asteroid_entity_id(&self, asteroid_id: i64) -> bool {
+        self.asteroid_entity_ids().any(|id| id == asteroid_id)
+    }
+
     /// Deterministic ascending iteration over all archived mission history entries.
     pub fn iter_history(&self) -> impl Iterator<Item = &MissionHistoryEntry> + '_ {
         self.history.values()

@@ -566,6 +566,43 @@ async fn query_journal_missions(
         .collect()
 }
 
+async fn complete_accepted_courier_mission(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    mid: i64,
+    dest_sta: i64,
+) {
+    let kw = HashMap::new();
+    let tag = format!("courier_cargo:{char_id}:{mid}");
+    ctx.db.with_mut_snapshot(|snap| {
+        let cid = snap
+            .item_custom_names
+            .iter()
+            .find(|(_, v)| *v == &tag)
+            .map(|(&k, _)| k)
+            .expect("granted courier cargo item");
+        if let Some(it) = snap.items.get_mut(&cid) {
+            it.location_id = ship_id;
+            it.flag = InventoryFlag::Cargo;
+        }
+    });
+    let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
+    dock_at_station(ctx, sess, char_id, dest_sys, Some(dest_sta));
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        None,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(mid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Complete courier mission");
+}
+
 async fn complete_live_courier(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -608,32 +645,7 @@ async fn complete_live_courier(
     .await
     .expect("Accept courier mission");
 
-    let tag = format!("courier_cargo:{char_id}:{mid}");
-    ctx.db.with_mut_snapshot(|snap| {
-        let cid = snap
-            .item_custom_names
-            .iter()
-            .find(|(_, v)| *v == &tag)
-            .map(|(&k, _)| k)
-            .expect("granted courier cargo item");
-        if let Some(it) = snap.items.get_mut(&cid) {
-            it.location_id = ship_id;
-            it.flag = InventoryFlag::Cargo;
-        }
-    });
-    let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
-    dock_at_station(ctx, sess, char_id, dest_sys, Some(dest_sta));
-    ctx.dispatch_rpc(
-        sess,
-        "agentMgr",
-        None,
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(mid)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Complete courier mission");
+    complete_accepted_courier_mission(ctx, sess, char_id, ship_id, mid, dest_sta).await;
 }
 
 async fn complete_live_fw_mission(
@@ -671,11 +683,24 @@ async fn complete_live_fw_mission(
     )
     .await
     .expect("Accept FW mission");
-    let m_sys_id = ctx.db.with_snapshot(|s| {
-        eve_server::services::mission_fixture::get(s, char_id, mid as u32)
-            .unwrap()
-            .solar_system_id
+    let (m_sys_id, is_courier, dest_sta_opt) = ctx.db.with_snapshot(|s| {
+        let m = s
+            .missions
+            .get_by_character_template(char_id, mid as u32)
+            .expect("accepted FW mission");
+        (
+            m.solar_system_id,
+            m.kind == eve_db::MissionKind::Courier,
+            m.courier().and_then(|c| c.destination_station_id),
+        )
     });
+    if is_courier {
+        let dest_sta = dest_sta_opt
+            .or_else(|| offer.get("destinationStationID").and_then(|v| v.as_i64()))
+            .unwrap_or_else(|| fw_agent.station_id.unwrap());
+        complete_accepted_courier_mission(ctx, sess, char_id, ship_id, mid, dest_sta).await;
+        return;
+    }
 
     dock_at_station(ctx, sess, char_id, m_sys_id, None);
     let sys_h = ctx.systems.get_or_spawn(m_sys_id);
