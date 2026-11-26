@@ -245,7 +245,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) post_unlock_ops: &'a mut post_unlock::PostUnlockOps,
     pub(in crate::system_actor) spawned_checkpoint_ball: &'a mut Option<BallId>,
     pub(in crate::system_actor) removed_checkpoint_ball: &'a mut Option<BallId>,
-    pub(in crate::system_actor) ball_positions_actor: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(in crate::system_actor) ball_positions_actor: &'a Arc<BallPositionSyncCache>,
     pub(in crate::system_actor) scrambled_balls_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) warp_stopped_at_actor: &'a Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(in crate::system_actor) active_module_ships_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
@@ -1110,14 +1110,14 @@ impl SystemRegistry {
         } else {
             Vec::new()
         };
-        let ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>> =
-            Arc::new(RankedRwLock::new(HashMap::new()));
         let scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         let tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         let committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(HashMap::new()));
+        let ball_positions = Arc::new(BallPositionSyncCache::new(
+            Arc::clone(&committed_warp_balls), Arc::clone(&tethered_balls)));
         let warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(HashMap::new()));
         let active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
@@ -1233,8 +1233,6 @@ impl SystemRegistry {
                 wh_ore_anomalies: seed_ctx.staged_wh_ore_anomalies,
             }
         };
-        register_committed_warp_cache(&ball_positions, &committed_warp_balls);
-        register_tethered_balls_cache(&ball_positions, &tethered_balls);
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         celestials::update_system_hibernation_flag(&initial_actor_state, &initial_ballpark, 0);
         protection::sync_all_protection_registry_in_actor(&initial_ballpark, &mut initial_actor_state);

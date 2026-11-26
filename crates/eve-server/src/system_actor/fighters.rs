@@ -8,8 +8,8 @@
 
 use super::{
     ball_ops, celestials, cycles, cycles_tackle, defer_reply, fighters_persistence, protection,
-    sync_ball_positions, ActorExecCtx, FighterCheckpointSnapshot, SystemActorState, SystemCommand,
-    SystemHandle,
+    sync_ball_positions, ActorExecCtx, BallPositionSyncCache, FighterCheckpointSnapshot,
+    SystemActorState, SystemCommand, SystemHandle,
 };
 use eve_destiny::{Ball, BallId, Ballpark, CombatState, MovementMode, SlimItemMeta};
 use eve_proto::{BridgeRpcError, ClientError};
@@ -505,7 +505,7 @@ pub(crate) fn apply_test_helper_op_to_state(
 
 fn remove_fighter_synth_cycles_inner(
     solar_system_id: SolarSystemId, ballpark: &mut Ballpark, actor_st: &mut super::SystemActorState,
-    ball_positions: &Arc<eve_db::lock_rank::RankedRwLock<HashMap<BallId, DVec3>, { eve_db::lock_rank::RANK_LEAF }>>,
+    ball_positions: &Arc<BallPositionSyncCache>,
     scrambled_balls: &Arc<eve_db::lock_rank::RankedRwLock<HashSet<BallId>, { eve_db::lock_rank::RANK_LEAF }>>,
     active_module_ships: Option<&Arc<eve_db::lock_rank::RankedRwLock<HashSet<BallId>, { eve_db::lock_rank::RANK_LEAF }>>>,
     module_deactivation_hook: &Arc<eve_db::lock_rank::RankedRwLock<Option<super::ModuleDeactivationHook>, { eve_db::lock_rank::RANK_LEAF }>>,
@@ -919,7 +919,7 @@ fn handle_apply_damage(
 #[allow(clippy::too_many_arguments)]
 fn abandon_owned_fighters_core(
     solar_system_id: SolarSystemId, ballpark: &mut Ballpark, actor_st: &mut super::SystemActorState,
-    ball_positions: &Arc<eve_db::lock_rank::RankedRwLock<HashMap<BallId, DVec3>, { eve_db::lock_rank::RANK_LEAF }>>,
+    ball_positions: &Arc<BallPositionSyncCache>,
     scrambled_balls: &Arc<eve_db::lock_rank::RankedRwLock<HashSet<BallId>, { eve_db::lock_rank::RANK_LEAF }>>,
     active_module_ships: Option<&Arc<eve_db::lock_rank::RankedRwLock<HashSet<BallId>, { eve_db::lock_rank::RANK_LEAF }>>>,
     module_deactivation_hook: &Arc<eve_db::lock_rank::RankedRwLock<Option<super::ModuleDeactivationHook>, { eve_db::lock_rank::RANK_LEAF }>>,

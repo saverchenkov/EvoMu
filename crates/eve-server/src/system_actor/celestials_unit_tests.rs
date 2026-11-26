@@ -527,7 +527,7 @@ async fn celestials_gate_cloak_wormhole_group_velocity_and_fast_forward_boundari
 
     // 4. fast_forward_clock_in_actor: missing ball, stationary non-invuln early return, stationary invuln 65s cap
     let mut bp = Ballpark::new(30_000_142);
-    let pos_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let pos_cache = Arc::new(BallPositionSyncCache::new_standalone());
     let scram_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new()));
     let (tx, _rx) = tokio::sync::broadcast::channel(16);
     let mut sim_elapsed = 0.0_f64;
@@ -605,6 +605,8 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
     let view_tx = Arc::new(view_tx);
     let tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
+    let tethered_balls = Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new()));
+    let committed_warp_balls = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
     let h = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
@@ -615,10 +617,13 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         fighters_needs_hydration: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         fighter_ctx: Arc::new(Default::default()),
         event_tx,
-        ball_positions: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        ball_positions: Arc::new(BallPositionSyncCache::new(
+            Arc::clone(&committed_warp_balls),
+            Arc::clone(&tethered_balls),
+        )),
         scrambled_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        tethered_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
+        tethered_balls,
+        committed_warp_balls,
         warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
         ballpark: Arc::new(super::BallparkHandle::new(

@@ -20,6 +20,8 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
     let (view_tx, view_rx) = tokio::sync::watch::channel(Arc::new(SystemView::default()));
     let view_tx = Arc::new(view_tx);
     let tidi_factor_bits = Arc::new(AtomicU64::new(1.0_f64.to_bits()));
+    let tethered_balls = Arc::new(RankedRwLock::new(HashSet::new()));
+    let committed_warp_balls = Arc::new(RankedRwLock::new(HashMap::new()));
     SystemHandle {
         solar_system_id,
         cmd_tx,
@@ -30,10 +32,13 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         fighters_needs_hydration: Arc::new(AtomicBool::new(false)),
         fighter_ctx: Arc::new(Default::default()),
         event_tx,
-        ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
+        ball_positions: Arc::new(celestials::BallPositionSyncCache::new(
+            Arc::clone(&committed_warp_balls),
+            Arc::clone(&tethered_balls),
+        )),
         scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),
-        tethered_balls: Arc::new(RankedRwLock::new(HashSet::new())),
-        committed_warp_balls: Arc::new(RankedRwLock::new(HashMap::new())),
+        tethered_balls,
+        committed_warp_balls,
         warp_stopped_at: Arc::new(RankedRwLock::new(HashMap::new())),
         active_module_ships: Arc::new(RankedRwLock::new(HashSet::new())),
         ballpark: Arc::new(BallparkHandle::new(

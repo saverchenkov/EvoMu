@@ -1348,7 +1348,6 @@ pub async fn handle_npcs_drones(
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
 
-            static NEXT_DRONE_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-200_000);
             let mut prepared_drones: Vec<PreparedLaunchDrone<'_>> = drone_records
                 .into_iter()
                 .enumerate()
@@ -1364,7 +1363,7 @@ pub async fn handle_npcs_drones(
                 .collect();
 
             let mut res_ids: Vec<i64> = (0..prepared_drones.len())
-                .map(|_| NEXT_DRONE_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed))
+                .map(|_| ctx.systems.drone_rt_state.alloc_drone_reservation_id())
                 .collect();
             let req_drones: Vec<(i64, DroneSpaceState)> = prepared_drones
                 .iter()

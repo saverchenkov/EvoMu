@@ -11,7 +11,7 @@ use super::{
 use eve_destiny::{BallId, DamageVector};
 use eve_sde::SolarSystemId;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Default)]
@@ -24,11 +24,29 @@ pub(crate) struct ActiveDronesSharedCtx {
     pub(in crate::system_actor) needs_hydration: Arc<AtomicBool>,
 }
 
-#[derive(Default)]
 pub(crate) struct RegistryDroneRuntimeState {
     pub(crate) migrated_legacy_drone_systems: Arc<RankedMutex<HashSet<SolarSystemId>, RANK_LEAF>>,
+    pub(crate) next_drone_res_id: AtomicI64,
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) headless_test_rt: std::sync::OnceLock<tokio::runtime::Runtime>,
+}
+
+impl Default for RegistryDroneRuntimeState {
+    fn default() -> Self {
+        Self {
+            migrated_legacy_drone_systems: Arc::default(),
+            next_drone_res_id: AtomicI64::new(-200_000),
+            #[cfg(any(test, feature = "testkit"))]
+            headless_test_rt: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl RegistryDroneRuntimeState {
+    /// Allocates the next per-world negative drone reservation ID (`#1583`).
+    pub(crate) fn alloc_drone_reservation_id(&self) -> i64 {
+        self.next_drone_res_id.fetch_sub(1, Ordering::Relaxed)
+    }
 }
 
 #[cfg(any(test, feature = "testkit"))]

@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 use super::celestials::{
-    clear_db_system_ballpark_if_matching, register_db_system_ballpark,
+    clear_db_system_ballpark_if_matching, register_db_system_ballpark, BallPositionSyncCache,
 };
 use super::lifecycle::{
     ClusterTickWakeReason, LifecycleTransitionRecord, SessionArrivalWakeReason,
@@ -48,7 +48,7 @@ pub(in crate::system_actor) struct StagedSeedClaims {
 pub(crate) struct PreparedSystemActivation {
     pub(in crate::system_actor) solar_system_id: SolarSystemId,
     pub(in crate::system_actor) lazy_gates: bool,
-    pub(in crate::system_actor) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(in crate::system_actor) ball_positions: Arc<BallPositionSyncCache>,
     pub(in crate::system_actor) scrambled_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) tethered_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,

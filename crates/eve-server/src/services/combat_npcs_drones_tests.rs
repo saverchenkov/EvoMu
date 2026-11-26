@@ -2441,3 +2441,52 @@ async fn bf01_drone_commands_reject_active_upwell_structure_control() {
         assert_eq!(err.code, "ShipNotInSpace", "{svc}.{method}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_contexts_isolate_drone_reservation_id_allocation() {
+    let pair =
+        eve_testkit::process_global_ratchet::TwoContextPair::from_factory(make_drone_test_ctx);
+    let (ctx_a, mut sess_a, char_a, ship_a, _sys_a) = pair.left;
+    let (ctx_b, _sess_b, _char_b, _ship_b, _sys_b) = pair.right;
+
+    assert_eq!(ctx_a.systems.drone_rt_state.alloc_drone_reservation_id(), -200_000);
+    assert_eq!(ctx_b.systems.drone_rt_state.alloc_drone_reservation_id(), -200_000);
+
+    // Advance ctx_a via both direct reservation allocation and LaunchDrones RPC.
+    assert_eq!(ctx_a.systems.drone_rt_state.alloc_drone_reservation_id(), -200_001);
+    ctx_a
+        .db
+        .acquire_online_lock(1, sess_a.session_id, Some(char_a), true, ctx_a.now_unix_secs())
+        .expect("online lock");
+    let drone_stack = 710_901_i64;
+    ctx_a.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            drone_stack,
+            make_fighter_item(drone_stack, 2_456, char_a, ship_a, InventoryFlag::DroneBay, 2),
+        );
+    });
+    let kwargs = HashMap::new();
+    let launch_res = handle_npcs_drones(
+        &ctx_a,
+        &mut sess_a,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(drone_stack),
+                PyRep::Integer(2),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("LaunchDrones on ctx_a must succeed");
+    assert_eq!(extract_v24_launch_entry(&launch_res, drone_stack).len(), 2);
+    assert_eq!(ctx_a.systems.drone_rt_state.alloc_drone_reservation_id(), -200_004);
+
+    // ctx_b's reservation ID sequence must remain completely unadvanced by ctx_a.
+    assert_eq!(ctx_b.systems.drone_rt_state.alloc_drone_reservation_id(), -200_001);
+}

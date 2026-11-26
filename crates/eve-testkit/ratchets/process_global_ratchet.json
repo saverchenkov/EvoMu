@@ -7,8 +7,8 @@
   ],
   "groups": {
     "A_game_state": {
-      "zero_required": false,
-      "max_count": 5,
+      "zero_required": true,
+      "max_count": 0,
       "rationale_required": false,
       "description": "Game or simulation state belonging to a system actor, world repository, or session rather than the process (#1583 Group A)."
     },
@@ -20,7 +20,7 @@
     },
     "C_counters": {
       "zero_required": false,
-      "max_count": 11,
+      "max_count": 9,
       "rationale_required": false,
       "description": "Process-global monotonic ID/sequence counters whose values reach game state or wire messages (#1583 Group C)."
     },
@@ -456,22 +456,6 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "services/combat_npcs_drones.rs",
-      "symbol": "NEXT_DRONE_RES_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/fitting_conduit_jump.rs",
-      "symbol": "COUNTER",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "services/space_probe_scanning.rs",
       "symbol": "NEXT_PROBE_RES_ID",
       "kind": "static_sync",
@@ -510,14 +494,6 @@
       "kind": "static_sync",
       "group": "E_test_seams",
       "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "system_actor/celestials_helpers.rs",
-      "symbol": "MAP",
-      "kind": "static_sync",
-      "group": "A_game_state",
-      "max_count": 5
     },
     {
       "crate_name": "eve-server",

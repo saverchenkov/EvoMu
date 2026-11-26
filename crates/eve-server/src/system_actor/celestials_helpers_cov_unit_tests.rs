@@ -121,7 +121,7 @@ async fn fast_forward_clock_warp_invuln_and_force_stop_warp_cover_all_branches()
         );
     });
 
-    let ball_positions = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let ball_positions = Arc::new(BallPositionSyncCache::new_standalone());
     let scrambled_balls = Arc::new(eve_db::lock_rank::RankedRwLock::new(
         std::collections::HashSet::new(),
     ));
