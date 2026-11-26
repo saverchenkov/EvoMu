@@ -1750,9 +1750,10 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
     let char_id = 96_103_001_i64;
     let ship_id = 96_103_002_i64;
     let (ac1, ac2, laser_id) = (96_103_003_i64, 96_103_004_i64, 96_103_005_i64);
-    let (mut_ammo_id, ins_ammo_id, valid_ammo_id, bad_crys_id, damaged_crys_id) = (
-        96_103_010_i64, 96_103_011_i64, 96_103_012_i64, 96_103_013_i64, 96_103_014_i64,
-    );
+    let (mut_ammo_id, ins_ammo_id, valid_ammo_id, bad_crys_id, damaged_crys_id) =
+        (96_103_010_i64, 96_103_011_i64, 96_103_012_i64, 96_103_013_i64, 96_103_014_i64);
+    let (bad_ns_ins_crys_id, bad_ns_mut_crys_id, pkg_crys_id) =
+        (96_103_015_i64, 96_103_016_i64, 96_103_017_i64);
     let mut mod_t = ctx.sde.types.get(&484).expect("autocannon").clone();
     mod_t.capacity = 0.005;
     let fm = eve_dogma::FittedModule {
@@ -1797,66 +1798,66 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
             item_id: bad_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
             flag: InventoryFlag::Cargo, quantity: 2, insured_payout_isk: 200.0, ..Default::default()
         });
-        snap.items.insert(damaged_crys_id, InventoryItemRecord {
-            item_id: damaged_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
-            flag: InventoryFlag::Cargo, quantity: 1, singleton: true,
-            dynamic_attributes: HashMap::from([(3_u16, 0.75)]), ..Default::default()
+        snap.items.insert(bad_ns_ins_crys_id, InventoryItemRecord {
+            item_id: bad_ns_ins_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 1, insured_payout_isk: 200.0, ..Default::default()
+        });
+        snap.items.insert(bad_ns_mut_crys_id, InventoryItemRecord {
+            item_id: bad_ns_mut_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 1, source_mutaplasmid_id: Some(60_002), ..Default::default()
         });
     });
 
-    // Multi-unit mutated & insured Cargo/AmmoHold stacks must not plan or commit via autoload.
+    let laser_t_ref = ctx.sde.types.get(&99_053).expect("laser type").clone();
     assert!(plan_weapon_autoload(&ctx, char_id, ship_id, ac1, &mod_t).unwrap().is_none());
-    for bad in [mut_ammo_id, ins_ammo_id] {
+    assert!(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().is_none());
+    let laser_fm = eve_dogma::FittedModule { item_id: laser_id, type_id: 99_053, flag_id: InventoryFlag::HiSlot2 as u16, state: eve_dogma::ModuleState::Online, charge_type_id: Some(crystal_tid), charge_quantity: 1, damage_hp: 0.0, max_hp: 40.0, dynamic_attribute_overrides: HashMap::new() };
+    let laser_state = eve_dogma::DogmaItemState::from_sde(char_id, 99_053, &ctx.sde);
+    for (bad, slot_id, mt, qty, mid, ms) in [
+        (mut_ammo_id, ac1, &mod_t, 2, &fm, &mod_state), (ins_ammo_id, ac1, &mod_t, 2, &fm, &mod_state),
+        (bad_crys_id, laser_id, &laser_t_ref, 1, &laser_fm, &laser_state),
+        (bad_ns_ins_crys_id, laser_id, &laser_t_ref, 1, &laser_fm, &laser_state),
+        (bad_ns_mut_crys_id, laser_id, &laser_t_ref, 1, &laser_fm, &laser_state),
+    ] {
         let mut d = DeferredPostCycleEffects::default();
         d.weapon_autoload = Some(PendingWeaponAutoload {
-            cargo_stack_id: bad, ammo_type_id: 178, owner_id: char_id, total_take: 4,
-            slot_allocations: vec![(ac1, InventoryFlag::HiSlot0, 2), (ac2, InventoryFlag::HiSlot1, 2)],
+            cargo_stack_id: bad, ammo_type_id: if slot_id == ac1 { 178 } else { crystal_tid }, owner_id: char_id,
+            total_take: qty * if slot_id == ac1 { 2 } else { 1 },
+            slot_allocations: if slot_id == ac1 { vec![(ac1, InventoryFlag::HiSlot0, qty), (ac2, InventoryFlag::HiSlot1, qty)] } else { vec![(laser_id, InventoryFlag::HiSlot2, qty)] },
             consume_one_round_per_slot: false,
         });
-        assert_eq!(
-            commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, ac1, &fm, &mod_t, &mod_state, None, d).await.unwrap_err().code,
-            "NoCharges"
-        );
+        assert_eq!(commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, slot_id, mid, mt, ms, None, d).await.unwrap_err().code, "NoCharges");
     }
-
-    // Valid multi-unit packaged ammo splits across linked slots cleanly with empty dynamic_attributes.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(valid_ammo_id, InventoryItemRecord {
-            item_id: valid_ammo_id, type_id: 178, owner_id: char_id, location_id: ship_id,
-            flag: InventoryFlag::Cargo, quantity: 10, ..Default::default()
-        });
+        snap.items.insert(valid_ammo_id, InventoryItemRecord { item_id: valid_ammo_id, type_id: 178, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 10, ..Default::default() });
     });
     let plan = plan_weapon_autoload(&ctx, char_id, ship_id, ac1, &mod_t).unwrap().expect("valid stack planned");
     assert_eq!(plan.cargo_stack_id, valid_ammo_id);
     let mut d_ok = DeferredPostCycleEffects::default();
     d_ok.weapon_autoload = Some(plan);
-    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, ac1, &fm, &mod_t, &mod_state, None, d_ok)
-        .await
-        .expect("valid bank autoload commits");
-    ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.items[&valid_ammo_id].quantity, 6);
-        assert_eq!(snap.items[&mut_ammo_id].quantity, 20);
-        assert_eq!(snap.items[&ins_ammo_id].quantity, 20);
-    });
-
-    // handle_load_ammo rejects multi-unit insured crystals & preserves single damaged crystal wear.
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, ac1, &fm, &mod_t, &mod_state, None, d_ok).await.expect("valid bank autoload commits");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&valid_ammo_id].quantity, snap.items[&mut_ammo_id].quantity, snap.items[&ins_ammo_id].quantity), (6, 20, 20)); });
     let mut sess = SessionState::new(711);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.ship_id = Some(ship_id);
-    sess.station_id = None;
-    sess.solar_system_id = Some(sys_id);
-    assert_eq!(
-        handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(bad_crys_id)]).unwrap_err().code,
-        "InventoryError"
-    );
-    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(damaged_crys_id)])
-        .expect("single damaged crystal loads in-place");
-    ctx.db.with_snapshot(|snap| {
-        let loaded = &snap.items[&damaged_crys_id];
-        assert_eq!(loaded.flag, InventoryFlag::HiSlot2);
-        assert!(loaded.singleton);
-        assert_eq!(loaded.dynamic_attributes.get(&3), Some(&0.75));
-        assert_eq!(snap.items[&bad_crys_id].quantity, 2);
+    sess.user_id = Some(1); sess.character_id = Some(char_id); sess.ship_id = Some(ship_id); sess.solar_system_id = Some(sys_id);
+    for bad_crys in [bad_crys_id, bad_ns_ins_crys_id, bad_ns_mut_crys_id] {
+        assert_eq!(handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(bad_crys)]).unwrap_err().code, "InventoryError");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(damaged_crys_id, InventoryItemRecord { item_id: damaged_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, dynamic_attributes: HashMap::from([(3_u16, 0.75)]), ..Default::default() });
     });
+    let mut d_crys = DeferredPostCycleEffects::default();
+    d_crys.weapon_autoload = Some(plan_weapon_autoload(&ctx, char_id, ship_id, laser_id, &laser_t_ref).unwrap().expect("damaged crystal planned"));
+    commit_post_cycle_activation_effects(&ctx, &sys, char_id, ship_id, laser_id, &laser_fm, &laser_t_ref, &laser_state, None, d_crys).await.expect("damaged crystal autoload commits");
+    ctx.db.with_mut_snapshot(|snap| {
+        let loaded = snap.items.get_mut(&damaged_crys_id).unwrap();
+        assert_eq!((loaded.flag, loaded.singleton, loaded.dynamic_attributes.get(&3)), (InventoryFlag::HiSlot2, true, Some(&0.75)));
+        loaded.flag = InventoryFlag::Cargo; snap.module_active_charges.remove(&laser_id);
+    });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(damaged_crys_id)]).expect("single damaged crystal loads in-place");
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!((snap.items[&damaged_crys_id].flag, snap.items[&damaged_crys_id].singleton, snap.items[&damaged_crys_id].dynamic_attributes.get(&3), snap.items[&bad_crys_id].quantity), (InventoryFlag::HiSlot2, true, Some(&0.75), 2));
+        snap.items.insert(pkg_crys_id, InventoryItemRecord { item_id: pkg_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() });
+    });
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(pkg_crys_id)]).expect("clean 1-unit packaged crystal loads and unpacks");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&pkg_crys_id].flag, snap.items[&pkg_crys_id].singleton, snap.items[&damaged_crys_id].flag), (InventoryFlag::HiSlot2, true, InventoryFlag::Cargo)); });
 }

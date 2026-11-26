@@ -2183,37 +2183,6 @@ impl WorldStateSnapshot {
         diffs
     }
 
-    /// Compensating restore for stacks consumed prior to a fallible external async step,
-    /// preserving original item IDs, quantities, and custom names.
-    pub fn restore_consumed_stacks_direct(
-        &mut self,
-        consumed: &[(InventoryItemRecord, Option<String>, i32)],
-    ) {
-        for (pre, pre_cname, needed) in consumed {
-            if *needed <= 0 {
-                continue;
-            }
-            match self.items.get_mut(&pre.item_id) {
-                Some(cur) if cur.owner_id == pre.owner_id && cur.type_id == pre.type_id => {
-                    if let Some(new_qty) = cur.quantity.checked_add(*needed) {
-                        cur.quantity = new_qty;
-                        cur.version = cur.version.max(pre.version).saturating_add(1);
-                    }
-                }
-                _ => {
-                    let mut restored = pre.clone();
-                    restored.quantity = *needed;
-                    restored.version = restored.version.saturating_add(1);
-                    let iid = restored.item_id;
-                    self.items.insert(iid, restored);
-                    if let Some(cname) = pre_cname {
-                        self.item_custom_names.insert(iid, cname.clone());
-                    }
-                }
-            }
-        }
-    }
-
     fn is_merge_stack_candidate(
         &self,
         it: &InventoryItemRecord,

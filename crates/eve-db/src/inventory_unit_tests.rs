@@ -4266,3 +4266,43 @@ fn item_class_policy_enforces_stackable_commodity_vs_exact_variants() {
         .is_err());
 }
 
+#[test]
+fn rollback_restore_consumed_stacks_consume_exact_cross_owner_contract_and_dead_ship_r8() {
+    let repo = WorldRepository::with_demo_seed();
+    let (cid, other_cid) = (90_000_001_i64, 90_000_002_i64);
+    let station_id = repo.get_character(cid).unwrap().station_id.unwrap();
+    let (live_ship_id, dead_ship_id, cross_id, contract_id, locked_id, dead_full_id) = repo.with_mut_snapshot(|snap| {
+        let ids = (snap.alloc_entity_id(), snap.alloc_entity_id(), snap.alloc_entity_id(), snap.alloc_entity_id(), snap.alloc_entity_id(), snap.alloc_entity_id());
+        for (item_id, type_id, location_id, flag, quantity, singleton) in [
+            (ids.0, 587_u32, station_id, InventoryFlag::Hangar, 1, true), (ids.1, 587_u32, station_id, InventoryFlag::Hangar, 1, true),
+            (ids.2, 16_274_u32, ids.0, InventoryFlag::Cargo, 50, false), (ids.3, 16_273_u32, station_id, InventoryFlag::Hangar, 50, false),
+            (ids.4, 16_275_u32, station_id, InventoryFlag::Hangar, 50, false), (ids.5, 16_274_u32, ids.1, InventoryFlag::Cargo, 40, false),
+        ] { snap.items.insert(item_id, InventoryItemRecord { item_id, type_id, owner_id: cid, location_id, flag, quantity, singleton, version: 1, ..Default::default() }); }
+        ids
+    });
+    let opts = ConsumeExactOptions::for_owner_exact(Some(cid), cid, ItemClassPolicy::StackableCommodity);
+    repo.with_mut_snapshot(|snap| {
+        let base_qty = |s: &WorldStateSnapshot, tid: u32| -> i32 {
+            s.items.values().filter(|i| i.item_id != contract_id && i.item_id != locked_id && i.owner_id == cid && i.location_id == station_id && i.flag == InventoryFlag::Hangar && i.type_id == tid).map(|i| i.quantity).sum()
+        };
+        let (pre_16273, pre_16275) = (base_qty(snap, 16_273), base_qty(snap, 16_275));
+        let (pre_cross, pre_contract, pre_locked, pre_dead) = (snap.items[&cross_id].clone(), snap.items[&contract_id].clone(), snap.items[&locked_id].clone(), snap.items[&dead_full_id].clone());
+        for (id, qty) in [(cross_id, 20), (contract_id, 20), (locked_id, 20), (dead_full_id, 40)] { snap.consume_exact_item_quantity(id, qty, opts.clone()).unwrap(); }
+        snap.items.get_mut(&cross_id).unwrap().owner_id = other_cid;
+        snap.contracts.insert(700_099, ContractRecord {
+            contract_id: 700_099, issuer_id: cid, assignee_id: other_cid, acceptor_id: Some(other_cid), contract_type: "ItemExchange".into(),
+            status: "Outstanding".into(), title: "R8".into(), start_station_id: station_id, end_station_id: station_id, item_ids: vec![contract_id], expiration_unix: u64::MAX, ..ContractRecord::default()
+        });
+        snap.items.get_mut(&locked_id).unwrap().flag = InventoryFlag::Locked;
+        snap.items.remove(&dead_ship_id);
+        let diffs = snap.rollback_restore_consumed_stacks(&[(pre_cross, 20), (pre_contract, 20), (pre_locked, 20), (pre_dead, 40)]);
+        assert_eq!((snap.items[&cross_id].owner_id, snap.items[&cross_id].quantity), (other_cid, 30));
+        assert_eq!(snap.items.values().filter(|i| i.owner_id == cid && i.location_id == live_ship_id && i.flag == InventoryFlag::Cargo && i.type_id == 16_274).map(|i| i.quantity).sum::<i32>(), 20);
+        assert!(diffs.iter().any(|(pre, cur)| pre.as_ref().is_some_and(|p| p.item_id == cross_id) && cur.is_none()));
+        assert_eq!((snap.items[&contract_id].quantity, snap.items[&locked_id].quantity, snap.items[&locked_id].flag), (30, 30, InventoryFlag::Locked));
+        assert_eq!((base_qty(snap, 16_273) - pre_16273, base_qty(snap, 16_275) - pre_16275), (20, 20));
+        assert!(!snap.items.contains_key(&dead_ship_id) && !snap.items.contains_key(&dead_full_id));
+        assert_eq!(snap.items.values().filter(|i| i.location_id == dead_ship_id).count(), 0);
+    });
+}
+

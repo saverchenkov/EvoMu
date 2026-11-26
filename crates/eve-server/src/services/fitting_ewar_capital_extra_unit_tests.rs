@@ -1917,7 +1917,7 @@ async fn weapon_autoload_damaged_crystal_preserves_dynamic_attributes_and_mutapl
         &[10],
         &[(604, 86.0), (128, 1.0), (51, 3000.0), (54, 15_000.0), (158, 5_000.0), (160, 1.0), (6, 5.0), (64, 1.0)],
     );
-    laser_type.capacity = 5.0;
+    laser_type.capacity = 1.0;
     let mut crystal_type = synth_type(
         86_912,
         86,
@@ -2040,7 +2040,7 @@ async fn weapon_autoload_damaged_crystal_preserves_dynamic_attributes_and_mutapl
         assert_eq!(loaded.source_mutaplasmid_id, Some(49_711));
     });
 
-    // 2. Stack-split branch (`singleton: false`): damaged non-singleton crystal keeps damage + source_mutaplasmid_id
+    // 2. Stack-split branch (`singleton: false`): reject damaged non-singleton crystal; clean stack unpacks `singleton: true`
     ctx.db.with_mut_snapshot(|snap| {
         let mut ns_dyn = HashMap::new();
         ns_dyn.insert(eve_sde::attr_ids::DAMAGE, 0.62);
@@ -2060,7 +2060,7 @@ async fn weapon_autoload_damaged_crystal_preserves_dynamic_attributes_and_mutapl
             },
         );
     });
-    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+    assert!(crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
         &ctx,
         &mut sess,
         None,
@@ -2071,19 +2071,29 @@ async fn weapon_autoload_damaged_crystal_preserves_dynamic_attributes_and_mutapl
     )
     .await
     .expect("Some")
-    .expect("non-singleton damaged crystal autoload must succeed");
+    .is_err());
+    ctx.db.with_mut_snapshot(|snap| {
+        let c = snap.items.get_mut(&crys_split_id).expect("rejected crystal stays in cargo");
+        assert_eq!(c.flag, InventoryFlag::Cargo);
+        c.dynamic_attributes.clear(); c.source_mutaplasmid_id = None; c.quantity = 2;
+    });
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx, &mut sess, None, "dogmaIM", "Activate",
+        &[PyRep::Integer(laser_split_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)], &kw,
+    ).await.expect("Some").expect("clean packaged crystal stack must split into HiSlot1");
     ctx.db.with_snapshot(|s| {
         let loaded = s
             .items
             .values()
             .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot1 && i.item_id != laser_split_id)
             .expect("split damaged crystal loaded into HiSlot1");
-        assert_eq!(loaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE), Some(&0.62));
-        assert_eq!(loaded.source_mutaplasmid_id, Some(49_712));
+        assert_eq!((s.items[&crys_split_id].quantity, s.items[&crys_split_id].singleton), (1, false));
+        assert_eq!((loaded.quantity, loaded.singleton), (1, true));
     });
 
     // 3. Direct `combat_weapons::handle_weapons` autoload preserves damaged crystal & advances volatility from 0.40 -> 0.45
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&crys_split_id);
         let mut fp_dyn = HashMap::new();
         fp_dyn.insert(eve_sde::attr_ids::DAMAGE, 0.40);
         snap.items.insert(
@@ -2095,7 +2105,7 @@ async fn weapon_autoload_damaged_crystal_preserves_dynamic_attributes_and_mutapl
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
                 quantity: 1,
-                singleton: false,
+                singleton: true,
                 dynamic_attributes: fp_dyn,
                 source_mutaplasmid_id: Some(49_713),
                 ..Default::default()

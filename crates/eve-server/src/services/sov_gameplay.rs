@@ -1298,25 +1298,28 @@ pub async fn dispatch_special_structure_attack(
             BridgeRpcError::no_charges_loaded(0, format!("Charge {cid} count overflow"))
         })?;
     }
-    let consumed_backups: Vec<(eve_db::InventoryItemRecord, Option<String>, i32)> =
+    let (consumed_backups, consumed_cnames): (Vec<(eve_db::InventoryItemRecord, i32)>, Vec<(i64, String)>) =
         if !charge_counts.is_empty() {
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut backups = Vec::with_capacity(charge_counts.len());
+                let mut cnames = Vec::new();
                 for (&cid, &needed) in &charge_counts {
                     let pre_rec = snap
                         .items
                         .get(&cid)
                         .cloned()
                         .ok_or_else(|| BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))?;
-                    let pre_cname = snap.item_custom_names.get(&cid).cloned();
+                    if let Some(pre_cname) = snap.item_custom_names.get(&cid).cloned() {
+                        cnames.push((cid, pre_cname));
+                    }
                     snap.consume_exact_item_quantity(cid, needed, charge_opts.clone())
                         .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
-                    backups.push((pre_rec, pre_cname, needed));
+                    backups.push((pre_rec, needed));
                 }
-                Ok::<_, BridgeRpcError>(backups)
+                Ok::<_, BridgeRpcError>((backups, cnames))
             })?
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
     let dmg_res = if st_type_id == TYPE_MERCENARY_DEN {
         apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await
@@ -1339,7 +1342,13 @@ pub async fn dispatch_special_structure_attack(
         Err(e) => {
             if !consumed_backups.is_empty() {
                 ctx.db.with_mut_snapshot(|snap| {
-                    snap.restore_consumed_stacks_direct(&consumed_backups);
+                    let absent_cnames: Vec<(i64, i64, String)> = consumed_cnames.iter().filter(|(iid, _)| !snap.items.contains_key(iid))
+                        .filter_map(|(iid, cname)| consumed_backups.iter().find(|(p, _)| p.item_id == *iid).map(|(p, _)| (*iid, p.owner_id, cname.clone())))
+                        .collect();
+                    snap.rollback_restore_consumed_stacks(&consumed_backups);
+                    for (iid, expected_owner, cname) in absent_cnames {
+                        if snap.items.get(&iid).is_some_and(|it| it.owner_id == expected_owner) { snap.item_custom_names.insert(iid, cname); }
+                    }
                 });
             }
             return Err(e);
@@ -1689,6 +1698,10 @@ mod r3_charge_policy_tests {
         let den_id = 1_099_000_111_i64;
         let bpc_charge_id = 1_099_000_112_i64;
         ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(1_099_000_100, InventoryItemRecord {
+                item_id: 1_099_000_100, type_id: 587, owner_id: char_id,
+                location_id: 30_000_142, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+            });
             snap.structures.insert(
                 den_id,
                 UpwellStructureRecord {

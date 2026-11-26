@@ -1028,6 +1028,7 @@ pub(crate) fn handle_load_ammo(
                 moved_rec.location_id = ship_id;
                 moved_rec.flag = slot_flag;
                 moved_rec.quantity = alloc_qty;
+                moved_rec.singleton = pre_source.singleton || (is_crystal_type && alloc_qty == 1);
                 moved_rec.version = pre_source.version + 1;
                 snap.items.insert(first_charge_id, moved_rec.clone());
                 diffs.push((Some(pre_source.clone()), Some(moved_rec)));
@@ -1044,7 +1045,7 @@ pub(crate) fn handle_load_ammo(
                     location_id: ship_id,
                     flag: slot_flag,
                     quantity: alloc_qty,
-                    singleton: false,
+                    singleton: is_crystal_type && alloc_qty == 1,
                     version: 1,
                     ..Default::default()
                 };

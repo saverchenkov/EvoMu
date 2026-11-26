@@ -60,7 +60,7 @@ fn is_weapon_autoload_stack_consumable(
         return false;
     };
     let is_crystal_singleton =
-        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663) && item.quantity == 1;
+        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663) && item.quantity == 1 && item.singleton;
     if item.singleton && !is_crystal_singleton {
         return false;
     }
@@ -264,9 +264,11 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     let pre_dynamic_attributes = stack_pre.dynamic_attributes.clone();
     let pre_source_mutaplasmid_id = stack_pre.source_mutaplasmid_id;
 
-    let is_single_crystal_move = ctx.sde.types.get(&stack_pre.type_id).is_some_and(|ct| {
+    let is_crystal_type = ctx.sde.types.get(&stack_pre.type_id).is_some_and(|ct| {
         matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
-    }) && stack_pre.quantity == 1;
+    });
+    let is_single_crystal_move =
+        is_crystal_type && stack_pre.quantity == 1 && stack_pre.singleton;
     if is_single_crystal_move && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
         let (tid, tf, _) = plan.slot_allocations[0];
         let mut moved = stack_pre.clone();
@@ -307,7 +309,7 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
                 location_id: ship_id,
                 flag: tf,
                 quantity: give,
-                singleton: false,
+                singleton: is_crystal_type && give == 1,
                 version: 1,
                 ..Default::default()
             };
