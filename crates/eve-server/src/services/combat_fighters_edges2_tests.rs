@@ -6,6 +6,80 @@ use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::system_actor::{
+    check_fighter_class_slot_limit_in_state, fighter_class_and_slot_attr, SystemFighterState,
+};
+
+fn test_check_fighter_class_slot_limit_in_map(
+    active_map: &HashMap<i64, crate::router::context::ActiveFighterSquadron>,
+    ctx: &ServerContext,
+    ship_id: i64,
+    carrier_type_id: u32,
+    fighter_type_id: u32,
+    extra_squadrons: usize,
+) -> Result<(), BridgeRpcError> {
+    let fg_state = SystemFighterState {
+        active_fighters: active_map.clone(),
+        ..Default::default()
+    };
+    check_fighter_class_slot_limit_in_state(
+        &fg_state,
+        &ctx.sde,
+        ship_id,
+        carrier_type_id,
+        fighter_type_id,
+        false,
+        extra_squadrons,
+        None,
+    )
+    .map_err(|e| e.into_bridge_err())
+}
+
+fn test_check_fighter_class_slot_limit(
+    ctx: &ServerContext,
+    ship_id: i64,
+    carrier_type_id: u32,
+    fighter_type_id: u32,
+    count_loaded_tubes: bool,
+    extra_squadrons: usize,
+    replace_tube_idx: Option<usize>,
+) -> Result<(), BridgeRpcError> {
+    let mut fg_state = SystemFighterState::default();
+    for fid in fighter_test_helpers::active_fighter_ids(ctx) {
+        if let Some(sq) = fighter_test_helpers::active_fighter(ctx, fid) {
+            fg_state.active_fighters.insert(sq.ball_id, sq);
+        }
+    }
+    for (k, entry) in fighter_test_helpers::fighter_tube_load_entries(ctx) {
+        fg_state.tube_loads.insert(k, entry);
+    }
+    if fg_state
+        .tube_loads
+        .iter()
+        .any(|(&(sid, _), &(_, tid))| sid == ship_id && tid == 0)
+    {
+        ctx.db.with_snapshot(|snap| {
+            for (&(sid, _), (fid, tid)) in &mut fg_state.tube_loads {
+                if sid == ship_id && *tid == 0 {
+                    if let Some(it) = snap.items.get(fid) {
+                        *tid = it.type_id;
+                    }
+                }
+            }
+        });
+    }
+    check_fighter_class_slot_limit_in_state(
+        &fg_state,
+        &ctx.sde,
+        ship_id,
+        carrier_type_id,
+        fighter_type_id,
+        count_loaded_tubes,
+        extra_squadrons,
+        replace_tube_idx,
+    )
+    .map_err(|e| e.into_bridge_err())
+}
 
 async fn spawn_carrier(ctx: &ServerContext, ship_id: i64, _owner_id: i64, _corp_id: i64, sys_id: u32) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
@@ -713,35 +787,35 @@ fn fighter_class_and_slot_attr_and_slot_limit_helpers_cover_all_classes_and_boun
     }
     let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), ctx.db.clone());
 
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_001), Some((2212, 2217)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_002), Some((2213, 2218)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_003), Some((2214, 2219)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_004), Some((2740, 2737)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_005), Some((2741, 2738)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_006), Some((2742, 2739)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_007), Some((2742, 2739)));
-    assert_eq!(super::fighter_class_and_slot_attr(&ctx.sde, 990_008), None);
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_001), Some((2212, 2217)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_002), Some((2213, 2218)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_003), Some((2214, 2219)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_004), Some((2740, 2737)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_005), Some((2741, 2738)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_006), Some((2742, 2739)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_007), Some((2742, 2739)));
+    assert_eq!(fighter_class_and_slot_attr(&ctx.sde, 990_008), None);
 
     let mut active_map = HashMap::new();
     // Non-fighter or carrier without slot attr -> Ok(())
-    assert!(super::check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_101, 990_008, 1).is_ok());
-    assert!(super::check_fighter_class_slot_limit(&ctx, 500, 990_101, 990_008, true, 1, None).is_ok());
+    assert!(test_check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_101, 990_008, 1).is_ok());
+    assert!(test_check_fighter_class_slot_limit(&ctx, 500, 990_101, 990_008, true, 1, None).is_ok());
 
     // max_slots == 0 rejects both in-map launch and tube load/launch
     assert_eq!(
-        super::check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_100, 990_001, 1)
+        test_check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_100, 990_001, 1)
             .unwrap_err()
             .code,
         "CannotLaunchFighterNotEnoughTubesAvailableForClass"
     );
     assert_eq!(
-        super::check_fighter_class_slot_limit(&ctx, 500, 990_100, 990_001, true, 1, None)
+        test_check_fighter_class_slot_limit(&ctx, 500, 990_100, 990_001, true, 1, None)
             .unwrap_err()
             .code,
         "CannotLoadFighterTubeNoTubesExistForClass"
     );
     assert_eq!(
-        super::check_fighter_class_slot_limit(&ctx, 500, 990_100, 990_001, false, 1, None)
+        test_check_fighter_class_slot_limit(&ctx, 500, 990_100, 990_001, false, 1, None)
             .unwrap_err()
             .code,
         "CannotLaunchFighterNotEnoughTubesAvailableForClass"
@@ -762,9 +836,9 @@ fn fighter_class_and_slot_attr_and_slot_limit_helpers_cover_all_classes_and_boun
     };
     active_map.insert(1, make_sq(1, false));
     active_map.insert(2, make_sq(2, true));
-    assert!(super::check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_101, 990_001, 1).is_ok());
+    assert!(test_check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_101, 990_001, 1).is_ok());
     assert_eq!(
-        super::check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_101, 990_001, 2)
+        test_check_fighter_class_slot_limit_in_map(&active_map, &ctx, 500, 990_101, 990_001, 2)
             .unwrap_err()
             .code,
         "CannotLaunchFighterNotEnoughTubesAvailableForClass"
@@ -789,12 +863,12 @@ fn fighter_class_and_slot_attr_and_slot_limit_helpers_cover_all_classes_and_boun
         );
     });
     assert_eq!(
-        super::check_fighter_class_slot_limit(&ctx, 500, 990_101, 990_001, true, 1, None)
+        test_check_fighter_class_slot_limit(&ctx, 500, 990_101, 990_001, true, 1, None)
             .unwrap_err()
             .code,
         "CannotLoadFighterTubeNoTubesAvailableForClass"
     );
-    assert!(super::check_fighter_class_slot_limit(&ctx, 500, 990_101, 990_001, true, 1, Some(0)).is_ok());
+    assert!(test_check_fighter_class_slot_limit(&ctx, 500, 990_101, 990_001, true, 1, Some(0)).is_ok());
 }
 
 #[tokio::test]
@@ -953,7 +1027,7 @@ async fn w4_mutant_killers_fighters_slots_launch_movement_scoop_and_persistence(
             mwd_active: false,
         },
     );
-    assert!(super::check_fighter_class_slot_limit(&ctx, ship_id, t_carrier, t_light, false, 1, None).is_ok());
+    assert!(test_check_fighter_class_slot_limit(&ctx, ship_id, t_carrier, t_light, false, 1, None).is_ok());
     fighter_test_helpers::clear_active_fighters(&ctx);
 
     // 2. Load & Unload on Tube 1 (`FighterTube1 = 160`) (`L504, 573`), plus Launch with excess qty on

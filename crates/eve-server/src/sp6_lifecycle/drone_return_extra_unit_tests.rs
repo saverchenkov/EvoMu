@@ -277,7 +277,8 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
             },
         );
     });
-    ctx.active_fighters.write().unwrap().insert(
+    crate::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
         fighter_ball_id,
         ActiveFighterSquadron {
             ball_id: fighter_ball_id,

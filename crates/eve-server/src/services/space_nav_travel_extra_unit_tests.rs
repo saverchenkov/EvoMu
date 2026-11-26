@@ -438,7 +438,7 @@ mod w4_ops_pve_mut_extra_tests {
             snap.module_active_states.remove(&mod_item_id);
         });
 
-        // Break by active fighter in ctx.active_fighters
+        // Break by active fighter in SystemActor fighter state
         sync_tether(&ctx, char_id, sys_id, ship_id).await;
         assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
         fighter_test_helpers::insert_active_fighter(

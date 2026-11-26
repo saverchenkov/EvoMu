@@ -101,10 +101,27 @@ pub(crate) fn emit_combat_log_and_damage_state(
             )
         })
     });
-    let active_fighter = ctx.active_fighters.read().ok().and_then(|fs| {
-        fs.get(&target_ball_id)
-            .map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
-    });
+    let active_fighter = combat_sys_id
+        .filter(|&id| id != 0)
+        .and_then(|sid| ctx.systems.get_handle(sid).map(|h| (sid, h)))
+        .and_then(|(sid, h)| {
+            ctx.systems.ensure_live_fighters_hydrated_if_unlocked_sync(sid, &h);
+            h.view()
+                .fighters
+                .active_fighters
+                .get(&target_ball_id)
+                .map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
+        })
+        .or_else(|| {
+            ctx.systems.active_system_handles().into_iter().find_map(|(sid, h)| {
+                ctx.systems.ensure_live_fighters_hydrated_if_unlocked_sync(sid, &h);
+                h.view()
+                    .fighters
+                    .active_fighters
+                    .get(&target_ball_id)
+                    .map(|sq| (!sq.is_abandoned && sq.owner_char_id > 0, sq.owner_char_id, sq.item_id))
+            })
+        });
     let combat_sys = combat_sys_id.filter(|&id| id != 0).or_else(|| {
         ctx.db.with_snapshot(|snap| {
             let item_sys = |id: i64| {

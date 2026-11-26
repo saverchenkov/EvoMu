@@ -17,6 +17,8 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
     sys_handle: &SystemHandle,
     fighter_ids: &[i64],
 ) -> Result<(), BridgeRpcError> {
+    use crate::system_actor::{FighterAbilityActorOp, FighterMwdSpec};
+
     if fighter_ids.is_empty() {
         return Err(BridgeRpcError {
             code: "NoFightersSelected".into(),
@@ -25,16 +27,12 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
         });
     }
     let now_unix = ctx.now_unix();
-    let planned: Vec<(i64, f64, bool)> = {
-        let mut fg = ctx.fighters.write().unwrap();
-        let mut pending_charges: std::collections::HashMap<(i64, u32), u32> =
-            std::collections::HashMap::new();
-        let mut pending_cds: std::collections::HashMap<(i64, u32), u64> =
-            std::collections::HashMap::new();
-        let mut plan = Vec::with_capacity(fighter_ids.len());
-
+    let specs: Vec<FighterMwdSpec> = {
+        let view = sys_handle.view();
+        let active = &view.fighters.active_fighters;
+        let mut specs = Vec::with_capacity(fighter_ids.len());
         for &fid in fighter_ids {
-            let Some(f) = fg.active_fighters.get(&fid) else {
+            let Some(f) = active.get(&fid) else {
                 return Err(BridgeRpcError {
                     code: "FighterNotFound".into(),
                     message: format!("Fighter squadron {fid} not found or not launched"),
@@ -49,8 +47,6 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                 });
             }
             let ftype_id = f.type_id;
-            let was_mwd = f.mwd_active || plan.iter().any(|&(id, _, _)| id == fid);
-
             let Some(slots) = ctx.sde.fighter_abilities_by_type.get(&ftype_id) else {
                 return Err(BridgeRpcError {
                     code: "UnsupportedFighterAbility".into(),
@@ -70,42 +66,7 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                 });
             };
             let slot_id = mwd_slot.slot_index as u32;
-
-            if let Some(ready_at) = pending_cds
-                .get(&(fid, slot_id))
-                .copied()
-                .or_else(|| fg.cooldown_state.get(&(fid, slot_id)).copied())
-            {
-                if now_unix < ready_at {
-                    return Err(BridgeRpcError {
-                        code: "AbilityOnCooldown".into(),
-                        message: format!(
-                            "Fighter MWD slot {slot_id} on {fid} is on cooldown until {ready_at}"
-                        ),
-                        client_error: None,
-                    });
-                }
-            }
-
-            if let Some(ref ch) = mwd_slot.charges {
-                let used = pending_charges
-                    .get(&(fid, slot_id))
-                    .copied()
-                    .unwrap_or_else(|| fg.charge_state.get(&(fid, slot_id)).copied().unwrap_or(0));
-                if used >= ch.charge_count {
-                    return Err(BridgeRpcError {
-                        code: "OutOfCharges".into(),
-                        message: format!(
-                            "Fighter MWD slot {slot_id} on {fid} has exhausted all {} charges",
-                            ch.charge_count
-                        ),
-                        client_error: None,
-                    });
-                }
-                pending_charges.insert((fid, slot_id), used.saturating_add(1));
-            }
-
-            let cd_secs = mwd_slot
+            let cooldown_secs = mwd_slot
                 .cooldown_seconds
                 .or_else(|| {
                     ctx.sde
@@ -116,8 +77,6 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                 })
                 .unwrap_or(20.0)
                 .max(1.0) as u64;
-            pending_cds.insert((fid, slot_id), now_unix + cd_secs);
-
             let speed_bonus_pct = ctx
                 .sde
                 .types
@@ -130,39 +89,25 @@ pub(crate) async fn validate_and_activate_fighter_mwd(
                         .copied()
                 })
                 .unwrap_or(400.0);
-            plan.push((fid, speed_bonus_pct, was_mwd));
+            specs.push(FighterMwdSpec {
+                fighter_ball_id: fid,
+                cooldown_secs,
+                slot_id,
+                max_charges: mwd_slot.charges.as_ref().map(|c| c.charge_count),
+                speed_bonus_pct,
+            });
         }
-
-        for (key, used) in pending_charges {
-            fg.charge_state.insert(key, used);
-        }
-        for (key, ready_at) in pending_cds {
-            fg.cooldown_state.insert(key, ready_at);
-        }
-        for &(fid, _, _) in &plan {
-            if let Some(f) = fg.active_fighters.get_mut(&fid) {
-                f.mwd_active = true;
-            }
-        }
-        plan
+        specs
     };
 
-    for (fid, speed_bonus_pct, was_mwd) in planned {
-        if !ctx.active_fighters.read().unwrap().contains_key(&fid) {
-            continue;
-        }
-        if !was_mwd {
-            if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(fid).await {
-                if ctx.active_fighters.read().unwrap().contains_key(&fid) {
-                    let boosted = b.max_velocity * (1.0 + speed_bonus_pct / 100.0);
-                    let _ = sys_handle.set_ball_max_velocity(fid, boosted).await;
-                }
-            }
-        }
-        if ctx.active_fighters.read().unwrap().contains_key(&fid) {
-            let _ = sys_handle.set_speed_fraction(fid, 1.0).await;
-        }
-    }
+    sys_handle
+        .mutate_fighter_ability_state(FighterAbilityActorOp::ActivateMwdBatch {
+            char_id,
+            specs,
+            now_unix,
+        })
+        .await
+        .map_err(|e| e.into_bridge_err())?;
 
     Ok(())
 }

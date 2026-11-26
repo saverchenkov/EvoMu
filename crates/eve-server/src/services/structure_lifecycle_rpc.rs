@@ -871,7 +871,12 @@ pub async fn apply_damage_structure_or_ball(
         return Ok(Some((0.0, false, false)));
     }
     let att_opt = (attacker_char_id > 0).then_some(attacker_char_id);
-    let was_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&target_ball_id));
+    ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
+    let was_fighter = sys_handle
+        .view()
+        .fighters
+        .active_fighters
+        .contains_key(&target_ball_id);
     let mut hit = sys_handle
         .apply_damage_with_attacker(target_ball_id, dmg, att_opt)
         .await

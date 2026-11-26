@@ -4,17 +4,14 @@ use super::notify_registry::{OnMoonScanComplete, OnRemoveMoonProbe, OnScanNoMate
 use crate::living_world::LivingWorldDirector;
 use crate::system_actor::SystemRegistry;
 use crate::world_seeder;
-use eve_db::lock_rank::{
-    AnyRwLock, RankedMutex, RankedRwLock, RankedRwLockReadGuard, RankedRwLockWriteGuard,
-    RANK_CLOCK, RANK_LEAF, RANK_NPC_SPAWNS,
-};
+use eve_db::lock_rank::{AnyRwLock, RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_NPC_SPAWNS};
 use eve_db::WorldRepository;
 use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, LockResult, PoisonError, RwLock, TryLockError, TryLockResult};
+use std::sync::{Arc, RwLock};
 
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
 
@@ -78,11 +75,6 @@ pub struct ServerContext {
     pub projected_ewar: Arc<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
     pub projected_ewar_sources: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     pub active_ewar_starts: Arc<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
-    pub fighters: Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
-    pub fighter_cooldown_state: FighterStateLens<HashMap<(i64, u32), u64>>,
-    pub fighter_charge_state: FighterStateLens<HashMap<(i64, u32), u32>>,
-    pub active_fighters: FighterStateLens<HashMap<i64, ActiveFighterSquadron>>,
-    pub fighter_tube_loads: FighterStateLens<HashMap<(i64, usize), i64>>,
     pub active_scanner_probes: Arc<RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>>,
     pub(crate) active_probe_scan_contexts: Arc<RankedRwLock<HashMap<i64, Vec<crate::services::space_destiny::space_probe_scanning::ActiveProbeScanContext>>, RANK_LEAF>>,
     pub active_moon_probes: Arc<RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>>,
@@ -261,7 +253,6 @@ pub(crate) struct ServerContextWeak {
     projected_ewar: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
     projected_ewar_sources: std::sync::Weak<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
     active_ewar_starts: std::sync::Weak<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
-    fighters: std::sync::Weak<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
     active_scanner_probes: std::sync::Weak<RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>>,
     active_probe_scan_contexts: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<crate::services::space_destiny::space_probe_scanning::ActiveProbeScanContext>>, RANK_LEAF>>,
     active_moon_probes: std::sync::Weak<RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>>,
@@ -314,9 +305,6 @@ pub(crate) struct ServerContextWeak {
 
 impl ServerContextWeak {
     pub(crate) fn upgrade(&self) -> Option<ServerContext> {
-        let fighters = self.fighters.upgrade()?;
-        let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
-            make_fighter_lenses(&fighters);
         Some(ServerContext {
             instance_id: self.instance_id,
             sde: self.sde.upgrade()?,
@@ -343,11 +331,6 @@ impl ServerContextWeak {
             projected_ewar: self.projected_ewar.upgrade()?,
             projected_ewar_sources: self.projected_ewar_sources.upgrade()?,
             active_ewar_starts: self.active_ewar_starts.upgrade()?,
-            fighters,
-            fighter_cooldown_state,
-            fighter_charge_state,
-            active_fighters,
-            fighter_tube_loads,
             active_scanner_probes: self.active_scanner_probes.upgrade()?,
             active_probe_scan_contexts: self.active_probe_scan_contexts.upgrade()?,
             active_moon_probes: self.active_moon_probes.upgrade()?,
@@ -400,184 +383,7 @@ impl ServerContextWeak {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ModuleCooldownEntry { pub recorded_unix_f64: f64, pub delay_s: f64, pub solar_system_id: Option<u32>, pub recorded_sys_sim_s: f64 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ActiveFighterSquadron {
-    pub ball_id: i64, pub item_id: i64, pub type_id: u32, pub owner_char_id: i64, pub parent_ship_id: i64,
-    pub tube_index: usize, pub squadron_size: u32, pub target_id: Option<i64>, pub is_abandoned: bool, pub mwd_active: bool,
-}
-
-/// Consolidated carrier fighter runtime maps guarded under a single `RANK_LEAF` lock so
-/// multi-map fighter operations cannot invert or trigger same-rank assertions (`RFC-1 §4.3`).
-#[derive(Debug, Default)]
-pub struct FighterRuntimeState {
-    pub cooldown_state: HashMap<(i64, u32), u64>,
-    pub charge_state: HashMap<(i64, u32), u32>,
-    pub active_fighters: HashMap<i64, ActiveFighterSquadron>,
-    pub tube_loads: HashMap<(i64, usize), i64>,
-}
-
-/// Safe, zero-`unsafe` projection wrapper exposing a single map inside [`FighterRuntimeState`]
-/// with `.read()` / `.write()` ergonomics compatible with existing call sites and tests.
-pub struct FighterStateLens<T: 'static> {
-    lock: Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
-    project_ref: fn(&FighterRuntimeState) -> &T,
-    project_mut: fn(&mut FighterRuntimeState) -> &mut T,
-}
-
-impl<T: 'static> Clone for FighterStateLens<T> {
-    fn clone(&self) -> Self {
-        Self {
-            lock: Arc::clone(&self.lock),
-            project_ref: self.project_ref,
-            project_mut: self.project_mut,
-        }
-    }
-}
-
-pub struct FighterLensReadGuard<'a, T: 'static> {
-    guard: RankedRwLockReadGuard<'a, FighterRuntimeState, RANK_LEAF>,
-    project: fn(&FighterRuntimeState) -> &T,
-}
-
-impl<T: 'static> std::ops::Deref for FighterLensReadGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        (self.project)(&self.guard)
-    }
-}
-
-pub struct FighterLensWriteGuard<'a, T: 'static> {
-    guard: RankedRwLockWriteGuard<'a, FighterRuntimeState, RANK_LEAF>,
-    project_ref: fn(&FighterRuntimeState) -> &T,
-    project_mut: fn(&mut FighterRuntimeState) -> &mut T,
-}
-
-impl<T: 'static> std::ops::Deref for FighterLensWriteGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        (self.project_ref)(&self.guard)
-    }
-}
-
-impl<T: 'static> std::ops::DerefMut for FighterLensWriteGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        (self.project_mut)(&mut self.guard)
-    }
-}
-
-impl<T: 'static> FighterStateLens<T> {
-    pub fn new(
-        lock: Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
-        project_ref: fn(&FighterRuntimeState) -> &T,
-        project_mut: fn(&mut FighterRuntimeState) -> &mut T,
-    ) -> Self {
-        Self {
-            lock,
-            project_ref,
-            project_mut,
-        }
-    }
-
-    #[track_caller]
-    pub fn read(&self) -> LockResult<FighterLensReadGuard<'_, T>> {
-        let project = self.project_ref;
-        match (*self.lock).read() {
-            Ok(guard) => Ok(FighterLensReadGuard { guard, project }),
-            Err(poisoned) => Err(PoisonError::new(FighterLensReadGuard {
-                guard: poisoned.into_inner(),
-                project,
-            })),
-        }
-    }
-
-    #[track_caller]
-    pub fn try_read(&self) -> TryLockResult<FighterLensReadGuard<'_, T>> {
-        let project = self.project_ref;
-        match self.lock.try_read() {
-            Ok(guard) => Ok(FighterLensReadGuard { guard, project }),
-            Err(TryLockError::Poisoned(poisoned)) => Err(TryLockError::Poisoned(PoisonError::new(
-                FighterLensReadGuard {
-                    guard: poisoned.into_inner(),
-                    project,
-                },
-            ))),
-            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
-        }
-    }
-
-    #[track_caller]
-    pub fn write(&self) -> LockResult<FighterLensWriteGuard<'_, T>> {
-        let project_ref = self.project_ref;
-        let project_mut = self.project_mut;
-        match (*self.lock).write() {
-            Ok(guard) => Ok(FighterLensWriteGuard {
-                guard,
-                project_ref,
-                project_mut,
-            }),
-            Err(poisoned) => Err(PoisonError::new(FighterLensWriteGuard {
-                guard: poisoned.into_inner(),
-                project_ref,
-                project_mut,
-            })),
-        }
-    }
-
-    #[track_caller]
-    pub fn try_write(&self) -> TryLockResult<FighterLensWriteGuard<'_, T>> {
-        let project_ref = self.project_ref;
-        let project_mut = self.project_mut;
-        match self.lock.try_write() {
-            Ok(guard) => Ok(FighterLensWriteGuard {
-                guard,
-                project_ref,
-                project_mut,
-            }),
-            Err(TryLockError::Poisoned(poisoned)) => Err(TryLockError::Poisoned(PoisonError::new(
-                FighterLensWriteGuard {
-                    guard: poisoned.into_inner(),
-                    project_ref,
-                    project_mut,
-                },
-            ))),
-            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
-        }
-    }
-}
-
-pub(crate) fn make_fighter_lenses(
-    fighters: &Arc<RankedRwLock<FighterRuntimeState, RANK_LEAF>>,
-) -> (
-    FighterStateLens<HashMap<(i64, u32), u64>>,
-    FighterStateLens<HashMap<(i64, u32), u32>>,
-    FighterStateLens<HashMap<i64, ActiveFighterSquadron>>,
-    FighterStateLens<HashMap<(i64, usize), i64>>,
-) {
-    (
-        FighterStateLens::new(
-            Arc::clone(fighters),
-            |s| &s.cooldown_state,
-            |s| &mut s.cooldown_state,
-        ),
-        FighterStateLens::new(
-            Arc::clone(fighters),
-            |s| &s.charge_state,
-            |s| &mut s.charge_state,
-        ),
-        FighterStateLens::new(
-            Arc::clone(fighters),
-            |s| &s.active_fighters,
-            |s| &mut s.active_fighters,
-        ),
-        FighterStateLens::new(
-            Arc::clone(fighters),
-            |s| &s.tube_loads,
-            |s| &mut s.tube_loads,
-        ),
-    )
-}
+pub use crate::system_actor::ActiveFighterSquadron;
 
 pub type ActiveScannerProbe = eve_db::PersistedScannerProbe;
 
@@ -705,7 +511,6 @@ impl ServerContext {
             projected_ewar: Arc::downgrade(&self.projected_ewar),
             projected_ewar_sources: Arc::downgrade(&self.projected_ewar_sources),
             active_ewar_starts: Arc::downgrade(&self.active_ewar_starts),
-            fighters: Arc::downgrade(&self.fighters),
             active_scanner_probes: Arc::downgrade(&self.active_scanner_probes),
             active_probe_scan_contexts: Arc::downgrade(&self.active_probe_scan_contexts),
             active_moon_probes: Arc::downgrade(&self.active_moon_probes),
@@ -806,7 +611,6 @@ impl ServerContext {
             crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db),
         ));
         let module_reactivation_cooldowns = Arc::new(RankedRwLock::new(HashMap::new()));
-        let fighters = Arc::new(RankedRwLock::new(FighterRuntimeState::default()));
         let persisted_notifications = db.with_snapshot(|snap| {
             let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap.owner_notes.values()
                 .filter(|n| n.character_id == -79)
@@ -842,8 +646,6 @@ impl ServerContext {
                 })
                 .collect()
         });
-        let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
-            make_fighter_lenses(&fighters);
         let esi_port = Arc::clone(&quasar_gateway.esi_port);
         let cyno_portal_state =
             crate::services::inventory_fitting::fitting_cyno_portal::init_cyno_portal_slot(&db);
@@ -875,11 +677,6 @@ impl ServerContext {
             projected_ewar,
             projected_ewar_sources,
             active_ewar_starts,
-            fighters,
-            fighter_cooldown_state,
-            fighter_charge_state,
-            active_fighters,
-            fighter_tube_loads,
             active_scanner_probes: Arc::new(RankedRwLock::new(persisted_probes)),
             active_probe_scan_contexts: Arc::new(RankedRwLock::new(HashMap::new())),
             active_moon_probes: Arc::new(RankedRwLock::new(Vec::new())),

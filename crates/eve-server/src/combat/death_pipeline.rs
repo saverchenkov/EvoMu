@@ -657,21 +657,17 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
     };
 
     let active_fighter_item_ids: Vec<i64> = ctx
+        .systems
+        .snapshot_fighters_for_system(sys_id)
         .active_fighters
-        .read()
-        .ok()
-        .map(|fighters| {
-            fighters
-                .values()
-                .filter(|f| {
-                    ((victim_char_id > 0 && f.owner_char_id == victim_char_id)
-                        || f.parent_ship_id == victim_ship_id)
-                        && !f.is_abandoned
-                })
-                .map(|f| f.item_id)
-                .collect()
+        .values()
+        .filter(|f| {
+            ((victim_char_id > 0 && f.owner_char_id == victim_char_id)
+                || f.parent_ship_id == victim_ship_id)
+                && !f.is_abandoned
         })
-        .unwrap_or_default();
+        .map(|f| f.item_id)
+        .collect();
 
     enum DeathTxOutcome<T> {
         Committed { payload: T, sd_gen: u64 },
@@ -2057,19 +2053,8 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
         return;
     }
 
-    let removed_fighter = if let Ok(mut fighters) = ctx.active_fighters.write() {
-        let key = fighters
-            .iter()
-            .find(|(_, f)| f.ball_id == ball_id || f.item_id == ball_id)
-            .map(|(k, _)| *k);
-        key.and_then(|k| fighters.remove(&k))
-    } else {
-        None
-    };
-    if let Some(f) = removed_fighter {
-        if let Ok(mut loads) = ctx.fighter_tube_loads.write() {
-            loads.remove(&(f.parent_ship_id, f.tube_index));
-        }
+    let _ = ctx.systems.ensure_live_fighters_hydrated_sync(sys_id, &sys_handle);
+    if let Some(f) = sys_handle.cleanup_destroyed_fighter_sync(ball_id) {
         ctx.db.with_mut_snapshot(|snap| {
             snap.combat_crimewatch_state
                 .record_destroyed_item_id(f.ball_id);
@@ -2078,8 +2063,10 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
             snap.items.remove(&f.item_id);
             snap.item_positions.remove(&f.ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&f.ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&f.item_id);
         });
         sys_handle.try_remove_ball(ball_id);
+        ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
         return;
     }
 

@@ -3,89 +3,26 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use std::sync::Arc;
+use crate::system_actor::{
+    ActiveFighterSquadron, FighterAbilityActorOp, FighterLaunchActorOp, FighterLaunchSpawnInput,
+    FighterRecallActorOp, FighterScoopActorOp, FighterTubeOp,
+};
 
-fn fighter_class_and_slot_attr(sde: &eve_sde::SdeRegistry, fighter_type_id: u32) -> Option<(u16, u16)> {
-    let ty = sde.types.get(&fighter_type_id)?;
-    let attrs = &ty.default_attributes;
-    for (f_attr, s_attr) in [(2212u16, 2217u16), (2213, 2218), (2214, 2219), (2740, 2737), (2741, 2738), (2742, 2739)] {
-        if attrs.get(&f_attr).copied().unwrap_or(0.0) > 0.0 {
-            return Some((f_attr, s_attr));
+fn resolve_fighter_ship_system_id(
+    ctx: &ServerContext,
+    session: &SessionState,
+    ship_id: i64,
+) -> u32 {
+    if session.ship_id == Some(ship_id) || session.structure_id == Some(ship_id) {
+        if let Some(sys) = session
+            .solar_system_id
+            .filter(|&s| (30_000_000..40_000_000).contains(&s))
+        {
+            return sys;
         }
     }
-    match ty.group_id {
-        1652 => Some((2212, 2217)),
-        1537 => Some((2213, 2218)),
-        1653 => Some((2214, 2219)),
-        4777 => Some((2740, 2737)),
-        4778 => Some((2741, 2738)),
-        4779 => Some((2742, 2739)),
-        _ => None,
-    }
-}
-
-fn check_fighter_class_slot_limit_in_map(
-    active_map: &HashMap<i64, crate::router::context::ActiveFighterSquadron>,
-    ctx: &ServerContext,
-    ship_id: i64,
-    carrier_type_id: u32,
-    fighter_type_id: u32,
-    extra_squadrons: usize,
-) -> Result<(), BridgeRpcError> {
-    let Some((f_attr, s_attr)) = fighter_class_and_slot_attr(&ctx.sde, fighter_type_id) else {
-        return Ok(());
-    };
-    let Some(raw_max) = ctx.sde.types.get(&carrier_type_id).and_then(|t| t.default_attributes.get(&s_attr).copied()) else {
-        return Ok(());
-    };
-    let max_slots = raw_max.max(0.0) as usize;
-    if max_slots == 0 {
-        return Err(BridgeRpcError {
-            code: "CannotLaunchFighterNotEnoughTubesAvailableForClass".into(),
-            message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into(),
-            client_error: None,
-        });
-    }
-    let is_same_class = |tid: u32| fighter_class_and_slot_attr(&ctx.sde, tid).is_some_and(|(fa, _)| fa == f_attr);
-    let active_in_class = active_map
-        .values()
-        .filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned && is_same_class(f.type_id))
-        .count();
-    if active_in_class + extra_squadrons > max_slots {
-        return Err(BridgeRpcError {
-            code: "CannotLaunchFighterNotEnoughTubesAvailableForClass".into(),
-            message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}"),
-            client_error: None,
-        });
-    }
-    Ok(())
-}
-
-fn check_fighter_class_slot_limit(
-    ctx: &ServerContext, ship_id: i64, carrier_type_id: u32, fighter_type_id: u32,
-    count_loaded_tubes: bool, extra_squadrons: usize, replace_tube_idx: Option<usize>,
-) -> Result<(), BridgeRpcError> {
-    let Some((f_attr, s_attr)) = fighter_class_and_slot_attr(&ctx.sde, fighter_type_id) else { return Ok(()) };
-    let Some(raw_max) = ctx.sde.types.get(&carrier_type_id).and_then(|t| t.default_attributes.get(&s_attr).copied()) else {
-        return Ok(());
-    };
-    let max_slots = raw_max.max(0.0) as usize;
-    if max_slots == 0 {
-        let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesExistForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
-        return Err(BridgeRpcError { code: code.into(), message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into(), client_error: None });
-    }
-    let is_same_class = |tid: u32| fighter_class_and_slot_attr(&ctx.sde, tid).is_some_and(|(fa, _)| fa == f_attr);
-    let active_in_class = ctx.active_fighters.read().unwrap().values().filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned && is_same_class(f.type_id)).count();
-    let loaded_in_class = if count_loaded_tubes {
-        let loads: Vec<i64> = ctx.fighter_tube_loads.read().unwrap().iter().filter(|&(&(sid, tidx), _)| sid == ship_id && Some(tidx) != replace_tube_idx).map(|(_, &fid)| fid).collect();
-        ctx.db.with_snapshot(|snap| loads.into_iter().filter(|fid| snap.items.get(fid).is_some_and(|it| is_same_class(it.type_id))).count())
-    } else {
-        0
-    };
-    if active_in_class + loaded_in_class + extra_squadrons > max_slots {
-        let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesAvailableForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
-        return Err(BridgeRpcError { code: code.into(), message: format!("UserError: Fighter class limit ({max_slots}) exceeded for hull {carrier_type_id}"), client_error: None });
-    }
-    Ok(())
+    ctx.systems.resolve_fighter_entity_system_id(&[ship_id])
 }
 
 /// Applies incoming weapon/NPC damage to a deployed fighter squadron in space (`feat:drones.fighter-squadron-losses`).
@@ -100,68 +37,51 @@ pub async fn apply_damage_to_fighter_squadron(
     fighter_ball_id: i64,
     damage: DamageVector,
 ) -> (u32, u32, bool) {
-    let Some(type_id) = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .get(&fighter_ball_id)
-        .map(|s| s.type_id)
+    let sys_handle = match ctx.systems.get_handle(solar_system_id) {
+        Some(h) => h,
+        None => {
+            if ctx
+                .systems
+                .snapshot_fighters_for_system(solar_system_id)
+                .active_fighters
+                .contains_key(&fighter_ball_id)
+            {
+                ctx.systems.get_or_spawn(solar_system_id)
+            } else {
+                return (0, 0, false);
+            }
+        }
+    };
+    if let Err(e) = ctx
+        .systems
+        .ensure_live_fighters_hydrated_async(solar_system_id, &sys_handle)
+        .await
+    {
+        tracing::warn!(
+            solar_system_id,
+            fighter_ball_id,
+            error = %e,
+            "Skipping fighter damage while system fighter hydration fails"
+        );
+        return (0, 0, false);
+    }
+    let raw_dmg = damage.total().max(0.0);
+    let Some(out) = sys_handle
+        .apply_damage_to_fighter_squadron_in_actor(fighter_ball_id, raw_dmg, Arc::clone(&ctx.sde))
+        .await
     else {
         return (0, 0, false);
     };
-    let unit_hp = ctx
-        .sde
-        .types
-        .get(&type_id)
-        .and_then(|t| t.default_attributes.get(&263).copied().or_else(|| t.default_attributes.get(&9).copied()))
-        .unwrap_or(1_000.0)
-        .max(250.0);
-    let raw_dmg = damage.total().max(0.0);
-    let units_killed = with_mut_combat_runtime(ctx, |rt| {
-        let entry = rt.fighter_unit_damage_accum.entry(fighter_ball_id).or_insert(0.0);
-        *entry += raw_dmg;
-        let killed = (*entry / unit_hp).floor() as u32;
-        if killed > 0 {
-            *entry = (*entry - (killed as f64) * unit_hp).max(0.0);
-        }
-        killed
-    });
 
-    let atomic_res = {
-        let mut fg = ctx.fighters.write().unwrap();
-        if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
-            let before_size = live.squadron_size;
-            let lost = units_killed.min(before_size);
-            let after_size = before_size.saturating_sub(lost);
-            let wiped_out = after_size == 0;
-            let item_id = live.item_id;
-            let owner_char_id = live.owner_char_id;
-            let parent_ship_id = live.parent_ship_id;
-            let tube_flag = (159 + live.tube_index) as i64;
-            if wiped_out {
-                fg.active_fighters.remove(&fighter_ball_id);
-                fg.charge_state.retain(|&(bid, _), _| bid != fighter_ball_id);
-                fg.cooldown_state.retain(|&(bid, _), _| bid != fighter_ball_id);
-            } else if lost > 0 {
-                live.squadron_size = after_size;
-            }
-            Some((lost, after_size, wiped_out, item_id, owner_char_id, parent_ship_id, tube_flag))
-        } else {
-            None
-        }
-    };
-    let Some((lost, after_size, wiped_out, item_id, owner_char_id, parent_ship_id, tube_flag)) = atomic_res else {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
-        });
-        return (0, 0, false);
-    };
-
-    if wiped_out {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
-        });
-    }
+    let (lost, after_size, wiped_out, item_id, owner_char_id, parent_ship_id, tube_flag) = (
+        out.lost,
+        out.after_size,
+        out.wiped_out,
+        out.item_id,
+        out.owner_char_id,
+        out.parent_ship_id,
+        out.tube_flag,
+    );
 
     if wiped_out || lost > 0 {
         ctx.db.with_mut_snapshot(|snap| {
@@ -194,7 +114,6 @@ pub async fn apply_damage_to_fighter_squadron(
         for slot in 0..3 {
             ctx.remove_projected_ewar_by_module(parent_ship_id, -(fighter_ball_id * 10 + slot));
         }
-        let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
         let _ = sys_handle.remove_ball(fighter_ball_id).await;
         crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, fighter_ball_id);
         ctx.emit_typed(
@@ -212,6 +131,10 @@ pub async fn apply_damage_to_fighter_squadron(
                 squadron_size: after_size as i64,
             },
         );
+    }
+
+    if wiped_out || lost > 0 {
+        ctx.systems.flush_system_fighter_checkpoint_sync(solar_system_id);
     }
 
     (lost, after_size, wiped_out)
@@ -294,6 +217,10 @@ async fn resolve_in_space_fighter_ship(
         true,
     )?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    ctx.systems
+        .ensure_live_fighters_hydrated_async(sys_id, &sys_handle)
+        .await
+        .map_err(|e| crate::system_actor::FighterActorError::plain("StorageError", e).into_bridge_err())?;
     let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, b))) => b,
         Ok(None) => {
@@ -368,6 +295,22 @@ pub async fn handle_fighters(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "fighterMgr" {
+        let hydrate_sys = session
+            .ship_id
+            .or(session.structure_id)
+            .map(|sid| resolve_fighter_ship_system_id(ctx, session, sid))
+            .or(session.solar_system_id);
+        if let Some(sys_id) = hydrate_sys {
+            if let Some(h) = ctx.systems.get_handle(sys_id) {
+                if let Err(e) = ctx.systems.ensure_live_fighters_hydrated_async(sys_id, &h).await {
+                    if method != "GetFightersForShip" {
+                        return Some(Err(crate::system_actor::FighterActorError::plain("StorageError", e).into_bridge_err()));
+                    }
+                }
+            }
+        }
+    }
     let res = if service == "fighterMgr" && method == "CmdScoopAbandonedFighterFromSpace" {
         Box::pin(handle_scoop_abandoned_fighter(ctx, session, args)).await
     } else {
@@ -375,6 +318,21 @@ pub async fn handle_fighters(
     };
     let is_read_only = matches!((service, method), ("fighterMgr", "GetFightersForShip"));
     if !is_read_only && matches!(res, Some(Ok(_))) {
+        let mut flushed_sys = None;
+        if let Some(ship_id) = session.ship_id.or(session.structure_id) {
+            let sys_id = resolve_fighter_ship_system_id(ctx, session, ship_id);
+            ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+            flushed_sys = Some(sys_id);
+        } else if let Some(sys_id) = session
+            .solar_system_id
+            .filter(|&s| (30_000_000..40_000_000).contains(&s))
+        {
+            ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+            flushed_sys = Some(sys_id);
+        }
+        if flushed_sys.is_none() {
+            let _ = ctx.systems.flush_all_fighter_checkpoints_to_db();
+        }
         ctx.persist_server_runtime_to_db();
     }
     res
@@ -393,10 +351,10 @@ async fn handle_fighters_inner(
             handle_get_fighters_for_ship(ctx, session, args)
         }
         ("fighterMgr", "LoadFightersToTube") => {
-            handle_load_fighters_to_tube(ctx, session, args)
+            Box::pin(handle_load_fighters_to_tube(ctx, session, args)).await
         }
         ("fighterMgr", "UnloadTubeToFighterBay") => {
-            handle_unload_tube_to_fighter_bay(ctx, session, args)
+            Box::pin(handle_unload_tube_to_fighter_bay(ctx, session, args)).await
         }
         ("fighterMgr", "LaunchFightersFromTubes") => {
             Box::pin(handle_launch_fighters_from_tubes(ctx, session, args)).await
@@ -455,13 +413,13 @@ fn handle_get_fighters_for_ship(
             client_error: None,
         }));
     }
-    let mut tube_pairs: Vec<(usize, i64)> = ctx
-        .fighter_tube_loads
-        .read()
-        .unwrap()
+    let ship_sys_id = resolve_fighter_ship_system_id(ctx, session, ship_id);
+    let fg = ctx.systems.snapshot_fighters_for_system(ship_sys_id);
+    let mut tube_pairs: Vec<(usize, i64)> = fg
+        .tube_loads
         .iter()
         .filter(|&(&(sid, _), _)| sid == ship_id)
-        .map(|(&(_, tidx), &fid)| (tidx, fid))
+        .map(|(&(_, tidx), &(fid, _))| (tidx, fid))
         .collect();
     tube_pairs.sort_by_key(|&(tidx, _)| tidx);
     let fighters_in_tubes: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
@@ -478,10 +436,8 @@ fn handle_get_fighters_for_ship(
             })
             .collect()
     });
-    let mut in_space_vec: Vec<_> = ctx
+    let mut in_space_vec: Vec<_> = fg
         .active_fighters
-        .read()
-        .unwrap()
         .values()
         .filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned)
         .cloned()
@@ -508,7 +464,7 @@ fn handle_get_fighters_for_ship(
     ])))
 }
 
-fn handle_load_fighters_to_tube(
+async fn handle_load_fighters_to_tube(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
@@ -576,41 +532,20 @@ fn handle_load_fighters_to_tube(
         }));
     }
 
+    let ship_sys_id = resolve_fighter_ship_system_id(ctx, session, ship_id);
+    if let Err(e) = ctx
+        .systems
+        .load_or_unload_fighter_tube(
+            ship_sys_id,
+            FighterTubeOp::PreCheckLoad {
+                ship_id,
+                tube_index: tube_idx,
+                fighter_item_id,
+            },
+        )
+        .await
     {
-        let tube_loads = ctx.fighter_tube_loads.read().unwrap();
-        if tube_loads
-            .iter()
-            .any(|(&(sid, tidx), &fid)| sid == ship_id && fid == fighter_item_id && tidx != tube_idx)
-        {
-            return Some(Err(BridgeRpcError {
-                code: "FighterAlreadyLoaded".into(),
-                message: format!("Fighter item {fighter_item_id} is already loaded in another tube"),
-                client_error: None,
-            }));
-        }
-    }
-    {
-        let active = ctx.active_fighters.read().unwrap();
-        if active
-            .values()
-            .any(|f| f.item_id == fighter_item_id && !f.is_abandoned)
-        {
-            return Some(Err(BridgeRpcError {
-                code: "FighterAlreadyLaunched".into(),
-                message: format!("Fighter item {fighter_item_id} is already launched in space"),
-                client_error: None,
-            }));
-        }
-        if active
-            .values()
-            .any(|f| f.parent_ship_id == ship_id && f.tube_index == tube_idx && !f.is_abandoned)
-        {
-            return Some(Err(BridgeRpcError {
-                code: "FighterAlreadyLaunched".into(),
-                message: format!("Tube {tube_idx} currently has a squadron deployed in space"),
-                client_error: None,
-            }));
-        }
+        return Some(Err(e.into_bridge_err()));
     }
 
     let item_opt = ctx
@@ -637,19 +572,6 @@ fn handle_load_fighters_to_tube(
             client_error: None,
         }));
     }
-    if ctx
-        .fighter_tube_loads
-        .read()
-        .unwrap()
-        .iter()
-        .any(|(&(sid, tidx), &fid)| sid == ship_id && tidx != tube_idx && fid == fighter_item_id)
-    {
-        return Some(Err(BridgeRpcError {
-            code: "FighterAlreadyLoadedInTube".into(),
-            message: format!("Fighter item {fighter_item_id} is already loaded in another fighter tube"),
-            client_error: None,
-        }));
-    }
     let is_fighter_category = ctx
         .sde
         .types
@@ -666,17 +588,25 @@ fn handle_load_fighters_to_tube(
             client_error: None,
         }));
     }
-    if let Err(e) = check_fighter_class_slot_limit(
-        ctx,
-        ship_id,
-        carrier_type_id,
-        item.type_id,
-        true,
-        1,
-        Some(tube_idx),
-    ) {
-        return Some(Err(e));
-    }
+
+    let prev_loaded = match ctx
+        .systems
+        .load_or_unload_fighter_tube(
+            ship_sys_id,
+            FighterTubeOp::CommitLoad {
+                ship_id,
+                tube_index: tube_idx,
+                fighter_item_id,
+                carrier_type_id,
+                fighter_type_id: item.type_id,
+                sde: Arc::clone(&ctx.sde),
+            },
+        )
+        .await
+    {
+        Ok(prev) => prev,
+        Err(e) => return Some(Err(e.into_bridge_err())),
+    };
 
     let max_squadron_size = ctx
         .sde
@@ -695,39 +625,47 @@ fn handle_load_fighters_to_tube(
         })
         .unwrap_or(9);
 
-    let loaded_fighter_id = if item.quantity > max_squadron_size as i32 {
-        let excess_qty = item.quantity - max_squadron_size as i32;
+    let loaded_fighter_id = fighter_item_id;
+    let max_sz_i32 = max_squadron_size as i32;
+    let sq_size_opt = if item.quantity > max_sz_i32 {
         ctx.db.with_mut_snapshot(|snap| {
-            if let Some(it) = snap.items.get_mut(&fighter_item_id) {
-                it.quantity = max_squadron_size as i32;
-                it.version += 1;
-            }
+            let it = snap.items.get_mut(&fighter_item_id)?;
+            if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::FighterBay { return None; }
+            if it.quantity <= max_sz_i32 { return Some(it.quantity as i64); }
+            let excess = it.quantity - max_sz_i32;
+            it.quantity = max_sz_i32;
+            it.version += 1;
+            let (type_id, owner_id, location_id, flag) = (it.type_id, it.owner_id, it.location_id, it.flag);
             snap.next_entity_id += 1;
             let rem_id = snap.next_entity_id;
-            let rem_item = InventoryItemRecord {
-                item_id: rem_id,
-                type_id: item.type_id,
-                owner_id: item.owner_id,
-                location_id: item.location_id,
-                flag: item.flag,
-                quantity: excess_qty,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            };
-            snap.items.insert(rem_id, rem_item);
-            fighter_item_id
+            snap.items.insert(rem_id, InventoryItemRecord {
+                item_id: rem_id, type_id, owner_id, location_id, flag, quantity: excess, singleton: false, version: 1,
+                dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0,
+                is_blueprint_copy: false, blueprint_runs_remaining: None,
+            });
+            Some(max_sz_i32 as i64)
         })
     } else {
-        fighter_item_id
+        ctx.db.with_snapshot(|snap| {
+            snap.items.get(&fighter_item_id)
+                .filter(|it| it.owner_id == char_id && it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
+                .map(|it| it.quantity.min(max_sz_i32) as i64)
+        })
     };
-
-    ctx.fighter_tube_loads.write().unwrap().insert((ship_id, tube_idx), loaded_fighter_id);
-    let loaded_sq_size = item.quantity.min(max_squadron_size as i32) as i64;
+    let Some(loaded_sq_size) = sq_size_opt else {
+        let restore_prev = prev_loaded.map(|pfid| {
+            let ptype = ctx.db.with_snapshot(|s| s.items.get(&pfid).map(|i| i.type_id).unwrap_or(0));
+            (pfid, ptype)
+        });
+        let _ = ctx.systems.load_or_unload_fighter_tube(ship_sys_id, FighterTubeOp::RollbackLoad {
+            ship_id, tube_index: tube_idx, expected_fighter_item_id: fighter_item_id, restore_prev,
+        }).await;
+        return Some(Err(BridgeRpcError {
+            code: "ItemNotInFighterBay".into(),
+            message: format!("Fighter item {fighter_item_id} moved or lost ownership before tube load split"),
+            client_error: None,
+        }));
+    };
     crate::router::notify_registry::push_typed_session_notification(
         session,
         crate::router::notify_registry::OnFighterTubeContentUpdate {
@@ -763,7 +701,7 @@ fn handle_load_fighters_to_tube(
     ])))
 }
 
-fn handle_unload_tube_to_fighter_bay(
+async fn handle_unload_tube_to_fighter_bay(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
@@ -820,20 +758,21 @@ fn handle_unload_tube_to_fighter_bay(
         }));
     }
     let tube_idx = raw_tube as usize;
+    let ship_sys_id = resolve_fighter_ship_system_id(ctx, session, ship_id);
+    let removed = match ctx
+        .systems
+        .load_or_unload_fighter_tube(
+            ship_sys_id,
+            FighterTubeOp::Unload {
+                ship_id,
+                tube_index: tube_idx,
+            },
+        )
+        .await
     {
-        let active = ctx.active_fighters.read().unwrap();
-        if active
-            .values()
-            .any(|f| f.parent_ship_id == ship_id && f.tube_index == tube_idx && !f.is_abandoned)
-        {
-            return Some(Err(BridgeRpcError {
-                code: "FighterAlreadyLaunched".into(),
-                message: format!("Cannot unload tube {tube_idx} while squadron is deployed in space"),
-                client_error: None,
-            }));
-        }
-    }
-    let removed = ctx.fighter_tube_loads.write().unwrap().remove(&(ship_id, tube_idx));
+        Ok(v) => v,
+        Err(e) => return Some(Err(e.into_bridge_err())),
+    };
     if removed.is_some() {
         crate::router::notify_registry::push_typed_session_notification(
             session,
@@ -929,17 +868,20 @@ async fn handle_launch_fighters_from_tubes(
         .map(|v| v as usize)
         .unwrap_or(0);
 
-    let tubes_to_launch: Vec<usize> = if let Some(req) = requested_tubes {
-        for &tidx in &req {
-            if !(0..tube_count).contains(&tidx) {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidFighterTube".into(),
-                    message: format!("Tube index {tidx} is invalid (ship/structure has {tube_count} tubes)"),
-                    client_error: None,
-                }));
-            }
-            {
-                let fighters = ctx.fighters.read().unwrap();
+    {
+        let v = sys_handle.view();
+        let fighters = &v.fighters;
+        if let Some(ref req) = requested_tubes {
+            for &tidx in req {
+                if !(0..tube_count).contains(&tidx) {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidFighterTube".into(),
+                        message: format!(
+                            "Tube index {tidx} is invalid (ship/structure has {tube_count} tubes)"
+                        ),
+                        client_error: None,
+                    }));
+                }
                 if fighters
                     .active_fighters
                     .values()
@@ -947,7 +889,9 @@ async fn handle_launch_fighters_from_tubes(
                 {
                     return Some(Err(BridgeRpcError {
                         code: "FighterAlreadyLaunched".into(),
-                        message: format!("Fighter squadron in tube {tidx} is already launched in space"),
+                        message: format!(
+                            "Fighter squadron in tube {tidx} is already launched in space"
+                        ),
                         client_error: None,
                     }));
                 }
@@ -958,46 +902,44 @@ async fn handle_launch_fighters_from_tubes(
                         client_error: None,
                     }));
                 }
+                let now_unix = ctx.now_unix();
+                if fighters
+                    .tube_rearm_until
+                    .get(&(ship_id, tidx))
+                    .copied()
+                    .unwrap_or(0)
+                    > now_unix
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "TubeRearming".into(),
+                        message: format!("Fighter tube {tidx} is currently rearming/repairing"),
+                        client_error: None,
+                    }));
+                }
             }
-            let now_unix = ctx.now_unix();
-            let is_rearming = with_combat_runtime(ctx, |rt| {
-                rt.fighter_tube_rearm_until.get(&(ship_id, tidx)).copied().unwrap_or(0) > now_unix
-            });
-            if is_rearming {
+        } else {
+            let available_any = (0..tube_count).any(|tidx| fighters.tube_loads.contains_key(&(ship_id, tidx)));
+            if !available_any {
+                if (0..tube_count).any(|tidx| {
+                    fighters
+                        .active_fighters
+                        .values()
+                        .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
+                }) {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterAlreadyLaunched".into(),
+                        message: "All loaded fighter squadrons are already launched in space".into(),
+                        client_error: None,
+                    }));
+                }
                 return Some(Err(BridgeRpcError {
-                    code: "TubeRearming".into(),
-                    message: format!("Fighter tube {tidx} is currently rearming/repairing"),
+                    code: "EmptyFighterTube".into(),
+                    message: "No fighters loaded in tubes".into(),
                     client_error: None,
                 }));
             }
         }
-        req
-    } else {
-        let fighters = ctx.fighters.read().unwrap();
-        let available: Vec<usize> = (0..tube_count)
-            .filter(|&tidx| fighters.tube_loads.contains_key(&(ship_id, tidx)))
-            .collect();
-        if available.is_empty() {
-            if (0..tube_count).any(|tidx| {
-                fighters
-                    .active_fighters
-                    .values()
-                    .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
-            }) {
-                return Some(Err(BridgeRpcError {
-                    code: "FighterAlreadyLaunched".into(),
-                    message: "All loaded fighter squadrons are already launched in space".into(),
-                    client_error: None,
-                }));
-            }
-            return Some(Err(BridgeRpcError {
-                code: "EmptyFighterTube".into(),
-                message: "No fighters loaded in tubes".into(),
-                client_error: None,
-            }));
-        }
-        available
-    };
+    }
 
     if let Ok(Some(ship_cs)) = sys_handle.get_combat_state(ship_id).await {
         if ship_cs.is_tethered {
@@ -1010,23 +952,37 @@ async fn handle_launch_fighters_from_tubes(
     }
 
     static NEXT_FIGHTER_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-300_000);
-    let claimed_tubes: Vec<(usize, i64)> = {
-        let mut guard = ctx.fighter_tube_loads.write().unwrap();
-        tubes_to_launch
-            .iter()
-            .filter_map(|&tube_idx| guard.remove(&(ship_id, tube_idx)).map(|fid| (tube_idx, fid)))
-            .collect()
+    let res_count = requested_tubes
+        .as_ref()
+        .map(|r| r.len())
+        .unwrap_or(tube_count)
+        .max(tube_count)
+        .max(1);
+    let next_res_ids: Vec<i64> = (0..res_count)
+        .map(|_| NEXT_FIGHTER_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed))
+        .collect();
+    let launch_out = match sys_handle
+        .fighter_launch_op(FighterLaunchActorOp::ClaimAndReserve {
+            ship_id,
+            char_id,
+            carrier_type_id,
+            tube_count,
+            requested_tubes,
+            now_unix: ctx.now_unix(),
+            next_res_ids,
+            sde: Arc::clone(&ctx.sde),
+        })
+        .await
+    {
+        Ok(out) => out,
+        Err(e) => return Some(Err(e.into_bridge_err())),
     };
-    let restore_tubes = |claimed: &[(usize, i64)]| {
-        let mut guard = ctx.fighter_tube_loads.write().unwrap();
-        for &(tidx, fid) in claimed {
-            guard.insert((ship_id, tidx), fid);
-        }
-    };
+    let claimed_tubes = launch_out.claimed_tubes;
+    let res_ids = launch_out.res_ids;
+    let raw_res_ids: Vec<i64> = res_ids.iter().map(|&(_, rid)| rid).collect();
 
-    let items_meta: Vec<(usize, i64, u32)> = match ctx.db.with_snapshot(|snap| -> Result<Vec<(usize, i64, u32)>, BridgeRpcError> {
-        let mut out = Vec::with_capacity(claimed_tubes.len());
-        for &(tube_idx, fighter_item_id) in &claimed_tubes {
+    let precheck_err = ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        for &(tube_idx, (fighter_item_id, _)) in &claimed_tubes {
             let Some(item) = snap.items.get(&fighter_item_id) else {
                 return Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
@@ -1046,194 +1002,132 @@ async fn handle_launch_fighters_from_tubes(
                     client_error: None,
                 });
             }
-            out.push((tube_idx, fighter_item_id, item.type_id));
         }
-        Ok(out)
-    }) {
-        Ok(v) => v,
-        Err(e) => {
-            restore_tubes(&claimed_tubes);
-            return Some(Err(e));
-        }
-    };
+        Ok(())
+    });
+    if let Err(e) = precheck_err {
+        let _ = sys_handle
+            .fighter_launch_op(FighterLaunchActorOp::Rollback {
+                ship_id,
+                res_ids: raw_res_ids,
+                claimed_tubes,
+            })
+            .await;
+        return Some(Err(e));
+    }
 
-    let res_ids: Vec<(usize, i64)> = {
-        let mut active = ctx.active_fighters.write().unwrap();
-        let mut inserted = Vec::with_capacity(items_meta.len());
-        for &(tube_idx, fid, ftype) in &items_meta {
-            if let Err(e) = check_fighter_class_slot_limit_in_map(&active, ctx, ship_id, carrier_type_id, ftype, 1) {
-                for &(_, rid) in &inserted {
-                    active.remove(&rid);
-                }
-                drop(active);
-                restore_tubes(&claimed_tubes);
-                return Some(Err(e));
-            }
-            let rid = NEXT_FIGHTER_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            active.insert(rid, crate::router::context::ActiveFighterSquadron {
-                ball_id: rid,
-                item_id: fid,
-                type_id: ftype,
-                owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                tube_index: tube_idx,
-                squadron_size: 1,
-                target_id: None,
-                is_abandoned: false,
-                mwd_active: false,
-            });
-            inserted.push((tube_idx, rid));
-        }
-        inserted
-    };
-    let rollback_launch_claims = || {
-        {
-            let mut active = ctx.active_fighters.write().unwrap();
-            for &(_, rid) in &res_ids {
-                active.remove(&rid);
-            }
-        }
-        restore_tubes(&claimed_tubes);
-    };
-
-    let db_committed = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(usize, i64, i64, u32, u32, [f64; 3])>, BridgeRpcError> {
+    struct LaunchDbEntry {
+        tube_idx: usize,
+        fighter_item_id: i64,
+        ball_id: i64,
+        item_type_id: u32,
+        launched_units: u32,
+        ball_pos: [f64; 3],
+        orig_qty: i32,
+        orig_loc: i64,
+        orig_flag: InventoryFlag,
+        orig_pos: Option<[f64; 3]>,
+        prev_drone_ball: Option<Option<i64>>,
+        rem_id: Option<i64>,
+    }
+    let db_committed = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<LaunchDbEntry>, BridgeRpcError> {
         if let Some(ch) = snap.characters.get(&char_id) {
             let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
             if entry_db_state.is_some_and(|e| cur_db_state != e) {
                 return Err(BridgeRpcError::ship_not_in_space(
-                    ship_id,
-                    Some(char_id),
-                    Some(sys_id),
-                    "LaunchFighter",
+                    ship_id, Some(char_id), Some(sys_id), "LaunchFighter",
                     format!("Ship {ship_id} is no longer undocked in solar system {sys_id}"),
                 ));
             }
         }
         let mut committed = Vec::with_capacity(claimed_tubes.len());
-        for &(tube_idx, fighter_item_id) in &claimed_tubes {
-            let item_type_id = snap
-                .items
-                .get(&fighter_item_id)
-                .ok_or_else(|| BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
-                    client_error: None,
-                })?
+        for &(tube_idx, (fighter_item_id, _)) in &claimed_tubes {
+            let item_type_id = snap.items.get(&fighter_item_id)
+                .ok_or_else(|| crate::system_actor::FighterActorError::plain("ItemNotFound", format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists")).into_bridge_err())?
                 .type_id;
-            let max_squadron_size = ctx
-                .sde
-                .types
-                .get(&item_type_id)
-                .map(|t| {
-                    t.default_attributes
-                        .get(&2215)
-                        .copied()
-                        .map(|v| v as u32)
-                        .unwrap_or(match t.group_id {
-                            1537 | 4778 => 3,
-                            1653 | 4779 => 6,
-                            _ => 9,
-                        })
-                })
-                .unwrap_or(9);
+            let max_squadron_size = ctx.sde.types.get(&item_type_id).map(|t| {
+                t.default_attributes.get(&2215).copied().map(|v| v as u32)
+                    .unwrap_or(match t.group_id { 1537 | 4778 => 3, 1653 | 4779 => 6, _ => 9 })
+            }).unwrap_or(9);
             let cap = max_squadron_size.max(1) as i32;
             let tube_flag = InventoryFlag::from_u16(159 + tube_idx as u16);
 
-            let (launched_units, rem_excess) = {
+            let (orig_qty, orig_loc, orig_flag, launched_units, rem_excess) = {
                 let it = snap.items.get_mut(&fighter_item_id).unwrap();
-                if it.owner_id != char_id
-                    || it.location_id != ship_id
-                    || (it.flag != InventoryFlag::FighterBay && it.flag != tube_flag)
-                    || it.quantity <= 0
-                {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotInFighterBay".into(),
-                        message: format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay"),
-                        client_error: None,
-                    });
+                if it.owner_id != char_id || it.location_id != ship_id || (it.flag != InventoryFlag::FighterBay && it.flag != tube_flag) || it.quantity <= 0 {
+                    return Err(crate::system_actor::FighterActorError::plain("ItemNotInFighterBay", format!("Fighter item {fighter_item_id} is no longer owned by pilot in ship's fighter bay")).into_bridge_err());
                 }
-                let rem = if it.quantity > cap {
+                let (orig_qty, orig_loc, orig_flag) = (it.quantity, it.location_id, it.flag);
+                let rem = (it.quantity > cap).then(|| {
                     let excess = it.quantity - cap;
-                    let excess_rec = InventoryItemRecord {
-                        item_id: 0,
-                        type_id: it.type_id,
-                        owner_id: it.owner_id,
-                        location_id: ship_id,
-                        flag: InventoryFlag::FighterBay,
-                        quantity: excess,
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    };
                     it.quantity = cap;
-                    Some(excess_rec)
-                } else {
-                    None
-                };
+                    InventoryItemRecord {
+                        item_id: 0, type_id: it.type_id, owner_id: it.owner_id, location_id: ship_id,
+                        flag: InventoryFlag::FighterBay, quantity: excess, singleton: false, version: 1,
+                        ..Default::default()
+                    }
+                });
                 let units = (it.quantity.max(1) as u32).min(max_squadron_size);
                 it.location_id = sys_id as i64;
                 it.flag = eve_db::InventoryFlag::None;
                 it.version += 1;
-                (units, rem)
+                (orig_qty, orig_loc, orig_flag, units, rem)
             };
-            if let Some(mut rem_item) = rem_excess {
+            let rem_id = rem_excess.map(|mut rem_item| {
                 snap.next_entity_id += 1;
-                rem_item.item_id = snap.next_entity_id;
-                snap.items.insert(rem_item.item_id, rem_item);
-            }
+                let rid = snap.next_entity_id;
+                rem_item.item_id = rid;
+                snap.items.insert(rid, rem_item);
+                rid
+            });
             snap.next_entity_id += 1;
             let ball_id = snap.next_entity_id;
-            let offset = DVec3::new((tube_idx as f64 + 1.0) * 50.0, 0.0, 0.0);
-            let ball_pos = [
-                ship_ball.position.x + offset.x,
-                ship_ball.position.y + offset.y,
-                ship_ball.position.z + offset.z,
-            ];
+            let ball_pos = [ship_ball.position.x + (tube_idx as f64 + 1.0) * 50.0, ship_ball.position.y, ship_ball.position.z];
+            let orig_pos = snap.item_positions.get(&fighter_item_id).copied();
+            let prev_drone_ball = snap.sp6_lifecycle.space_object_meta.get(&fighter_item_id).map(|m| m.drone_ball_id);
             crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, fighter_item_id, ball_id);
             snap.item_positions.insert(fighter_item_id, ball_pos);
             snap.item_positions.insert(ball_id, ball_pos);
-            committed.push((tube_idx, fighter_item_id, ball_id, item_type_id, launched_units, ball_pos));
+            committed.push(LaunchDbEntry {
+                tube_idx, fighter_item_id, ball_id, item_type_id, launched_units, ball_pos,
+                orig_qty, orig_loc, orig_flag, orig_pos, prev_drone_ball, rem_id,
+            });
         }
         Ok(committed)
     });
     let committed_launches = match db_committed {
         Ok(v) => v,
         Err(e) => {
-            rollback_launch_claims();
+            let _ = sys_handle
+                .fighter_launch_op(FighterLaunchActorOp::Rollback {
+                    ship_id,
+                    res_ids: raw_res_ids,
+                    claimed_tubes,
+                })
+                .await;
             return Some(Err(e));
         }
     };
 
-    {
-        let mut active = ctx.active_fighters.write().unwrap();
-        for &(_, rid) in &res_ids {
-            active.remove(&rid);
-        }
-        for &(tube_idx, fighter_item_id, ball_id, item_type_id, launched_units, _) in &committed_launches {
-            active.insert(
-                ball_id,
-                crate::router::context::ActiveFighterSquadron {
-                    ball_id,
-                    item_id: fighter_item_id,
-                    type_id: item_type_id,
-                    owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    tube_index: tube_idx,
-                    squadron_size: launched_units,
-                    target_id: None,
-                    is_abandoned: false,
-                    mwd_active: false,
-                },
-            );
-        }
-    }
-
-    let mut launched_ball_ids = Vec::new();
-    for (tube_idx, _fighter_item_id, ball_id, item_type_id, launched_units, ball_pos) in committed_launches {
+    let (pilot_corp_id, pilot_alliance_id) = ctx
+        .db
+        .get_character(char_id)
+        .map(|ch| (ch.corporation_id, ch.alliance_id.unwrap_or(-1)))
+        .unwrap_or((
+            session.corporation_id.unwrap_or(-1),
+            session.alliance_id.unwrap_or(-1),
+        ));
+    let mut spawns = Vec::with_capacity(committed_launches.len());
+    let mut launched_ball_ids = Vec::with_capacity(committed_launches.len());
+    for entry in &committed_launches {
+        let (tube_idx, fighter_item_id, ball_id, item_type_id, launched_units, ball_pos) = (
+            entry.tube_idx,
+            entry.fighter_item_id,
+            entry.ball_id,
+            entry.item_type_id,
+            entry.launched_units,
+            entry.ball_pos,
+        );
         let ball = eve_destiny::Ball {
             id: ball_id,
             type_id: item_type_id,
@@ -1257,14 +1151,6 @@ async fn handle_launch_fighters_from_tubes(
         cs.max_armor_hp *= squad_size;
         cs.structure_hp *= squad_size;
         cs.max_structure_hp *= squad_size;
-        let (pilot_corp_id, pilot_alliance_id) = ctx
-            .db
-            .get_character(char_id)
-            .map(|ch| (ch.corporation_id, ch.alliance_id.unwrap_or(-1)))
-            .unwrap_or((
-                session.corporation_id.unwrap_or(-1),
-                session.alliance_id.unwrap_or(-1),
-            ));
         let f_type = ctx.sde.types.get(&item_type_id);
         let fighter_meta = eve_destiny::SlimItemMeta {
             group_id: f_type.map(|t| t.group_id).unwrap_or(1652),
@@ -1278,8 +1164,85 @@ async fn handle_launch_fighters_from_tubes(
             name: f_type.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
             ..Default::default()
         };
-        let _ = sys_handle.spawn_ball_with_meta(ball, cs, fighter_meta).await;
+        spawns.push(FighterLaunchSpawnInput {
+            squadron: ActiveFighterSquadron {
+                ball_id,
+                item_id: fighter_item_id,
+                type_id: item_type_id,
+                owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                tube_index: tube_idx,
+                squadron_size: launched_units,
+                target_id: None,
+                is_abandoned: false,
+                mwd_active: false,
+            },
+            ball,
+            combat_state: cs,
+            slim_meta: Some(fighter_meta),
+        });
+    }
+    let rollback_res_ids = raw_res_ids.clone();
+    if let Err(err) = sys_handle
+        .fighter_launch_op(FighterLaunchActorOp::CommitSpawned {
+            res_ids: raw_res_ids,
+            spawns,
+        })
+        .await
+    {
+        ctx.db.with_mut_snapshot(|snap| {
+            for entry in &committed_launches {
+                if let Some(it) = snap.get_any_item_mut(entry.fighter_item_id) {
+                    if it.location_id == sys_id as i64 && it.flag == InventoryFlag::None {
+                        it.quantity = entry.orig_qty;
+                        it.location_id = entry.orig_loc;
+                        it.flag = entry.orig_flag;
+                        it.version += 1;
+                    }
+                }
+                if let Some(rid) = entry.rem_id {
+                    snap.remove_system_cleanup_item(rid);
+                }
+                snap.item_positions.remove(&entry.ball_id);
+                match entry.orig_pos {
+                    Some(pos) => {
+                        snap.item_positions.insert(entry.fighter_item_id, pos);
+                    }
+                    None => {
+                        snap.item_positions.remove(&entry.fighter_item_id);
+                    }
+                }
+                match entry.prev_drone_ball {
+                    Some(prev) => {
+                        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&entry.fighter_item_id) {
+                            meta.drone_ball_id = prev;
+                        }
+                    }
+                    None => {
+                        snap.sp6_lifecycle.space_object_meta.remove(&entry.fighter_item_id);
+                    }
+                }
+            }
+        });
+        let _ = sys_handle
+            .fighter_launch_op(FighterLaunchActorOp::Rollback {
+                ship_id,
+                res_ids: rollback_res_ids,
+                claimed_tubes,
+            })
+            .await;
+        tracing::error!(ship_id, sys_id, code = %err.code, message = %err.message, "CommitSpawned failed during fighter launch");
+        return Some(Err(err.into_bridge_err()));
+    }
 
+    for entry in committed_launches {
+        let (tube_idx, _fighter_item_id, ball_id, item_type_id, launched_units) = (
+            entry.tube_idx,
+            entry.fighter_item_id,
+            entry.ball_id,
+            entry.item_type_id,
+            entry.launched_units,
+        );
         let tube_flag = (159 + tube_idx) as i64;
         let now_ft = ctx.now_client_sim_filetime_ticks();
         crate::router::notify_registry::push_typed_session_notification(
@@ -1346,10 +1309,10 @@ async fn handle_recall_fighters_to_tubes(
         Err(e) => return Some(Err(e)),
     };
 
-    let candidate_ids: Vec<(i64, u32)> = ctx
+    let candidate_ids: Vec<(i64, u32)> = sys_handle
+        .view()
+        .fighters
         .active_fighters
-        .read()
-        .unwrap()
         .values()
         .filter(|f| {
             f.parent_ship_id == ship_id
@@ -1441,74 +1404,30 @@ async fn handle_recall_fighters_to_tubes(
                 eve_proto::ClientError::CustomInfo(message),
             )));
         }
-        let missing_cs_hp = sys_handle
-            .get_combat_state(bid)
+        let Some(claim) = sys_handle
+            .fighter_recall_op(FighterRecallActorOp::ClaimActive {
+                ball_id: bid,
+                ship_id,
+                char_id,
+                sde: Arc::clone(&ctx.sde),
+            })
             .await
             .ok()
             .flatten()
-            .map(|cs| {
-                (cs.max_shield_hp - cs.shield_hp).max(0.0)
-                    + (cs.max_armor_hp - cs.armor_hp).max(0.0)
-                    + (cs.max_structure_hp - cs.structure_hp).max(0.0)
-            })
-            .unwrap_or(0.0);
-
-        let claimed = {
-            let mut fg = ctx.fighters.write().unwrap();
-            let valid = fg.active_fighters.get(&bid).is_some_and(|cur| {
-                cur.parent_ship_id == ship_id
-                    && cur.owner_char_id == char_id
-                    && !cur.is_abandoned
-                    && cur.squadron_size > 0
-            });
-            if valid {
-                let f = fg.active_fighters.remove(&bid).unwrap();
-                let charge_reload_s: f64 = ctx
-                    .sde
-                    .fighter_abilities_by_type
-                    .get(&f.type_id)
-                    .map(|slots| {
-                        slots
-                            .iter()
-                            .filter_map(|s| {
-                                let ch = s.charges.as_ref()?;
-                                let used = fg.charge_state.get(&(bid, s.slot_index as u32)).copied().unwrap_or(0);
-                                let max_c = ch.charge_count.max(1) as f64;
-                                (used > 0).then_some(((used as f64) / max_c) * (ch.rearm_time_seconds.max(1.0) * 0.45))
-                            })
-                            .sum()
-                    })
-                    .unwrap_or(0.0);
-                let saved_charges: Vec<_> = fg
-                    .charge_state
-                    .iter()
-                    .filter(|(&(id, _), _)| id == bid)
-                    .map(|(&k, &v)| (k, v))
-                    .collect();
-                let saved_cooldowns: Vec<_> = fg
-                    .cooldown_state
-                    .iter()
-                    .filter(|(&(id, _), _)| id == bid)
-                    .map(|(&k, &v)| (k, v))
-                    .collect();
-                fg.charge_state.retain(|&(id, _), _| id != bid);
-                fg.cooldown_state.retain(|&(id, _), _| id != bid);
-                let loaded_tube_ids: std::collections::HashSet<i64> = fg.tube_loads.values().copied().collect();
-                Some((f, charge_reload_s, loaded_tube_ids, saved_charges, saved_cooldowns))
-            } else {
-                None
-            }
-        };
-        let Some((mut f, charge_reload_s, loaded_tube_ids, saved_charges, saved_cooldowns)) = claimed else {
+        else {
             continue;
         };
+        let f = claim.squadron;
+        let charge_reload_s = claim.charge_reload_s;
+        let loaded_tube_ids = claim.loaded_tube_ids;
+        let saved_charges = claim.saved_charges;
+        let saved_cooldowns = claim.saved_cooldowns;
+        let accum_dmg = claim.accum_dmg;
+        let missing_cs_hp = claim.missing_cs_hp;
 
         for slot in 0..3 {
             ctx.remove_projected_ewar_by_module(ship_id, -(bid * 10 + slot));
         }
-        let accum_dmg = with_mut_combat_runtime(ctx, |rt| {
-            rt.fighter_unit_damage_accum.remove(&bid).unwrap_or(0.0)
-        });
 
         let f_sde = ctx.sde.types.get(&f.type_id);
         let base_refuel_s = f_sde
@@ -1530,7 +1449,15 @@ async fn handle_recall_fighters_to_tubes(
                 })
             })
             .unwrap_or(9);
-        let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i32, BridgeRpcError> {
+        struct RecallDbDelta {
+            main_existed: bool,
+            orig_loc: i64,
+            orig_flag: InventoryFlag,
+            orig_qty: i32,
+            orig_pos: Option<[f64; 3]>,
+            consumed_reserves: Vec<(i64, i32, Option<InventoryItemRecord>)>,
+        }
+        let db_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(i32, RecallDbDelta), BridgeRpcError> {
             let char_invalid = snap.characters.get(&char_id).is_some_and(|ch| {
                 let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
                 entry_db_state.is_some_and(|e| cur_db_state != e)
@@ -1552,13 +1479,24 @@ async fn handle_recall_fighters_to_tubes(
                 ));
             }
             let mut refilled_units = 0i32;
+            let mut delta = RecallDbDelta {
+                main_existed: false,
+                orig_loc: sys_id as i64,
+                orig_flag: InventoryFlag::None,
+                orig_qty: f.squadron_size as i32,
+                orig_pos: snap.item_positions.remove(&f.item_id),
+                consumed_reserves: Vec::new(),
+            };
             if let Some(main_it) = snap.items.get_mut(&f.item_id) {
+                delta.main_existed = true;
+                delta.orig_loc = main_it.location_id;
+                delta.orig_flag = main_it.flag;
+                delta.orig_qty = main_it.quantity;
                 main_it.location_id = ship_id;
                 main_it.flag = InventoryFlag::FighterBay;
                 main_it.quantity = f.squadron_size as i32;
                 main_it.version += 1;
             }
-            snap.item_positions.remove(&f.item_id);
             let mut needed = (max_squadron_size - f.squadron_size as i32).max(0);
             if needed > 0 {
                 let reserve_ids: Vec<i64> = snap
@@ -1575,10 +1513,19 @@ async fn handle_recall_fighters_to_tubes(
                     if needed <= 0 { break; }
                     if let Some(res_it) = snap.items.get_mut(&rid) {
                         let take = res_it.quantity.min(needed);
-                        res_it.quantity -= take;
-                        needed -= take;
-                        refilled_units += take;
-                        if res_it.quantity <= 0 { snap.items.remove(&rid); }
+                        if take >= res_it.quantity {
+                            let removed = res_it.clone();
+                            needed -= take;
+                            refilled_units += take;
+                            delta.consumed_reserves.push((rid, take, Some(removed)));
+                            snap.items.remove(&rid);
+                        } else {
+                            res_it.quantity -= take;
+                            res_it.version += 1;
+                            needed -= take;
+                            refilled_units += take;
+                            delta.consumed_reserves.push((rid, take, None));
+                        }
                     }
                 }
                 if refilled_units > 0 {
@@ -1588,43 +1535,36 @@ async fn handle_recall_fighters_to_tubes(
                     }
                 }
             }
-            Ok(refilled_units)
+            Ok((refilled_units, delta))
         });
-        let refilled_units = match db_res {
-            Ok(units) => units,
+        let (refilled_units, recall_delta) = match db_res {
+            Ok(v) => v,
             Err(e) => {
-                let destroyed = with_mut_combat_runtime_tx_locks(
-                    &ctx.db,
-                    &*ctx.combat_ephemeral,
-                    |snap, rt| {
-                        let dead = snap
+                let destroyed = ctx.db.with_snapshot(|snap| {
+                    snap.combat_crimewatch_state
+                        .is_recently_destroyed_item_id(f.ball_id)
+                        || snap
                             .combat_crimewatch_state
-                            .is_recently_destroyed_item_id(f.ball_id)
-                            || snap
-                                .combat_crimewatch_state
-                                .is_recently_destroyed_item_id(f.item_id);
-                        if !dead && accum_dmg > 0.0 {
-                            rt.fighter_unit_damage_accum.insert(bid, accum_dmg);
-                        }
-                        dead
-                    },
-                );
-                if let Ok(mut fg) = ctx.fighters.write() {
-                    fg.tube_loads.remove(&(ship_id, f.tube_index));
-                    if !destroyed {
-                        f.is_abandoned = true;
-                        f.parent_ship_id = 0;
-                        f.target_id = None;
-                        fg.active_fighters.entry(f.ball_id).or_insert(f);
-                        for (k, v) in saved_charges {
-                            fg.charge_state.insert(k, v);
-                        }
-                        for (k, v) in saved_cooldowns {
-                            fg.cooldown_state.insert(k, v);
-                        }
-                    }
+                            .is_recently_destroyed_item_id(f.item_id)
+                });
+                if !destroyed {
+                    let _ = sys_handle
+                        .fighter_recall_op(FighterRecallActorOp::RestoreClaimed {
+                            squadron: f.clone(),
+                            saved_charges,
+                            saved_cooldowns,
+                            accum_dmg,
+                            abandoned_fallback: true,
+                        })
+                        .await;
+                    sys_handle.try_stop_ball(bid);
+                } else {
+                    let _ = sys_handle
+                        .fighter_recall_op(FighterRecallActorOp::DiscardClaimed {
+                            ball_id: f.ball_id,
+                        })
+                        .await;
                 }
-                sys_handle.try_stop_ball(bid);
                 return Some(Err(e));
             }
         };
@@ -1632,11 +1572,51 @@ async fn handle_recall_fighters_to_tubes(
         let total_rearm_secs = (base_refuel_s + charge_reload_s + repair_s + (refilled_units as f64) * 2.5)
             .ceil()
             .clamp(3.0, 20.0) as u64;
-        ctx.fighter_tube_loads.write().unwrap().entry((ship_id, f.tube_index)).or_insert(f.item_id);
         let now_unix = ctx.now_unix();
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), now_unix + total_rearm_secs);
-        });
+        if let Err(err) = sys_handle
+            .fighter_recall_op(FighterRecallActorOp::CommitToTube {
+                ship_id,
+                tube_index: f.tube_index,
+                item_id: f.item_id,
+                type_id: f.type_id,
+                ball_id: f.ball_id,
+                rearm_until_unix: now_unix + total_rearm_secs,
+            })
+            .await
+        {
+            ctx.db.with_mut_snapshot(|snap| {
+                if recall_delta.main_existed {
+                    if let Some(main_it) = snap.get_any_item_mut(f.item_id) {
+                        main_it.location_id = recall_delta.orig_loc;
+                        main_it.flag = recall_delta.orig_flag;
+                        main_it.quantity = recall_delta.orig_qty;
+                        main_it.version += 1;
+                    }
+                }
+                if let Some(pos) = recall_delta.orig_pos {
+                    snap.item_positions.insert(f.item_id, pos);
+                }
+                for (rid, took, removed_rec) in &recall_delta.consumed_reserves {
+                    if let Some(rec) = removed_rec {
+                        snap.items.entry(*rid).or_insert_with(|| rec.clone());
+                    } else if let Some(res_it) = snap.get_any_item_mut(*rid) {
+                        res_it.quantity += *took;
+                        res_it.version += 1;
+                    }
+                }
+            });
+            let _ = sys_handle
+                .fighter_recall_op(FighterRecallActorOp::RestoreClaimed {
+                    squadron: f.clone(),
+                    saved_charges,
+                    saved_cooldowns,
+                    accum_dmg,
+                    abandoned_fallback: true,
+                })
+                .await;
+            sys_handle.try_stop_ball(bid);
+            return Some(Err(crate::system_actor::FighterActorError::plain("SolarSystemUnavailable", err).into_bridge_err()));
+        }
         let tube_flag = (159 + f.tube_index) as i64;
         let recalled_qty = ctx.db.with_snapshot(|s| s.items.get(&f.item_id).map(|i| i.quantity).unwrap_or(f.squadron_size as i32)) as i64;
         let now_ft = ctx.now_client_sim_filetime_ticks();
@@ -1667,7 +1647,6 @@ async fn handle_recall_fighters_to_tubes(
                 user_error: None,
             },
         );
-        let _ = sys_handle.remove_ball(f.ball_id).await;
         recalled.push(PyRep::Integer(f.ball_id));
     }
     Some(Ok(PyRep::List(recalled)))
@@ -1698,7 +1677,8 @@ async fn handle_execute_movement_command_on_fighters(
         }));
     }
     {
-        let fighters = ctx.active_fighters.read().unwrap();
+        let view = sys_handle.view();
+        let fighters = &view.fighters.active_fighters;
         for &fid in &fighter_ids {
             let Some(f) = fighters.get(&fid) else {
                 let message = format!("Fighter squadron {fid} not found");
@@ -1738,15 +1718,16 @@ async fn handle_execute_movement_command_on_fighters(
     }
     if cmd == "MJD" {
         let now_unix = ctx.now_unix();
-        let reserved_batch: Result<Vec<(i64, u32, f64, Option<u64>)>, BridgeRpcError> = (|| {
-            let mut fg = ctx.fighters.write().unwrap();
+        let targets: Vec<(i64, u32, f64, u64)> = {
+            let view = sys_handle.view();
+            let active = &view.fighters.active_fighters;
             let mut seen = std::collections::HashSet::with_capacity(fighter_ids.len());
-            let mut targets = Vec::with_capacity(fighter_ids.len());
+            let mut list = Vec::with_capacity(fighter_ids.len());
             for &fid in &fighter_ids {
                 if !seen.insert(fid) {
                     continue;
                 }
-                let Some(f) = fg.active_fighters.get(&fid) else {
+                let Some(f) = active.get(&fid) else {
                     continue;
                 };
                 if f.owner_char_id != char_id || f.is_abandoned {
@@ -1767,42 +1748,41 @@ async fn handle_execute_movement_command_on_fighters(
                     let message = format!(
                         "Fighter squadron {fid} (type {ftype_id}) does not possess a Micro Jump Drive ability"
                     );
-                    return Err(BridgeRpcError::with_client_error(
+                    return Some(Err(BridgeRpcError::with_client_error(
                         "FighterLacksMjdAbility",
                         message.clone(),
                         eve_proto::ClientError::CustomInfo(message),
-                    ));
+                    )));
                 }
                 let slot_idx = mjd_slot_opt.map(|s| s.slot_index as u32).unwrap_or(1);
-                if let Some(&ready_at) = fg.cooldown_state.get(&(fid, slot_idx)) {
-                    if now_unix < ready_at {
-                        let message = format!(
-                            "Fighter MJD ability on squadron {fid} is on cooldown until {ready_at}"
-                        );
-                        return Err(BridgeRpcError::with_client_error(
-                            "AbilityOnCooldown",
-                            message.clone(),
-                            eve_proto::ClientError::CustomInfo(message),
-                        ));
-                    }
-                }
                 let mjd_dist = mjd_dist_attr.unwrap_or(100_000.0);
                 let cd_secs = mjd_slot_opt
                     .and_then(|s| s.cooldown_seconds)
                     .map(|c| c.ceil() as u64)
                     .unwrap_or(60)
                     .max(1);
-                targets.push((fid, slot_idx, mjd_dist, cd_secs));
+                list.push((fid, slot_idx, mjd_dist, cd_secs));
             }
-            let mut committed = Vec::with_capacity(targets.len());
-            for (fid, slot_idx, mjd_dist, cd_secs) in targets {
-                let prev_cd = fg.cooldown_state.insert((fid, slot_idx), now_unix + cd_secs);
-                committed.push((fid, slot_idx, mjd_dist, prev_cd));
-            }
-            Ok(committed)
-        })();
-        let committed = match reserved_batch {
-            Ok(v) if !v.is_empty() => v,
+            list
+        };
+        if targets.is_empty() {
+            let first_id = fighter_ids[0];
+            let message = format!("Fighter squadron {first_id} not found");
+            return Some(Err(BridgeRpcError::with_client_error(
+                "FighterNotFound",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(message),
+            )));
+        }
+        let committed = match sys_handle
+            .mutate_fighter_ability_state(FighterAbilityActorOp::ReserveMjdBatch {
+                char_id,
+                targets,
+                now_unix,
+            })
+            .await
+        {
+            Ok(out) if !out.mjd_committed.is_empty() => out.mjd_committed,
             Ok(_) => {
                 let first_id = fighter_ids[0];
                 let message = format!("Fighter squadron {first_id} not found");
@@ -1812,7 +1792,7 @@ async fn handle_execute_movement_command_on_fighters(
                     eve_proto::ClientError::CustomInfo(message),
                 )));
             }
-            Err(e) => return Some(Err(e)),
+            Err(e) => return Some(Err(e.into_bridge_err())),
         };
         let mut first_err: Option<BridgeRpcError> = None;
         let mut jumped_any = false;
@@ -1822,16 +1802,15 @@ async fn handle_execute_movement_command_on_fighters(
                     jumped_any = true;
                 }
                 Err(err_msg) => {
-                    let mut fg = ctx.fighters.write().unwrap();
-                    if fg.active_fighters.contains_key(&fid) {
-                        if let Some(old) = prev_cd {
-                            fg.cooldown_state.insert((fid, slot_idx), old);
-                        } else {
-                            fg.cooldown_state.remove(&(fid, slot_idx));
-                        }
-                    } else {
-                        fg.cooldown_state.remove(&(fid, slot_idx));
-                    }
+                    let _ = sys_handle
+                        .mutate_fighter_ability_state(
+                            FighterAbilityActorOp::RestoreMovementCooldown {
+                                fighter_ball_id: fid,
+                                slot_idx,
+                                prev_cooldown: prev_cd,
+                            },
+                        )
+                        .await;
                     if first_err.is_none() {
                         let message = format!("Fighter micro jump failed for {fid}: {err_msg}");
                         first_err = Some(BridgeRpcError::with_client_error(
@@ -1891,10 +1870,10 @@ async fn handle_execute_movement_command_on_fighters(
         }
     };
     for fid in fighter_ids {
-        let still_owned = ctx
+        let still_owned = sys_handle
+            .view()
+            .fighters
             .active_fighters
-            .read()
-            .unwrap()
             .get(&fid)
             .is_some_and(|f| f.owner_char_id == char_id && !f.is_abandoned);
         if still_owned {
@@ -1918,36 +1897,15 @@ async fn handle_cmd_abandon_fighter(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let mut abandoned = Vec::new();
-    let mut abandoned_item_ids = Vec::new();
-    let mut foreign_active_match = false;
+    let ab_res = match sys_handle
+        .abandon_owned_fighters(char_id, ship_id, filter_ids.clone())
+        .await
     {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        for f in fighters.values_mut() {
-            let matches_filter = filter_ids
-                .as_ref()
-                .map(|ids| ids.contains(&f.ball_id) || ids.contains(&f.item_id))
-                .unwrap_or(true);
-            if !matches_filter {
-                continue;
-            }
-            if f.parent_ship_id == ship_id && f.owner_char_id == char_id && !f.is_abandoned
-            {
-                f.is_abandoned = true;
-                f.parent_ship_id = 0;
-                f.target_id = None;
-                abandoned.push(f.ball_id);
-                abandoned_item_ids.push(f.item_id);
-            } else if filter_ids.is_some()
-                && !f.is_abandoned
-                && f.owner_char_id != char_id
-            {
-                foreign_active_match = true;
-            }
-        }
-    }
-    if abandoned.is_empty() {
-        if foreign_active_match {
+        Ok(v) => v,
+        Err(e) => return Some(Err(fighter_rpc_err("SolarSystemUnavailable", e))),
+    };
+    if ab_res.abandoned.is_empty() {
+        if ab_res.foreign_active_match {
             return Some(Ok(PyRep::List(Vec::new())));
         }
         return Some(Err(fighter_rpc_err(
@@ -1959,28 +1917,26 @@ async fn handle_cmd_abandon_fighter(
             "No matching active fighter squadron found to abandon",
         )));
     }
-    if !abandoned_item_ids.is_empty() {
-        ctx.db.with_mut_snapshot(|snap| {
-            for iid in &abandoned_item_ids {
-                if let Some(item) = snap.items.get_mut(iid) {
-                    item.location_id = sys_id as i64;
-                    item.flag = InventoryFlag::None;
-                    item.version += 1;
-                }
+    ctx.db.with_mut_snapshot(|snap| {
+        for &(_, iid, _) in &ab_res.abandoned {
+            if let Some(item) = snap.items.get_mut(&iid) {
+                item.location_id = sys_id as i64;
+                item.flag = InventoryFlag::None;
+                item.version += 1;
             }
-        });
-    }
-    for &bid in &abandoned {
-        for slot in 0..3 {
-            let _ = sys_handle.remove_module_cycle(bid, -(bid * 10 + slot)).await;
         }
-        sys_handle.try_stop_ball(bid);
+    });
+    for &(bid, _, _) in &ab_res.abandoned {
         let _ = sys_handle
             .set_movement_mode(bid, eve_destiny::MovementMode::Stop)
             .await;
     }
     Some(Ok(PyRep::List(
-        abandoned.into_iter().map(PyRep::Integer).collect(),
+        ab_res
+            .abandoned
+            .into_iter()
+            .map(|(bid, _, _)| PyRep::Integer(bid))
+            .collect(),
     )))
 }
 
@@ -2010,8 +1966,9 @@ async fn handle_scoop_abandoned_fighter(
             }));
         }
     };
-    let (key, owner_char_id) = {
-        let fighters = ctx.active_fighters.read().unwrap();
+    let owner_char_id = {
+        let view = sys_handle.view();
+        let fighters = &view.fighters.active_fighters;
         let key = if fighters.contains_key(&target_fighter_id) {
             target_fighter_id
         } else if let Some((&k, _)) = fighters.iter().find(|(_, f)| f.item_id == target_fighter_id) {
@@ -2031,56 +1988,70 @@ async fn handle_scoop_abandoned_fighter(
                 client_error: None,
             }));
         }
-        (key, squad_ref.owner_char_id)
+        squad_ref.owner_char_id
     };
-    if owner_char_id != char_id {
-        let authorized = ctx.db.with_snapshot(|snap| {
-            let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-            let owner_corp = snap.characters.get(&owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
-            caller_corp != 0 && caller_corp == owner_corp
-        });
-        if !authorized {
-            return Some(Err(BridgeRpcError {
-                code: "NotFighterOwner".into(),
-                message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
-                client_error: None,
-            }));
-        }
+    let is_owner_or_corp = |owner_cid: i64| -> bool {
+        owner_cid == char_id
+            || ctx.db.with_snapshot(|snap| {
+                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let owner_corp = snap
+                    .characters
+                    .get(&owner_cid)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
+                caller_corp != 0 && caller_corp == owner_corp
+            })
+    };
+    if !is_owner_or_corp(owner_char_id) {
+        return Some(Err(BridgeRpcError {
+            code: "NotFighterOwner".into(),
+            message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
+            client_error: None,
+        }));
     }
-    let squad = {
-        let mut fighters = ctx.active_fighters.write().unwrap();
-        let resolved_key = if fighters.contains_key(&key) {
-            key
-        } else if let Some((&k, _)) = fighters.iter().find(|(_, f)| f.item_id == target_fighter_id) {
-            k
-        } else {
+    let (claimed_key, squad) = match sys_handle
+        .scoop_abandoned_fighter_op(FighterScoopActorOp::Claim { target_fighter_id })
+        .await
+    {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
             return Some(Err(BridgeRpcError {
                 code: "FighterNotFound".into(),
                 message: format!("Fighter squadron {target_fighter_id} not found in space"),
                 client_error: None,
             }));
-        };
-        if !fighters[&resolved_key].is_abandoned {
-            return Some(Err(BridgeRpcError {
-                code: "FighterNotAbandoned".into(),
-                message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
-                client_error: None,
-            }));
         }
-        fighters.remove(&resolved_key).unwrap()
+        Err(e) => return Some(Err(e.into_bridge_err())),
     };
-    let restore_squad = |sq: crate::router::context::ActiveFighterSquadron| {
-        let destroyed = ctx.db.with_snapshot(|snap| {
-            snap.combat_crimewatch_state
-                .is_recently_destroyed_item_id(sq.ball_id)
-                || snap
-                    .combat_crimewatch_state
-                    .is_recently_destroyed_item_id(sq.item_id)
-        });
-        if !destroyed {
-            ctx.active_fighters.write().unwrap().entry(sq.ball_id).or_insert(sq);
+    let restore_squad = |key: i64, sq: ActiveFighterSquadron| {
+        let restore_sys = sys_handle.clone();
+        async move {
+            let destroyed = ctx.db.with_snapshot(|snap| {
+                snap.combat_crimewatch_state
+                    .is_recently_destroyed_item_id(sq.ball_id)
+                    || snap
+                        .combat_crimewatch_state
+                        .is_recently_destroyed_item_id(sq.item_id)
+            });
+            if !destroyed {
+                let _ = restore_sys
+                    .scoop_abandoned_fighter_op(FighterScoopActorOp::Restore { key, squadron: sq })
+                    .await;
+            } else {
+                let _ = restore_sys
+                    .scoop_abandoned_fighter_op(FighterScoopActorOp::Commit { key })
+                    .await;
+            }
         }
     };
+    if !is_owner_or_corp(squad.owner_char_id) {
+        restore_squad(claimed_key, squad).await;
+        return Some(Err(BridgeRpcError {
+            code: "NotFighterOwner".into(),
+            message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
+            client_error: None,
+        }));
+    }
 
     let in_caller_sys = ctx.db.with_snapshot(|snap| {
         snap.items
@@ -2089,7 +2060,7 @@ async fn handle_scoop_abandoned_fighter(
     });
     if !in_caller_sys {
         let ball_id = squad.ball_id;
-        restore_squad(squad);
+        restore_squad(claimed_key, squad).await;
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
             message: format!("Fighter squadron {ball_id} is not in solar system {sys_id}"),
@@ -2110,7 +2081,7 @@ async fn handle_scoop_abandoned_fighter(
         .map(|(_, b)| b);
     let Some(f_ball) = f_ball else {
         let ball_id = squad.ball_id;
-        restore_squad(squad);
+        restore_squad(claimed_key, squad).await;
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),
             message: format!("Fighter ball {ball_id} not found in system {sys_id}"),
@@ -2118,7 +2089,7 @@ async fn handle_scoop_abandoned_fighter(
         }));
     };
     let Some(s_ball) = s_ball else {
-        restore_squad(squad);
+        restore_squad(claimed_key, squad).await;
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSystem".into(),
             message: format!("Ship ball {ship_id} not found in system {sys_id}"),
@@ -2127,7 +2098,7 @@ async fn handle_scoop_abandoned_fighter(
     };
     let dist = s_ball.surface_distance(&f_ball);
     if dist > 2500.0 {
-        restore_squad(squad);
+        restore_squad(claimed_key, squad).await;
         return Some(Err(BridgeRpcError {
             code: "FighterOutOfRange".into(),
             message: format!("Fighter squadron is {dist:.1}m from ship hull, must be within 2500m to scoop"),
@@ -2205,10 +2176,13 @@ async fn handle_scoop_abandoned_fighter(
         Ok(())
     });
     if let Err(e) = db_res {
-        restore_squad(squad);
+        restore_squad(claimed_key, squad).await;
         return Some(Err(e));
     }
 
+    let _ = sys_handle
+        .scoop_abandoned_fighter_op(FighterScoopActorOp::Commit { key: claimed_key })
+        .await;
     let _ = sys_handle.remove_ball(squad.ball_id).await;
     Some(Ok(PyRep::Bool(true)))
 }

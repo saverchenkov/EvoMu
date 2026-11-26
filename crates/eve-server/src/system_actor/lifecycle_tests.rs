@@ -27,6 +27,8 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         post_unlock_in_flight: Arc::new(AtomicUsize::new(0)),
         completed_post_unlock_seq: Arc::new(AtomicU64::new(0)),
+        fighters_needs_hydration: Arc::new(AtomicBool::new(false)),
+        fighter_ctx: Arc::new(Default::default()),
         event_tx,
         ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
         scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),

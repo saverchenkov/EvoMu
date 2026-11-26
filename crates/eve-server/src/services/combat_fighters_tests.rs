@@ -1,5 +1,6 @@
 use super::*;
 use crate::router::ActiveFighterSquadron;
+use crate::system_actor::fighter_class_and_slot_attr;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_sde::{
     FighterAbilityCharges, FighterAbilityInfo, FighterAbilitySlot, InvType, SdeRegistry,
@@ -102,6 +103,11 @@ pub(in crate::services) fn make_fighter_sde_registry() -> SdeRegistry {
     sde.types.insert(
         23_061,
         make_fighter_type(23_061, 1653, 87, 1_000.0, vec![(2215, 6.0), (2214, 1.0), (2154, 100_000.0)]),
+    );
+    // Support Fighter (Dromi 23063, group 1537, cat 87, support attr 2213=1 -> Chimera 2218=1 allows strictly 1)
+    sde.types.insert(
+        23_063,
+        make_fighter_type(23_063, 1537, 87, 1_000.0, vec![(2215, 3.0), (2213, 1.0)]),
     );
     // Non-fighter module item for category rejection check
     sde.types.insert(587, make_fighter_type(587, 25, 6, 10_000.0, vec![(2055, 0.0)]));
@@ -1638,4 +1644,479 @@ async fn fighter_mjd_batch_prevalidates_atomically_rolls_back_errors_and_multita
     .unwrap_err();
     assert_eq!(err_move_mjd.code, "MicroJumpFailed");
     assert!(fighter_test_helpers::fighter_ability_cooldown(&ctx, heavy_ok, 1).is_none());
+}
+
+async fn spawn_fighter_test_ball(
+    sys_handle: &crate::system_actor::SystemHandle,
+    id: i64,
+    type_id: u32,
+    position: DVec3,
+    combat: Option<CombatState>,
+) {
+    let ball = Ball {
+        id,
+        type_id,
+        position,
+        velocity: DVec3::ZERO,
+        max_velocity: 500.0,
+        inertia: 1.0,
+        mass: 25_000.0,
+        radius: if type_id == 23_915 { 500.0 } else { 25.0 },
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    if let Some(cs) = combat {
+        sys_handle.spawn_ball_with_combat(ball, cs).await.unwrap();
+    } else {
+        sys_handle.spawn_ball(ball).await.unwrap();
+    }
+}
+
+fn make_test_fighter_sq(
+    ball_id: i64,
+    item_id: i64,
+    type_id: u32,
+    owner_char_id: i64,
+    parent_ship_id: i64,
+    tube_index: usize,
+    is_abandoned: bool,
+) -> ActiveFighterSquadron {
+    ActiveFighterSquadron {
+        ball_id,
+        item_id,
+        type_id,
+        owner_char_id,
+        parent_ship_id,
+        tube_index,
+        squadron_size: 9,
+        target_id: None,
+        is_abandoned,
+        mwd_active: false,
+    }
+}
+
+#[tokio::test]
+async fn r2_f01_destroyed_launched_fighter_ball_ne_item_removed_from_db_and_no_resurrection() {
+    let dir = std::env::temp_dir().join(format!("evomu_r2_f01_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create r2_f01 temp dir");
+    let (db_path, sde, sys_id, char_id, ship_id, attacker_id) = (dir.join("f01_fighters.sqlite"), make_fighter_sde(), 30_000_142u32, 90_000_001i64, 200_000_001i64, 200_000_099i64);
+    let ((f_ball_turret, f_item_turret), (f_ball_missile, f_item_missile)) = ((630_101i64, 530_101i64), (630_102i64, 530_102i64));
+    {
+        let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open f01 sqlite"));
+        db.with_mut_snapshot(|snap| {
+            snap.system_states.insert(sys_id, eve_db::SystemDynamicState { solar_system_id: sys_id, ..Default::default() });
+            for (iid, tid, owner, qty) in [(ship_id, 23_915u32, char_id, 1), (attacker_id, 587, 90_000_002, 1), (f_item_turret, 23_057, char_id, 9), (f_item_missile, 23_057, char_id, 9)] {
+                snap.items.insert(iid, make_fighter_item(iid, tid, owner, sys_id as i64, InventoryFlag::None, qty));
+            }
+        });
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let low_hp = CombatState { shield_hp: 1.0, max_shield_hp: 1.0, armor_hp: 1.0, max_armor_hp: 1.0, structure_hp: 10.0, max_structure_hp: 10.0, shield_resonance: [1.0; 4], armor_resonance: [1.0; 4], structure_resonance: [1.0; 4], capacitor: 50_000.0, max_capacitor: 50_000.0, signature_radius: 250.0, ..CombatState::default() };
+        for (bid, tid, pos) in [(ship_id, 23_915u32, DVec3::new(-5_000.0, 0.0, 0.0)), (attacker_id, 587u32, DVec3::ZERO), (f_ball_turret, 23_057u32, DVec3::new(1_500.0, 0.0, 0.0)), (f_ball_missile, 23_057u32, DVec3::new(150.0, 0.0, 0.0))] {
+            spawn_fighter_test_ball(&sys_handle, bid, tid, pos, Some(low_hp.clone())).await;
+        }
+        for (bid, iid, tube) in [(f_ball_turret, f_item_turret, 0usize), (f_ball_missile, f_item_missile, 1usize)] {
+            fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_id, bid, make_test_fighter_sq(bid, iid, 23_057, char_id, ship_id, tube, false));
+            fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_id, ship_id, tube, iid);
+        }
+        let _ = sys_handle.flush_fighter_checkpoint().await;
+
+        let turret_ball = sys_handle.get_ball_snapshot(f_ball_turret).await.unwrap().unwrap().1;
+        let _ = crate::services::combat_weapons_spool::handle_ship_or_npc_destruction(&ctx, &sys_handle, 90_000_002, attacker_id, 587, 0, f_ball_turret, &turret_ball, None, sys_id, 5_000.0, ctx.now_unix()).await;
+        assert!(ctx.db.get_item(f_item_turret).is_none() && fighter_test_helpers::active_fighter(&ctx, f_ball_turret).is_none());
+        ctx.db.with_snapshot(|snap| assert!(snap.combat_crimewatch_state.is_recently_destroyed_item_id(f_item_turret) && snap.combat_crimewatch_state.is_recently_destroyed_item_id(f_ball_turret)));
+
+        sys_handle.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id: attacker_id, module_id: 99_905, owner_char_id: Some(90_000_002), effect_name: "missile_launching".into(),
+            target_id: Some(f_ball_missile), repeat: 1, duration_s: 1.0, elapsed_s: 0.99, weapon_is_guided_missile: true,
+            missile_charge_type_id: Some(215), missile_max_velocity_ms: 5_000.0, missile_flight_time_s: 5.0, missile_ball_radius: 100.0,
+            missile_explosion_radius_m: 1_000.0, missile_explosion_velocity_ms: 1_000.0, missile_drf: 1.0, damage_vector: DamageVector::new(10_000.0, 0.0, 0.0, 0.0), ..Default::default()
+        }).await.unwrap();
+        let mut saw_missile_destroy = false;
+        for _ in 0..8 {
+            if sys_handle.step_with_output(1.0).await.unwrap().destroyed_balls.iter().any(|&(bid, _)| bid == f_ball_missile) { saw_missile_destroy = true; break; }
+        }
+        assert!(saw_missile_destroy && ctx.db.get_item(f_item_missile).is_none() && fighter_test_helpers::active_fighter(&ctx, f_ball_missile).is_none());
+        ctx.db.with_snapshot(|snap| assert!(snap.combat_crimewatch_state.is_recently_destroyed_item_id(f_item_missile) && snap.combat_crimewatch_state.is_recently_destroyed_item_id(f_ball_missile)));
+    }
+    let ctx2 = ServerContext::with_sde_and_repository(sde, Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen f01 sqlite")));
+    let _ = ctx2.systems.get_or_spawn(sys_id);
+    assert!(ctx2.db.get_item(f_item_turret).is_none() && ctx2.db.get_item(f_item_missile).is_none());
+    assert!(fighter_test_helpers::active_fighter(&ctx2, f_ball_turret).is_none() && fighter_test_helpers::active_fighter(&ctx2, f_ball_missile).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn r2_f03_failed_scoop_preserves_cooldowns_charges_and_damage_accum() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (sys_handle, kw, now, (f_ball, f_item)) = (ctx.systems.get_or_spawn(sys_id), HashMap::new(), ctx.now_unix(), (630_201i64, 530_201i64));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(s) = snap.items.get_mut(&ship_id) { s.type_id = 587; }
+        snap.items.insert(f_item, make_fighter_item(f_item, 23_057, char_id, sys_id as i64, InventoryFlag::None, 6));
+    });
+    spawn_fighter_test_ball(&sys_handle, ship_id, 587, DVec3::ZERO, None).await;
+    spawn_fighter_test_ball(&sys_handle, f_ball, 23_057, DVec3::new(50_000.0, 0.0, 0.0), None).await;
+    fighter_test_helpers::insert_active_fighter(&ctx, f_ball, make_test_fighter_sq(f_ball, f_item, 23_057, char_id, 0, 0, true));
+    fighter_test_helpers::set_fighter_ability_cooldown(&ctx, f_ball, 0, now + 120);
+    fighter_test_helpers::set_fighter_ability_charges_used(&ctx, f_ball, 2, 3);
+    fighter_test_helpers::set_fighter_damage_accum(&ctx, f_ball, 275.5);
+    let assert_preserved = || assert!(fighter_test_helpers::active_fighter(&ctx, f_ball).is_some()
+        && fighter_test_helpers::fighter_ability_cooldown(&ctx, f_ball, 0) == Some(now + 120)
+        && fighter_test_helpers::fighter_ability_charges_used(&ctx, f_ball, 2) == Some(3)
+        && fighter_test_helpers::fighter_damage_accum(&ctx, f_ball) == Some(275.5));
+    assert_eq!(handle_fighters(&ctx, &mut session, "fighterMgr", "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(f_ball)], &kw).await.unwrap().unwrap_err().code, "FighterOutOfRange");
+    assert_preserved();
+    let _ = sys_handle.remove_ball(ship_id).await;
+    spawn_fighter_test_ball(&sys_handle, ship_id, 587, DVec3::new(49_000.0, 0.0, 0.0), None).await;
+    assert_eq!(handle_fighters(&ctx, &mut session, "fighterMgr", "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(f_ball)], &kw).await.unwrap().unwrap_err().code, "NoFighterBay");
+    assert_preserved();
+    ctx.db.with_mut_snapshot(|snap| { if let Some(s) = snap.items.get_mut(&ship_id) { s.type_id = 23_915; } });
+    assert_eq!(handle_fighters(&ctx, &mut session, "fighterMgr", "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(f_ball)], &kw).await.unwrap().unwrap(), PyRep::Bool(true));
+    assert!(fighter_test_helpers::active_fighter(&ctx, f_ball).is_none()
+        && fighter_test_helpers::fighter_ability_cooldown(&ctx, f_ball, 0).is_none()
+        && fighter_test_helpers::fighter_ability_charges_used(&ctx, f_ball, 2).is_none()
+        && fighter_test_helpers::fighter_damage_accum(&ctx, f_ball).is_none());
+    assert_eq!((ctx.db.get_item(f_item).unwrap().location_id, ctx.db.get_item(f_item).unwrap().flag), (ship_id, InventoryFlag::FighterBay));
+}
+
+#[tokio::test]
+async fn r2_f06_mjd_rejects_abandoned_or_missing_without_mutating_cooldowns() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (sys_handle, kw, (f_aband, f_missing)) = (ctx.systems.get_or_spawn(sys_id), HashMap::new(), (630_301i64, 630_399i64));
+    spawn_fighter_test_ball(&sys_handle, ship_id, 23_915, DVec3::ZERO, Some(CombatState::default())).await;
+    spawn_fighter_test_ball(&sys_handle, f_aband, 23_061, DVec3::new(1_000.0, 0.0, 0.0), Some(CombatState::default())).await;
+    fighter_test_helpers::insert_active_fighter(&ctx, f_aband, make_test_fighter_sq(f_aband, 530_301, 23_061, char_id, 0, 0, true));
+    assert_eq!(handle_fighters(&ctx, &mut session, "fighterMgr", "ExecuteMovementCommandOnFighters", &[PyRep::List(vec![PyRep::Integer(f_aband)]), PyRep::String("MJD".into())], &kw).await.unwrap().unwrap_err().code, "FighterNotOwned");
+    assert_eq!(sys_handle.mutate_fighter_ability_state(FighterAbilityActorOp::ReserveMjdBatch { char_id, targets: vec![(f_aband, 1, 100_000.0, 60)], now_unix: ctx.now_unix() }).await.unwrap_err().code, "FighterNotOwned");
+    assert_eq!(sys_handle.mutate_fighter_ability_state(FighterAbilityActorOp::ReserveMjdBatch { char_id, targets: vec![(f_missing, 1, 100_000.0, 60)], now_unix: ctx.now_unix() }).await.unwrap_err().code, "FighterNotFound");
+    assert!(fighter_test_helpers::fighter_ability_cooldown(&ctx, f_aband, 1).is_none() && fighter_test_helpers::fighter_ability_cooldown(&ctx, f_missing, 1).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r3_f2_03_concurrent_load_fighters_to_tube_enforces_class_slot_limit() {
+    let (raw_ctx, session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (ctx, f1, f2) = (Arc::new(raw_ctx), 630_401i64, 630_402i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(f1, make_fighter_item(f1, 23_063, char_id, ship_id, InventoryFlag::FighterBay, 3));
+        snap.items.insert(f2, make_fighter_item(f2, 23_063, char_id, ship_id, InventoryFlag::FighterBay, 3));
+    });
+    let race_two_loads = |c: Arc<ServerContext>, sess: SessionState| async move {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let run = |fid: i64, tube: i64| {
+            let (c, b, mut s) = (Arc::clone(&c), Arc::clone(&barrier), sess.clone());
+            tokio::spawn(async move { b.wait().await; handle_fighters(&c, &mut s, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(fid), PyRep::Integer(tube)], &HashMap::new()).await.unwrap() })
+        };
+        let (r1, r2) = tokio::join!(run(f1, 0), run(f2, 1));
+        let results = [r1.unwrap(), r2.unwrap()];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "at most 1 Support squadron fits Chimera's 1 Support slot");
+        assert_eq!(results.into_iter().find_map(Result::err).expect("second concurrent load must reject").code, "CannotLoadFighterTubeNoTubesAvailableForClass");
+    };
+    race_two_loads(Arc::clone(&ctx), session.clone()).await;
+    assert_eq!(fighter_test_helpers::fighter_tube_load_keys(&ctx).len(), 1);
+    for tidx in 0..2 { let _ = ctx.systems.load_or_unload_fighter_tube(sys_id, crate::system_actor::FighterTubeOp::Unload { ship_id, tube_index: tidx }).await; }
+    let _sys_handle = ctx.systems.get_or_spawn(sys_id);
+    race_two_loads(Arc::clone(&ctx), session).await;
+    assert_eq!(fighter_test_helpers::fighter_tube_load_keys(&ctx).len(), 1);
+}
+
+#[tokio::test]
+async fn r5_f2_02_claim_ops_do_not_dirty_and_preserve_precommit_state_on_flush() {
+    use crate::system_actor::{load_cold_fighters_for_system, FighterLaunchActorOp, FighterLaunchSpawnInput, FighterRecallActorOp, FighterScoopActorOp};
+    let (ctx, _, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (sys_h, f_item, sq_ball, ab_ball) = (ctx.systems.get_or_spawn(sys_id), 530_501i64, 770_002i64, 770_003i64);
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(f_item, make_fighter_item(f_item, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9)); });
+    f2_test_commit_load(&ctx, sys_id, ship_id, 0, f_item, 23_057).await;
+    sys_h.flush_fighter_checkpoint().await.unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+
+    // 1. Launch ClaimAndReserve must not mark dirty and concurrent flush keeps tube 0 without res_id.
+    let mk_claim = || FighterLaunchActorOp::ClaimAndReserve { ship_id, char_id, carrier_type_id: 23_915, tube_count: 3, requested_tubes: Some(vec![0]), now_unix: ctx.now_unix(), next_res_ids: vec![770_001], sde: Arc::clone(&ctx.sde) };
+    let claim = sys_h.fighter_launch_op(mk_claim()).await.unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, 999_001, 5.0);
+    ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+    let cold = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
+    assert!(cold.tube_loads.get(&(ship_id, 0)) == Some(&(f_item, 23_057)) && !cold.active_fighters.contains_key(&770_001));
+    sys_h.fighter_launch_op(FighterLaunchActorOp::Rollback { ship_id, res_ids: claim.res_ids.iter().map(|&(_, r)| r).collect(), claimed_tubes: claim.claimed_tubes }).await.unwrap();
+
+    let claim2 = sys_h.fighter_launch_op(mk_claim()).await.unwrap();
+    sys_h.fighter_launch_op(FighterLaunchActorOp::CommitSpawned {
+        res_ids: claim2.res_ids.into_iter().map(|(_, r)| r).collect(),
+        spawns: vec![FighterLaunchSpawnInput {
+            squadron: make_test_fighter_sq(sq_ball, f_item, 23_057, char_id, ship_id, 0, false),
+            ball: eve_destiny::Ball { id: sq_ball, type_id: 23_057, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 2_500.0, inertia: 0.5, mass: 25_000.0, radius: 20.0, speed_fraction: 1.0, mode: eve_destiny::MovementMode::Stop },
+            combat_state: CombatState::default(), slim_meta: None,
+        }],
+    }).await.unwrap();
+    fighter_test_helpers::set_fighter_ability_cooldown_in_system(&ctx, sys_id, sq_ball, 0, 5_000);
+    sys_h.flush_fighter_checkpoint().await.unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+
+    // 2. Recall ClaimActive must not mark dirty and concurrent flush retains launched sq + cooldown.
+    let rc = sys_h.fighter_recall_op(FighterRecallActorOp::ClaimActive { ball_id: sq_ball, ship_id, char_id, sde: Arc::clone(&ctx.sde) }).await.unwrap().expect("claim active");
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, 999_002, 5.0);
+    ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+    let cold2 = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
+    assert!(cold2.active_fighters.contains_key(&sq_ball) && cold2.cooldown_state.get(&(sq_ball, 0)) == Some(&5_000));
+    sys_h.fighter_recall_op(FighterRecallActorOp::RestoreClaimed { squadron: rc.squadron, saved_charges: rc.saved_charges, saved_cooldowns: rc.saved_cooldowns, accum_dmg: rc.accum_dmg, abandoned_fallback: false }).await.unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+
+    // 3. Scoop Claim must not mark dirty and concurrent flush retains abandoned sq + damage until Commit.
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_id, ab_ball, make_test_fighter_sq(ab_ball, 530_503, 23_057, char_id, 0, 0, true));
+    fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, ab_ball, 12.5);
+    sys_h.flush_fighter_checkpoint().await.unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    let (k, sq) = sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Claim { target_fighter_id: ab_ball }).await.unwrap().unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, 999_003, 5.0);
+    ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+    let cold3 = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
+    assert!(cold3.active_fighters.contains_key(&ab_ball) && cold3.unit_damage_accum.get(&ab_ball) == Some(&12.5));
+    sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Restore { key: k, squadron: sq }).await.unwrap();
+    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    let (k2, _) = sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Claim { target_fighter_id: ab_ball }).await.unwrap().unwrap();
+    sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Commit { key: k2 }).await.unwrap();
+    assert!(sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    sys_h.flush_fighter_checkpoint().await.unwrap();
+    let cold4 = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
+    assert!(!cold4.active_fighters.contains_key(&ab_ball) && cold4.unit_damage_accum.get(&ab_ball).is_none());
+}
+
+fn f2_hold_db(db: &Arc<eve_db::WorldRepository>, mut_fn: impl FnOnce(&mut eve_db::WorldStateSnapshot) + Send + 'static) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let ((htx, hrx), (rtx, rrx), d) = (std::sync::mpsc::channel(), std::sync::mpsc::channel(), Arc::clone(db));
+    let h = std::thread::spawn(move || d.with_mut_snapshot(move |s| { htx.send(()).unwrap(); let _ = rrx.recv(); mut_fn(s); }));
+    hrx.recv().unwrap();
+    (rtx, h)
+}
+
+async fn f2_test_commit_load(ctx: &ServerContext, sys_id: u32, ship_id: i64, tube_index: usize, fighter_item_id: i64, fighter_type_id: u32) {
+    ctx.systems.load_or_unload_fighter_tube(sys_id, crate::system_actor::FighterTubeOp::CommitLoad {
+        ship_id, tube_index, fighter_item_id, carrier_type_id: 23_915, fighter_type_id, sde: Arc::clone(&ctx.sde),
+    }).await.unwrap();
+}
+
+async fn f2_test_spawn_unhydrated(ctx: &ServerContext, sys_id: u32) -> crate::system_actor::SystemHandle {
+    let held = f2_hold_db(&ctx.db, |_| ());
+    let h = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx.systems); move || r.get_or_spawn(sys_id) }).await.unwrap();
+    let _ = held.0.send(());
+    held.1.join().unwrap();
+    h
+}
+
+fn f2_test_break_cp(ctx: &ServerContext, broken: bool) {
+    let sql = if broken { "ALTER TABLE system_checkpoint RENAME TO system_checkpoint_bak; CREATE TABLE system_checkpoint(broken INT);" }
+        else { "DROP TABLE system_checkpoint; ALTER TABLE system_checkpoint_bak RENAME TO system_checkpoint;" };
+    ctx.db.with_sqlite_conn(|c| c.execute_batch(sql).map_err(|e| e.to_string())).unwrap();
+}
+
+fn f2_test_seed_sqlite_fighters(ctx: &ServerContext, sys_id: u32, sqs: &[(i64, ActiveFighterSquadron)]) {
+    ctx.db.with_mut_snapshot(|s| { s.system_states.entry(sys_id).or_insert_with(|| eve_db::SystemDynamicState { solar_system_id: sys_id, ..Default::default() }); });
+    let rows: Vec<_> = sqs.iter().map(|(id, sq)| (format!("sq:{id}"), serde_json::json!({ "Squadron": sq }))).collect();
+    ctx.db.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(c, sys_id, eve_db::sqlite_store::system_checkpoint::KIND_FIGHTERS, &rows, 100)).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r6_f2_02_destroyed_recall_db_fail_discards_claim_and_cleanup_clears_claims() {
+    use crate::system_actor::{load_cold_fighters_for_system, FighterLaunchActorOp, FighterRecallActorOp};
+    let (raw_ctx, session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let (ctx, (f_ball, f_item), (c_ball, c_item), (res_tube_item, res_id)) = (Arc::new(raw_ctx), (630_601i64, 530_601i64), (630_602i64, 530_602i64), (530_603i64, -399_001i64));
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(f_item, make_fighter_item(f_item, 23_057, char_id, sys_id as i64, InventoryFlag::None, 9));
+        s.items.insert(res_tube_item, make_fighter_item(res_tube_item, 23_063, char_id, ship_id, InventoryFlag::FighterBay, 3));
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    spawn_fighter_test_ball(&sys_h, ship_id, 23_915, DVec3::ZERO, Some(CombatState::default())).await;
+    spawn_fighter_test_ball(&sys_h, f_ball, 23_057, DVec3::new(100.0, 0.0, 0.0), None).await;
+    spawn_fighter_test_ball(&sys_h, c_ball, 23_057, DVec3::new(150.0, 0.0, 0.0), None).await;
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_id, f_ball, make_test_fighter_sq(f_ball, f_item, 23_057, char_id, ship_id, 0, false));
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_id, c_ball, make_test_fighter_sq(c_ball, c_item, 23_057, char_id, ship_id, 2, false));
+    f2_test_commit_load(&ctx, sys_id, ship_id, 1, res_tube_item, 23_063).await;
+    sys_h.flush_fighter_checkpoint().await.unwrap();
+
+    // Pre-existing P2: ClaimAndReserve + ClaimActive entries cleared on destruction without snapshot resurrection.
+    sys_h.fighter_launch_op(FighterLaunchActorOp::ClaimAndReserve {
+        ship_id, char_id, carrier_type_id: 23_915, tube_count: 3, requested_tubes: Some(vec![1]), now_unix: ctx.now_unix(), next_res_ids: vec![res_id], sde: Arc::clone(&ctx.sde),
+    }).await.unwrap();
+    assert!(sys_h.fighter_recall_op(FighterRecallActorOp::ClaimActive { ball_id: c_ball, ship_id, char_id, sde: Arc::clone(&ctx.sde) }).await.unwrap().is_some());
+    assert!(sys_h.cleanup_destroyed_fighter_sync(res_id).is_some() && sys_h.cleanup_destroyed_fighter_sync(c_ball).is_some());
+    {
+        let st = sys_h.actor_state.read().unwrap();
+        assert!(st.pending_launch_reservations.is_empty() && st.pending_recall_or_scoop_claims.is_empty());
+        assert!(st.take_fighter_checkpoint_snapshot().is_some_and(|s| !s.state.tube_loads.contains_key(&(ship_id, 1)) && !s.state.active_fighters.contains_key(&c_ball)));
+    }
+
+    // F2-R6-02: Destroyed squadron whose recall fails DB check after ClaimActive must discard claim instead of resurrecting.
+    ctx.db.with_mut_snapshot(|s| { s.combat_crimewatch_state.record_destroyed_item_id(f_ball); s.combat_crimewatch_state.record_destroyed_item_id(f_item); });
+    let held = f2_hold_db(&ctx.db, move |s| { s.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760); });
+    let rpc = tokio::spawn({ let (c, mut s) = (Arc::clone(&ctx), session); async move { handle_fighters(&c, &mut s, "fighterMgr", "RecallFightersToTubes", &[PyRep::List(vec![PyRep::Integer(f_ball)])], &HashMap::new()).await } });
+    for _ in 0..200 {
+        if sys_h.actor_state.read().unwrap().pending_recall_or_scoop_claims.contains_key(&f_ball) { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(sys_h.actor_state.read().unwrap().pending_recall_or_scoop_claims.contains_key(&f_ball));
+    let _ = held.0.send(());
+    held.1.join().unwrap();
+    assert!(rpc.await.unwrap().unwrap().is_err());
+    assert!(sys_h.actor_state.read().unwrap().pending_recall_or_scoop_claims.is_empty() && fighter_test_helpers::active_fighter(&ctx, f_ball).is_none());
+    let _ = sys_h.flush_fighter_checkpoint().await;
+    assert!(!load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap().active_fighters.contains_key(&f_ball));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r6_f2_04_load_tube_split_invalid_restores_prev_and_preserves_concurrent_load() {
+    use crate::services::combat_crimewatch::combat_fighters_abilities::{
+        handle_activate_fighter_ability_slots, handle_activate_fighter_ability_slots_on_point, handle_deactivate_fighter_ability_slots,
+    };
+    use crate::system_actor::FighterTubeOp;
+    let (ctx, _, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let ((f_prev, f_next, f_win, sq_ball), kw) = ((530_701i64, 530_702i64, 530_703i64, 630_701i64), HashMap::new());
+    ctx.db.with_mut_snapshot(|s| { for iid in [f_prev, f_next, f_win] { s.items.insert(iid, make_fighter_item(iid, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9)); } });
+
+    // F2-R6-04: RollbackLoad restores prev if unchanged and preserves concurrent overwrite (Cold + Live).
+    for live in [false, true] {
+        if live { let _ = ctx.systems.get_or_spawn(sys_id); }
+        f2_test_commit_load(&ctx, sys_id, ship_id, 0, f_prev, 23_057).await;
+        f2_test_commit_load(&ctx, sys_id, ship_id, 0, f_next, 23_057).await;
+        let rb = || FighterTubeOp::RollbackLoad { ship_id, tube_index: 0, expected_fighter_item_id: f_next, restore_prev: Some((f_prev, 23_057)) };
+        assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_id, rb()).await.unwrap(), Some(f_prev));
+        assert_eq!(ctx.systems.snapshot_fighters_for_system(sys_id).tube_loads.get(&(ship_id, 0)), Some(&(f_prev, 23_057)));
+        f2_test_commit_load(&ctx, sys_id, ship_id, 0, f_next, 23_057).await;
+        f2_test_commit_load(&ctx, sys_id, ship_id, 0, f_win, 23_057).await;
+        assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_id, rb()).await.unwrap(), None);
+        assert_eq!(ctx.systems.snapshot_fighters_for_system(sys_id).tube_loads.get(&(ship_id, 0)), Some(&(f_win, 23_057)));
+    }
+    assert!(ctx.systems.stop_system(sys_id).await);
+
+    // F2-R6-03: Mutating fighter RPCs, ability endpoints, and damage path refuse/hydrate cleanly when unhydrated.
+    let (ctx2, mut sess2, char2, ship2, sys2) = make_fighter_ctx_and_session();
+    let h2 = f2_test_spawn_unhydrated(&ctx2, sys2).await;
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx2, sys2, sq_ball, make_test_fighter_sq(sq_ball, 530_799, 23_057, char2, ship2, 0, false));
+    spawn_fighter_test_ball(&h2, ship2, 23_915, DVec3::ZERO, Some(CombatState::default())).await;
+    spawn_fighter_test_ball(&h2, sq_ball, 23_057, DVec3::new(100.0, 0.0, 0.0), Some(CombatState::default())).await;
+    f2_test_break_cp(&ctx2, true);
+    assert_eq!(handle_fighters(&ctx2, &mut sess2, "fighterMgr", "CmdAbandonFighter", &[PyRep::Integer(sq_ball)], &kw).await.unwrap().unwrap_err().code, "StorageError");
+    assert_eq!(handle_activate_fighter_ability_slots(&ctx2, &mut sess2, &[PyRep::Integer(sq_ball), PyRep::Integer(1)]).await.unwrap().unwrap_err().code, "StorageError");
+    assert_eq!(handle_activate_fighter_ability_slots_on_point(&ctx2, &mut sess2, &[PyRep::List(vec![PyRep::Integer(sq_ball)]), PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Real(0.0); 3])]).await.unwrap().unwrap_err().code, "StorageError");
+    assert_eq!(handle_deactivate_fighter_ability_slots(&ctx2, &mut sess2, &[PyRep::Integer(sq_ball), PyRep::Integer(1)]).await.unwrap().unwrap_err().code, "StorageError");
+    assert_eq!(apply_damage_to_fighter_squadron(&ctx2, sys2, sq_ball, DamageVector::new(100.0, 0.0, 0.0, 0.0)).await, (0, 0, false));
+    f2_test_break_cp(&ctx2, false);
+    assert!(apply_damage_to_fighter_squadron(&ctx2, sys2, sq_ball, DamageVector::new(1_200.0, 0.0, 0.0, 0.0)).await.0 >= 1 && !h2.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+
+    // BF-02: Unhydrated cross-system fighter lookup hydrates and returns FighterNotInSystem.
+    let (sys_other, other_sq) = (30_002_187u32, 630_799i64);
+    f2_test_seed_sqlite_fighters(&ctx2, sys_other, &[(other_sq, make_test_fighter_sq(other_sq, 530_798, 23_057, char2, ship2, 0, false))]);
+    let h_other = f2_test_spawn_unhydrated(&ctx2, sys_other).await;
+    assert!(h_other.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert_eq!(handle_activate_fighter_ability_slots(&ctx2, &mut sess2, &[PyRep::Integer(other_sq), PyRep::Integer(1)]).await.unwrap().unwrap_err().code, "FighterNotInSystem");
+    assert!(!h_other.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
+    use crate::combat::npc_ai::{step_system_npc_spawns_ai_sync, NpcSpawnManager};
+    use crate::services::combat_crimewatch::{emit_combat_log_and_damage_state, set_char_safety_level, SafetyLevel};
+    use crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction;
+    use crate::services::space_destiny::space_nav_travel::{attr_id_by_name, sync_tether};
+    use crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball;
+    use crate::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state, InFlightGuidedBombRecord};
+    use crate::services::structure_standup_weapons::{step_guided_bombs_in_system, GROUP_STANDUP_GUIDED_BOMB};
+    let (mut ctx, _, char_id, ship_id, sys_t) = make_fighter_ctx_and_session();
+    let (corp_owner, gunner_id, gunner_ship) = (98_500_001_i64, 90_000_099_i64, 200_000_099_i64);
+    let (sys_n1, sys_n2, sys_d, sys_sp, sys_b, sys_npc) = (30_002_512u32, 30_002_518u32, 30_002_514u32, 30_002_515u32, 30_002_511u32, 30_002_516u32);
+    let (bomb_id, bomb_tid, st_id, sg_id) = (880_001_i64, 99_901_u32, 1_049_901_001_i64, 999_142_u32);
+    let tether_attr = attr_id_by_name(&ctx, "tetheringRange").unwrap_or_else(|| {
+        let aid = 2_095_u16;
+        Arc::make_mut(&mut ctx.sde).attributes.insert(aid, eve_sde::DogmaAttributeType { attribute_id: aid, name: "tetheringRange".into(), default_value: 0.0, high_is_good: true, stackable: true, published: true });
+        aid
+    });
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        sde.types.insert(35_832, make_fighter_type(35_832, 1657, 65, 800_000.0, vec![(tether_attr, 15_000.0)]));
+        sde.types.insert(bomb_tid, make_fighter_type(bomb_tid, GROUP_STANDUP_GUIDED_BOMB, 8, 50.0, vec![(114, 200.0), (99, 20_000.0), (654, 100.0)]));
+        sde.solar_systems.insert(sys_b, eve_sde::SolarSystem { solar_system_id: sys_b, constellation_id: 20_000_001, region_id: 10_000_001, name: "R7Lowsec".into(), security_status: 0.2, radius: 1.0e12, galactic_pos_ly: [0.0; 3], planet_ids: vec![], stations: vec![], wormhole_class_id: None });
+        sde.npc_spawn_groups.insert(sg_id, eve_sde::NpcSpawnGroupInfo { spawn_group_id: sg_id, faction_id: 500_012, ship_class: 1, group_id: 550, group_name: "Corpii Test".into(), npc_type_ids: vec![16_936] });
+    }
+    let st_rec = |sid: i64, sol: u32, corp: i64| eve_db::UpwellStructureRecord { structure_id: sid, type_id: 35_832, owner_corp_id: corp, solar_system_id: sol, name: "Citadel".into(), state: "ShieldVulnerable".into(), quantum_core_installed: true, fuel_blocks: 100, position: [0.0; 3], shield_hp: 100_000.0, armor_hp: 100_000.0, hull_hp: 100_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None };
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().corporation_id = 1_000_009;
+        let mut g = s.characters.get(&char_id).unwrap().clone();
+        g.character_id = gunner_id; g.corporation_id = corp_owner; g.alliance_id = None; g.solar_system_id = sys_b; g.active_ship_id = gunner_ship;
+        s.characters.insert(gunner_id, g);
+        s.items.insert(gunner_ship, make_fighter_item(gunner_ship, 23_915, gunner_id, sys_b as i64, InventoryFlag::None, 1));
+        s.structures.insert(st_id, st_rec(st_id, sys_t, 1_000_009));
+        s.structures.insert(st_id + 1, st_rec(st_id + 1, sys_b, corp_owner));
+        let mut ext = load_ext_state(s);
+        ext.in_flight_guided_bombs.insert(bomb_id, InFlightGuidedBombRecord { bomb_id, structure_id: st_id + 1, structure_corp_id: corp_owner, gunner_char_id: gunner_id, solar_system_id: sys_b, target_id: gunner_ship, bomb_type_id: bomb_tid, remaining_flight_s: 5.0 });
+        save_ext_state(s, &ext);
+    });
+    set_char_safety_level(&ctx, gunner_id, SafetyLevel::Red);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock(uid, 1, Some(char_id), true, ctx.now_unix());
+    let sponge_cs = || CombatState { shield_hp: 500.0, max_shield_hp: 500.0, armor_hp: 500.0, max_armor_hp: 500.0, structure_hp: 500.0, max_structure_hp: 500.0, signature_radius: 1_000.0, ..CombatState::default() };
+
+    // 1. sync_tether hydrates and denies tether while deployed SQLite fighter is active.
+    f2_test_seed_sqlite_fighters(&ctx, sys_t, &[(630_801, make_test_fighter_sq(630_801, 530_801, 23_057, char_id, ship_id, 0, false))]);
+    let h_t = f2_test_spawn_unhydrated(&ctx, sys_t).await;
+    spawn_fighter_test_ball(&h_t, ship_id, 23_915, DVec3::new(2_000.0, 0.0, 0.0), Some(CombatState::default())).await;
+    sync_tether(&ctx, char_id, sys_t, ship_id).await;
+    assert!(!h_t.actor_state.read().unwrap().fighters_needs_sqlite_hydration && !h_t.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+
+    // 2. crimewatch_scene_notify hydrates on both targeted combat_sys_id (Some) and scan fallback (None).
+    for (sys_n, sq_n, explicit) in [(sys_n1, 630_802_i64, Some(sys_n1)), (sys_n2, 630_803_i64, None)] {
+        ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().solar_system_id = sys_n; s.characters.get_mut(&gunner_id).unwrap().solar_system_id = sys_n; s.items.get_mut(&gunner_ship).unwrap().location_id = sys_n as i64; });
+        let _ = ctx.drain_notifications_for_char(char_id);
+        f2_test_seed_sqlite_fighters(&ctx, sys_n, &[(sq_n, make_test_fighter_sq(sq_n, sq_n - 100_000, 23_057, char_id, ship_id, 0, false))]);
+        let h_n = f2_test_spawn_unhydrated(&ctx, sys_n).await;
+        emit_combat_log_and_damage_state(&ctx, gunner_id, None, gunner_ship, sq_n, 23_057, 25.0, false, 0.8, 1.0, 1.0, explicit);
+        assert!(!h_n.actor_state.read().unwrap().fighters_needs_sqlite_hydration && ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event.starts_with("OnDamageMessage")));
+    }
+
+    // 3. apply_damage_structure_or_ball hydrates and applies squadron casualty damage.
+    let sq_d = 630_804_i64;
+    f2_test_seed_sqlite_fighters(&ctx, sys_d, &[(sq_d, make_test_fighter_sq(sq_d, 530_804, 23_057, char_id, ship_id, 0, false))]);
+    let h_d = f2_test_spawn_unhydrated(&ctx, sys_d).await;
+    spawn_fighter_test_ball(&h_d, sq_d, 23_057, DVec3::ZERO, Some(sponge_cs())).await;
+    let dmg_hit = apply_damage_structure_or_ball(&ctx, &h_d, sys_d, gunner_id, sq_d, DamageVector::new(1_200.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix()).await.unwrap();
+    assert!(dmg_hit.is_some_and(|(a, _, _)| a > 0.0) && !h_d.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h_d.view().fighters.active_fighters.get(&sq_d).is_none_or(|sq| sq.squadron_size < 9));
+
+    // 4. combat_weapons_spool::handle_ship_or_npc_destruction hydrates and removes destroyed fighter while keeping siblings.
+    let (sq_sp, sq_sp_keep) = (630_805_i64, 630_806_i64);
+    f2_test_seed_sqlite_fighters(&ctx, sys_sp, &[(sq_sp, make_test_fighter_sq(sq_sp, 530_805, 23_057, char_id, ship_id, 0, false)), (sq_sp_keep, make_test_fighter_sq(sq_sp_keep, 530_806, 23_057, char_id, ship_id, 1, false))]);
+    let h_sp = f2_test_spawn_unhydrated(&ctx, sys_sp).await;
+    spawn_fighter_test_ball(&h_sp, sq_sp, 23_057, DVec3::ZERO, Some(sponge_cs())).await;
+    let ball_sp = h_sp.get_ball_snapshot(sq_sp).await.unwrap().unwrap().1;
+    let _ = handle_ship_or_npc_destruction(&ctx, &h_sp, gunner_id, gunner_ship, 23_915, 0, sq_sp, &ball_sp, None, sys_sp, 100.0, ctx.now_unix()).await;
+    assert!(!h_sp.actor_state.read().unwrap().fighters_needs_sqlite_hydration && !h_sp.view().fighters.active_fighters.contains_key(&sq_sp) && h_sp.view().fighters.active_fighters.contains_key(&sq_sp_keep));
+
+    // 5. step_guided_bombs_in_system hydrates before hostility check: spares corp-friendly fighter, damages hostile fighter.
+    let (sq_fr, sq_en) = (630_807_i64, 630_808_i64);
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().solar_system_id = sys_b; s.characters.get_mut(&gunner_id).unwrap().solar_system_id = sys_b; });
+    f2_test_seed_sqlite_fighters(&ctx, sys_b, &[(sq_fr, make_test_fighter_sq(sq_fr, 530_807, 23_057, gunner_id, gunner_ship, 0, false)), (sq_en, make_test_fighter_sq(sq_en, 530_808, 23_057, char_id, ship_id, 1, false))]);
+    let h_b = f2_test_spawn_unhydrated(&ctx, sys_b).await;
+    for (bid, tid, pos, cs) in [(bomb_id, bomb_tid, DVec3::new(100.0, 0.0, 0.0), None), (gunner_ship, 23_915, DVec3::ZERO, Some(sponge_cs())), (sq_fr, 23_057, DVec3::new(200.0, 0.0, 0.0), Some(sponge_cs())), (sq_en, 23_057, DVec3::new(200.0, 0.0, 0.0), Some(sponge_cs()))] {
+        spawn_fighter_test_ball(&h_b, bid, tid, pos, cs).await;
+    }
+    step_guided_bombs_in_system(&ctx, sys_b, 0.1).await;
+    assert!(!h_b.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h_b.get_combat_state(sq_fr).await.unwrap().unwrap().shield_hp == 500.0 && h_b.get_combat_state(sq_en).await.unwrap().unwrap().shield_hp < 500.0);
+
+    // 6. npc_ai::step_system_npc_spawns_ai_sync hydrates and resolves fighter owner_char_id -> delivers OnDamageMessage.
+    let sq_npc = 630_809_i64;
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().solar_system_id = sys_npc; });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    f2_test_seed_sqlite_fighters(&ctx, sys_npc, &[(sq_npc, make_test_fighter_sq(sq_npc, 530_809, 23_057, char_id, ship_id, 0, false))]);
+    let h_npc = f2_test_spawn_unhydrated(&ctx, sys_npc).await;
+    let mut mgr = NpcSpawnManager::new();
+    let npc_ids = mgr.spawn_group(&ctx, sys_npc, sg_id, DVec3::ZERO).await.unwrap();
+    let npc_pos = h_npc.view().ball_position(npc_ids[0]).unwrap();
+    ctx.npc_spawns.write().unwrap().insert(sys_npc, mgr);
+    let _ = h_npc.spawn_ball_with_meta(
+        eve_destiny::Ball { id: sq_npc, type_id: 23_057, position: npc_pos + DVec3::new(800.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 40.0, inertia: 1.0, mass: 1_000.0, radius: 25.0, speed_fraction: 1.0, mode: eve_destiny::MovementMode::Stop },
+        sponge_cs(),
+        eve_destiny::SlimItemMeta { group_id: 100, category_id: 18, owner_id: char_id, ..Default::default() },
+    ).await.unwrap();
+    assert!(h_npc.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    for tick in 1..=5 { step_system_npc_spawns_ai_sync(&ctx, sys_npc, tick, 1.0); }
+    assert!(!h_npc.actor_state.read().unwrap().fighters_needs_sqlite_hydration && ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event.starts_with("OnDamageMessage")));
 }

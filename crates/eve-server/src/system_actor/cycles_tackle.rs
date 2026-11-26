@@ -2416,6 +2416,12 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             );
         }
     }
+    let fighter_checkpoint =
+        if is_condition_checkpoint_tick(exec_ctx.solar_system_id, current_tick) {
+            exec_ctx.actor_st.take_fighter_checkpoint_snapshot()
+        } else {
+            None
+        };
     celestials::update_system_hibernation_flag(
         exec_ctx.actor_st,
         exec_ctx.ballpark,
@@ -2434,6 +2440,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         target_lost_events,
         cycle_actions,
         condition_checkpoint,
+        fighter_checkpoint,
         broadcast: broadcast_opt,
         has_post_unlock_work: !exec_ctx.post_unlock_ops.is_empty(),
     };

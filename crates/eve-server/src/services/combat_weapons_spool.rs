@@ -266,11 +266,13 @@ pub async fn handle_ship_or_npc_destruction(
     let mut generated_wreck_id: i64 = 0;
     let generated_km_hash;
 
-    let is_active_fighter = ctx.active_fighters.read().is_ok_and(|fighters| {
-        fighters
-            .values()
-            .any(|sq| sq.ball_id == target_ball_id || sq.item_id == target_ball_id)
-    });
+    ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
+    let is_active_fighter = sys_handle
+        .view()
+        .fighters
+        .active_fighters
+        .values()
+        .any(|sq| sq.ball_id == target_ball_id || sq.item_id == target_ball_id);
     let ball_cat_id = ctx
         .sde
         .types
@@ -300,9 +302,10 @@ pub async fn handle_ship_or_npc_destruction(
             (Some(cat_id), Some(it.owner_id), corp_all)
         });
     if is_active_fighter
+        || ball_cat_id == 87
         || target_item_cat_id_opt.is_some_and(|cat_id| matches!(cat_id, 2 | 8 | 18 | 65))
     {
-        if is_active_fighter {
+        if is_active_fighter || ball_cat_id == 87 {
             crate::combat::death_pipeline::cleanup_destroyed_non_ship_ball_sync(
                 ctx,
                 sys_id,

@@ -1121,49 +1121,6 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
             &|c| c.character_scan_progress.write().unwrap().clear(),
         );
         check_one(
-            "active_fighters",
-            &|c| {
-                fighter_test_helpers::insert_active_fighter(
-                    c,
-                    1,
-                    ActiveFighterSquadron {
-                        ball_id: 1,
-                        item_id: 1,
-                        type_id: 23_057,
-                        owner_char_id: 1,
-                        parent_ship_id: 2,
-                        tube_index: 0,
-                        squadron_size: 9,
-                        target_id: None,
-                        is_abandoned: false,
-                        mwd_active: false,
-                    },
-                );
-            },
-            &|c| fighter_test_helpers::clear_active_fighters(c),
-        );
-        check_one(
-            "fighter_cooldown_state",
-            &|c| {
-                fighter_test_helpers::set_fighter_ability_cooldown(c, 1, 0, 100);
-            },
-            &|c| fighter_test_helpers::clear_all_fighter_cooldowns(c),
-        );
-        check_one(
-            "fighter_charge_state",
-            &|c| {
-                fighter_test_helpers::set_fighter_ability_charges_used(c, 1, 2, 6);
-            },
-            &|c| fighter_test_helpers::clear_all_fighter_charges(c),
-        );
-        check_one(
-            "fighter_tube_loads",
-            &|c| {
-                fighter_test_helpers::set_fighter_tube_load(c, 2, 0, 1);
-            },
-            &|c| fighter_test_helpers::clear_all_fighter_tubes(c),
-        );
-        check_one(
             "module_reactivation_cooldowns",
             &|c| {
                 c.module_reactivation_cooldowns.write().unwrap().insert(
@@ -1701,5 +1658,603 @@ fn legacy_runtime_snapshot_with_location_change_invuln_fields_loads_cleanly() {
         assert_eq!(reloaded.started_tick, 21);
         assert_eq!(reloaded.reason, "stargate_jump");
     }
+}
+
+fn f2_open_ctx(sde: &Arc<eve_sde::SdeRegistry>, dir: &TempTestDir, name: &str, seed_fn: impl FnOnce(&mut eve_db::WorldStateSnapshot)) -> (Arc<WorldRepository>, ServerContext) {
+    let db = Arc::new(WorldRepository::open_sqlite(&dir.path().join(name)).expect("open fighter test sqlite"));
+    db.with_mut_snapshot(seed_fn);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), Arc::clone(&db));
+    (db, ctx)
+}
+
+fn f2_sq(ball_id: i64, item_id: i64, ship_id: i64, tube_index: usize, sz: u32, is_abandoned: bool, mwd_active: bool) -> ActiveFighterSquadron {
+    ActiveFighterSquadron { ball_id, item_id, type_id: 23_057, owner_char_id: 90_000_001, parent_ship_id: ship_id, tube_index, squadron_size: sz, target_id: None, is_abandoned, mwd_active }
+}
+
+fn f2_cluster_count(db: &WorldRepository) -> usize {
+    use eve_db::sqlite_store::system_checkpoint::{load_all_checkpoints_for_kind, CLUSTER_SYSTEM_ID, KIND_FIGHTERS};
+    db.with_sqlite_conn(|c| Ok::<usize, String>(load_all_checkpoints_for_kind::<serde_json::Value>(c, KIND_FIGHTERS)?.into_iter().filter(|(sid, _, _)| *sid == CLUSTER_SYSTEM_ID).count())).unwrap()
+}
+
+fn f2_hold_db_writer(db: &Arc<WorldRepository>) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let ((htx, hrx), (rtx, rrx), d) = (std::sync::mpsc::channel(), std::sync::mpsc::channel(), Arc::clone(db));
+    let h = std::thread::spawn(move || d.with_mut_snapshot(|_| { htx.send(()).unwrap(); let _ = rrx.recv(); }));
+    hrx.recv().unwrap();
+    (rtx, h)
+}
+
+async fn f2_spawn_unhydrated(db: &Arc<WorldRepository>, ctx: &ServerContext, sys: u32) -> crate::system_actor::SystemHandle {
+    let held = f2_hold_db_writer(db);
+    let h = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx.systems); move || r.get_or_spawn(sys) }).await.unwrap();
+    let _ = held.0.send(());
+    held.1.join().unwrap();
+    h
+}
+
+fn f2_break_cp_table(db: &WorldRepository, broken: bool) {
+    let sql = if broken { "ALTER TABLE system_checkpoint RENAME TO system_checkpoint_bak; CREATE TABLE system_checkpoint(broken INT);" }
+        else { "DROP TABLE system_checkpoint; ALTER TABLE system_checkpoint_bak RENAME TO system_checkpoint;" };
+    db.with_sqlite_conn(|c| c.execute_batch(sql).map_err(|e| e.to_string())).unwrap();
+}
+
+fn f2_make_hook_gate() -> Arc<(std::sync::Mutex<u8>, std::sync::Condvar)> { Arc::new((std::sync::Mutex::new(0u8), std::sync::Condvar::new())) }
+fn f2_hold_gate(g: &(std::sync::Mutex<u8>, std::sync::Condvar), secs: u64) {
+    let mut st = g.0.lock().unwrap();
+    *st = 1;
+    g.1.notify_all();
+    while *st < 2 {
+        let (n, r) = g.1.wait_timeout(st, std::time::Duration::from_secs(secs)).unwrap();
+        st = n;
+        if r.timed_out() { break; }
+    }
+}
+fn f2_install_hold(gate: &Arc<(std::sync::Mutex<u8>, std::sync::Condvar)>, target: u32) -> Arc<dyn Fn(u32, u64) + Send + Sync> {
+    let g = Arc::clone(gate);
+    Arc::new(move |sid, _| if sid == target { f2_hold_gate(&g, 5); })
+}
+fn f2_wait_entered(gate: &Arc<(std::sync::Mutex<u8>, std::sync::Condvar)>) {
+    let mut st = gate.0.lock().unwrap();
+    while *st == 0 { let (n, r) = gate.1.wait_timeout(st, std::time::Duration::from_secs(5)).unwrap(); st = n; assert!(!r.timed_out(), "timed out waiting for hook entry"); }
+}
+fn f2_release_gate(gate: &Arc<(std::sync::Mutex<u8>, std::sync::Condvar)>) { *gate.0.lock().unwrap() = 2; gate.1.notify_all(); }
+fn f2_seed_cp(db: &WorldRepository, sys: u32, rows: &[(String, serde_json::Value)], ts: u64) {
+    db.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(c, sys, eve_db::sqlite_store::system_checkpoint::KIND_FIGHTERS, rows, ts)).unwrap();
+}
+fn f2_commit(ship_id: i64, tube_index: usize, fighter_item_id: i64, sde: &Arc<eve_sde::SdeRegistry>) -> crate::system_actor::FighterTubeOp {
+    crate::system_actor::FighterTubeOp::CommitLoad { ship_id, tube_index, fighter_item_id, carrier_type_id: 23_915, fighter_type_id: 23_057, sde: Arc::clone(sde) }
+}
+async fn f2_shutdown(h: &crate::system_actor::SystemHandle) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    h.cmd_tx.send(crate::system_actor::SystemCommand::ShutdownActor { reply: tx }).await.unwrap();
+    let _ = rx.await;
+    h.cmd_tx.closed().await;
+}
+
+#[tokio::test]
+async fn system_actor_fighters_persist_per_system_and_migrate_legacy_one_way() {
+    use eve_db::sqlite_store::system_checkpoint::{load_all_checkpoints_for_kind, CLUSTER_SYSTEM_ID, KIND_FIGHTERS};
+    let (sde, dir, (sys_jita, ship_id, fid)) = (shared_sde(), TempTestDir::new("fighters_actor_persist"), (30_000_142_u32, 880_001_001_i64, 880_001_002_i64));
+    {
+        let (db, ctx) = f2_open_ctx(&sde, &dir, "actor_roundtrip.sqlite", |s| { s.system_states.insert(sys_jita, SystemDynamicState { solar_system_id: sys_jita, ..Default::default() }); });
+        let sys_h = ctx.systems.get_or_spawn(sys_jita);
+        fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_jita, fid, f2_sq(fid, fid, ship_id, 1, 7, false, true));
+        fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_jita, ship_id, 1, fid);
+        fighter_test_helpers::set_fighter_ability_cooldown_in_system(&ctx, sys_jita, fid, 0, 4242);
+        fighter_test_helpers::set_fighter_ability_charges_used_in_system(&ctx, sys_jita, fid, 2, 3);
+        fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_jita, fid, 18.5);
+        fighter_test_helpers::set_fighter_tube_rearm_until_in_system(&ctx, sys_jita, ship_id, 1, 9_999);
+        assert!(sys_h.flush_fighter_checkpoint().await.expect("flush fighter cp") >= 6);
+        flush_combat_runtime_to_db(&ctx);
+        let cp_systems: Vec<u32> = db.with_sqlite_conn(|c| Ok::<Vec<u32>, String>(load_all_checkpoints_for_kind::<serde_json::Value>(c, KIND_FIGHTERS)?.into_iter().map(|(sid, _, _)| sid).collect())).unwrap();
+        assert!(!cp_systems.is_empty() && cp_systems.iter().all(|&sid| sid == sys_jita));
+        let ext_json = db.with_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json.clone());
+        assert!(!ext_json.contains("fighter_unit_damage_accum") && !ext_json.contains("fighter_tube_rearm_until"));
+    }
+    {
+        let db2 = Arc::new(WorldRepository::open_sqlite(&dir.path().join("actor_roundtrip.sqlite")).expect("reopen sqlite"));
+        let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+        let fg = &ctx2.systems.get_or_spawn(sys_jita).view().fighters;
+        assert_eq!((fg.active_fighters.get(&fid).map(|s| s.squadron_size), fg.tube_loads.get(&(ship_id, 1)).map(|&(id, _)| id), fg.cooldown_state.get(&(fid, 0)), fg.charge_state.get(&(fid, 2)), fg.unit_damage_accum.get(&fid), fg.tube_rearm_until.get(&(ship_id, 1))), (Some(7), Some(fid), Some(&4242), Some(&3), Some(&18.5), Some(&9_999)));
+        fighter_test_helpers::clear_all_fighter_state(&ctx2);
+        assert_eq!(db2.with_sqlite_conn(|c| Ok::<usize, String>(load_all_checkpoints_for_kind::<serde_json::Value>(c, KIND_FIGHTERS)?.len())).unwrap(), 0);
+    }
+    {
+        let (db, ctx) = f2_open_ctx(&sde, &dir, "legacy_fallback.sqlite", |s| {
+            seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(fid, ship_id, eve_db::InventoryFlag::FighterBay, true)]);
+            s.combat_crimewatch_state.extended_runtime_json = format!(r#"{{"fighter_unit_damage_accum":{{"{fid}":27.25}},"fighter_tube_rearm_until":[[[{ship_id},0],55555]]}}"#);
+        });
+        f2_seed_cp(&db, CLUSTER_SYSTEM_ID, &[(format!("sq|{fid}"), serde_json::json!({ "Squadron": f2_sq(fid, fid, ship_id, 0, 8, false, false) })), (format!("tl|{ship_id}|0"), serde_json::json!({ "TubeLoad": [[ship_id, 0], fid] }))], 100);
+        let sys_h = ctx.systems.get_or_spawn(sys_jita);
+        let _ = sys_h.wait_for_post_unlock_barrier().await;
+        let fg = &sys_h.view().fighters;
+        assert_eq!((fg.active_fighters.get(&fid).map(|s| s.squadron_size), fg.tube_loads.get(&(ship_id, 0)).map(|&(id, _)| id), fg.unit_damage_accum.get(&fid), fg.tube_rearm_until.get(&(ship_id, 0))), (Some(8), Some(fid), Some(&27.25), Some(&55_555)));
+        assert_eq!(f2_cluster_count(&db), 0);
+        flush_combat_runtime_to_db(&ctx);
+        let new_ext = db.with_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json.clone());
+        assert!(!new_ext.contains("fighter_unit_damage_accum") && !new_ext.contains("fighter_tube_rearm_until"));
+    }
+}
+
+fn seed_fighter_system_snapshot(s: &mut eve_db::WorldStateSnapshot, sys_id: u32, ship_id: i64, fighters: &[(i64, i64, eve_db::InventoryFlag, bool)]) {
+    s.system_states.insert(sys_id, SystemDynamicState { solar_system_id: sys_id, ..Default::default() });
+    s.items.insert(ship_id, eve_db::InventoryItemRecord { item_id: ship_id, type_id: 23_915, owner_id: 90_000_001, location_id: sys_id as i64, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+    for &(iid, loc_id, flag, singleton) in fighters {
+        s.items.insert(iid, eve_db::InventoryItemRecord { item_id: iid, type_id: 23_057, owner_id: 90_000_001, location_id: loc_id, flag, quantity: 9, singleton, ..Default::default() });
+    }
+}
+
+#[tokio::test]
+async fn r2_f04_cluster_migration_ball_id_ne_item_id_and_ext_json_pruning() {
+    use eve_db::sqlite_store::system_checkpoint::CLUSTER_SYSTEM_ID;
+    let (sde, dir, (sys_jita, ship_id, item_id, ball_id)) = (shared_sde(), TempTestDir::new("f04_cluster_mig"), (30_000_142_u32, 880_002_001_i64, 880_002_101_i64, 990_002_101_i64));
+    {
+        let (db, ctx) = f2_open_ctx(&sde, &dir, "legacy_f04.sqlite", |s| {
+            seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(item_id, sys_jita as i64, eve_db::InventoryFlag::None, true)]);
+            s.combat_crimewatch_state.extended_runtime_json = format!(r#"{{"fighter_unit_damage_accum":{{"{ball_id}":19.25}},"fighter_tube_rearm_until":[[[{ship_id},1],77777]]}}"#);
+        });
+        f2_seed_cp(&db, CLUSTER_SYSTEM_ID, &[
+            (format!("cd|{ball_id}|0"), serde_json::json!({ "Cooldown": [[ball_id, 0], 5_555] })),
+            (format!("ch|{ball_id}|2"), serde_json::json!({ "Charge": [[ball_id, 2], 4] })),
+            (format!("sq|{ball_id}"), serde_json::json!({ "Squadron": f2_sq(ball_id, item_id, ship_id, 0, 7, false, true) })),
+            (format!("tl|{ship_id}|0"), serde_json::json!({ "TubeLoad": [[ship_id, 0], item_id] })),
+        ], 100);
+        let sys_h = ctx.systems.get_or_spawn(sys_jita);
+        let _ = sys_h.wait_for_post_unlock_barrier().await;
+        let fg = &sys_h.view().fighters;
+        assert_eq!((fg.active_fighters.get(&ball_id).map(|s| s.item_id), fg.cooldown_state.get(&(ball_id, 0)), fg.charge_state.get(&(ball_id, 2)), fg.tube_loads.get(&(ship_id, 0)), fg.unit_damage_accum.get(&ball_id), fg.tube_rearm_until.get(&(ship_id, 1))), (Some(item_id), Some(&5_555), Some(&4), Some(&(item_id, 23_057)), Some(&19.25), Some(&77_777)));
+        assert_eq!(f2_cluster_count(&db), 0);
+        assert!(db.with_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json.is_empty()));
+        fighter_test_helpers::clear_all_fighter_state(&ctx);
+    }
+    let db2 = Arc::new(WorldRepository::open_sqlite(&dir.path().join("legacy_f04.sqlite")).expect("reopen f04 sqlite"));
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+    let fg2 = &ctx2.systems.get_or_spawn(sys_jita).view().fighters;
+    assert!(fg2.unit_damage_accum.is_empty() && fg2.tube_rearm_until.is_empty() && fg2.cooldown_state.is_empty() && fg2.charge_state.is_empty());
+}
+
+#[tokio::test]
+async fn r2_f05_precheck_and_failed_cold_tube_op_preserve_state() {
+    use crate::system_actor::FighterTubeOp;
+    let (sde, dir, (sys_jita, ship_id, f1_id, f2_id)) = (shared_sde(), TempTestDir::new("f05_cold_tube"), (30_000_142_u32, 880_003_001_i64, 880_003_101_i64, 880_003_102_i64));
+    let (_, ctx) = f2_open_ctx(&sde, &dir, "cold_f05.sqlite", |s| seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    assert!(ctx.systems.get_handle(sys_jita).is_none());
+    ctx.systems.load_or_unload_fighter_tube(sys_jita, f2_commit(ship_id, 0, f1_id, &sde)).await.unwrap();
+    let (pre_res, commit_res) = tokio::join!(
+        ctx.systems.load_or_unload_fighter_tube(sys_jita, FighterTubeOp::PreCheckLoad { ship_id, tube_index: 2, fighter_item_id: f2_id }),
+        ctx.systems.load_or_unload_fighter_tube(sys_jita, f2_commit(ship_id, 1, f2_id, &sde)),
+    );
+    assert!(matches!(pre_res, Ok(None)) || matches!(&pre_res, Err(e) if e.code == "FighterAlreadyLoaded"));
+    assert!(commit_res.is_ok());
+    let fail = ctx.systems.load_or_unload_fighter_tube(sys_jita, f2_commit(ship_id, 2, f1_id, &sde)).await.unwrap_err();
+    assert_eq!(fail.code, "FighterAlreadyLoadedInTube");
+    let snap = ctx.systems.snapshot_fighters_for_system(sys_jita);
+    assert_eq!((snap.tube_loads.get(&(ship_id, 0)), snap.tube_loads.get(&(ship_id, 1))), (Some(&(f1_id, 23_057)), Some(&(f2_id, 23_057))));
+    assert!(ctx.systems.get_handle(sys_jita).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r3_f2_01_cold_guard_cleans_preempted_loading_and_dead_live_and_transfer_waits_stopping() {
+    use crate::system_actor::{SystemLifecycleState, SystemRegistry};
+    let (sde, dir, (sys_a, sys_b, ship_id, f1_id, f2_id)) = (shared_sde(), TempTestDir::new("r3_f2_01"), (30_000_142_u32, 30_002_187_u32, 880_004_001_i64, 880_004_101_i64, 880_004_102_i64));
+    let (_, ctx) = f2_open_ctx(&sde, &dir, "r3_f2_01.sqlite", |s| {
+        seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]);
+        s.system_states.insert(sys_b, SystemDynamicState { solar_system_id: sys_b, ..Default::default() });
+    });
+
+    // 1. PreemptedLoading clears phase immediately so Cold ops succeed WHILE wake_a is still in flight.
+    let load_gate = f2_make_hook_gate();
+    ctx.systems.set_before_publish_hook_for_test(Some(f2_install_hold(&load_gate, sys_a)));
+    let wake_a = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx.systems); move || r.wake_for_session_arrival(sys_a, crate::system_actor::SessionArrivalWakeReason::LoginInSpace) });
+    f2_wait_entered(&load_gate);
+    assert!(ctx.systems.stop_system(sys_a).await);
+    ctx.systems.load_or_unload_fighter_tube(sys_a, f2_commit(ship_id, 0, f1_id, &sde)).await.expect("PreemptedLoading allows Cold ops");
+    ctx.systems.abandon_fighters_in_cold_db(sys_a, 90_000_001, ship_id, &std::collections::HashSet::new()).expect("sync abandon succeeds");
+    ctx.systems.set_before_publish_hook_for_test(None);
+    f2_release_gate(&load_gate);
+    assert!(wake_a.await.unwrap().is_err());
+    assert_eq!(ctx.systems.snapshot_fighters_for_system(sys_a).tube_loads.get(&(ship_id, 0)), Some(&(f1_id, 23_057)));
+
+    // 2. stop_dead_live_to_cold clears live slot state so Cold ops proceed.
+    let h_a = ctx.systems.get_or_spawn(sys_a);
+    f2_shutdown(&h_a).await;
+    assert!(!ctx.systems.stop_system(sys_a).await);
+    ctx.systems.load_or_unload_fighter_tube(sys_a, f2_commit(ship_id, 1, f2_id, &sde)).await.expect("stop_dead_live_to_cold cleans slot");
+
+    let _ = ctx.systems.get_or_spawn(sys_b);
+    let stop_gate = f2_make_hook_gate();
+    ctx.systems.set_before_stop_finish_hook_for_test(Some(f2_install_hold(&stop_gate, sys_b)));
+    let stop_b = tokio::spawn({ let r = Arc::clone(&ctx.systems); async move { r.stop_system(sys_b).await } });
+    f2_wait_entered(&stop_gate);
+    assert_eq!(ctx.systems.system_lifecycle_state(sys_b), SystemLifecycleState::Stopping);
+    let xfer = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx.systems); move || r.transfer_ship_fighter_tubes(sys_a, sys_b, ship_id) });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    ctx.systems.set_before_stop_finish_hook_for_test(None);
+    f2_release_gate(&stop_gate);
+    assert!(stop_b.await.unwrap());
+    xfer.await.unwrap().expect("transfer across Stopping succeeds");
+    let dest_fg = ctx.systems.snapshot_fighters_for_system(sys_b);
+    assert_eq!((dest_fg.tube_loads.get(&(ship_id, 0)), dest_fg.tube_loads.get(&(ship_id, 1))), (Some(&(f1_id, 23_057)), Some(&(f2_id, 23_057))));
+    assert!(ctx.systems.snapshot_fighters_for_system(sys_a).tube_loads.is_empty());
+
+    let reg_nodb = Arc::new(SystemRegistry::new());
+    let ha_nodb = tokio::task::spawn_blocking({ let r = Arc::clone(&reg_nodb); move || r.get_or_spawn(sys_a) }).await.unwrap();
+    ha_nodb.load_or_unload_fighter_tube(f2_commit(ship_id, 0, f1_id, &sde)).await.unwrap();
+    assert!(reg_nodb.transfer_ship_fighter_tubes(sys_a, sys_b, ship_id).is_err() && ha_nodb.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+    drop(ha_nodb);
+    let _ = reg_nodb.stop_system(sys_a).await;
+}
+
+#[tokio::test]
+async fn r3_f2_02_cold_unload_and_transfer_delete_migrated_cluster_rows() {
+    use crate::system_actor::FighterTubeOp;
+    use eve_db::sqlite_store::system_checkpoint::CLUSTER_SYSTEM_ID;
+    let (sde, dir, (sys_jita, sys_amarr, ship_id, f1_id, f2_id)) = (shared_sde(), TempTestDir::new("r3_f2_02"), (30_000_142_u32, 30_002_187_u32, 880_005_001_i64, 880_005_101_i64, 880_005_102_i64));
+    let (db, ctx) = f2_open_ctx(&sde, &dir, "r3_f2_02.sqlite", |s| {
+        seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]);
+        s.system_states.insert(sys_amarr, SystemDynamicState { solar_system_id: sys_amarr, ..Default::default() });
+    });
+    f2_seed_cp(&db, CLUSTER_SYSTEM_ID, &[(format!("tl|{ship_id}|0"), serde_json::json!({ "TubeLoad": [[ship_id, 0], f1_id] })), (format!("tl|{ship_id}|1"), serde_json::json!({ "TubeLoad": [[ship_id, 1], f2_id] }))], 100);
+    assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_jita, FighterTubeOp::Unload { ship_id, tube_index: 0 }).await.unwrap(), Some(f1_id));
+    assert!(ctx.systems.get_handle(sys_jita).is_none() && f2_cluster_count(&db) == 0);
+    let snap = ctx.systems.snapshot_fighters_for_system(sys_jita);
+    assert!(snap.tube_loads.get(&(ship_id, 0)).is_none() && snap.tube_loads.get(&(ship_id, 1)) == Some(&(f2_id, 23_057)));
+
+    f2_seed_cp(&db, CLUSTER_SYSTEM_ID, &[(format!("tl|{ship_id}|0"), serde_json::json!({ "TubeLoad": [[ship_id, 0], f1_id] }))], 101);
+    ctx.systems.transfer_ship_fighter_tubes(sys_jita, sys_amarr, ship_id).expect("cold transfer");
+    let amarr_fg = ctx.systems.snapshot_fighters_for_system(sys_amarr);
+    assert!(f2_cluster_count(&db) == 0 && (amarr_fg.tube_loads.get(&(ship_id, 0)), amarr_fg.tube_loads.get(&(ship_id, 1))) == (Some(&(f1_id, 23_057)), Some(&(f2_id, 23_057))));
+
+    ctx.systems.load_or_unload_fighter_tube(sys_jita, f2_commit(ship_id, 0, f1_id, &sde)).await.unwrap();
+    db.with_mut_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json = format!(r#"{{"fighter_tube_rearm_until":[[[{ship_id},0],9876]]}}"#));
+    f2_seed_cp(&db, CLUSTER_SYSTEM_ID, &[(format!("tl|{ship_id}|1"), serde_json::json!({ "TubeLoad": [[ship_id, 1], f2_id] }))], 102);
+    db.with_sqlite_conn(|c| c.execute_batch("CREATE TRIGGER fail_cluster_del BEFORE DELETE ON system_checkpoint WHEN OLD.system_id = 0 BEGIN SELECT RAISE(ABORT, 'injected_cluster_del_fail'); END;").map_err(|e| e.to_string())).unwrap();
+    assert!(ctx.systems.load_or_unload_fighter_tube(sys_jita, FighterTubeOp::Unload { ship_id, tube_index: 0 }).await.is_err());
+    let jita_rb = ctx.systems.snapshot_fighters_for_system(sys_jita);
+    assert!((jita_rb.tube_loads.get(&(ship_id, 0)), jita_rb.tube_loads.get(&(ship_id, 1))) == (Some(&(f1_id, 23_057)), Some(&(f2_id, 23_057))) && !db.with_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json.is_empty()));
+    db.with_sqlite_conn(|c| c.execute_batch("DROP TRIGGER fail_cluster_del;").map_err(|e| e.to_string())).unwrap();
+    assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_jita, FighterTubeOp::Unload { ship_id, tube_index: 0 }).await.unwrap(), Some(f1_id));
+    assert!(f2_cluster_count(&db) == 0 && db.with_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json.is_empty()));
+    assert_eq!(ctx.systems.get_or_spawn(sys_jita).view().fighters.tube_loads.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>(), vec![((ship_id, 1), (f2_id, 23_057))]);
+}
+
+#[tokio::test]
+async fn r4_f2_02_serialized_rev_and_retired_gen_rejects_stale_and_post_stop_flush() {
+    use crate::system_actor::{persist_live_fighter_snapshot_sync, FighterTubeOp};
+    let (sde, dir, (sys_a, ship_id, f1_id, f2_id)) = (shared_sde(), TempTestDir::new("r4_f2_02"), (30_000_142_u32, 880_006_001_i64, 880_006_101_i64, 880_006_102_i64));
+    let (db, ctx) = f2_open_ctx(&sde, &dir, "r4_f2_02.sqlite", |s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    let h_a = ctx.systems.get_or_spawn(sys_a);
+    fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_a, ship_id, 0, f1_id);
+    let (snap1, coord) = { let st = h_a.actor_state.read().unwrap(); (st.take_fighter_checkpoint_snapshot().unwrap(), Arc::clone(&st.fighters_persist)) };
+    fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_a, ship_id, 1, f2_id);
+    let snap2 = h_a.actor_state.read().unwrap().take_fighter_checkpoint_snapshot().unwrap();
+    assert!(persist_live_fighter_snapshot_sync(&db, sys_a, &coord, &snap2, &h_a.fighter_ctx.dirty_stamp, Some(&sde), false).unwrap() >= 2);
+    assert!(!h_a.actor_state.read().unwrap().is_fighters_dirty());
+    assert_eq!(persist_live_fighter_snapshot_sync(&db, sys_a, &coord, &snap1, &h_a.fighter_ctx.dirty_stamp, Some(&sde), false).unwrap(), 0);
+    assert_eq!(crate::system_actor::load_cold_fighters_for_system(&db, Some(&sde), sys_a).unwrap().tube_loads.len(), 2);
+
+    fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_a, f1_id, 55.0);
+    let stale_after_stop = h_a.actor_state.read().unwrap().take_fighter_checkpoint_snapshot().unwrap();
+    drop(h_a);
+    assert!(ctx.systems.stop_system(sys_a).await);
+    assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_a, FighterTubeOp::Unload { ship_id, tube_index: 1 }).await.unwrap(), Some(f2_id));
+    let detached = std::sync::atomic::AtomicU64::new(0);
+    assert_eq!(persist_live_fighter_snapshot_sync(&db, sys_a, &coord, &stale_after_stop, &detached, Some(&sde), false).unwrap(), 0);
+    assert!(ctx.systems.snapshot_fighters_for_system(sys_a).tube_loads.get(&(ship_id, 1)).is_none());
+}
+
+#[tokio::test]
+async fn r4_f2_03_legacy_monolith_launched_fighter_ball_ne_item_preserves_ext_damage() {
+    let (sde, dir, (sys_jita, ship_id)) = (shared_sde(), TempTestDir::new("r4_f2_03"), (30_000_142_u32, 880_007_001_i64));
+    let (item_a, ball_a, item_b, ball_b, item_c, ball_c) = (880_007_101_i64, 990_007_101_i64, 880_007_102_i64, 990_007_102_i64, 880_007_103_i64, 990_007_103_i64);
+    let (db, ctx) = f2_open_ctx(&sde, &dir, "r4_f2_03.sqlite", |s| {
+        seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(item_a, sys_jita as i64, eve_db::InventoryFlag::None, true), (item_b, sys_jita as i64, eve_db::InventoryFlag::None, true), (item_c, sys_jita as i64, eve_db::InventoryFlag::None, true)]);
+        for (iid, bid) in [(item_a, ball_a), (item_b, ball_b)] { s.sp6_lifecycle.space_object_meta.insert(iid, eve_db::PersistedSpaceObjectMeta { drone_ball_id: Some(bid), ..Default::default() }); }
+        s.combat_crimewatch_state.extended_runtime_json = format!(r#"{{"fighter_unit_damage_accum":{{"{ball_a}":42.5,"{ball_b}":13.75,"{ball_c}":9.5}},"fighter_tube_rearm_until":[[[{ship_id},0],77777]]}}"#);
+    });
+    let mut legacy = std::collections::HashMap::new();
+    for (bid, iid) in [(ball_a, item_a), (ball_c, item_c)] { legacy.insert(bid, f2_sq(bid, iid, ship_id, 0, 7, false, false)); }
+    crate::system_actor::migrate_legacy_monolith_fighters_one_way(&db, Some(&sde), &ctx.systems, legacy, vec![], vec![], vec![]);
+    assert!(db.with_snapshot(|s| s.combat_crimewatch_state.extended_runtime_json.is_empty()));
+    let fg = &ctx.systems.get_or_spawn(sys_jita).view().fighters;
+    assert_eq!((fg.unit_damage_accum.get(&ball_a), fg.unit_damage_accum.get(&ball_b), fg.unit_damage_accum.get(&ball_c), fg.tube_rearm_until.get(&(ship_id, 0))), (Some(&42.5), Some(&13.75), Some(&9.5), Some(&77_777)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r4_f2_04_current_thread_preempted_loading_allows_sync_and_async_cold_ops() {
+    let (sde, dir, (sys_a, sys_b, ship_id, f1_id)) = (shared_sde(), TempTestDir::new("r4_f2_04"), (30_000_142_u32, 30_002_187_u32, 880_008_001_i64, 880_008_101_i64));
+    let (_, ctx) = f2_open_ctx(&sde, &dir, "r4_f2_04.sqlite", |s| {
+        seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]);
+        s.system_states.insert(sys_b, SystemDynamicState { solar_system_id: sys_b, ..Default::default() });
+    });
+    let gate = f2_make_hook_gate();
+    ctx.systems.set_before_publish_hook_for_test(Some(f2_install_hold(&gate, sys_a)));
+    let (rt, reg_wake) = (tokio::runtime::Handle::current(), Arc::clone(&ctx.systems));
+    let wake_thread = std::thread::spawn(move || { let _g = rt.enter(); reg_wake.wake_for_session_arrival(sys_a, crate::system_actor::SessionArrivalWakeReason::LoginInSpace) });
+    f2_wait_entered(&gate);
+    assert!(ctx.systems.stop_system(sys_a).await);
+    ctx.systems.load_or_unload_fighter_tube(sys_a, f2_commit(ship_id, 0, f1_id, &sde)).await.unwrap();
+    ctx.systems.transfer_ship_fighter_tubes(sys_a, sys_b, ship_id).unwrap();
+    ctx.systems.abandon_fighters_in_cold_db(sys_b, 90_000_001, ship_id, &std::collections::HashSet::new()).unwrap();
+    ctx.systems.set_before_publish_hook_for_test(None);
+    f2_release_gate(&gate);
+    assert!(wake_thread.join().unwrap().is_err());
+    assert_eq!(ctx.systems.snapshot_fighters_for_system(sys_b).tube_loads.get(&(ship_id, 0)), Some(&(f1_id, 23_057)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r5_f2_01_writer_contention_hydrates_lazily_without_deadlock_or_sqlite_wipe() {
+    let (sde, (sys_a, ship_id, f1_id)) = (shared_sde(), (30_000_142_u32, 880_009_001_i64, 880_009_101_i64));
+    let db_mem = Arc::new(WorldRepository::with_demo_seed());
+    db_mem.with_mut_snapshot(|s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    let rows = vec![(format!("tl|{ship_id}|0"), serde_json::json!({ "TubeLoadTyped": [[ship_id, 0], f1_id, 23_057] })), (format!("re|{ship_id}|0"), serde_json::json!({ "TubeRearmUntil": [[ship_id, 0], 88_888] }))];
+    f2_seed_cp(&db_mem, sys_a, &rows, 100);
+    let ctx_mem = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db_mem));
+
+    let held = f2_hold_db_writer(&db_mem);
+    let sys_h = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx_mem.systems); move || r.get_or_spawn(sys_a) }).await.unwrap();
+    assert!(sys_h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    fighter_test_helpers::set_fighter_tube_rearm_until_in_system(&ctx_mem, sys_a, ship_id, 1, 77_777);
+    assert_eq!(sys_h.flush_fighter_checkpoint().await.unwrap(), 0, "unhydrated actor must not wipe SQLite");
+    let _ = held.0.send(());
+    held.1.join().unwrap();
+    assert_eq!(crate::system_actor::load_cold_fighters_for_system(&db_mem, Some(&sde), sys_a).unwrap().tube_loads.get(&(ship_id, 0)), Some(&(f1_id, 23_057)));
+
+    assert!(ctx_mem.systems.flush_system_fighter_checkpoint_sync(sys_a) >= 3);
+    assert!(!sys_h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    let cold_after = crate::system_actor::load_cold_fighters_for_system(&db_mem, Some(&sde), sys_a).unwrap();
+    assert_eq!((cold_after.tube_loads.get(&(ship_id, 0)), cold_after.tube_rearm_until.get(&(ship_id, 0)), cold_after.tube_rearm_until.get(&(ship_id, 1))), (Some(&(f1_id, 23_057)), Some(&88_888), Some(&77_777)));
+
+    let dir = TempTestDir::new("r5_f2_01_wal");
+    let (db_wal, ctx_wal) = f2_open_ctx(&sde, &dir, "wal.sqlite", |s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    f2_seed_cp(&db_wal, sys_a, &rows, 100);
+    let held_wal = f2_hold_db_writer(&db_wal);
+    let h_wal = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx_wal.systems); move || r.get_or_spawn(sys_a) }).await.unwrap();
+    assert!(!h_wal.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h_wal.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+    let _ = held_wal.0.send(());
+    held_wal.1.join().unwrap();
+}
+
+#[tokio::test]
+async fn r5_f2_03_live_legacy_migration_preserves_live_mutations_and_rejects_stale_snapshot() {
+    use crate::system_actor::persist_live_fighter_snapshot_sync;
+    let (sde, dir, (sys_jita, ship_id, f1_id, f2_id)) = (shared_sde(), TempTestDir::new("r5_f2_03"), (30_000_142_u32, 880_010_001_i64, 880_010_101_i64, 880_010_102_i64));
+    let (db, ctx) = f2_open_ctx(&sde, &dir, "r5_f2_03.sqlite", |s| seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(f1_id, sys_jita as i64, eve_db::InventoryFlag::None, true), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    let h = ctx.systems.get_or_spawn(sys_jita);
+    fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_jita, ship_id, 1, f2_id);
+    let (stale_snap, coord) = { let st = h.actor_state.read().unwrap(); (st.take_fighter_checkpoint_snapshot().unwrap(), Arc::clone(&st.fighters_persist)) };
+    fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_jita, f2_id, 99.0);
+
+    let mut legacy = std::collections::HashMap::new();
+    legacy.insert(f1_id, f2_sq(f1_id, f1_id, ship_id, 0, 6, false, false));
+    crate::system_actor::migrate_legacy_monolith_fighters_one_way(&db, Some(&sde), &ctx.systems, legacy, vec![], vec![], vec![((ship_id, 0), f1_id)]);
+    let fg = &h.view().fighters;
+    assert_eq!((fg.tube_loads.get(&(ship_id, 0)), fg.tube_loads.get(&(ship_id, 1)), fg.unit_damage_accum.get(&f2_id), fg.active_fighters.get(&f1_id).map(|s| s.squadron_size)), (Some(&(f1_id, 23_057)), Some(&(f2_id, 23_057)), Some(&99.0), Some(6)));
+    assert_eq!(persist_live_fighter_snapshot_sync(&db, sys_jita, &coord, &stale_snap, &h.fighter_ctx.dirty_stamp, Some(&sde), false).unwrap(), 0);
+    let persisted = crate::system_actor::load_cold_fighters_for_system(&db, Some(&sde), sys_jita).unwrap();
+    assert_eq!((persisted.tube_loads.get(&(ship_id, 0)), persisted.unit_damage_accum.get(&f2_id)), (Some(&(f1_id, 23_057)), Some(&99.0)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r5_f2_04_cold_op_racing_finish_stopping_slot_completes_without_exhaustion() {
+    use crate::system_actor::FighterTubeOp;
+    let (sde, dir, (sys_a, ship_id, f1_id)) = (shared_sde(), TempTestDir::new("r5_f2_04"), (30_000_142_u32, 880_011_001_i64, 880_011_101_i64));
+    let (_, ctx) = f2_open_ctx(&sde, &dir, "r5_f2_04.sqlite", |s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    for i in 0..4_u64 {
+        let _ = ctx.systems.get_or_spawn(sys_a);
+        let gate = f2_make_hook_gate();
+        ctx.systems.set_before_stop_finish_hook_for_test(Some(f2_install_hold(&gate, sys_a)));
+        let stop = tokio::spawn({ let r = Arc::clone(&ctx.systems); async move { r.stop_system(sys_a).await } });
+        f2_wait_entered(&gate);
+        let cold_sync = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx.systems); move || r.abandon_fighters_in_cold_db(sys_a, 90_000_001, ship_id, &std::collections::HashSet::new()) });
+        let cold_async = tokio::spawn({ let (r, s) = (Arc::clone(&ctx.systems), Arc::clone(&sde)); async move {
+            let op = if i % 2 == 0 { f2_commit(ship_id, 0, f1_id, &s) } else { FighterTubeOp::Unload { ship_id, tube_index: 0 } };
+            r.load_or_unload_fighter_tube(sys_a, op).await
+        } });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        ctx.systems.set_before_stop_finish_hook_for_test(None);
+        f2_release_gate(&gate);
+        assert!(stop.await.unwrap());
+        cold_sync.await.unwrap().expect("cold_sync abandon ok");
+        cold_async.await.unwrap().expect("cold_async tube op ok");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r6_f2_01_concurrent_and_late_hydration_noop_prevents_resurrection() {
+    use crate::system_actor::{FighterTubeOp, SystemFighterState};
+    let (sde, (sys_a, ship_id, f1_id, f2_id)) = (shared_sde(), (30_000_142_u32, 880_012_001_i64, 880_012_101_i64, 880_012_102_i64));
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    db.with_mut_snapshot(|s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
+    let rows = vec![(format!("tl:{ship_id}:0"), serde_json::json!({ "TubeLoadTyped": [[ship_id, 0], f1_id, 23_057] })), (format!("tl:{ship_id}:1"), serde_json::json!({ "TubeLoadTyped": [[ship_id, 1], f2_id, 23_057] }))];
+    f2_seed_cp(&db, sys_a, &rows, 100);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+
+    let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
+    assert!(h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    // Error during HydrateFlight must release flight slot cleanly so waiters retry and hydrate.
+    f2_break_cp_table(&db, true);
+    assert!(ctx.systems.ensure_live_fighters_hydrated_async(sys_a, &h).await.is_err() && h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    f2_break_cp_table(&db, false);
+
+    let bar = Arc::new(tokio::sync::Barrier::new(3));
+    let a1 = tokio::spawn({ let (r, hh, b) = (Arc::clone(&ctx.systems), h.clone(), Arc::clone(&bar)); async move { b.wait().await; r.ensure_live_fighters_hydrated_async(sys_a, &hh).await } });
+    let a2 = tokio::spawn({ let (r, hh, b) = (Arc::clone(&ctx.systems), h.clone(), Arc::clone(&bar)); async move { b.wait().await; r.ensure_live_fighters_hydrated_async(sys_a, &hh).await } });
+    let s1 = tokio::task::spawn_blocking({ let (r, hh, b) = (Arc::clone(&ctx.systems), h.clone(), Arc::clone(&bar)); move || { tokio::runtime::Handle::current().block_on(b.wait()); r.ensure_live_fighters_hydrated_sync(sys_a, &hh) } });
+    assert!(a1.await.unwrap().is_ok() && a2.await.unwrap().is_ok() && s1.await.unwrap().is_ok());
+    assert!(!h.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+
+    // Unload tube 0, verify stale hydration MergeFighterState does not resurrect it, and PreCheckLoad stays clean.
+    assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_a, FighterTubeOp::Unload { ship_id, tube_index: 0 }).await.unwrap(), Some(f1_id));
+    let mut stale = SystemFighterState::default();
+    stale.tube_loads.insert((ship_id, 0), (f1_id, 23_057));
+    let _ = h.merge_fighter_state_async(stale, false, true).await.unwrap();
+    assert!(h.view().fighters.tube_loads.get(&(ship_id, 0)).is_none());
+    h.flush_fighter_checkpoint().await.unwrap();
+    let _ = ctx.systems.load_or_unload_fighter_tube(sys_a, FighterTubeOp::PreCheckLoad { ship_id, tube_index: 1, fighter_item_id: f2_id }).await;
+    assert!(!h.actor_state.read().unwrap().is_fighters_dirty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r6_f2_03_unhydrated_eviction_and_shutdown_preserve_mutations_and_live_paths_hydrate() {
+    use crate::system_actor::load_cold_fighters_for_system;
+    let (sde, (sys_a, ship_id, f1_id, f_ab, f_kill)) = (shared_sde(), (30_000_142_u32, 880_013_001_i64, 880_013_101_i64, 880_013_102_i64, 880_013_103_i64));
+    let spawn_unhydrated = |rows: Vec<(String, serde_json::Value)>| {
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        db.with_mut_snapshot(|s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f_ab, sys_a as i64, eve_db::InventoryFlag::None, false), (f_kill, sys_a as i64, eve_db::InventoryFlag::None, false)]));
+        f2_seed_cp(&db, sys_a, &rows, 100);
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        (db, ctx)
+    };
+    let base_rows = vec![
+        (format!("tl:{ship_id}:0"), serde_json::json!({ "TubeLoadTyped": [[ship_id, 0], f1_id, 23_057] })),
+        (format!("sq:{f_ab}"), serde_json::json!({ "Squadron": f2_sq(f_ab, f_ab, ship_id, 1, 7, false, false) })),
+        (format!("sq:{f_kill}"), serde_json::json!({ "Squadron": f2_sq(f_kill, f_kill, ship_id, 2, 7, false, false) })),
+    ];
+
+    // 1. Eviction: refuses eviction when dirty & hydration fails; succeeds once DB healthy preserving SQLite + dirty mutation.
+    {
+        let sys_ev = 30_002_510_u32;
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        db.with_mut_snapshot(|s| {
+            s.items.retain(|_, i| i.location_id != sys_ev as i64);
+            s.structures.retain(|_, st| st.solar_system_id != sys_ev);
+            s.system_states.entry(sys_ev).or_insert_with(|| SystemDynamicState { solar_system_id: sys_ev, ..Default::default() });
+        });
+        f2_seed_cp(&db, sys_ev, &[(format!("tl:{ship_id}:0"), serde_json::json!({ "TubeLoadTyped": [[ship_id, 0], f1_id, 23_057] }))], 100);
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        let h = f2_spawn_unhydrated(&db, &ctx, sys_ev).await;
+        fighter_test_helpers::set_fighter_tube_rearm_until_in_system(&ctx, sys_ev, ship_id, 1, 77_777);
+        let _ = h.step_with_output(1.0).await;
+        assert!(h.is_hibernated());
+        drop(h);
+        f2_break_cp_table(&db, true);
+        assert!(ctx.systems.evict_idle_systems_with_min_ticks(0, 0).await.is_empty());
+        f2_break_cp_table(&db, false);
+        assert_eq!(ctx.systems.evict_idle_systems_with_min_ticks(0, 0).await, vec![sys_ev]);
+        let cold = load_cold_fighters_for_system(&db, Some(&sde), sys_ev).unwrap();
+        assert_eq!((cold.tube_loads.get(&(ship_id, 0)), cold.tube_rearm_until.get(&(ship_id, 1))), (Some(&(f1_id, 23_057)), Some(&77_777)));
+    }
+    // 2. Shutdown flush hydrates dirty unhydrated actor without wiping SQLite entries.
+    {
+        let (db, ctx) = spawn_unhydrated(base_rows.clone());
+        let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
+        fighter_test_helpers::set_fighter_tube_rearm_until_in_system(&ctx, sys_a, ship_id, 2, 66_666);
+        f2_shutdown(&h).await;
+        let cold = load_cold_fighters_for_system(&db, Some(&sde), sys_a).unwrap();
+        assert_eq!((cold.tube_loads.get(&(ship_id, 0)), cold.tube_rearm_until.get(&(ship_id, 2))), (Some(&(f1_id, 23_057)), Some(&66_666)));
+    }
+    // 3. Live callers (snapshot_loaded_tube_items, abandon_drones_and_fighters_for_ship_sync, cleanup_destroyed_non_ship_ball_sync, resolve_runtime_killer_char_id) hydrate.
+    for case in 0..4 {
+        let (db, ctx) = spawn_unhydrated(base_rows.clone());
+        let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
+        assert!(h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+        match case {
+            0 => assert!(crate::services::inventory_stacking::inventory_stacking_ops::snapshot_loaded_tube_items(&ctx).contains(&f1_id)),
+            1 => {
+                crate::sp6_lifecycle::drone_return::abandon_drones_and_fighters_for_ship_sync(&ctx, 90_000_001, ship_id, sys_a);
+                assert!(h.view().fighters.active_fighters.get(&f_ab).is_some_and(|s| s.is_abandoned));
+            }
+            2 => {
+                crate::combat::death_pipeline::cleanup_destroyed_non_ship_ball_sync(&ctx, sys_a, f_kill);
+                assert!(!h.view().fighters.active_fighters.contains_key(&f_kill) && h.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+            }
+            _ => assert_eq!(crate::services::agents_missions::agents_standings_arcs::resolve_runtime_killer_char_id(&ctx, f_ab), 90_000_001),
+        }
+        assert!(!h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    }
+    // 4. BF-01 & F2-R7-01: Pre-hydration ball removal (`remove_ball` & `try_remove_destroyed_ball`) marks dirty, blocks resurrection across hydration/eviction/shutdown, and persists deletion.
+    {
+        let (db, ctx) = spawn_unhydrated(base_rows.clone());
+        let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
+        let _ = h.remove_ball(f_ab).await;
+        h.try_remove_destroyed_ball(f_kill);
+        assert!(h.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h.actor_state.read().unwrap().is_fighters_dirty());
+        let _ = h.step_with_output(1.0).await;
+        assert!(h.is_hibernated());
+        drop(h);
+        f2_break_cp_table(&db, true);
+        assert!(ctx.systems.evict_idle_systems_with_min_ticks(0, 0).await.is_empty());
+        f2_break_cp_table(&db, false);
+        assert_eq!(ctx.systems.evict_idle_systems_with_min_ticks(0, 0).await, vec![sys_a]);
+        let cold = load_cold_fighters_for_system(&db, Some(&sde), sys_a).unwrap();
+        assert!(!cold.active_fighters.contains_key(&f_ab) && !cold.active_fighters.contains_key(&f_kill) && cold.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+
+        let (db2, ctx2) = spawn_unhydrated(base_rows);
+        let h2 = f2_spawn_unhydrated(&db2, &ctx2, sys_a).await;
+        let _ = h2.remove_ball(f_ab).await;
+        let _ = h2.cleanup_destroyed_fighter_sync(f_kill);
+        f2_shutdown(&h2).await;
+        let cold2 = load_cold_fighters_for_system(&db2, Some(&sde), sys_a).unwrap();
+        assert!(!cold2.active_fighters.contains_key(&f_ab) && !cold2.active_fighters.contains_key(&f_kill) && cold2.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn r7_f2_03_transfer_restores_origin_on_dest_live_failure_and_retries_stopping() {
+    use crate::system_actor::load_cold_fighters_for_system;
+    let dir = TempTestDir::new("evomu-r7-f2-03");
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let (sys_a, sys_b, ship_id, f1_id, f_ab) = (30_000_142_u32, 30_002_187_u32, 200_000_001_i64, 530_901_i64, 630_902_i64);
+    let (db, ctx) = f2_open_ctx(&sde, &dir, "transfer.sqlite", |s| {
+        s.system_states.entry(sys_a).or_insert_with(|| SystemDynamicState { solar_system_id: sys_a, ..Default::default() });
+        seed_fighter_system_snapshot(s, sys_b, ship_id, &[(f_ab, sys_b as i64, eve_db::InventoryFlag::None, true)]);
+    });
+
+    // 1. Live actor dispatch Err propagation + cold fallback in abandon_drones_and_fighters_for_ship_sync.
+    let h_dead = ctx.systems.get_or_spawn(sys_b);
+    fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_b, f_ab, f2_sq(f_ab, f_ab, ship_id, 1, 5, false, false));
+    h_dead.flush_fighter_checkpoint().await.unwrap();
+    f2_shutdown(&h_dead).await;
+    assert!(h_dead.abandon_ship_fighters_sync(90_000_001, ship_id, std::collections::HashSet::from([f_ab])).is_err() && h_dead.extract_ship_fighter_tubes_sync(ship_id).is_err());
+    assert!(h_dead.insert_ship_fighter_tubes_sync(ship_id, crate::system_actor::ShipFighterTubeTransfer { tube_loads: vec![(0, (f1_id, 23_057))], tube_rearm_until: vec![], cooldowns: vec![], charges: vec![] }).is_err() && h_dead.seed_abandoned_fighters_sync(vec![f2_sq(f_ab, f_ab, 0, 0, 5, true, false)]).is_err());
+    drop(h_dead);
+    crate::sp6_lifecycle::drone_return::abandon_drones_and_fighters_for_ship_sync(&ctx, 90_000_001, ship_id, sys_b);
+    assert!(load_cold_fighters_for_system(&db, Some(&sde), sys_b).unwrap().active_fighters.get(&f_ab).is_some_and(|sq| sq.is_abandoned));
+
+    // 2. Destination live failure (same_live == true timeout on stalled actor) returns Err and restores origin tubes + rearm_until.
+    let (_db2, ctx2) = f2_open_ctx(&sde, &dir, "transfer_timeout.sqlite", |s| {
+        seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]);
+        s.system_states.entry(sys_b).or_insert_with(|| SystemDynamicState { solar_system_id: sys_b, ..Default::default() });
+    });
+    let (h_a, h_b) = (ctx2.systems.get_or_spawn(sys_a), ctx2.systems.get_or_spawn(sys_b));
+    h_a.load_or_unload_fighter_tube(f2_commit(ship_id, 0, f1_id, &sde)).await.unwrap();
+    fighter_test_helpers::set_fighter_tube_rearm_until_in_system(&ctx2, sys_a, ship_id, 1, 88_888);
+    let block_gate = f2_make_hook_gate();
+    let blocker = tokio::spawn({
+        let (hb, bg) = (h_b.clone(), Arc::clone(&block_gate));
+        async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let op = crate::system_actor::TestAccessOp::new(move |_, _| f2_hold_gate(&bg, 7));
+            hb.cmd_tx.send(crate::system_actor::SystemCommand::TestAccess { op, mutated: false, reply: tx }).await.unwrap();
+            let _ = rx.await;
+        }
+    });
+    f2_wait_entered(&block_gate);
+    let mut fill_rxs = Vec::new();
+    loop {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if h_b.cmd_tx.try_send(crate::system_actor::SystemCommand::CurrentTick { reply: tx }).is_err() { break; }
+        fill_rxs.push(rx);
+    }
+    let res = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx2.systems); move || r.transfer_ship_fighter_tubes(sys_a, sys_b, ship_id) }).await.unwrap();
+    f2_release_gate(&block_gate);
+    blocker.await.unwrap();
+    drop(fill_rxs);
+    assert!(res.is_err() && h_a.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+    assert!(h_a.view().fighters.tube_rearm_until.get(&(ship_id, 1)) == Some(&88_888) && h_b.view().fighters.tube_loads.is_empty());
+
+    // 3. Live -> Stopping -> ColdReady retry lands transferred tubes + rearm_until cleanly on cold destination.
+    let stop_gate = f2_make_hook_gate();
+    ctx2.systems.set_before_stop_finish_hook_for_test(Some(f2_install_hold(&stop_gate, sys_b)));
+    let stopper = tokio::spawn({ let r = Arc::clone(&ctx2.systems); async move { r.stop_system(sys_b).await } });
+    f2_wait_entered(&stop_gate);
+    let moved = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx2.systems); move || r.transfer_ship_fighter_tubes(sys_a, sys_b, ship_id) });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    f2_release_gate(&stop_gate);
+    assert!(stopper.await.unwrap());
+    ctx2.systems.set_before_stop_finish_hook_for_test(None);
+    assert!(moved.await.unwrap().is_ok() && h_a.view().fighters.tube_loads.is_empty() && h_a.view().fighters.tube_rearm_until.is_empty());
+    let cold_b = load_cold_fighters_for_system(ctx2.db.as_ref(), Some(&sde), sys_b).unwrap();
+    assert_eq!((cold_b.tube_loads.get(&(ship_id, 0)), cold_b.tube_rearm_until.get(&(ship_id, 1))), (Some(&(f1_id, 23_057)), Some(&88_888)));
 }
 

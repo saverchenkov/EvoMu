@@ -187,7 +187,13 @@ fn resolve_victim_owner(ctx: &ServerContext, sys_handle: &SystemHandle, ball_id:
     if let Some(dc) = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&ball_id).map(|d| d.owner_char_id)) {
         return (Some(dc), true);
     }
-    if let Some(fc) = ctx.active_fighters.read().ok().and_then(|af| af.get(&ball_id).map(|f| f.owner_char_id)) {
+    if let Some(fc) = sys_handle
+        .view()
+        .fighters
+        .active_fighters
+        .get(&ball_id)
+        .map(|f| f.owner_char_id)
+    {
         return (Some(fc), true);
     }
     let ch_opt = ctx.db.with_snapshot(|snap| {
@@ -226,7 +232,11 @@ fn is_hostile_to_structure(
     if ball.id == structure_id {
         return false;
     }
-    let is_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id));
+    let is_fighter = sys_handle
+        .view()
+        .fighters
+        .active_fighters
+        .contains_key(&ball.id);
     let is_drone = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.contains_key(&ball.id));
     if let Some(bt) = ctx.sde.types.get(&ball.type_id) {
         if bt.group_id == GROUP_STANDUP_GUIDED_BOMB {
@@ -335,7 +345,12 @@ async fn apply_standup_hit(
     {
         return None;
     }
-    let was_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id));
+    ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
+    let was_fighter = sys_handle
+        .view()
+        .fighters
+        .active_fighters
+        .contains_key(&ball.id);
     let (victim_char_opt, is_sub_unit) = resolve_victim_owner(ctx, sys_handle, ball.id);
     if let Some(vcid) = victim_char_opt.filter(|&v| v != gunner_char_id) {
         let cw_target = if is_sub_unit { vcid } else { ball.id };
@@ -505,6 +520,7 @@ pub async fn step_guided_bombs_in_system(ctx: &ServerContext, sys_id: u32, dt: f
                 .db
                 .with_snapshot(|s| s.structures.get(&rec.structure_id).map(|st| st.type_id))
                 .unwrap_or(TYPE_KEEPSTAR);
+            ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, &sys_handle).await;
             let all_balls = sys_handle.list_balls().await.unwrap_or_default();
 
             for b in &all_balls {
@@ -607,6 +623,7 @@ async fn ensure_standup_target_attackable(
     {
         return Err(err("TargetInvulnerable", format!("Target {tid} is cloaked, tethered, or invulnerable")));
     }
+    ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
     if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, target_ball) {
         return Err(err("CantDoInCurrentSafetyLevel", safety_msg));
     }
@@ -768,6 +785,7 @@ pub async fn try_activate_standup_weapon(
             let pulse_dmg = read_omni_damage(flak_type).scaled(dmg_mult);
 
             let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+            ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
             let mut targets_hit = 0_i64;
             let mut total_applied = 0.0_f64;
             let mut destroyed_count = 0_i64;
@@ -1073,6 +1091,7 @@ pub async fn try_activate_standup_weapon(
             let base_dmg = read_omni_damage(&mod_type).scaled(primary_falloff_mult);
 
             let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+            ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
             let ball_map: std::collections::HashMap<i64, Ball> = all_balls.into_iter().map(|b| (b.id, b)).collect();
             let mut candidates: Vec<(i64, DVec3)> = Vec::new();
             for b in ball_map.values() {

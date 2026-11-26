@@ -1153,19 +1153,12 @@ impl SystemHandle {
                     } else {
                         let _ = bp.remove_ball(ball_id);
                     }
-                    super::protection::sync_active_module_ships_cache(
-                        active_module_cycles,
-                        external_active_modules,
-                        &self.active_module_ships,
-                    );
+                    super::protection::sync_active_module_ships_cache(active_module_cycles, external_active_modules, &self.active_module_ships);
                     (removed_cycles, fallback_slim_owner, db_opt.clone(), sde_opt.clone())
                 };
+                let _ = st.clear_fighter_ball_and_track(ball_id);
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
-                celestials_helpers::update_system_hibernation_flag(
-                    st,
-                    bp,
-                    self.event_tx.receiver_count(),
-                );
+                celestials_helpers::update_system_hibernation_flag(st, bp, self.event_tx.receiver_count());
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
                 self.publish_view_from(bp, Some(st));
                 let ticket = if db_opt_cloned.is_some() {
@@ -2471,13 +2464,8 @@ impl SystemHandle {
                 }
             }
         }
-        self.commit_destroyed_ball_hooks(
-            output.dt_sim,
-            &output.destroyed_balls,
-            output.destroyed_lease.as_ref(),
-            true,
-        )
-        .await;
+        if let Some(ref snap) = output.fighter_checkpoint { self.flush_step_fighter_checkpoint(snap); }
+        self.commit_destroyed_ball_hooks(output.dt_sim, &output.destroyed_balls, output.destroyed_lease.as_ref(), true).await;
     }
 
     /// Steps this system by `dt` seconds and returns the full [`super::StepOutput`] after driver commit (`#919` E-4).
@@ -3138,6 +3126,8 @@ pub struct SystemHandle {
     pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
     pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     pub(in crate::system_actor) completed_post_unlock_seq: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::system_actor) fighters_needs_hydration: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) fighter_ctx: Arc<super::fighters_persistence::FighterHandleCtx>,
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
     pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,

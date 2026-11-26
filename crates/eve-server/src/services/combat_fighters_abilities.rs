@@ -7,6 +7,9 @@ use crate::router::notify_registry::{
     push_typed_session_notification, OnFighterAbilitySlotActivated,
     OnFighterAbilitySlotDeactivated,
 };
+use crate::system_actor::{
+    ActiveFighterSquadron, FighterAbilityActorOp, FighterAbilityActorOut, SystemHandle,
+};
 
 async fn check_fighter_and_parent_operational_state(
     ctx: &ServerContext,
@@ -201,17 +204,9 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
     }
 }
 
-struct ReservedAbilitySlot {
-    squadron_size: u32,
-    remaining_charges: i64,
-    prev_cooldown: Option<u64>,
-    prev_mwd_active: bool,
-    spent_charge: bool,
-}
-
 #[allow(clippy::too_many_arguments)]
-fn reserve_fighter_ability_slot(
-    ctx: &ServerContext,
+async fn reserve_fighter_ability_slot(
+    sys_handle: &SystemHandle,
     char_id: i64,
     fighter_ball_id: i64,
     parent_ship_id: i64,
@@ -220,120 +215,87 @@ fn reserve_fighter_ability_slot(
     now_unix: u64,
     effective_gate_sec: f64,
     charge_count: i64,
-) -> Result<ReservedAbilitySlot, BridgeRpcError> {
-    let mut fg = ctx.fighters.write().unwrap();
-    let (squadron_size, prev_mwd_active) = {
-        let Some(live) = fg.active_fighters.get(&fighter_ball_id) else {
-            let message = format!("Fighter squadron {fighter_ball_id} not found or not launched");
-            return Err(BridgeRpcError::with_client_error(
-                "FighterNotFound",
-                message.clone(),
-                eve_proto::ClientError::CustomInfo(message),
-            ));
-        };
-        if live.owner_char_id != char_id || live.is_abandoned || live.parent_ship_id != parent_ship_id {
-            let message = format!(
-                "Fighter squadron {fighter_ball_id} is not controlled by character {char_id}"
-            );
-            return Err(BridgeRpcError::with_client_error(
-                "FighterNotOwned",
-                message.clone(),
-                eve_proto::ClientError::CustomInfo(message),
-            ));
-        }
-        if live.squadron_size == 0 {
-            let message = format!("Fighter squadron {fighter_ball_id} has no remaining fighters");
-            return Err(BridgeRpcError::with_client_error(
-                "FighterNotFound",
-                message.clone(),
-                eve_proto::ClientError::CustomInfo(message),
-            ));
-        }
-        (live.squadron_size, live.mwd_active)
-    };
-    if let Some(&ready_at) = fg.cooldown_state.get(&(fighter_ball_id, slot_id)) {
-        if now_unix < ready_at {
-            let message = format!(
-                "Fighter ability slot {slot_id} on {fighter_ball_id} is on cooldown until {ready_at}"
-            );
-            return Err(BridgeRpcError::with_client_error(
-                "AbilityOnCooldown",
-                message.clone(),
-                eve_proto::ClientError::CustomInfo(message),
-            ));
-        }
-    }
-    let (remaining_charges, spent_charge) = if charge_count > 0 {
-        let entry = fg.charge_state.entry((fighter_ball_id, slot_id)).or_insert(0);
-        if *entry >= charge_count as u32 {
-            let message = format!(
-                "Fighter ability slot {slot_id} on {fighter_ball_id} has exhausted all {} charges",
-                charge_count
-            );
-            return Err(BridgeRpcError::with_client_error(
-                "OutOfCharges",
-                message.clone(),
-                eve_proto::ClientError::CustomInfo(message),
-            ));
-        }
-        *entry = entry.saturating_add(1);
-        ((charge_count as i64).saturating_sub(*entry as i64), true)
-    } else {
-        (0, false)
-    };
-    let prev_cooldown = fg.cooldown_state.insert(
-        (fighter_ball_id, slot_id),
-        now_unix.saturating_add(effective_gate_sec.ceil() as u64),
-    );
-    if matches!(ability_id, 4 | 9 | 13) {
-        if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
-            live.mwd_active = true;
-        }
-    }
-    let prev_mwd_active = if matches!(ability_id, 4 | 9 | 13) {
-        prev_mwd_active
-    } else {
-        false
-    };
-    Ok(ReservedAbilitySlot {
-        squadron_size,
-        remaining_charges,
-        prev_cooldown,
-        prev_mwd_active,
-        spent_charge,
-    })
+) -> Result<FighterAbilityActorOut, BridgeRpcError> {
+    sys_handle
+        .mutate_fighter_ability_state(FighterAbilityActorOp::ReserveSlot {
+            char_id,
+            fighter_ball_id,
+            parent_ship_id,
+            slot_id,
+            ability_id,
+            now_unix,
+            effective_gate_sec,
+            charge_count,
+        })
+        .await
+        .map_err(|e| e.into_bridge_err())
 }
 
-fn rollback_fighter_ability_slot(
-    ctx: &ServerContext,
+async fn rollback_fighter_ability_slot(
+    sys_handle: &SystemHandle,
     fighter_ball_id: i64,
     slot_id: u32,
     ability_id: u32,
-    reserved: &ReservedAbilitySlot,
+    reserved: &FighterAbilityActorOut,
 ) {
-    let mut fg = ctx.fighters.write().unwrap();
-    if fg.active_fighters.contains_key(&fighter_ball_id) {
-        if let Some(old_cd) = reserved.prev_cooldown {
-            fg.cooldown_state.insert((fighter_ball_id, slot_id), old_cd);
-        } else {
-            fg.cooldown_state.remove(&(fighter_ball_id, slot_id));
+    let _ = sys_handle
+        .mutate_fighter_ability_state(FighterAbilityActorOp::RollbackSlot {
+            fighter_ball_id,
+            slot_id,
+            ability_id,
+            prev_cooldown: reserved.prev_cooldown,
+            prev_mwd_active: reserved.prev_mwd_active,
+            spent_charge: reserved.spent_charge,
+        })
+        .await;
+}
+
+async fn spawn_hydrated_fighter_system(
+    ctx: &ServerContext,
+    sys_id: u32,
+) -> Result<SystemHandle, BridgeRpcError> {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    ctx.systems
+        .ensure_live_fighters_hydrated_async(sys_id, &sys_handle)
+        .await
+        .map_err(|e| BridgeRpcError {
+            code: "StorageError".into(),
+            message: e,
+            client_error: None,
+        })?;
+    Ok(sys_handle)
+}
+
+async fn resolve_active_fighter_in_system(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    sys_id: u32,
+    fighter_ball_id: i64,
+) -> Result<ActiveFighterSquadron, BridgeRpcError> {
+    if let Some(f) = sys_handle.view().fighters.active_fighters.get(&fighter_ball_id).cloned() {
+        return Ok(f);
+    }
+    let mut in_other_system = false;
+    for (other_sid, h) in ctx.systems.active_system_handles() {
+        if other_sid == sys_id { continue; }
+        ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(other_sid, &h).await;
+        if h.view().fighters.active_fighters.contains_key(&fighter_ball_id) {
+            in_other_system = true;
+            break;
         }
-        if reserved.spent_charge {
-            if let Some(used) = fg.charge_state.get_mut(&(fighter_ball_id, slot_id)) {
-                *used = used.saturating_sub(1);
-                if *used == 0 {
-                    fg.charge_state.remove(&(fighter_ball_id, slot_id));
-                }
-            }
-        }
-        if matches!(ability_id, 4 | 9 | 13) {
-            if let Some(live) = fg.active_fighters.get_mut(&fighter_ball_id) {
-                live.mwd_active = reserved.prev_mwd_active;
-            }
-        }
+    }
+    if in_other_system {
+        Err(BridgeRpcError {
+            code: "FighterNotInSystem".into(),
+            message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
+            client_error: None,
+        })
     } else {
-        fg.cooldown_state.remove(&(fighter_ball_id, slot_id));
-        fg.charge_state.remove(&(fighter_ball_id, slot_id));
+        Err(BridgeRpcError {
+            code: "FighterNotFound".into(),
+            message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+            client_error: None,
+        })
     }
 }
 
@@ -346,18 +308,13 @@ async fn activate_single_fighter_ability(
     slot_id: u32,
     target_id: Option<i64>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let fighter_opt = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .get(&fighter_ball_id)
-        .cloned();
-    let Some(fighter) = fighter_opt else {
-        return Some(Err(BridgeRpcError {
-            code: "FighterNotFound".into(),
-            message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
-            client_error: None,
-        }));
+    let sys_handle = match spawn_hydrated_fighter_system(ctx, sys_id).await {
+        Ok(h) => h,
+        Err(e) => return Some(Err(e)),
+    };
+    let fighter = match resolve_active_fighter_in_system(ctx, &sys_handle, sys_id, fighter_ball_id).await {
+        Ok(f) => f,
+        Err(e) => return Some(Err(e)),
     };
     if fighter.owner_char_id != char_id || fighter.is_abandoned {
         return Some(Err(BridgeRpcError {
@@ -369,7 +326,6 @@ async fn activate_single_fighter_ability(
         }));
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, fighter_ball)) = sys_handle
         .get_ball_snapshot(fighter_ball_id)
         .await
@@ -396,10 +352,10 @@ async fn activate_single_fighter_ability(
     }
 
     let now_unix = ctx.now_unix();
-    if let Some(&ready_at) = ctx
-        .fighter_cooldown_state
-        .read()
-        .unwrap()
+    if let Some(&ready_at) = sys_handle
+        .view()
+        .fighters
+        .cooldown_state
         .get(&(fighter_ball_id, slot_id))
     {
         if now_unix < ready_at {
@@ -447,10 +403,10 @@ async fn activate_single_fighter_ability(
     if let Some(ref ch) = slot_def.charges {
         charge_count = ch.charge_count as i64;
         rearm_time_sec = ch.rearm_time_seconds;
-        let used = ctx
-            .fighter_charge_state
-            .read()
-            .unwrap()
+        let used = sys_handle
+            .view()
+            .fighters
+            .charge_state
             .get(&(fighter_ball_id, slot_id))
             .copied()
             .unwrap_or(0);
@@ -764,7 +720,7 @@ async fn activate_single_fighter_ability(
         }
 
         let reserved = match reserve_fighter_ability_slot(
-            ctx,
+            &sys_handle,
             char_id,
             fighter_ball_id,
             fighter.parent_ship_id,
@@ -773,14 +729,20 @@ async fn activate_single_fighter_ability(
             now_unix,
             effective_gate_sec,
             charge_count,
-        ) {
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
         let squad_mult = reserved.squadron_size.max(1) as f64;
 
         // Check if target is a fighter ball (for anti-fighter missiles bonus)
-        let is_target_fighter = ctx.active_fighters.read().unwrap().contains_key(&tid);
+        let is_target_fighter = sys_handle
+            .view()
+            .fighters
+            .active_fighters
+            .contains_key(&tid);
 
         let dmg = match ability_id {
             19..=27 | 29..=32 => {
@@ -1055,7 +1017,7 @@ async fn activate_single_fighter_ability(
             {
                 Ok(v) => v,
                 Err(e) => {
-                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                    rollback_fighter_ability_slot(&sys_handle, fighter_ball_id, slot_id, ability_id, &reserved).await;
                     return Some(Err(e));
                 }
             };
@@ -1153,7 +1115,7 @@ async fn activate_single_fighter_ability(
         (reserved.squadron_size, reserved.remaining_charges)
     } else {
         let reserved = match reserve_fighter_ability_slot(
-            ctx,
+            &sys_handle,
             char_id,
             fighter_ball_id,
             fighter.parent_ship_id,
@@ -1162,15 +1124,29 @@ async fn activate_single_fighter_ability(
             now_unix,
             effective_gate_sec,
             charge_count,
-        ) {
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
         match ability_id {
             5 => {
                 let mjd_dist = attr(2154).unwrap_or(100_000.0);
-                if !ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
-                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                if !sys_handle
+                    .view()
+                    .fighters
+                    .active_fighters
+                    .contains_key(&fighter_ball_id)
+                {
+                    rollback_fighter_ability_slot(
+                        &sys_handle,
+                        fighter_ball_id,
+                        slot_id,
+                        ability_id,
+                        &reserved,
+                    )
+                    .await;
                     let message = format!("Fighter squadron {fighter_ball_id} is no longer in space");
                     return Some(Err(BridgeRpcError::with_client_error(
                         "FighterNotFound",
@@ -1179,7 +1155,14 @@ async fn activate_single_fighter_ability(
                     )));
                 }
                 if let Err(err_msg) = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await {
-                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                    rollback_fighter_ability_slot(
+                        &sys_handle,
+                        fighter_ball_id,
+                        slot_id,
+                        ability_id,
+                        &reserved,
+                    )
+                    .await;
                     let message = format!("Fighter micro jump failed for {fighter_ball_id}: {err_msg}");
                     return Some(Err(BridgeRpcError::with_client_error(
                         "MicroJumpFailed",
@@ -1191,7 +1174,13 @@ async fn activate_single_fighter_ability(
             4 | 9 | 13 => {
                 // MWD / Evasive Maneuvers (`feat:drones.fighter-movement`, `feat:drones.light-fighter-space-superiority`):
                 // Increases fighter velocity by SDE speed bonus (`2151` / `2124`)
-                if !reserved.prev_mwd_active && ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                if !reserved.prev_mwd_active
+                    && sys_handle
+                        .view()
+                        .fighters
+                        .active_fighters
+                        .contains_key(&fighter_ball_id)
+                {
                     let speed_bonus_pct = if ability_id == 13 {
                         attr(2224).unwrap_or(200.0)
                     } else {
@@ -1206,7 +1195,12 @@ async fn activate_single_fighter_ability(
                         }
                     }) {
                         if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
-                            if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                            if sys_handle
+                                .view()
+                                .fighters
+                                .active_fighters
+                                .contains_key(&fighter_ball_id)
+                            {
                                 let _ = sys_handle
                                     .set_ball_max_velocity(
                                         fighter_ball_id,
@@ -1217,13 +1211,30 @@ async fn activate_single_fighter_ability(
                         }
                     }
                 }
-                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
+                if sys_handle
+                    .view()
+                    .fighters
+                    .active_fighters
+                    .contains_key(&fighter_ball_id)
+                {
                     let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
                 }
             }
             _ => {
-                if !ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
-                    rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                if !sys_handle
+                    .view()
+                    .fighters
+                    .active_fighters
+                    .contains_key(&fighter_ball_id)
+                {
+                    rollback_fighter_ability_slot(
+                        &sys_handle,
+                        fighter_ball_id,
+                        slot_id,
+                        ability_id,
+                        &reserved,
+                    )
+                    .await;
                     let message = format!("Fighter squadron {fighter_ball_id} is no longer in space");
                     return Some(Err(BridgeRpcError::with_client_error(
                         "FighterNotFound",
@@ -1233,7 +1244,14 @@ async fn activate_single_fighter_ability(
                 }
                 if let Some(mjd_dist) = attr(2154) {
                     if let Err(err_msg) = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await {
-                        rollback_fighter_ability_slot(ctx, fighter_ball_id, slot_id, ability_id, &reserved);
+                        rollback_fighter_ability_slot(
+                            &sys_handle,
+                            fighter_ball_id,
+                            slot_id,
+                            ability_id,
+                            &reserved,
+                        )
+                        .await;
                         let message = format!("Fighter micro jump failed for {fighter_ball_id}: {err_msg}");
                         return Some(Err(BridgeRpcError::with_client_error(
                             "MicroJumpFailed",
@@ -1305,21 +1323,17 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             Err(e) => return Some(Err(e)),
         };
 
+    let sys_handle = match spawn_hydrated_fighter_system(ctx, sys_id).await {
+        Ok(h) => h,
+        Err(e) => return Some(Err(e)),
+    };
     let mut point_results: Vec<PyRep> = Vec::with_capacity(fighter_ids.len());
     for &fighter_ball_id in &fighter_ids {
-        let fighter_opt = ctx
-            .active_fighters
-            .read()
-            .unwrap()
-            .get(&fighter_ball_id)
-            .cloned();
-        let Some(fighter) = fighter_opt else {
-            return Some(Err(BridgeRpcError {
-                code: "FighterNotFound".into(),
-                message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
-                client_error: None,
-            }));
-        };
+        let fighter =
+            match resolve_active_fighter_in_system(ctx, &sys_handle, sys_id, fighter_ball_id).await {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
+            };
     if fighter.owner_char_id != char_id || fighter.is_abandoned {
         return Some(Err(BridgeRpcError {
             code: "FighterNotOwned".into(),
@@ -1388,8 +1402,12 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         .unwrap_or(60.0)
         .max(1.0) as u64;
     {
-        let cds = ctx.fighter_cooldown_state.read().unwrap();
-        if let Some(&ready_at) = cds.get(&(fighter_ball_id, slot_id)) {
+        if let Some(&ready_at) = sys_handle
+            .view()
+            .fighters
+            .cooldown_state
+            .get(&(fighter_ball_id, slot_id))
+        {
             if now_unix < ready_at {
                 return Some(Err(BridgeRpcError {
                     code: "AbilityOnCooldown".into(),
@@ -1400,7 +1418,6 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         }
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, fb)) = sys_handle
         .get_ball_snapshot(fighter_ball_id)
         .await
@@ -1437,7 +1454,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
 
     let charge_count = slot_def.charges.as_ref().map(|c| c.charge_count).unwrap_or(1);
     let reserved = match reserve_fighter_ability_slot(
-        ctx,
+        &sys_handle,
         char_id,
         fighter_ball_id,
         fighter.parent_ship_id,
@@ -1446,7 +1463,9 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         now_unix,
         cd_secs as f64,
         charge_count as i64,
-    ) {
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => return Some(Err(e)),
     };
@@ -1695,10 +1714,14 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
     }
     let slot_id = raw_slot_id as u32;
 
-    let fighter_opt = ctx
+    let sys_handle = match spawn_hydrated_fighter_system(ctx, sys_id).await {
+        Ok(h) => h,
+        Err(e) => return Some(Err(e)),
+    };
+    let fighter_opt = sys_handle
+        .view()
+        .fighters
         .active_fighters
-        .read()
-        .unwrap()
         .get(&fighter_ball_id)
         .cloned();
     let Some(fighter) = fighter_opt else {
@@ -1740,61 +1763,45 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
     };
     let ability_id = slot_def.ability_id;
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let speed_bonus_pct = ctx
+        .sde
+        .types
+        .get(&fighter.type_id)
+        .and_then(|t| {
+            if ability_id == 13 {
+                t.default_attributes.get(&2224).copied()
+            } else {
+                t.default_attributes
+                    .get(&2151)
+                    .or_else(|| t.default_attributes.get(&2124))
+                    .copied()
+            }
+        })
+        .unwrap_or(if ability_id == 13 { 200.0 } else { 400.0 });
+    let out = match sys_handle
+        .mutate_fighter_ability_state(FighterAbilityActorOp::DeactivateSlot {
+            fighter_ball_id,
+            slot_id,
+            ability_id,
+            speed_bonus_pct,
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e.into_bridge_err())),
+    };
     if matches!(ability_id, 4 | 9 | 13) || slot_id == 1 {
-        let was_mwd = ctx
-            .active_fighters
-            .write()
-            .unwrap()
-            .get_mut(&fighter_ball_id)
-            .map(|f| {
-                let prev = f.mwd_active;
-                f.mwd_active = false;
-                prev
-            })
-            .unwrap_or(false);
-        if was_mwd {
-            let speed_bonus_pct = ctx
-                .sde
-                .types
-                .get(&fighter.type_id)
-                .and_then(|t| {
-                    if ability_id == 13 {
-                        t.default_attributes.get(&2224).copied()
-                    } else {
-                        t.default_attributes.get(&2151).or_else(|| t.default_attributes.get(&2124)).copied()
-                    }
-                })
-                .unwrap_or(if ability_id == 13 { 200.0 } else { 400.0 });
-            if !sys_handle.try_recompute_combat_attributes(fighter_ball_id, |cs| {
+        if out.was_mwd {
+            let _ = sys_handle.try_recompute_combat_attributes(fighter_ball_id, |cs| {
                 cs.external_velocity_multiplier = None;
                 if ability_id == 13 {
                     cs.external_sig_multiplier = None;
                 }
-            }) {
-                if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
-                    if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
-                        if ctx.active_fighters.read().unwrap().contains_key(&fighter_ball_id) {
-                            let _ = sys_handle
-                                .set_ball_max_velocity(
-                                    fighter_ball_id,
-                                    b.max_velocity / (1.0 + speed_bonus_pct / 100.0),
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
+            });
         }
     } else {
         let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
         ctx.remove_projected_ewar_by_module(fighter.parent_ship_id, synth_id);
-        let _ = sys_handle.remove_module_cycle(fighter_ball_id, synth_id).await;
-        if slot_id == 0 {
-            if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
-                f.target_id = None;
-            }
-        }
     }
 
     push_typed_session_notification(

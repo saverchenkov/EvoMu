@@ -1282,18 +1282,6 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     );
     check_ext_field!(
         |r: &mut CombatRuntimeState| {
-            r.fighter_unit_damage_accum.insert(1, 5.0);
-        },
-        |r: &mut CombatRuntimeState| r.fighter_unit_damage_accum.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.fighter_tube_rearm_until.insert((1, 0), 99);
-        },
-        |r: &mut CombatRuntimeState| r.fighter_tube_rearm_until.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
             r.behavior_debugging_active.insert(1);
         },
         |r: &mut CombatRuntimeState| r.behavior_debugging_active.clear()

@@ -819,6 +819,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                     }
                 }
                 // Apply AoE damage to all uncloaked dynamic ship/NPC/drone/probe balls within emp_range (including fleetmates!)
+                ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, &sys_handle).await;
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let mut hit_ball_ids = Vec::new();
                 let mut illegal_capsuleer_hits: Vec<(i64, bool)> = Vec::new();
@@ -844,7 +845,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|&oid| snap.characters.contains_key(&oid)))
                         })
                         .or_else(|| with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&b.id).map(|d| d.owner_char_id)))
-                        .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)))
+                        .or_else(|| sys_handle.view().fighters.active_fighters.get(&b.id).map(|f| f.owner_char_id))
                         .or_else(|| ctx.active_scanner_probes.read().ok().and_then(|ap| ap.get(&b.id).map(|p| p.owner_char_id)));
                         if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, sb_dmg, 5.0, now_unix).await {
                             hit_ball_ids.push(b.id);
@@ -1008,6 +1009,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                 };
                 let detonation_pos = attacker_ball.position + dir * flight_dist;
 
+                ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, &sys_handle).await;
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let mut hit_targets = Vec::new();
                 let mut total_dmg_applied = 0.0;
@@ -1023,7 +1025,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                             snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
                                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
                         })
-                        .or_else(|| ctx.active_fighters.read().ok().and_then(|af| af.get(&b.id).map(|f| f.owner_char_id)));
+                        .or_else(|| sys_handle.view().fighters.active_fighters.get(&b.id).map(|f| f.owner_char_id));
                         if sys_handle
                             .get_combat_state(b.id)
                             .await

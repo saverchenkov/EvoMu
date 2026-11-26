@@ -1631,10 +1631,14 @@ async fn lock_rank_enforcement_across_fixed_subsystems_and_inversion_panic() {
         .expect("machoNet.GetMetrics");
     assert!(matches!(metrics, eve_proto::PyRep::List(_)));
 
-    // 4. Consolidated FighterRuntimeState + lenses, CrimeWatchLock + tick_concord_responses, target-tag cleanup.
+    // 4. Per-system SystemActor fighter state, CrimeWatchLock + tick_concord_responses, target-tag cleanup.
     eve_server::services::fighter_test_helpers::set_fighter_tube_load(&ctx, ship_id, 0, 980_001_002);
     assert_eq!(
-        ctx.fighters.read().unwrap().tube_loads.get(&(ship_id, 0)).copied(),
+        sys.view().fighters.tube_loads.get(&(ship_id, 0)).map(|&(fid, _)| fid),
+        Some(980_001_002)
+    );
+    assert_eq!(
+        eve_server::services::fighter_test_helpers::loaded_fighter_in_tube(&ctx, ship_id, 0),
         Some(980_001_002)
     );
     eve_server::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(

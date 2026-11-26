@@ -341,6 +341,24 @@ pub fn upsert_system_checkpoint<T: Serialize + ?Sized>(
     Ok(())
 }
 
+fn replace_system_checkpoints_in_tx<T: Serialize>(
+    tx: &rusqlite::Transaction<'_>,
+    system_id: u32,
+    kind: &str,
+    rows: &[(String, T)],
+    updated_unix: u64,
+) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM system_checkpoint WHERE system_id = ?1 AND kind = ?2",
+        params![i64::from(system_id), kind],
+    )
+    .map_err(|e| format!("delete old system_checkpoint ({system_id}, {kind}): {e}"))?;
+    for (key, value) in rows {
+        upsert_system_checkpoint_in_tx(tx, system_id, kind, key, value, updated_unix)?;
+    }
+    Ok(())
+}
+
 /// Atomically replaces every `(key, value)` entry for `(system_id, kind)`.
 pub fn replace_system_checkpoints_for_kind<T: Serialize>(
     conn: &mut Connection,
@@ -354,16 +372,38 @@ pub fn replace_system_checkpoints_for_kind<T: Serialize>(
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin replace_system_checkpoints_for_kind tx: {e}"))?;
-    tx.execute(
-        "DELETE FROM system_checkpoint WHERE system_id = ?1 AND kind = ?2",
-        params![i64::from(system_id), kind],
-    )
-    .map_err(|e| format!("delete old system_checkpoint ({system_id}, {kind}): {e}"))?;
-    for (key, value) in rows {
-        upsert_system_checkpoint_in_tx(&tx, system_id, kind, key, value, updated_unix)?;
-    }
+    replace_system_checkpoints_in_tx(&tx, system_id, kind, rows, updated_unix)?;
     tx.commit()
         .map_err(|e| format!("commit replace_system_checkpoints_for_kind tx: {e}"))?;
+    Ok(())
+}
+
+/// Atomically replaces `(system_id, kind)` checkpoints and deletes `(legacy_system_id, kind, key)`
+/// rows inside a single SQLite transaction.
+pub fn replace_system_checkpoints_and_delete_legacy<T: Serialize>(
+    conn: &mut Connection,
+    system_id: u32,
+    kind: &str,
+    rows: &[(String, T)],
+    updated_unix: u64,
+    legacy_system_id: u32,
+    legacy_keys: &[String],
+) -> Result<(), String> {
+    ensure_system_checkpoint_schema(conn)?;
+    validate_checkpoint_kind(kind)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin replace_system_checkpoints_and_delete_legacy tx: {e}"))?;
+    replace_system_checkpoints_in_tx(&tx, system_id, kind, rows, updated_unix)?;
+    for key in legacy_keys {
+        tx.execute(
+            "DELETE FROM system_checkpoint WHERE system_id = ?1 AND kind = ?2 AND key = ?3",
+            params![i64::from(legacy_system_id), kind, key],
+        )
+        .map_err(|e| format!("delete legacy system_checkpoint ({legacy_system_id}, {kind}, {key}): {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit replace_system_checkpoints_and_delete_legacy tx: {e}"))?;
     Ok(())
 }
 

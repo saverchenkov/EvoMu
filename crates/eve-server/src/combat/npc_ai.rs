@@ -1943,9 +1943,11 @@ fn apply_ai_step_world_effects(
                     })
                     .collect::<HashMap<i64, Option<i64>>>()
             });
-            if let Ok(fighters) = ctx.active_fighters.read() {
+            if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+                ctx.systems.ensure_live_fighters_hydrated_if_unlocked_sync(sys_id, &sys_h);
+                let view = sys_h.view();
                 for &(_, _, tid, ..) in &applied_hits {
-                    if let Some(sq) = fighters.get(&tid) {
+                    if let Some(sq) = view.fighters.active_fighters.get(&tid) {
                         let owner = (!sq.is_abandoned && sq.owner_char_id > 0)
                             .then_some(sq.owner_char_id);
                         map.entry(tid).or_insert(owner);

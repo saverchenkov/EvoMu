@@ -456,8 +456,6 @@ pub struct CombatRuntimeState {
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    pub fighter_unit_damage_accum: HashMap<i64, f64>,
-    pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
     pub authorized_shipping_storage: std::collections::HashSet<(i64, i64)>,
     pub clone_soldier_cooldown_until: HashMap<u32, u64>,
@@ -491,8 +489,6 @@ struct PersistedCombatExtendedPayload {
     active_drones_in_space: HashMap<i64, DroneSpaceState>,
     npc_entities: HashMap<i64, ExtendedNpcEntity>,
     encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    fighter_unit_damage_accum: HashMap<i64, f64>,
-    fighter_tube_rearm_until: Vec<((i64, usize), u64)>,
     behavior_debugging_active: std::collections::HashSet<i64>,
     authorized_shipping_storage: Vec<(i64, i64)>,
     clone_soldier_cooldown_until: HashMap<u32, u64>,
@@ -675,8 +671,6 @@ impl CombatRuntimeState {
             self.active_drones_in_space.clear();
             self.npc_entities.clear();
             self.encounter_waves.clear();
-            self.fighter_unit_damage_accum.clear();
-            self.fighter_tube_rearm_until.clear();
             self.behavior_debugging_active.clear();
             self.authorized_shipping_storage.clear();
             self.clone_soldier_cooldown_until.clear();
@@ -702,8 +696,6 @@ impl CombatRuntimeState {
             self.active_drones_in_space = ext.active_drones_in_space;
             self.npc_entities = ext.npc_entities;
             self.encounter_waves = ext.encounter_waves;
-            self.fighter_unit_damage_accum = ext.fighter_unit_damage_accum;
-            self.fighter_tube_rearm_until = ext.fighter_tube_rearm_until.into_iter().collect();
             self.behavior_debugging_active = ext.behavior_debugging_active;
             self.authorized_shipping_storage =
                 ext.authorized_shipping_storage.into_iter().collect();
@@ -732,8 +724,6 @@ impl CombatRuntimeState {
             || !self.active_drones_in_space.is_empty()
             || !self.npc_entities.is_empty()
             || !self.encounter_waves.is_empty()
-            || !self.fighter_unit_damage_accum.is_empty()
-            || !self.fighter_tube_rearm_until.is_empty()
             || !self.behavior_debugging_active.is_empty()
             || !self.authorized_shipping_storage.is_empty()
             || !self.clone_soldier_cooldown_until.is_empty()
@@ -768,12 +758,6 @@ impl CombatRuntimeState {
                 active_drones_in_space: self.active_drones_in_space.clone(),
                 npc_entities: self.npc_entities.clone(),
                 encounter_waves: self.encounter_waves.clone(),
-                fighter_unit_damage_accum: self.fighter_unit_damage_accum.clone(),
-                fighter_tube_rearm_until: self
-                    .fighter_tube_rearm_until
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect(),
                 behavior_debugging_active: self.behavior_debugging_active.clone(),
                 authorized_shipping_storage: self
                     .authorized_shipping_storage
@@ -794,7 +778,6 @@ impl CombatRuntimeState {
             };
             payload.entropic_spools.sort_by_key(|(k, _)| *k);
             payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);
-            payload.fighter_tube_rearm_until.sort_by_key(|(k, _)| *k);
             payload.authorized_shipping_storage.sort_unstable();
             payload.npc_sec_gain_intervals.sort_by_key(|(k, _)| *k);
             serde_json::to_string(&payload).unwrap_or_default()
@@ -1021,8 +1004,6 @@ fn merge_extended_payload_3way(
         active_drones_in_space: merge_map_3way(&base.active_drones_in_space, &db.active_drones_in_space, &ram.active_drones_in_space),
         npc_entities: merge_map_3way(&base.npc_entities, &db.npc_entities, &ram.npc_entities),
         encounter_waves: merge_map_3way(&base.encounter_waves, &db.encounter_waves, &ram.encounter_waves),
-        fighter_unit_damage_accum: merge_map_3way(&base.fighter_unit_damage_accum, &db.fighter_unit_damage_accum, &ram.fighter_unit_damage_accum),
-        fighter_tube_rearm_until: merge_pair_vec_3way(&base.fighter_tube_rearm_until, &db.fighter_tube_rearm_until, &ram.fighter_tube_rearm_until),
         behavior_debugging_active: merge_set_3way(&base.behavior_debugging_active, &db.behavior_debugging_active, &ram.behavior_debugging_active),
         authorized_shipping_storage: merge_pair_set_vec_3way(&base.authorized_shipping_storage, &db.authorized_shipping_storage, &ram.authorized_shipping_storage),
         clone_soldier_cooldown_until: merge_map_3way(&base.clone_soldier_cooldown_until, &db.clone_soldier_cooldown_until, &ram.clone_soldier_cooldown_until),

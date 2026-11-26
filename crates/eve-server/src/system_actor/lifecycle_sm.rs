@@ -24,7 +24,7 @@ use super::{
 };
 use eve_db::lock_rank::{
     held_lock_ranks, RankedRwLock, RankedRwLockReadGuard, RankedRwLockWriteGuard, RANK_BALLPARK,
-    RANK_LEAF, RANK_SYSTEM_REGISTRY,
+    RANK_LEAF, RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY,
 };
 use eve_sde::SolarSystemId;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -128,6 +128,12 @@ impl SystemLifecycleSlot {
             _ => None,
         }
     }
+}
+
+pub(in crate::system_actor) enum FighterColdProbe {
+    Live(SystemHandle),
+    WaitGate(Arc<LifecycleGate>),
+    ColdReady,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -560,6 +566,15 @@ impl Drop for LoadingSlotGuard<'_> {
                 self.solar_system_id,
                 self.generation,
             );
+            self.registry
+                .fighter_persist
+                .slot_for(self.solar_system_id)
+                .retire_if_loading_gen(self.generation);
+        } else {
+            self.registry
+                .fighter_persist
+                .slot_for(self.solar_system_id)
+                .retire_if_loading_gen(self.generation);
         }
         if !cleared {
             let _ = with_telemetry_write_safe(&self.registry.lifecycle_telemetry, |telem| {
@@ -1190,6 +1205,12 @@ impl SystemRegistry {
 
         let mut evicted = Vec::new();
         for (sys_id, candidate_gen, handle) in candidates {
+            if (self.ensure_live_fighters_hydrated_async(sys_id, &handle).await.is_err()
+                || handle.flush_fighter_checkpoint().await.is_err())
+                && handle.fighter_ctx.dirty_stamp.load(std::sync::atomic::Ordering::Acquire) != 0
+            {
+                continue;
+            }
             let _ = handle.flush_condition_checkpoint().await;
             if !self.is_handle_hibernated_safe(&handle) {
                 continue;
@@ -1361,6 +1382,9 @@ impl SystemRegistry {
                 ..
             }) => {
                 let stale_gen = *stale_gen;
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_to_cold(stale_gen);
                 let mut telem = self
                     .lifecycle_telemetry
                     .write()
@@ -1390,6 +1414,9 @@ impl SystemRegistry {
                 ..
             }) => {
                 let stale_gen = *stale_gen;
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_to_cold(stale_gen);
                 self.clear_system_seed_markers(solar_system_id);
                 let mut telem = self
                     .lifecycle_telemetry
@@ -1413,6 +1440,9 @@ impl SystemRegistry {
                 let dead_gen = *dead_gen;
                 self.clear_db_ballpark_for_handle(solar_system_id, handle);
                 self.clear_system_seed_markers(solar_system_id);
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_to_cold(dead_gen);
                 let mut telem = self
                     .lifecycle_telemetry
                     .write()
@@ -1448,6 +1478,9 @@ impl SystemRegistry {
                 "claim_loading",
             );
         }
+        self.fighter_persist
+            .slot_for(solar_system_id)
+            .begin_loading(generation);
         guard.insert(
             solar_system_id,
             SystemLifecycleSlot::Loading {
@@ -1473,7 +1506,8 @@ impl SystemRegistry {
         let mut loading_guard =
             LoadingSlotGuard::new(self, solar_system_id, generation, Arc::clone(&gate));
 
-        let mut prepared = self.prepare_system_activation(solar_system_id, &wake_reason)?;
+        let mut prepared =
+            self.prepare_system_activation(solar_system_id, generation, &wake_reason)?;
         let staged_claims = std::mem::take(&mut prepared.staged_claims);
         let (handle, lazy_gates) = self.spawn_prepared_system_actor(&rt_handle, prepared);
         let mut handle_guard = UnregisteredHandleGuard::new(self, handle);
@@ -1544,6 +1578,9 @@ impl SystemRegistry {
             if let Ok(mut telem) = self.lifecycle_telemetry.write() {
                 telem.record_discard_stale(solar_system_id, generation, observed_state, wake_reason);
             }
+            self.fighter_persist
+                .slot_for(solar_system_id)
+                .retire_if_loading_gen(generation);
             drop(guard);
             loading_guard.disarm();
             gate.resolve(GateResolution::Aborted);
@@ -1557,12 +1594,15 @@ impl SystemRegistry {
             .map(|mut telem| telem.record_publish_live(solar_system_id, generation, wake_reason))
             .unwrap_or(false);
         if !telem_ok {
-            let _ = remove_matching_loading_slot(
+            let _cleared = remove_matching_loading_slot(
                 &mut guard,
                 &self.lifecycle_telemetry,
                 solar_system_id,
                 generation,
             );
+            self.fighter_persist
+                .slot_for(solar_system_id)
+                .retire_if_loading_gen(generation);
             loading_guard.disarm();
             drop(guard);
             gate.resolve(GateResolution::Aborted);
@@ -1574,6 +1614,9 @@ impl SystemRegistry {
             register_db_system_ballpark(db, solar_system_id, &handle);
         }
         self.commit_staged_seed_claims(solar_system_id, staged_claims);
+        self.fighter_persist
+            .slot_for(solar_system_id)
+            .mark_live(generation);
         guard.insert(
             solar_system_id,
             SystemLifecycleSlot::Live {
@@ -1609,6 +1652,9 @@ impl SystemRegistry {
                 origin.begin_detail(),
             );
         }
+        self.fighter_persist
+            .slot_for(solar_system_id)
+            .begin_stopping(generation);
         guard.insert(
             solar_system_id,
             SystemLifecycleSlot::Stopping {
@@ -1640,6 +1686,9 @@ impl SystemRegistry {
                 let generation = *generation;
                 let gate = Arc::clone(gate);
                 guard.remove(&solar_system_id);
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_to_cold(generation);
                 if let Ok(mut telem) = self.lifecycle_telemetry.write() {
                     telem.record_aborted_loading(
                         solar_system_id,
@@ -1660,6 +1709,9 @@ impl SystemRegistry {
                 if handle.cmd_tx.is_closed() {
                     self.clear_db_ballpark_for_handle(solar_system_id, &handle);
                     self.clear_system_seed_markers(solar_system_id);
+                    self.fighter_persist
+                        .slot_for(solar_system_id)
+                        .retire_to_cold(generation);
                     if let Ok(mut telem) = self.lifecycle_telemetry.write() {
                         telem.record_settled_cold(
                             solar_system_id,
@@ -1668,6 +1720,7 @@ impl SystemRegistry {
                             "stop_dead_live_to_cold",
                         );
                     }
+                    drop(guard);
                     return StopBeginAction::AlreadyCold;
                 }
                 let from_state = if self.is_handle_hibernated_safe(&handle) {
@@ -1778,8 +1831,78 @@ impl SystemRegistry {
             ) {
                 self.clear_system_seed_markers(solar_system_id);
             }
+            self.fighter_persist
+                .slot_for(solar_system_id)
+                .retire_to_cold(generation);
         }
         gate.resolve(GateResolution::SettledToCold);
+    }
+
+    pub(in crate::system_actor) fn probe_fighter_cold_or_live(
+        &self,
+        solar_system_id: SolarSystemId,
+    ) -> Result<FighterColdProbe, ()> {
+        if held_lock_ranks().iter().any(|&r| r >= RANK_SERVICE_STATE) {
+            return Err(());
+        }
+        let sys_guard = self.read_systems_slot_map();
+        match sys_guard.get(&solar_system_id) {
+            Some(SystemLifecycleSlot::Live { generation, handle }) => {
+                if !handle.cmd_tx.is_closed() {
+                    return Ok(FighterColdProbe::Live(handle.clone()));
+                }
+                let dead_gen = *generation;
+                drop(sys_guard);
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_to_cold(dead_gen);
+                Ok(FighterColdProbe::ColdReady)
+            }
+            Some(SystemLifecycleSlot::Loading { gate, .. })
+            | Some(SystemLifecycleSlot::Stopping { gate, .. })
+                if matches!(gate.current_resolution(), GateResolution::Pending) =>
+            {
+                let gate = Arc::clone(gate);
+                drop(sys_guard);
+                Ok(FighterColdProbe::WaitGate(gate))
+            }
+            Some(SystemLifecycleSlot::Loading { generation, .. }) => {
+                let g = *generation;
+                drop(sys_guard);
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_if_loading_gen(g);
+                Ok(FighterColdProbe::ColdReady)
+            }
+            Some(SystemLifecycleSlot::Stopping { generation, .. }) => {
+                let g = *generation;
+                drop(sys_guard);
+                self.fighter_persist
+                    .slot_for(solar_system_id)
+                    .retire_to_cold(g);
+                Ok(FighterColdProbe::ColdReady)
+            }
+            None => Ok(FighterColdProbe::ColdReady),
+        }
+    }
+
+    pub(in crate::system_actor) fn wait_fighter_gate_sync(
+        &self,
+        solar_system_id: SolarSystemId,
+        gate: &LifecycleGate,
+    ) -> bool {
+        gate.wait_for_slot_with_timeout(solar_system_id, self.gate_wait_timeout())
+            .is_ok()
+    }
+
+    pub(in crate::system_actor) async fn wait_fighter_gate_async(
+        &self,
+        solar_system_id: SolarSystemId,
+        gate: &LifecycleGate,
+    ) -> bool {
+        gate.wait_async_with_timeout(solar_system_id, self.gate_wait_timeout())
+            .await
+            .is_ok()
     }
 
     pub(crate) fn current_wallclock_ms(&self) -> u64 {

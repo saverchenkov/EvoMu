@@ -167,10 +167,11 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
         .await
         .map(|l| !l.is_empty())
         .unwrap_or(false);
-    let has_fighters = ctx
+    ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, &handle).await;
+    let has_fighters = handle
+        .view()
+        .fighters
         .active_fighters
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
         .values()
         .any(|f| f.parent_ship_id == ship_id && !f.is_abandoned);
     let in_range = anchors

@@ -181,6 +181,10 @@ pub(crate) enum PostUnlockIntent {
     BosonicDoomsdayRuntime(crate::services::doomsday_aoe_tick::BosonicDoomsdayRuntimeDbOp),
     ProvingArenaTick(crate::services::pvp_filament_arena::ProvingArenaTickDbOp),
     FobBallDamage(crate::services::fw_gameplay::fw_gameplay_insurgency::FobBallDamageDbOp),
+    PruneLegacyFighterExtJson {
+        damage_fids: Vec<i64>,
+        tube_rearms: Vec<(i64, usize)>,
+    },
     DeactivationHook(DeferredDeactivationHookOp),
     TargetLockHook(DeferredTargetLockHookOp),
 }
@@ -1121,6 +1125,9 @@ fn apply_intent_in_snap(
         }
         PostUnlockIntent::FobBallDamage(op) => {
             crate::services::fw_gameplay::fw_gameplay_insurgency::apply_fob_ball_damage_in_snap(snap, &op);
+        }
+        PostUnlockIntent::PruneLegacyFighterExtJson { damage_fids, tube_rearms } => {
+            super::fighters_persistence::prune_migrated_ext_json_in_snap(snap, &damage_fids, &tube_rearms);
         }
         PostUnlockIntent::DeactivationHook(hook) => deferred_deact_hooks.push(hook),
         PostUnlockIntent::TargetLockHook(hook) => deferred_lock_hooks.push(hook),

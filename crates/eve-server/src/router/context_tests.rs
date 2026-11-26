@@ -1617,6 +1617,11 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         "pending_warp_finished:",
         "session_change_timers:",
         "weapon_cycle_state:",
+        "fighters:",
+        "fighter_cooldown_state:",
+        "fighter_charge_state:",
+        "active_fighters:",
+        "fighter_tube_loads:",
     ] {
         assert!(
             !ctx_body.contains(forbidden),
@@ -1665,7 +1670,7 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         .filter(|f| f.contains("Mutex<") || f.contains("RwLock<"))
         .count();
     assert!(
-        locked_fields <= 40,
-        "ServerContext lock-guarded field count regressed above 40: {locked_fields} (#1541)"
+        locked_fields <= 39,
+        "ServerContext lock-guarded field count regressed above 39: {locked_fields} (#1541)"
     );
 }
