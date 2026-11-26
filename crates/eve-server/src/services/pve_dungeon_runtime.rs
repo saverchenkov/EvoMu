@@ -1774,14 +1774,12 @@ pub async fn despawn_completed_dungeon(
     instance_id: i64,
     char_id: i64,
 ) {
-    despawn_completed_dungeon_core(
-        &ctx.systems,
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        Some(&ctx.notify_tx),
+    actions::complete_and_flush_instance(
+        actions::DungeonRuntimeDeps::from_ctx(ctx),
         sys_id,
         instance_id,
         char_id,
+        true,
     )
     .await;
 }

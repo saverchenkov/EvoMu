@@ -583,3 +583,81 @@ async fn t2a2_i4_locked_entry_gate_final_room_none_and_branching_gate_links() {
     assert!(ctx.db.with_snapshot(|s| resolve_runtime_gate_in_snap(s, sys_id, None, Some(&dng_tag))).is_none());
     assert!(try_activate_dungeon_runtime_gate(&ctx, &mut sess, sys_id, &[PyRep::String(dng_tag)]).await.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a2_parse_extra_actions_from_pyrep_and_multi_action_execution() {
+    use crate::services::pve_dungeon_runtime::read_dungeon_runtime_store;
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_040_333;
+    let ship_id: i64 = 1_040_000_333;
+    let (ctx, _sess) = make_ctx_and_session(sys_id, char_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(uid, char_id as u64, Some(char_id), None, true, 1_785_000_000);
+    let room_pos = [20_000_000.0, 0.0, 0.0];
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball(Ball {
+        id: ship_id, type_id: 587, position: DVec3::from_array(room_pos), velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await.unwrap();
+
+    let room_rep = PyRep::keyval([
+        ("roomName", PyRep::String("Multi Trigger Room".into())),
+        ("gateLocked", PyRep::Bool(false)),
+        ("objects", PyRep::List(vec![PyRep::keyval([
+            ("typeID", PyRep::Integer(i64::from(DEFAULT_CONTAINER_TYPE_ID))),
+            ("name", PyRep::String("Extra Cache".into())),
+            ("isContainer", PyRep::Bool(true)),
+            ("spawnOnTrigger", PyRep::Bool(true)),
+            ("offset", PyRep::List(vec![PyRep::Real(800.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+        ])])),
+        ("triggers", PyRep::List(vec![PyRep::keyval([
+            ("kind", PyRep::String("approach".into())),
+            ("radius", PyRep::Real(5_000.0)),
+            ("targetRoomIndex", PyRep::Integer(0)),
+            ("action", PyRep::String("LockGate".into())),
+            ("extraActions", PyRep::List(vec![
+                PyRep::keyval([("action", PyRep::String("SpawnObject".into())), ("actionObjectIndex", PyRep::Integer(0))]),
+                PyRep::keyval([("action", PyRep::String("GrantLoot".into())), ("targetObjectIndex", PyRep::Integer(0)), ("items", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(15)])]))]),
+                PyRep::keyval([("action", PyRep::String("SetObjective".into())), ("objectiveID", PyRep::Integer(7701)), ("title", PyRep::String("Parsed Multi".into())), ("completed", PyRep::Bool(true))]),
+                PyRep::keyval([("action", PyRep::String("TriggerMessage".into())), ("messageType", PyRep::Integer(1)), ("messageID", PyRep::Integer(9009))]),
+            ])),
+        ])])),
+    ]);
+    let room2_rep = PyRep::keyval([("roomName", PyRep::String("Next Room".into()))]);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let mut kw = HashMap::new();
+    kw.insert("position".into(), PyRep::List(vec![PyRep::Real(room_pos[0]), PyRep::Real(0.0), PyRep::Real(0.0)]));
+    let spawned = spawn_dungeon_instance(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        &[PyRep::Integer(1), PyRep::List(vec![room_rep, room2_rep])],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let inst_id = spawned.dict_get("instanceID").unwrap().as_i64().unwrap();
+
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_id];
+        assert!(rt.rooms[0].objects[0].spawn_on_trigger && !rt.rooms[0].objects[0].spawned);
+        let t = &rt.rooms[0].triggers[0];
+        assert_eq!(t.action, DungeonTriggerAction::LockGate);
+        assert_eq!(t.target_room_index, Some(0));
+        assert_eq!(t.extra_actions.len(), 4);
+        assert_eq!(t.extra_actions[0], DungeonTriggerAction::SpawnObject { object_index: 0 });
+    });
+
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rt = &s.instances[&inst_id];
+        assert!(rt.rooms[0].gate_locked, "LockGate in primary action must survive trigger eval");
+        assert!(rt.rooms[0].objects[0].spawned);
+        assert_eq!(rt.objectives[0].objective_id, 7701);
+    });
+    ctx.db.with_snapshot(|s| assert!(s.items.values().any(|i| i.type_id == 34 && i.quantity == 15)));
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(notes.iter().any(|n| n.event == "OnDungeonTriggerMessage"));
+}

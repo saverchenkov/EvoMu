@@ -4,12 +4,9 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    cleanup_instance_containers_in_snap, collect_all_room_gate_ids,
-    has_unlooted_containers_in_snap, insert_container_and_loot_in_snap, instance_is_finished,
-    plan_npc_group_spawns_in_snap, record_dungeon_actor, record_room_actor,
-    resolve_dungeon_recipient, resolve_room_recipient, room_is_entered, spawn_gate_ball,
+    insert_container_and_loot_in_snap, instance_is_finished, plan_npc_group_spawns_in_snap,
+    record_room_actor, resolve_room_recipient, room_is_entered, spawn_gate_ball,
     spawn_object_ball, wake_dungeon_system_handle, NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
-    DUNGEON_COMPLETION_LOOT_GRACE_SECS,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::build_specialized_npc_spawn_item;
@@ -84,6 +81,8 @@ pub(crate) struct TriggerTxEffects {
     pub(crate) completed_sites: Vec<(i64, u32, i64)>,
     pub(crate) failed_notices: Vec<(i64, u32, i64)>,
     pub(crate) escalation_requests: Vec<(i64, u32, Option<u32>, u16, Option<String>, [f64; 3], i64)>,
+    pub(crate) locked_rooms: HashSet<usize>,
+    pub(crate) affected_clear_rooms: Vec<usize>,
     pub(crate) complete_now: bool,
     pub(crate) fail_reason: Option<String>,
 }
@@ -116,7 +115,7 @@ pub(crate) async fn spawn_dungeon_npc_orders(
     for order in orders {
         let seed = order.ball_id.unsigned_abs() ^ (u64::from(order.type_id) << 16);
         let (ball, mut cs, mut meta, entity) = build_specialized_npc_spawn_item(
-            sde, sys_id, order.ball_id, order.type_id, "Dungeon", u32::from(order.group_id),
+            sde, sys_id, order.ball_id, order.type_id, "", u32::from(order.group_id),
             DVec3::from_array(order.pos), seed, &mut |_| {},
         );
         if !order.destructible { cs.is_tethered = true; }
@@ -145,62 +144,16 @@ fn finish_instance_entities_in_snap(
     snap: &mut WorldStateSnapshot, instance_id: i64, actor_char_id: i64, now_unix: u64,
     is_fail: bool, force_full_despawn: bool, effects: &mut TriggerTxEffects,
 ) {
-    if snap.dungeon_runtime.instances.get(&instance_id).is_none_or(|i| i.despawned) { return; }
-    let has_loot = !is_fail && !force_full_despawn
-        && snap.dungeon_runtime.instances.get(&instance_id).is_some_and(|i| has_unlooted_containers_in_snap(snap, i));
-    let mut cleanup_conts = Vec::new();
-    if let Some(inst) = snap.dungeon_runtime.instances.get_mut(&instance_id) {
-        let (was_completed, was_finished, was_failed) = (inst.completed, instance_is_finished(inst), inst.failed);
-        record_dungeon_actor(inst, actor_char_id);
-        if is_fail {
-            inst.failed = true;
-            inst.completed = false;
-        } else if !was_failed {
-            inst.completed = true;
-            inst.completed_unix.get_or_insert(now_unix);
-        }
-        for obj in &mut inst.objectives {
-            if obj.status != DungeonObjectiveStatus::Completed {
-                obj.status = if is_fail { DungeonObjectiveStatus::Failed } else if !was_failed { DungeonObjectiveStatus::Completed } else { obj.status };
-            }
-        }
-        if let Some(eg) = inst.entry_gate_ball_id.take() { effects.despawn_other_balls.push(eg); }
-        for r in &mut inst.rooms {
-            effects.despawn_other_balls.extend(collect_all_room_gate_ids(r));
-            r.gate_ball_id = None;
-            for gl in &mut r.gate_links { gl.gate_ball_id = None; }
-            for grp in &mut r.npc_groups {
-                effects.despawn_npc_ids.extend(grp.npc_ball_ids.drain(..));
-                grp.dead_npc_ball_ids.clear(); grp.npc_ball_meta.clear(); grp.npc_ball_tags.clear();
-                grp.npc_ball_names.clear(); grp.npc_ball_bounties.clear();
-                if !is_fail && !was_failed { grp.cleared = true; }
-            }
-            if !is_fail && !was_failed { r.cleared = true; }
-            for obj in &mut r.objects {
-                let keep = has_loot && obj.is_container && obj.spawned && !obj.destroyed;
-                if !keep && obj.ball_id > 0 {
-                    if obj.is_container { cleanup_conts.push(obj.ball_id); }
-                    effects.despawn_other_balls.push(obj.ball_id);
-                    obj.ball_id = 0; obj.spawned = false;
-                }
-            }
-        }
-        if has_loot {
-            inst.despawned = false;
-            let grace = now_unix.saturating_add(DUNGEON_COMPLETION_LOOT_GRACE_SECS);
-            inst.loot_grace_until_unix.get_or_insert(grace);
-            inst.despawn_after_unix.get_or_insert(grace);
-        } else {
-            inst.despawned = true; inst.loot_grace_until_unix = None; inst.despawn_after_unix = Some(now_unix);
-        }
-        let recipient = resolve_dungeon_recipient(inst, actor_char_id);
-        if is_fail && !was_finished && recipient > 0 {
-            effects.failed_notices.push((recipient, inst.dungeon_id, instance_id));
-        } else if !is_fail && !was_completed && !was_failed {
-            effects.completed_sites.push((instance_id, inst.dungeon_id, recipient));
-        }
+    let Some(done) = super::ops::apply_finish_dungeon_instance_snap(
+        snap, instance_id, actor_char_id, is_fail, force_full_despawn, now_unix,
+    ) else { return; };
+    effects.despawn_other_balls.extend(done.non_npc_balls_to_remove);
+    effects.despawn_npc_ids.extend(done.npc_balls_to_remove);
+    if done.emit_failed {
+        effects.failed_notices.push((done.recipient_char_id, done.dungeon_id, instance_id));
+    } else if done.emit_completed {
+        effects.completed_sites.push((instance_id, done.dungeon_id, done.recipient_char_id));
     }
-    cleanup_instance_containers_in_snap(snap, &cleanup_conts);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -306,17 +259,20 @@ pub(crate) fn apply_single_action_in_inst(
     snap: &mut WorldStateSnapshot, sys_id: SolarSystemId, inst: &mut DungeonRuntimeInstance,
     src_r_idx: usize, target_room_index: Option<usize>, trig_id: u32, trig_rep: bool,
     act: &DungeonTriggerAction, actor: i64, now_unix: u64, effects: &mut TriggerTxEffects,
-) -> (i64, bool) {
-    let r_idx = target_room_index
-        .and_then(|ri| inst.room_vec_index_by_room_index(ri).or_else(|| (ri < inst.rooms.len()).then_some(ri)))
-        .unwrap_or(src_r_idx);
-    let room_id = inst.rooms.get(r_idx).or_else(|| inst.rooms.get(src_r_idx)).map(|r| r.room_id).unwrap_or(0);
+) -> Option<(i64, bool)> {
+    let r_idx = match target_room_index {
+        Some(ri) if ri < inst.rooms.len() => ri,
+        Some(_) => return None,
+        None => src_r_idx,
+    };
+    let room_id = inst.rooms.get(r_idx).map(|r| r.room_id).unwrap_or(0);
     let recip = resolve_room_recipient(inst, Some(r_idx), actor);
     let default_oid = room_id * 10 + i64::from(trig_id);
     let mut explicit_obj = false;
     let oid = match act {
         DungeonTriggerAction::UnlockGate | DungeonTriggerAction::LockGate => {
             let locked = matches!(act, DungeonTriggerAction::LockGate);
+            if locked { effects.locked_rooms.insert(r_idx); } else { effects.locked_rooms.remove(&r_idx); }
             if let Some(r) = inst.rooms.get_mut(r_idx) {
                 r.gate_locked = locked;
                 for gl in &mut r.gate_links { gl.locked = locked; }
@@ -344,6 +300,9 @@ pub(crate) fn apply_single_action_in_inst(
                         g.spawned = true; g.cleared = true;
                     }
                 }
+            }
+            if r_idx != src_r_idx && !effects.affected_clear_rooms.contains(&r_idx) {
+                effects.affected_clear_rooms.push(r_idx);
             }
             room_id * 10 + i64::from(*gid)
         }
@@ -394,7 +353,7 @@ pub(crate) fn apply_single_action_in_inst(
             default_oid
         }
     };
-    (oid, explicit_obj)
+    Some((oid, explicit_obj))
 }
 
 /// Evaluates room clear, gate unlocks, and dungeon auto-complete STRICTLY AFTER triggers execute (`OWN-R5-02`).
@@ -413,8 +372,10 @@ pub(crate) fn unlock_room_gates_on_clear_in_inst(
 
     let was_cleared = room.cleared;
     room.cleared = true;
-    room.gate_locked = false;
-    for gl in &mut room.gate_links { gl.locked = false; }
+    if !was_cleared && !effects.locked_rooms.contains(&r_idx) {
+        room.gate_locked = false;
+        for gl in &mut room.gate_links { gl.locked = false; }
+    }
     if !was_cleared && !had_room_actions {
         let oid = if r_idx + 1 < total_rooms { room.room_id * 10 + 9 } else { room.room_id * 10 + 99 };
         let evs = vec![(room.room_id * 100 + 99, oid)];
@@ -423,9 +384,23 @@ pub(crate) fn unlock_room_gates_on_clear_in_inst(
         if recip > 0 { effects.progression_events.push((recip, evs)); }
     }
     if r_idx + 1 == total_rooms
+        && !effects.locked_rooms.contains(&r_idx)
         && inst.rooms.iter().all(|r| r.cleared && r.npc_groups.iter().all(|g| g.spawned && g.cleared && g.npc_ball_ids.is_empty()))
     {
         effects.complete_now = true;
+    }
+}
+
+fn finish_room_clear_checks_in_inst(
+    inst: &mut DungeonRuntimeInstance, primary_r_idx: usize, actor: i64,
+    had_room_actions: bool, allow_empty_groups_clear: bool, effects: &mut TriggerTxEffects,
+) {
+    unlock_room_gates_on_clear_in_inst(inst, primary_r_idx, actor, had_room_actions, allow_empty_groups_clear, effects);
+    let cross_rooms = std::mem::take(&mut effects.affected_clear_rooms);
+    for cr_idx in cross_rooms {
+        if cr_idx != primary_r_idx {
+            unlock_room_gates_on_clear_in_inst(inst, cr_idx, actor, true, false, effects);
+        }
     }
 }
 
@@ -441,12 +416,12 @@ fn run_trigger_batch_in_inst(
         let eff_actor = if trig_actor > 0 { trig_actor } else { fallback_actor };
         let recip = resolve_room_recipient(inst, Some(r_idx), eff_actor);
         let (mut primary_oid, mut explicit_override) = (None, None);
-        fired_actions += actions.len();
         for (idx, act) in actions.into_iter().enumerate() {
-            let (oid, is_exp) = apply_single_action_in_inst(
+            let Some((oid, is_exp)) = apply_single_action_in_inst(
                 snap, sys_id, inst, r_idx, target_room_index, trig_id, trig_rep, &act, eff_actor, now_unix, effects,
-            );
-            if idx == 0 { primary_oid = Some(oid); } else if is_exp { explicit_override = Some(oid); }
+            ) else { continue; };
+            fired_actions += 1;
+            if primary_oid.is_none() && idx == 0 { primary_oid = Some(oid); } else if is_exp { explicit_override = Some(oid); }
         }
         if let Some(oid) = primary_oid {
             let evs = vec![(source_room_id * 100 + i64::from(trig_id), oid)];
@@ -517,7 +492,7 @@ fn eval_kill_room_in_snap(
     }
     let had_actions = !batch.is_empty();
     let _ = run_trigger_batch_in_inst(snap, sys_id, inst, r_idx, actor, now_unix, batch, effects);
-    unlock_room_gates_on_clear_in_inst(inst, r_idx, actor, had_actions, true, effects);
+    finish_room_clear_checks_in_inst(inst, r_idx, actor, had_actions, true, effects);
 }
 
 pub(crate) async fn on_dungeon_npc_killed_impl(
@@ -609,7 +584,7 @@ where
             }
             let (inst_sys, mut ie) = (inst.solar_system_id, TriggerTxEffects::default());
             for r_idx in 0..inst.rooms.len() {
-                let mut batch = Vec::new();
+                let (mut batch, mut any_room_hit) = (Vec::new(), false);
                 {
                     let room = &mut inst.rooms[r_idx];
                     if !room.spawned || !room_is_entered(room) { continue; }
@@ -617,15 +592,18 @@ where
                     for trig in &mut room.triggers {
                         if trig.fired || trig.armed_at_unix.is_some() || !matcher(objs, trig) { continue; }
                         count += 1;
+                        any_room_hit = true;
                         if trig.delay_secs > 0 { trig.armed_at_unix = Some(now_unix); trig.armed_by_char_id = (actor > 0).then_some(actor); continue; }
                         if !trig.repeatable { trig.fired = true; }
                         batch.push((trig.trigger_id, trig.target_room_index, trig.repeatable, actor, trig.all_actions().cloned().collect()));
                     }
                 }
-                if !batch.is_empty() {
+                if any_room_hit {
                     record_room_actor(&mut inst, r_idx, actor);
+                }
+                if !batch.is_empty() {
                     let _ = run_trigger_batch_in_inst(snap, inst_sys, &mut inst, r_idx, actor, now_unix, batch, &mut ie);
-                    unlock_room_gates_on_clear_in_inst(&mut inst, r_idx, actor, true, false, &mut ie);
+                    finish_room_clear_checks_in_inst(&mut inst, r_idx, actor, true, false, &mut ie);
                 }
             }
             finalize_terminal_in_snap(snap, inst, actor, now_unix, &mut ie);
@@ -668,8 +646,9 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
                     }
                 }
                 if !batch.is_empty() {
+                    record_room_actor(&mut inst, r_idx, last_actor);
                     let _ = run_trigger_batch_in_inst(snap, inst_sys, &mut inst, r_idx, last_actor, now_unix, batch, &mut ie);
-                    unlock_room_gates_on_clear_in_inst(&mut inst, r_idx, last_actor, true, false, &mut ie);
+                    finish_room_clear_checks_in_inst(&mut inst, r_idx, last_actor, true, false, &mut ie);
                 }
             }
             finalize_terminal_in_snap(snap, inst, last_actor, now_unix, &mut ie);

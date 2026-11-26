@@ -286,6 +286,81 @@ fn parse_finite_vec3(rep: Option<&PyRep>, default: [f64; 3]) -> [f64; 3] {
     }
 }
 
+fn parse_dungeon_trigger_action(spec: &PyRep, fallback: &PyRep) -> DungeonTriggerAction {
+    let action_str = spec
+        .as_str()
+        .or_else(|| spec.dict_get("action").and_then(|v| v.as_str()))
+        .unwrap_or("UnlockGate");
+    let src = if spec.as_str().is_some() { fallback } else { spec };
+    let action_grp = src
+        .dict_get("actionGroup")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(2);
+    let action_obj_idx = src
+        .dict_get("actionObjectIndex")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(0);
+    match action_str {
+        "LockGate" => DungeonTriggerAction::LockGate,
+        "UnlockEntryGate" => DungeonTriggerAction::UnlockEntryGate,
+        "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
+        "DespawnNpcGroup" => DungeonTriggerAction::DespawnNpcGroup(action_grp),
+        "SpawnObject" => DungeonTriggerAction::SpawnObject { object_index: action_obj_idx },
+        "GrantLoot" => {
+            let items = match src.dict_get("items") {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list
+                    .iter()
+                    .take(32)
+                    .filter_map(|e| match e {
+                        PyRep::List(p) | PyRep::Tuple(p) if p.len() >= 2 => Some((
+                            u32::try_from(p[0].as_i64()?).ok()?,
+                            i32::try_from(p[1].as_i64()?).ok()?,
+                        )),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            DungeonTriggerAction::GrantLoot {
+                items,
+                target_object_index: src
+                    .dict_get("targetObjectIndex")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| usize::try_from(v).ok()),
+            }
+        }
+        "GrantReward" => DungeonTriggerAction::GrantReward {
+            isk: src.dict_get("isk").and_then(|v| v.as_i64()).unwrap_or(0),
+            lp: src.dict_get("lp").and_then(|v| v.as_i64()).unwrap_or(0),
+            corp_id: src.dict_get("corpID").or_else(|| src.dict_get("corpId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+            faction_id: src.dict_get("factionID").or_else(|| src.dict_get("factionId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+            standing_milli: src.dict_get("standingMilli").and_then(|v| v.as_i64()).and_then(|v| i32::try_from(v).ok()).unwrap_or(0),
+        },
+        "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
+        "FailDungeon" => DungeonTriggerAction::FailDungeon {
+            reason: src.dict_get("reason").and_then(|v| v.as_str()).unwrap_or("DungeonFailed").to_string(),
+        },
+        "SetObjective" => DungeonTriggerAction::SetObjective {
+            objective_id: src.dict_get("objectiveID").or_else(|| src.dict_get("objectiveId")).and_then(|v| v.as_i64()).unwrap_or(0),
+            objective_key: src.dict_get("objectiveKey").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            title: src.dict_get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            completed: src.dict_get("completed").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
+        "StartEscalation" => DungeonTriggerAction::StartEscalation {
+            target_dungeon_id: src.dict_get("targetDungeonID").or_else(|| src.dict_get("targetDungeonId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()),
+            chance_bps: src.dict_get("chanceBps").and_then(|v| v.as_i64()).and_then(|v| u16::try_from(v).ok()).unwrap_or(10_000),
+            target_title: src.dict_get("targetTitle").and_then(|v| v.as_str()).map(str::to_string),
+        },
+        "TriggerMessage" => DungeonTriggerAction::TriggerMessage {
+            message_type: src.dict_get("messageType").and_then(|v| v.as_i64()).unwrap_or(1),
+            message_id: src.dict_get("messageID").or_else(|| src.dict_get("messageId")).and_then(|v| v.as_i64()).unwrap_or(0),
+        },
+        _ => DungeonTriggerAction::UnlockGate,
+    }
+}
+
 fn parse_rooms_from_pyrep(
     ctx: &ServerContext,
     sys_id: u32,
@@ -450,37 +525,14 @@ fn parse_rooms_from_pyrep(
                         .and_then(|v| v.as_str())
                         .unwrap_or("kill")
                         .to_ascii_lowercase();
-                    let action_str = t_rep
-                        .dict_get("action")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("UnlockGate");
-                    let action_grp = t_rep
-                        .dict_get("actionGroup")
-                        .and_then(|v| v.as_i64())
-                        .and_then(|v| u8::try_from(v).ok())
-                        .unwrap_or(2);
-                    let action_obj_idx = t_rep
-                        .dict_get("actionObjectIndex")
-                        .and_then(|v| v.as_i64())
-                        .and_then(|v| usize::try_from(v).ok())
-                        .unwrap_or(0);
-                    let action = match action_str {
-                        "LockGate" => DungeonTriggerAction::LockGate,
-                        "UnlockEntryGate" => DungeonTriggerAction::UnlockEntryGate,
-                        "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
-                        "DespawnNpcGroup" => DungeonTriggerAction::DespawnNpcGroup(action_grp),
-                        "SpawnObject" => DungeonTriggerAction::SpawnObject {
-                            object_index: action_obj_idx,
-                        },
-                        "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
-                        "FailDungeon" => DungeonTriggerAction::FailDungeon {
-                            reason: t_rep
-                                .dict_get("reason")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("DungeonFailed")
-                                .to_string(),
-                        },
-                        _ => DungeonTriggerAction::UnlockGate,
+                    let action = parse_dungeon_trigger_action(t_rep, t_rep);
+                    let extra_actions = match t_rep.dict_get("extraActions") {
+                        Some(PyRep::List(list) | PyRep::Tuple(list)) => list
+                            .iter()
+                            .take(16)
+                            .map(|a_rep| parse_dungeon_trigger_action(a_rep, t_rep))
+                            .collect(),
+                        _ => Vec::new(),
                     };
                     let kind = match kind_str.as_str() {
                         "approach" => {
@@ -535,6 +587,7 @@ fn parse_rooms_from_pyrep(
                         trigger_id: u32::try_from(t_i + 1).unwrap_or(u32::MAX),
                         kind,
                         action,
+                        extra_actions,
                         fired: false,
                         repeatable: t_rep
                             .dict_get("repeatable")
