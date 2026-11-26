@@ -148,15 +148,18 @@ impl UnmappedCustomInfoRatchet {
                     "ratchet must never allowlist amended #1195 live-client code {code:?} (entry {entry:?})"
                 ));
             }
-            if let Some((service, method)) = rpc.split_once('.') {
-                let mapping = eve_proto::BridgeRpcError::user_error(code)
-                    .to_client_error_mapped(service, method);
-                if !mapping.used_unmapped_custom_info_fallback {
-                    return Err(format!(
-                        "ratchet entry {entry:?} is already mapped by BridgeRpcError::to_client_error_mapped ({:?}) and must not be allowlisted",
-                        mapping.client_error
-                    ));
-                }
+            let (service, method) = rpc.split_once('.').ok_or_else(|| {
+                format!(
+                    "invalid unmapped_custom_info_ratchet entry {entry:?}: expected service.method:code"
+                )
+            })?;
+            let mapping = eve_proto::BridgeRpcError::user_error(code)
+                .to_client_error_mapped(service, method);
+            if !mapping.used_unmapped_custom_info_fallback {
+                return Err(format!(
+                    "ratchet entry {entry:?} is already mapped by BridgeRpcError::to_client_error_mapped ({:?}) and must not be allowlisted",
+                    mapping.client_error
+                ));
             }
         }
         Ok(())
@@ -224,7 +227,7 @@ mod tests {
             "dogmaIM.Activate:NoChargesLoaded",
             "contractProxy.AcceptContract:MustBeDocked",
             "beyonce.CmdWarpToStuff:ShipAlreadyInWarp",
-            "marketProxy.PlaceCharOrder:MaxOpenOrdersReached",
+            "marketProxy.PlaceBuyOrder:MaxOpenOrdersReached",
         ] {
             let ratchet = UnmappedCustomInfoRatchet {
                 version: 1,
