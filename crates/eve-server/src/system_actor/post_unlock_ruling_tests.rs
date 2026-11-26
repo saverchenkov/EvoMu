@@ -1823,3 +1823,144 @@ async fn track_1d_r2_bug03_concurrent_abyssal_systems_preserve_npc_active_clouds
         assert!(!snap.abyssal_state.active_clouds.contains_key(&high_loc_ship), "high 64-bit location_id aliasing sys_b in low 32 bits must not block stale cleanup");
     });
 }
+
+/// Regression test (`F-01`): an expiring Mobile Observatory with a due final boundary ping
+/// executes its boundary ping / decloak roll at most once across multiple held-writer ticks,
+/// retains `obs_ping_shadow` across expiry until `SweepExpired` commits, and prunes cleanly afterward.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_f01_expiring_observatory_boundary_ping_fires_once_under_held_writer() {
+    use crate::services::mobile_deployables::{
+        read_deployable_state, register_mobile_deployable,
+        step_mobile_deployables_in_actor_collecting, write_deployable_state, MobileDeployableDbOp,
+        GROUP_MOBILE_OBSERVATORY, OBSERVATORY_PING_INTERVAL_SECS,
+    };
+    use crate::services::mobile_deployables_ext::{MobileExtDbOp, TYPE_MOBILE_OBSERVATORY};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (ship_id, obs1_id, obs_pre_id) = (779_800_001_i64, 779_800_101, 779_800_102);
+    let cloak_ships: Vec<i64> = (0..6).map(|i| 779_800_200 + i).collect();
+    let cloak_mods: Vec<i64> = (0..6).map(|i| 779_800_300 + i).collect();
+    let (ctx, sys) = boot_ship(ship_id, &[], None, Some(make_combat_state(100.0, 100.0, 100.0, 100.0))).await;
+    let now = ctx.now_unix();
+
+    let deact_calls = Arc::new(AtomicUsize::new(0));
+    {
+        let dc = Arc::clone(&deact_calls);
+        let hook: crate::system_actor::ModuleDeactivationHook = Arc::new(move |_sys, _cid, _cyc| {
+            dc.fetch_add(1, Ordering::SeqCst);
+        });
+        *sys.module_deactivation_hook.write().unwrap() = Some(hook);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(obs1_id, make_item(obs1_id, TYPE_MOBILE_OBSERVATORY, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+        snap.item_positions.insert(obs1_id, [2_000.0, 0.0, 0.0]);
+        for i in 0..cloak_ships.len() {
+            snap.items.insert(cloak_ships[i], make_item(cloak_ships[i], 606, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+            snap.items.insert(cloak_mods[i], make_item(cloak_mods[i], 11578, CHAR_ID, cloak_ships[i], InventoryFlag::HiSlot0, 1));
+            snap.module_active_states.insert(cloak_mods[i]);
+        }
+    });
+    register_mobile_deployable(&ctx, obs1_id, TYPE_MOBILE_OBSERVATORY, GROUP_MOBILE_OBSERVATORY, CHAR_ID, SYS_ID, 0, DVec3::new(2_000.0, 0.0, 0.0));
+    write_deployable_state(&ctx, |st| {
+        let rec = st.deployables.get_mut(&obs1_id).unwrap();
+        rec.anchor_completed = true;
+        rec.anchor_start_unix = now.saturating_sub(OBSERVATORY_PING_INTERVAL_SECS + 30);
+        rec.expires_at_unix = now;
+        st.observatory_pings_done.insert(obs1_id, 1);
+    });
+    sys.spawn_ball(make_ball(obs1_id, TYPE_MOBILE_OBSERVATORY, DVec3::new(2_000.0, 0.0, 0.0))).await.unwrap();
+    for i in 0..cloak_ships.len() {
+        let mut cloak_cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+        cloak_cs.is_cloaked = true;
+        sys.spawn_ball_with_combat(make_ball(cloak_ships[i], 606, DVec3::new(2_500.0 + (i as f64) * 50.0, 0.0, 0.0)), cloak_cs).await.unwrap();
+        let mut cyc = cloak_cyc(cloak_ships[i], cloak_mods[i], 30.0, 0.0, 1_000);
+        cyc.elapsed_s = 0.0;
+        sys.actor_state.write().unwrap().active_module_cycles.push(cyc);
+    }
+
+    // Part 1: real actor ticks across expiry while `db.writer` is held must run the final boundary ping once.
+    let held = hold_db_writer(&ctx.db);
+    sys.ask_step_tick_only(1.0).await.unwrap();
+    let shadow_t1 = sys.actor_state.read().unwrap().post_unlock_shadows.observatory_pings_done.get(&obs1_id).copied();
+    assert!(matches!(shadow_t1, Some((2, seq)) if seq > 0), "expiring Observatory must keep (2, seq) in obs_ping_shadow before commit: {shadow_t1:?}");
+    assert!(!sys.ballpark.read().unwrap().balls.contains_key(&obs1_id), "expired Observatory ball must be swept on tick 1");
+    let cloaked_t1: Vec<(i64, bool)> = {
+        let bp = sys.ballpark.read().unwrap();
+        cloak_ships.iter().map(|&id| (id, bp.combat_states[&id].is_cloaked)).collect()
+    };
+
+    for tick in 2..=3 {
+        sys.ask_step_tick_only(1.0).await.unwrap();
+        assert_eq!(
+            sys.actor_state.read().unwrap().post_unlock_shadows.observatory_pings_done.get(&obs1_id).copied(),
+            shadow_t1,
+            "held-writer tick {tick} must keep exact (2, seq) shadow without re-firing"
+        );
+        let bp = sys.ballpark.read().unwrap();
+        for &(cid, was_cloaked) in &cloaked_t1 {
+            assert_eq!(bp.combat_states[&cid].is_cloaked, was_cloaked, "held-writer tick {tick} must not re-roll decloak on surviving cloaked ship {cid}");
+        }
+    }
+    release_writer(held);
+    assert!(sys.wait_for_post_unlock_barrier().await);
+    sys.ask_step_tick_only(1.0).await.unwrap();
+    assert!(sys.wait_for_post_unlock_barrier().await);
+
+    let expected_deact = cloaked_t1.iter().filter(|&&(_, cloaked)| !cloaked).count();
+    assert_eq!(deact_calls.load(Ordering::SeqCst), expected_deact, "decloaked ships must trigger DeactivationHook at most once");
+    assert!(!read_deployable_state(&ctx).deployables.contains_key(&obs1_id));
+    assert!(!read_deployable_state(&ctx).observatory_pings_done.contains_key(&obs1_id));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&obs1_id)));
+    assert!(sys.actor_state.read().unwrap().post_unlock_shadows.observatory_pings_done.is_empty(), "post-commit prune_committed must clear obs_ping_shadow");
+
+    // Part 2: pre-expiry ping under held writer followed by crossing `expires_at_unix` before commit.
+    let now2 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(obs_pre_id, make_item(obs_pre_id, TYPE_MOBILE_OBSERVATORY, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+        snap.item_positions.insert(obs_pre_id, [3_000.0, 0.0, 0.0]);
+    });
+    register_mobile_deployable(&ctx, obs_pre_id, TYPE_MOBILE_OBSERVATORY, GROUP_MOBILE_OBSERVATORY, CHAR_ID, SYS_ID, 0, DVec3::new(3_000.0, 0.0, 0.0));
+    write_deployable_state(&ctx, |st| {
+        let rec = st.deployables.get_mut(&obs_pre_id).unwrap();
+        rec.anchor_completed = true;
+        rec.anchor_start_unix = now2.saturating_sub(OBSERVATORY_PING_INTERVAL_SECS + 30);
+        rec.expires_at_unix = now2 + 10;
+        st.observatory_pings_done.insert(obs_pre_id, 1);
+    });
+    sys.spawn_ball(make_ball(obs_pre_id, TYPE_MOBILE_OBSERVATORY, DVec3::new(3_000.0, 0.0, 0.0))).await.unwrap();
+
+    let held2 = hold_db_writer(&ctx.db);
+    let mut seq_pre = 0_u64;
+    for (ts, expect_ping, expect_sweep) in [(now2 + 5, true, false), (now2 + 10, false, true), (now2 + 11, false, true)] {
+        let mut ops = PostUnlockOps::default();
+        let mut bp_g = sys.ballpark.write().unwrap();
+        let mut st_g = sys.actor_state.write().unwrap();
+        let (bp, st) = (&mut *bp_g, &mut *st_g);
+        super::prune_actor_shadows_for_cmd(SYS_ID, st, &sys.completed_post_unlock_seq);
+        let next_seq = st.next_post_unlock_seq.saturating_add(1);
+        if expect_ping {
+            seq_pre = next_seq;
+        }
+        step_mobile_deployables_in_actor_collecting(
+            bp, &mut st.active_module_cycles, &ctx.mechanic_rng, Some(&ctx.sde), st.db_opt.as_ref(),
+            Some(&ctx.mechanic_rng), SYS_ID, 1.0, ts,
+            Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)),
+            Some((&mut st.post_unlock_shadows.observatory_pings_done, next_seq)),
+            &mut ops,
+        );
+        let ping_steps: Vec<_> = ops.intents.iter().filter(|i| matches!(i, PostUnlockIntent::MobileExt(MobileExtDbOp::ObservatoryStep { .. }))).collect();
+        let sweeps = ops.intents.iter().filter(|i| matches!(i, PostUnlockIntent::MobileDeployable(MobileDeployableDbOp::SweepExpired { expired_ids }) if expired_ids.contains(&obs_pre_id))).count();
+        assert_eq!(ping_steps.len(), usize::from(expect_ping), "unexpected ObservatoryStep count at ts={ts}");
+        assert_eq!(sweeps, usize::from(expect_sweep), "unexpected SweepExpired count at ts={ts}");
+        assert_eq!(st.post_unlock_shadows.observatory_pings_done.get(&obs_pre_id).copied(), Some((2, seq_pre)), "obs_ping_shadow must survive SweepExpired queuing until commit");
+        let _ = super::enqueue_tick_post_unlock_or_barrier_under_locks(&sys, st, ops, false);
+    }
+    release_writer(held2);
+    assert!(sys.wait_for_post_unlock_barrier().await);
+    sys.ask_step_tick_only(1.0).await.unwrap();
+    assert!(sys.wait_for_post_unlock_barrier().await);
+    assert!(!read_deployable_state(&ctx).deployables.contains_key(&obs_pre_id));
+    assert!(!read_deployable_state(&ctx).observatory_pings_done.contains_key(&obs_pre_id));
+    assert!(sys.actor_state.read().unwrap().post_unlock_shadows.observatory_pings_done.is_empty());
+}

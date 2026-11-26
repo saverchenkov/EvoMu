@@ -936,13 +936,10 @@ pub(crate) fn step_mobile_deployables_in_actor_collecting(
         );
     }
 
-    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
+    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix.
+    // Keep `obs_ping_shadow` intact until `SweepExpired` / `ObservatoryStep` commits; post-commit
+    // `prune_committed(done_seq)` and `shadow.retain(|_, (_, seq)| *seq > committed_seq)` prune it.
     if !expired_ids.is_empty() {
-        if let Some((sh, _)) = obs_ping_shadow.as_mut() {
-            for eid in &expired_ids {
-                sh.remove(eid);
-            }
-        }
         for &eid in &expired_ids {
             ballpark.balls.remove(&eid);
             ballpark.combat_states.remove(&eid);
