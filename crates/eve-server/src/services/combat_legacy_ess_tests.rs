@@ -252,13 +252,11 @@ async fn legacy_activate_validation_npc_kill_and_concord_highsec_enforcement() {
 
     // Load ammo and seed an active mission + NPC entity referencing `npc_ball_id`
     {
+        use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
         use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
-        use crate::services::combat_crimewatch::with_mut_combat_runtime;
-        with_mut_combat_runtime(&ctx, |rt| {
-            let mut ent = make_test_npc_entity(npc_ball_id, 10_001, sys_id, "Pirate");
-            ent.bounty_isk = 100_000.0;
-            rt.npc_entities.insert(npc_ball_id, ent);
-        });
+        let mut ent = make_test_npc_entity(npc_ball_id, 10_001, sys_id, "Pirate");
+        ent.bounty_isk = 100_000.0;
+        seed_npc_entity(&ctx, ent);
     }
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -831,8 +829,8 @@ fn make_standings_test_ctx_and_session(
 
 #[tokio::test]
 async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_loss_without_double_apply() {
+    use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
-    use crate::services::combat_crimewatch::with_mut_combat_runtime;
 
     let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
         seed_standings_test_turret_sde(sde);
@@ -929,7 +927,7 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
             .unwrap();
     }
 
-    // 1. Ballpark-only NPC (not in rt.npc_entities) killed via canonical dogmaIM.Activate
+    // 1. Ballpark-only NPC (not in runtime NPC entity tracking) killed via canonical dogmaIM.Activate
     let kill_ballpark = ctx
         .dispatch_rpc(
             &mut session,
@@ -966,7 +964,7 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
     assert_eq!(notes_1.iter().filter(|n| n.event == "OnStandingSet").count(), 1);
     assert_eq!(notes_1.iter().filter(|n| n.event == "OnStandingsModified").count(), 1);
 
-    // 2. Runtime rt.npc_entities NPC with explicit faction_id (500_002) killed via canonical dogmaIM.Activate:
+    // 2. Runtime NPC entity with explicit faction_id (500_002) killed via canonical dogmaIM.Activate:
     //    apply_damage / npc_death_hook must apply -0.02 once (not double-applied).
     ctx.advance_secs(2);
     for _ in 0..2 {
@@ -975,11 +973,11 @@ async fn legacy_activate_primary_npc_and_runtime_hook_apply_faction_standing_los
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
     });
-    with_mut_combat_runtime(&ctx, |rt| {
+    {
         let mut ent = make_test_npc_entity(runtime_npc_id, 90_675, sys_id, "Minmatar");
         ent.faction_id = 500_002;
-        rt.npc_entities.insert(runtime_npc_id, ent);
-    });
+        seed_npc_entity(&ctx, ent);
+    }
     let kill_runtime = ctx
         .dispatch_rpc(
             &mut session,
@@ -1301,10 +1299,11 @@ async fn legacy_activate_convoy_kill_applies_faction_standing_loss() {
 
 #[tokio::test]
 async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_not_twice() {
+    use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
     use crate::formulas::compute_dbs_and_ess_bounty_split;
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
     use crate::services::combat_crimewatch::combat_npc_encounters::flush_npc_bounty_tick;
-    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+    use crate::services::combat_crimewatch::with_combat_runtime;
     use eve_db::IskCents;
 
     let (ctx, mut session, char_id, ship_id, sys_id) = make_standings_test_ctx_and_session(|sde| {
@@ -1387,12 +1386,12 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
             .await
             .unwrap();
     }
-    with_mut_combat_runtime(&ctx, |rt| {
+    {
         let mut ent = make_test_npc_entity(runtime_npc_id, 90_675, sys_id, "Minmatar");
         ent.faction_id = 500_002;
         ent.bounty_isk = 100_000.0;
-        rt.npc_entities.insert(runtime_npc_id, ent);
-    });
+        seed_npc_entity(&ctx, ent);
+    }
 
     sys_handle
         .add_target_lock(
@@ -1464,8 +1463,8 @@ async fn legacy_activate_runtime_npc_with_bounty_and_nullsec_ess_credits_once_no
 
 #[tokio::test]
 async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements() {
+    use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
-    use crate::services::combat_crimewatch::with_mut_combat_runtime;
     use crate::services::social_corp_fleet::social_corp_projects::{
         create_canonical_project, CanonicalProjectSpec,
     };
@@ -1646,11 +1645,9 @@ async fn legacy_activate_pvp_kill_skips_npc_death_hook_projects_and_achievements
         .db
         .with_snapshot(|snap| snap.quasar_state_blobs.get("quasar_opportunities").cloned());
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ent = make_test_npc_entity(control_npc_id, 90_675, sys_id, "Minmatar");
-        ent.faction_id = 500_002;
-        rt.npc_entities.insert(control_npc_id, ent);
-    });
+    let mut ent = make_test_npc_entity(control_npc_id, 90_675, sys_id, "Minmatar");
+    ent.faction_id = 500_002;
+    seed_npc_entity(&ctx, ent);
     for bid in [victim_ship_id, control_npc_id] {
         sys_handle
             .add_target_lock(

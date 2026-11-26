@@ -464,9 +464,9 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
         compute_sleeper_sentry_interval_s, handle_npc_ai_ball_destructions, NpcAiState,
         NpcCombatEntity, NpcSpawnManager,
     };
+    use crate::combat::npc_ai::npc_test_helpers::{has_npc_entity, seed_npc_entity};
     use crate::services::combat_crimewatch::{
-        with_combat_runtime, with_mut_combat_runtime, AssistLogEntry, DroneSpaceState,
-        ExtendedNpcEntity,
+        with_mut_combat_runtime, AssistLogEntry, DroneSpaceState, ExtendedNpcEntity,
     };
     use crate::sp6_lifecycle::{with_mut_sp6_state, DisconnectedShipEntry};
 
@@ -585,41 +585,41 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
                 },
             ],
         );
-        rt.npc_entities.insert(
-            ext_npc_id,
-            ExtendedNpcEntity {
-                ball_id: ext_npc_id,
-                type_id: 10_019,
-                faction_id: 500_010,
-                archetype: "Pirate".into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 1,
-                target_id: None,
-                aggression_threat: HashMap::new(),
-                threat_table: HashMap::new(),
-                bounty_isk: 10_000.0,
-                optimal_range: 10_000.0,
-                orbit_range: 5_000.0,
-                damage_vector: eve_destiny::DamageVector::default(),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                custom_cargo_loot: None,
-                spawn_position: DVec3::ZERO,
-                sleeper_wh_class: 0,
-            },
-        );
     });
+    seed_npc_entity(
+        &ctx,
+        ExtendedNpcEntity {
+            ball_id: ext_npc_id,
+            type_id: 10_019,
+            faction_id: 500_010,
+            archetype: "Pirate".into(),
+            solar_system_id: sys_id,
+            spawn_group_id: 1,
+            target_id: None,
+            aggression_threat: HashMap::new(),
+            threat_table: HashMap::new(),
+            bounty_isk: 10_000.0,
+            optimal_range: 10_000.0,
+            orbit_range: 5_000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 0.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            custom_cargo_loot: None,
+            spawn_position: DVec3::ZERO,
+            sleeper_wh_class: 0,
+        },
+    );
 
     let make_dead_ball = |id: i64, type_id: u32, pos: DVec3| Ball {
         id,
@@ -663,9 +663,7 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
     );
 
     assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_id));
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.npc_entities.contains_key(&ext_npc_id));
-    });
+    assert!(!has_npc_entity(&ctx, ext_npc_id));
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&drone_id));
     });

@@ -901,7 +901,7 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         .expect("handled")
         .expect("/unspawn hull ok");
 
-    // 3. /spawn <npc_type> registers live NPC AI in both npc_spawns and combat_ephemeral.npc_entities (#792).
+    // 3. /spawn <npc_type> registers live NPC AI in both npc_spawns and combat NPC entity tracking (#792).
     let npc_tid = ctx
         .sde
         .types
@@ -929,20 +929,16 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
             "/spawn NPC must register in NpcSpawnManager"
         );
         assert!(
-            crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-                rt.npc_entities.contains_key(&npc_id)
-            }),
-            "/spawn NPC must register in combat_ephemeral.npc_entities"
+            crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, npc_id),
+            "/spawn NPC must register in combat NPC entity tracking"
         );
         let _ = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {npc_id}"))
             .await
             .expect("handled")
             .expect("/unspawn NPC ok");
         assert!(
-            !crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-                rt.npc_entities.contains_key(&npc_id)
-            }),
-            "/unspawn NPC must remove from combat_ephemeral.npc_entities"
+            !crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, npc_id),
+            "/unspawn NPC must remove from combat NPC entity tracking"
         );
     }
 }
@@ -1663,11 +1659,9 @@ async fn spawn_multi_npc_rollback_cleans_db_ballpark_and_npc_runtime_state() {
         "rollback must clean ctx.npc_spawns for prior and failed NPCs"
     );
     assert!(
-        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-            !rt.npc_entities.contains_key(&first_npc_id)
-                && !rt.npc_entities.contains_key(&second_npc_id)
-        }),
-        "rollback must clean combat_runtime.npc_entities for prior and failed NPCs"
+        !crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, first_npc_id)
+            && !crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, second_npc_id),
+        "rollback must clean combat NPC entity tracking for prior and failed NPCs"
     );
 }
 

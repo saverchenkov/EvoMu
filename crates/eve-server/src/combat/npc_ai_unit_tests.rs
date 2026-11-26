@@ -1022,41 +1022,41 @@ async fn npc_ai_chase_idle_ewar_logi_threat_and_ball_destruction_branches() {
                 last_action_unix: now,
             },
         );
-        rt.npc_entities.insert(
-            ext_npc_id,
-            crate::services::combat_crimewatch::ExtendedNpcEntity {
-                ball_id: ext_npc_id,
-                type_id: 597,
-                faction_id: 500_010,
-                archetype: "Pirate".into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 1,
-                target_id: None,
-                aggression_threat: HashMap::new(),
-                threat_table: HashMap::new(),
-                bounty_isk: 1_000.0,
-                optimal_range: 5_000.0,
-                orbit_range: 4_000.0,
-                damage_vector: DamageVector::new(0.0, 0.0, 0.0, 0.0),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: DVec3::ZERO,
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
-            },
-        );
     });
+    crate::combat::npc_ai::npc_test_helpers::seed_npc_entity(
+        &ctx,
+        crate::services::combat_crimewatch::ExtendedNpcEntity {
+            ball_id: ext_npc_id,
+            type_id: 597,
+            faction_id: 500_010,
+            archetype: "Pirate".into(),
+            solar_system_id: sys_id,
+            spawn_group_id: 1,
+            target_id: None,
+            aggression_threat: HashMap::new(),
+            threat_table: HashMap::new(),
+            bounty_isk: 1_000.0,
+            optimal_range: 5_000.0,
+            orbit_range: 4_000.0,
+            damage_vector: DamageVector::new(0.0, 0.0, 0.0, 0.0),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 0.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            spawn_position: DVec3::ZERO,
+            sleeper_wh_class: 0,
+            custom_cargo_loot: None,
+        },
+    );
     sys_handle
         .test_with_ballpark_mut_async(move |bp| {
             if let Some(b) = bp.balls.get_mut(&player_ship) {
@@ -1101,9 +1101,7 @@ async fn npc_ai_chase_idle_ewar_logi_threat_and_ball_destruction_branches() {
         ],
     );
     assert!(!crate::services::drone_test_helpers::has_active_drone(&ctx, drone_id));
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.npc_entities.contains_key(&ext_npc_id));
-    });
+    assert!(!crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, ext_npc_id));
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&drone_id));
         assert!(!snap.items.contains_key(&ext_npc_id));

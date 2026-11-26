@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::combat::npc_ai::npc_test_helpers::{has_npc_entity, seed_npc_entity};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, ContainerLifetimeEntry, ExtendedNpcEntity,
@@ -185,41 +186,41 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
                 is_abandoned: false,
             },
         );
-        rt.npc_entities.insert(
-            old_mission_npc_bid,
-            ExtendedNpcEntity {
-                ball_id: old_mission_npc_bid,
-                type_id: 10_019,
-                faction_id: 500_010,
-                archetype: "Pirate".into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 1,
-                target_id: None,
-                aggression_threat: HashMap::new(),
-                threat_table: HashMap::new(),
-                bounty_isk: 10_000.0,
-                optimal_range: 5_000.0,
-                orbit_range: 2_500.0,
-                damage_vector: DamageVector::default(),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                custom_cargo_loot: None,
-                spawn_position: DVec3::ZERO,
-                sleeper_wh_class: 0,
-            },
-        );
     });
+    seed_npc_entity(
+        &ctx,
+        ExtendedNpcEntity {
+            ball_id: old_mission_npc_bid,
+            type_id: 10_019,
+            faction_id: 500_010,
+            archetype: "Pirate".into(),
+            solar_system_id: sys_id,
+            spawn_group_id: 1,
+            target_id: None,
+            aggression_threat: HashMap::new(),
+            threat_table: HashMap::new(),
+            bounty_isk: 10_000.0,
+            optimal_range: 5_000.0,
+            orbit_range: 2_500.0,
+            damage_vector: DamageVector::default(),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 0.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            custom_cargo_loot: None,
+            spawn_position: DVec3::ZERO,
+            sleeper_wh_class: 0,
+        },
+    );
 
     let (wrecks_removed, missions_reset) = cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
     assert_eq!(wrecks_removed, 1);
@@ -231,8 +232,8 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
 
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.container_lifetimes.contains_key(&npc_wreck_id));
-        assert!(!rt.npc_entities.contains_key(&old_mission_npc_bid));
     });
+    assert!(!has_npc_entity(&ctx, old_mission_npc_bid));
 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&npc_wreck_id));

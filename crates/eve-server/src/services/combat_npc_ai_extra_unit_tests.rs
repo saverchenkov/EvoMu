@@ -2,12 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, seed_npc_entity};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
 use crate::services::combat_crimewatch::combat_npc_ai::*;
-use crate::services::combat_crimewatch::{with_combat_ephemeral, with_mut_combat_ephemeral};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta};
 use glam::DVec3;
 
@@ -178,44 +178,42 @@ async fn step_npc_ai_sleeper_leash_remote_rep_zarzakh_drifter_doomsday_and_edenc
             .unwrap();
     }
 
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        let mut sl = make_test_npc_entity(sleeper_id, 30_195, sys_id, "Sleeper");
-        sl.spawn_position = DVec3::ZERO;
-        rt.npc_entities.insert(sleeper_id, sl);
+    let mut sl = make_test_npc_entity(sleeper_id, 30_195, sys_id, "Sleeper");
+    sl.spawn_position = DVec3::ZERO;
+    seed_npc_entity(&ctx, sl);
 
-        let mut sl_rep = make_test_npc_entity(sleeper_rep_id, 30_195, sys_id, "Sleeper");
-        sl_rep.spawn_position = DVec3::ZERO;
-        sl_rep.optimal_range = 40_000.0;
-        sl_rep.remote_shield_rep = 150.0;
-        sl_rep.remote_armor_rep = 120.0;
-        sl_rep.remote_rep_range = 20_000.0;
-        sl_rep.sleeper_wh_class = 5;
-        sl_rep.scram_range = 20_000.0;
-        sl_rep.scram_strength = 2.0;
-        sl_rep.neut_amount = 50.0;
-        sl_rep.web_range = 20_000.0;
-        sl_rep.web_speed_factor = -60.0;
-        sl_rep.target_id = Some(ship_id);
-        rt.npc_entities.insert(sleeper_rep_id, sl_rep);
+    let mut sl_rep = make_test_npc_entity(sleeper_rep_id, 30_195, sys_id, "Sleeper");
+    sl_rep.spawn_position = DVec3::ZERO;
+    sl_rep.optimal_range = 40_000.0;
+    sl_rep.remote_shield_rep = 150.0;
+    sl_rep.remote_armor_rep = 120.0;
+    sl_rep.remote_rep_range = 20_000.0;
+    sl_rep.sleeper_wh_class = 5;
+    sl_rep.scram_range = 20_000.0;
+    sl_rep.scram_strength = 2.0;
+    sl_rep.neut_amount = 50.0;
+    sl_rep.web_range = 20_000.0;
+    sl_rep.web_speed_factor = -60.0;
+    sl_rep.target_id = Some(ship_id);
+    seed_npc_entity(&ctx, sl_rep);
 
-        let mut tr = make_test_npc_entity(trig_id, 47_270, sys_id, "Triglavian");
-        tr.damage_vector = DamageVector::new(0.0, 100.0, 0.0, 100.0);
-        tr.target_id = Some(ship_id);
-        rt.npc_entities.insert(trig_id, tr);
+    let mut tr = make_test_npc_entity(trig_id, 47_270, sys_id, "Triglavian");
+    tr.damage_vector = DamageVector::new(0.0, 100.0, 0.0, 100.0);
+    tr.target_id = Some(ship_id);
+    seed_npc_entity(&ctx, tr);
 
-        let mut dr = make_test_npc_entity(drifter_id, 37_473, sys_id, "Drifter");
-        dr.damage_vector = DamageVector::new(50.0, 50.0, 50.0, 50.0);
-        dr.drifter_overshield_hp = 0.0;
-        dr.drifter_doomsday_fired = false;
-        dr.target_id = Some(ship_id);
-        rt.npc_entities.insert(drifter_id, dr);
+    let mut dr = make_test_npc_entity(drifter_id, 37_473, sys_id, "Drifter");
+    dr.damage_vector = DamageVector::new(50.0, 50.0, 50.0, 50.0);
+    dr.drifter_overshield_hp = 0.0;
+    dr.drifter_doomsday_fired = false;
+    dr.target_id = Some(ship_id);
+    seed_npc_entity(&ctx, dr);
 
-        let mut ed = make_test_npc_entity(eden_id, 54_800, sys_id, "EDENCOM");
-        ed.damage_vector = DamageVector::new(100.0, 0.0, 100.0, 0.0);
-        ed.threat_table.insert(ship_id, 200.0);
-        ed.target_id = Some(ship_id);
-        rt.npc_entities.insert(eden_id, ed);
-    });
+    let mut ed = make_test_npc_entity(eden_id, 54_800, sys_id, "EDENCOM");
+    ed.damage_vector = DamageVector::new(100.0, 0.0, 100.0, 0.0);
+    ed.threat_table.insert(ship_id, 200.0);
+    ed.target_id = Some(ship_id);
+    seed_npc_entity(&ctx, ed);
 
     step_extended_npc_ai(&ctx, sys_id).await;
 
@@ -227,10 +225,8 @@ async fn step_npc_ai_sleeper_leash_remote_rep_zarzakh_drifter_doomsday_and_edenc
     assert!((trig_cs.armor_hp - 320.0).abs() < 1e-3);
 
     // Verify Drifter fired doomsday, Triglavian spooled entropic_cycles, and EDENCOM splashed wing_ship
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.npc_entities[&drifter_id].drifter_doomsday_fired);
-        assert_eq!(rt.npc_entities[&trig_id].entropic_cycles, 1);
-    });
+    assert!(get_npc_entity(&ctx, drifter_id).unwrap().drifter_doomsday_fired);
+    assert_eq!(get_npc_entity(&ctx, trig_id).unwrap().entropic_cycles, 1);
     let primary_cs = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     let wing_cs = sys_h.get_combat_state(wing_ship).await.unwrap().unwrap();
     assert!(primary_cs.shield_hp < 45_000.0);
@@ -305,12 +301,16 @@ async fn destroy_specialized_npc_sleeper_wormhole_pochven_roguedrone_trig_edenco
 }
 
 mod w4_ops_pve_mut_extra_tests {
+    use crate::combat::npc_ai::npc_test_helpers::{
+        get_npc_entity, has_npc_entity, npc_entity_ids, remove_npc_entity, seed_npc_entity,
+        update_npc_entity,
+    };
     use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
         make_fighter_ctx_and_session, make_fighter_type,
     };
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
     use crate::services::combat_crimewatch::combat_npc_ai::*;
-    use crate::services::combat_crimewatch::{with_combat_ephemeral, with_mut_combat_ephemeral, DroneSpaceState};
+    use crate::services::combat_crimewatch::{with_combat_ephemeral, DroneSpaceState};
     use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
     use glam::DVec3;
 
@@ -337,11 +337,9 @@ mod w4_ops_pve_mut_extra_tests {
         // Pirate SDE accepts custom hint ("CustomBoss")
         let b_custom = spawn_specialized_npc_entity(&ctx, sys_id, 940_003, "CustomBoss", 3, DVec3::ZERO).await;
 
-        with_combat_ephemeral(&ctx, |rt| {
-            assert_eq!(rt.npc_entities[&b_navy].archetype, "Navy");
-            assert_eq!(rt.npc_entities[&b_fpol].archetype, "FactionPolice");
-            assert_eq!(rt.npc_entities[&b_custom].archetype, "CustomBoss");
-        });
+        assert_eq!(get_npc_entity(&ctx, b_navy).unwrap().archetype, "Navy");
+        assert_eq!(get_npc_entity(&ctx, b_fpol).unwrap().archetype, "FactionPolice");
+        assert_eq!(get_npc_entity(&ctx, b_custom).unwrap().archetype, "CustomBoss");
 
         // EDENCOM checks: unknown candidate=false, drone owned by negative standing owner=true, neutral drone=false
         let other_char = 94_400_002_i64;
@@ -542,13 +540,14 @@ mod w4_ops_pve_mut_extra_tests {
         let seek_id = spawn_specialized_npc_entity(&ctx, sys_id, 940_103, "Drifter", 20, DVec3::new(3_000.0, 0.0, 0.0)).await;
         let boss_id = spawn_specialized_npc_entity(&ctx, sys_id, 37_473, "Drifter", 21, DVec3::new(3_500.0, 0.0, 0.0)).await;
 
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            let mut missing = make_test_npc_entity(missing_ball_npc, 940_101, sys_id, "Sleeper");
-            missing.spawn_group_id = 99;
-            rt.npc_entities.insert(missing_ball_npc, missing);
-            rt.npc_entities.get_mut(&warp_npc).unwrap().target_id = Some(ship_id);
+        let mut missing = make_test_npc_entity(missing_ball_npc, 940_101, sys_id, "Sleeper");
+        missing.spawn_group_id = 99;
+        seed_npc_entity(&ctx, missing);
+        update_npc_entity(&ctx, warp_npc, |w| {
+            w.target_id = Some(ship_id);
+        });
 
-            let h = rt.npc_entities.get_mut(&sle_healer).unwrap();
+        update_npc_entity(&ctx, sle_healer, |h| {
             h.remote_armor_rep = 200.0;
             h.remote_rep_range = 20_000.0;
             h.sleeper_wh_class = 3;
@@ -558,8 +557,9 @@ mod w4_ops_pve_mut_extra_tests {
             h.web_range = 30_000.0;
             h.target_id = Some(cloak_ship); // triggers target switch -> resets entropic_cycles!
             h.entropic_cycles = 4;
+        });
 
-            let m_boss = rt.npc_entities.get_mut(&boss_id).unwrap();
+        update_npc_entity(&ctx, boss_id, |m_boss| {
             m_boss.drifter_overshield_hp = 0.0;
             m_boss.drifter_doomsday_fired = false;
             m_boss.damage_vector = DamageVector::new(10.0, 10.0, 10.0, 10.0);
@@ -567,14 +567,14 @@ mod w4_ops_pve_mut_extra_tests {
 
         step_extended_npc_ai(&ctx, sys_id).await;
 
+        assert!(!has_npc_entity(&ctx, dead_npc));
+        assert!(!has_npc_entity(&ctx, missing_ball_npc));
+        assert!(has_npc_entity(&ctx, relay_id));
+        assert_eq!(get_npc_entity(&ctx, warp_npc).unwrap().target_id, None);
+        assert_eq!(get_npc_entity(&ctx, sle_healer).unwrap().entropic_cycles, 0); // reset on switch!
+        assert!(!get_npc_entity(&ctx, seek_id).unwrap().drifter_doomsday_fired);
+        assert!(get_npc_entity(&ctx, boss_id).unwrap().drifter_doomsday_fired);
         with_combat_ephemeral(&ctx, |rt| {
-            assert!(!rt.npc_entities.contains_key(&dead_npc));
-            assert!(!rt.npc_entities.contains_key(&missing_ball_npc));
-            assert!(rt.npc_entities.contains_key(&relay_id));
-            assert_eq!(rt.npc_entities[&warp_npc].target_id, None);
-            assert_eq!(rt.npc_entities[&sle_healer].entropic_cycles, 0); // reset on switch!
-            assert!(!rt.npc_entities[&seek_id].drifter_doomsday_fired);
-            assert!(rt.npc_entities[&boss_id].drifter_doomsday_fired);
             assert!(rt.npc_scrambled_ships.get(&sys_id).is_some_and(|s| s.contains(&ship_id)));
         });
         // Ship was scrammed by C3 sleeper; sle_mate healed, sle_other_grp did NOT heal!
@@ -584,9 +584,11 @@ mod w4_ops_pve_mut_extra_tests {
         assert!((cs_other.armor_hp - 500.0).abs() < 1e-6);
 
         // Next tick: removing all scram-capable / active NPCs clears player scram!
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            rt.npc_entities.retain(|_, e| e.solar_system_id != sys_id);
-        });
+        for id in npc_entity_ids(&ctx) {
+            if get_npc_entity(&ctx, id).is_some_and(|e| e.solar_system_id == sys_id) {
+                remove_npc_entity(&ctx, id);
+            }
+        }
         let _ = sys_h.remove_ball(sle_healer).await;
         step_extended_npc_ai(&ctx, sys_id).await;
         with_combat_ephemeral(&ctx, |rt| {
@@ -769,10 +771,8 @@ mod w4_ops_pve_mut_extra_tests {
         // 1. spawn_npc_entity_from_sde using a real published SDE entity if present
         if let Some(&sde_npc_tid) = ctx.sde.types.values().find(|t| t.category_id == 11 && t.published).map(|t| &t.type_id) {
             let sde_npc = spawn_npc_entity_from_sde(&ctx, sys_id, sde_npc_tid, 1, DVec3::ZERO).await;
-            with_mut_combat_ephemeral(&ctx, |rt| {
-                assert!(rt.npc_entities.contains_key(&sde_npc));
-                rt.npc_entities.remove(&sde_npc);
-            });
+            assert!(has_npc_entity(&ctx, sde_npc));
+            remove_npc_entity(&ctx, sde_npc);
             let _ = sys_h.remove_ball(sde_npc).await;
         }
 
@@ -786,16 +786,14 @@ mod w4_ops_pve_mut_extra_tests {
         let sentry_far = spawn_specialized_npc_entity(&ctx, sys_id, 940_203, "SleeperSentry", 5, DVec3::new(300_000.0, 0.0, 0.0)).await;
         let sentry_near = spawn_specialized_npc_entity(&ctx, sys_id, 940_203, "SleeperSentry", 6, DVec3::new(200_000.0, 0.0, 0.0)).await;
 
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            if let Some(t) = rt.npc_entities.get_mut(&trig_standing_npc) {
-                t.faction_id = 500_026;
-            }
-            for sid in [sentry_far, sentry_near] {
-                if let Some(s) = rt.npc_entities.get_mut(&sid) {
-                    s.archetype = "SleeperSentry".into();
-                }
-            }
+        update_npc_entity(&ctx, trig_standing_npc, |t| {
+            t.faction_id = 500_026;
         });
+        for sid in [sentry_far, sentry_near] {
+            update_npc_entity(&ctx, sid, |s| {
+                s.archetype = "SleeperSentry".into();
+            });
+        }
         ctx.db.with_mut_snapshot(|snap| {
             for cid in [char_id, cap_char, sub_char] {
                 if let Some(ch) = snap.characters.get_mut(&cid) {
@@ -805,15 +803,13 @@ mod w4_ops_pve_mut_extra_tests {
         });
 
         step_extended_npc_ai(&ctx, sys_id).await;
-        with_combat_ephemeral(&ctx, |rt| {
-            assert_eq!(rt.npc_entities[&navy_npc].target_id, None, "Navy skips neutral");
-            assert_eq!(rt.npc_entities[&roamer_npc].target_id, None, "Roamer dormant at corruption < 2");
-            assert!(rt.npc_entities[&pirate_npc].target_id.is_some(), "Pirate always aggroes");
-            assert_eq!(rt.npc_entities[&trig_standing_npc].target_id, None, "Triglavian skips standing >= 5.0");
-            assert_eq!(rt.npc_entities[&sle_npc].target_id, Some(cap_ship), "Sleeper prefers capital hull weight");
-            assert_eq!(rt.npc_entities[&sentry_far].target_id, None, "Sentry >250km out of range");
-            assert!(rt.npc_entities[&sentry_near].target_id.is_some(), "Sentry <250km engages");
-        });
+        assert_eq!(get_npc_entity(&ctx, navy_npc).unwrap().target_id, None, "Navy skips neutral");
+        assert_eq!(get_npc_entity(&ctx, roamer_npc).unwrap().target_id, None, "Roamer dormant at corruption < 2");
+        assert!(get_npc_entity(&ctx, pirate_npc).unwrap().target_id.is_some(), "Pirate always aggroes");
+        assert_eq!(get_npc_entity(&ctx, trig_standing_npc).unwrap().target_id, None, "Triglavian skips standing >= 5.0");
+        assert_eq!(get_npc_entity(&ctx, sle_npc).unwrap().target_id, Some(cap_ship), "Sleeper prefers capital hull weight");
+        assert_eq!(get_npc_entity(&ctx, sentry_far).unwrap().target_id, None, "Sentry >250km out of range");
+        assert!(get_npc_entity(&ctx, sentry_near).unwrap().target_id.is_some(), "Sentry <250km engages");
 
         // Trigger suspect & low Navy standing on char_id, set pirate corruption >= 2, and record threat on trig_standing_npc
         ctx.crimewatch.write().unwrap().trigger_suspect_flag(char_id, now);
@@ -827,25 +823,24 @@ mod w4_ops_pve_mut_extra_tests {
         });
         record_npc_threat_event(&ctx, trig_standing_npc, sub_ship, 500.0, true, false);
         step_extended_npc_ai(&ctx, sys_id).await;
-        with_combat_ephemeral(&ctx, |rt| {
-            assert_eq!(rt.npc_entities[&navy_npc].target_id, Some(ship_id), "Navy aggroes suspect");
-            assert!(rt.npc_entities[&roamer_npc].target_id.is_some(), "Roamer aggroes corruption >= 2");
-            assert_eq!(rt.npc_entities[&trig_standing_npc].target_id, Some(sub_ship), "Aggroes already_threat despite high standing");
-        });
+        assert_eq!(get_npc_entity(&ctx, navy_npc).unwrap().target_id, Some(ship_id), "Navy aggroes suspect");
+        assert!(get_npc_entity(&ctx, roamer_npc).unwrap().target_id.is_some(), "Roamer aggroes corruption >= 2");
+        assert_eq!(get_npc_entity(&ctx, trig_standing_npc).unwrap().target_id, Some(sub_ship), "Aggroes already_threat despite high standing");
 
         // 3. Triglavian entropic cycle ramp + ZarzakhGateGun ECM/lock clear + Drifter overshield > 0 blocks doomsday
         let trig_npc = spawn_specialized_npc_entity(&ctx, sys_id, 940_205, "Triglavian", 7, DVec3::new(1_000.0, 0.0, 0.0)).await;
         let gate_gun = spawn_specialized_npc_entity(&ctx, sys_id, 940_204, "ZarzakhGateGun", 8, DVec3::new(1_000.0, 0.0, 0.0)).await;
         let drifter_shielded = spawn_specialized_npc_entity(&ctx, sys_id, 37_473, "Drifter", 9, DVec3::new(1_000.0, 0.0, 0.0)).await;
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            let t = rt.npc_entities.get_mut(&trig_npc).unwrap();
+        update_npc_entity(&ctx, trig_npc, |t| {
             t.target_id = Some(ship_id);
             t.threat_table.insert(ship_id, 500.0);
             t.entropic_cycles = 0;
-            let gg = rt.npc_entities.get_mut(&gate_gun).unwrap();
+        });
+        update_npc_entity(&ctx, gate_gun, |gg| {
             gg.target_id = Some(ship_id);
             gg.threat_table.insert(ship_id, 500.0);
-            let ds = rt.npc_entities.get_mut(&drifter_shielded).unwrap();
+        });
+        update_npc_entity(&ctx, drifter_shielded, |ds| {
             ds.target_id = Some(ship_id);
             ds.threat_table.insert(ship_id, 500.0);
             ds.drifter_overshield_hp = 5_000.0;
@@ -867,10 +862,8 @@ mod w4_ops_pve_mut_extra_tests {
 
         step_extended_npc_ai(&ctx, sys_id).await;
         step_extended_npc_ai(&ctx, sys_id).await;
-        with_combat_ephemeral(&ctx, |rt| {
-            assert!(rt.npc_entities[&trig_npc].entropic_cycles >= 1);
-            assert!(!rt.npc_entities[&drifter_shielded].drifter_doomsday_fired);
-        });
+        assert!(get_npc_entity(&ctx, trig_npc).unwrap().entropic_cycles >= 1);
+        assert!(!get_npc_entity(&ctx, drifter_shielded).unwrap().drifter_doomsday_fired);
 
         // 4. is_candidate_hostile_to_edencom on NPC balls & destroy_specialized_npc_with_hint incursion reduction + Metal Scraps fallback
         let eden = make_test_npc_entity(999_888_111, 54_800, sys_id, "EDENCOM");
@@ -1114,31 +1107,29 @@ mod w4_ops_pve_mut_extra_tests {
         let sen_close = spawn_specialized_npc_entity(&ctx, sys_id, 940_304, "SleeperSentry", 8, DVec3::ZERO).await;
         let killer = spawn_specialized_npc_entity(&ctx, sys_id, 587, "Pirate", 9, DVec3::new(2_000.0, 0.0, 0.0)).await;
 
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            for (id, arch, fac) in [
-                (enf, "InsurgencyEnforcer", 500_003),
-                (ci, "CounterInsurgencySentry", 500_003),
-                (tack, "InsurgencyAmbushTackler", 500_010),
-                (ore_def, "InsurgencyAmbushOreDefender", 500_010),
-                (rorq, "InsurgencyOreRorqual", 500_010),
-                (outpost, "InsurgencyOutpostDefender", 500_018),
-                (pol, "FactionPolice", 500_003),
-                (sen_close, "SleeperSentry", 500_021),
-            ] {
-                if let Some(n) = rt.npc_entities.get_mut(&id) {
-                    n.archetype = arch.into();
-                    n.faction_id = fac;
-                    if arch == "SleeperSentry" {
-                        n.optimal_range = 10_000.0;
-                    }
+        for (id, arch, fac) in [
+            (enf, "InsurgencyEnforcer", 500_003),
+            (ci, "CounterInsurgencySentry", 500_003),
+            (tack, "InsurgencyAmbushTackler", 500_010),
+            (ore_def, "InsurgencyAmbushOreDefender", 500_010),
+            (rorq, "InsurgencyOreRorqual", 500_010),
+            (outpost, "InsurgencyOutpostDefender", 500_018),
+            (pol, "FactionPolice", 500_003),
+            (sen_close, "SleeperSentry", 500_021),
+        ] {
+            update_npc_entity(&ctx, id, |n| {
+                n.archetype = arch.into();
+                n.faction_id = fac;
+                if arch == "SleeperSentry" {
+                    n.optimal_range = 10_000.0;
                 }
-            }
-            if let Some(k) = rt.npc_entities.get_mut(&killer) {
-                k.target_id = Some(ship_fragile);
-                k.threat_table.insert(ship_fragile, 99_999.0);
-                k.damage_vector = DamageVector::new(1_000.0, 1_000.0, 1_000.0, 1_000.0);
-                k.optimal_range = 50_000.0;
-            }
+            });
+        }
+        update_npc_entity(&ctx, killer, |k| {
+            k.target_id = Some(ship_fragile);
+            k.threat_table.insert(ship_fragile, 99_999.0);
+            k.damage_vector = DamageVector::new(1_000.0, 1_000.0, 1_000.0, 1_000.0);
+            k.optimal_range = 50_000.0;
         });
 
         step_extended_npc_ai(&ctx, sys_id).await;
@@ -1150,20 +1141,16 @@ mod w4_ops_pve_mut_extra_tests {
         assert_eq!(b_sl, 0.0);
 
         let off_id = spawn_specialized_npc_entity(&ctx, sys_id, 940_305, "Officer", 11, DVec3::ZERO).await;
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            if let Some(o) = rt.npc_entities.get_mut(&off_id) {
-                o.archetype = "Officer".into();
-            }
+        update_npc_entity(&ctx, off_id, |o| {
+            o.archetype = "Officer".into();
         });
         let (w_off, _, _) = destroy_specialized_npc_with_hint(&ctx, sys_id, off_id, char_id, None).await;
         assert!(w_off > 0);
 
         let haul_id = spawn_specialized_npc_entity(&ctx, sys_id, 648, "Hauler", 12, DVec3::ZERO).await;
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            if let Some(h) = rt.npc_entities.get_mut(&haul_id) {
-                h.archetype = "Hauler".into();
-                h.custom_cargo_loot = Some((34, 25));
-            }
+        update_npc_entity(&ctx, haul_id, |h| {
+            h.archetype = "Hauler".into();
+            h.custom_cargo_loot = Some((34, 25));
         });
         let (_, _, haul_drops) = destroy_specialized_npc_with_hint(&ctx, sys_id, haul_id, char_id, None).await;
         assert!(haul_drops.contains(&34));

@@ -349,8 +349,16 @@ async fn guard_idempotency_non_pochven_side_and_missing_npc_faction_defaults() {
     let spawned =
         ensure_pochven_side_guards(&synth_ctx, poch_sys, 930_000, DVec3::ZERO, true).await;
     assert_eq!(spawned.len(), 6);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&synth_ctx, |rt| {
-        assert_eq!(rt.npc_entities[&930_010].faction_id, 500_026);
-        assert_eq!(rt.npc_entities[&930_011].faction_id, 500_024);
-    });
+    assert_eq!(
+        crate::combat::npc_ai::npc_test_helpers::get_npc_entity(&synth_ctx, 930_010)
+            .unwrap()
+            .faction_id,
+        500_026
+    );
+    assert_eq!(
+        crate::combat::npc_ai::npc_test_helpers::get_npc_entity(&synth_ctx, 930_011)
+            .unwrap()
+            .faction_id,
+        500_024
+    );
 }

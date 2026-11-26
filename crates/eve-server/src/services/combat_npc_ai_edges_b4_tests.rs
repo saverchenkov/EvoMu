@@ -2,6 +2,7 @@
 
 use super::*;
 use super::combat_npc_ai_tests::make_test_npc_entity;
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity, seed_npc_entity};
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
 use eve_db::types::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, WarpPhase};
@@ -175,12 +176,8 @@ fn is_candidate_hostile_to_edencom_all_branches() {
             tp_sig_bonus_pct: 0.0,
         },
     );
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_entities
-            .insert(trig_npc_id, make_test_npc_entity(trig_npc_id, 606, sys_id, "Triglavian"));
-        rt.npc_entities
-            .insert(neutral_npc_id, make_test_npc_entity(neutral_npc_id, 606, sys_id, "Navy"));
-    });
+    seed_npc_entity(&ctx, make_test_npc_entity(trig_npc_id, 606, sys_id, "Triglavian"));
+    seed_npc_entity(&ctx, make_test_npc_entity(neutral_npc_id, 606, sys_id, "Navy"));
 
     ctx.db.with_mut_snapshot(|snap| {
         // Negative EDENCOM standing (< 0.0) triggers hostility for player ship and its drones
@@ -249,7 +246,7 @@ async fn step_ai_sync_early_returns_debugging_dead_cleanup_relay_warp_and_sleepe
     let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
     let sys_id = 30_000_142_u32;
 
-    // Empty npc_entities in system -> clean no-op
+    // Empty NPC entities in system -> clean no-op
     step_extended_npc_ai_sync(&ctx, sys_id);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -287,37 +284,31 @@ async fn step_ai_sync_early_returns_debugging_dead_cleanup_relay_warp_and_sleepe
 
     with_mut_combat_ephemeral(&ctx, |rt| {
         rt.behavior_debugging_active.insert(debug_npc);
-        let mut dbg_ent = make_test_npc_entity(debug_npc, 606, sys_id, "Pirate");
-        dbg_ent.target_id = Some(debug_target);
-        dbg_ent.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);
-        rt.npc_entities.insert(debug_npc, dbg_ent);
-
-        // Dead NPC has NO ball spawned -> gets pruned on step
-        rt.npc_entities
-            .insert(dead_npc, make_test_npc_entity(dead_npc, 606, sys_id, "Pirate"));
-        rt.npc_entities.insert(
-            relay_npc,
-            make_test_npc_entity(relay_npc, 606, sys_id, "TransmissionRelay"),
-        );
-
-        let mut warp_ent = make_test_npc_entity(warp_npc, 606, sys_id, "Pirate");
-        warp_ent.target_id = Some(999_222);
-        rt.npc_entities.insert(warp_npc, warp_ent);
-
-        let mut slp_ent = make_test_npc_entity(leash_sleeper, 606, sys_id, "Sleeper");
-        slp_ent.spawn_position = DVec3::ZERO;
-        slp_ent.sleeper_wh_class = 3;
-        rt.npc_entities.insert(leash_sleeper, slp_ent);
     });
+    let mut dbg_ent = make_test_npc_entity(debug_npc, 606, sys_id, "Pirate");
+    dbg_ent.target_id = Some(debug_target);
+    dbg_ent.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);
+    seed_npc_entity(&ctx, dbg_ent);
+
+    // Dead NPC has NO ball spawned -> gets pruned on step
+    seed_npc_entity(&ctx, make_test_npc_entity(dead_npc, 606, sys_id, "Pirate"));
+    seed_npc_entity(&ctx, make_test_npc_entity(relay_npc, 606, sys_id, "TransmissionRelay"));
+
+    let mut warp_ent = make_test_npc_entity(warp_npc, 606, sys_id, "Pirate");
+    warp_ent.target_id = Some(999_222);
+    seed_npc_entity(&ctx, warp_ent);
+
+    let mut slp_ent = make_test_npc_entity(leash_sleeper, 606, sys_id, "Sleeper");
+    slp_ent.spawn_position = DVec3::ZERO;
+    slp_ent.sleeper_wh_class = 3;
+    seed_npc_entity(&ctx, slp_ent);
 
     step_extended_npc_ai(&ctx, sys_id).await;
 
-    with_combat_ephemeral(&ctx, |rt| {
-        // Dead NPC removed; debugged NPC remains alive; warping NPC cleared target
-        assert!(!rt.npc_entities.contains_key(&dead_npc));
-        assert!(rt.npc_entities.contains_key(&debug_npc));
-        assert_eq!(rt.npc_entities[&warp_npc].target_id, None);
-    });
+    // Dead NPC removed; debugged NPC remains alive; warping NPC cleared target
+    assert!(!has_npc_entity(&ctx, dead_npc));
+    assert!(has_npc_entity(&ctx, debug_npc));
+    assert_eq!(get_npc_entity(&ctx, warp_npc).unwrap().target_id, None);
 
     // Sleeper was leashed back toward spawn_position
     let (_, snap_ball) = sys_handle
@@ -444,45 +435,44 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
     with_mut_combat_ephemeral(&ctx, |rt| {
         // Pilot has disapproval flag so ZarzakhGateGun triggers ECM jam + attacks
         rt.disapproval_flags.insert(char_id, 1_700_000_600);
-
-        for (bid, arch) in archetypes {
-            let mut ent = make_test_npc_entity(bid, 606, sys_id, arch);
-            ent.optimal_range = 100_000.0;
-            ent.damage_vector = DamageVector::new(25.0, 25.0, 25.0, 25.0);
-            match arch {
-                "Sleeper" => {
-                    ent.sleeper_wh_class = 4;
-                    ent.web_speed_factor = 0.4;
-                    ent.web_range = 50_000.0;
-                    ent.scram_strength = 3.0;
-                    ent.scram_range = 50_000.0;
-                    ent.neut_amount = 100.0;
-                    // Damaged ally gets repaired
-                    ent.remote_armor_rep = 150.0;
-                    ent.remote_rep_range = 50_000.0;
-                }
-                "Drifter" => {
-                    // Supershield already broken -> triggers one-shot doomsday
-                    ent.drifter_overshield_hp = 0.0;
-                    ent.drifter_doomsday_fired = false;
-                }
-                "EDENCOM" => {
-                    ent.target_id = Some(ship_id);
-                    ent.aggression_threat.insert(ship_id, 50.0);
-                }
-                "Triglavian" => {
-                    ent.target_id = Some(ship_id);
-                    ent.entropic_cycles = 2;
-                }
-                "Pirate" => {
-                    ent.ecm_jammed = true;
-                    ent.remote_shield_rep = 100.0;
-                }
-                _ => {}
-            }
-            rt.npc_entities.insert(bid, ent);
-        }
     });
+    for (bid, arch) in archetypes {
+        let mut ent = make_test_npc_entity(bid, 606, sys_id, arch);
+        ent.optimal_range = 100_000.0;
+        ent.damage_vector = DamageVector::new(25.0, 25.0, 25.0, 25.0);
+        match arch {
+            "Sleeper" => {
+                ent.sleeper_wh_class = 4;
+                ent.web_speed_factor = 0.4;
+                ent.web_range = 50_000.0;
+                ent.scram_strength = 3.0;
+                ent.scram_range = 50_000.0;
+                ent.neut_amount = 100.0;
+                // Damaged ally gets repaired
+                ent.remote_armor_rep = 150.0;
+                ent.remote_rep_range = 50_000.0;
+            }
+            "Drifter" => {
+                // Supershield already broken -> triggers one-shot doomsday
+                ent.drifter_overshield_hp = 0.0;
+                ent.drifter_doomsday_fired = false;
+            }
+            "EDENCOM" => {
+                ent.target_id = Some(ship_id);
+                ent.aggression_threat.insert(ship_id, 50.0);
+            }
+            "Triglavian" => {
+                ent.target_id = Some(ship_id);
+                ent.entropic_cycles = 2;
+            }
+            "Pirate" => {
+                ent.ecm_jammed = true;
+                ent.remote_shield_rep = 100.0;
+            }
+            _ => {}
+        }
+        seed_npc_entity(&ctx, ent);
+    }
 
     // Mark projected EWAR from ship_id and damage an ally NPC so remote repair fires
     ctx.seed_ewar_source_for_test(Some(sys_id), 72_000_011, ship_id);
@@ -530,15 +520,13 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
             make_combat(10_000.0),
         )
         .await;
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        let mut ent = make_test_npc_entity(v_npc, 606, vorton_sys, "EDENCOM");
-        ent.optimal_range = 100_000.0;
-        ent.damage_vector = DamageVector::new(100.0, 100.0, 100.0, 100.0);
-        ent.target_id = Some(v_s1);
-        ent.aggression_threat.insert(v_s1, 100.0);
-        ent.aggression_threat.insert(v_s2, 20.0);
-        rt.npc_entities.insert(v_npc, ent);
-    });
+    let mut ent = make_test_npc_entity(v_npc, 606, vorton_sys, "EDENCOM");
+    ent.optimal_range = 100_000.0;
+    ent.damage_vector = DamageVector::new(100.0, 100.0, 100.0, 100.0);
+    ent.target_id = Some(v_s1);
+    ent.aggression_threat.insert(v_s1, 100.0);
+    ent.aggression_threat.insert(v_s2, 20.0);
+    seed_npc_entity(&ctx, ent);
     step_extended_npc_ai(&ctx, vorton_sys).await;
     let vc1 = v_handle.get_combat_state(v_s1).await.unwrap().unwrap();
     let vc2 = v_handle.get_combat_state(v_s2).await.unwrap().unwrap();
@@ -552,9 +540,9 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
     assert!(scrammed);
     let c1 = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(c1.shield_hp < c1.max_shield_hp);
+    assert!(get_npc_entity(&ctx, 72_000_012).unwrap().drifter_doomsday_fired);
+    assert!(get_npc_entity(&ctx, 72_000_013).unwrap().entropic_cycles >= 3);
     with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.npc_entities[&72_000_012].drifter_doomsday_fired);
-        assert!(rt.npc_entities[&72_000_013].entropic_cycles >= 3);
         assert!(rt.npc_timers.contains_key(&char_id));
     });
 
@@ -566,9 +554,7 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
         .set_ball_position(ship2_id, DVec3::new(500_000.0, 0.0, 0.0))
         .await;
     step_extended_npc_ai(&ctx, sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&72_000_013].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, 72_000_013).unwrap().target_id, None);
 }
 
 #[tokio::test]
@@ -581,10 +567,7 @@ async fn record_threat_relay_mining_and_destroy_hint_all_loot_bounty_variants() 
     // 1) record_npc_threat_event against TransmissionRelay and MiningOp escort
     let relay_id = 73_000_001_i64;
     let attacker_id = 100_000_001_i64;
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_entities
-            .insert(relay_id, make_test_npc_entity(relay_id, 606, hi_sys, "TransmissionRelay"));
-    });
+    seed_npc_entity(&ctx, make_test_npc_entity(relay_id, 606, hi_sys, "TransmissionRelay"));
     record_npc_threat_event(&ctx, relay_id, attacker_id, 100.0, false, false);
 
     // Step mining op in Perimeter (30000144) to spawn mining op convoy & escort, then threaten escort
@@ -607,15 +590,13 @@ async fn record_threat_relay_mining_and_destroy_hint_all_loot_bounty_variants() 
         (73_100_009, wh_sys, "Sleeper", None, None, 500_000.0),
     ];
 
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        for (bid, sys, arch, tag, custom, bounty) in cases {
-            let mut ent = make_test_npc_entity(bid, 606, sys, arch);
-            ent.tag_drop_type_id = tag;
-            ent.custom_cargo_loot = custom;
-            ent.bounty_isk = bounty;
-            rt.npc_entities.insert(bid, ent);
-        }
-    });
+    for (bid, sys, arch, tag, custom, bounty) in cases {
+        let mut ent = make_test_npc_entity(bid, 606, sys, arch);
+        ent.tag_drop_type_id = tag;
+        ent.custom_cargo_loot = custom;
+        ent.bounty_isk = bounty;
+        seed_npc_entity(&ctx, ent);
+    }
 
     for (i, (bid, sys, arch, tag, custom, _bounty)) in cases.iter().enumerate() {
         let hint_pos = DVec3::new((i as f64 + 1.0) * 1_000.0, 0.0, 0.0);

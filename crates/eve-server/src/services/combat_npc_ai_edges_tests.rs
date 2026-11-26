@@ -4,6 +4,9 @@
 
 use super::super::*;
 use super::make_test_npc_entity;
+use crate::combat::npc_ai::npc_test_helpers::{
+    get_npc_entity, has_npc_entity, remove_npc_entity, seed_npc_entity,
+};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
 };
@@ -106,33 +109,31 @@ async fn sleeper_wh_class_scram_capital_damage_ecm_jammed_and_scram_cleanup() {
             .unwrap();
     }
 
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        let mut s2 = make_test_npc_entity(c2_sl, 30_195, wh_sys, "Sleeper");
-        s2.sleeper_wh_class = 2;
-        s2.scram_strength = 3.0;
-        s2.scram_range = 20_000.0;
-        s2.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);
-        s2.target_id = Some(subcap_id);
-        rt.npc_entities.insert(c2_sl, s2);
+    let mut s2 = make_test_npc_entity(c2_sl, 30_195, wh_sys, "Sleeper");
+    s2.sleeper_wh_class = 2;
+    s2.scram_strength = 3.0;
+    s2.scram_range = 20_000.0;
+    s2.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);
+    s2.target_id = Some(subcap_id);
+    seed_npc_entity(&ctx, s2);
 
-        let mut s5 = make_test_npc_entity(c5_sl, 30_195, wh_sys, "Sleeper");
-        s5.sleeper_wh_class = 5;
-        s5.scram_strength = 3.0;
-        s5.scram_range = 20_000.0;
-        s5.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);
-        s5.target_id = Some(cap_id);
-        rt.npc_entities.insert(c5_sl, s5);
+    let mut s5 = make_test_npc_entity(c5_sl, 30_195, wh_sys, "Sleeper");
+    s5.sleeper_wh_class = 5;
+    s5.scram_strength = 3.0;
+    s5.scram_range = 20_000.0;
+    s5.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);
+    s5.target_id = Some(cap_id);
+    seed_npc_entity(&ctx, s5);
 
-        let mut j = make_test_npc_entity(jammed_npc, 30_195, wh_sys, "Pirate");
-        j.ecm_jammed = true;
-        j.damage_vector = DamageVector::new(5_000.0, 0.0, 0.0, 0.0);
-        j.target_id = Some(subcap_id);
-        rt.npc_entities.insert(jammed_npc, j);
+    let mut j = make_test_npc_entity(jammed_npc, 30_195, wh_sys, "Pirate");
+    j.ecm_jammed = true;
+    j.damage_vector = DamageVector::new(5_000.0, 0.0, 0.0, 0.0);
+    j.target_id = Some(subcap_id);
+    seed_npc_entity(&ctx, j);
 
-        // Passive TransmissionRelay never picks a target or deals damage
-        let rel = make_test_npc_entity(relay_npc, 41_589, wh_sys, "TransmissionRelay");
-        rt.npc_entities.insert(relay_npc, rel);
-    });
+    // Passive TransmissionRelay never picks a target or deals damage
+    let rel = make_test_npc_entity(relay_npc, 41_589, wh_sys, "TransmissionRelay");
+    seed_npc_entity(&ctx, rel);
 
     step_extended_npc_ai(&ctx, wh_sys).await;
 
@@ -148,9 +149,7 @@ async fn sleeper_wh_class_scram_capital_damage_ecm_jammed_and_scram_cleanup() {
     assert!(cap_cs.is_warp_scrambled());
 
     // Step again after removing C5 sleeper entity -> scram cleanup clears is_warp_scrambled on cap_id
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_entities.remove(&c5_sl);
-    });
+    remove_npc_entity(&ctx, c5_sl);
     step_extended_npc_ai(&ctx, wh_sys).await;
     let cap_cs_after = sys_h.get_combat_state(cap_id).await.unwrap().unwrap();
     assert!(!cap_cs_after.is_warp_scrambled());
@@ -209,9 +208,7 @@ async fn destroy_npc_cache_fallback_custom_loot_tag_bounty_dedup_and_threat_noop
     let missing_sde_npc =
         spawn_npc_entity_from_sde(&ctx, sys_id, 999_444_333, 2, DVec3::new(500.0, 0.0, 0.0)).await;
     assert!(missing_sde_npc > 0);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.npc_entities.contains_key(&missing_sde_npc));
-    });
+    assert!(has_npc_entity(&ctx, missing_sde_npc));
 
     // 5. Missing solar system step_extended_npc_ai returns cleanly
     step_extended_npc_ai(&ctx, 30_999_888).await;
@@ -294,16 +291,14 @@ async fn insurgency_navy_police_aggression_and_edencom_unknown_candidate_edges()
             )
             .await
             .unwrap();
-        with_mut_combat_ephemeral(&ctx, |rt| {
-            let mut ent = make_test_npc_entity(nid, tid, sys_id, arch);
-            ent.faction_id = if arch == "Navy" { 500_001 } else { 500_010 };
-            ent.damage_vector = DamageVector::new(dmg, 0.0, 0.0, 0.0);
-            ent.optimal_range = 25_000.0;
-            if arch == "Navy" {
-                ent.threat_table.insert(ship_id, 50.0);
-            }
-            rt.npc_entities.insert(nid, ent);
-        });
+        let mut ent = make_test_npc_entity(nid, tid, sys_id, arch);
+        ent.faction_id = if arch == "Navy" { 500_001 } else { 500_010 };
+        ent.damage_vector = DamageVector::new(dmg, 0.0, 0.0, 0.0);
+        ent.optimal_range = 25_000.0;
+        if arch == "Navy" {
+            ent.threat_table.insert(ship_id, 50.0);
+        }
+        seed_npc_entity(&ctx, ent);
     }
 
     // Negative Navy faction standing makes Navy aggro player, and Pirate auto-aggros nearby ship
@@ -318,8 +313,6 @@ async fn insurgency_navy_police_aggression_and_edencom_unknown_candidate_edges()
     step_extended_npc_ai(&ctx, sys_id).await;
     let post_cs = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(post_cs.shield_hp < 10_000.0);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&551_002].target_id, Some(ship_id));
-        assert_eq!(rt.npc_entities[&551_003].target_id, Some(ship_id));
-    });
+    assert_eq!(get_npc_entity(&ctx, 551_002).unwrap().target_id, Some(ship_id));
+    assert_eq!(get_npc_entity(&ctx, 551_003).unwrap().target_id, Some(ship_id));
 }

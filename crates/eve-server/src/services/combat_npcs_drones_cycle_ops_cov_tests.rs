@@ -3,7 +3,8 @@
 use super::super::cycle_ops::*;
 use super::super::*;
 use super::{make_drone_test_ctx, make_fighter_item, make_fighter_type};
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, ExtendedNpcEntity};
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, seed_npc_entity};
+use crate::services::combat_crimewatch::{with_mut_combat_runtime, ExtendedNpcEntity};
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, TargetLock};
@@ -188,47 +189,45 @@ async fn ewar_immunity_ecm_taunt_victim_resolution_and_aggression_timers() {
             .await
             .unwrap();
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.insert(
-            other_ship,
-            ExtendedNpcEntity {
-                ball_id: other_ship,
-                type_id: 587,
-                faction_id: 0,
-                archetype: String::new(),
-                solar_system_id: sys_id,
-                spawn_group_id: 0,
-                target_id: None,
-                aggression_threat: std::collections::HashMap::new(),
-                threat_table: std::collections::HashMap::new(),
-                bounty_isk: 0.0,
-                optimal_range: 10_000.0,
-                orbit_range: 5_000.0,
-                damage_vector: DamageVector::default(),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: DVec3::ZERO,
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
-            },
-        );
-    });
+    seed_npc_entity(
+        &ctx,
+        ExtendedNpcEntity {
+            ball_id: other_ship,
+            type_id: 587,
+            faction_id: 0,
+            archetype: String::new(),
+            solar_system_id: sys_id,
+            spawn_group_id: 0,
+            target_id: None,
+            aggression_threat: std::collections::HashMap::new(),
+            threat_table: std::collections::HashMap::new(),
+            bounty_isk: 0.0,
+            optimal_range: 10_000.0,
+            orbit_range: 5_000.0,
+            damage_vector: DamageVector::default(),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 0.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            spawn_position: DVec3::ZERO,
+            sleeper_wh_class: 0,
+            custom_cargo_loot: None,
+        },
+    );
     assert!(try_apply_drone_ecm_jam(&ctx, &sys_handle, &ecm_drone, &drone_ball, other_ship, &target_ball).await);
     let locks_after = sys_handle.get_target_locks(other_ship).await.unwrap();
     assert_eq!(locks_after.len(), 1);
     assert_eq!(locks_after[0].target_id, ecm_drone.ball_id);
-    assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&other_ship].ecm_jammed));
+    assert!(get_npc_entity(&ctx, other_ship).unwrap().ecm_jammed);
 
     // Zero ECM resist (2253 == 0.0) prevents jam
     let res0_ball = Ball {

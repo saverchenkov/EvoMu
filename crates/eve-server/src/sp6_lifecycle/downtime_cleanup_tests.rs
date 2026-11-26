@@ -4,6 +4,7 @@ use super::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime,
     spawn_mission_wave_on_pocket_entry_if_needed,
 };
+use crate::combat::npc_ai::npc_test_helpers::{has_npc_entity, seed_npc_entity};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, ExtendedNpcEntity};
 use crate::services::mission_fixture::{self, MissionFixture};
@@ -144,41 +145,41 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
                 is_abandoned: false,
             },
         );
-        rt.npc_entities.insert(
-            old_mission_npc_id,
-            ExtendedNpcEntity {
-                ball_id: old_mission_npc_id,
-                type_id: 10_019,
-                faction_id: 500_010,
-                archetype: "Pirate".into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 1,
-                target_id: None,
-                aggression_threat: HashMap::new(),
-                threat_table: HashMap::new(),
-                bounty_isk: 10_000.0,
-                optimal_range: 10_000.0,
-                orbit_range: 5_000.0,
-                damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 1.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: DVec3::new(100.0, 0.0, 0.0),
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
-            },
-        );
     });
+    seed_npc_entity(
+        &ctx,
+        ExtendedNpcEntity {
+            ball_id: old_mission_npc_id,
+            type_id: 10_019,
+            faction_id: 500_010,
+            archetype: "Pirate".into(),
+            solar_system_id: sys_id,
+            spawn_group_id: 1,
+            target_id: None,
+            aggression_threat: HashMap::new(),
+            threat_table: HashMap::new(),
+            bounty_isk: 10_000.0,
+            optimal_range: 10_000.0,
+            orbit_range: 5_000.0,
+            damage_vector: DamageVector::new(10.0, 0.0, 0.0, 0.0),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 1.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            spawn_position: DVec3::new(100.0, 0.0, 0.0),
+            sleeper_wh_class: 0,
+            custom_cargo_loot: None,
+        },
+    );
 
     let (wrecks_removed, missions_reset) = cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
     assert_eq!(wrecks_removed, 1);
@@ -200,8 +201,8 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
     });
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.container_lifetimes.contains_key(&npc_wreck_id));
-        assert!(!rt.npc_entities.contains_key(&old_mission_npc_id));
     });
+    assert!(!has_npc_entity(&ctx, old_mission_npc_id));
 
     // Pocket entry respawns the initial mission NPC wave and clears awaiting flag
     let spawned = spawn_mission_wave_on_pocket_entry_if_needed(

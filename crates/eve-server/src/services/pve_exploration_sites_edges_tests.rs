@@ -3,14 +3,14 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::CombatRuntimeState;
 use crate::services::pve_exploration::SpewedLootCan;
 use eve_db::clock::VirtualServerClock;
 use eve_db::WorldRepository;
 use eve_sde::{ConstellationInfo, InvType, RegionInfo, SdeRegistry, SolarSystem};
 use glam::DVec3;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
@@ -213,13 +213,12 @@ async fn ded_wreck_bands_sleeper_rep_attributes_and_empty_sde_fallbacks() {
     rep_sleeper.default_attributes.insert(20, -60.0);
     custom_sde.types.insert(30215, rep_sleeper);
 
-    let combat_rt = Arc::new(RwLock::new(CombatRuntimeState::default()));
     let custom_sde_arc = Arc::new(custom_sde);
     let spawned = spawn_sleeper_wave_core(
         &ctx_empty.systems,
         &ctx_empty.db,
         &custom_sde_arc,
-        &combat_rt,
+        &ctx_empty.combat_ephemeral,
         sys_id,
         1,
         1,
@@ -227,7 +226,7 @@ async fn ded_wreck_bands_sleeper_rep_attributes_and_empty_sde_fallbacks() {
     )
     .await;
     assert_eq!(spawned.len(), 4);
-    let trig_entity = combat_rt.read().unwrap().npc_entities[&spawned[0]].clone();
+    let trig_entity = get_npc_entity(&ctx_empty, spawned[0]).unwrap();
     assert_eq!(trig_entity.remote_shield_rep, 250.0);
     assert_eq!(trig_entity.remote_armor_rep, 150.0);
     assert_eq!(trig_entity.remote_rep_range, 25_000.0);

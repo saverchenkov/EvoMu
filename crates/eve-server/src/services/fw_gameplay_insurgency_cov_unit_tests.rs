@@ -4,6 +4,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{
+    any_npc_entity_in_system, find_npc_entity_in_system, has_npc_entity, npc_entity_ids,
+};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_ephemeral, with_mut_combat_runtime};
 use eve_db::clock::{ServerClock, VirtualServerClock};
@@ -324,23 +327,16 @@ async fn roamer_selection_waypoints_npc_sync_patrol_and_ended_campaign_cleanup()
 
     // Spawn Pirate roamer (c_st=3), Enforcer (s_st=5), and CI Sentry (79_507 at s_st=5)
     sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 3, 5).await;
-    let (pir_bid, enf_bid, ci_bid) = with_combat_runtime(&ctx, |rt| {
-        let mut p = 0;
-        let mut e = 0;
-        let mut c = 0;
-        for (&bid, npc) in &rt.npc_entities {
-            if npc.solar_system_id == sys_id {
-                if npc.type_id == 79_507 {
-                    c = bid;
-                } else if ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4637) {
-                    p = bid;
-                } else if ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4638) {
-                    e = bid;
-                }
-            }
-        }
-        (p, e, c)
-    });
+    let pir_bid = find_npc_entity_in_system(&ctx, sys_id, |npc| {
+        ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4637)
+    })
+    .map_or(0, |n| n.ball_id);
+    let enf_bid = find_npc_entity_in_system(&ctx, sys_id, |npc| {
+        ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4638)
+    })
+    .map_or(0, |n| n.ball_id);
+    let ci_bid = find_npc_entity_in_system(&ctx, sys_id, |npc| npc.type_id == 79_507)
+        .map_or(0, |n| n.ball_id);
     assert!(pir_bid > 0 && enf_bid > 0 && ci_bid > 0);
 
     // Move pirate roamer > 15 km from spawn_position to exercise idle patrol stepping (`arrived_positions` + warp/goto)
@@ -355,10 +351,10 @@ async fn roamer_selection_waypoints_npc_sync_patrol_and_ended_campaign_cleanup()
     sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 0, 0).await;
     // Second call at (0, 0) exercises fast-path early return (`stale_balls.is_empty() && idle_roamers.is_empty() && ...`)
     sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 0, 0).await;
+    assert!(!has_npc_entity(&ctx, pir_bid));
+    assert!(!has_npc_entity(&ctx, enf_bid));
+    assert!(has_npc_entity(&ctx, ci_bid));
     with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.npc_entities.contains_key(&pir_bid));
-        assert!(!rt.npc_entities.contains_key(&enf_bid));
-        assert!(rt.npc_entities.contains_key(&ci_bid));
         assert!(!rt.ci_sentry_deployed_systems.contains(&sys_id));
     });
 
@@ -451,10 +447,8 @@ async fn roamer_selection_waypoints_npc_sync_patrol_and_ended_campaign_cleanup()
         let heist_ids: Vec<i64> = snap.insurgency_runtime.ice_heist_instances.iter().map(|h| h.instance_id).collect();
         assert_eq!(heist_ids, vec![860_000]);
     });
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.npc_entities.contains_key(&ci_bid));
-        assert!(!rt.npc_entities.values().any(|n| n.solar_system_id == sys_id && n.type_id != 79_507));
-    });
+    assert!(has_npc_entity(&ctx, ci_bid));
+    assert!(!any_npc_entity_in_system(&ctx, sys_id, |n| n.type_id != 79_507));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -603,7 +597,7 @@ async fn actor_fob_damage_phases_and_idle_roamer_patrol_branches() {
     });
     sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 2, 3).await;
     // Move an idle roamer far from its spawn_position so second tick updates spawn_position and warps/goes to next waypoint
-    let moved_bid = with_combat_runtime(&ctx, |rt| rt.npc_entities.keys().next().copied());
+    let moved_bid = npc_entity_ids(&ctx).into_iter().next();
     if let Some(bid) = moved_bid {
         sys_h
             .test_with_ballpark_mut_async(move |bp| {

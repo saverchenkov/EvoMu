@@ -63,7 +63,7 @@ async fn sleeper_sentry_helpers_cooldowns_loot_drop_and_special_wh_seeding() {
     let (_, tower_ball) = sys_handle.get_ball_snapshot(tower_id).await.unwrap().expect("tower ball");
     assert_eq!(tower_ball.position, center + DVec3::new(3_000.0, 0.0, 2_500.0));
     assert_eq!(tower_ball.type_id, 30_461);
-    assert!(ctx.combat_ephemeral.read().unwrap().npc_entities.contains_key(&tower_id));
+    assert!(crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, tower_id));
 
     // 3. can_sentry_fire_and_record: first fires, immediate both-small fails, advance either triggers true
     assert!(can_sentry_fire_and_record(&ctx, tower_id, 10.0, 100.0));
@@ -245,7 +245,7 @@ async fn spawn_sleeper_sentry_tower_and_drop_site_loot_into_space_core_work() {
     let sys_id = 31_000_005_u32;
     let sentry_bid = spawn_sleeper_sentry_tower(&ctx, sys_id, 3, DVec3::new(1_000.0, 0.0, 0.0)).await;
     assert!(sentry_bid > 0);
-    assert!(ctx.combat_ephemeral.read().unwrap().npc_entities.contains_key(&sentry_bid));
+    assert!(crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, sentry_bid));
 
     let loot_id = drop_site_loot_into_space_core(
         &ctx.db,

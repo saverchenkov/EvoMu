@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{ExtendedNpcEntity, with_combat_runtime, with_mut_combat_runtime};
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity, seed_npc_entity};
+use crate::services::combat_crimewatch::ExtendedNpcEntity;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode, WarpPhase};
 use eve_sde::{InvType, SdeRegistry};
@@ -237,49 +238,40 @@ async fn step_ai_sync_target_pruning_ecm_capsule_sleepers_zarzakh_and_threat_eve
         }
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        // missing_ball_npc is NOT spawned in ballpark, so step_extended_npc_ai removes it
-        rt.npc_entities.insert(
-            missing_ball_npc,
-            make_npc(missing_ball_npc, sys_id, 587, "Pirate", DVec3::ZERO),
-        );
+    // missing_ball_npc is NOT spawned in ballpark, so step_extended_npc_ai removes it
+    seed_npc_entity(&ctx, make_npc(missing_ball_npc, sys_id, 587, "Pirate", DVec3::ZERO));
 
-        let mut warp = make_npc(warp_id, sys_id, 587, "Pirate", DVec3::new(2_000.0, 0.0, 0.0));
-        warp.target_id = Some(ship_id);
-        rt.npc_entities.insert(warp_id, warp);
+    let mut warp = make_npc(warp_id, sys_id, 587, "Pirate", DVec3::new(2_000.0, 0.0, 0.0));
+    warp.target_id = Some(ship_id);
+    seed_npc_entity(&ctx, warp);
 
-        rt.npc_entities.insert(
-            relay_id,
-            make_npc(relay_id, sys_id, 41_589, "TransmissionRelay", DVec3::new(3_000.0, 0.0, 0.0)),
-        );
+    seed_npc_entity(
+        &ctx,
+        make_npc(relay_id, sys_id, 41_589, "TransmissionRelay", DVec3::new(3_000.0, 0.0, 0.0)),
+    );
 
-        let mut pol = make_npc(police_id, sys_id, 587, "Police", DVec3::new(1_200.0, 0.0, 0.0));
-        pol.target_id = Some(cap_id);
-        rt.npc_entities.insert(police_id, pol);
+    let mut pol = make_npc(police_id, sys_id, 587, "Police", DVec3::new(1_200.0, 0.0, 0.0));
+    pol.target_id = Some(cap_id);
+    seed_npc_entity(&ctx, pol);
 
-        let mut gg = make_npc(gate_gun_id, sys_id, 587, "ZarzakhGateGun", DVec3::new(4_500.0, 0.0, 0.0));
-        gg.ecm_jammed = true;
-        gg.target_id = Some(ship_id);
-        rt.npc_entities.insert(gate_gun_id, gg);
+    let mut gg = make_npc(gate_gun_id, sys_id, 587, "ZarzakhGateGun", DVec3::new(4_500.0, 0.0, 0.0));
+    gg.ecm_jammed = true;
+    gg.target_id = Some(ship_id);
+    seed_npc_entity(&ctx, gg);
 
-        let mut dr = make_npc(drifter_id, sys_id, 587, "Drifter", DVec3::new(5_500.0, 0.0, 0.0));
-        dr.drifter_overshield_hp = 500.0;
-        dr.threat_table.insert(ship_id, 50.0);
-        rt.npc_entities.insert(drifter_id, dr);
-    });
+    let mut dr = make_npc(drifter_id, sys_id, 587, "Drifter", DVec3::new(5_500.0, 0.0, 0.0));
+    dr.drifter_overshield_hp = 500.0;
+    dr.threat_table.insert(ship_id, 50.0);
+    seed_npc_entity(&ctx, dr);
 
     step_extended_npc_ai(&ctx, sys_id).await;
 
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.npc_entities.contains_key(&missing_ball_npc));
-        assert_eq!(rt.npc_entities[&warp_id].target_id, None);
-        assert_ne!(rt.npc_entities[&police_id].target_id, Some(cap_id));
-    });
+    assert!(!has_npc_entity(&ctx, missing_ball_npc));
+    assert_eq!(get_npc_entity(&ctx, warp_id).unwrap().target_id, None);
+    assert_ne!(get_npc_entity(&ctx, police_id).unwrap().target_id, Some(cap_id));
 
     record_npc_threat_event(&ctx, drifter_id, ship_id, 100.0, false, false);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.npc_entities[&drifter_id].drifter_overshield_hp < 500.0);
-    });
+    assert!(get_npc_entity(&ctx, drifter_id).unwrap().drifter_overshield_hp < 500.0);
 
     let hint_res = destroy_specialized_npc_with_hint(
         &ctx,
@@ -306,11 +298,9 @@ async fn step_ai_sync_target_pruning_ecm_capsule_sleepers_zarzakh_and_threat_eve
             mode: MovementMode::Stop,
         })
         .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut cs = make_npc(clone_id, sys_id, 587, "CloneSoldier", DVec3::new(6_000.0, 0.0, 0.0));
-        cs.custom_cargo_loot = Some((34, 10));
-        rt.npc_entities.insert(clone_id, cs);
-    });
+    let mut cs = make_npc(clone_id, sys_id, 587, "CloneSoldier", DVec3::new(6_000.0, 0.0, 0.0));
+    cs.custom_cargo_loot = Some((34, 10));
+    seed_npc_entity(&ctx, cs);
     let (wreck_id, bounty, _) = destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, clone_id, cid).await;
     assert!(wreck_id > 0);
     assert!(bounty > 0.0);

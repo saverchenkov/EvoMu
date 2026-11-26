@@ -4,6 +4,7 @@
 
 use super::*;
 
+use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use crate::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, ContainerLifetimeEntry, DroneSpaceState,
     ExtendedNpcEntity,
@@ -40,44 +41,42 @@ async fn behavior_debugging_clusters_and_extra_fleet_members() {
     let dis2 = handle(&ctx, &mut gm, None, "entity", "DisableBehaviorDebugging", &[], &HashMap::new()).await.unwrap().unwrap();
     assert_eq!(kv_field(&dis2, "behaviorDebuggingEnabled").and_then(|v| v.as_bool()), Some(false));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        for (bid, gid, arch, bounty) in [(901, 11, "Kiter", 15_000.0), (902, 11, "Kiter", 25_000.0), (903, 12, "Brawler", 50_000.0)] {
-            rt.npc_entities.insert(
-                bid,
-                ExtendedNpcEntity {
-                    ball_id: bid,
-                    type_id: 23_793,
-                    faction_id: 500_010,
-                    archetype: arch.into(),
-                    solar_system_id: sys_id,
-                    spawn_group_id: gid,
-                    target_id: None,
-                    aggression_threat: HashMap::new(),
-                    threat_table: HashMap::new(),
-                    bounty_isk: bounty,
-                    optimal_range: 15_000.0,
-                    orbit_range: 12_000.0,
-                    damage_vector: Default::default(),
-                    entropic_cycles: 0,
-                    drifter_overshield_hp: 0.0,
-                    drifter_doomsday_fired: false,
-                    web_speed_factor: 0.0,
-                    web_range: 0.0,
-                    scram_strength: 0.0,
-                    scram_range: 0.0,
-                    neut_amount: 0.0,
-                    ecm_jammed: false,
-                    remote_shield_rep: 0.0,
-                    remote_armor_rep: 0.0,
-                    remote_rep_range: 0.0,
-                    tag_drop_type_id: None,
-                    spawn_position: DVec3::ZERO,
-                    sleeper_wh_class: 0,
-                    custom_cargo_loot: None,
-                },
-            );
-        }
-    });
+    for (bid, gid, arch, bounty) in [(901, 11, "Kiter", 15_000.0), (902, 11, "Kiter", 25_000.0), (903, 12, "Brawler", 50_000.0)] {
+        seed_npc_entity(
+            &ctx,
+            ExtendedNpcEntity {
+                ball_id: bid,
+                type_id: 23_793,
+                faction_id: 500_010,
+                archetype: arch.into(),
+                solar_system_id: sys_id,
+                spawn_group_id: gid,
+                target_id: None,
+                aggression_threat: HashMap::new(),
+                threat_table: HashMap::new(),
+                bounty_isk: bounty,
+                optimal_range: 15_000.0,
+                orbit_range: 12_000.0,
+                damage_vector: Default::default(),
+                entropic_cycles: 0,
+                drifter_overshield_hp: 0.0,
+                drifter_doomsday_fired: false,
+                web_speed_factor: 0.0,
+                web_range: 0.0,
+                scram_strength: 0.0,
+                scram_range: 0.0,
+                neut_amount: 0.0,
+                ecm_jammed: false,
+                remote_shield_rep: 0.0,
+                remote_armor_rep: 0.0,
+                remote_rep_range: 0.0,
+                tag_drop_type_id: None,
+                spawn_position: DVec3::ZERO,
+                sleeper_wh_class: 0,
+                custom_cargo_loot: None,
+            },
+        );
+    }
 
     let btm = handle(&ctx, &mut player, None, "entity", "GetBehaviorTreeManager", &[], &HashMap::new()).await.unwrap().unwrap();
     assert_eq!(kv_field(&btm, "activeTreesCount").and_then(|v| v.as_i64()), Some(3));

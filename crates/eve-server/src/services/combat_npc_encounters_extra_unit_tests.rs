@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
@@ -58,13 +59,13 @@ async fn test_handle_npc_destroyed_bounty_sec_status_drifter_and_wave_fallback()
         if let Some(enc) = rt.encounter_waves.get_mut(&502) {
             enc.max_waves = 3; // wave 3 is not in wave_npc_types -> falls back to vec![npc_type_id, npc_type_id]
         }
-        // Register trigger ball as a Drifter with bounty and custom_cargo_loot
-        let mut drifter = make_test_npc_entity(wave_balls[0], 931_001, sys_id, "Drifter");
-        drifter.bounty_isk = 100_000.0;
-        drifter.custom_cargo_loot = Some((30_744, 2));
-        drifter.sleeper_wh_class = 6;
-        rt.npc_entities.insert(wave_balls[0], drifter);
     });
+    // Register trigger ball as a Drifter with bounty and custom_cargo_loot
+    let mut drifter = make_test_npc_entity(wave_balls[0], 931_001, sys_id, "Drifter");
+    drifter.bounty_isk = 100_000.0;
+    drifter.custom_cargo_loot = Some((30_744, 2));
+    drifter.sleeper_wh_class = 6;
+    seed_npc_entity(&ctx, drifter);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().security_status = 1.0;
     });
@@ -251,12 +252,10 @@ async fn test_officer_fallback_faction_prefixes_archetypes_and_abyssal_finalize(
         (952_003_i64, "PochvenHypnosianSleeper"),
         (952_004_i64, "Triglavian"),
     ] {
-        with_mut_combat_runtime(&ctx, |rt| {
-            let mut ent = make_test_npc_entity(ball_id, 932_010, sys_id, arch);
-            ent.tag_drop_type_id = Some(28_999);
-            ent.custom_cargo_loot = Some((30_001, 3));
-            rt.npc_entities.insert(ball_id, ent);
-        });
+        let mut ent = make_test_npc_entity(ball_id, 932_010, sys_id, arch);
+        ent.tag_drop_type_id = Some(28_999);
+        ent.custom_cargo_loot = Some((30_001, 3));
+        seed_npc_entity(&ctx, ent);
         let mut dropped = Vec::new();
         let ret_arch = populate_npc_wreck_on_turret_kill(
             &ctx,
@@ -349,11 +348,9 @@ async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() 
 
     // Kill normal NPC via handle_npc_destroyed_in_space AND specialized NPC via credit_specialized_npc_bounty_and_sec_status
     let npc_ball_id = 954_001_i64;
-    with_mut_combat_runtime(&ctx1, |rt| {
-        let mut ent = make_test_npc_entity(npc_ball_id, 932_010, null_sys_id, "Pirate");
-        ent.bounty_isk = 800_000.0;
-        rt.npc_entities.insert(npc_ball_id, ent);
-    });
+    let mut ent = make_test_npc_entity(npc_ball_id, 932_010, null_sys_id, "Pirate");
+    ent.bounty_isk = 800_000.0;
+    seed_npc_entity(&ctx1, ent);
     handle_npc_destroyed_in_space(
         &ctx1.systems,
         &ctx1.db,

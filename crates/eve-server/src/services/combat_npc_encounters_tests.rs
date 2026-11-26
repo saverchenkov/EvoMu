@@ -1,6 +1,7 @@
 //! Unit and mutation-killing tests for `combat_npc_encounters`.
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
@@ -261,16 +262,14 @@ async fn populate_npc_wreck_on_turret_kill_handles_pithi_invader_and_faction_loo
             make_fighter_item(wreck_id, 26_573, char_id, sys_id as i64, InventoryFlag::None, 1),
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
-            960_101,
-            16_997,
-            sys_id,
-            "Pirate",
-        );
-        ent.faction_id = 500_012; // Wrong regional fallback must yield to Guristas group/type/wreck derivation.
-        rt.npc_entities.insert(960_101, ent);
-    });
+    let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+        960_101,
+        16_997,
+        sys_id,
+        "Pirate",
+    );
+    ent.faction_id = 500_012; // Wrong regional fallback must yield to Guristas group/type/wreck derivation.
+    seed_npc_entity(&ctx, ent);
     let mut dropped = Vec::new();
     let arch = populate_npc_wreck_on_turret_kill(
         &ctx,
@@ -907,17 +906,15 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
         ch.standings.clear();
         ch.security_status = 0.0;
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
-            970_101,
-            16_997,
-            sys_a,
-            "Pirate",
-        );
-        ent.faction_id = 500_010;
-        ent.bounty_isk = 50_000.0;
-        rt.npc_entities.insert(970_101, ent);
-    });
+    let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+        970_101,
+        16_997,
+        sys_a,
+        "Pirate",
+    );
+    ent.faction_id = 500_010;
+    ent.bounty_isk = 50_000.0;
+    seed_npc_entity(&ctx, ent);
     handle_npc_destroyed_in_space_with_ctx(&ctx, sys_a, 970_101, Some(char_id)).await;
     ctx.db.with_snapshot(|snap| {
         let ch = &snap.characters[&char_id];
@@ -946,16 +943,14 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
             make_fighter_item(970_202, 3_743, 500_002, sys_b as i64, InventoryFlag::None, 1),
         );
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
-            970_201,
-            12_391,
-            sys_b,
-            "Navy",
-        );
-        ent.faction_id = 500_001;
-        rt.npc_entities.insert(970_201, ent);
-    });
+    let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+        970_201,
+        12_391,
+        sys_b,
+        "Navy",
+    );
+    ent.faction_id = 500_001;
+    seed_npc_entity(&ctx, ent);
     let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_b, 970_201, Some(char_id), DVec3::ZERO)
         .expect("on_ball_destroyed_sync ext npc");
     let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_b, 970_202, Some(char_id), DVec3::ZERO)
@@ -975,16 +970,14 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
-            970_301,
-            12_391,
-            sys_c,
-            "Navy",
-        );
-        ent.faction_id = 500_001;
-        rt.npc_entities.insert(970_301, ent);
-    });
+    let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+        970_301,
+        12_391,
+        sys_c,
+        "Navy",
+    );
+    ent.faction_id = 500_001;
+    seed_npc_entity(&ctx, ent);
     ctx.systems
         .invoke_npc_death_hook(sys_c, 970_301, Some(char_id))
         .await;
@@ -1257,7 +1250,7 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
         let mut fit = eve_dogma::ShipFittingEngine::from_sde(m_ship, 587, &m_ctx.sde);
         fit.modules.insert(m_launcher, fitted_launcher.clone());
 
-        // Notice `m_npc_ball` is intentionally NOT inserted into `rt.npc_entities` so `npc_death_hook`
+        // Notice `m_npc_ball` is intentionally NOT seeded into NPC entity runtime tracking so `npc_death_hook`
         // is a no-op and `handle_destroyed_ball_from_missile_or_aoe -> destroy_specialized_npc_with_hint`
         // performs the standing loss directly.
         crate::services::combat_crimewatch::activate_missile_or_breacher_launcher(
@@ -1653,16 +1646,14 @@ async fn npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
-            970_401,
-            12_391,
-            sys_d,
-            "Navy",
-        );
-        ent.faction_id = 500_001;
-        rt.npc_entities.insert(970_401, ent);
-    });
+    let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+        970_401,
+        12_391,
+        sys_d,
+        "Navy",
+    );
+    ent.faction_id = 500_001;
+    seed_npc_entity(&ctx, ent);
     ctx.systems
         .invoke_npc_death_hook(sys_d, 970_401, Some(char_id))
         .await;
