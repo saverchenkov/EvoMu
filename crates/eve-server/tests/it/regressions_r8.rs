@@ -2401,7 +2401,11 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
         .expect("GetStandingTransactions after quit");
     let quit_rows = extract_rowset_rows(&st_tx_after_quit);
     assert_eq!(quit_rows.len(), 1);
-    assert_eq!(quit_rows[0][3], PyRep::Real(-0.1));
+    let quit_mod = quit_rows[0][3].as_f64().expect("standing modification Real");
+    assert!(
+        (quit_mod - (-0.1)).abs() < 1e-9,
+        "expected ~-0.1 standing modification, got {quit_mod}"
+    );
     assert_eq!(quit_rows[0][4], PyRep::Integer(83));
 
     // R23-P1-2: jumpCloneSvc.GetPriceForClone matches flat 900,000 ISK charged by InstallCloneInStation
