@@ -342,7 +342,13 @@ fn parse_dungeon_trigger_action(spec: &PyRep, fallback: &PyRep) -> DungeonTrigge
             reason: src.dict_get("reason").and_then(|v| v.as_str()).unwrap_or("DungeonFailed").to_string(),
         },
         "StartTimer" => DungeonTriggerAction::StartTimer {
-            timer_id: src.dict_get("timerID").or_else(|| src.dict_get("timerId")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            timer_id: src
+                .dict_get("timerID")
+                .or_else(|| src.dict_get("timerId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && !s.starts_with("__"))
+                .unwrap_or("")
+                .to_string(),
             delay_secs: src.dict_get("delaySecs").and_then(|v| v.as_i64()).and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
         },
         "SetObjective" => DungeonTriggerAction::SetObjective {
@@ -547,6 +553,9 @@ fn parse_rooms_from_pyrep(
                         _ => Vec::new(),
                     };
                     let kind = parse_dungeon_trigger_kind(t_rep, &objects, room_pos, 0);
+                    let delay_consumed_by_payload = matches!(kind, DungeonTriggerKind::OnTimer { .. })
+                        || matches!(action, DungeonTriggerAction::StartTimer { .. });
+                    let target_room_consumed_by_kind = matches!(kind, DungeonTriggerKind::OnRoomEntered { .. });
                     triggers.push(DungeonTrigger {
                         trigger_id: u32::try_from(t_i + 1).unwrap_or(u32::MAX),
                         kind,
@@ -558,12 +567,14 @@ fn parse_rooms_from_pyrep(
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false),
                         delay_secs: t_rep
-                            .dict_get("delaySecs")
+                            .dict_get("triggerDelaySecs")
+                            .or_else(|| (!delay_consumed_by_payload).then(|| t_rep.dict_get("delaySecs")).flatten())
                             .and_then(|v| v.as_i64())
                             .and_then(|v| u64::try_from(v).ok())
                             .unwrap_or(0),
                         target_room_index: t_rep
-                            .dict_get("targetRoomIndex")
+                            .dict_get("actionTargetRoomIndex")
+                            .or_else(|| (!target_room_consumed_by_kind).then(|| t_rep.dict_get("targetRoomIndex")).flatten())
                             .and_then(|v| v.as_i64())
                             .and_then(|v| usize::try_from(v).ok()),
                         ..Default::default()
@@ -1436,7 +1447,12 @@ fn parse_dungeon_trigger_kind(
         },
         "timer" | "ontimer" | "on_timer" => DungeonTriggerKind::OnTimer {
             delay_secs: t_rep.dict_get("delaySecs").and_then(|v| v.as_i64()).and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
-            timer_id: t_rep.dict_get("timerID").or_else(|| t_rep.dict_get("timerId")).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
+            timer_id: t_rep
+                .dict_get("timerID")
+                .or_else(|| t_rep.dict_get("timerId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && !s.starts_with("__"))
+                .map(str::to_string),
             after_group_cleared: t_rep.dict_get("afterGroupCleared").and_then(|v| v.as_i64()).and_then(|v| u8::try_from(v).ok()),
         },
         "room_entered" | "onroomentered" | "roomentered" | "enter" => DungeonTriggerKind::OnRoomEntered {

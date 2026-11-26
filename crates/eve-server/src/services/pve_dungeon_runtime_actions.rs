@@ -374,7 +374,7 @@ pub(crate) fn apply_single_action_in_inst(
             default_oid
         }
         DungeonTriggerAction::StartTimer { timer_id, delay_secs } => {
-            if !timer_id.is_empty() {
+            if !timer_id.is_empty() && !timer_id.starts_with("__") {
                 if let Some(r) = inst.rooms.get_mut(r_idx) {
                     r.armed_timers.insert(timer_id.clone(), now_unix.saturating_add(*delay_secs));
                 }

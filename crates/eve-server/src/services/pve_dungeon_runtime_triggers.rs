@@ -108,7 +108,9 @@ fn collect_due_named_timers(
 }
 
 /// Resets repeatable trigger latches ONLY for clauses whose occurrence/timer has genuinely elapsed (`OWN-R5-04`).
-/// Named timers (`timer_id`) are deferred in `out_expired_named` until ALL triggers in the room are evaluated.
+/// Named timers (`timer_id`) and unnamed repeatable `__rep_timer` deadlines are consumed ONLY when
+/// `consume_timers` (`DungeonEvent::TimerTick`) is true so peer `OnTimer` triggers are never starved (`BF-03`).
+#[allow(clippy::too_many_arguments)]
 fn reset_repeatable_trigger_state(
     kind: &DungeonTriggerKind,
     armed_timers: &mut BTreeMap<String, u64>,
@@ -117,6 +119,7 @@ fn reset_repeatable_trigger_state(
     t_idx: usize,
     path: &str,
     now_unix: u64,
+    consume_timers: bool,
     out_expired_named: &mut Vec<String>,
 ) {
     if path == "root" {
@@ -130,21 +133,24 @@ fn reset_repeatable_trigger_state(
     match kind {
         DungeonTriggerKind::OnTimer { delay_secs, timer_id, after_group_cleared } => {
             if let Some(tid) = timer_id {
-                if armed_timers.get(tid).is_some_and(|&due| now_unix >= due) {
+                if consume_timers && armed_timers.get(tid).is_some_and(|&due| now_unix >= due) {
                     armed_timers.remove(&format!("__latch:{r_idx}:{t_idx}:{path}:timer:{tid}"));
                     if !out_expired_named.contains(tid) {
                         out_expired_named.push(tid.clone());
                     }
                 }
             } else if after_group_cleared.is_none() {
-                let rep_key = format!("__rep_timer:{r_idx}:{t_idx}:{path}");
-                let due = armed_timers
-                    .get(&rep_key)
-                    .copied()
-                    .or_else(|| room_entered_unix.map(|e| e.saturating_add(*delay_secs)));
-                if due.is_some_and(|d| now_unix >= d) {
-                    armed_timers.insert(rep_key, now_unix.saturating_add((*delay_secs).max(1)));
-                    armed_timers.remove(&format!("__latch:{r_idx}:{t_idx}:{path}:unnamed_timer"));
+                let unnamed_latch = format!("__latch:{r_idx}:{t_idx}:{path}:unnamed_timer");
+                if consume_timers || armed_timers.contains_key(&unnamed_latch) {
+                    let rep_key = format!("__rep_timer:{r_idx}:{t_idx}:{path}");
+                    let due = armed_timers
+                        .get(&rep_key)
+                        .copied()
+                        .or_else(|| room_entered_unix.map(|e| e.saturating_add(*delay_secs)));
+                    if due.is_some_and(|d| now_unix >= d) {
+                        armed_timers.insert(rep_key, now_unix.saturating_add((*delay_secs).max(1)));
+                        armed_timers.remove(&unnamed_latch);
+                    }
                 }
             }
         }
@@ -152,7 +158,15 @@ fn reset_repeatable_trigger_state(
             for (ci, clause) in clauses.iter().enumerate() {
                 let sub = format!("{path}.{ci}");
                 reset_repeatable_trigger_state(
-                    clause, armed_timers, room_entered_unix, r_idx, t_idx, &sub, now_unix, out_expired_named,
+                    clause,
+                    armed_timers,
+                    room_entered_unix,
+                    r_idx,
+                    t_idx,
+                    &sub,
+                    now_unix,
+                    consume_timers,
+                    out_expired_named,
                 );
             }
         }
@@ -534,10 +548,12 @@ fn evaluate_trigger_with_occurrence_latch(
                         clause, inst, room, armed_timers, room_vec_idx, trig_idx, &sub_path, event, now_unix,
                     )
                 };
-                if already || ok_now {
-                    armed_timers.insert(key, now_unix);
-                } else {
-                    all_ok = false;
+                if !already {
+                    if ok_now {
+                        armed_timers.insert(key, now_unix);
+                    } else {
+                        all_ok = false;
+                    }
                 }
             }
             all_ok
@@ -577,6 +593,7 @@ fn evaluate_room_triggers_in_inst(
     if r_idx >= inst.rooms.len() || !room_is_entered(&inst.rooms[r_idx]) {
         return 0;
     }
+    let is_timer_tick = matches!(event, DungeonEvent::TimerTick);
     let mut batch: TriggerBatch = Vec::new();
     let mut expired_named_timers: Vec<String> = Vec::new();
     let mut armed_count = 0usize;
@@ -607,7 +624,9 @@ fn evaluate_room_triggers_in_inst(
                 let acts: Vec<DungeonTriggerAction> = t.all_actions().cloned().collect();
                 if !repeatable {
                     t.fired = true;
-                    collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
+                    if is_timer_tick {
+                        collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
+                    }
                 } else {
                     let entered_unix = inst.rooms[r_idx].entered_unix;
                     reset_repeatable_trigger_state(
@@ -618,6 +637,7 @@ fn evaluate_room_triggers_in_inst(
                         t_idx,
                         "root",
                         now_unix,
+                        is_timer_tick,
                         &mut expired_named_timers,
                     );
                 }
@@ -654,18 +674,23 @@ fn evaluate_room_triggers_in_inst(
                 t_idx,
                 "root",
                 now_unix,
+                is_timer_tick,
                 &mut expired_named_timers,
             );
         } else {
-            collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
+            if is_timer_tick {
+                collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
+            }
             inst.rooms[r_idx].triggers[t_idx].fired = true;
         }
         batch.push((trig_id, target_room_index, repeatable, actor_char_id, acts));
     }
-    // OWN-R5-04: Clear shared expired named timers ONLY AFTER every trigger in this room has evaluated.
-    for tid in expired_named_timers {
-        if inst.rooms[r_idx].armed_timers.get(&tid).is_some_and(|&due| now_unix >= due) {
-            inst.rooms[r_idx].armed_timers.remove(&tid);
+    // OWN-R5-04 / BF-03: Clear shared expired named timers ONLY AFTER every trigger in this room has evaluated on TimerTick.
+    if is_timer_tick {
+        for tid in expired_named_timers {
+            if inst.rooms[r_idx].armed_timers.get(&tid).is_some_and(|&due| now_unix >= due) {
+                inst.rooms[r_idx].armed_timers.remove(&tid);
+            }
         }
     }
     if any_hit {
@@ -794,10 +819,10 @@ pub(crate) async fn on_dungeon_npc_killed_impl(
                 };
                 let Some((gid_opt, tag_opt, tid)) = hit_ev else { continue };
                 if !entered {
-                    let gid_val = gid_opt.unwrap_or(0);
+                    let gid_str = gid_opt.map_or_else(|| "none".to_string(), |g| g.to_string());
                     let tag_str = tag_opt.unwrap_or_default();
                     inst.rooms[r_idx].armed_timers.insert(
-                        format!("__pre_kill:{r_idx}:{npc_ball_id}:{gid_val}:{tid}:{tag_str}"),
+                        format!("__pre_kill:{r_idx}:{npc_ball_id}:{gid_str}:{tid}:{tag_str}"),
                         now_unix,
                     );
                     continue;
@@ -860,8 +885,13 @@ pub(crate) async fn on_dungeon_room_entered_impl(
                 r.armed_timers.remove(&k);
                 let parts: Vec<&str> = k.splitn(6, ':').collect();
                 if parts.len() == 6 {
-                    if let (Ok(bid), Ok(gid), Ok(tid)) = (parts[2].parse::<i64>(), parts[3].parse::<u8>(), parts[4].parse::<u32>()) {
-                        recorded.push((bid, (gid > 0).then_some(gid), (!parts[5].is_empty()).then(|| parts[5].to_string()), tid));
+                    let gid_opt = if parts[3] == "none" {
+                        Ok(None)
+                    } else {
+                        parts[3].parse::<u8>().map(Some)
+                    };
+                    if let (Ok(bid), Ok(gid), Ok(tid)) = (parts[2].parse::<i64>(), gid_opt, parts[4].parse::<u32>()) {
+                        recorded.push((bid, gid, (!parts[5].is_empty()).then(|| parts[5].to_string()), tid));
                     }
                 }
             }
@@ -1129,7 +1159,7 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
                     break;
                 }
                 let room_fallback_actor = resolve_room_recipient(&inst, Some(r_idx), 0);
-                let mut expired_named = Vec::new();
+                let mut ignored_expired_named = Vec::new();
                 let mut batch: TriggerBatch = Vec::new();
                 let trig_len = inst.rooms[r_idx].triggers.len();
                 for t_idx in 0..trig_len {
@@ -1152,22 +1182,24 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
                     };
                     if repeatable {
                         let entered_unix = inst.rooms[r_idx].entered_unix;
+                        // BF-03: never consume shared named timers or advance unnamed __rep_timer outside TimerTick.
                         reset_repeatable_trigger_state(
-                            &kind, &mut inst.rooms[r_idx].armed_timers, entered_unix, r_idx, t_idx, "root", now_unix, &mut expired_named,
+                            &kind,
+                            &mut inst.rooms[r_idx].armed_timers,
+                            entered_unix,
+                            r_idx,
+                            t_idx,
+                            "root",
+                            now_unix,
+                            false,
+                            &mut ignored_expired_named,
                         );
-                    } else {
-                        collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named);
                     }
                     let actor = if armed_by > 0 { armed_by } else { room_fallback_actor };
                     if actor > 0 {
                         last_actor = actor;
                     }
                     batch.push((trig_id, tri, repeatable, actor, acts));
-                }
-                for tid in expired_named {
-                    if inst.rooms[r_idx].armed_timers.get(&tid).is_some_and(|&d| now_unix >= d) {
-                        inst.rooms[r_idx].armed_timers.remove(&tid);
-                    }
                 }
                 if !batch.is_empty() {
                     record_room_actor(&mut inst, r_idx, last_actor);
@@ -1191,6 +1223,15 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
 /// and expired loot grace (`OWN-R5-04`, `OWN-R5-05`, `R5 P2-1` strictly read-pure when idle/waiting).
 pub(crate) async fn tick_dungeon_runtime_system_step_impl(deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId) {
     if !has_dungeon_runtime_store_db(deps.db) {
+        return;
+    }
+    let has_sys_inst = deps.db.with_snapshot(|snap| {
+        snap.dungeon_runtime
+            .instances
+            .values()
+            .any(|i| !i.despawned && i.solar_system_id == sys_id)
+    });
+    if !has_sys_inst {
         return;
     }
     let now_unix = deps.db.clock().now_unix_secs();
