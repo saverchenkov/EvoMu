@@ -1361,18 +1361,10 @@ pub async fn handle_with_bound(
                 });
             let allow_history_lookup =
                 method == "GetMissionJournalInfo" || has_explicit_mission_id;
-            let Some((m, bm_coords)) = ctx.db.with_snapshot(|snap| {
+            let Some(m) = ctx.db.with_snapshot(|snap| {
                 snap.missions
                     .get_by_character_template(char_id, mission_id)
                     .cloned()
-                    .map(|m| {
-                        let bm_coords = m
-                            .bookmark_id
-                            .and_then(|bid| snap.bookmarks.get(&bid))
-                            .filter(|b| b.item_id.is_none())
-                            .map(|b| (b.solar_system_id, b.x, b.y, b.z));
-                        (m, bm_coords)
-                    })
                     .or_else(|| {
                         if !allow_history_lookup {
                             return None;
@@ -1400,14 +1392,11 @@ pub async fn handle_with_bound(
                                 .latest_history_for_character_template(char_id, mission_id)
                         };
                         entry.map(|entry| {
-                            (
-                                hydrate_mission_from_history_entry(
-                                    ctx,
-                                    entry,
-                                    sys_id,
-                                    session.station_id,
-                                ),
-                                None,
+                            hydrate_mission_from_history_entry(
+                                ctx,
+                                entry,
+                                sys_id,
+                                session.station_id,
                             )
                         })
                     })
@@ -1522,36 +1511,65 @@ pub async fn handle_with_bound(
             };
             let has_dungeon_site =
                 !is_courier && !is_trade && !is_data_center && !is_rnd_turnin && !is_heraldry;
-            let dun_sys = bm_coords
-                .map(|(sid, _, _, _)| sid)
-                .filter(|&sid| sid > 0)
-                .or_else(|| (m.solar_system_id > 0).then_some(m.solar_system_id))
-                .unwrap_or(sys_id);
-            let dungeon_loc = has_dungeon_site.then(|| {
-                let (dx, dy, dz) = bm_coords
-                    .map(|(_, x, y, z)| (x, y, z))
-                    .or_else(|| m.site_origin_f64().map(|[x, y, z]| (x, y, z)))
-                    .unwrap_or_else(|| {
-                        let origin =
-                            mission_site_origin_for_instance(ctx, dun_sys, m.instance_id);
-                        (origin.x, origin.y, origin.z)
-                    });
+            let (dun_sys, dungeon_loc) = if has_dungeon_site {
+                let (dun_sys, origin) = ctx.db.with_snapshot(|snap| {
+                    let bm_sys = m
+                        .bookmark_id
+                        .filter(|bid| {
+                            !crate::services::fleet_social::is_bookmark_expired_in_snap(
+                                snap, *bid, now,
+                            )
+                        })
+                        .and_then(|bid| snap.bookmarks.get(&bid))
+                        .filter(|b| b.item_id.is_none() && b.solar_system_id > 0)
+                        .map(|b| b.solar_system_id);
+                    let dun_sys = (m.solar_system_id > 0)
+                        .then_some(m.solar_system_id)
+                        .or(bm_sys)
+                        .or_else(|| ctx.sde.agents.get(&m.agent_id).and_then(|a| a.solar_system_id))
+                        .unwrap_or(sys_id);
+                    let origin = match agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+                        ctx,
+                        snap,
+                        Some(session),
+                        &m,
+                        dun_sys,
+                        now,
+                        true,
+                    ) {
+                        Ok(Some(pos)) => pos,
+                        Ok(None) | Err(_) => m
+                            .site_origin_f64()
+                            .map(glam::DVec3::from)
+                            .filter(|pos| pos.is_finite())
+                            .unwrap_or_else(|| {
+                                mission_site_origin_for_instance(ctx, dun_sys, m.instance_id)
+                            }),
+                    };
+                    (dun_sys, origin)
+                });
+                let (dx, dy, dz) = (origin.x, origin.y, origin.z);
                 let dun_bm_rep = m.bookmark_id.map(PyRep::Integer).unwrap_or(PyRep::None);
                 let dun_coords_rep =
                     PyRep::Tuple(vec![PyRep::Real(dx), PyRep::Real(dy), PyRep::Real(dz)]);
-                PyRep::Dict(vec![
-                    (PyRep::String("locationID".into()), PyRep::Integer(i64::from(dun_sys))),
-                    (PyRep::String("solarsystemID".into()), PyRep::Integer(i64::from(dun_sys))),
-                    (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(dun_sys))),
-                    (PyRep::String("stationID".into()), PyRep::None),
-                    (PyRep::String("typeID".into()), PyRep::Integer(5)),
-                    (PyRep::String("agentID".into()), PyRep::Integer(m.agent_id)),
-                    (PyRep::String("shipTypeID".into()), PyRep::None),
-                    (PyRep::String("BookmarkID".into()), dun_bm_rep),
-                    (PyRep::String("coords".into()), dun_coords_rep),
-                    (PyRep::String("locationType".into()), PyRep::String("dungeon".into())),
-                ])
-            });
+                (
+                    dun_sys,
+                    Some(PyRep::Dict(vec![
+                        (PyRep::String("locationID".into()), PyRep::Integer(i64::from(dun_sys))),
+                        (PyRep::String("solarsystemID".into()), PyRep::Integer(i64::from(dun_sys))),
+                        (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(dun_sys))),
+                        (PyRep::String("stationID".into()), PyRep::None),
+                        (PyRep::String("typeID".into()), PyRep::Integer(5)),
+                        (PyRep::String("agentID".into()), PyRep::Integer(m.agent_id)),
+                        (PyRep::String("shipTypeID".into()), PyRep::None),
+                        (PyRep::String("BookmarkID".into()), dun_bm_rep),
+                        (PyRep::String("coords".into()), dun_coords_rep),
+                        (PyRep::String("locationType".into()), PyRep::String("dungeon".into())),
+                    ])),
+                )
+            } else {
+                (sys_id, None)
+            };
             let origin_loc = make_loc(origin_loc_id, "agenthomebase");
             let dest_loc_opt = dest_sid_opt.map(|dsid| make_loc(dsid, "objective.destination"));
             let mut locations = vec![origin_loc.clone()];

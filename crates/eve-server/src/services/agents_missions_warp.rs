@@ -886,29 +886,56 @@ fn mission_dungeon_warp_target(
             eve_proto::UserErrorKey::DunBlacklistCannotWarp,
         ));
     }
-    let target_bmid = selected_bookmark_id.or(mission.bookmark_id);
     let now_unix = ctx.now_unix();
-    let bm_pos = ctx.db.with_snapshot(|snap| -> Result<Option<DVec3>, BridgeRpcError> {
-        let Some(bmid) = target_bmid else {
-            return Ok(None);
-        };
-        validate_mission_bookmark_origin_in_snap(
-            snap,
-            Some(session),
-            char_id,
-            bmid,
-            mission_sys_id,
-            now_unix,
-        )
-    })?;
-    let anchor_pos = bm_pos
-        .or_else(|| mission.site_origin_f64().map(DVec3::from).filter(|pos| pos.is_finite()))
-        .unwrap_or_else(|| {
-            mission_site_origin_for_instance(ctx, mission_sys_id, mission.instance_id)
-        });
+    let distinct_selected_bmid =
+        selected_bookmark_id.filter(|&bmid| mission.bookmark_id != Some(bmid));
+    let (anchor_pos, resolved_bookmark_id) =
+        ctx.db.with_snapshot(|snap| -> Result<(DVec3, Option<i64>), BridgeRpcError> {
+            if let Some(bmid) = distinct_selected_bmid {
+                if let Some(pos) = validate_mission_bookmark_origin_in_snap(
+                    snap,
+                    Some(session),
+                    char_id,
+                    bmid,
+                    mission_sys_id,
+                    now_unix,
+                )? {
+                    return Ok((pos, Some(bmid)));
+                }
+            }
+            let anchor_pos = resolve_mission_pocket_origin_in_snap(
+                ctx,
+                snap,
+                Some(session),
+                mission,
+                mission_sys_id,
+                now_unix,
+                true,
+            )?
+            .unwrap_or_else(|| {
+                mission_site_origin_for_instance(ctx, mission_sys_id, mission.instance_id)
+            });
+            let valid_mission_bm = match mission.bookmark_id {
+                Some(bmid)
+                    if validate_mission_bookmark_origin_in_snap(
+                        snap,
+                        Some(session),
+                        char_id,
+                        bmid,
+                        mission_sys_id,
+                        now_unix,
+                    )?
+                    .is_some() =>
+                {
+                    Some(bmid)
+                }
+                _ => None,
+            };
+            Ok((anchor_pos, valid_mission_bm))
+        })?;
     Ok(WarpTarget::Dungeon {
         mission_id: mission.template_id,
-        bookmark_id: bm_pos.and(target_bmid),
+        bookmark_id: resolved_bookmark_id,
         solar_system_id: mission_sys_id,
         anchor_pos,
     })

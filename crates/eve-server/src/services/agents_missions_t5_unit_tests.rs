@@ -3812,3 +3812,153 @@ async fn expired_or_item_attached_bookmark_never_materializes_foreign_mission() 
     }
     f.ctx.db.with_snapshot(|s| assert!(mission_fixture::get(s, f.pilot_b, f.mid_enc).unwrap().spawned_npc_ball_ids.is_empty()));
 }
+
+#[tokio::test]
+async fn site_origin_precedes_bookmark_across_briefing_warp_and_materialization() {
+    let mut f = setup_shared_mission_bookmark_fixture(true, false).await;
+    let kw = HashMap::new();
+    let h = f.ctx.systems.get_or_spawn(f.sys_id);
+    let mut agents: Vec<i64> = f.ctx.sde.agents.keys().copied().collect();
+    agents.sort_unstable();
+    let (mid_1, mid_2) = (98_530_u32, 98_531_u32);
+    let (bm_1, bm_2) = (960_130_i64, 960_131_i64);
+    let site_1 = glam::DVec3::new(4.2e10, 1.5e8, -2.5e8);
+    let site_2 = glam::DVec3::new(5.4e10, -1.8e8, 2.2e8);
+    let div_bm_1 = glam::DVec3::new(9.1e11, 0.0, 0.0);
+    let div_bm_2 = glam::DVec3::new(9.5e11, 0.0, 0.0);
+
+    f.ctx.db.with_mut_snapshot(|snap| {
+        for (bid, pos, mid, ag_id, site) in [
+            (bm_1, div_bm_1, mid_1, agents[0], site_1),
+            (bm_2, div_bm_2, mid_2, agents[1], site_2),
+        ] {
+            snap.bookmarks.insert(
+                bid,
+                eve_db::BookmarkRecord {
+                    bookmark_id: bid,
+                    owner_id: f.pilot_a,
+                    solar_system_id: f.sys_id,
+                    label: "Diverging Bookmark".into(),
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    item_id: None,
+                    memo: "Diverging".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(f.pilot_a, mid, ag_id, f.sys_id)
+                    .bookmark_id(Some(bid))
+                    .site_origin_m(Some([site.x as i64, site.y as i64, site.z as i64]))
+                    .npcs_remaining(2)
+                    .initial_wave_count(Some(2))
+                    .initial_wave_types(Some(vec![34_155])),
+            );
+        }
+    });
+
+    for (ag_id, mid, expected_site) in [(agents[0], mid_1, site_1), (agents[1], mid_2, site_2)] {
+        let brief = f
+            .ctx
+            .dispatch_rpc(
+                &mut f.sess_a,
+                "agentMgr",
+                None,
+                "GetMissionBriefingInfo",
+                &[PyRep::Integer(ag_id), PyRep::Integer(i64::from(mid))],
+                &kw,
+                None,
+            )
+            .await
+            .expect("GetMissionBriefingInfo");
+        let PyRep::List(locs) = brief.dict_get("locations").expect("locations list") else {
+            panic!("expected locations PyRep::List");
+        };
+        let dun_loc = locs
+            .iter()
+            .find(|l| l.dict_get("locationType").and_then(PyRep::as_str) == Some("dungeon"))
+            .expect("dungeon location entry");
+        let PyRep::Tuple(coords) = dun_loc.dict_get("coords").expect("dungeon coords") else {
+            panic!("expected coords tuple");
+        };
+        let brief_pos = glam::DVec3::new(
+            coords[0].as_f64().unwrap(),
+            coords[1].as_f64().unwrap(),
+            coords[2].as_f64().unwrap(),
+        );
+        assert!(
+            brief_pos.distance(expected_site) <= 1.0,
+            "briefing dungeon coords {brief_pos:?} must match site_origin_m {expected_site:?}"
+        );
+    }
+
+    // `agentMgr.WarpToLocation("dungeon")` must resolve and materialize at `site_1` over diverging `bm_1`.
+    f.ctx
+        .dispatch_rpc(
+            &mut f.sess_a,
+            "agentMgr",
+            None,
+            "WarpToLocation",
+            &[PyRep::String("dungeon".into()), PyRep::Integer(i64::from(mid_1))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("WarpToLocation dungeon mid_1");
+    let (_, b1) = h.get_ball_snapshot(f.ship_a).await.unwrap().unwrap();
+    match b1.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(site_1) <= 1.0,
+                "WarpToLocation dest {destination:?} != {site_1:?}"
+            );
+        }
+        other => panic!("expected Warp mode after WarpToLocation, got {other:?}"),
+    }
+    let bids_1 = f
+        .ctx
+        .db
+        .with_snapshot(|s| mission_fixture::get(s, f.pilot_a, mid_1).unwrap().spawned_npc_ball_ids);
+    assert_eq!(bids_1.len(), 2);
+    assert!(h.get_ball_snapshot(bids_1[0]).await.unwrap().unwrap().1.position.distance(site_1) <= 5_000.0);
+
+    // `beyonce.CmdWarpToStuff("mission")` must resolve and materialize at `site_2` over diverging `bm_2`.
+    let _ = h.set_movement_mode(f.ship_a, eve_destiny::MovementMode::Stop).await;
+    let _ = h.set_ball_position(f.ship_a, glam::DVec3::ZERO).await;
+    h.try_update_combat_state(f.ship_a, |cs| {
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+    });
+    let _ = f
+        .ctx
+        .dispatch_rpc(
+            &mut f.sess_a,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("mission".into()), PyRep::Integer(i64::from(mid_2))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdWarpToStuff mission mid_2");
+    let (_, b2) = h.get_ball_snapshot(f.ship_a).await.unwrap().unwrap();
+    match b2.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(site_2) <= 1.0,
+                "CmdWarpToStuff dest {destination:?} != {site_2:?}"
+            );
+        }
+        other => panic!("expected Warp mode after CmdWarpToStuff, got {other:?}"),
+    }
+    let bids_2 = f
+        .ctx
+        .db
+        .with_snapshot(|s| mission_fixture::get(s, f.pilot_a, mid_2).unwrap().spawned_npc_ball_ids);
+    assert_eq!(bids_2.len(), 2);
+    assert!(h.get_ball_snapshot(bids_2[0]).await.unwrap().unwrap().1.position.distance(site_2) <= 5_000.0);
+}
