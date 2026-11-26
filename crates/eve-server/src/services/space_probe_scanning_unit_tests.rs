@@ -2939,29 +2939,54 @@ async fn rt_109_poisoned_probe_locks_recover_cleanly_on_read_and_write() {
     let ship_id = 100_000_001_i64;
     let sys_id = 30_000_142_u32;
     let probe_id = 890_999_001_i64;
+    let overdue_lost_id = 890_999_002_i64;
+    let overdue_ret_id = 890_999_003_i64;
     let now_unix = ctx.now_unix();
     let kw = HashMap::new();
 
-    ctx.active_scanner_probes.write().unwrap().insert(
-        probe_id,
-        ActiveScannerProbe {
+    {
+        let mut probes = ctx.active_scanner_probes.write().unwrap();
+        probes.insert(
             probe_id,
-            probe_type_id: 30_013,
-            owner_char_id: char_id,
-            ship_id,
-            launcher_module_id: 0,
-            solar_system_id: sys_id,
-            position: [0.0; 3],
-            destination: [0.0; 3],
-            range_step: 4,
-            scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
-            base_sensor_strength: 40.0,
-            max_flight_time_s: 3_600.0,
-            launched_at_unix: now_unix,
-            state: PROBE_STATE_IDLE,
-            warp_end_ft: None,
-        },
-    );
+            ActiveScannerProbe {
+                probe_id,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+        probes.insert(
+            overdue_lost_id,
+            ActiveScannerProbe {
+                probe_id: overdue_lost_id,
+                probe_type_id: 30_013,
+                owner_char_id: 90_000_002,
+                ship_id: 100_000_002,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 60.0,
+                launched_at_unix: now_unix.saturating_sub(120),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
 
     let probes_lock = Arc::clone(&ctx.active_scanner_probes);
     let _ = std::thread::spawn(move || {
@@ -3022,5 +3047,54 @@ async fn rt_109_poisoned_probe_locks_recover_cleanly_on_read_and_write() {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(&probe_id)
+    );
+
+    // Lock remains poisoned: overdue-probe background & per-char sweeps must also recover
+    // cleanly across read() (`expire_all_overdue_probes`) and both write() sites (`state = -1`
+    // claim and `state = -2` lost-probe mark in `expire_overdue_probes_for_char`).
+    assert!(ctx.active_scanner_probes.read().is_err());
+    expire_all_overdue_probes(&ctx, now_unix).await;
+    assert_eq!(
+        ctx.active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&overdue_lost_id)
+            .map(|p| p.state),
+        Some(-2)
+    );
+
+    ctx.active_scanner_probes
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            overdue_ret_id,
+            ActiveScannerProbe {
+                probe_id: overdue_ret_id,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 60.0,
+                launched_at_unix: now_unix.saturating_sub(120),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    let (returned, lost) = expire_overdue_probes_for_char(&ctx, char_id, now_unix).await;
+    assert_eq!(returned, vec![overdue_ret_id]);
+    assert!(lost.is_empty());
+    assert_eq!(
+        ctx.active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&overdue_ret_id)
+            .map(|p| p.state),
+        Some(-1)
     );
 }

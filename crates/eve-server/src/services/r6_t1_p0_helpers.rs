@@ -248,24 +248,25 @@ pub async fn expire_overdue_probes_for_char(
     char_id: i64,
     now_unix: u64,
 ) -> (Vec<i64>, Vec<i64>) {
-    let newly_expired: Vec<ActiveScannerProbe> =
-        if let Ok(mut map) = ctx.active_scanner_probes.write() {
-            let mut claimed = Vec::new();
-            for p in map.values_mut() {
-                if p.owner_char_id == char_id
-                    && p.state >= 0
-                    && now_unix
-                        >= p.launched_at_unix
-                            .saturating_add(p.max_flight_time_s.max(0.0) as u64)
-                {
-                    p.state = -1;
-                    claimed.push(p.clone());
-                }
+    let newly_expired: Vec<ActiveScannerProbe> = {
+        let mut map = ctx
+            .active_scanner_probes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut claimed = Vec::new();
+        for p in map.values_mut() {
+            if p.owner_char_id == char_id
+                && p.state >= 0
+                && now_unix
+                    >= p.launched_at_unix
+                        .saturating_add(p.max_flight_time_s.max(0.0) as u64)
+            {
+                p.state = -1;
+                claimed.push(p.clone());
             }
-            claimed
-        } else {
-            Vec::new()
-        };
+        }
+        claimed
+    };
 
     if newly_expired.is_empty() {
         return (Vec::new(), Vec::new());
@@ -342,7 +343,11 @@ pub async fn expire_overdue_probes_for_char(
         (ret, lost)
     });
 
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    {
+        let mut map = ctx
+            .active_scanner_probes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         for pid in &lost_ids {
             if let Some(p) = map.get_mut(pid) {
                 p.state = -2;
@@ -356,7 +361,11 @@ pub async fn expire_overdue_probes_for_char(
 
 /// `R6-T1-06` (`#360`): Background sweep expiring overdue scanner probes across all owners.
 pub async fn expire_all_overdue_probes(ctx: &ServerContext, now_unix: u64) {
-    let overdue_owners: Vec<i64> = if let Ok(map) = ctx.active_scanner_probes.read() {
+    let overdue_owners: Vec<i64> = {
+        let map = ctx
+            .active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut owners: Vec<i64> = map
             .values()
             .filter(|p| {
@@ -370,8 +379,6 @@ pub async fn expire_all_overdue_probes(ctx: &ServerContext, now_unix: u64) {
         owners.sort_unstable();
         owners.dedup();
         owners
-    } else {
-        Vec::new()
     };
     for cid in overdue_owners {
         let _ = expire_overdue_probes_for_char(ctx, cid, now_unix).await;

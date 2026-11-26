@@ -1521,9 +1521,10 @@ impl SystemRegistry {
                         if let Some(cmd) = cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, cmd) {
                             if let Some(cmd) = ball_ops::handle_ball_ops_command(&mut exec_ctx, cmd) {
                             if let Some(cmd) = drones::handle_drone_runtime_command(&mut exec_ctx, cmd) {
-                            let mut cmd_opt = Some(cmd);
-                            #[cfg(any(test, feature = "testkit"))]
-                            { cmd_opt = cmd_opt.and_then(|c| test_seam::handle_test_access_command(&mut exec_ctx, c)); }
+                            let cmd_opt = {
+                                #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, cmd) }
+                                #[cfg(not(any(test, feature = "testkit")))] { Some(cmd) }
+                            };
                             if let Some(cmd) = cmd_opt {
                             let mut sync_protection_ball: Option<BallId> = None;
                             {

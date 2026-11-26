@@ -844,5 +844,50 @@ mod tests {
             assert!(!sys.has_active_nanite_repair_sync(ship_combat, mod_b));
             assert!(!sys.has_any_active_nanite_repair_sync(ship_combat));
         }
+
+        // 8. cancel_nanite_repairs_for_ship_sync and sync_asteroid_quantity patch SystemView
+        // atomically under held `st` even when >= RANK_BALLPARK lock is held.
+        let ast_id = 940_301_i64;
+        let belt_id = 940_300_i64;
+        sys.test_with_actor_state_mut_async(move |st| {
+            st.active_nanite_repairs.push(ActiveNaniteRepair {
+                char_id: 90_000_003,
+                ship_id: ship_meta,
+                module_id: mod_a,
+                initial_damage_hp: 10.0,
+                paste_total_needed: 1,
+                paste_consumed_so_far: 1,
+                duration_s: 10.0,
+                elapsed_s: 0.0,
+            });
+            st.asteroids.insert(
+                ast_id,
+                AsteroidState {
+                    asteroid_id: ast_id,
+                    belt_id,
+                    type_id: 1230,
+                    initial_units: 100,
+                    remaining_units: 100,
+                    unit_volume: 0.1,
+                    depleted: false,
+                    respawn_at_tick: None,
+                },
+            );
+        })
+        .await;
+        {
+            let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
+                eve_db::lock_rank::RankedRwLock::new(());
+            let _bp_guard = bp_lock.write().unwrap();
+            let cancelled = sys.cancel_nanite_repairs_for_ship_sync(ship_meta);
+            assert_eq!(cancelled.len(), 1);
+            assert!(!sys.has_any_active_nanite_repair_sync(ship_meta));
+
+            sys.sync_asteroid_quantity(ast_id, 0, 12_345);
+            let ast_view = sys.view().asteroids.get(&ast_id).cloned().expect("asteroid view");
+            assert_eq!(ast_view.remaining_units, 0);
+            assert!(ast_view.depleted);
+            assert_eq!(ast_view.respawn_at_tick, Some(12_345));
+        }
     }
 }

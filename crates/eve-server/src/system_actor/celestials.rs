@@ -1382,30 +1382,32 @@ impl SystemHandle {
     }
 
     pub fn sync_asteroid_quantity(&self, asteroid_id: BallId, remaining_units: u64, due_unix_on_belt_empty: u64) {
-        {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let mut belt_id_opt = None;
-            if let Some(ast) = st.asteroids.get_mut(&asteroid_id) {
-                ast.remaining_units = remaining_units;
-                ast.depleted = remaining_units == 0;
-                if remaining_units == 0 {
-                    belt_id_opt = Some(ast.belt_id);
-                }
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let mut belt_id_opt = None;
+        if let Some(ast) = st.asteroids.get_mut(&asteroid_id) {
+            ast.remaining_units = remaining_units;
+            ast.depleted = remaining_units == 0;
+            if remaining_units == 0 {
+                belt_id_opt = Some(ast.belt_id);
             }
-            if let Some(belt_id) = belt_id_opt {
-                let belt_fully_depleted = st
-                    .asteroids
-                    .values()
-                    .filter(|a| a.belt_id == belt_id)
-                    .all(|a| a.remaining_units == 0);
-                if belt_fully_depleted {
-                    for belt_ast in st.asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
-                        belt_ast.respawn_at_tick = Some(due_unix_on_belt_empty);
-                    }
+        }
+        if let Some(belt_id) = belt_id_opt {
+            let belt_fully_depleted = st
+                .asteroids
+                .values()
+                .filter(|a| a.belt_id == belt_id)
+                .all(|a| a.remaining_units == 0);
+            if belt_fully_depleted {
+                for belt_ast in st.asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
+                    belt_ast.respawn_at_tick = Some(due_unix_on_belt_empty);
                 }
             }
         }
-        self.publish_view();
+        self.view_tx.send_modify(|cur| {
+            let mut next = (**cur).clone();
+            next.asteroids = st.asteroids.clone();
+            *cur = Arc::new(next);
+        });
     }
 
     pub fn try_spawn_ball_with_meta(
@@ -3067,21 +3069,22 @@ impl SystemHandle {
     }
 
     pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
-        let cancelled = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let mut cancelled = Vec::new();
-            let all = std::mem::take(&mut st.active_nanite_repairs);
-            for job in all {
-                if job.ship_id == ship_id {
-                    cancelled.push(job);
-                } else {
-                    st.active_nanite_repairs.push(job);
-                }
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let mut cancelled = Vec::new();
+        let all = std::mem::take(&mut st.active_nanite_repairs);
+        for job in all {
+            if job.ship_id == ship_id {
+                cancelled.push(job);
+            } else {
+                st.active_nanite_repairs.push(job);
             }
-            cancelled
-        };
+        }
         if !cancelled.is_empty() {
-            self.publish_view();
+            self.view_tx.send_modify(|cur| {
+                let mut next = (**cur).clone();
+                next.active_nanite_repairs = st.active_nanite_repairs.clone();
+                *cur = Arc::new(next);
+            });
         }
         cancelled
     }
