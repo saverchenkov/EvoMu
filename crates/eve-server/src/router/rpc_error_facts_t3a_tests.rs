@@ -1661,12 +1661,16 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
     let foreign_uid = 91_502_u64;
     let foreign_cid = 91_501_099_i64;
     let foreign_corp_id = 98_501_099_i64;
+    let roleless_uid = 91_503_u64;
+    let roleless_cid = 91_501_098_i64;
     let sys_id = 30_000_142_u32;
     let tower_id = 1_915_000_100_i64;
     let other_tower_id = 1_915_000_200_i64;
     let non_silo_id = 1_915_000_101_i64;
     let misplaced_silo_id = 1_915_000_102_i64;
     let foreign_item_id = 1_915_000_103_i64;
+    let personal_tower_id = 1_915_000_104_i64;
+    let corp_silo_in_personal_id = 1_915_000_105_i64;
     let missing_id = 1_915_000_999_i64;
     let kw = HashMap::new();
 
@@ -1687,12 +1691,19 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
         ch.solar_system_id = sys_id;
         snap.characters.insert(char_id, ch);
 
-        let mut foreign_ch = seed;
+        let mut foreign_ch = seed.clone();
         foreign_ch.character_id = foreign_cid;
         foreign_ch.user_id = foreign_uid;
         foreign_ch.corporation_id = foreign_corp_id;
         foreign_ch.solar_system_id = sys_id;
         snap.characters.insert(foreign_cid, foreign_ch);
+
+        let mut roleless_ch = seed;
+        roleless_ch.character_id = roleless_cid;
+        roleless_ch.user_id = roleless_uid;
+        roleless_ch.corporation_id = corp_id;
+        roleless_ch.solar_system_id = sys_id;
+        snap.characters.insert(roleless_cid, roleless_ch);
 
         let mut corp = CorporationRecord::default();
         corp.corporation_id = corp_id;
@@ -1748,6 +1759,32 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
                 owner_id: foreign_cid,
                 location_id: 60_003_760,
                 flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            personal_tower_id,
+            InventoryItemRecord {
+                item_id: personal_tower_id,
+                type_id: 34,
+                owner_id: roleless_cid,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            corp_silo_in_personal_id,
+            InventoryItemRecord {
+                item_id: corp_silo_in_personal_id,
+                type_id: 14_343,
+                owner_id: corp_id,
+                location_id: personal_tower_id,
+                flag: InventoryFlag::None,
                 quantity: 1,
                 singleton: true,
                 ..Default::default()
@@ -1942,4 +1979,47 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
         .await
         .expect_err("bogus tower_id must fail starbase auth before probing item_id");
     assert_eq!(bogus_tower_err.code, "StructureNotFound");
+
+    // BF-01 regression: roleless corp member (corp_role == 0) passing personal item as towerID
+    // must NOT probe corp-owned non-silo/silo items or mutate orbital_provision_types
+    let mut roleless_sess = auth_session(roleless_uid, roleless_cid, corp_id, sys_id);
+    ctx.sync_session(&mut roleless_sess);
+    for corp_item_id in [non_silo_id, misplaced_silo_id, corp_silo_in_personal_id] {
+        let bypass_err = ctx
+            .dispatch_rpc(
+                &mut roleless_sess,
+                "posMgr",
+                None,
+                "ChangeStructureProvisionType",
+                &[
+                    PyRep::Integer(personal_tower_id),
+                    PyRep::Integer(corp_item_id),
+                    PyRep::Integer(i64::from(moon_mat_tid)),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("roleless corp member with personal towerID must fail closed on corp item");
+        let (facts, args) = assert_rejected_wire_facts(
+            "posMgr",
+            "ChangeStructureProvisionType",
+            Some(roleless_cid),
+            &bypass_err,
+            CODE_INVALID_TARGET,
+            UserErrorKey::ItemNotFound,
+        );
+        assert!(args.is_empty(), "corp bypass probe must not emit groupName args: {args:?}");
+        assert_eq!(
+            facts,
+            &RejectionFacts::InvalidTarget {
+                target_id: Some(corp_item_id),
+                module_id: None,
+                reason: "target_not_found".into(),
+            }
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.orbital_provision_types.contains_key(&corp_silo_in_personal_id));
+    });
 }

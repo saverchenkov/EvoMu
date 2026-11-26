@@ -1323,10 +1323,6 @@ pub fn handle(
                     check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 } else {
                     check_starbase_auth(snap, session, char_id, tower_id, now_unix)?;
-                    let char_corp = session
-                        .corporation_id
-                        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
-                        .unwrap_or(0);
                     let tower_corp = snap
                         .structures
                         .get(&tower_id)
@@ -1336,7 +1332,6 @@ pub fn handle(
                     let Some(item) = snap.items.get(&item_id).filter(|i| {
                         session.has_gm_role()
                             || i.owner_id == char_id
-                            || (char_corp > 0 && i.owner_id == char_corp)
                             || (tower_corp > 0 && i.owner_id == tower_corp)
                     }) else {
                         return Err(BridgeRpcError::with_rejection(
