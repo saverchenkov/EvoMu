@@ -974,28 +974,22 @@ pub(crate) fn handle_load_ammo(
         })?;
         let src_flag = pre_source.flag;
         let charge_owner = pre_source.owner_id;
-        let is_crystal_type = ctx.sde.types.get(&charge_type_id).is_some_and(|ct| {
-            matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
-        });
-        let is_single_crystal_move = is_crystal_type
-            && pre_source.quantity == 1
-            && (pre_source.singleton
-                || crate::services::inventory_fitting::fitting_ewar_capital::is_wear_only_non_singleton_crystal(
-                    &pre_source,
-                ))
-            && mod_allocations.len() == 1
-            && total_needed == 1;
-        let policy = if is_single_crystal_move {
-            eve_db::ItemClassPolicy::ExactAssembledItem
-        } else {
-            eve_db::ItemClassPolicy::StackableCommodity
+        let charge_group = ctx.sde.types.get(&charge_type_id).map(|ct| ct.group_id);
+        let is_crystal_type = matches!(charge_group, Some(86 | 374 | 375 | 482 | 663));
+        let is_script_type = matches!(charge_group, Some(907..=911 | 1153 | 1400 | 1549..=1551 | 1559 | 1569 | 1701 | 1702));
+        let single_mod = mod_allocations.len() == 1 && total_needed == 1 && pre_source.quantity == 1;
+        let is_single_crystal_move = is_crystal_type && single_mod && (pre_source.singleton
+            || crate::services::inventory_fitting::fitting_ewar_capital::is_wear_only_non_singleton_crystal(&pre_source));
+        let is_single_script_move = is_script_type && single_mod && pre_source.singleton;
+        let policy = if is_single_crystal_move { eve_db::ItemClassPolicy::ExactAssembledItem }
+            else if is_single_script_move { eve_db::ItemClassPolicy::ExactBlueprintOrSingleton }
+            else { eve_db::ItemClassPolicy::StackableCommodity };
+        let consume_opts = eve_db::ConsumeExactOptions {
+            reject_blueprint_copy: true,
+            ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), charge_owner, policy)
         };
-        snap.consume_exact_item_quantity(
-            first_charge_id,
-            total_needed,
-            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), charge_owner, policy),
-        )
-        .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
+        snap.consume_exact_item_quantity(first_charge_id, total_needed, consume_opts)
+            .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
         let post_source = snap.items.get(&first_charge_id).cloned();
         let move_source_in_place = mod_allocations.len() == 1 && post_source.is_none();
         if !move_source_in_place {

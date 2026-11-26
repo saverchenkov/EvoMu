@@ -1728,18 +1728,15 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
     use eve_proto::PyRep;
 
     let mut sde = (*shared_sde()).clone();
-    let mut crystal_t = sde.types.get(&178).expect("ammo template").clone();
-    let crystal_tid = 99_886_u32;
-    crystal_t.type_id = crystal_tid;
-    crystal_t.group_id = 86;
-    crystal_t.category_id = 8;
-    crystal_t.volume = 1.0;
-    sde.types.insert(crystal_tid, crystal_t);
-
+    let (mut crystal_t, crystal_tid) = (sde.types.get(&178).expect("ammo template").clone(), 99_886_u32);
+    crystal_t.type_id = crystal_tid; crystal_t.group_id = 86; crystal_t.category_id = 8; crystal_t.volume = 1.0;
+    let mut script_t = crystal_t.clone();
+    script_t.type_id = 29_011; script_t.group_id = 910;
+    sde.types.insert(crystal_tid, crystal_t); sde.types.insert(29_011, script_t);
     let mut laser_t = synth_mod_type(99_053, 53, "Heavy Beam Laser I", vec![]);
-    laser_t.capacity = 1.0;
-    laser_t.default_attributes.insert(604, 86.0);
-    sde.types.insert(99_053, laser_t);
+    laser_t.capacity = 1.0; laser_t.default_attributes.insert(604, 86.0); sde.types.insert(99_053, laser_t);
+    let mut rsb_t = synth_mod_type(99_290, 290, "Remote Sensor Booster II", vec![]);
+    rsb_t.capacity = 1.0; rsb_t.default_attributes.insert(604, 910.0); sde.types.insert(99_290, rsb_t);
 
     let ctx = ServerContext::with_sde_and_repository(
         Arc::new(sde),
@@ -1878,4 +1875,14 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
     ctx.db.with_mut_snapshot(|snap| { let l = snap.items.get_mut(&worn_ns_crys_id).unwrap(); assert_eq!((l.flag, l.singleton, l.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::HiSlot2, true, Some(&0.5))); l.singleton = false; snap.items.insert(pkg_crys_id, InventoryItemRecord { item_id: pkg_crys_id, type_id: crystal_tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() }); });
     handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(pkg_crys_id)]).expect("unloading worn crystal normalizes singleton");
     ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&worn_ns_crys_id].flag, snap.items[&worn_ns_crys_id].singleton, snap.items[&worn_ns_crys_id].dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)), (InventoryFlag::Cargo, true, Some(&0.5))); });
+    let (rsb_id, bad_ins_s_id, bad_mut_s_id, clean_s_id) = (96_103_006_i64, 96_103_020_i64, 96_103_021_i64, 96_103_022_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(rsb_id, InventoryItemRecord { item_id: rsb_id, type_id: 99_290, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, ..Default::default() });
+        snap.items.insert(bad_ins_s_id, InventoryItemRecord { item_id: bad_ins_s_id, type_id: 29_011, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, insured_payout_isk: 100.0, ..Default::default() });
+        snap.items.insert(bad_mut_s_id, InventoryItemRecord { item_id: bad_mut_s_id, type_id: 29_011, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, source_mutaplasmid_id: Some(60_003), ..Default::default() });
+        snap.items.insert(clean_s_id, InventoryItemRecord { item_id: clean_s_id, type_id: 29_011, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default() });
+    });
+    for bad_s in [bad_ins_s_id, bad_mut_s_id] { assert_eq!(handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(rsb_id), PyRep::Integer(bad_s)]).unwrap_err().code, "InventoryError"); }
+    handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(rsb_id), PyRep::Integer(clean_s_id)]).expect("clean singleton script loads");
+    ctx.db.with_snapshot(|snap| { assert_eq!((snap.items[&clean_s_id].flag, snap.items[&clean_s_id].singleton), (InventoryFlag::MedSlot0, true)); });
 }
