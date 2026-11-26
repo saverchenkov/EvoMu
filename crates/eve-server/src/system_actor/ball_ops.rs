@@ -82,29 +82,33 @@ pub(crate) async fn call_actor_reply_with_deadline<T>(
 ) -> Result<T, String> {
     let (tx, rx) = oneshot::channel();
     let cmd = make_cmd(tx);
-    match tokio::time::timeout(timeout_dur, handle.cmd_sender().send(cmd)).await {
+    await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, rx).await
+}
+
+async fn await_actor_cmd_with_deadline<T>(
+    cmd_sender: &tokio::sync::mpsc::Sender<SystemCommand>,
+    solar_system_id: SolarSystemId,
+    label: &str,
+    timeout_dur: Duration,
+    cmd: SystemCommand,
+    rx: oneshot::Receiver<T>,
+) -> Result<T, String> {
+    match tokio::time::timeout(timeout_dur, cmd_sender.send(cmd)).await {
         Err(_) => {
             return Err(format!(
-                "system {} actor timed out queuing {label} after {}ms",
-                handle.solar_system_id,
+                "system {solar_system_id} actor timed out queuing {label} after {}ms",
                 timeout_dur.as_millis()
             ));
         }
-        Ok(Err(_)) => {
-            return Err(format!("system {} actor closed", handle.solar_system_id));
-        }
+        Ok(Err(_)) => return Err(format!("system {solar_system_id} actor closed")),
         Ok(Ok(())) => {}
     }
     match tokio::time::timeout(timeout_dur, rx).await {
         Err(_) => Err(format!(
-            "system {} actor timed out awaiting {label} after {}ms",
-            handle.solar_system_id,
+            "system {solar_system_id} actor timed out awaiting {label} after {}ms",
             timeout_dur.as_millis()
         )),
-        Ok(Err(_)) => Err(format!(
-            "system {} actor dropped {label} reply",
-            handle.solar_system_id
-        )),
+        Ok(Err(_)) => Err(format!("system {solar_system_id} actor dropped {label} reply")),
         Ok(Ok(reply)) => Ok(reply),
     }
 }
@@ -202,7 +206,7 @@ fn run_direct_ball_op_on_current_thread<R>(
     out
 }
 
-pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
+pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T: Send + 'static>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
@@ -223,31 +227,44 @@ pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
                     direct_fn(ctx, payload)
                 }))
             }
-            _ => tokio::task::block_in_place(|| {
-                rt_handle.block_on(call_actor_reply_with_deadline(
-                    handle,
-                    label,
-                    timeout_dur,
-                    |reply| make_cmd(payload, reply),
-                ))
-            }),
+            _ => {
+                // Isolate sync waiting from Tokio's thread-local `CURRENT_PARKER` (no nested `block_on`).
+                let (reply_tx, reply_rx) = oneshot::channel::<T>();
+                let cmd = make_cmd(payload, reply_tx);
+                let cmd_sender = handle.cmd_sender().clone();
+                let sys_id = handle.solar_system_id;
+                let label_owned = label.to_owned();
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<T, String>>(1);
+                rt_handle.spawn(async move {
+                    let res = await_actor_cmd_with_deadline(&cmd_sender, sys_id, &label_owned, timeout_dur, cmd, reply_rx).await;
+                    let _ = done_tx.send(res);
+                });
+                let wait_dur = timeout_dur.saturating_mul(2).saturating_add(Duration::from_secs(1));
+                match tokio::task::block_in_place(|| done_rx.recv_timeout(wait_dur)) {
+                    Ok(res) => res,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                        "system {sys_id} actor timed out awaiting {label} sync reply after {}ms",
+                        wait_dur.as_millis()
+                    )),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(format!("system {sys_id} actor task dropped {label} sync reply channel"))
+                    }
+                }
+            }
         },
         Err(_) => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
                 .map_err(|e| format!("failed to build transient runtime for {label}: {e}"))?;
-            rt.block_on(call_actor_reply_with_deadline(
-                handle,
-                label,
-                timeout_dur,
-                |reply| make_cmd(payload, reply),
-            ))
+            let (reply_tx, reply_rx) = oneshot::channel::<T>();
+            let cmd = make_cmd(payload, reply_tx);
+            rt.block_on(await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, reply_rx))
         }
     }
 }
 
-pub(in crate::system_actor) fn dispatch_actor_sync_with_deadline<P, T>(
+pub(in crate::system_actor) fn dispatch_actor_sync_with_deadline<P, T: Send + 'static>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
@@ -2269,5 +2286,55 @@ mod tests {
         assert!(!handle.is_return_warp(spawn_ship_id));
         assert_eq!(handle.warp_provenance(spawn_ship_id), None);
         assert!(!handle.view().is_pending_warp_finished(spawn_ship_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dispatch_actor_sync_never_steals_current_parker_wakeup_in_join() {
+        let (handle, mut cmd_rx) = make_test_handle(16);
+        let actor_task = tokio::spawn(async move {
+            let mut pending_b: Option<oneshot::Sender<Result<bool, String>>> = None;
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SystemCommand::SetBallTypeId { reply, .. } => pending_b = Some(reply),
+                    SystemCommand::ApplyNpcRemoteRepairs { peer_ids, reply, .. } => {
+                        if let Some(b_reply) = pending_b.take() {
+                            // Wake branch B first while branch A blocks in dispatch_actor_sync.
+                            let _ = b_reply.send(Ok(true));
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        let _ = reply.send(Ok(peer_ids[0] as usize));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for i in 0..20_i64 {
+                let target_id = 500_000 + i;
+                let branch_a = async {
+                    tokio::task::yield_now().await; // Poll B first on poll 2 via Rotator<2>.
+                    dispatch_actor_sync_reply_with_deadline(
+                        &handle, "ProbeSyncNoParkerSteal", Duration::from_secs(2), vec![target_id],
+                        |peer_ids, reply| SystemCommand::ApplyNpcRemoteRepairs {
+                            peer_ids, shield_rep: 0.0, armor_rep: 0.0, reply,
+                        },
+                        |_, _| panic!("MultiThread runtime must not use direct_fn"),
+                    )
+                };
+                let branch_b = call_actor_reply_with_deadline(
+                    &handle, "ProbeDelayedBranchB", Duration::from_secs(2),
+                    |reply| SystemCommand::SetBallTypeId { ball_id: target_id, type_id: 587, reply },
+                );
+                let (a_res, b_res) = tokio::join!(branch_a, branch_b);
+                assert_eq!(a_res.expect("branch A sync reply"), Ok(target_id as usize));
+                assert_eq!(b_res.expect("branch B async reply"), Ok(true));
+            }
+        })
+        .await
+        .expect("tokio::join! must complete without CURRENT_PARKER lost-wakeup deadlock");
+
+        drop(handle);
+        actor_task.await.unwrap();
     }
 }

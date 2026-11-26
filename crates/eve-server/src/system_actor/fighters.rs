@@ -1334,6 +1334,9 @@ impl SystemHandle {
     }
 
     pub async fn flush_fighter_checkpoint(&self) -> Result<usize, String> {
+        if self.fighter_ctx.dirty_stamp.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return Ok(0);
+        }
         let Some(snap) = ball_ops::call_actor_reply_with_deadline(
             self, "FlushFighterCheckpoint", ball_ops::ACTOR_CMD_TIMEOUT,
             |reply| SystemCommand::FlushFighterCheckpoint { reply },
@@ -1342,6 +1345,9 @@ impl SystemHandle {
     }
 
     pub fn flush_fighter_checkpoint_sync(&self) -> Result<usize, String> {
+        if self.fighter_ctx.dirty_stamp.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return Ok(0);
+        }
         let Some(snap) = ball_ops::dispatch_actor_sync_reply_with_deadline(
             self, "FlushFighterCheckpoint", ball_ops::ACTOR_CMD_TIMEOUT, (),
             |_, reply| SystemCommand::FlushFighterCheckpoint { reply },

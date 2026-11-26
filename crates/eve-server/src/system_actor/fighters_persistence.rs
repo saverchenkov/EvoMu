@@ -1140,17 +1140,8 @@ impl SystemRegistry {
         Err(FighterActorError::plain("SolarSystemUnavailable", format!("Exceeded lifecycle transition retries on system {solar_system_id}")))
     }
 
-    /// Flushes `KIND_FIGHTERS` checkpoints to SQLite for `solar_system_id` only when
-    /// `fighters_dirty` is set, serialized per system with `(lifecycle_gen, fighters_rev)` guards.
-    pub fn flush_system_fighter_checkpoint_sync(&self, solar_system_id: SolarSystemId) -> usize {
-        let Some(handle) = self.get_handle(solar_system_id) else {
-            return 0;
-        };
-        if let Err(err) = self.ensure_live_fighters_hydrated_sync(solar_system_id, &handle) {
-            tracing::warn!(solar_system_id, error = %err, "Deferring fighter checkpoint flush until hydration succeeds");
-            return 0;
-        }
-        match handle.flush_fighter_checkpoint_sync() {
+    fn finish_fighter_checkpoint_flush(solar_system_id: SolarSystemId, res: Result<usize, String>) -> usize {
+        match res {
             Ok(n) => n,
             Err(err) => {
                 tracing::warn!(
@@ -1163,12 +1154,49 @@ impl SystemRegistry {
         }
     }
 
+    /// Flushes `KIND_FIGHTERS` checkpoints to SQLite for `solar_system_id` only when
+    /// `fighters_dirty` is set, serialized per system with `(lifecycle_gen, fighters_rev)` guards.
+    pub fn flush_system_fighter_checkpoint_sync(&self, solar_system_id: SolarSystemId) -> usize {
+        let Some(handle) = self.get_handle(solar_system_id) else {
+            return 0;
+        };
+        if let Err(err) = self.ensure_live_fighters_hydrated_sync(solar_system_id, &handle) {
+            tracing::warn!(solar_system_id, error = %err, "Deferring fighter checkpoint flush until hydration succeeds");
+            return 0;
+        }
+        Self::finish_fighter_checkpoint_flush(solar_system_id, handle.flush_fighter_checkpoint_sync())
+    }
+
+    /// Async counterpart to [`Self::flush_system_fighter_checkpoint_sync`] (`#1541` Track F2).
+    pub async fn flush_system_fighter_checkpoint_async(&self, solar_system_id: SolarSystemId) -> usize {
+        let Some(handle) = self.get_handle(solar_system_id) else {
+            return 0;
+        };
+        if let Err(err) = self.ensure_live_fighters_hydrated_async(solar_system_id, &handle).await {
+            tracing::warn!(solar_system_id, error = %err, "Deferring fighter checkpoint flush until hydration succeeds");
+            return 0;
+        }
+        if handle.fighter_ctx.dirty_stamp.load(Ordering::Acquire) == 0 {
+            return 0;
+        }
+        Self::finish_fighter_checkpoint_flush(solar_system_id, handle.flush_fighter_checkpoint().await)
+    }
+
     /// Flushes dirty `KIND_FIGHTERS` checkpoints across currently live system actors outside
     /// ballpark/actor/registry locks (`#1541` Track F2).
     pub fn flush_all_fighter_checkpoints_to_db(&self) -> usize {
         let mut total = 0usize;
         for (sys_id, _) in self.active_system_handles() {
             total += self.flush_system_fighter_checkpoint_sync(sys_id);
+        }
+        total
+    }
+
+    /// Async counterpart to [`Self::flush_all_fighter_checkpoints_to_db`] (`#1541` Track F2).
+    pub async fn flush_all_fighter_checkpoints_to_db_async(&self) -> usize {
+        let mut total = 0usize;
+        for (sys_id, _) in self.active_system_handles() {
+            total += self.flush_system_fighter_checkpoint_async(sys_id).await;
         }
         total
     }

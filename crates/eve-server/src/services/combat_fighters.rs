@@ -134,7 +134,7 @@ pub async fn apply_damage_to_fighter_squadron(
     }
 
     if wiped_out || lost > 0 {
-        ctx.systems.flush_system_fighter_checkpoint_sync(solar_system_id);
+        ctx.systems.flush_system_fighter_checkpoint_async(solar_system_id).await;
     }
 
     (lost, after_size, wiped_out)
@@ -321,17 +321,17 @@ pub async fn handle_fighters(
         let mut flushed_sys = None;
         if let Some(ship_id) = session.ship_id.or(session.structure_id) {
             let sys_id = resolve_fighter_ship_system_id(ctx, session, ship_id);
-            ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+            ctx.systems.flush_system_fighter_checkpoint_async(sys_id).await;
             flushed_sys = Some(sys_id);
         } else if let Some(sys_id) = session
             .solar_system_id
             .filter(|&s| (30_000_000..40_000_000).contains(&s))
         {
-            ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+            ctx.systems.flush_system_fighter_checkpoint_async(sys_id).await;
             flushed_sys = Some(sys_id);
         }
         if flushed_sys.is_none() {
-            let _ = ctx.systems.flush_all_fighter_checkpoints_to_db();
+            let _ = ctx.systems.flush_all_fighter_checkpoints_to_db_async().await;
         }
         ctx.persist_server_runtime_to_db();
     }
