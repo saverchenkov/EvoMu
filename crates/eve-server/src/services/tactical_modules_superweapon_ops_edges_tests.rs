@@ -2569,6 +2569,6 @@ async fn scan_probe_launcher_skips_bpc_and_courier_loaded_probes() {
     });
     if let Ok(mut probes) = ctx.active_scanner_probes.write() {
         probes.retain(|_, p| p.owner_char_id != char_id);
-    }
+    };
 }
 
