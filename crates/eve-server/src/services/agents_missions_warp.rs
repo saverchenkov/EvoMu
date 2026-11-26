@@ -20,7 +20,8 @@ fn splitmix64_hash(mut x: u64) -> u64 {
 ///
 /// Anchors off the system's first station (or `DVec3::ZERO`) and offsets by a SplitMix64-derived
 /// vector quantized onto 500 km cells spanning `+/- 50,000 km` outside station undock grids
-/// (`>= 5,000,000 m` per axis), so distinct `(mission_sys_id, instance_id)` sites never collide.
+/// (`>= 5,000,000 m` per axis), so distinct `(mission_sys_id, instance_id)` sites hash
+/// uniformly across `182^3` cells with negligible collision probability.
 pub(crate) fn mission_site_origin_for_instance(
     ctx: &ServerContext,
     mission_sys_id: u32,
@@ -48,6 +49,92 @@ pub(crate) fn mission_site_origin_for_instance(
     DVec3::new(pos.x.round(), pos.y.round(), pos.z.round())
 }
 
+fn validate_mission_bookmark_origin_in_snap(
+    snap: &WorldStateSnapshot,
+    session: Option<&SessionState>,
+    char_id: i64,
+    bid: i64,
+    sys_id: u32,
+    now_unix: u64,
+) -> Result<Option<DVec3>, BridgeRpcError> {
+    if crate::services::fleet_social::is_bookmark_expired_in_snap(snap, bid, now_unix) {
+        return Ok(None);
+    }
+    let Some(bm) = snap.bookmarks.get(&bid) else {
+        return Ok(None);
+    };
+    if bm.solar_system_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH {
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::DunBlacklistCannotWarp,
+        ));
+    }
+    let owner_session_storage;
+    let owner_sess = match session {
+        Some(s) => s,
+        None => {
+            owner_session_storage = {
+                let mut s = SessionState::new(0);
+                s.character_id = Some(char_id);
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    s.corporation_id = Some(ch.corporation_id);
+                    s.alliance_id = ch.alliance_id;
+                }
+                s
+            };
+            &owner_session_storage
+        }
+    };
+    Ok((can_use_bookmark_in_snap(snap, owner_sess, char_id, bm)
+        && bm.solar_system_id == sys_id
+        && bm.item_id.is_none()
+        && bm.x.is_finite()
+        && bm.y.is_finite()
+        && bm.z.is_finite())
+    .then(|| DVec3::new(bm.x, bm.y, bm.z)))
+}
+
+/// Canonical mission pocket-origin resolver shared across warp origin lookup, warp-entry
+/// materialization, and downtime wave entry (`site_origin_f64` -> validated non-expired ACL
+/// `bookmark_id` -> optional `mission_site_origin_for_instance` fallback).
+pub(crate) fn resolve_mission_pocket_origin_in_snap(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    session: Option<&SessionState>,
+    mission: &MissionInstance,
+    sys_id: u32,
+    now_unix: u64,
+    allow_site_fallback: bool,
+) -> Result<Option<DVec3>, BridgeRpcError> {
+    if sys_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH {
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::DunBlacklistCannotWarp,
+        ));
+    }
+    let site_origin = mission
+        .site_origin_f64()
+        .map(DVec3::from)
+        .filter(|pos| pos.is_finite());
+    let bm_origin = match mission.bookmark_id {
+        Some(bid) => validate_mission_bookmark_origin_in_snap(
+            snap,
+            session,
+            mission.character_id,
+            bid,
+            sys_id,
+            now_unix,
+        )?,
+        None => None,
+    };
+    let mut origin = site_origin.or(bm_origin);
+    if origin.is_none() && allow_site_fallback {
+        let fallback = mission_site_origin_for_instance(ctx, sys_id, mission.instance_id);
+        if fallback.is_finite() {
+            origin = Some(fallback);
+        }
+    }
+    Ok(origin)
+}
+
 /// Resolves an accepted mission target (`template_id` or `agent_id`) in `sys_id` to its canonical
 /// pocket origin (`site_origin_f64` -> valid non-expired ACL `bookmark_id` -> `mission_site_origin_for_instance`),
 /// enforcing the Zarzakh dungeon warp ban matching `mission_dungeon_warp_target`.
@@ -59,9 +146,8 @@ pub(crate) fn resolve_accepted_mission_warp_origin(
     target_id: i64,
 ) -> Result<Option<DVec3>, BridgeRpcError> {
     let now_unix = ctx.now_unix();
-    let matched = ctx
-        .db
-        .with_snapshot(|snap| -> Result<Option<(i64, Option<DVec3>)>, BridgeRpcError> {
+    ctx.db
+        .with_snapshot(|snap| -> Result<Option<DVec3>, BridgeRpcError> {
             let mut missions: Vec<&MissionInstance> = snap
                 .missions
                 .iter_by_character(char_id)
@@ -75,40 +161,8 @@ pub(crate) fn resolve_accepted_mission_warp_origin(
             let Some(m) = missions.into_iter().next() else {
                 return Ok(None);
             };
-            if sys_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH {
-                return Err(BridgeRpcError::from_user_key(
-                    eve_proto::UserErrorKey::DunBlacklistCannotWarp,
-                ));
-            }
-            let mut bm_origin = None;
-            if let Some(bid) = m.bookmark_id {
-                if !crate::services::fleet_social::is_bookmark_expired_in_snap(snap, bid, now_unix) {
-                    if let Some(bm) = snap.bookmarks.get(&bid) {
-                        if bm.solar_system_id
-                            == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH
-                        {
-                            return Err(BridgeRpcError::from_user_key(
-                                eve_proto::UserErrorKey::DunBlacklistCannotWarp,
-                            ));
-                        }
-                        if can_use_bookmark_in_snap(snap, session, char_id, bm)
-                            && bm.solar_system_id == sys_id
-                            && bm.item_id.is_none()
-                            && bm.x.is_finite()
-                            && bm.y.is_finite()
-                            && bm.z.is_finite()
-                        {
-                            bm_origin = Some(DVec3::new(bm.x, bm.y, bm.z));
-                        }
-                    }
-                }
-            }
-            let origin = m.site_origin_f64().map(DVec3::from).or(bm_origin);
-            Ok(Some((m.instance_id, origin)))
-        })?;
-    Ok(matched.map(|(inst_id, explicit_origin)| {
-        explicit_origin.unwrap_or_else(|| mission_site_origin_for_instance(ctx, sys_id, inst_id))
-    }))
+            resolve_mission_pocket_origin_in_snap(ctx, snap, Some(session), m, sys_id, now_unix, true)
+        })
 }
 
 /// Matches the targeted mission on a `beyonce.CmdWarpToStuff` / fleet warp and materializes both
@@ -122,6 +176,10 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
     target_id: i64,
     dest_pos: DVec3,
 ) {
+    if !dest_pos.is_finite() {
+        return;
+    }
+    let now_unix = ctx.now_unix();
     let is_mission_stuff = matches!(stuff_type, "mission" | "dungeon" | "location");
     let matched_mission = ctx.db.with_snapshot(|snap| {
         let mut by_proximity = None;
@@ -131,23 +189,18 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
             }
             let explicit_mission_match = is_mission_stuff
                 && (target_id == i64::from(m.template_id) || target_id == m.agent_id);
-            let Some(pocket_pos) = m
-                .site_origin_f64()
-                .map(DVec3::from)
-                .or_else(|| {
-                    m.bookmark_id
-                        .and_then(|bid| snap.bookmarks.get(&bid))
-                        .filter(|bm| bm.solar_system_id == sys_id)
-                        .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
-                })
-                .or_else(|| {
-                    explicit_mission_match
-                        .then(|| mission_site_origin_for_instance(ctx, sys_id, m.instance_id))
-                })
-            else {
+            let Ok(Some(pocket_pos)) = resolve_mission_pocket_origin_in_snap(
+                ctx,
+                snap,
+                None,
+                m,
+                sys_id,
+                now_unix,
+                explicit_mission_match,
+            ) else {
                 continue;
             };
-            if dest_pos.distance(pocket_pos) > 200_000.0 {
+            if !pocket_pos.is_finite() || dest_pos.distance(pocket_pos) > 200_000.0 {
                 continue;
             }
             if (stuff_type == "bookmark" && m.bookmark_id == Some(target_id))
@@ -744,27 +797,17 @@ fn mission_dungeon_warp_target(
         let Some(bmid) = target_bmid else {
             return Ok(None);
         };
-        if crate::services::fleet_social::is_bookmark_expired_in_snap(snap, bmid, now_unix) {
-            return Ok(None);
-        }
-        let Some(bm) = snap.bookmarks.get(&bmid) else {
-            return Ok(None);
-        };
-        if bm.solar_system_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH {
-            return Err(BridgeRpcError::from_user_key(
-                eve_proto::UserErrorKey::DunBlacklistCannotWarp,
-            ));
-        }
-        Ok((can_use_bookmark_in_snap(snap, session, char_id, bm)
-            && bm.solar_system_id == mission_sys_id
-            && bm.item_id.is_none()
-            && bm.x.is_finite()
-            && bm.y.is_finite()
-            && bm.z.is_finite())
-        .then(|| DVec3::new(bm.x, bm.y, bm.z)))
+        validate_mission_bookmark_origin_in_snap(
+            snap,
+            Some(session),
+            char_id,
+            bmid,
+            mission_sys_id,
+            now_unix,
+        )
     })?;
     let anchor_pos = bm_pos
-        .or_else(|| mission.site_origin_f64().map(DVec3::from))
+        .or_else(|| mission.site_origin_f64().map(DVec3::from).filter(|pos| pos.is_finite()))
         .unwrap_or_else(|| {
             mission_site_origin_for_instance(ctx, mission_sys_id, mission.instance_id)
         });

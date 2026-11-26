@@ -166,7 +166,7 @@ async fn handle_agent_warp_to_location(
         ));
     }
     let is_subwarp_goto = parsed.is_goto && warp_dist_m < MIN_AGENT_WARP_DISTANCE_M;
-    let (leave_entries, landing_positions): (Vec<(i64, [f64; 3], [f64; 3])>, Vec<glam::DVec3>) =
+    let (leave_entries, landing_positions): (Vec<(i64, [f64; 3], [f64; 3])>, Vec<(i64, glam::DVec3)>) =
         if is_subwarp_goto {
         crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
         if matches!(current_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
@@ -204,7 +204,7 @@ async fn handle_agent_warp_to_location(
             raw_dest_pos,
         )
         .await?;
-        (Vec::new(), vec![raw_dest_pos])
+        (Vec::new(), vec![(char_id, raw_dest_pos)])
     } else if parsed.fleet {
         let mut fleet_kwargs = HashMap::new();
         for key in ["formationID", "formationSpacing", "formationSize"] {
@@ -320,7 +320,7 @@ async fn handle_agent_warp_to_location(
                 current_ball.position.to_array(),
                 adjusted_dest.to_array(),
             )],
-            vec![adjusted_dest],
+            vec![(char_id, adjusted_dest)],
         )
     };
 
@@ -332,7 +332,7 @@ async fn handle_agent_warp_to_location(
         } => {
             if landing_positions
                 .iter()
-                .any(|pos| pos.distance(anchor_pos) <= 200_000.0)
+                .any(|&(_, pos)| pos.distance(anchor_pos) <= 200_000.0)
             {
                 reconcile_stale_mission_npcs(ctx, &sys_handle, char_id, mission_id);
                 let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
@@ -353,18 +353,16 @@ async fn handle_agent_warp_to_location(
             }
         }
         WarpTarget::Bookmark { bookmark_id, .. } => {
-            for pos in &landing_positions {
-                agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
-                    ctx,
-                    &sys_handle,
-                    char_id,
-                    sys_id,
-                    "bookmark",
-                    bookmark_id,
-                    *pos,
-                )
-                .await;
-            }
+            agents_missions_warp::materialize_mission_pocket_on_fleet_warp(
+                ctx,
+                &sys_handle,
+                char_id,
+                sys_id,
+                "bookmark",
+                bookmark_id,
+                &landing_positions,
+            )
+            .await;
         }
         WarpTarget::StationOrCelestial { .. }
         | WarpTarget::AgentInSpace { .. }
@@ -427,7 +425,7 @@ pub(super) fn reconcile_stale_mission_npcs(
     }
 }
 
-fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<glam::DVec3>) {
+fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<(i64, glam::DVec3)>) {
     let PyRep::KeyVal(kv) = fleet_reply else {
         return (0, Vec::new());
     };
@@ -436,9 +434,11 @@ fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<glam::DVec3>) {
     if let Some(PyRep::List(entries)) = kv.get("landingPositions") {
         for entry in entries {
             if let PyRep::Tuple(elems) = entry {
-                if let [_, x, y, z] = elems.as_slice() {
-                    if let (Some(x), Some(y), Some(z)) = (x.as_f64(), y.as_f64(), z.as_f64()) {
-                        positions.push(glam::DVec3::new(x, y, z));
+                if let [cid, x, y, z] = elems.as_slice() {
+                    if let (Some(member_char_id), Some(x), Some(y), Some(z)) =
+                        (cid.as_i64(), x.as_f64(), y.as_f64(), z.as_f64())
+                    {
+                        positions.push((member_char_id, glam::DVec3::new(x, y, z)));
                     }
                 }
             }

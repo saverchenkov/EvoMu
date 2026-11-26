@@ -934,7 +934,7 @@ async fn history_lookup_recovers_career_plausible_missions_and_completed_courier
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_respawn() {
+async fn cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_respawn() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
@@ -1074,10 +1074,10 @@ async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_re
         cs.capacitor = 250.0;
         cs.max_capacitor = 250.0;
     });
-    let bf1_bubble_id = 995_199_i64;
+    let stop_bubble_id = 995_199_i64;
     handle
         .add_warp_bubble(
-            bf1_bubble_id,
+            stop_bubble_id,
             pocket_pos - glam::DVec3::new(500_000.0, 0.0, 0.0),
             20_000.0,
         )
@@ -1113,7 +1113,7 @@ async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_re
             "bubble-dragged CmdWarpToStuff bookmark warp (>200km from pocket) must not materialize NPCs"
         );
     });
-    assert!(handle.remove_warp_bubble(bf1_bubble_id).await.unwrap());
+    assert!(handle.remove_warp_bubble(stop_bubble_id).await.unwrap());
 
     // 3. Full-cap 100 km range warp to bookmark must materialize NPCs around canonical `pocket_pos` (NOT 100 km dest_pos).
     let _ = handle.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
@@ -1194,7 +1194,7 @@ async fn bf1_cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_re
 }
 
 #[tokio::test]
-async fn bf2_pocket_spawned_mission_npcs_preserve_sde_ewar_reps_and_uses_synthetic_false() {
+async fn pocket_spawned_mission_npcs_preserve_sde_ewar_reps_and_uses_synthetic_false() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let sys_id = 30_000_142_u32;
@@ -1269,7 +1269,7 @@ async fn bf2_pocket_spawned_mission_npcs_preserve_sde_ewar_reps_and_uses_synthet
 }
 
 #[tokio::test]
-async fn bf4_clamped_penalty_and_journal_expiry_penalties() {
+async fn clamped_penalty_and_journal_expiry_penalties() {
     let ctx = test_ctx();
     let clock = Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_400_000));
     ctx.set_clock(clock);
@@ -1424,7 +1424,7 @@ async fn bf4_clamped_penalty_and_journal_expiry_penalties() {
 }
 
 #[tokio::test]
-async fn own1_solo_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius() {
+async fn solo_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
@@ -1710,7 +1710,7 @@ async fn own1_solo_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius(
 }
 
 #[tokio::test]
-async fn own1_fleet_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius() {
+async fn fleet_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
     let mut jita_agents: Vec<i64> = ctx.sde.agents.keys().copied().collect();
@@ -1750,7 +1750,7 @@ async fn own1_fleet_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius
             let uid = 959_650 + idx as u64;
             let mut acc = template_acc.clone();
             acc.user_id = uid;
-            acc.username = format!("own1_fleet_{idx}");
+            acc.username = format!("fleet_warp_{idx}");
             snap.accounts.insert(acc.username.clone(), acc);
             snap.items.insert(
                 sid,
@@ -2080,7 +2080,7 @@ async fn own1_fleet_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius
 }
 
 #[tokio::test]
-async fn own_r3_cmd_warp_to_stuff_mission_dungeon_and_fleet_bookmark_materialize() {
+async fn cmd_warp_to_stuff_mission_dungeon_and_fleet_bookmark_materialize() {
     let ctx = test_ctx();
     let sys_id = 30_000_142_u32;
     let mut all_agents: Vec<i64> = ctx.sde.agents.keys().copied().collect();
@@ -2309,7 +2309,7 @@ async fn own_r3_cmd_warp_to_stuff_mission_dungeon_and_fleet_bookmark_materialize
             let uid = 959_850 + idx as u64;
             let mut acc = template_acc.clone();
             acc.user_id = uid;
-            acc.username = format!("own_r3_fleet_{idx}");
+            acc.username = format!("fleet_cmd_warp_{idx}");
             snap.accounts.insert(acc.username.clone(), acc);
             snap.items.insert(
                 sid,
@@ -2957,4 +2957,614 @@ async fn cmd_warp_to_stuff_short_stop_bubble_and_zarzakh_mission_origin_guards()
         .await
         .unwrap_err();
     assert_eq!(jita_zz_err.code, "DunBlacklistCannotWarp");
+}
+
+#[tokio::test]
+async fn cmd_warp_to_stuff_legacy_mission_bookmark_guards_and_downtime_nan_safety() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let char_id = 90_000_001_i64;
+    let other_char_id = 90_000_099_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let custom_origin = glam::DVec3::new(9.2e12, 1_000.0, 2_000.0);
+
+    let mut agents: Vec<i64> = ctx.sde.agents.keys().copied().collect();
+    agents.sort_unstable();
+    assert!(agents.len() >= 5);
+
+    let bm_expired = 995_901_i64;
+    let bm_foreign = 995_902_i64;
+    let bm_item = 995_903_i64;
+    let bm_wrong_sys = 995_904_i64;
+    let bm_item_mine = 995_905_i64;
+    let ast_item_id = 995_906_i64;
+
+    let mid_exp = 98_501_u32;
+    let mid_for = 98_502_u32;
+    let mid_item = 98_503_u32;
+    let mid_wrong_sys = 98_504_u32;
+    let mid_item_mine = 98_505_u32;
+
+    let handle_sys = ctx.systems.get_or_spawn(sys_id);
+    let mut ship_cs = ctx.build_type_combat_state(587);
+    ship_cs.capacitor = 250.0;
+    ship_cs.max_capacitor = 250.0;
+    handle_sys
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ship_cs,
+        )
+        .await
+        .unwrap();
+
+    let (inst_exp, inst_for, inst_item, inst_wrong_sys, inst_mine) = ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.bookmarks.insert(
+            bm_expired,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_expired,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Expired Legacy BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: None,
+                memo: "Expired".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmark_expiries.insert(bm_expired, now.saturating_sub(10));
+        snap.bookmarks.insert(
+            bm_foreign,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_foreign,
+                owner_id: other_char_id,
+                solar_system_id: sys_id,
+                label: "Foreign Legacy BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: None,
+                memo: "Private".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            bm_item,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_item,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Item Attached Legacy BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: Some(123_456),
+                memo: "Station Item".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            bm_wrong_sys,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_wrong_sys,
+                owner_id: char_id,
+                solar_system_id: sys_id + 1,
+                label: "Wrong System Legacy BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: None,
+                memo: "Other System".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            bm_item_mine,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_item_mine,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Item Attached Mining BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: Some(123_457),
+                memo: "Station Item".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.asteroids.insert(
+            ast_item_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: ast_item_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (custom_origin.x, custom_origin.y, custom_origin.z),
+                radius: 50.0,
+            },
+        );
+
+        for (idx, (mid, bmid)) in [
+            (mid_exp, bm_expired),
+            (mid_for, bm_foreign),
+            (mid_item, bm_item),
+            (mid_wrong_sys, bm_wrong_sys),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, mid, agents[idx], sys_id)
+                    .bookmark_id(Some(bmid))
+                    .npcs_remaining(2)
+                    .initial_wave_count(Some(2))
+                    .initial_wave_types(Some(vec![34_155])),
+            );
+        }
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid_item_mine, agents[4], sys_id)
+                .bookmark_id(Some(bm_item_mine))
+                .asteroid_entity_id(Some(ast_item_id))
+                .required_delivery_type_id(Some(1230))
+                .required_delivery_qty(100),
+        );
+        snap.missions
+            .update_by_character_template(char_id, mid_item_mine, |m| {
+                m.kind = eve_db::MissionKind::Mining;
+            })
+            .unwrap();
+
+        (
+            snap.missions.get_by_character_template(char_id, mid_exp).unwrap().instance_id,
+            snap.missions.get_by_character_template(char_id, mid_for).unwrap().instance_id,
+            snap.missions.get_by_character_template(char_id, mid_item).unwrap().instance_id,
+            snap.missions.get_by_character_template(char_id, mid_wrong_sys).unwrap().instance_id,
+            snap.missions.get_by_character_template(char_id, mid_item_mine).unwrap().instance_id,
+        )
+    });
+
+    // In-memory NaN bookmark check (WorldRepository rejects non-finite DB writes, so test canonical
+    // helper directly on a corrupted in-memory snapshot as well as NaN inputs).
+    let mut nan_snap = ctx.db.with_snapshot(|s| s.clone());
+    if let Some(bm) = nan_snap.bookmarks.get_mut(&bm_item) {
+        bm.item_id = None;
+        bm.x = f64::NAN;
+    }
+    let nan_mission = nan_snap.missions.get_by_character_template(char_id, mid_item).unwrap().clone();
+    assert_eq!(
+        agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+            &ctx,
+            &nan_snap,
+            None,
+            &nan_mission,
+            sys_id,
+            now,
+            false,
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+            &ctx,
+            &nan_snap,
+            None,
+            &nan_mission,
+            sys_id,
+            now,
+            true,
+        )
+        .unwrap(),
+        Some(agents_missions_warp::mission_site_origin_for_instance(
+            &ctx,
+            sys_id,
+            inst_item,
+        ))
+    );
+
+    // Unrelated proximity/downtime entry near `custom_origin` or with `NaN` must NOT trigger spawns
+    // on expired/foreign/item-attached/wrong-system legacy mission bookmarks.
+    assert_eq!(
+        crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
+            &ctx,
+            char_id,
+            sys_id,
+            glam::DVec3::NAN,
+        ),
+        0
+    );
+    assert_eq!(
+        crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
+            &ctx,
+            char_id,
+            sys_id,
+            custom_origin,
+        ),
+        0
+    );
+    agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+        &ctx,
+        &handle_sys,
+        char_id,
+        sys_id,
+        "celestial",
+        999_999,
+        glam::DVec3::NAN,
+    )
+    .await;
+    agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+        &ctx,
+        &handle_sys,
+        char_id,
+        sys_id,
+        "celestial",
+        999_999,
+        custom_origin,
+    )
+    .await;
+    ctx.db.with_snapshot(|snap| {
+        for mid in [mid_exp, mid_for, mid_item, mid_wrong_sys] {
+            assert!(
+                mission_fixture::get(snap, char_id, mid).unwrap().spawned_npc_ball_ids.is_empty(),
+                "proximity warp at rejected bookmark coords must not materialize mission {mid}"
+            );
+        }
+    });
+    assert!(handle_sys.get_ball_snapshot(ast_item_id).await.unwrap().is_none());
+
+    // Live CmdWarpToStuff("mission", mid) for all 5 legacy cases falls back to
+    // mission_site_origin_for_instance AND materializes NPCs / asteroid there.
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+    for (mid, inst_id, is_enc) in [
+        (mid_exp, inst_exp, true),
+        (mid_for, inst_for, true),
+        (mid_item, inst_item, true),
+        (mid_wrong_sys, inst_wrong_sys, true),
+        (mid_item_mine, inst_mine, false),
+    ] {
+        let _ = handle_sys.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+        let _ = handle_sys.set_ball_position(ship_id, glam::DVec3::ZERO).await;
+        handle_sys.try_update_combat_state(ship_id, |cs| {
+            cs.capacitor = 250.0;
+            cs.max_capacitor = 250.0;
+        });
+        let expected_origin = agents_missions_warp::mission_site_origin_for_instance(&ctx, sys_id, inst_id);
+        let _ = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                None,
+                "CmdWarpToStuff",
+                &[PyRep::String("mission".into()), PyRep::Integer(i64::from(mid))],
+                &kw,
+                None,
+            )
+            .await
+            .expect("CmdWarpToStuff mission fallback succeeds");
+        match handle_sys.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode {
+            eve_destiny::MovementMode::Warp { destination, .. } => {
+                assert!(
+                    destination.distance(expected_origin) <= 1.0,
+                    "ship must warp to canonical fallback for mission {mid}, got {destination:?} vs {expected_origin:?}"
+                );
+            }
+            other => panic!("expected Warp mode for mission {mid}, got {other:?}"),
+        }
+        if is_enc {
+            let bids = ctx.db.with_snapshot(|snap| {
+                mission_fixture::get(snap, char_id, mid).unwrap().spawned_npc_ball_ids
+            });
+            assert_eq!(bids.len(), 2, "legacy mission {mid} must materialize 2 NPCs");
+            for &bid in &bids {
+                let (_, b) = handle_sys.get_ball_snapshot(bid).await.unwrap().expect("npc ball spawned");
+                assert!(b.position.is_finite());
+                assert!(
+                    (b.position.distance(expected_origin) - 4_500.0).abs() < 1.0,
+                    "NPC {bid} for mission {mid} must spawn around canonical fallback"
+                );
+            }
+        } else {
+            assert!(
+                handle_sys.get_ball_snapshot(ast_item_id).await.unwrap().is_some(),
+                "legacy mining mission {mid} must materialize asteroid on fallback warp"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn agent_warp_to_location_fleet_bookmark_materializes_wingmate_pocket() {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let mut agents: Vec<i64> = ctx.sde.agents.keys().copied().collect();
+    agents.sort_unstable();
+    assert!(agents.len() >= 2);
+
+    let corp_id = 98_959_001_i64;
+    let folder_id = 959_910_i64;
+    let char_fc = 959_901_i64;
+    let char_wing = 959_902_i64;
+    let ship_fc = 959_911_i64;
+    let ship_wing = 959_912_i64;
+    let fleet_id = 959_920_i64;
+    let bm_wing_enc = 959_930_i64;
+    let bm_wing_mine = 959_931_i64;
+    let ast_wing_id = 959_932_i64;
+    let mid_wing_enc = 98_510_u32;
+    let mid_wing_mine = 98_511_u32;
+    let pos_wing_enc = glam::DVec3::new(9.5e12, 0.0, 0.0);
+    let pos_wing_mine = glam::DVec3::new(9.8e12, 0.0, 0.0);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let template_acc = snap.accounts.values().next().unwrap().clone();
+        let template_ch = snap.characters.values().next().unwrap().clone();
+        for (idx, (cid, sid)) in [(char_fc, ship_fc), (char_wing, ship_wing)].into_iter().enumerate() {
+            let uid = 959_950 + idx as u64;
+            let mut acc = template_acc.clone();
+            acc.user_id = uid;
+            acc.username = format!("wing_bm_fleet_{idx}");
+            snap.accounts.insert(acc.username.clone(), acc);
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: i64::from(sys_id),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let mut ch = template_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.corporation_id = corp_id;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+            mission_fixture::clear_character(snap, cid);
+        }
+        snap.bookmark_folders.insert(
+            folder_id,
+            eve_db::BookmarkFolderRecord {
+                folder_id,
+                owner_id: char_wing,
+                folder_name: "Wing Shared".into(),
+                is_shared: true,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folder_acls.insert(folder_id, vec![char_fc, char_wing]);
+        snap.bookmarks.insert(
+            bm_wing_enc,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_wing_enc,
+                owner_id: char_wing,
+                solar_system_id: sys_id,
+                label: "Wingmate Shared Encounter".into(),
+                x: pos_wing_enc.x,
+                y: pos_wing_enc.y,
+                z: pos_wing_enc.z,
+                item_id: None,
+                memo: "Wing Enc".into(),
+                folder_id: Some(folder_id),
+                is_shared: true,
+            },
+        );
+        snap.bookmarks.insert(
+            bm_wing_mine,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_wing_mine,
+                owner_id: char_wing,
+                solar_system_id: sys_id,
+                label: "Wingmate Shared Mining".into(),
+                x: pos_wing_mine.x,
+                y: pos_wing_mine.y,
+                z: pos_wing_mine.z,
+                item_id: None,
+                memo: "Wing Mine".into(),
+                folder_id: Some(folder_id),
+                is_shared: true,
+            },
+        );
+        snap.asteroids.insert(
+            ast_wing_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: ast_wing_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (pos_wing_mine.x + 8_000.0, pos_wing_mine.y, pos_wing_mine.z),
+                radius: 50.0,
+            },
+        );
+        // Only the wingmate holds missions; the FC holds zero missions.
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_wing, mid_wing_enc, agents[0], sys_id)
+                .bookmark_id(Some(bm_wing_enc))
+                .site_origin_m(Some([pos_wing_enc.x as i64, 0, 0]))
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_wing, mid_wing_mine, agents[1], sys_id)
+                .bookmark_id(Some(bm_wing_mine))
+                .site_origin_m(Some([pos_wing_mine.x as i64, 0, 0]))
+                .asteroid_entity_id(Some(ast_wing_id))
+                .required_delivery_type_id(Some(1230))
+                .required_delivery_qty(100),
+        );
+        snap.missions
+            .update_by_character_template(char_wing, mid_wing_mine, |m| {
+                m.kind = eve_db::MissionKind::Mining;
+            })
+            .unwrap();
+        let mut member_details = HashMap::new();
+        member_details.insert(
+            char_fc,
+            eve_db::FleetMemberRecord {
+                character_id: char_fc,
+                role: eve_db::FleetRole::FleetCommander,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        member_details.insert(
+            char_wing,
+            eve_db::FleetMemberRecord {
+                character_id: char_wing,
+                role: eve_db::FleetRole::SquadMember,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            fleet_id,
+            eve_db::FleetRecord {
+                fleet_id,
+                boss_id: char_fc,
+                members: vec![char_fc, char_wing],
+                member_details,
+                ..Default::default()
+            },
+        );
+    });
+
+    for (idx, (cid, sid, offset)) in [
+        (char_fc, ship_fc, glam::DVec3::ZERO),
+        (char_wing, ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut cs = ctx.build_type_combat_state(587);
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+        sys_handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: offset,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 2.0,
+                    mass: 1_067_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                cs,
+            )
+            .await
+            .unwrap();
+        ctx.db
+            .acquire_online_lock(959_950 + idx as u64, 959_970 + idx as u64, Some(cid), true, now)
+            .expect("online lock");
+    }
+
+    let mut fc_sess = docked_session(char_fc, sys_id, None);
+    fc_sess.user_id = Some(959_950);
+    fc_sess.session_id = 959_970;
+    fc_sess.corporation_id = Some(corp_id);
+    fc_sess.ship_id = Some(ship_fc);
+    fc_sess.fleet_id = Some(fleet_id);
+
+    for (bm_id, is_enc) in [(bm_wing_enc, true), (bm_wing_mine, false)] {
+        for (sid, offset) in [
+            (ship_fc, glam::DVec3::ZERO),
+            (ship_wing, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+        ] {
+            let _ = sys_handle.set_movement_mode(sid, eve_destiny::MovementMode::Stop).await;
+            let _ = sys_handle.set_ball_position(sid, offset).await;
+            sys_handle.try_update_combat_state(sid, |cs| {
+                cs.capacitor = 250.0;
+                cs.max_capacitor = 250.0;
+            });
+        }
+        let res = ctx
+            .dispatch_rpc(
+                &mut fc_sess,
+                "agentMgr",
+                None,
+                "WarpToLocation",
+                &[
+                    PyRep::String("bookmark".into()),
+                    PyRep::Integer(bm_id),
+                    PyRep::Real(0.0),
+                    PyRep::Bool(true),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .expect("agentMgr.WarpToLocation fleet bookmark succeeds");
+        assert_eq!(res, PyRep::Bool(true));
+        if is_enc {
+            let bids = ctx.db.with_snapshot(|snap| {
+                mission_fixture::get(snap, char_wing, mid_wing_enc)
+                    .unwrap()
+                    .spawned_npc_ball_ids
+            });
+            assert_eq!(
+                bids.len(),
+                2,
+                "agentMgr.WarpToLocation fleet bookmark must materialize wingmate's NPCs"
+            );
+            for &bid in &bids {
+                let (_, b) = sys_handle.get_ball_snapshot(bid).await.unwrap().expect("wingmate NPC ball spawned");
+                assert!((b.position.distance(pos_wing_enc) - 4_500.0).abs() < 1.0);
+            }
+        } else {
+            assert!(
+                sys_handle.get_ball_snapshot(ast_wing_id).await.unwrap().is_some(),
+                "agentMgr.WarpToLocation fleet bookmark must materialize wingmate's mining asteroid"
+            );
+        }
+    }
 }

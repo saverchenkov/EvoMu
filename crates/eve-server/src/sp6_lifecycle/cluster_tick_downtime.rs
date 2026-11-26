@@ -389,6 +389,10 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
     pocket_origin: DVec3,
     target_mission_id: Option<u32>,
 ) -> usize {
+    if !pocket_origin.is_finite() {
+        return 0;
+    }
+    let now_unix = ctx.now_unix();
     let default_npc_tid =
         crate::services::agents_missions::agents_missions_helpers::resolve_mission_npc_type(ctx)
             .max(10_019);
@@ -404,18 +408,35 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
             let Some((wave_count, wave_types)) = snap.missions.get(iid).and_then(|mission| {
                 let enc = mission.encounter()?;
                 let matches_target = match target_mission_id {
-                    Some(mid) => mission.template_id == mid,
+                    Some(mid) => {
+                        mission.template_id == mid
+                            && crate::services::agents_missions::agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+                                ctx,
+                                snap,
+                                None,
+                                mission,
+                                solar_system_id,
+                                now_unix,
+                                false,
+                            )
+                            .is_ok()
+                    }
                     None => {
-                        let known_origin = mission
-                            .site_origin_f64()
-                            .map(DVec3::from)
-                            .or_else(|| {
-                                mission
-                                    .bookmark_id
-                                    .and_then(|bmid| snap.bookmarks.get(&bmid))
-                                    .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
-                            });
-                        known_origin.is_none_or(|pos| pocket_origin.distance(pos) <= 200_000.0)
+                        let Ok(known_origin) =
+                            crate::services::agents_missions::agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+                                ctx,
+                                snap,
+                                None,
+                                mission,
+                                solar_system_id,
+                                now_unix,
+                                mission.site_origin_m.is_some() || mission.bookmark_id.is_some(),
+                            )
+                        else {
+                            return None;
+                        };
+                        known_origin
+                            .is_none_or(|pos| pos.is_finite() && pocket_origin.distance(pos) <= 200_000.0)
                     }
                 };
                 let needs_respawn = enc.awaiting_downtime_respawn
