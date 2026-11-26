@@ -2424,7 +2424,7 @@ async fn superweapon_fuel_skips_lower_id_bpc_and_consumes_valid_commodity() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn scan_probe_launcher_skips_bpc_and_courier_loaded_probes() {
-    use crate::services::space_docking_cloaking::space_probe_scanning::activate_scan_probe_launcher;
+    use crate::services::space_probe_scanning::activate_scan_probe_launcher;
 
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;

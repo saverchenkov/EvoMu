@@ -1445,15 +1445,15 @@ mod r6_standup_weapon_policy_tests {
             .await;
         let _ = sys_null.spawn_ball_with_meta(t_ball.clone(), t_cs.clone(), t_meta.clone()).await;
         let _ = sys_null
-            .set_target_locks(
+            .add_target_lock(
                 sid,
-                vec![TargetLock {
+                TargetLock {
                     target_id,
                     lock_time_ms: 1.0,
                     remaining_lock_ms: 0.0,
                     locked: true,
                     max_range_m: None,
-                }],
+                },
             )
             .await;
 
@@ -1542,15 +1542,15 @@ mod r6_standup_weapon_policy_tests {
             .spawn_ball_with_meta(pod_ball, t_cs, SlimItemMeta { owner_id: 0, char_id: None, corp_id: 98_999, ..t_meta })
             .await;
         let _ = sys_low
-            .set_target_locks(
+            .add_target_lock(
                 sid,
-                vec![TargetLock {
+                TargetLock {
                     target_id: pod_id,
                     lock_time_ms: 1.0,
                     remaining_lock_ms: 0.0,
                     locked: true,
                     max_range_m: None,
-                }],
+                },
             )
             .await;
         let err_safety = try_activate_standup_weapon(&ctx, &sys_low, char_id, sid, low_sys, gbl_id, Some(pod_id), &st_ball)
