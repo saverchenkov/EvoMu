@@ -275,6 +275,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) scrambled_balls_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) warp_stopped_at_actor: &'a Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(in crate::system_actor) active_module_ships_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub(in crate::system_actor) module_deactivation_hook_actor: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     pub(in crate::system_actor) deactivation_sink_hook: &'a Option<ModuleDeactivationHook>,
     pub(in crate::system_actor) target_lock_completed_hook_actor: &'a Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(in crate::system_actor) tidi_factor_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
@@ -1162,7 +1163,7 @@ impl SystemRegistry {
             self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
         let persist_gate = self.cooldown_persist_gate(solar_system_id);
         let (persist_epoch, initial_cooldowns, loaded_cooldowns_cleanly) = {
-            let _gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
             let persist_epoch = persist_gate.bump_epoch();
             if has_tidi_history {
                 persist_gate.mark_tidi_history();
@@ -1172,19 +1173,19 @@ impl SystemRegistry {
             let boot_loaded_opt = if db_read_safe {
                 db_opt.as_ref().and_then(|db| {
                     ewar_cooldowns::load_active_system_module_cooldowns_for_boot_nonblocking(
-                        db,
-                        solar_system_id,
-                        initial_tidi,
-                        has_tidi_history,
-                        0.0,
-                        0.0,
+                        db, solar_system_id, initial_tidi, has_tidi_history, 0.0, 0.0,
                     )
                 })
             } else {
                 None
             };
             let loaded_cleanly = boot_loaded_opt.is_some();
-            (persist_epoch, boot_loaded_opt.unwrap_or_default(), loaded_cleanly)
+            if let Some((_, ref raw_boot_map)) = boot_loaded_opt {
+                gate_guard.boot_raw_cooldowns = raw_boot_map.clone();
+            } else {
+                gate_guard.boot_raw_cooldowns.clear();
+            }
+            (persist_epoch, boot_loaded_opt.map(|(a, _)| a).unwrap_or_default(), loaded_cleanly)
         };
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
@@ -1393,6 +1394,9 @@ impl SystemRegistry {
             view_tx: Arc::clone(&view_tx),
             tidi_factor_bits: Arc::clone(&tidi_factor_bits),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            module_deactivation_post_unlock_hook: Arc::clone(&self.module_deactivation_post_unlock_hook),
+            cooldown_persist_gate: Arc::clone(&cooldown_persist_gate_actor),
+            cmd_tx_weak: Some(cmd_tx.downgrade()),
             event_tx: event_tx.clone(),
         };
         let (post_unlock_tx, post_unlock_worker_join) =
@@ -1508,6 +1512,7 @@ impl SystemRegistry {
                     scrambled_balls_actor: &scrambled_balls_actor,
                     warp_stopped_at_actor: &warp_stopped_at_actor,
                     active_module_ships_actor: &active_module_ships_actor,
+                    module_deactivation_hook_actor: &module_deactivation_hook_actor,
                     deactivation_sink_hook: &deactivation_sink_hook,
                     target_lock_completed_hook_actor: &target_lock_completed_hook_actor,
                     tidi_factor_bits_actor: &tidi_factor_bits_actor,

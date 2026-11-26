@@ -242,7 +242,7 @@ pub(in crate::system_actor) fn record_auto_reload_deadlines_from_actions(
     }
 }
 
-fn resolve_removed_cycle_char_id(
+pub(in crate::system_actor) fn resolve_removed_cycle_char_id(
     char_id_opt: Option<CharacterId>,
     ship_id: eve_destiny::BallId,
     db_opt: Option<&eve_db::WorldRepository>,

@@ -2229,4 +2229,48 @@ async fn hydrate_server_runtime_preserves_seq_zero_tidi_progress_and_dilated_coo
     assert!((c2.delay_s - (h2.sim_elapsed_secs() - c2.recorded_sys_sim_s) - 8.0).abs() < 1e-6);
     drop(h2);
     assert!(ctx.systems.stop_system(sys2).await && crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys2).get(&(s2, m2, tid)).is_some_and(|e| (e.delay_s - 8.0).abs() < 1e-6));
+
+    let (sys3, s3, m3, m_exp, t2) = (30_000_144_u32, 100_999_303_i64, 100_999_403_i64, 100_999_404_i64, t1 + 1_000);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t2)));
+    set_tidi_note(&ctx.db, sys3, "1.0", t2);
+    seed_ships_and_mods(&ctx.db, sys3, &[s3], &[]);
+    write_cooldown_rows(&ctx.db, sys3, &[((s3, m3, tid), cd_entry(t2 as f64, 20.0, sys3)), ((s3, m_exp, tid), cd_entry((t2 - 50) as f64, 5.0, sys3))], t2);
+    let h3 = ctx.systems.get_or_spawn(sys3);
+    assert!(h3.actor_state.read().unwrap().module_cooldown_checkpoint_seq == 0 && h3.module_reactivation_cooldown(&(s3, m_exp, tid)).is_none());
+    for _ in 0..10 { let _ = h3.step_manual(1.0).await.unwrap(); }
+    h3.set_tidi_factor_raw(0.2); set_tidi_note(&ctx.db, sys3, "0.2", t2);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t2 + 12)));
+    ctx.hydrate_server_runtime_from_db();
+    let c3 = h3.module_reactivation_cooldown(&(s3, m3, tid)).expect("1.0->0.2 slowdown must preserve 10s rem");
+    assert!((c3.delay_s - (h3.sim_elapsed_secs() - c3.recorded_sys_sim_s) - 10.0).abs() < 1e-6 && h3.module_reactivation_cooldown(&(s3, m_exp, tid)).is_none());
+    drop(h3);
+    assert!(ctx.systems.stop_system(sys3).await && crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys3).get(&(s3, m3, tid)).is_some_and(|e| (e.delay_s - 10.0).abs() < 1e-6));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_thread_wait_worker_deact_and_post_commit_remove_ball_finalize_cooldowns() {
+    let (ctx, sys, char_id, ship_id, target_id, cloak1, cloak2, tid) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 100_999_501_i64, 100_999_502_i64, 100_999_601_i64, 100_999_602_i64, 11_370_u32);
+    ctx.wire_module_deactivation_hook();
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) { (ch.station_id, ch.solar_system_id, ch.active_ship_id) = (None, sys, ship_id); }
+        s.module_active_states.insert(cloak1); s.module_active_states.insert(cloak2);
+    });
+    seed_ships_and_mods(&ctx.db, sys, &[ship_id], &[(cloak1, ship_id, tid), (cloak2, ship_id, tid)]);
+    let h = ctx.systems.get_or_spawn(sys);
+    spawn_ship_ball(&h, ship_id, char_id).await;
+    h.record_active_ewar_start(ship_id, cloak1, target_id, "electronic").await.unwrap();
+    ctx.pending_notifications.write().unwrap().clear();
+    crate::system_actor::post_unlock::run_wait_worker_deact_hook_for_test(&h, Arc::clone(&ctx.db), Arc::clone(&ctx.sde), ship_id, cloak1, tid, 25.0);
+    assert!(h.view().module_cooldowns.reactivation_cooldowns.get(&(ship_id, cloak1, tid)).is_some_and(|e| e.delay_s >= 24.0) && ctx.systems.ewar_starts_count() == 0);
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+
+    h.record_active_ewar_start(ship_id, cloak2, target_id, "electronic").await.unwrap();
+    h.add_module_cycle(crate::system_actor::ActiveModuleCycle { ship_id, module_id: cloak2, module_type_id: tid, effect_name: "cloaking".into(), reactivation_delay_s: 30.0, ..Default::default() }).await.unwrap();
+    ctx.pending_notifications.write().unwrap().clear();
+    crate::system_actor::post_unlock::apply_remove_ball_post_commit_for_test(&h, &ctx.db, &ctx.sde, ship_id);
+    assert!(!h.view().balls.contains_key(&ship_id) && ctx.systems.ewar_starts_count() == 0);
+    assert!(h.view().module_cooldowns.reactivation_cooldowns.get(&(ship_id, cloak2, tid)).is_some_and(|e| e.delay_s >= 29.0));
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys);
+    assert!(cold.contains_key(&(ship_id, cloak1, tid)) && cold.contains_key(&(ship_id, cloak2, tid)));
 }

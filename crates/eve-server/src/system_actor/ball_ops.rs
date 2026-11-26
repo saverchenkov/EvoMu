@@ -154,6 +154,7 @@ fn run_direct_ball_op_on_current_thread<R>(
             actor_st: &mut actor_st,
             ball_positions: &handle.ball_positions,
             scrambled_balls: &handle.scrambled_balls,
+            module_deactivation_hook: &handle.module_deactivation_hook,
             deactivation_sink_hook: super::ewar_cooldowns::active_sink_hook(
                 raw_hook.as_ref(),
                 post_hook.as_ref(),
@@ -882,6 +883,8 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
     ball_positions: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: &Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     module_deactivation_hook: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    cooldown_persist_gate: Option<&Arc<CooldownPersistGate>>,
+    tidi_factor: f64,
     post_unlock_ops: &mut super::post_unlock::PostUnlockOps,
     ball_id: BallId,
 ) -> Option<Ball> {
@@ -891,13 +894,14 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
         actor_st,
         ball_positions,
         scrambled_balls,
+        module_deactivation_hook,
         deactivation_sink_hook: module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone(),
         explicit_update_state_guards: None,
         ball_spawn_tokens: None,
         removed_checkpoint_ball: None,
         post_unlock_ops,
-        cooldown_persist_gate: None,
-        tidi_factor: 1.0,
+        cooldown_persist_gate,
+        tidi_factor,
     };
     remove_ball_in_actor(&mut ctx, ball_id, false)
 }

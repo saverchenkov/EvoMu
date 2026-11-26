@@ -24,18 +24,12 @@ fn test_registry_with_db() -> (Arc<SystemRegistry>, Arc<WorldRepository>, Arc<Sd
     (reg, db, sde)
 }
 
-fn test_tidi_reg(
-    base_unix: u64,
-    sys_opt: Option<(u32, f64)>,
-) -> (Arc<SystemRegistry>, Arc<WorldRepository>, Arc<VirtualServerClock>) {
-    let clock = Arc::new(VirtualServerClock::with_fixed_base(base_unix));
-    let repo = WorldRepository::new_empty();
+fn test_tidi_reg(base_unix: u64, sys_opt: Option<(u32, f64)>) -> (Arc<SystemRegistry>, Arc<WorldRepository>, Arc<VirtualServerClock>) {
+    let (clock, repo) = (Arc::new(VirtualServerClock::with_fixed_base(base_unix)), WorldRepository::new_empty());
     repo.set_clock(clock.clone());
     let db = Arc::new(repo);
     let reg = Arc::new(SystemRegistry::with_sde_and_db(test_sde(), Arc::clone(&db)));
-    if let Some((sys, tidi)) = sys_opt {
-        reg.cluster_nodes.write().unwrap().manual_tidi_overrides.insert(sys, tidi);
-    }
+    if let Some((sys, tidi)) = sys_opt { reg.cluster_nodes.write().unwrap().manual_tidi_overrides.insert(sys, tidi); }
     (reg, db, clock)
 }
 
@@ -50,10 +44,7 @@ fn seed_db_rows(db: &WorldRepository, sys_id: u32, rows: &[((i64, i64, u32), Mod
 
 async fn send_rec(h: &SystemHandle, key: (i64, i64, u32), now: f64, delay_s: f64) -> ModuleCooldownPersistPayload {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    h.cmd_sender().send(SystemCommand::RecordModuleCooldown {
-        ship_id: key.0, module_id: key.1, module_type_id: key.2,
-        now_unix_f64: now, delay_s, tidi_factor: 1.0, has_tidi_history: false, reply: tx,
-    }).await.expect("send record");
+    h.cmd_sender().send(SystemCommand::RecordModuleCooldown { ship_id: key.0, module_id: key.1, module_type_id: key.2, now_unix_f64: now, delay_s, tidi_factor: 1.0, has_tidi_history: false, reply: tx }).await.expect("send record");
     rx.await.expect("rx").expect("record ok")
 }
 
@@ -63,26 +54,18 @@ async fn send_rm(h: &SystemHandle, key: (i64, i64, u32)) -> Option<ModuleCooldow
     rx.await.expect("rx").expect("remove ok")
 }
 
-async fn step_n(h: &SystemHandle, count: usize) {
-    for _ in 0..count { let _ = h.step_manual(1.0).await.unwrap(); }
-}
+async fn step_n(h: &SystemHandle, count: usize) { for _ in 0..count { let _ = h.step_manual(1.0).await.unwrap(); } }
 
 #[tokio::test]
 async fn ewar_state_is_actor_scoped_and_cleared_on_stop_restart() {
     let (reg, _db, sde) = test_registry_with_db();
     let (jita, amarr) = (30_000_142_u32, 30_002_187_u32);
     let (h_jita, h_amarr) = (reg.get_or_spawn(jita), reg.get_or_spawn(amarr));
-    let eff = ProjectedEwarEffect {
-        source_module_id: 700_001, source_module_type_id: 526, charge_type_id: None,
-        distance: 5_000.0, overloaded: false, effective_module: DogmaItemState::from_sde(700_001, 526, &sde),
-    };
+    let eff = ProjectedEwarEffect { source_module_id: 700_001, source_module_type_id: 526, charge_type_id: None, distance: 5_000.0, overloaded: false, effective_module: DogmaItemState::from_sde(700_001, 526, &sde) };
     h_jita.upsert_projected_ewar(800_001, 900_001, eff).await.expect("upsert");
     h_jita.record_active_ewar_start(800_001, 700_001, 900_001, "webify").await.expect("start");
-    assert_eq!(h_jita.projected_ewar_for(900_001).len(), 1);
-    assert!(h_amarr.projected_ewar_for(900_001).is_empty());
-    assert_eq!(reg.ship_ewar_projections(900_001).len(), 1);
-    assert!(reg.stop_system(jita).await);
-    assert!(reg.ship_ewar_projections(900_001).is_empty());
+    assert_eq!((h_jita.projected_ewar_for(900_001).len(), h_amarr.projected_ewar_for(900_001).is_empty(), reg.ship_ewar_projections(900_001).len()), (1, true, 1));
+    assert!(reg.stop_system(jita).await && reg.ship_ewar_projections(900_001).is_empty());
     let h_jita_restarted = reg.get_or_spawn(jita);
     assert!(h_jita_restarted.projected_ewar_for(900_001).is_empty() && h_jita_restarted.ewar_state_snapshot().is_empty());
 }
@@ -379,27 +362,17 @@ async fn uncommitted_live_cooldown_and_in_flight_post_unlock_survive_rehydrate()
     let _unsent = send_rec(&h, k_live, now, 35.0).await;
     assert!(h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
 
-    let stale_token = {
-        let gate = reg.cooldown_persist_gate(jita);
-        let cg = gate.inner.lock().unwrap();
-        (gate.current_epoch(), cg.last_persisted)
-    };
+    let stale_token = { let g = reg.cooldown_persist_gate(jita); let cg = g.inner.lock().unwrap(); (g.current_epoch(), cg.last_persisted) };
     assert_eq!(h.replace_module_cooldowns_checked_sync(HashMap::new(), Some(stale_token)), Err("STALE_REHYDRATE_TOKEN".to_string()));
     assert!(h.module_reactivation_cooldown(&k_live).is_some());
 
     let in_flight = Arc::clone(&h.post_unlock_in_flight);
     in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let release = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    });
+    let release = tokio::spawn(async move { tokio::time::sleep(std::time::Duration::from_millis(20)).await; in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); });
     let reg_c = Arc::clone(&reg);
     tokio::task::spawn_blocking(move || reg_c.rehydrate_active_system_cooldowns_from_db()).await.unwrap();
     release.await.unwrap();
-
-    assert!(h.module_reactivation_cooldown(&k_live).is_some_and(|e| e.delay_s >= 34.0));
-    assert!(load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_live));
-    assert!(!h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+    assert!(h.module_reactivation_cooldown(&k_live).is_some_and(|e| e.delay_s >= 34.0) && load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_live) && !h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -411,18 +384,11 @@ async fn live_system_migration_prunes_stale_sqlite_rows_when_cluster_migrated_is
     let h = reg.get_or_spawn(jita);
     let live_entry = ModuleCooldownEntry { recorded_unix_f64: now, delay_s: 30.0, solar_system_id: None, recorded_sys_sim_s: 0.0 };
     h.replace_module_cooldowns_sync(HashMap::from([((s_live, m_live, cloak_tid), live_entry)])).unwrap();
-    let stale_rows = [
-        ((s_live, m_live, cloak_tid), live_entry),
-        ((s_exp, m_exp, cloak_tid), cd_entry(now - 50.0, 5.0, jita, 0.0)),
-    ];
-    seed_db_rows(&db, jita, &stale_rows, now as u64);
+    seed_db_rows(&db, jita, &[((s_live, m_live, cloak_tid), live_entry), ((s_exp, m_exp, cloak_tid), cd_entry(now - 50.0, 5.0, jita, 0.0))], now as u64);
     assert!(load_cold_system_module_cooldowns_from_db(&db, CLUSTER_SYSTEM_ID).is_empty());
-
     migrate_and_prune_module_cooldowns_in_db(&reg, &db, now);
-
     let after = load_cold_system_module_cooldowns_from_db(&db, jita);
-    assert!(!after.contains_key(&(s_exp, m_exp, cloak_tid)));
-    assert_eq!(after.get(&(s_live, m_live, cloak_tid)).and_then(|e| e.solar_system_id), Some(jita));
+    assert!(!after.contains_key(&(s_exp, m_exp, cloak_tid)) && after.get(&(s_live, m_live, cloak_tid)).and_then(|e| e.solar_system_id) == Some(jita));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -552,4 +518,28 @@ async fn dropped_and_full_apply_persisted_cooldown_commit_recovers_via_dirty_flu
     execute_post_unlock_ops_with_seq(Some(&db), None, ops, None, None, None, Some(&tokio::runtime::Handle::current()));
     assert!(matches!(full_rx.recv().await.unwrap(), SystemCommand::ClearAllModuleCooldowns { .. }));
     assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(2), full_rx.recv()).await.unwrap().unwrap(), SystemCommand::ApplyPersistedCooldownCommit { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_loading_replays_in_flight_transitions_before_pending_in_fifo_order() {
+    use crate::system_actor::module_cooldowns::{CooldownGatePhase, PendingCooldownTransition};
+    let (reg, db, _sde) = test_registry_with_db();
+    let (jita, tid, now) = (30_000_142_u32, 11_370_u32, db.clock().now_unix_secs() as f64);
+    let (k1, k2) = ((551_001_i64, 651_001_i64, tid), (551_002_i64, 651_002_i64, tid));
+    seed_ships_in_db(&db, jita, &[k1.0, k2.0]);
+    seed_db_rows(&db, jita, &[(k2, cd_entry(now, 20.0, jita, 0.0))], now as u64);
+    let gate = reg.cooldown_persist_gate(jita);
+    {
+        let mut cg = gate.inner.lock().unwrap();
+        cg.phase = CooldownGatePhase::Loading;
+        cg.in_flight_loading_transitions = vec![PendingCooldownTransition::Record { ship_id: k1.0, module_id: k1.1, module_type_id: tid, now_unix_f64: now, delay_s: 30.0, tidi_factor: 1.0, has_tidi_history: false }, PendingCooldownTransition::Remove { key: k2 }];
+        cg.pending_transitions = vec![PendingCooldownTransition::Remove { key: k1 }, PendingCooldownTransition::Record { ship_id: k2.0, module_id: k2.1, module_type_id: tid, now_unix_f64: now, delay_s: 45.0, tidi_factor: 1.0, has_tidi_history: false }];
+    }
+    reg.seed_aborted_loading_slot_for_test(jita);
+    let h = reg.wake_for_session_arrival_async(jita, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    assert!(h.module_reactivation_cooldown(&k1).is_none() && h.module_reactivation_cooldown(&k2).is_some_and(|e| e.delay_s >= 44.0));
+    let cold = load_cold_system_module_cooldowns_from_db(&db, jita);
+    assert!(!cold.contains_key(&k1) && cold.get(&k2).is_some_and(|e| e.delay_s >= 44.0));
+    let cg = gate.inner.lock().unwrap();
+    assert!(cg.phase == CooldownGatePhase::Live && cg.in_flight_loading_transitions.is_empty() && cg.pending_transitions.is_empty());
 }

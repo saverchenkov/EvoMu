@@ -1534,6 +1534,14 @@ impl SystemRegistry {
             .begin_loading(generation);
         {
             let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if !cg.in_flight_loading_transitions.is_empty() {
+                let mut replayed = std::mem::take(&mut cg.in_flight_loading_transitions);
+                replayed.append(&mut cg.pending_transitions);
+                cg.pending_transitions = replayed;
+            }
+            if !cg.pending_transitions.is_empty() {
+                persist_gate.mark_pending_transitions();
+            }
             cg.phase = CooldownGatePhase::Loading;
         }
         guard.insert(
@@ -2216,6 +2224,13 @@ impl SystemRegistry {
             .after_read_probe_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    #[cfg(test)]
+    pub(in crate::system_actor) fn seed_aborted_loading_slot_for_test(&self, solar_system_id: SolarSystemId) {
+        let (generation, gate) = (self.allocate_lifecycle_generation(), Arc::new(LifecycleGate::new_loading()));
+        gate.resolve(GateResolution::Aborted);
+        self.systems.write().unwrap().insert(solar_system_id, SystemLifecycleSlot::Loading { generation, gate });
     }
 
     #[cfg(test)]
