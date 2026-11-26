@@ -783,3 +783,142 @@ async fn pve_012_persisted_objectives_match_briefing_and_reoffer() {
     assert_eq!(brief_info.dict_get("requiredTypeID"), Some(&PyRep::Integer(34)));
     assert_eq!(brief_info.dict_get("requiredQuantity"), Some(&PyRep::Integer(77)));
 }
+
+#[tokio::test]
+async fn history_lookup_recovers_career_plausible_missions_and_completed_courier_objectives() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let kw = HashMap::new();
+
+    // 1. Career agent (`agent_type_id == 12`) mission completed & archived into history:
+    //    `agentMgr.GetPlausibleMissionIDs` without an explicit/bound agent must still include it.
+    let career_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.agent_type_id == 12 && a.solar_system_id.is_some() && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
+        .expect("career agent in SDE")
+        .clone();
+    let career_sys = career_ag.solar_system_id.expect("career agent sys");
+    let career_st = career_ag.station_id.expect("career agent station");
+    let career_mid = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| mission_matches_agent_pool(m, &career_ag))
+        .map(|m| m.mission_id)
+        .min()
+        .expect("career mission template in SDE");
+
+    move_demo_character(&ctx, char_id, career_sys, Some(career_st));
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, career_mid, career_ag.agent_id, career_sys)
+                .state("Completed"),
+        );
+    });
+    let mut sess = docked_session(char_id, career_sys, Some(career_st));
+    sess.session_id = 1653_001;
+    let plausible = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetPlausibleMissionIDs", &[], &kw, None)
+        .await
+        .expect("GetPlausibleMissionIDs with archived career mission");
+    let PyRep::List(plausible_ids) = plausible else {
+        panic!("expected plausible mission list, got {plausible:?}");
+    };
+    assert!(
+        !plausible_ids.is_empty(),
+        "plausible mission IDs must not be empty when character has archived career mission history"
+    );
+
+    // 2. Archived `Completed` courier mission queried via `GetMissionObjectiveInfo`:
+    //    must hydrate courier destination/cargo from SDE so `"transport"` objective is emitted.
+    let courier_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.agent_type_id == 2
+                && a.division_id == 22
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
+        .expect("distribution courier agent in SDE")
+        .clone();
+    let courier_sys = courier_ag.solar_system_id.expect("courier agent sys");
+    let courier_st = courier_ag.station_id.expect("courier agent station");
+    let courier_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.content_template
+                .as_deref()
+                .unwrap_or_default()
+                .contains("BasicCourier")
+                && resolve_courier_mission_details(&ctx, m, &courier_ag).is_ok()
+        })
+        .min_by_key(|m| m.mission_id)
+        .expect("courier mission template in SDE");
+    let details = resolve_courier_mission_details(&ctx, courier_tmpl, &courier_ag)
+        .expect("courier details");
+
+    move_demo_character(&ctx, char_id, courier_sys, Some(courier_st));
+    ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        mission_fixture::insert_with_sde(
+            snap,
+            &ctx.sde,
+            MissionFixture::accepted(
+                char_id,
+                courier_tmpl.mission_id,
+                courier_ag.agent_id,
+                courier_sys,
+            )
+            .state("Completed")
+            .destination_station_id(Some(details.destination_station_id)),
+        );
+    });
+    let mut obj_sess = docked_session(char_id, courier_sys, Some(courier_st));
+    obj_sess.session_id = 1653_002;
+    let obj_info = ctx
+        .dispatch_rpc(
+            &mut obj_sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[
+                PyRep::Integer(courier_ag.agent_id),
+                PyRep::Integer(i64::from(courier_tmpl.mission_id)),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetMissionObjectiveInfo for archived completed courier mission");
+    let Some(PyRep::List(objs)) = obj_info.dict_get("objectives") else {
+        panic!("expected objectives list, got {obj_info:?}");
+    };
+    assert_eq!(objs.len(), 2, "completed courier history must include transport objective");
+    let PyRep::Tuple(transport_entry) = &objs[1] else {
+        panic!("expected transport tuple");
+    };
+    assert_eq!(transport_entry[0], PyRep::String("transport".into()));
+    let PyRep::Tuple(transport_data) = &transport_entry[1] else {
+        panic!("expected transport data tuple");
+    };
+    assert_eq!(
+        transport_data[4].dict_get("hasCargo"),
+        Some(&PyRep::Bool(true))
+    );
+    assert_eq!(
+        transport_data[4].dict_get("typeID"),
+        Some(&PyRep::Integer(i64::from(details.cargo_type_id)))
+    );
+}

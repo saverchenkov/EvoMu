@@ -1277,17 +1277,12 @@ pub async fn handle_with_bound(
                                 .latest_history_for_character_template(char_id, mission_id)
                         };
                         entry.map(|entry| {
-                            let agent_info = ctx.sde.agents.get(&entry.agent_id);
-                            let origin_sid =
-                                agent_info.and_then(|a| a.station_id).or(session.station_id);
-                            let mission_sys_id = agent_info
-                                .and_then(|a| a.solar_system_id)
-                                .unwrap_or(sys_id);
                             (
-                                MissionInstance::from_history_entry(
+                                hydrate_mission_from_history_entry(
+                                    ctx,
                                     entry,
-                                    mission_sys_id,
-                                    origin_sid,
+                                    sys_id,
+                                    session.station_id,
                                 ),
                                 None,
                             )

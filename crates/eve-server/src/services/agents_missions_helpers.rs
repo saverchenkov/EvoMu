@@ -2196,6 +2196,86 @@ pub fn on_mission_npc_destroyed_core(
     });
 }
 
+/// Collects sorted, deduplicated positive `agent_id`s across a character's active and archived missions.
+pub fn collect_character_mission_agent_ids(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<i64> {
+    let mut agent_ids: Vec<i64> = snap
+        .missions
+        .iter_by_character(char_id)
+        .filter(|m| m.agent_id > 0)
+        .map(|m| m.agent_id)
+        .chain(
+            snap.missions
+                .iter_history_by_character(char_id)
+                .filter(|e| e.agent_id > 0)
+                .map(|e| e.agent_id),
+        )
+        .collect();
+    agent_ids.sort_unstable();
+    agent_ids.dedup();
+    agent_ids
+}
+
+/// Reconstructs a `MissionInstance` from an archived [`eve_db::MissionHistoryEntry`],
+/// hydrating courier destination and cargo metadata from SDE when absent.
+pub fn hydrate_mission_from_history_entry(
+    ctx: &ServerContext,
+    entry: &eve_db::MissionHistoryEntry,
+    fallback_sys_id: u32,
+    fallback_station_id: Option<i64>,
+) -> eve_db::MissionInstance {
+    let agent_info = ctx.sde.agents.get(&entry.agent_id);
+    let origin_sid = agent_info.and_then(|a| a.station_id).or(fallback_station_id);
+    let mission_sys_id = agent_info
+        .and_then(|a| a.solar_system_id)
+        .unwrap_or(fallback_sys_id);
+    let mut inst = eve_db::MissionInstance::from_history_entry(entry, mission_sys_id, origin_sid);
+    if inst.kind == eve_db::MissionKind::Courier && inst.destination_station_id().is_none() {
+        if let (Some(tmpl), Some(agent)) =
+            (ctx.sde.missions.get(&inst.template_id), agent_info)
+        {
+            if let Ok(details) = resolve_courier_mission_details(ctx, tmpl, agent) {
+                if let Some(courier) = inst.courier_mut() {
+                    courier.cargo_type_id = Some(details.cargo_type_id);
+                    courier.quantity = details.cargo_quantity;
+                    courier.destination_station_id = Some(details.destination_station_id);
+                }
+                if inst.origin_station_id.is_none() {
+                    inst.origin_station_id = Some(details.origin_station_id);
+                }
+            }
+        }
+        if inst.destination_station_id().is_none() {
+            let fallback_dest = inst.origin_station_id.or(fallback_station_id).or_else(|| {
+                (mission_sys_id > 0)
+                    .then(|| {
+                        ctx.sde
+                            .stations
+                            .values()
+                            .filter(|st| st.solar_system_id == mission_sys_id)
+                            .map(|st| st.station_id)
+                            .min()
+                    })
+                    .flatten()
+            });
+            if let Some(dest_sid) = fallback_dest {
+                if let Some(courier) = inst.courier_mut() {
+                    courier.destination_station_id = Some(dest_sid);
+                    if courier.cargo_type_id.is_none() {
+                        courier.cargo_type_id = Some(3814);
+                    }
+                    if courier.quantity <= 0 {
+                        courier.quantity = 1;
+                    }
+                }
+            }
+        }
+    }
+    inst
+}
+
 #[cfg(test)]
 #[path = "agents_missions_helpers_tests.rs"]
 mod agents_missions_helpers_tests;
