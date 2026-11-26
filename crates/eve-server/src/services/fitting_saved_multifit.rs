@@ -714,11 +714,14 @@ pub(crate) async fn handle_ships_and_services(
                         });
                     };
                     if item.owner_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "OwnershipOrLocationViolation".into(),
-                            message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}"),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError::ownership_or_location_violation(
+                            item_id,
+                            Some(item.owner_id),
+                            Some(item.location_id),
+                            Some(char_id),
+                            Some(station_id),
+                            format!("Item {item_id} must be owned by character {char_id} at station {station_id}"),
+                        ));
                     }
                     if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132 | 158) {
                         return Err(BridgeRpcError {
@@ -738,11 +741,14 @@ pub(crate) async fn handle_ships_and_services(
                         });
                     }
                     if item.location_id != station_id {
-                        return Err(BridgeRpcError {
-                            code: "OwnershipOrLocationViolation".into(),
-                            message: format!("Item {item_id} must be owned by character {char_id} at station {station_id}"),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError::ownership_or_location_violation(
+                            item_id,
+                            Some(item.owner_id),
+                            Some(item.location_id),
+                            Some(char_id),
+                            Some(station_id),
+                            format!("Item {item_id} must be owned by character {char_id} at station {station_id}"),
+                        ));
                     }
                     if item.flag != InventoryFlag::Hangar {
                         return Err(BridgeRpcError {
@@ -929,13 +935,16 @@ pub(crate) async fn handle_ships_and_services(
                     .unwrap_or(0);
                 let is_corp_item = corp_id > 0 && item.owner_id == corp_id;
                 if item.owner_id != char_id && !is_corp_item {
-                    return Err(BridgeRpcError {
-                        code: "OwnershipOrLocationViolation".into(),
-                        message: format!(
+                    return Err(BridgeRpcError::ownership_or_location_violation(
+                        item_id,
+                        Some(item.owner_id),
+                        Some(item.location_id),
+                        Some(char_id),
+                        Some(station_id),
+                        format!(
                             "Ship item {item_id} must be owned by character {char_id} at station {station_id}"
                         ),
-                        client_error: None,
-                    });
+                    ));
                 }
                 if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132 | 158) {
                     return Err(BridgeRpcError {
@@ -957,13 +966,16 @@ pub(crate) async fn handle_ships_and_services(
                     });
                 }
                 if item.location_id != station_id || snap.items.contains_key(&station_id) {
-                    return Err(BridgeRpcError {
-                        code: "OwnershipOrLocationViolation".into(),
-                        message: format!(
+                    return Err(BridgeRpcError::ownership_or_location_violation(
+                        item_id,
+                        Some(item.owner_id),
+                        Some(item.location_id),
+                        Some(if is_corp_item { corp_id } else { char_id }),
+                        Some(station_id),
+                        format!(
                             "Ship item {item_id} must be owned by character {char_id} at station {station_id}"
                         ),
-                        client_error: None,
-                    });
+                    ));
                 }
                 let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 if ext.asset_safety_wraps.values().any(|w| {

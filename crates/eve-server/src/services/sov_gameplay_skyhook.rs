@@ -312,11 +312,13 @@ pub async fn handle_anchor_skyhook_rpc(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Cannot anchor an Orbital Skyhook while docked".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            session.ship_id.unwrap_or(0),
+            Some(char_id),
+            session.solar_system_id,
+            "anchor_skyhook",
+            "Cannot anchor an Orbital Skyhook while docked",
+        ));
     }
     let corp_id = session.corporation_id.unwrap_or(0);
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
@@ -324,10 +326,14 @@ pub async fn handle_anchor_skyhook_rpc(
         message: "No active solar system".into(),
         client_error: None,
     })?;
-    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-        code: "ShipNotInSpace".into(),
-        message: "Active ship required".into(),
-        client_error: None,
+    let ship_id = session.ship_id.ok_or_else(|| {
+        BridgeRpcError::ship_not_in_space(
+            0,
+            Some(char_id),
+            Some(sys_id),
+            "anchor_skyhook",
+            "Active ship required",
+        )
     })?;
 
     let has_role = ctx.db.with_snapshot(|s| {
@@ -392,10 +398,14 @@ pub async fn handle_anchor_skyhook_rpc(
         .ok()
         .flatten()
         .map(|(_, b)| b.position)
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active ship {ship_id} is not present in space in system {sys_id}"),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "anchor_skyhook",
+                format!("Active ship {ship_id} is not present in space in system {sys_id}"),
+            )
         })?;
     let planet_anchor_pos = DVec3::new(
         celestial.position.x + 150_000.0,
@@ -1002,10 +1012,14 @@ pub async fn handle_skyhook_component_call(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Ship {ship_id} is not present in space in system {sys_id}"),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "skyhook_component_call",
+                format!("Ship {ship_id} is not present in space in system {sys_id}"),
+            )
         })?;
     let cs = sys_handle
         .get_combat_state(ship_id)

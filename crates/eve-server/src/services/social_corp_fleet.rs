@@ -1835,11 +1835,13 @@ fn handle_gm_force_accept_application(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "GMRoleRequired".into(),
-            message: "GMForceAcceptApplication requires GM privileges".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role_with_code(
+            "GMRoleRequired",
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "GMForceAcceptApplication",
+            "GMForceAcceptApplication requires GM privileges",
+        ));
     }
     let aid = resolve_alliance_id(session, bound_obj_id)?;
     let Some(applicant_corp_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {

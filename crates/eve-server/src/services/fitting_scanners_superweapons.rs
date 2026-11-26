@@ -1095,11 +1095,13 @@ fn handle_system_wide_effects(
 
             if method == "ResetSystemWideEffects" {
                 if !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError {
-                        code: "GMRoleRequired".into(),
-                        message: "ResetSystemWideEffects requires GM/Admin authority".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(BridgeRpcError::insufficient_role_with_code(
+                        "GMRoleRequired",
+                        eve_machonet::service_roles::ROLE_GM_MASK,
+                        session.role,
+                        "ResetSystemWideEffects",
+                        "ResetSystemWideEffects requires GM/Admin authority",
+                    )));
                 }
                 let reset_sys = args
                     .first()
@@ -1132,11 +1134,13 @@ fn handle_system_wide_effects(
 
             if method == "RefreshSystemWideEnvironment" {
                 if !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError {
-                        code: "GMRoleRequired".into(),
-                        message: "RefreshSystemWideEnvironment requires GM/Admin authority".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(BridgeRpcError::insufficient_role_with_code(
+                        "GMRoleRequired",
+                        eve_machonet::service_roles::ROLE_GM_MASK,
+                        session.role,
+                        "RefreshSystemWideEnvironment",
+                        "RefreshSystemWideEnvironment requires GM/Admin authority",
+                    )));
                 }
                 let phenom_str_opt = args.get(1).and_then(|a| a.as_str()).or_else(|| args.first().and_then(|a| a.as_str()));
                 let req_tid_opt = if args.len() >= 2 {
@@ -1527,11 +1531,13 @@ fn handle_dogma_dbuff_rpc(
 
     if method == "ApplyBuffsToItems" {
         if !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "GMRoleRequired".into(),
-                message: "ApplyBuffsToItems requires GM/Admin authority".into(),
-                client_error: None,
-            }));
+            return Some(Err(BridgeRpcError::insufficient_role_with_code(
+                "GMRoleRequired",
+                eve_machonet::service_roles::ROLE_GM_MASK,
+                session.role,
+                "ApplyBuffsToItems",
+                "ApplyBuffsToItems requires GM/Admin authority",
+            )));
         }
         let mut target_ships = Vec::new();
         if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {

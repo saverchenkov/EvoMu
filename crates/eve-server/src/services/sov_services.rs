@@ -1153,11 +1153,13 @@ pub fn handle_reset_last_clone_jump_time(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "GMRoleRequired".into(),
-            message: "jumpCloneSvc.ResetLastCloneJumpTime requires GM role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role_with_code(
+            "GMRoleRequired",
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "jumpCloneSvc.ResetLastCloneJumpTime",
+            "jumpCloneSvc.ResetLastCloneJumpTime requires GM role",
+        ));
     }
     let (_, char_id) = ServerContext::require_character(session)?;
     ctx.db.try_with_mut_snapshot(|snap| {

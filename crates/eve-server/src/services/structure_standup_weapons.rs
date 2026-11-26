@@ -467,8 +467,11 @@ async fn check_and_prepare_structure_cap(
         let _ = sys_handle.set_combat_state(structure_id, cs).await;
     }
     if cur_cap + 1e-6 < cap_need {
-        return Err(err(
-            "NotEnoughCapacitor",
+        return Err(BridgeRpcError::not_enough_capacitor(
+            Some(structure_id),
+            &mod_type.name,
+            cap_need,
+            cur_cap,
             format!("Structure {structure_id} has {:.1} GJ capacitor; module requires {:.1} GJ", cur_cap, cap_need),
         ));
     }

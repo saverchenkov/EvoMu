@@ -55,22 +55,26 @@ pub(crate) fn ship_jammed_rpc_error(ctx: &ServerContext, target_id: i64) -> Brid
 /// Builds a `TargetingFailed` lock-cap error carrying exact V24 `UserError` (`#1082`):
 /// `TargetingAptitudeAlreadyFullyUtilized` when character skill cap bottlenecks, or
 /// `TargetingSystemsAlreadyFullyUtilized` when the ship hull/rig cap bottlenecks.
-pub(crate) fn target_lock_cap_rpc_error(
-    max_locked: usize,
-    skill_bottleneck: bool,
+pub(crate) fn target_lock_cap_rpc_error(max_locked: usize, skill_bottleneck: bool) -> BridgeRpcError {
+    target_lock_cap_rpc_error_with_ids(None, None, max_locked, skill_bottleneck)
+}
+
+pub(crate) fn target_lock_cap_rpc_error_with_ids(
+    ship_id: Option<i64>, target_id: Option<i64>, max_locked: usize, skill_bottleneck: bool,
 ) -> BridgeRpcError {
     let key = if skill_bottleneck {
         eve_proto::UserErrorKey::TargetingAptitudeAlreadyFullyUtilized
     } else {
         eve_proto::UserErrorKey::TargetingSystemsAlreadyFullyUtilized
     };
-    BridgeRpcError::with_client_error(
+    BridgeRpcError::with_rejection(
         "TargetingFailed",
         format!("Max locked targets exceeded ({max_locked})"),
-        eve_proto::ClientError::user_with_args(
-            key,
-            [("limit", eve_proto::UserErrorArg::Int(max_locked as i64))],
-        ),
+        key,
+        [("limit", eve_proto::UserErrorArg::Int(max_locked as i64))],
+        eve_proto::RejectionFacts::TargetingFailed {
+            ship_id, target_id, reason: "max_locked_targets".into(), distance_m: None, max_range_m: None,
+        },
     )
 }
 
@@ -1900,7 +1904,12 @@ pub(crate) async fn handle_dogma_im(
                     ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
                 ])));
             } else if current_locks.len() >= max_locked {
-                return Some(Err(target_lock_cap_rpc_error(max_locked, skill_bottleneck)));
+                return Some(Err(target_lock_cap_rpc_error_with_ids(
+                    Some(ship_id),
+                    Some(target_id),
+                    max_locked,
+                    skill_bottleneck,
+                )));
             }
 
             let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);

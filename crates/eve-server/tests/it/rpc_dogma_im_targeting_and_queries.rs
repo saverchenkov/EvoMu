@@ -817,9 +817,16 @@ async fn lock_cap_base_two_raised_by_skills() {
         .unwrap_err();
     assert_eq!(
         cap_err.to_client_error("dogmaIM", "AddTarget"),
-        eve_proto::ClientError::user_with_args(
+        eve_proto::ClientError::rejected_with_args(
             eve_proto::UserErrorKey::TargetingAptitudeAlreadyFullyUtilized,
             [("limit", eve_proto::UserErrorArg::Int(2))],
+            eve_proto::RejectionFacts::TargetingFailed {
+                ship_id: Some(ship1),
+                target_id: Some(893_202),
+                reason: "max_locked_targets".into(),
+                distance_m: None,
+                max_range_m: None,
+            },
         )
     );
 
@@ -858,9 +865,16 @@ async fn lock_cap_base_two_raised_by_skills() {
     .unwrap_err();
     assert_eq!(
         ship_err.to_client_error("dogmaIM", "AddTarget"),
-        eve_proto::ClientError::user_with_args(
+        eve_proto::ClientError::rejected_with_args(
             eve_proto::UserErrorKey::TargetingSystemsAlreadyFullyUtilized,
             [("limit", eve_proto::UserErrorArg::Int(ship_max as i64))],
+            eve_proto::RejectionFacts::TargetingFailed {
+                ship_id: Some(ship1),
+                target_id: Some(893_200 + ship_max as i64),
+                reason: "max_locked_targets".into(),
+                distance_m: None,
+                max_range_m: None,
+            },
         )
     );
 }

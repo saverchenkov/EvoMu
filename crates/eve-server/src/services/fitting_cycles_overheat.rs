@@ -404,11 +404,13 @@ pub fn check_can_overload_module(
     mod_type_id: u32,
 ) -> Result<(), eve_proto::BridgeRpcError> {
     let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
-        return Err(eve_proto::BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Module type {mod_type_id} not found in SDE"),
-            client_error: None,
-        });
+        return Err(eve_proto::BridgeRpcError::module_not_found(
+            0,
+            Some(char_id),
+            Some(i64::from(mod_type_id)),
+            false,
+            format!("Module type {mod_type_id} not found in SDE"),
+        ));
     };
     if !has_category5_overload(mod_type, &ctx.sde) {
         return Err(eve_proto::BridgeRpcError {

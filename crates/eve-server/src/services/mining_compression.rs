@@ -427,11 +427,13 @@ pub async fn handle_in_space_compression_mgr(
                 || ch.solar_system_id != sys_id
                 || Some(ch.active_ship_id) != ship_id
             {
-                return Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Character ship state changed before compression completed".into(),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ship_id.unwrap_or(0),
+                    Some(char_id),
+                    Some(sys_id),
+                    "mining_compression",
+                    "Character ship state changed before compression completed",
+                ));
             }
         }
         if snap.is_item_locked_in_contract_or_job(item_id) {

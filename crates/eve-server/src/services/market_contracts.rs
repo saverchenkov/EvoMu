@@ -1787,7 +1787,7 @@ pub fn handle(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(c) = snap.contracts.get(&cid).cloned() else { return Err(rpc_err("ContractNotFound", "Auction contract not found")); };
                 if c.contract_type != "Auction" { return Err(rpc_err("InvalidContractType", "Contract is not an Auction")); }
-                if c.status != "Outstanding" { return Err(rpc_err("InvalidContractState", "Auction is already settled or not Outstanding")); }
+                if c.status != "Outstanding" { return Err(BridgeRpcError::invalid_contract_state(cid, "Outstanding", &c.status, "Auction is already settled or not Outstanding")); }
                 let caller_corp = snap
                     .characters
                     .get(&char_id)
@@ -1800,7 +1800,7 @@ pub fn handle(
                     && c.current_bidder_id == Some(caller_corp)
                     && snap.corporations.contains_key(&caller_corp);
                 if c.issuer_id != char_id && !is_corp_issuer && c.current_bidder_id != Some(char_id) && !is_corp_winner {
-                    return Err(rpc_err("ContractOwnershipViolation", "Not issuer or winning bidder"));
+                    return Err(BridgeRpcError::contract_ownership_violation(cid, char_id, Some(c.issuer_id), "Not issuer or winning bidder"));
                 }
                 if c.expiration_unix == 0 || now_unix < c.expiration_unix { return Err(rpc_err("AuctionNotExpired", "Auction has not yet expired")); }
                 let has_winner = c.current_bidder_id.is_some() && c.current_bid.0 > 0;

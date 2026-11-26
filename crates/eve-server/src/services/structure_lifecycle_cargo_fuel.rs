@@ -484,7 +484,15 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
         Ok((DVec3::from_array(st.position), st.type_id))
     })?;
     let st_radius = ctx.sde.types.get(&st_type).map(|t| t.radius).unwrap_or(0.0);
-    let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))?.ok_or_else(|| err("ShipNotInSpace", "Active ship not in space"))?;
+    let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))?.ok_or_else(|| {
+        BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "structure_cargo_dropoff",
+            "Active ship not in space",
+        )
+    })?;
     if ship_ball.position.distance(st_pos) > st_radius + CARGO_DROPOFF_EXTRA_RANGE_M {
         return Err(err("OutsideCargoDropoffRange", "Ship is too far from the structure to drop off cargo"));
     }
@@ -495,7 +503,13 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
                 || ch.solar_system_id != sys_id
                 || ch.active_ship_id != ship_id
             {
-                return Err(err("ShipNotInSpace", "Character ship is no longer undocked in system"));
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "structure_cargo_dropoff",
+                    "Character ship is no longer undocked in system",
+                ));
             }
         }
         let st = snap

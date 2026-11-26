@@ -16,11 +16,12 @@ pub async fn materialize_system_lod2(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "materialize_system_lod2 requires GM role; normal players trigger LOD 2 automatically on system entry or undock".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "materialize_system_lod2",
+            "materialize_system_lod2 requires GM role; normal players trigger LOD 2 automatically on system entry or undock",
+        ));
     }
     let Some(session_sys_id) = session.solar_system_id else {
         return Err(BridgeRpcError {
@@ -75,11 +76,12 @@ pub async fn interdict_convoy(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "interdict_convoy requires GM role; normal players must destroy convoys in space via combat".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "interdict_convoy",
+            "interdict_convoy requires GM role; normal players must destroy convoys in space via combat",
+        ));
     }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
@@ -131,11 +133,13 @@ pub async fn interdict_convoy(
             })
         }
     }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Attacker ship is not in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            session.solar_system_id,
+            "interdict_convoy",
+            "Attacker ship is not in space",
+        ));
     };
 
     let Some((_, convoy_ball)) = (match sys_handle.get_ball_snapshot(convoy_id).await {
@@ -258,11 +262,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "shipCosmeticsMgr.GiveSkin requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "shipCosmeticsMgr.GiveSkin",
+                    "shipCosmeticsMgr.GiveSkin requires GM role",
+                )));
             }
             let Some(raw_skin) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
