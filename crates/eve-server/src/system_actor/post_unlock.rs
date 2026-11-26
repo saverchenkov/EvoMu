@@ -11,12 +11,16 @@ use eve_db::lock_rank::{held_lock_ranks, RankedMutex, RankedRwLock, RANK_ACTOR_S
 use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord, TxError, WorldRepository};
 use eve_destiny::BallId;
 use eve_sde::{attr_ids, SdeRegistry, SolarSystemId, TypeId};
-use std::{collections::HashMap, sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock}};
+use glam::DVec3;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock},
+};
 
 use super::types::{
     ActiveModuleCycle, CharacterId, ConditionCheckpointEntry, ItemId, ModuleDeactivationHook,
-    PendingCycleAction, PostUnlockHookAction, SystemActorState, SystemCommand,
-    TargetLockCompletedHook,
+    PendingCycleAction, PostUnlockActorShadows, PostUnlockHookAction, SystemActorState,
+    SystemCommand, SystemView, TargetLockCompletedHook,
 };
 
 #[derive(Debug, Clone)]
@@ -37,11 +41,6 @@ pub(crate) enum PostCommitBallparkOp {
         origin_sys: SolarSystemId,
         trace_ids: Vec<BallId>,
     },
-}
-
-enum PendingCommandAck {
-    Spawn(tokio::sync::oneshot::Receiver<Result<u64, String>>),
-    Remove(tokio::sync::oneshot::Receiver<Option<eve_destiny::Ball>>),
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +197,38 @@ pub(crate) struct PostUnlockOps {
     pub intents: Vec<PostUnlockIntent>,
     pub item_qty_deltas: Vec<(ItemId, i32)>,
     pub crystal_dmg_deltas: Vec<(ItemId, f64)>,
+    pub overheat_dmg_deltas: Vec<(ItemId, f64, bool)>,
+}
+
+impl PostUnlockActorShadows {
+    pub(in crate::system_actor) fn prune_committed(&mut self, done_seq: u64) {
+        self.mmju_spool_fired_at.retain(|_, (_, seq)| *seq > done_seq);
+        self.abyssal_boundary_ticks.retain(|_, (_, seq)| *seq > done_seq);
+        self.abyssal_active_clouds.retain(|_, (_, seq)| *seq > done_seq);
+        self.arena_hazard_ticks.retain(|_, (_, seq)| *seq > done_seq);
+        self.depot_reinforced_until.retain(|_, (_, seq)| *seq > done_seq);
+        self.fob_states.retain(|_, st| st.work_seq > done_seq);
+        self.rack_heat_pending.retain(|_, (_, seq)| *seq > done_seq);
+        self.restored_doomsday_cycles.retain(|_, seq| *seq > done_seq);
+        self.restored_warp_suppressions.retain(|_, seq| *seq > done_seq);
+        while self
+            .pending_overheat_dmg_deltas
+            .front()
+            .is_some_and(|&(seq, _, _, _)| seq <= done_seq)
+        {
+            self.pending_overheat_dmg_deltas.pop_front();
+        }
+    }
+
+    pub(in crate::system_actor) fn build_pending_overheat_dmg(&self) -> HashMap<i64, (f64, bool)> {
+        let mut out: HashMap<i64, (f64, bool)> = HashMap::new();
+        for &(_, id, dd, burned) in &self.pending_overheat_dmg_deltas {
+            let entry = out.entry(id).or_insert((0.0, false));
+            entry.0 += dd;
+            entry.1 |= burned;
+        }
+        out
+    }
 }
 
 impl PostUnlockOps {
@@ -1126,7 +1157,6 @@ pub(crate) fn execute_post_unlock_ops_for_standalone(
         None,
         None,
         None,
-        None,
         standalone_ballpark_opt,
     );
 }
@@ -1150,8 +1180,45 @@ pub(crate) fn execute_post_unlock_ops_with_seq(
         seq_meta,
         None,
         None,
-        None,
     )
+}
+
+pub(in crate::system_actor) fn apply_post_commit_op_to_ballpark(
+    bp: &mut eve_destiny::Ballpark,
+    op: PostCommitBallparkOp,
+) {
+    match op {
+        PostCommitBallparkOp::AddStaticBallWithMeta { mut ball, slim_meta } => {
+            ball.velocity = DVec3::ZERO;
+            ball.max_velocity = 0.0;
+            ball.speed_fraction = 0.0;
+            ball.mode = eve_destiny::MovementMode::Rigid;
+            let bid = ball.id;
+            bp.add_static_ball_with_meta(ball.clone(), slim_meta);
+            bp.pending_events
+                .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
+            bp.queue_event_for_all_grid_observers(
+                Some(bid),
+                &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
+            );
+        }
+        PostCommitBallparkOp::AddBallWithCombatAndMeta {
+            ball,
+            combat_state,
+            slim_meta,
+        } => {
+            let bid = ball.id;
+            if let Some(cs) = combat_state {
+                bp.combat_states.insert(bid, cs);
+            }
+            bp.add_ball(ball);
+            bp.set_ball_slim_meta(bid, slim_meta);
+        }
+        PostCommitBallparkOp::RemoveBall { ball_id } => {
+            let _ = bp.remove_ball(ball_id);
+        }
+        PostCommitBallparkOp::RemoveCrossSystemTraceBalls { .. } => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1163,8 +1230,7 @@ fn execute_post_unlock_ops_inner(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     lock_completed_hook: Option<&TargetLockCompletedHook>,
     seq_meta: Option<(SolarSystemId, u64)>,
-    cmd_tx_opt: Option<&tokio::sync::mpsc::Sender<SystemCommand>>,
-    mut pending_acks_opt: Option<&mut Vec<PendingCommandAck>>,
+    post_commit_tx_opt: Option<&tokio::sync::mpsc::UnboundedSender<PostCommitBallparkOp>>,
     mut standalone_ballpark_opt: Option<&mut eve_destiny::Ballpark>,
 ) -> (Vec<PendingCycleAction>, bool) {
     if ops.is_empty() {
@@ -1255,84 +1321,8 @@ fn execute_post_unlock_ops_inner(
     }
 
     if can_write_db {
-        if let Some(acks) = pending_acks_opt.as_deref_mut() {
-            acks.retain_mut(|ack| match ack {
-                PendingCommandAck::Spawn(rx) => matches!(
-                    rx.try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                ),
-                PendingCommandAck::Remove(rx) => matches!(
-                    rx.try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                ),
-            });
-        }
         for op in post_commit_bp_ops {
             match op {
-                PostCommitBallparkOp::AddStaticBallWithMeta { ball, slim_meta } => {
-                    if let Some(bp) = standalone_ballpark_opt.as_deref_mut() {
-                        let _ = bp.add_static_ball_with_meta(ball, slim_meta);
-                    } else if let Some(cmd_tx) = cmd_tx_opt {
-                        let (reply, rx) = tokio::sync::oneshot::channel();
-                        if cmd_tx
-                            .try_send(SystemCommand::SpawnBallWithMeta {
-                                ball,
-                                combat_state: eve_destiny::CombatState::default(),
-                                slim_meta,
-                                reply,
-                            })
-                            .is_ok()
-                        {
-                            if let Some(acks) = pending_acks_opt.as_deref_mut() {
-                                acks.push(PendingCommandAck::Spawn(rx));
-                            }
-                        }
-                    }
-                }
-                PostCommitBallparkOp::AddBallWithCombatAndMeta {
-                    ball,
-                    combat_state,
-                    slim_meta,
-                } => {
-                    if let Some(bp) = standalone_ballpark_opt.as_deref_mut() {
-                        let bid = ball.id;
-                        bp.add_ball(ball);
-                        if let Some(cs) = combat_state {
-                            bp.combat_states.insert(bid, cs);
-                        }
-                        bp.set_ball_slim_meta(bid, slim_meta);
-                    } else if let Some(cmd_tx) = cmd_tx_opt {
-                        let (reply, rx) = tokio::sync::oneshot::channel();
-                        if cmd_tx
-                            .try_send(SystemCommand::SpawnBallWithMeta {
-                                ball,
-                                combat_state: combat_state.unwrap_or_default(),
-                                slim_meta,
-                                reply,
-                            })
-                            .is_ok()
-                        {
-                            if let Some(acks) = pending_acks_opt.as_deref_mut() {
-                                acks.push(PendingCommandAck::Spawn(rx));
-                            }
-                        }
-                    }
-                }
-                PostCommitBallparkOp::RemoveBall { ball_id } => {
-                    if let Some(bp) = standalone_ballpark_opt.as_deref_mut() {
-                        let _ = bp.remove_ball(ball_id);
-                    } else if let Some(cmd_tx) = cmd_tx_opt {
-                        let (reply, rx) = tokio::sync::oneshot::channel();
-                        if cmd_tx
-                            .try_send(SystemCommand::RemoveBall { ball_id, reply })
-                            .is_ok()
-                        {
-                            if let Some(acks) = pending_acks_opt.as_deref_mut() {
-                                acks.push(PendingCommandAck::Remove(rx));
-                            }
-                        }
-                    }
-                }
                 PostCommitBallparkOp::RemoveCrossSystemTraceBalls {
                     origin_sys,
                     trace_ids,
@@ -1340,6 +1330,18 @@ fn execute_post_unlock_ops_inner(
                     if let Some(db_arc) = db_arc_opt {
                         for tid in trace_ids {
                             crate::system_actor::try_remove_ball_for_db(db_arc, origin_sys, tid);
+                        }
+                    }
+                }
+                other => {
+                    if let Some(bp) = standalone_ballpark_opt.as_deref_mut() {
+                        apply_post_commit_op_to_ballpark(bp, other);
+                    } else if let Some(tx) = post_commit_tx_opt {
+                        if let Err(err) = tx.send(other) {
+                            tracing::warn!(
+                                op = ?err.0,
+                                "SystemActor post_commit_tx closed while delivering PostCommitBallparkOp"
+                            );
                         }
                     }
                 }
@@ -1469,6 +1471,36 @@ pub(in crate::system_actor) fn seed_pending_charge_reservations(
     (qty, dmg)
 }
 
+pub(in crate::system_actor) fn current_post_unlock_done_seq(
+    solar_system_id: SolarSystemId,
+    actor_st: &SystemActorState,
+    completed_seq: &AtomicU64,
+) -> u64 {
+    let non_tx_done = completed_seq.load(Ordering::Acquire);
+    let snap_seq = actor_st
+        .db_opt
+        .as_deref()
+        .and_then(|db| {
+            db.published_snapshot_arc()
+                .sp6_lifecycle
+                .post_unlock_committed_seq
+                .get(&solar_system_id)
+                .copied()
+        })
+        .unwrap_or(0);
+    snap_seq.max(non_tx_done)
+}
+
+pub(in crate::system_actor) fn prune_actor_shadows_for_cmd(
+    solar_system_id: SolarSystemId,
+    actor_st: &mut SystemActorState,
+    completed_seq: &AtomicU64,
+) -> u64 {
+    let done_seq = current_post_unlock_done_seq(solar_system_id, actor_st, completed_seq);
+    actor_st.post_unlock_shadows.prune_committed(done_seq);
+    done_seq
+}
+
 pub(in crate::system_actor) fn begin_tick_charge_reservations(
     solar_system_id: SolarSystemId,
     actor_st: &mut SystemActorState,
@@ -1480,8 +1512,18 @@ pub(in crate::system_actor) fn begin_tick_charge_reservations(
         .as_ref()
         .and_then(|s| s.sp6_lifecycle.post_unlock_committed_seq.get(&solar_system_id).copied())
         .unwrap_or(0);
-    let (qty, dmg) = seed_pending_charge_reservations(actor_st, snap_seq.max(non_tx_done));
+    let done_seq = snap_seq.max(non_tx_done);
+    actor_st.post_unlock_shadows.prune_committed(done_seq);
+    let (qty, dmg) = seed_pending_charge_reservations(actor_st, done_seq);
     (tick_snap_opt, qty, dmg)
+}
+
+fn push_pending_deltas(actor_st: &mut SystemActorState, work_seq: u64, qty_deltas: Vec<(ItemId, i32)>, dmg_deltas: Vec<(ItemId, f64)>, overheat_deltas: Vec<(ItemId, f64, bool)>) {
+    for (id, dq) in qty_deltas { actor_st.pending_item_qty_deltas.push_back((work_seq, id, dq)); }
+    for (id, dd) in dmg_deltas { actor_st.pending_crystal_dmg_deltas.push_back((work_seq, id, dd)); }
+    for (id, dd, burned) in overheat_deltas {
+        actor_st.post_unlock_shadows.pending_overheat_dmg_deltas.push_back((work_seq, id, dd, burned));
+    }
 }
 
 pub(in crate::system_actor) fn enqueue_actor_cmd_post_unlock_ops(
@@ -1496,13 +1538,13 @@ pub(in crate::system_actor) fn enqueue_actor_cmd_post_unlock_ops(
     let work_seq = actor_st.next_post_unlock_seq;
     let qty_deltas = std::mem::take(&mut ops.item_qty_deltas);
     let dmg_deltas = std::mem::take(&mut ops.crystal_dmg_deltas);
+    let overheat_deltas = std::mem::take(&mut ops.overheat_dmg_deltas);
     let item = PostUnlockWorkItem {
         db_opt: actor_st.db_opt.clone(), sde_opt: actor_st.sde_opt.clone(),
         ops, replies: Vec::new(), in_flight_guard: None, work_seq,
     };
     if send_post_unlock_item(tx, in_flight, item).is_ok() {
-        for (id, dq) in qty_deltas { actor_st.pending_item_qty_deltas.push_back((work_seq, id, dq)); }
-        for (id, dd) in dmg_deltas { actor_st.pending_crystal_dmg_deltas.push_back((work_seq, id, dd)); }
+        push_pending_deltas(actor_st, work_seq, qty_deltas, dmg_deltas, overheat_deltas);
     }
 }
 
@@ -1577,12 +1619,12 @@ pub(in crate::system_actor) fn enqueue_tick_post_unlock_or_barrier_under_locks(
     let work_seq = actor_st.next_post_unlock_seq;
     let qty_deltas = std::mem::take(&mut ops.item_qty_deltas);
     let dmg_deltas = std::mem::take(&mut ops.crystal_dmg_deltas);
+    let overheat_deltas = std::mem::take(&mut ops.overheat_dmg_deltas);
     let (queued, ticket) = enqueue_work_ticket_with_seq(
         handle, actor_st.db_opt.as_ref(), actor_st.sde_opt.as_ref(), ops, caller_can_wait, work_seq,
     );
     if queued {
-        for (id, dq) in qty_deltas { actor_st.pending_item_qty_deltas.push_back((work_seq, id, dq)); }
-        for (id, dd) in dmg_deltas { actor_st.pending_crystal_dmg_deltas.push_back((work_seq, id, dd)); }
+        push_pending_deltas(actor_st, work_seq, qty_deltas, dmg_deltas, overheat_deltas);
     }
     ticket
 }
@@ -1609,7 +1651,6 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
                     deact_guard,
                     lock_guard,
                     Some((handle.solar_system_id, unsent.work_seq)),
-                    Some(handle.cmd_sender()),
                     None,
                     None,
                 );
@@ -1655,6 +1696,140 @@ impl PostUnlockShutdownGuard {
 
 impl Drop for PostUnlockShutdownGuard { fn drop(&mut self) { self.send_shutdown(); } }
 
+#[derive(Clone)]
+pub(in crate::system_actor) struct PostCommitActorTargets {
+    pub solar_system_id: SolarSystemId,
+    pub ballpark: Arc<RankedRwLock<eve_destiny::Ballpark, RANK_BALLPARK>>,
+    pub actor_state: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+    pub ball_positions: Arc<RankedRwLock<HashMap<BallId, (DVec3, eve_destiny::MovementMode)>, RANK_LEAF>>,
+    pub scrambled_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
+    pub view_tx: Arc<tokio::sync::watch::Sender<SystemView>>,
+    pub tidi_factor_bits: Arc<AtomicU64>,
+    pub module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub post_unlock_in_flight: Arc<AtomicUsize>,
+}
+
+fn apply_drained_post_commit_ops(
+    first: Option<PostCommitBallparkOp>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
+    post_unlock_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
+    targets: &PostCommitActorTargets,
+) {
+    let mut ops = Vec::new();
+    if let Some(op) = first {
+        ops.push(op);
+    }
+    while let Ok(op) = rx.try_recv() {
+        ops.push(op);
+    }
+    if ops.is_empty() {
+        return;
+    }
+    let mut cleanup_ops = PostUnlockOps::default();
+    {
+        let mut bp = targets.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
+        let mut actor_st = targets.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        for op in ops {
+            match op {
+                PostCommitBallparkOp::RemoveBall { ball_id } => {
+                    let _ = super::ball_ops::remove_ball_for_post_commit(
+                        targets.solar_system_id,
+                        &mut bp,
+                        &mut actor_st,
+                        &targets.ball_positions,
+                        &targets.scrambled_balls,
+                        &targets.module_deactivation_hook,
+                        &mut cleanup_ops,
+                        ball_id,
+                    );
+                }
+                other => apply_post_commit_op_to_ballpark(&mut bp, other),
+            }
+        }
+        super::sync_ball_positions(&bp, &targets.ball_positions, &targets.scrambled_balls);
+        super::protection::sync_all_protection_registry_in_actor(&bp, &mut actor_st);
+        let cur_tidi = super::celestials::clamp_tidi_factor_bits(&targets.tidi_factor_bits);
+        let prev_view = { targets.view_tx.borrow().clone() };
+        let next_view = SystemView::from_ballpark(&bp, Some(&actor_st), cur_tidi, Some(prev_view.as_ref()));
+        let _ = targets.view_tx.send(Arc::new(next_view));
+        enqueue_actor_cmd_post_unlock_ops(&mut actor_st, post_unlock_tx, &targets.post_unlock_in_flight, cleanup_ops);
+    }
+}
+
+pub(in crate::system_actor) fn drain_post_commit_rx(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
+    post_unlock_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
+    targets: &PostCommitActorTargets,
+) {
+    apply_drained_post_commit_ops(None, rx, post_unlock_tx, targets);
+}
+
+fn is_batch_barrier_cmd(cmd: &SystemCommand) -> bool {
+    matches!(
+        cmd,
+        SystemCommand::StepManual { .. }
+            | SystemCommand::StepManualTickOnly { .. }
+            | SystemCommand::FireWeaponCycleVolley { .. }
+            | SystemCommand::FlushConditionCheckpoint { .. }
+    )
+}
+
+pub(in crate::system_actor) async fn next_actor_cmd_batch(
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<SystemCommand>,
+    post_commit_rx: &mut tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
+    post_commit_open: &mut bool,
+    post_unlock_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
+    targets: &PostCommitActorTargets,
+    shutdown_reply: &mut Option<tokio::sync::oneshot::Sender<()>>,
+) -> Option<(Vec<SystemCommand>, bool)> {
+    const MAX_ACTOR_COMMAND_BATCH: usize = 64;
+    let first_cmd = loop {
+        drain_post_commit_rx(post_commit_rx, post_unlock_tx, targets);
+        tokio::select! {
+            biased;
+            maybe_op = post_commit_rx.recv(), if *post_commit_open => {
+                match maybe_op {
+                    Some(op) => apply_drained_post_commit_ops(Some(op), post_commit_rx, post_unlock_tx, targets),
+                    None => *post_commit_open = false,
+                }
+            }
+            maybe_cmd = cmd_rx.recv() => {
+                match maybe_cmd {
+                    Some(SystemCommand::ShutdownActor { reply }) => {
+                        *shutdown_reply = Some(reply);
+                        return None;
+                    }
+                    Some(cmd) => break cmd,
+                    None => return None,
+                }
+            }
+        }
+    };
+    drain_post_commit_rx(post_commit_rx, post_unlock_tx, targets);
+    let mut shutdown_requested = false;
+    let stop_after_first = is_batch_barrier_cmd(&first_cmd);
+    let mut cmd_batch = Vec::with_capacity(1);
+    cmd_batch.push(first_cmd);
+    if !stop_after_first {
+        while cmd_batch.len() < MAX_ACTOR_COMMAND_BATCH {
+            match cmd_rx.try_recv() {
+                Ok(SystemCommand::ShutdownActor { reply }) => {
+                    *shutdown_reply = Some(reply);
+                    shutdown_requested = true;
+                    break;
+                }
+                Ok(next_cmd) => {
+                    let stop_after = is_batch_barrier_cmd(&next_cmd);
+                    cmd_batch.push(next_cmd);
+                    if stop_after { break; }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    Some((cmd_batch, shutdown_requested))
+}
+
 /// Spawns the ordered FIFO post-unlock persistence and hook worker for one `SystemActor` (`W2`, `#1170`).
 ///
 /// Uses a dedicated OS thread instead of Tokio `spawn_blocking` so `tokio::runtime::Runtime::drop()`
@@ -1668,16 +1843,19 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
     deact_hook_worker: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     post_unlock_actions_worker: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    cmd_tx_worker: tokio::sync::mpsc::Sender<SystemCommand>,
-) -> (tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>, tokio::sync::oneshot::Receiver<()>) {
+) -> (
+    tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
     let (post_unlock_tx, mut post_unlock_rx) = tokio::sync::mpsc::unbounded_channel::<PostUnlockMsg>();
+    let (post_commit_tx, post_commit_rx) = tokio::sync::mpsc::unbounded_channel::<PostCommitBallparkOp>();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::Builder::new().name(format!("post-unlock-{solar_system_id}")).spawn(move || {
         struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
         impl Drop for WorkerDoneGuard { fn drop(&mut self) { if let Some(tx) = self.0.take() { let _ = tx.send(()); } } }
         let _done_guard = WorkerDoneGuard(Some(done_tx));
         let _ = worker_thread_id.set(std::thread::current().id());
-        let mut pending_acks: Vec<PendingCommandAck> = Vec::new();
         let mut process_item = |item: PostUnlockWorkItem| {
             let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1691,8 +1869,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
                     deact_hook.as_ref(),
                     lock_hook.as_ref(),
                     Some((solar_system_id, work_seq)),
-                    Some(&cmd_tx_worker),
-                    Some(&mut pending_acks),
+                    Some(&post_commit_tx),
                     None,
                 )
             })).unwrap_or_else(|_| { tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker"); (Vec::new(), false) });
@@ -1718,7 +1895,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
             }
         }
     }).expect("spawn post_unlock worker thread");
-    (post_unlock_tx, done_rx)
+    (post_unlock_tx, post_commit_rx, done_rx)
 }
 
 #[cfg(test)]

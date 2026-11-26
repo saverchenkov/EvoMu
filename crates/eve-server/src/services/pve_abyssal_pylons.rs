@@ -990,8 +990,8 @@ pub(crate) fn step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
-    boundary_ticks_shadow: Option<&mut HashMap<i64, u32>>,
-    active_clouds_shadow: Option<&mut HashMap<i64, TypeId>>,
+    boundary_ticks_shadow: Option<(&mut HashMap<i64, (Option<u32>, u64)>, u64)>,
+    active_clouds_shadow: Option<(&mut HashMap<i64, (Option<TypeId>, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Vec<i64> {
     step_abyssal_hazards_and_pylons_in_ballpark_with_options(
@@ -1006,6 +1006,45 @@ pub(crate) fn step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
     )
 }
 
+fn overlay_tombstone_shadow<V: Copy>(
+    map: &mut HashMap<i64, V>,
+    shadow: Option<&HashMap<i64, (Option<V>, u64)>>,
+) {
+    if let Some(sh) = shadow {
+        for (&k, &(val_opt, _)) in sh {
+            match val_opt {
+                Some(v) => { map.insert(k, v); }
+                None => { map.remove(&k); }
+            }
+        }
+    }
+}
+
+fn diff_and_update_tombstone_shadow<V: Copy + PartialEq>(
+    prev: &HashMap<i64, V>,
+    curr: &HashMap<i64, V>,
+    mut shadow: Option<(&mut HashMap<i64, (Option<V>, u64)>, u64)>,
+) -> (Vec<(i64, V)>, Vec<i64>) {
+    let upserts: Vec<(i64, V)> = curr
+        .iter()
+        .filter_map(|(&k, &v)| (prev.get(&k) != Some(&v)).then_some((k, v)))
+        .collect();
+    let removes: Vec<i64> = prev
+        .keys()
+        .copied()
+        .filter(|k| !curr.contains_key(k))
+        .collect();
+    if let Some((sh, seq)) = shadow.as_deref_mut() {
+        for &(k, v) in &upserts {
+            sh.insert(k, (Some(v), *seq));
+        }
+        for &k in &removes {
+            sh.insert(k, (None, *seq));
+        }
+    }
+    (upserts, removes)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     ballpark: &mut eve_destiny::Ballpark,
@@ -1013,8 +1052,8 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: eve_sde::SolarSystemId,
     defer_ship_death_to_step_hook: bool,
-    mut boundary_ticks_shadow: Option<&mut HashMap<i64, u32>>,
-    mut active_clouds_shadow: Option<&mut HashMap<i64, TypeId>>,
+    mut boundary_ticks_shadow: Option<(&mut HashMap<i64, (Option<u32>, u64)>, u64)>,
+    mut active_clouds_shadow: Option<(&mut HashMap<i64, (Option<TypeId>, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Vec<i64> {
     let mut suppressor_destroyed = Vec::new();
@@ -1100,6 +1139,8 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             boundary_ticks = snap.abyssal_state.boundary_ticks.clone();
         });
     }
+    overlay_tombstone_shadow(&mut boundary_ticks, boundary_ticks_shadow.as_deref().map(|(sh, _)| &**sh));
+    overlay_tombstone_shadow(&mut active_clouds, active_clouds_shadow.as_deref().map(|(sh, _)| &**sh));
     let prev_boundary_ticks = boundary_ticks.clone();
     let prev_active_clouds = active_clouds.clone();
 
@@ -1254,28 +1295,15 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             });
         let Some(center) = center_opt else {
             boundary_ticks.remove(&bid);
-            if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
-                sh.remove(&bid);
-            }
             continue;
         };
         if b_pos.distance(center) <= ABYSSAL_ROOM_BOUNDARY_RADIUS_M {
             boundary_ticks.remove(&bid);
-            if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
-                sh.remove(&bid);
-            }
             continue;
         }
-        let prev_val = boundary_ticks
-            .get(&bid)
-            .copied()
-            .unwrap_or(0)
-            .max(boundary_ticks_shadow.as_deref().and_then(|sh| sh.get(&bid).copied()).unwrap_or(0));
+        let prev_val = boundary_ticks.get(&bid).copied().unwrap_or(0);
         let t_count = prev_val + 1;
         boundary_ticks.insert(bid, t_count);
-        if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
-            sh.insert(bid, t_count);
-        }
         let per_type = 250.0 * (1.0 + 0.5 * ((t_count as f64) - 1.0));
         if let Some(res_sum) = ballpark.combat_states.get(&bid).map(|cs| {
             cs.structure_resonance[0]
@@ -1286,17 +1314,11 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             let raw_hull_dmg = per_type * res_sum;
             if let Some((_, true, _)) = ballpark.apply_direct_structure_damage_to_ball(bid, raw_hull_dmg) {
                 boundary_ticks.remove(&bid);
-                if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
-                    sh.remove(&bid);
-                }
                 boundary_destroyed.push((bid, b_type, b_pos, is_probe, is_pod, t_count, owner_hint));
             }
         } else if is_probe {
             let _ = ballpark.remove_ball(bid);
             boundary_ticks.remove(&bid);
-            if let Some(sh) = boundary_ticks_shadow.as_deref_mut() {
-                sh.remove(&bid);
-            }
             boundary_destroyed.push((bid, b_type, b_pos, true, false, t_count, owner_hint));
         }
     }
@@ -1395,15 +1417,11 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
 
     boundary_ticks.retain(|bid, _| *bid < 0 || ballpark.balls.contains_key(bid));
     if boundary_ticks != prev_boundary_ticks && db_opt.is_some() {
-        let upserts: Vec<(i64, u32)> = boundary_ticks
-            .iter()
-            .filter_map(|(&k, &v)| (prev_boundary_ticks.get(&k) != Some(&v)).then_some((k, v)))
-            .collect();
-        let removes: Vec<i64> = prev_boundary_ticks
-            .keys()
-            .copied()
-            .filter(|k| !boundary_ticks.contains_key(k))
-            .collect();
+        let (upserts, removes) = diff_and_update_tombstone_shadow(
+            &prev_boundary_ticks,
+            &boundary_ticks,
+            boundary_ticks_shadow,
+        );
         if !upserts.is_empty() || !removes.is_empty() {
             post_unlock.push(PostUnlockIntent::AbyssalPylons(
                 AbyssalPylonsDbOp::SyncBoundaryTicks { upserts, removes },
@@ -1427,11 +1445,6 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         return suppressor_destroyed;
     }
 
-    if let Some(sh) = active_clouds_shadow.as_deref() {
-        for (&k, &v) in sh {
-            active_clouds.insert(k, v);
-        }
-    }
     active_clouds.retain(|bid, _| ballpark.balls.contains_key(bid));
 
     for sid in ship_ids {
@@ -1476,19 +1489,12 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         }
     }
 
-    if let Some(sh) = active_clouds_shadow.as_deref_mut() {
-        *sh = active_clouds.clone();
-    }
     if active_clouds != prev_active_clouds && db_opt.is_some() {
-        let upserts: Vec<(i64, TypeId)> = active_clouds
-            .iter()
-            .filter_map(|(&k, &v)| (prev_active_clouds.get(&k) != Some(&v)).then_some((k, v)))
-            .collect();
-        let removes: Vec<i64> = prev_active_clouds
-            .keys()
-            .copied()
-            .filter(|k| !active_clouds.contains_key(k))
-            .collect();
+        let (upserts, removes) = diff_and_update_tombstone_shadow(
+            &prev_active_clouds,
+            &active_clouds,
+            active_clouds_shadow,
+        );
         if !upserts.is_empty() || !removes.is_empty() {
             post_unlock.push(PostUnlockIntent::AbyssalPylons(
                 AbyssalPylonsDbOp::SyncActiveClouds { upserts, removes },

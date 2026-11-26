@@ -1367,15 +1367,16 @@ impl SystemRegistry {
         let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
         let completed_post_unlock_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let completed_post_unlock_seq_actor = Arc::clone(&completed_post_unlock_seq);
-        let (post_unlock_tx, post_unlock_worker_join) = post_unlock::spawn_post_unlock_worker(
-            solar_system_id,
-            post_unlock_worker_thread_id.clone(),
-            Arc::clone(&completed_post_unlock_seq),
-            actor_state_actor.clone(),
-            module_deactivation_hook_actor.clone(),
-            target_lock_completed_hook_actor.clone(),
-            post_unlock_actions_actor.clone(), cmd_tx.clone(),
-        );
+        let (post_unlock_tx, mut post_commit_rx, post_unlock_worker_join) =
+            post_unlock::spawn_post_unlock_worker(
+                solar_system_id,
+                post_unlock_worker_thread_id.clone(),
+                Arc::clone(&completed_post_unlock_seq),
+                actor_state_actor.clone(),
+                module_deactivation_hook_actor.clone(),
+                target_lock_completed_hook_actor.clone(),
+                post_unlock_actions_actor.clone(),
+            );
         if !initial_post_unlock_ops.is_empty() {
             let _ = post_unlock::send_post_unlock_item(
                 &post_unlock_tx,
@@ -1398,49 +1399,32 @@ impl SystemRegistry {
             let mut post_unlock_tx_opt = post_unlock_shutdown;
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
+            let mut post_commit_open = true;
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
+            let post_commit_targets = post_unlock::PostCommitActorTargets {
+                solar_system_id,
+                ballpark: Arc::clone(&ballpark_actor),
+                actor_state: Arc::clone(&actor_state_actor),
+                ball_positions: Arc::clone(&ball_positions_actor),
+                scrambled_balls: Arc::clone(&scrambled_balls_actor),
+                view_tx: Arc::clone(&view_tx_actor),
+                tidi_factor_bits: Arc::clone(&tidi_factor_bits_actor),
+                module_deactivation_hook: Arc::clone(&module_deactivation_hook_actor),
+                post_unlock_in_flight: Arc::clone(&post_unlock_in_flight_actor),
+            };
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
-            // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
-            const MAX_ACTOR_COMMAND_BATCH: usize = 64;
-            let is_batch_barrier_cmd = |cmd: &SystemCommand| -> bool {
-                matches!(
-                    cmd,
-                    SystemCommand::StepManual { .. }
-                        | SystemCommand::StepManualTickOnly { .. }
-                        | SystemCommand::FireWeaponCycleVolley { .. }
-                        | SystemCommand::FlushConditionCheckpoint { .. }
-                )
-            };
-            while let Some(first_cmd) = cmd_rx.recv().await {
-                if let SystemCommand::ShutdownActor { reply } = first_cmd {
-                    shutdown_reply.0 = Some(reply);
-                    break;
-                }
-                let mut shutdown_requested = false;
-                let stop_after_first = is_batch_barrier_cmd(&first_cmd);
-                let mut cmd_batch = Vec::with_capacity(1);
-                cmd_batch.push(first_cmd);
-                if !stop_after_first {
-                    while cmd_batch.len() < MAX_ACTOR_COMMAND_BATCH {
-                        match cmd_rx.try_recv() {
-                            Ok(SystemCommand::ShutdownActor { reply }) => {
-                                shutdown_reply.0 = Some(reply);
-                                shutdown_requested = true;
-                                break;
-                            }
-                            Ok(next_cmd) => {
-                                let stop_after = is_batch_barrier_cmd(&next_cmd);
-                                cmd_batch.push(next_cmd);
-                                if stop_after {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
+            while let Some((cmd_batch, shutdown_requested)) = post_unlock::next_actor_cmd_batch(
+                &mut cmd_rx,
+                &mut post_commit_rx,
+                &mut post_commit_open,
+                post_unlock_tx_opt.0.as_ref(),
+                &post_commit_targets,
+                &mut shutdown_reply.0,
+            )
+            .await
+            {
 
                 let mut batch_view_dirty = false;
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
@@ -1475,6 +1459,7 @@ impl SystemRegistry {
                 let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
+                post_unlock::prune_actor_shadows_for_cmd(solar_system_id, &mut actor_st, &completed_post_unlock_seq_actor);
                 let out = (|| -> Option<PendingActorDelivery> {
                 let mut pending_step: Option<(f64, StepReply)> = None;
                 let mut pending_volley: Option<(
@@ -1563,6 +1548,8 @@ impl SystemRegistry {
                                     protection_registry,
                                     active_drone_miners,
                                     drone_next_ready_unix,
+                                    next_post_unlock_seq,
+                                    post_unlock_shadows,
                                     ..
                                 } = &mut *exec_ctx.actor_st;
                                 match cmd {
@@ -1923,6 +1910,7 @@ impl SystemRegistry {
                                             pending_missile_launches,
                                         );
                                     } else {
+                                        let next_pu_seq = next_post_unlock_seq.saturating_add(1);
                                         cycles::apply_weapon_cycle_damage_collecting(
                                             solar_system_id,
                                             &cycle,
@@ -1933,6 +1921,7 @@ impl SystemRegistry {
                                             &mut volley_actions,
                                             &mut volley_destroyed,
                                             Some(pending_destroyed_actor),
+                                            Some((&mut post_unlock_shadows.depot_reinforced_until, next_pu_seq)),
                                             post_unlock_ops,
                                         );
                                     }
@@ -2372,6 +2361,7 @@ impl SystemRegistry {
                 post_unlock_worker_join,
             )
             .await;
+            post_unlock::drain_post_commit_rx(&mut post_commit_rx, None, &post_commit_targets);
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,

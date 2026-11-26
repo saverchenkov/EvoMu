@@ -190,6 +190,7 @@ pub(crate) fn step_guided_missiles_in_actor(
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
     dt_sim: f64,
+    mut depot_reinf_shadow: Option<(&mut HashMap<BallId, (u64, u64)>, u64)>,
     post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     if active_missiles.is_empty() {
@@ -260,6 +261,7 @@ pub(crate) fn step_guided_missiles_in_actor(
             ballpark,
         );
         if effective_dmg.total() > 0.0 {
+            let reinf_sh = depot_reinf_shadow.as_deref_mut().map(|(m, seq)| (&mut **m, *seq));
             super::cycles::apply_resolved_weapon_damage(
                 m.attacker_ship_id,
                 Some(m.char_id).filter(|&c| c > 0),
@@ -273,6 +275,7 @@ pub(crate) fn step_guided_missiles_in_actor(
                 pending_cycle_actions,
                 destroyed_balls,
                 pending_destroyed_outbox,
+                reinf_sh,
                 post_unlock,
             );
         }

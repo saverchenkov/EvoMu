@@ -134,6 +134,11 @@ fn run_direct_ball_op_on_current_thread<R>(
             .actor_state
             .write()
             .unwrap_or_else(|e| e.into_inner());
+        super::post_unlock::prune_actor_shadows_for_cmd(
+            handle.solar_system_id,
+            &mut actor_st,
+            &handle.completed_post_unlock_seq,
+        );
         let mut ops = super::post_unlock::PostUnlockOps::default();
         let mut ctx = BallOpsCtx {
             solar_system_id: handle.solar_system_id,
@@ -159,10 +164,9 @@ fn run_direct_ball_op_on_current_thread<R>(
             handle.event_tx.receiver_count(),
         );
         handle.publish_view_from(&ballpark, Some(&actor_st));
-        let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+        let ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
             handle,
-            actor_st.db_opt.as_ref(),
-            actor_st.sde_opt.as_ref(),
+            &mut actor_st,
             ops,
             caller_can_wait,
         );
@@ -752,6 +756,32 @@ fn clear_removed_ball_actor_state(
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, g| !(g.sys_id == ctx.solar_system_id && g.ship_id == ball_id));
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::system_actor) fn remove_ball_for_post_commit(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    actor_st: &mut SystemActorState,
+    ball_positions: &Arc<RankedRwLock<HashMap<BallId, (DVec3, MovementMode)>, RANK_LEAF>>,
+    scrambled_balls: &Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
+    module_deactivation_hook: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    post_unlock_ops: &mut super::post_unlock::PostUnlockOps,
+    ball_id: BallId,
+) -> Option<Ball> {
+    let mut ctx = BallOpsCtx {
+        solar_system_id,
+        ballpark,
+        actor_st,
+        ball_positions,
+        scrambled_balls,
+        module_deactivation_hook,
+        explicit_update_state_guards: None,
+        ball_spawn_tokens: None,
+        removed_checkpoint_ball: None,
+        post_unlock_ops,
+    };
+    remove_ball_in_actor(&mut ctx, ball_id, false)
 }
 
 fn remove_ball_in_actor(

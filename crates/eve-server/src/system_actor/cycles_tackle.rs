@@ -1714,6 +1714,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                 .as_ref()
                 .map(|db| db.clock().now_unix_secs())
                 .unwrap_or(0);
+            let next_pu_seq = exec_ctx.actor_st.next_post_unlock_seq.saturating_add(1);
             let out = if is_invuln_stronghold {
                 exec_ctx.ballpark.balls.get(&ball_id).cloned().map(|b| (0.0, false, b))
             } else if let Some((applied, destroyed, ball_opt)) =
@@ -1725,6 +1726,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                     damage,
                     exec_ctx.ballpark,
                     now_unix,
+                    Some((&mut exec_ctx.actor_st.post_unlock_shadows.depot_reinforced_until, next_pu_seq)),
                     exec_ctx.post_unlock_ops,
                 )
                 .or_else(|| {
@@ -1735,6 +1737,7 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
                         damage,
                         exec_ctx.ballpark,
                         now_unix,
+                        Some((&mut exec_ctx.actor_st.post_unlock_shadows.fob_states, next_pu_seq)),
                         exec_ctx.post_unlock_ops,
                     )
                 })
@@ -2078,6 +2081,13 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         tidi,
         exec_ctx.post_unlock_ops,
     );
+    let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
+        super::post_unlock::begin_tick_charge_reservations(
+            exec_ctx.solar_system_id,
+            exec_ctx.actor_st,
+            exec_ctx.completed_post_unlock_seq_actor,
+        );
+    let next_pu_seq = exec_ctx.actor_st.next_post_unlock_seq.saturating_add(1);
     let mut missile_destroyed = Vec::new();
     missiles::step_guided_missiles_in_actor(
         exec_ctx.ballpark,
@@ -2090,14 +2100,9 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         &mut missile_destroyed,
         Some(exec_ctx.pending_destroyed_actor),
         dt_sim,
+        Some((&mut exec_ctx.actor_st.post_unlock_shadows.depot_reinforced_until, next_pu_seq)),
         exec_ctx.post_unlock_ops,
     );
-    let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
-        super::post_unlock::begin_tick_charge_reservations(
-            exec_ctx.solar_system_id,
-            exec_ctx.actor_st,
-            exec_ctx.completed_post_unlock_seq_actor,
-        );
     let mut destroyed_balls = cycles::step_cycles_with_reservations_collecting(
         exec_ctx.solar_system_id, exec_ctx.ballpark,
         &mut exec_ctx.actor_st.active_module_cycles,
@@ -2125,6 +2130,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
         tick_snap_opt,
         virtual_item_deltas,
         virtual_crystal_dmg_deltas,
+        Some((&mut exec_ctx.actor_st.post_unlock_shadows, next_pu_seq)),
         exec_ctx.post_unlock_ops,
     );
     destroyed_balls.extend(missile_destroyed);
@@ -2197,14 +2203,15 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             );
         }
     }
+    let next_pu_seq = exec_ctx.actor_st.next_post_unlock_seq.saturating_add(1);
     for _ in 0..completed_sim_steps {
         for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
             exec_ctx.ballpark,
             exec_ctx.actor_st.sde_opt.as_deref(),
             exec_ctx.actor_st.db_opt.as_ref(),
             exec_ctx.solar_system_id,
-            Some(&mut exec_ctx.actor_st.post_unlock_shadows.abyssal_boundary_ticks),
-            Some(&mut exec_ctx.actor_st.post_unlock_shadows.abyssal_active_clouds),
+            Some((&mut exec_ctx.actor_st.post_unlock_shadows.abyssal_boundary_ticks, next_pu_seq)),
+            Some((&mut exec_ctx.actor_st.post_unlock_shadows.abyssal_active_clouds, next_pu_seq)),
             exec_ctx.post_unlock_ops,
         ) {
             destroyed_balls.push((bid, None));
@@ -2217,7 +2224,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             exec_ctx.solar_system_id,
             exec_ctx.actor_st.pending_notifications_opt.as_ref(),
             exec_ctx.actor_st.notify_tx_opt.as_ref(),
-            Some(&mut exec_ctx.actor_st.post_unlock_shadows.arena_hazard_ticks),
+            Some((&mut exec_ctx.actor_st.post_unlock_shadows.arena_hazard_ticks, next_pu_seq)),
             exec_ctx.post_unlock_ops,
         ) {
             destroyed_balls.push((bid, None));
@@ -2271,6 +2278,11 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             exec_ctx.solar_system_id,
             step_now_unix,
             &mut destroyed_balls,
+            Some((
+                &mut exec_ctx.actor_st.post_unlock_shadows.restored_doomsday_cycles,
+                &mut exec_ctx.actor_st.post_unlock_shadows.restored_warp_suppressions,
+                next_pu_seq,
+            )),
             exec_ctx.post_unlock_ops,
         );
         exec_ctx

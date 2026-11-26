@@ -724,34 +724,43 @@ pub(crate) fn apply_mobile_deployable_in_snap(
             owner_id,
             pos_arr,
             now_unix,
-        } => destroy_deployable_with_loot_drop_in_snap(
-            snap,
-            *solar_system_id,
-            *ball_id,
-            *owner_id,
-            *pos_arr,
-            *now_unix,
-        )
-        .map(|can_id| PostCommitBallparkOp::AddStaticBallWithMeta {
-            ball: eve_destiny::Ball {
-                id: can_id,
-                type_id: 23,
-                position: DVec3::from_array(*pos_arr),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1_000.0,
-                radius: 20.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            },
-            slim_meta: eve_destiny::SlimItemMeta {
-                group_id: 12,
-                category_id: 2,
-                owner_id: *owner_id,
-                ..Default::default()
-            },
-        }),
+        } => {
+            let actively_reinforced = read_deployable_state_snap(snap)
+                .deployables
+                .get(ball_id)
+                .is_some_and(|rec| rec.reinforced_until_unix.is_some_and(|u| *now_unix < u));
+            if actively_reinforced {
+                return None;
+            }
+            destroy_deployable_with_loot_drop_in_snap(
+                snap,
+                *solar_system_id,
+                *ball_id,
+                *owner_id,
+                *pos_arr,
+                *now_unix,
+            )
+            .map(|can_id| PostCommitBallparkOp::AddStaticBallWithMeta {
+                ball: eve_destiny::Ball {
+                    id: can_id,
+                    type_id: 23,
+                    position: DVec3::from_array(*pos_arr),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 20.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Rigid,
+                },
+                slim_meta: eve_destiny::SlimItemMeta {
+                    group_id: 12,
+                    category_id: 2,
+                    owner_id: *owner_id,
+                    ..Default::default()
+                },
+            })
+        }
         MobileDeployableDbOp::MtuDestroyed {
             solar_system_id,
             ball_id,
@@ -1124,6 +1133,7 @@ pub fn handle_ball_damage_in_actor(
         damage,
         ballpark,
         now_unix,
+        None,
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(
@@ -1146,6 +1156,7 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
     damage: DamageVector,
     ballpark: &mut eve_destiny::Ballpark,
     now_unix: u64,
+    mut depot_reinf_shadow: Option<(&mut HashMap<BallId, (u64, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
     let db = db_opt.as_ref()?;
@@ -1158,20 +1169,27 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
     let it_grp = sde.types.get(&item_type_id).map(|t| t.group_id).unwrap_or(0);
 
     if it_grp == GROUP_MOBILE_DEPOT {
+        let Some(ball_snap) = ballpark.balls.get(&ball_id).cloned() else {
+            return Some((0.0, false, None));
+        };
         let state = db.with_snapshot(read_deployable_state_snap);
         let rec_opt = state.deployables.get(&ball_id).cloned();
 
-        let ball_snap = ballpark.balls.get(&ball_id).cloned();
+        let shadow_reinf = depot_reinf_shadow
+            .as_deref()
+            .and_then(|(sh, _)| sh.get(&ball_id).map(|&(u, _)| u));
+        let db_reinf = rec_opt.as_ref().and_then(|r| r.reinforced_until_unix);
+        let effective_reinf = match (db_reinf, shadow_reinf) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if effective_reinf.is_some_and(|u| now_unix < u) {
+            return Some((0.0, false, Some(ball_snap)));
+        }
+
         let cs = ballpark.combat_states.entry(ball_id).or_default();
 
         if let Some(rec) = rec_opt {
-            // Invulnerable during active reinforcement
-            if let Some(reinf_until) = rec.reinforced_until_unix {
-                if now_unix < reinf_until {
-                    return Some((0.0, false, ball_snap));
-                }
-            }
-
             // During 60-second anchoring countdown or when unanchored: takes direct damage and can be destroyed without reinforcement
             let anchoring_until_unix = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
             let is_anchoring = !rec.anchor_completed && rec.anchor_start_unix > 0 && anchoring_until_unix > now_unix;
@@ -1185,21 +1203,24 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
                         + damage.kinetic.max(0.0) * cs.shield_resonance[2]
                         + damage.explosive.max(0.0) * cs.shield_resonance[3];
                     if resisted_shield_dmg <= 0.0 {
-                        return Some((0.0, false, ball_snap));
+                        return Some((0.0, false, Some(ball_snap)));
                     }
                     if resisted_shield_dmg + 1e-6 >= damage_to_threshold {
                         cs.shield_hp = shield_threshold;
                         let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
+                        if let Some((sh, seq)) = depot_reinf_shadow.as_deref_mut() {
+                            sh.insert(ball_id, (reinf_until, *seq));
+                        }
                         post_unlock.push(PostUnlockIntent::MobileDeployable(
                             MobileDeployableDbOp::DepotReinforce {
                                 ball_id,
                                 reinforced_until_unix: reinf_until,
                             },
                         ));
-                        return Some((damage_to_threshold, false, ball_snap));
+                        return Some((damage_to_threshold, false, Some(ball_snap)));
                     } else {
                         cs.shield_hp -= resisted_shield_dmg;
-                        return Some((resisted_shield_dmg, false, ball_snap));
+                        return Some((resisted_shield_dmg, false, Some(ball_snap)));
                     }
                 }
             }
@@ -1211,8 +1232,7 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
             let _ = ballpark.remove_ball(ball_id);
             let pos_arr = db
                 .with_snapshot(|s| s.item_positions.get(&ball_id).copied())
-                .or_else(|| ball_snap.as_ref().map(|b| b.position.to_array()))
-                .unwrap_or([0.0; 3]);
+                .unwrap_or_else(|| ball_snap.position.to_array());
             post_unlock.push(PostUnlockIntent::MobileDeployable(
                 MobileDeployableDbOp::DepotDestroyed {
                     solar_system_id,
@@ -1223,7 +1243,7 @@ pub(crate) fn handle_ball_damage_in_actor_collecting(
                 },
             ));
         }
-        return Some((applied, destroyed, ball_snap));
+        return Some((applied, destroyed, Some(ball_snap)));
     }
 
     if it_grp == GROUP_MOBILE_TRACTOR {

@@ -899,7 +899,7 @@ pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting
         >,
     >,
     notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
-    arena_hazard_ticks_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
+    arena_hazard_ticks_shadow: Option<(&mut std::collections::HashMap<i64, (Option<u32>, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Vec<i64> {
     step_proving_grounds_arena_hazards_in_ballpark_with_options(
@@ -929,7 +929,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
         >,
     >,
     notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
-    mut arena_hazard_ticks_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
+    mut arena_hazard_ticks_shadow: Option<(&mut std::collections::HashMap<i64, (Option<u32>, u64)>, u64)>,
     standalone_post_commit: Option<std::sync::Arc<std::sync::Mutex<Option<ProvingArenaPostCommit>>>>,
     post_unlock: &mut PostUnlockOps,
 ) -> Vec<i64> {
@@ -1030,33 +1030,30 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
         if cand.already_eliminated && ship_type_id != 670 {
             continue;
         }
+        let effective_prev_tick = match arena_hazard_ticks_shadow
+            .as_deref()
+            .and_then(|(sh, _)| sh.get(&cand.ship_id).copied())
+        {
+            Some((v_opt, _)) => v_opt,
+            None => cand.db_hazard_ticks,
+        };
         let outside_sphere = ship_pos.distance(cand.center) > PROVING_ARENA_BOUNDARY_RADIUS_M;
         if !outside_sphere && !cand.exceeded_timer {
-            let had_shadow = arena_hazard_ticks_shadow
-                .as_deref_mut()
-                .and_then(|sh| sh.remove(&cand.ship_id))
-                .is_some();
-            if cand.db_hazard_ticks.is_some() || had_shadow {
+            if effective_prev_tick.is_some() {
+                if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_deref_mut() {
+                    sh.insert(cand.ship_id, (None, *seq));
+                }
                 hazard_tick_removes.push(cand.ship_id);
             }
             continue;
         }
-        let prev_tick = cand.db_hazard_ticks.unwrap_or(0).max(
-            arena_hazard_ticks_shadow
-                .as_deref()
-                .and_then(|sh| sh.get(&cand.ship_id).copied())
-                .unwrap_or(0),
-        );
-        let next_tick = prev_tick + 1;
-        if let Some(sh) = arena_hazard_ticks_shadow.as_deref_mut() {
-            sh.insert(cand.ship_id, next_tick);
-        }
+        let next_tick = effective_prev_tick.unwrap_or(0) + 1;
 
         let rem_dmg =
             PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * f64::from(next_tick - 1));
         if let Some((_, true, _)) = ballpark.apply_true_damage_to_ball(cand.ship_id, rem_dmg) {
-            if let Some(sh) = arena_hazard_ticks_shadow.as_deref_mut() {
-                sh.remove(&cand.ship_id);
+            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_deref_mut() {
+                sh.insert(cand.ship_id, (None, *seq));
             }
             hazard_tick_removes.push(cand.ship_id);
             destroyed_balls.push(cand.ship_id);
@@ -1069,6 +1066,9 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
                 will_run_step_hook: cand.will_run_step_hook,
             });
         } else {
+            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_deref_mut() {
+                sh.insert(cand.ship_id, (Some(next_tick), *seq));
+            }
             hazard_tick_upserts.push((cand.ship_id, next_tick));
         }
     }

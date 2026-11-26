@@ -19,9 +19,11 @@ use crate::services::insurgency_services::{
 #[cfg(test)]
 use crate::system_actor::post_unlock::execute_post_unlock_ops_for_standalone;
 use crate::system_actor::post_unlock::{PostUnlockIntent, PostUnlockOps};
+use crate::system_actor::PendingFobStateShadow;
 use eve_db::WorldStateSnapshot;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
+use std::collections::HashMap;
 
 #[path = "fw_gameplay_insurgency_lifecycle.rs"]
 mod fw_gameplay_insurgency_lifecycle;
@@ -516,6 +518,16 @@ pub(crate) fn apply_fob_ball_damage_in_snap(
             became_reinf,
             until,
         } => {
+            let already_past_shield = snap
+                .insurgency_runtime
+                .fob_armor_reinforced_until
+                .contains_key(camp_id)
+                || snap.structures.get(ball_id).is_some_and(|st| {
+                    matches!(st.state.as_str(), "ArmorReinforced" | "HullVulnerable" | "Destroyed")
+                });
+            if already_past_shield {
+                return;
+            }
             if *became_reinf {
                 snap.insurgency_runtime
                     .fob_armor_reinforced_until
@@ -540,6 +552,13 @@ pub(crate) fn apply_fob_ball_damage_in_snap(
             new_h,
             now_unix,
         } => {
+            let terminal_or_reinforced = snap.structures.get(ball_id).is_some_and(|st| {
+                st.state == "Destroyed"
+                    || (st.state == "ArmorReinforced" && *now_unix < st.reinforced_until_unix)
+            });
+            if terminal_or_reinforced {
+                return;
+            }
             if let Some(st) = snap.structures.get_mut(ball_id) {
                 st.shield_hp = 0.0;
                 st.armor_hp = 0.0;
@@ -574,12 +593,14 @@ pub(crate) fn handle_fob_ball_damage_in_actor(
         damage,
         ballpark,
         now_unix,
+        None,
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(db_opt, None, None, ops, Some(ballpark), None);
     res
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
     db_opt: Option<&eve_db::WorldRepository>,
     solar_system_id: u32,
@@ -587,6 +608,7 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
     damage: eve_destiny::DamageVector,
     ballpark: &mut eve_destiny::Ballpark,
     now_unix: u64,
+    mut fob_shadow: Option<(&mut HashMap<i64, PendingFobStateShadow>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
     let db = db_opt?;
@@ -603,34 +625,51 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
     enum ActorFobOutcome {
         Invulnerable,
         ShieldPhase { shield: f64, armor: f64, hull: f64 },
-        ArmorPhase { hull: f64 },
+        ArmorPhase { hull: f64, reinf_until: Option<u64> },
     }
 
-    let prep = db.with_snapshot(|snap| {
-        if crate::services::insurgency_services::is_fob_invulnerable_in_snap(
-            snap,
-            camp_id,
-            ball_id,
-            now_unix,
-        ) {
-            return ActorFobOutcome::Invulnerable;
-        }
-        let existing_reinf = snap
-            .insurgency_runtime
-            .fob_armor_reinforced_until
-            .get(&camp_id)
-            .copied();
-        let (s, a, h) = snap
-            .structures
-            .get(&ball_id)
-            .map(|st| (st.shield_hp, st.armor_hp, st.hull_hp))
-            .unwrap_or((2_500.0, 2_500.0, 3_500.0));
-        if existing_reinf.is_none() {
-            ActorFobOutcome::ShieldPhase { shield: s, armor: a, hull: h }
-        } else {
-            ActorFobOutcome::ArmorPhase { hull: h }
-        }
-    });
+    let shadow_entry = fob_shadow
+        .as_deref()
+        .and_then(|(sh, _)| sh.get(&ball_id).copied());
+
+    let prep = if let Some(sh) = shadow_entry.filter(|sh| {
+        sh.destroyed || sh.reinforced_until_unix.is_some_and(|u| now_unix < u)
+    }) {
+        let _ = sh;
+        ActorFobOutcome::Invulnerable
+    } else {
+        db.with_snapshot(|snap| {
+            if crate::services::insurgency_services::is_fob_invulnerable_in_snap(
+                snap,
+                camp_id,
+                ball_id,
+                now_unix,
+            ) {
+                return ActorFobOutcome::Invulnerable;
+            }
+            let db_reinf = snap
+                .insurgency_runtime
+                .fob_armor_reinforced_until
+                .get(&camp_id)
+                .copied();
+            let eff_reinf = shadow_entry
+                .and_then(|sh| sh.reinforced_until_unix)
+                .or(db_reinf);
+            let (s, a, h) = shadow_entry
+                .map(|sh| (sh.shield_hp, sh.armor_hp, sh.hull_hp))
+                .unwrap_or_else(|| {
+                    snap.structures
+                        .get(&ball_id)
+                        .map(|st| (st.shield_hp, st.armor_hp, st.hull_hp))
+                        .unwrap_or((2_500.0, 2_500.0, 3_500.0))
+                });
+            if eff_reinf.is_none() {
+                ActorFobOutcome::ShieldPhase { shield: s, armor: a, hull: h }
+            } else {
+                ActorFobOutcome::ArmorPhase { hull: h, reinf_until: eff_reinf }
+            }
+        })
+    };
 
     match prep {
         ActorFobOutcome::Invulnerable => Some((0.0, false, ball_snap)),
@@ -664,6 +703,19 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
             } else {
                 0
             };
+            if let Some((sh, seq)) = fob_shadow.as_deref_mut() {
+                sh.insert(
+                    ball_id,
+                    PendingFobStateShadow {
+                        shield_hp: new_s,
+                        armor_hp: if became_reinf { 0.0 } else { new_a },
+                        hull_hp: hull,
+                        reinforced_until_unix: became_reinf.then_some(until),
+                        destroyed: false,
+                        work_seq: *seq,
+                    },
+                );
+            }
             post_unlock.push(PostUnlockIntent::FobBallDamage(
                 FobBallDamageDbOp::ShieldPhase {
                     camp_id,
@@ -679,7 +731,7 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
             ballpark.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, false);
             Some((applied, false, ball_snap))
         }
-        ActorFobOutcome::ArmorPhase { hull } => {
+        ActorFobOutcome::ArmorPhase { hull, reinf_until } => {
             let (applied, destroyed, new_h, s_ratio, a_ratio, h_ratio) = {
                 let cs = ballpark.combat_states.entry(ball_id).or_default();
                 cs.max_shield_hp = 2_500.0;
@@ -692,6 +744,19 @@ pub(crate) fn handle_fob_ball_damage_in_actor_collecting(
                 let hr = (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0);
                 (applied, destroyed, cs.structure_hp, 0.0, 0.0, hr)
             };
+            if let Some((sh, seq)) = fob_shadow.as_deref_mut() {
+                sh.insert(
+                    ball_id,
+                    PendingFobStateShadow {
+                        shield_hp: 0.0,
+                        armor_hp: 0.0,
+                        hull_hp: new_h,
+                        reinforced_until_unix: reinf_until,
+                        destroyed,
+                        work_seq: *seq,
+                    },
+                );
+            }
             post_unlock.push(PostUnlockIntent::FobBallDamage(
                 FobBallDamageDbOp::ArmorPhase {
                     ball_id,

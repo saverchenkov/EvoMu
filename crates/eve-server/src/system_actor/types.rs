@@ -895,13 +895,29 @@ pub(crate) struct SystemActorState {
     pub(crate) post_unlock_shadows: PostUnlockActorShadows,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingFobStateShadow {
+    pub shield_hp: f64,
+    pub armor_hp: f64,
+    pub hull_hp: f64,
+    pub reinforced_until_unix: Option<u64>,
+    pub destroyed: bool,
+    pub work_seq: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PostUnlockActorShadows {
     pub mmju_spool_fired_at: HashMap<ItemId, (u64, u64)>,
     pub observatory_pings_done: HashMap<ItemId, u32>,
-    pub abyssal_boundary_ticks: HashMap<ItemId, u32>,
-    pub abyssal_active_clouds: HashMap<ItemId, TypeId>,
-    pub arena_hazard_ticks: HashMap<ItemId, u32>,
+    pub abyssal_boundary_ticks: HashMap<ItemId, (Option<u32>, u64)>,
+    pub abyssal_active_clouds: HashMap<ItemId, (Option<TypeId>, u64)>,
+    pub arena_hazard_ticks: HashMap<ItemId, (Option<u32>, u64)>,
+    pub depot_reinforced_until: HashMap<BallId, (u64, u64)>,
+    pub fob_states: HashMap<BallId, PendingFobStateShadow>,
+    pub rack_heat_pending: HashMap<BallId, ([f64; 3], u64)>,
+    pub pending_overheat_dmg_deltas: std::collections::VecDeque<(u64, ItemId, f64, bool)>,
+    pub restored_doomsday_cycles: HashMap<(BallId, u64, u32), u64>,
+    pub restored_warp_suppressions: HashMap<(BallId, u64), u64>,
 }
 
 /// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`

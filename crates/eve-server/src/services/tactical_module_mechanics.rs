@@ -1077,12 +1077,20 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
     sde_opt: &Option<Arc<SdeRegistry>>,
     db_opt: &Option<Arc<WorldRepository>>,
     dt: f64,
+    mut rack_heat_pending: Option<(&mut HashMap<BallId, ([f64; 3], u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) {
     if dt <= 0.0 || !dt.is_finite() {
         return;
     }
     let mut ship_ids: Vec<BallId> = ship_rack_heat.keys().copied().collect();
+    if let Some((sh, _)) = rack_heat_pending.as_deref() {
+        for &sid in sh.keys() {
+            if !ship_ids.contains(&sid) {
+                ship_ids.push(sid);
+            }
+        }
+    }
     for c in active_module_cycles.iter().filter(|c| c.is_overloaded) {
         if !ship_ids.contains(&c.ship_id) {
             ship_ids.push(c.ship_id);
@@ -1091,7 +1099,10 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
     ship_ids.sort_unstable();
     for sid in ship_ids {
         let eval = evaluate_ship_thermodynamics(sid, sde_opt, db_opt);
-        let (runtime_heat, needs_legacy_cleanup) = if ship_rack_heat.contains_key(&sid) {
+        let pending_heat = rack_heat_pending
+            .as_deref()
+            .and_then(|(sh, _)| sh.get(&sid).map(|&(h, _)| h));
+        let (runtime_heat, needs_legacy_cleanup) = if let Some(h) = pending_heat {
             let has_legacy = db_opt.as_ref().is_some_and(|db| {
                 db.with_snapshot(|snap| {
                     snap.items.get(&sid).is_some_and(|sh| {
@@ -1101,11 +1112,16 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
                     })
                 })
             });
-            (ship_rack_heat[&sid], has_legacy)
-        } else {
+            (h, has_legacy)
+        } else if db_opt.is_some() {
             read_runtime_rack_heat_readonly(sid, db_opt)
+        } else {
+            (ship_rack_heat.get(&sid).copied().unwrap_or([0.0; 3]), false)
         };
         let racks = ship_rack_heat.entry(sid).or_insert(runtime_heat);
+        if db_opt.is_some() {
+            *racks = runtime_heat;
+        }
         let mut rack_absorption_sum = [0.0_f64; 3];
         for c in active_module_cycles
             .iter()
@@ -1143,6 +1159,9 @@ pub(crate) fn step_rack_heat_per_tick_collecting(
             ship_rack_heat.remove(&sid);
         }
         if (changed || needs_legacy_cleanup) && db_opt.is_some() {
+            if let Some((sh, seq)) = rack_heat_pending.as_deref_mut() {
+                sh.insert(sid, (heat_snap, *seq));
+            }
             post_unlock.push(PostUnlockIntent::RackHeatPersist(RackHeatPersistDbOp {
                 ship_id: sid,
                 heat_snap,
@@ -1169,6 +1188,7 @@ pub fn step_rack_heat_per_tick(
         sde_opt,
         db_opt,
         dt,
+        None,
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(
@@ -1193,14 +1213,25 @@ pub(crate) fn apply_overheat_rack_and_damage_on_cycle_collecting(
     burned_out: &mut bool,
     burned_ship_modules: &mut Vec<(BallId, i64)>,
     mut local_heat_dmg: Option<&mut HashMap<i64, (f64, bool)>>,
+    rack_heat_pending: Option<&HashMap<BallId, ([f64; 3], u64)>>,
     post_unlock: &mut PostUnlockOps,
 ) {
     let r_idx = cycle.rack_idx.min(2);
     let eval = evaluate_ship_thermodynamics(cycle.ship_id, sde_opt, db_opt);
-    let (runtime_heat, needs_legacy_cleanup) = if ship_rack_heat.contains_key(&cycle.ship_id) {
-        ([0.0; 3], false)
+    let pending_heat = rack_heat_pending
+        .and_then(|sh| sh.get(&cycle.ship_id).map(|&(h, _)| h));
+    let (runtime_heat, needs_legacy_cleanup) = if let Some(h) = pending_heat {
+        (ship_rack_heat.get(&cycle.ship_id).copied().unwrap_or(h), false)
+    } else if db_opt.is_some() {
+        let (db_heat, has_legacy) = read_runtime_rack_heat_readonly(cycle.ship_id, db_opt);
+        if db_heat.iter().all(|&h| h == 0.0) {
+            ship_rack_heat.remove(&cycle.ship_id);
+        } else {
+            ship_rack_heat.insert(cycle.ship_id, db_heat);
+        }
+        (db_heat, has_legacy)
     } else {
-        read_runtime_rack_heat_readonly(cycle.ship_id, db_opt)
+        (ship_rack_heat.get(&cycle.ship_id).copied().unwrap_or([0.0; 3]), false)
     };
     if needs_legacy_cleanup && db_opt.is_some() {
         post_unlock.push(PostUnlockIntent::RackHeatPersist(RackHeatPersistDbOp {
@@ -1299,7 +1330,7 @@ pub(crate) fn apply_overheat_rack_and_damage_on_cycle_collecting(
             .as_deref()
             .and_then(|m| m.get(&mod_id).copied())
             .unwrap_or((0.0, false));
-        if already_burned {
+        if already_burned || base_dmg + pending_dmg >= max_hp - 1e-6 {
             continue;
         }
         let slot_dist = (mod_flag as isize - active_flag as isize).unsigned_abs() as i32;
@@ -1338,6 +1369,11 @@ pub(crate) fn apply_overheat_rack_and_damage_on_cycle_collecting(
     }
 
     if !updates.is_empty() {
+        for u in &updates {
+            post_unlock
+                .overheat_dmg_deltas
+                .push((u.module_id, u.dmg_delta, u.burned));
+        }
         post_unlock.push(PostUnlockIntent::OverheatModuleDamage(
             OverheatModuleDamageDbOp {
                 ship_id: cycle.ship_id,
@@ -1369,6 +1405,7 @@ pub fn apply_overheat_rack_and_damage_on_cycle(
         mechanic_rng_opt,
         burned_out,
         burned_ship_modules,
+        None,
         None,
         &mut ops,
     );

@@ -212,6 +212,11 @@ pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
     sys_id: u32,
     now_unix: u64,
     _destroyed_balls: &mut Vec<(i64, Option<i64>)>,
+    mut restored_shadow: Option<(
+        &mut HashMap<(BallId, u64, u32), u64>,
+        &mut HashMap<(BallId, u64), u64>,
+        u64,
+    )>,
     post_unlock: &mut PostUnlockOps,
 ) {
     let Some(db) = db_opt else {
@@ -246,7 +251,17 @@ pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
     }
 
     for cycle in &sys_cycles {
+        let cycle_key = (cycle.ship_id, cycle.started_at_unix, cycle.mod_type_id);
+        let already_restored = restored_shadow
+            .as_deref()
+            .is_some_and(|(cyc_sh, _, _)| cyc_sh.contains_key(&cycle_key));
         if now_unix >= cycle.immobilize_until_unix && !cycle.mobility_restored {
+            if already_restored {
+                continue;
+            }
+            if let Some((cyc_sh, _, seq)) = restored_shadow.as_deref_mut() {
+                cyc_sh.insert(cycle_key, *seq);
+            }
             base_scramble_strengths.insert(cycle.ship_id, cycle.orig_warp_scramble_strength);
             if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                 cs.warp_scramble_strength = cycle.orig_warp_scramble_strength;
@@ -268,7 +283,7 @@ pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
                     titan_ball.max_velocity = cycle.orig_max_velocity;
                 }
             }
-        } else if !cycle.mobility_restored {
+        } else if !cycle.mobility_restored && !already_restored {
             base_scramble_strengths.insert(cycle.ship_id, 100);
             if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                 cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
@@ -287,12 +302,22 @@ pub(crate) fn step_bosonic_doomsday_in_ballpark_collecting(
     }
 
     for sup in &sys_suppressions {
+        let sup_key = (sup.ship_id, sup.suppressed_until_unix);
+        let already_restored = restored_shadow
+            .as_deref()
+            .is_some_and(|(_, sup_sh, _)| sup_sh.contains_key(&sup_key));
         if now_unix >= sup.suppressed_until_unix {
+            if already_restored {
+                continue;
+            }
+            if let Some((_, sup_sh, seq)) = restored_shadow.as_deref_mut() {
+                sup_sh.insert(sup_key, *seq);
+            }
             base_scramble_strengths.insert(sup.ship_id, sup.orig_warp_scramble_strength);
             if let Some(cs) = ballpark.combat_states.get_mut(&sup.ship_id) {
                 cs.warp_scramble_strength = sup.orig_warp_scramble_strength;
             }
-        } else {
+        } else if !already_restored {
             let enforced = sup
                 .orig_warp_scramble_strength
                 .max(GTFO_WARP_SUPPRESSION_STRENGTH);
@@ -331,6 +356,7 @@ pub fn step_bosonic_doomsday_in_ballpark(
         sys_id,
         now_unix,
         _destroyed_balls,
+        None,
         &mut ops,
     );
     execute_post_unlock_ops_for_standalone(

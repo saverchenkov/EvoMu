@@ -852,15 +852,15 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
         st.active_module_cycles.push(cyc.clone());
         st.active_module_cycles.push(cloak_cyc(cloak_ship, cloak_mod, 5.0, 0.0, 1));
 
-        step_rack_heat_per_tick_collecting(&mut st.ship_rack_heat, &st.active_module_cycles, &st.sde_opt, &st.db_opt, 1.0, &mut ops);
+        let next_seq = st.next_post_unlock_seq.saturating_add(1);
+        step_rack_heat_per_tick_collecting(&mut st.ship_rack_heat, &st.active_module_cycles, &st.sde_opt, &st.db_opt, 1.0, Some((&mut st.post_unlock_shadows.rack_heat_pending, next_seq)), &mut ops);
         let rng = Some(Arc::new(crate::rng::MechanicRng::seeded(7)));
         for _ in 0..24 {
-            apply_overheat_rack_and_damage_on_cycle_collecting(&cyc, &mut st.ship_rack_heat, &st.sde_opt, &st.db_opt, &rng, &mut burned_out, &mut burned_others, Some(&mut local_heat), &mut ops);
+            apply_overheat_rack_and_damage_on_cycle_collecting(&cyc, &mut st.ship_rack_heat, &st.sde_opt, &st.db_opt, &rng, &mut burned_out, &mut burned_others, Some(&mut local_heat), Some(&st.post_unlock_shadows.rack_heat_pending), &mut ops);
             if burned_out { break; }
         }
-        let dmg = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot_id, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), bp, now + 100, &mut ops);
+        let dmg = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot_id, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), bp, now + 100, Some((&mut st.post_unlock_shadows.depot_reinforced_until, next_seq)), &mut ops);
         assert!(dmg.is_some_and(|(_, destroyed, _)| destroyed));
-        let next_seq = st.next_post_unlock_seq.saturating_add(1);
         step_mobile_deployables_in_actor_collecting(bp, &mut st.active_module_cycles, &ctx.mechanic_rng, Some(&ctx.sde), st.db_opt.as_ref(), Some(&ctx.mechanic_rng), SYS_ID, 1.0, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
         step_ext_deployables_in_actor_collecting(bp, Some(&mut st.active_module_cycles), &ctx.sde, &ctx.db, Some(&ctx.mechanic_rng), SYS_ID, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
     }
@@ -983,23 +983,27 @@ async fn track_1d_zero_db_writes_under_actor_locks_abyssal_bosonic_arena_insurge
     {
         let (mut bp_ab_g, mut st_ab_g) = (sys_abyss.ballpark.write().unwrap(), sys_abyss.actor_state.write().unwrap());
         let (bp_ab, st_ab) = (&mut *bp_ab_g, &mut *st_ab_g);
+        let seq_ab = st_ab.next_post_unlock_seq.saturating_add(1);
         assert!(on_abyssal_room_npc_destroyed_in_ballpark_collecting(bp_ab, &ctx.db, abyss_sys, npc_id, &mut ops_ab));
-        let _ = step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(bp_ab, Some(&ctx.sde), Some(&ctx.db), abyss_sys, Some(&mut st_ab.post_unlock_shadows.abyssal_boundary_ticks), Some(&mut st_ab.post_unlock_shadows.abyssal_active_clouds), &mut ops_ab);
+        let _ = step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(bp_ab, Some(&ctx.sde), Some(&ctx.db), abyss_sys, Some((&mut st_ab.post_unlock_shadows.abyssal_boundary_ticks, seq_ab)), Some((&mut st_ab.post_unlock_shadows.abyssal_active_clouds, seq_ab)), &mut ops_ab);
     }
     {
         let (mut bp_ar_g, mut st_ar_g) = (sys_arena.ballpark.write().unwrap(), sys_arena.actor_state.write().unwrap());
         let (bp_ar, st_ar) = (&mut *bp_ar_g, &mut *st_ar_g);
-        let _ = step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(bp_ar, Some(&ctx.sde), Some(&ctx.db), arena_sys, st_ar.pending_notifications_opt.as_ref(), st_ar.notify_tx_opt.as_ref(), Some(&mut st_ar.post_unlock_shadows.arena_hazard_ticks), &mut ops_ar);
+        let seq_ar = st_ar.next_post_unlock_seq.saturating_add(1);
+        let _ = step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(bp_ar, Some(&ctx.sde), Some(&ctx.db), arena_sys, st_ar.pending_notifications_opt.as_ref(), st_ar.notify_tx_opt.as_ref(), Some((&mut st_ar.post_unlock_shadows.arena_hazard_ticks, seq_ar)), &mut ops_ar);
     }
     {
         let (mut bp_ti, mut st_ti) = (sys_titan.ballpark.write().unwrap(), sys_titan.actor_state.write().unwrap());
         let mut dead = Vec::new();
-        step_bosonic_doomsday_in_ballpark_collecting(&mut bp_ti, &mut st_ti.base_scramble_strengths, Some(&ctx.sde), Some(&ctx.db), titan_sys, now, &mut dead, &mut ops_ti);
+        let seq_ti = st_ti.next_post_unlock_seq.saturating_add(1);
+        step_bosonic_doomsday_in_ballpark_collecting(&mut bp_ti, &mut st_ti.base_scramble_strengths, Some(&ctx.sde), Some(&ctx.db), titan_sys, now, &mut dead, Some((&mut st_ti.post_unlock_shadows.restored_doomsday_cycles, &mut st_ti.post_unlock_shadows.restored_warp_suppressions, seq_ti)), &mut ops_ti);
     }
     {
         let mut bp_fb = sys_fob.ballpark.write().unwrap();
-        let _st_fb = sys_fob.actor_state.write().unwrap();
-        let dmg = handle_fob_ball_damage_in_actor_collecting(Some(&ctx.db), fob_sys, fob_id, eve_destiny::DamageVector::new(1_500.0, 1_500.0, 0.0, 0.0), &mut bp_fb, now, &mut ops_fb);
+        let mut st_fb = sys_fob.actor_state.write().unwrap();
+        let seq_fb = st_fb.next_post_unlock_seq.saturating_add(1);
+        let dmg = handle_fob_ball_damage_in_actor_collecting(Some(&ctx.db), fob_sys, fob_id, eve_destiny::DamageVector::new(1_500.0, 1_500.0, 0.0, 0.0), &mut bp_fb, now, Some((&mut st_fb.post_unlock_shadows.fob_states, seq_fb)), &mut ops_fb);
         assert!(dmg.is_some_and(|(applied, destroyed, _)| applied > 0.0 && !destroyed));
     }
 
@@ -1079,4 +1083,520 @@ async fn track_1d_writer_held_1500ms_does_not_block_actor_ticks_for_external_ser
     wait_until("post-unlock persisted rack heat after 1.5s writer release", || {
         ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&ship_id).is_some_and(|tr| tr.contains_key(&1175)))
     }).await;
+}
+
+/// Regression test (`BF-01`, `BF-02`): under a held `db.writer`, Mobile Depot reinforcement and Pirate FOB
+/// transitions compose monotonically in actor shadows and reject stale DB ops out of order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_bf01_bf02_multi_hit_held_writer_depot_reinforce_and_fob_state() {
+    use crate::services::fw_gameplay::fw_gameplay_insurgency::{
+        apply_fob_ball_damage_in_snap, FobBallDamageDbOp,
+    };
+    use crate::services::insurgency_services::{FACTION_GURISTAS, PIRATE_STRONGHOLD_GURISTAS_TYPE};
+    use crate::services::mobile_deployables::{
+        apply_mobile_deployable_in_snap, handle_ball_damage_in_actor_collecting,
+        register_mobile_deployable, write_deployable_state, MobileDeployableDbOp, GROUP_MOBILE_DEPOT,
+    };
+    use eve_db::{PersistedInsurgencyCampaign, UpwellStructureRecord};
+    use eve_destiny::DamageVector;
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (depot1, loot1, depot2) = (779_300_101_i64, 779_300_102_i64, 779_300_103_i64);
+    let (fob_sys1, camp1, fob1) = (30_002_505_u32, 77_931_i64, 1_897_077_931_i64);
+    let (fob_sys2, camp2, fob2) = (30_002_506_u32, 77_932_i64, 1_897_077_932_i64);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(depot1, make_item(depot1, 33474, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+        snap.item_positions.insert(depot1, [1_000.0, 0.0, 0.0]);
+        snap.items.insert(loot1, make_item(loot1, 178, CHAR_ID, depot1, InventoryFlag::Cargo, 5));
+        snap.items.insert(depot2, make_item(depot2, 33474, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+        snap.item_positions.insert(depot2, [2_000.0, 0.0, 0.0]);
+
+        let s5_systems = vec![fob_sys1, 30_002_507, 30_002_508, 30_002_509, 30_002_510];
+        let supp1: HashMap<u32, i64> = s5_systems.iter().map(|&s| (s, 1_000)).collect();
+        snap.insurgency_runtime.campaigns.insert(camp1, PersistedInsurgencyCampaign {
+            campaign_id: camp1, pirate_faction_id: FACTION_GURISTAS, target_faction_id: 500001,
+            fob_solar_system_id: fob_sys1, systems: s5_systems.clone(),
+            created_at_unix: now.saturating_sub(5 * 86_400),
+            forecasting_end_unix: now.saturating_sub(100),
+            active_end_unix: now.saturating_add(86_400),
+            winddown_end_unix: now.saturating_add(2 * 86_400),
+            corruption_points: HashMap::new(), suppression_points: supp1,
+        });
+        snap.structures.insert(fob1, UpwellStructureRecord {
+            structure_id: fob1, type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE, owner_corp_id: 1_000_125,
+            solar_system_id: fob_sys1, name: "FOB 1".into(), position: [0.0; 3],
+            state: "ShieldVulnerable".into(), shield_hp: 1_000.0, armor_hp: 1_000.0, hull_hp: 3_500.0,
+            ..Default::default()
+        });
+
+        let mut s5_systems2 = vec![fob_sys2, 30_002_511, 30_002_512, 30_002_513, 30_002_514];
+        let supp2: HashMap<u32, i64> = s5_systems2.iter().map(|&s| (s, 1_000)).collect();
+        snap.insurgency_runtime.campaigns.insert(camp2, PersistedInsurgencyCampaign {
+            campaign_id: camp2, pirate_faction_id: FACTION_GURISTAS, target_faction_id: 500001,
+            fob_solar_system_id: fob_sys2, systems: std::mem::take(&mut s5_systems2),
+            created_at_unix: now.saturating_sub(5 * 86_400),
+            forecasting_end_unix: now.saturating_sub(100),
+            active_end_unix: now.saturating_add(86_400),
+            winddown_end_unix: now.saturating_add(2 * 86_400),
+            corruption_points: HashMap::new(), suppression_points: supp2,
+        });
+        snap.insurgency_runtime.fob_armor_reinforced_until.insert(camp2, now.saturating_sub(10));
+        snap.structures.insert(fob2, UpwellStructureRecord {
+            structure_id: fob2, type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE, owner_corp_id: 1_000_125,
+            solar_system_id: fob_sys2, name: "FOB 2".into(), position: [0.0; 3],
+            state: "ArmorReinforced".into(), reinforced_until_unix: now.saturating_sub(10),
+            shield_hp: 0.0, armor_hp: 0.0, hull_hp: 1_000.0,
+            ..Default::default()
+        });
+    });
+
+    register_mobile_deployable(&ctx, depot1, 33474, GROUP_MOBILE_DEPOT, CHAR_ID, SYS_ID, 0, DVec3::new(1_000.0, 0.0, 0.0));
+    register_mobile_deployable(&ctx, depot2, 33474, GROUP_MOBILE_DEPOT, CHAR_ID, SYS_ID, 0, DVec3::new(2_000.0, 0.0, 0.0));
+    write_deployable_state(&ctx, |st| {
+        for did in [depot1, depot2] {
+            let rec = st.deployables.get_mut(&did).unwrap();
+            rec.anchor_completed = true;
+            rec.anchor_start_unix = now.saturating_sub(120);
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(SYS_ID);
+    sys.spawn_ball_with_combat(make_ball(depot1, 33474, DVec3::new(1_000.0, 0.0, 0.0)), make_combat_state(1_000.0, 1_000.0, 1_000.0, 0.0)).await.unwrap();
+    sys.spawn_ball_with_combat(make_ball(depot2, 33474, DVec3::new(2_000.0, 0.0, 0.0)), make_combat_state(1_000.0, 1_000.0, 1_000.0, 0.0)).await.unwrap();
+
+    let sys_fob1 = ctx.systems.get_or_spawn(fob_sys1);
+    sys_fob1.spawn_ball_with_combat(
+        make_ball(fob1, PIRATE_STRONGHOLD_GURISTAS_TYPE, DVec3::ZERO),
+        CombatState { shield_hp: 1_000.0, max_shield_hp: 2_500.0, armor_hp: 1_000.0, max_armor_hp: 2_500.0, structure_hp: 3_500.0, max_structure_hp: 3_500.0, ..Default::default() },
+    ).await.unwrap();
+    let sys_fob2 = ctx.systems.get_or_spawn(fob_sys2);
+    sys_fob2.spawn_ball_with_combat(
+        make_ball(fob2, PIRATE_STRONGHOLD_GURISTAS_TYPE, DVec3::ZERO),
+        CombatState { shield_hp: 0.0, max_shield_hp: 2_500.0, armor_hp: 0.0, max_armor_hp: 2_500.0, structure_hp: 1_000.0, max_structure_hp: 3_500.0, ..Default::default() },
+    ).await.unwrap();
+
+    let held = hold_db_writer(&ctx.db);
+    // BF-01 across sequential actor commands while db.writer held:
+    let (ap1, dest1, _) = sys.apply_damage(depot1, DamageVector::new(2_000.0, 0.0, 0.0, 0.0)).await.unwrap().unwrap();
+    assert!(ap1 > 700.0 && !dest1);
+    let (ap2, dest2, _) = sys.apply_damage(depot1, DamageVector::new(50_000.0, 50_000.0, 50_000.0, 50_000.0)).await.unwrap().unwrap();
+    assert_eq!(ap2, 0.0);
+    assert!(!dest2, "reinforced shadow must block second damage command while DB writer held");
+    assert_eq!(sys.get_combat_state(depot1).await.unwrap().unwrap().armor_hp, 1_000.0);
+
+    // BF-01 same-tick batch inside one actor lock window:
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let mut st = sys.actor_state.write().unwrap();
+        let seq = st.next_post_unlock_seq.saturating_add(1);
+        let mut same_ops = PostUnlockOps::default();
+        let r1 = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot2, DamageVector::new(2_000.0, 0.0, 0.0, 0.0), &mut bp, now, Some((&mut st.post_unlock_shadows.depot_reinforced_until, seq)), &mut same_ops);
+        assert!(r1.is_some_and(|(a, d, _)| a > 700.0 && !d));
+        let r2 = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot2, DamageVector::new(50_000.0, 0.0, 0.0, 0.0), &mut bp, now, Some((&mut st.post_unlock_shadows.depot_reinforced_until, seq)), &mut same_ops);
+        assert!(r2.is_some_and(|(a, d, _)| a == 0.0 && !d));
+        assert_eq!(same_ops.items.len(), 1, "same-tick follow-up hit must not queue DepotDestroyed");
+    }
+
+    // BF-02 Shield -> ArmorReinforced under held writer:
+    let (fa1, fd1, _) = sys_fob1.apply_damage(fob1, DamageVector::new(2_500.0, 0.0, 0.0, 0.0)).await.unwrap().unwrap();
+    assert!((fa1 - 2_000.0).abs() < 1e-6 && !fd1);
+    let (fa2, fd2, _) = sys_fob1.apply_damage(fob1, DamageVector::new(2_500.0, 0.0, 0.0, 0.0)).await.unwrap().unwrap();
+    assert_eq!(fa2, 0.0);
+    assert!(!fd2, "pending FOB ArmorReinforced shadow must block immediate follow-up hit");
+
+    // BF-02 ArmorPhase sequential accumulation & destruction under held writer:
+    let (fb1, fbd1, _) = sys_fob2.apply_damage(fob2, DamageVector::new(400.0, 0.0, 0.0, 0.0)).await.unwrap().unwrap();
+    assert!((fb1 - 400.0).abs() < 1e-6 && !fbd1);
+    let (fb2, fbd2, _) = sys_fob2.apply_damage(fob2, DamageVector::new(700.0, 0.0, 0.0, 0.0)).await.unwrap().unwrap();
+    assert!((fb2 - 600.0).abs() < 1e-6 && fbd2, "second hit must compose off 600 hull in FOB shadow and destroy");
+    assert!(sys_fob2.get_ball_snapshot(fob2).await.unwrap().is_none());
+
+    release_writer(held);
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    let _ = sys_fob1.wait_for_post_unlock_barrier().await;
+    let _ = sys_fob2.wait_for_post_unlock_barrier().await;
+
+    // DB invariants + snap-level monotonicity guards:
+    let stale_depot_eff = ctx.db.with_mut_snapshot(|snap| {
+        assert!(snap.deployable_state.deployables.get(&depot1).and_then(|r| r.reinforced_until_unix).is_some_and(|u| u > now));
+        apply_mobile_deployable_in_snap(snap, Some(&ctx.sde), &MobileDeployableDbOp::DepotDestroyed {
+            solar_system_id: SYS_ID, ball_id: depot1, owner_id: CHAR_ID, pos_arr: [1_000.0, 0.0, 0.0], now_unix: now + 10,
+        })
+    });
+    assert!(stale_depot_eff.is_none());
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(snap.items.contains_key(&depot1) && snap.items.contains_key(&loot1));
+        assert_eq!(snap.structures[&fob1].state, "ArmorReinforced");
+        assert!(snap.insurgency_runtime.fob_armor_reinforced_until.contains_key(&camp1));
+        apply_fob_ball_damage_in_snap(snap, &FobBallDamageDbOp::ShieldPhase {
+            camp_id: camp1, ball_id: fob1, new_s: 500.0, new_a: 1_000.0, hull: 3_500.0, now_unix: now + 5, became_reinf: false, until: 0,
+        });
+        assert_eq!(snap.structures[&fob1].state, "ArmorReinforced");
+        assert_eq!(snap.structures[&fob1].shield_hp, 0.0);
+
+        assert_eq!(snap.structures[&fob2].state, "Destroyed");
+        assert_eq!(snap.structures[&fob2].hull_hp, 0.0);
+        apply_fob_ball_damage_in_snap(snap, &FobBallDamageDbOp::ArmorPhase {
+            ball_id: fob2, destroyed: false, new_h: 250.0, now_unix: now + 5,
+        });
+        assert_eq!(snap.structures[&fob2].state, "Destroyed");
+        assert_eq!(snap.structures[&fob2].hull_hp, 0.0);
+    });
+}
+
+/// Regression test (`BF-03`): cross-tick overheat damage burnout under held `db.writer` + external rack-heat reset visibility.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_bf03_cross_tick_overheat_burnout_and_external_rack_reset() {
+    use crate::services::tactical_module_mechanics::RACK_HEAT_ATTR_IDS;
+
+    let (ship_id, mod_hi) = (779_300_201_i64, 779_300_202_i64);
+    let (ctx, sys) = boot_ship(
+        ship_id,
+        &[(mod_hi, 484, InventoryFlag::HiSlot0, 35.0)],
+        None,
+        Some(make_combat_state(100.0, 100.0, 100.0, 1_000.0)),
+    ).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_hi).unwrap().dynamic_attributes.insert(eve_sde::attr_ids::HP_STRUCT, 40.0);
+        snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(RACK_HEAT_ATTR_IDS[0], 1.0);
+        snap.transient_item_attributes.entry(ship_id).or_default().insert(RACK_HEAT_ATTR_IDS[0], 1.0);
+    });
+    sys.actor_state.write().unwrap().active_module_cycles.push(ActiveModuleCycle {
+        ship_id,
+        module_id: mod_hi,
+        module_type_id: 484,
+        owner_char_id: Some(CHAR_ID),
+        rack_idx: 0,
+        is_overloaded: true,
+        heat_damage_per_cycle: 3.0,
+        duration_s: 1.0,
+        elapsed_s: 0.9,
+        repeat: 10,
+        ..Default::default()
+    });
+
+    let held = hold_db_writer(&ctx.db);
+    // Step 1: accumulate first non-lethal heat damage delta (`35.0 -> 38.0`) while DB writer held.
+    for _ in 0..6 {
+        sys.ask_step_tick_only(0.2).await.unwrap();
+        if !sys.actor_state.read().unwrap().post_unlock_shadows.pending_overheat_dmg_deltas.is_empty() {
+            break;
+        }
+        sys.ask_step_tick_only(0.8).await.unwrap();
+        if !sys.actor_state.read().unwrap().post_unlock_shadows.pending_overheat_dmg_deltas.is_empty() {
+            break;
+        }
+    }
+    assert!(!sys.actor_state.read().unwrap().post_unlock_shadows.pending_overheat_dmg_deltas.is_empty());
+    assert!(!sys.actor_state.read().unwrap().active_module_cycles.is_empty());
+
+    // Step 2: subsequent ticks see uncommitted delta (`38.0`) and burn out (`>= 40.0`) synchronously.
+    for _ in 0..8 {
+        sys.ask_step_tick_only(1.0).await.unwrap();
+        if sys.actor_state.read().unwrap().active_module_cycles.is_empty() {
+            break;
+        }
+    }
+    assert!(sys.actor_state.read().unwrap().active_module_cycles.is_empty(), "cross-tick heat must burn out overloaded cycle even with DB writer held");
+
+    release_writer(held);
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    assert!(mod_dmg(&ctx.db, mod_hi).is_some_and(|d| d >= 40.0 - 1e-6));
+
+    // External DB rack-heat reset (e.g. station repair/session wipe) must reflect once rack_heat_pending is empty.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            for attr in RACK_HEAT_ATTR_IDS {
+                ship_it.dynamic_attributes.insert(attr, 0.0);
+            }
+        }
+        let tr = snap.transient_item_attributes.entry(ship_id).or_default();
+        for attr in RACK_HEAT_ATTR_IDS {
+            tr.insert(attr, 0.0);
+        }
+    });
+    sys.ask_step_tick_only(0.1).await.unwrap();
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    assert!(sys.actor_state.read().unwrap().ship_rack_heat.get(&ship_id).map_or(0.0, |h| h[0]) < 1e-6);
+}
+
+/// Regression test (`BF-04`): unbounded `post_commit_tx` delivers >260 ballpark ops without loss,
+/// marks Depot loot containers as rigid static balls without `CombatState`, and omits `CombatState` on corpses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_bf04_post_commit_no_drop_static_loot_and_noncombat_corpse() {
+    use crate::services::mobile_deployables::{register_mobile_deployable, write_deployable_state, MobileDeployableDbOp, GROUP_MOBILE_DEPOT};
+    use crate::services::pve_abyssal_pylons::AbyssalPylonsDbOp;
+
+    const N_DEPOTS: i64 = 265;
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (base_depot, base_loot, pod_id) = (779_400_000_i64, 779_410_000_i64, 779_420_001_i64);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for i in 0..N_DEPOTS {
+            let did = base_depot + i;
+            let lid = base_loot + i;
+            snap.items.insert(did, make_item(did, 33474, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+            snap.item_positions.insert(did, [1_000.0 + (i as f64) * 10.0, 0.0, 0.0]);
+            snap.items.insert(lid, make_item(lid, 178, CHAR_ID, did, InventoryFlag::Cargo, 2));
+        }
+        snap.items.insert(pod_id, make_item(pod_id, 670, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.active_ship_id = pod_id;
+        }
+    });
+    for i in 0..N_DEPOTS {
+        register_mobile_deployable(&ctx, base_depot + i, 33474, GROUP_MOBILE_DEPOT, CHAR_ID, SYS_ID, 0, DVec3::new(1_000.0 + (i as f64) * 10.0, 0.0, 0.0));
+    }
+    write_deployable_state(&ctx, |st| {
+        for i in 0..N_DEPOTS {
+            if let Some(rec) = st.deployables.get_mut(&(base_depot + i)) {
+                rec.anchor_completed = true;
+            }
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(SYS_ID);
+    let held = hold_db_writer(&ctx.db);
+    let mut ops = PostUnlockOps::default();
+    for i in 0..N_DEPOTS {
+        ops.push(PostUnlockIntent::MobileDeployable(MobileDeployableDbOp::DepotDestroyed {
+            solar_system_id: SYS_ID,
+            ball_id: base_depot + i,
+            owner_id: CHAR_ID,
+            pos_arr: [1_000.0 + (i as f64) * 10.0, 0.0, 0.0],
+            now_unix: now,
+        }));
+    }
+    ops.push(PostUnlockIntent::AbyssalPylons(AbyssalPylonsDbOp::PodBoundaryDestroyed {
+        solar_system_id: SYS_ID,
+        ball_id: pod_id,
+        b_pos: [500.0, 0.0, 0.0],
+        owner_hint: CHAR_ID,
+        now_unix: now,
+    }));
+    send_in_flight(&sys, &ctx, ops);
+
+    release_writer(held);
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    // Trigger one actor turn so `next_actor_cmd_batch` drains `post_commit_rx` completely before reading `ballpark`.
+    sys.ask_step_tick_only(0.0).await.unwrap();
+
+    let (can_ids, corpse_id) = ctx.db.with_snapshot(|snap| {
+        let cans: Vec<i64> = (0..N_DEPOTS).map(|i| snap.items[&(base_loot + i)].location_id).collect();
+        let corpse = snap.items.values().find(|it| it.type_id == 25 && it.owner_id == CHAR_ID && it.location_id == i64::from(SYS_ID)).map(|it| it.item_id);
+        (cans, corpse)
+    });
+    let corpse_id = corpse_id.expect("corpse item persisted");
+    let bp = sys.ballpark.read().unwrap();
+    for &cid in &can_ids {
+        assert!(bp.balls.contains_key(&cid), "missing post-commit loot can {cid} (>256 channel test)");
+        assert!(bp.is_static_ball(cid), "loot can {cid} must be rigid static ball");
+        assert!(!bp.combat_states.contains_key(&cid), "loot can {cid} must not have CombatState");
+    }
+    assert!(bp.balls.contains_key(&corpse_id), "corpse must be added to ballpark");
+    assert!(!bp.combat_states.contains_key(&corpse_id), "corpse must not have CombatState");
+}
+
+/// Regression test (`BF-05` tombstones): re-entering Abyssal/Proving Grounds boundaries or clearing all Abyssal clouds
+/// while `db.writer` is held must reset tick streaks and clear stale DB clouds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_bf05_tombstone_shadows_and_empty_cloud_despawn() {
+    use crate::services::pve_abyssal_hazards::TACHYON_CLOUD_TYPE_ID;
+    use crate::services::pve_special_sites_abyssal::{AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind};
+    use crate::services::pvp_filament_mgr::{load_pvp_store, save_pvp_store, PvpArenaMatchInstance};
+    use std::collections::HashSet;
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (abyss_sys, arena_sys) = (32_000_003_u32, 32_000_001_u32);
+    let (ab_ship, cloud_id, arena_char, arena_ship) = (779_500_001_i64, 1_898_000_111_i64, 90_000_002_i64, 779_500_002_i64);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ab_ship, make_item(ab_ship, 587, CHAR_ID, i64::from(abyss_sys), InventoryFlag::None, 1));
+        snap.abyssal_state.pockets.insert(CHAR_ID, AbyssalPocketSession {
+            pocket_id: 1, character_id: CHAR_ID, ship_id: ab_ship, origin_solar_system_id: SYS_ID,
+            abyssal_solar_system_id: abyss_sys, origin_position: [0.0; 3], grid_offset: [0.0; 3],
+            filament_type_id: 47762, tier: 1, weather: AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 0.0, weather_bonus_pct: 0.0, npc_difficulty_mult: 1.0,
+            current_room: 1,
+            rooms: [
+                AbyssalRoomRecord { room_index: 1, dungeon_id: 1, dungeon_name: "r1".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: true, gate_unlocked_at_sec: Some(now) },
+                AbyssalRoomRecord { room_index: 2, dungeon_id: 1, dungeon_name: "r2".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+                AbyssalRoomRecord { room_index: 3, dungeon_id: 1, dungeon_name: "r3".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+            ],
+            started_at_sec: now, collapse_at_sec: now + 1200,
+            completed: false, collapsed_destroyed: false, trace_ball_id: 0,
+            fleet_ship_ids: vec![ab_ship], ship_room: [(ab_ship, 1)].into_iter().collect(), max_ships: 1,
+        });
+
+        snap.items.insert(arena_ship, make_item(arena_ship, 587, arena_char, i64::from(arena_sys), InventoryFlag::None, 1));
+        if let Some(ch) = snap.characters.get_mut(&arena_char) {
+            ch.active_ship_id = arena_ship;
+        }
+        let mut store = load_pvp_store(snap);
+        store.active_matches.insert(9101, PvpArenaMatchInstance {
+            match_id: 9101, event_id: 171, arena_solar_system_id: arena_sys, end_gate_id: 779_500_099,
+            team_a: vec![arena_char], team_b: Vec::new(), origin_systems: [(arena_char, SYS_ID)].into_iter().collect(),
+            exited_pilots: HashSet::new(), winner_char_id: None, active: true, started_unix: now,
+        });
+        store.match_arena_offsets.insert(9101, [0.0, 0.0, 0.0]);
+        save_pvp_store(snap, &store);
+    });
+
+    let sys_ab = ctx.systems.get_or_spawn(abyss_sys);
+    sys_ab.spawn_ball_with_combat(make_ball(ab_ship, 587, DVec3::new(76_000.0, 0.0, 0.0)), make_combat_state(500.0, 500.0, 5_000.0, 100.0)).await.unwrap();
+    sys_ab.spawn_ball(make_ball(cloud_id, TACHYON_CLOUD_TYPE_ID, DVec3::new(76_000.0, 0.0, 0.0))).await.unwrap();
+    let sys_ar = ctx.systems.get_or_spawn(arena_sys);
+    sys_ar.spawn_ball_with_combat(make_ball(arena_ship, 587, DVec3::new(80_000.0, 0.0, 0.0)), make_combat_state(500.0, 500.0, 5_000.0, 100.0)).await.unwrap();
+
+    // Commit tick 1 in DB (`boundary_ticks[ab_ship] == 1`, `active_clouds[ab_ship] == TACHYON`, `arena_hazard_ticks[arena_ship] == 1`).
+    sys_ab.ask_step_tick_only(1.0).await.unwrap();
+    sys_ar.ask_step_tick_only(1.0).await.unwrap();
+    let _ = sys_ab.wait_for_post_unlock_barrier().await;
+    let _ = sys_ar.wait_for_post_unlock_barrier().await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.abyssal_state.boundary_ticks.get(&ab_ship), Some(&1));
+        assert_eq!(snap.abyssal_state.active_clouds.get(&ab_ship), Some(&TACHYON_CLOUD_TYPE_ID));
+        assert_eq!(load_pvp_store(snap).arena_hazard_ticks.get(&arena_ship), Some(&1));
+    });
+
+    // Under held writer: move inside (clears streaks -> tombstone None), then back outside (must reset to 1, NOT 2).
+    let held = hold_db_writer(&ctx.db);
+    sys_ab.ballpark.write().unwrap().balls.get_mut(&ab_ship).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
+    sys_ar.ballpark.write().unwrap().balls.get_mut(&arena_ship).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
+    sys_ab.ask_step_tick_only(1.0).await.unwrap();
+    sys_ar.ask_step_tick_only(1.0).await.unwrap();
+
+    sys_ab.ballpark.write().unwrap().balls.get_mut(&ab_ship).unwrap().position = DVec3::new(0.0, 80_000.0, 0.0);
+    sys_ar.ballpark.write().unwrap().balls.get_mut(&arena_ship).unwrap().position = DVec3::new(80_000.0, 0.0, 0.0);
+    sys_ab.ask_step_tick_only(1.0).await.unwrap();
+    sys_ar.ask_step_tick_only(1.0).await.unwrap();
+
+    release_writer(held);
+    let _ = sys_ab.wait_for_post_unlock_barrier().await;
+    let _ = sys_ar.wait_for_post_unlock_barrier().await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.abyssal_state.boundary_ticks.get(&ab_ship), Some(&1));
+        assert!(!snap.abyssal_state.active_clouds.contains_key(&ab_ship));
+        assert_eq!(load_pvp_store(snap).arena_hazard_ticks.get(&arena_ship), Some(&1));
+    });
+
+    // Empty-cloud cleanup test: enter cloud -> commit -> despawn cloud ball -> hold writer + tick -> DB cleared.
+    sys_ab.ballpark.write().unwrap().balls.get_mut(&ab_ship).unwrap().position = DVec3::new(76_000.0, 0.0, 0.0);
+    sys_ab.ask_step_tick_only(1.0).await.unwrap();
+    let _ = sys_ab.wait_for_post_unlock_barrier().await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.abyssal_state.active_clouds.get(&ab_ship).copied()), Some(TACHYON_CLOUD_TYPE_ID));
+    let _ = sys_ab.ballpark.write().unwrap().remove_ball(cloud_id);
+    let held2 = hold_db_writer(&ctx.db);
+    sys_ab.ask_step_tick_only(1.0).await.unwrap();
+    release_writer(held2);
+    let _ = sys_ab.wait_for_post_unlock_barrier().await;
+    assert!(ctx.db.with_snapshot(|s| !s.abyssal_state.active_clouds.contains_key(&ab_ship)));
+}
+
+/// Regression test (`BF-05` current-thread direct ball-op): `step_ext_deployables_sync` on `CurrentThread`
+/// assigns nonzero `work_seq`, blocks double MMJU fire under held DB writer, and prunes `mmju_spool_fired_at`.
+#[tokio::test(flavor = "current_thread")]
+async fn track_1d_bf05_current_thread_mmju_prune() {
+    use crate::services::mobile_deployables::{
+        register_mobile_deployable, write_deployable_state, MmjuSpoolEntry,
+        GROUP_MOBILE_MICRO_JUMP_UNIT, MMJU_SPOOL_SECS_U64,
+    };
+
+    let (ship_id, mmju_id) = (779_500_101_i64, 779_500_102_i64);
+    let (ctx, sys) = boot_ship(ship_id, &[], None, Some(make_combat_state(100.0, 100.0, 100.0, 100.0))).await;
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mmju_id, make_item(mmju_id, 33591, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1));
+        snap.item_positions.insert(mmju_id, [500.0, 0.0, 0.0]);
+    });
+    register_mobile_deployable(&ctx, mmju_id, 33591, GROUP_MOBILE_MICRO_JUMP_UNIT, CHAR_ID, SYS_ID, 0, DVec3::new(500.0, 0.0, 0.0));
+    write_deployable_state(&ctx, |st| {
+        let rec = st.deployables.get_mut(&mmju_id).unwrap();
+        rec.anchor_completed = true;
+        rec.anchor_start_unix = now.saturating_sub(120);
+        st.mmju_spools.insert(ship_id, MmjuSpoolEntry {
+            ship_id, char_id: CHAR_ID, unit_id: mmju_id, solar_system_id: SYS_ID,
+            started_unix: now.saturating_sub(MMJU_SPOOL_SECS_U64), complete_at_unix: now,
+            direction: [1.0, 0.0, 0.0],
+        });
+    });
+    sys.spawn_ball(make_ball(mmju_id, 33591, DVec3::new(500.0, 0.0, 0.0))).await.unwrap();
+
+    let held = hold_db_writer(&ctx.db);
+    sys.step_ext_deployables_sync(Arc::clone(&ctx.sde), Arc::clone(&ctx.db), Arc::clone(&ctx.mechanic_rng), now).unwrap();
+    assert!(sys.get_ball_position_sync(ship_id).unwrap().x > 50_000.0, "MMJU must jump ship on first step");
+    assert!(sys.actor_state.read().unwrap().post_unlock_shadows.mmju_spool_fired_at.get(&ship_id).is_some_and(|&(_, seq)| seq > 0));
+
+    // Move ship back near unit before DB commit: shadow must block double fire on current_thread path.
+    sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = DVec3::ZERO;
+    sys.step_ext_deployables_sync(Arc::clone(&ctx.sde), Arc::clone(&ctx.db), Arc::clone(&ctx.mechanic_rng), now).unwrap();
+    assert!(sys.get_ball_position_sync(ship_id).unwrap().x < 1_000.0, "MMJU shadow must prevent double-fire");
+
+    release_writer(held);
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    sys.step_ext_deployables_sync(Arc::clone(&ctx.sde), Arc::clone(&ctx.db), Arc::clone(&ctx.mechanic_rng), now).unwrap();
+    assert!(sys.actor_state.read().unwrap().post_unlock_shadows.mmju_spool_fired_at.is_empty(), "current_thread command must prune committed mmju_spool_fired_at");
+}
+
+/// Regression test (`BF-06`): Bosonic/GTFO expiry restore happens once under held DB writer so
+/// fresh post-expiry warp scram/mobility changes on subsequent ticks are not clobbered by stale DB rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_bf06_doomsday_expiry_shadow_preserves_new_tackle() {
+    use crate::services::doomsday_aoe_tick::{
+        mutate_superweapon_runtime, read_superweapon_runtime, PersistedSuperweaponCycle,
+        PersistedWarpSuppression, SuperweaponCycleKind,
+    };
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (titan_id, target_id) = (779_600_001_i64, 779_600_002_i64);
+    let sys = ctx.systems.get_or_spawn(SYS_ID);
+
+    let mut titan_ball = make_ball(titan_id, 11_567, DVec3::ZERO);
+    titan_ball.max_velocity = 0.0;
+    let mut titan_cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+    titan_cs.warp_scramble_strength = 100;
+    titan_cs.disallow_assistance = true;
+    sys.spawn_ball_with_combat(titan_ball, titan_cs).await.unwrap();
+
+    let mut tgt_cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+    tgt_cs.warp_scramble_strength = 99;
+    sys.spawn_ball_with_combat(make_ball(target_id, 606, DVec3::new(5_000.0, 0.0, 0.0)), tgt_cs).await.unwrap();
+
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        rt.active_cycles.push(PersistedSuperweaponCycle {
+            sys_id: SYS_ID, char_id: CHAR_ID, ship_id: titan_id, ship_type_id: 11_567, mod_type_id: 24_550,
+            kind: SuperweaponCycleKind::SpatialGtfo { center: [0.0; 3], sphere_radius_m: 10_000.0 },
+            started_at_unix: now.saturating_sub(120), warmup_secs: 15, total_ticks: 1, ticks_applied: 1,
+            immobilize_until_unix: now.saturating_sub(60),
+            orig_max_velocity: 80.0, orig_warp_scramble_strength: 0, orig_disallow_assistance: false,
+            mobility_restored: false,
+        });
+        rt.warp_suppressions.push(PersistedWarpSuppression {
+            sys_id: SYS_ID, ship_id: target_id, suppressed_until_unix: now.saturating_sub(60),
+            orig_warp_scramble_strength: 0,
+        });
+    });
+
+    let held = hold_db_writer(&ctx.db);
+    sys.ask_step_tick_only(1.0).await.unwrap();
+    assert!((sys.get_ball_snapshot(titan_id).await.unwrap().unwrap().1.max_velocity - 80.0).abs() < 1e-6);
+    assert_eq!(sys.get_combat_state(target_id).await.unwrap().unwrap().warp_scramble_strength, 0);
+
+    // Apply fresh post-expiry tackle & speed clamp before stale DB superweapon rows are deleted.
+    sys.set_warp_scramble_strength(target_id, 3).await.unwrap();
+    assert!(sys.set_ball_max_velocity(titan_id, 12.0).await.unwrap());
+
+    sys.ask_step_tick_only(1.0).await.unwrap();
+    assert_eq!(sys.get_combat_state(target_id).await.unwrap().unwrap().warp_scramble_strength, 3, "shadow must prevent stale warp suppression restore from overwriting new tackle");
+    assert!((sys.get_ball_snapshot(titan_id).await.unwrap().unwrap().1.max_velocity - 12.0).abs() < 1e-6, "shadow must prevent stale cycle mobility restore from overwriting new speed");
+
+    release_writer(held);
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    let rt_after = read_superweapon_runtime(&ctx.db);
+    assert!(rt_after.is_none_or(|rt| rt.active_cycles.iter().all(|c| c.sys_id != SYS_ID) && rt.warp_suppressions.iter().all(|s| s.sys_id != SYS_ID)));
 }
