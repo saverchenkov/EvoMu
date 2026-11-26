@@ -352,38 +352,33 @@ pub(crate) async fn finish_engaged_drone_cycle(
     cycle_ready: bool,
     next_cycle_unix: u64,
 ) {
-    let (clear_web, ready_action) = sys_handle
-        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-            if claimed.contains_key(&ball_id) {
-                return (false, (false, None));
-            }
+    let clear_web = sys_handle
+        .mutate_active_drones_with_claims(move |drones, _, timers, claimed| {
             let Some(st) = drones.get_mut(&ball_id) else {
-                return (false, (true, Some(false)));
+                timers.remove(&ball_id);
+                return (false, true);
             };
             if st.is_abandoned || st.parent_ship_id != ship_id || st.owner_char_id != char_id {
-                return (false, (true, None));
+                return (false, !claimed.contains_key(&ball_id));
             }
-            let ready = cycle_ready.then_some(true);
+            if cycle_ready {
+                timers
+                    .entry(ball_id)
+                    .and_modify(|t| *t = (*t).max(next_cycle_unix))
+                    .or_insert(next_cycle_unix);
+            }
+            if claimed.contains_key(&ball_id) {
+                return (false, false);
+            }
             if target_destroyed && st.target_id == Some(target_id) {
                 st.target_id = None;
                 st.activity_state = 0;
-                return (true, (true, ready));
+                return (true, true);
             }
-            (false, (st.activity_state != 1 || st.target_id != Some(target_id), ready))
+            (false, st.activity_state != 1 || st.target_id != Some(target_id))
         })
         .await
-        .unwrap_or((true, None));
-    match ready_action {
-        Some(false) => {
-            let _ = sys_handle.clear_drone_next_ready_unix(ball_id).await;
-        }
-        Some(true) => {
-            let _ = sys_handle
-                .set_drone_next_ready_unix_if_present(ball_id, next_cycle_unix)
-                .await;
-        }
-        None => {}
-    }
+        .unwrap_or(true);
     if clear_web {
         clear_drone_web_cycle(sys_handle, ball_id).await;
     }
@@ -478,6 +473,14 @@ pub async fn step_engaged_drones_in_system(
     sys_handle: &crate::system_actor::SystemHandle,
     now_unix: u64,
 ) {
+    let view = sys_handle.view();
+    if !view.active_drones_needs_sqlite_hydration
+        && !view.active_drones_in_space.values().any(|d| {
+            d.ball_id > 0 && !d.is_abandoned && d.activity_state == 1 && d.target_id.is_some()
+        })
+    {
+        return;
+    }
     let due_drones: Vec<DroneSpaceState> = sys_handle
         .mutate_active_drones_with_claims(move |drones, _, timers, claimed| {
             let due = drones
@@ -618,24 +621,23 @@ pub async fn step_engaged_drones_in_system(
                 check_unclaimed_engaged_drone(sys_handle, bid, expected_sys, target_id).await;
             let in_web_range =
                 drone_ball.surface_distance(&target_ball) <= d.effective_optimal_range(ctx);
-            if claimed_web {
-                continue;
-            }
-            if !still_targeting
-                || !in_web_range
-                || is_target_immune_to_drone_ewar(ctx, sys_handle, target_id, target_ball.type_id)
-                    .await
+            if !claimed_web
+                && (!still_targeting
+                    || !in_web_range
+                    || is_target_immune_to_drone_ewar(ctx, sys_handle, target_id, target_ball.type_id)
+                        .await)
             {
                 clear_drone_web_cycle(sys_handle, d.ball_id).await;
-            } else if apply_drone_web_cycle(
-                ctx,
-                sys_handle,
-                &d,
-                &drone_ball,
-                target_id,
-                &target_ball,
-            )
-            .await
+            } else if !claimed_web
+                && apply_drone_web_cycle(
+                    ctx,
+                    sys_handle,
+                    &d,
+                    &drone_ball,
+                    target_id,
+                    &target_ball,
+                )
+                .await
             {
                 record_killmail_assist_action(
                     ctx,
@@ -656,25 +658,22 @@ pub async fn step_engaged_drones_in_system(
         let scaled_cycle_secs = ((d.cycle_duration_secs(ctx) as f64) / tidi).round().max(1.0) as u64;
         let next_ready = now_unix.saturating_add(scaled_cycle_secs);
         let (expected_owner, expected_ship) = (d.owner_char_id, d.parent_ship_id);
-        let should_set_ready = sys_handle
-            .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-                let ok = !claimed.contains_key(&bid)
-                    && drones.get(&bid).is_some_and(|st| {
-                        !st.is_abandoned
-                            && st.solar_system_id == expected_sys
-                            && st.owner_char_id == expected_owner
-                            && st.parent_ship_id == expected_ship
-                            && st.activity_state != 4
-                    });
-                (false, ok)
+        let _ = sys_handle
+            .mutate_active_drones_with_claims(move |drones, _, timers, _claimed| {
+                if drones.get(&bid).is_some_and(|st| {
+                    !st.is_abandoned
+                        && st.solar_system_id == expected_sys
+                        && st.owner_char_id == expected_owner
+                        && st.parent_ship_id == expected_ship
+                }) {
+                    timers
+                        .entry(bid)
+                        .and_modify(|t| *t = (*t).max(next_ready))
+                        .or_insert(next_ready);
+                }
+                (false, ())
             })
-            .await
-            .unwrap_or(false);
-        if should_set_ready {
-            let _ = sys_handle
-                .set_drone_next_ready_unix_if_present(d.ball_id, next_ready)
-                .await;
-        }
+            .await;
     }
 }
 

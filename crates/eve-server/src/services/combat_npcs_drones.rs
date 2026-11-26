@@ -133,7 +133,7 @@ pub use cycle_ops::{step_drone_auto_aggression_and_assist, step_engaged_drones_i
 pub use cycle_ops::step_engaged_drones;
 pub(crate) use cycle_ops::{clear_drone_web_cycle, is_recently_destroyed_in_persisted};
 #[cfg(test)]
-pub(crate) use cycle_ops::{apply_drone_web_cycle, check_unclaimed_engaged_drone_ready};
+pub(crate) use cycle_ops::{apply_drone_web_cycle, check_unclaimed_engaged_drone_ready, finish_engaged_drone_cycle};
 
 /// Evaluates effective drone control range in meters for `char_id` flying `ship_id` (`feat:drones.drone-control-range`).
 /// Evaluates `charID` attribute `458` (`droneControlDistance`) via `ShipFittingEngine` (Drone Avionics `3437`,
