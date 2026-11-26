@@ -64,7 +64,7 @@ fn is_weapon_autoload_stack_consumable(
     if item.singleton && !is_crystal_singleton {
         return false;
     }
-    let policy = if is_crystal_singleton && item.singleton {
+    let policy = if is_crystal_singleton {
         eve_db::ItemClassPolicy::ExactAssembledItem
     } else {
         eve_db::ItemClassPolicy::StackableCommodity
@@ -264,7 +264,10 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     let pre_dynamic_attributes = stack_pre.dynamic_attributes.clone();
     let pre_source_mutaplasmid_id = stack_pre.source_mutaplasmid_id;
 
-    if stack_pre.singleton && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
+    let is_single_crystal_move = ctx.sde.types.get(&stack_pre.type_id).is_some_and(|ct| {
+        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
+    }) && stack_pre.quantity == 1;
+    if is_single_crystal_move && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
         let (tid, tf, _) = plan.slot_allocations[0];
         let mut moved = stack_pre.clone();
         if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {

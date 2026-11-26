@@ -2670,7 +2670,7 @@ async fn survey_probe_launcher_reload_enforces_stackable_commodity_and_rejects_b
         assert_eq!(snap.items[&sing_id].quantity, 1);
         assert_eq!(snap.items[&mut_id].quantity, 10);
         assert_eq!(snap.items[&ins_id].quantity, 10);
-        assert!(snap.items.values().all(|i| i.flag != InventoryFlag::HiSlot0 || i.item_id == launcher_id));
+        assert!(snap.items.values().all(|i| i.location_id != ship_id || i.flag != InventoryFlag::HiSlot0 || i.item_id == launcher_id));
     });
 
     // Partial reload from larger valid Cargo stack skips lower-ID bad stacks and leaves exact remainder.

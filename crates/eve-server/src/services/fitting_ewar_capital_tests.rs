@@ -1748,7 +1748,6 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
     let sys_id = 30_000_142_u32;
     let sys = ctx.systems.get_or_spawn(sys_id);
     let char_id = 96_103_001_i64;
-    let station_id = 60_003_760_i64;
     let ship_id = 96_103_002_i64;
     let (ac1, ac2, laser_id) = (96_103_003_i64, 96_103_004_i64, 96_103_005_i64);
     let (mut_ammo_id, ins_ammo_id, valid_ammo_id, bad_crys_id, damaged_crys_id) = (
@@ -1764,14 +1763,16 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
     let mod_state = eve_dogma::DogmaItemState::from_sde(char_id, 484, &ctx.sde);
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(station_id);
-            ch.solar_system_id = sys_id;
-            ch.active_ship_id = ship_id;
-        }
+        let mut ch = snap.characters.values().next().expect("seed char").clone();
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
         snap.items.insert(ship_id, InventoryItemRecord {
-            item_id: ship_id, type_id: 587, owner_id: char_id, location_id: station_id,
-            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default()
+            item_id: ship_id, type_id: 587, owner_id: char_id, location_id: sys_id as i64,
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
         });
         for (mid, tid, fl) in [
             (ac1, 484, InventoryFlag::HiSlot0),
@@ -1843,7 +1844,7 @@ async fn weapon_autoload_and_handle_load_ammo_enforce_commodity_and_preserve_cry
     sess.user_id = Some(1);
     sess.character_id = Some(char_id);
     sess.ship_id = Some(ship_id);
-    sess.station_id = Some(station_id);
+    sess.station_id = None;
     sess.solar_system_id = Some(sys_id);
     assert_eq!(
         handle_load_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(laser_id), PyRep::Integer(bad_crys_id)]).unwrap_err().code,
