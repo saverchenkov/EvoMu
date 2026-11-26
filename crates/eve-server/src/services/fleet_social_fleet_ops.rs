@@ -1427,9 +1427,12 @@ pub(crate) async fn handle_fleet_warp(
         .and_then(|s| s.stations.iter().find(|st| st.station_id == dest_id))
     {
         DVec3::new(st.position.x, st.position.y, st.position.z)
-    } else if let Some(m_pos) = crate::services::agents_missions::agents_missions_warp::resolve_accepted_mission_warp_origin(
-        ctx, char_id, sys_id, dest_id,
+    } else if let Some(m_pos) = match crate::services::agents_missions::agents_missions_warp::resolve_accepted_mission_warp_origin(
+        ctx, session, char_id, sys_id, dest_id,
     ) {
+        Ok(pos) => pos,
+        Err(e) => return Some(Err(e)),
+    } {
         dest_is_mission = true;
         m_pos
     } else {

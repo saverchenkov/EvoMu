@@ -2602,3 +2602,359 @@ async fn own_r3_cmd_warp_to_stuff_mission_dungeon_and_fleet_bookmark_materialize
     .expect("direct handle_fleet_warp(bm) succeeds");
     assert!(solo_handle.get_ball_snapshot(ast_f_direct).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn cmd_warp_to_stuff_short_stop_bubble_and_zarzakh_mission_origin_guards() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let kw = HashMap::new();
+    let agent_id = *ctx.sde.agents.keys().min().expect("SDE agent exists");
+
+    // 1. Short >=150 km CmdWarpToStuff caught by a stop bubble <150 km ahead must enter warp to the
+    //    bubble perimeter rather than failing with WarpDistanceTooShort, and skip unreached pockets.
+    let bm_300km = 995_801_i64;
+    let bm_400km = 995_802_i64;
+    let mid_400km = 98_430_u32;
+    let stop_bubble_id = 995_803_i64;
+    let handle_sys = ctx.systems.get_or_spawn(sys_id);
+    let mut ship_cs = ctx.build_type_combat_state(587);
+    ship_cs.capacitor = 250.0;
+    ship_cs.max_capacitor = 250.0;
+    handle_sys
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ship_cs,
+        )
+        .await
+        .unwrap();
+    handle_sys
+        .add_warp_bubble(stop_bubble_id, glam::DVec3::new(120_000.0, 0.0, 0.0), 20_000.0)
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(sys_id);
+            ship.flag = eve_db::InventoryFlag::None;
+        }
+        mission_fixture::clear_character(snap, char_id);
+        for (bid, x) in [(bm_300km, 300_000.0), (bm_400km, 400_000.0)] {
+            snap.bookmarks.insert(
+                bid,
+                eve_db::BookmarkRecord {
+                    bookmark_id: bid,
+                    owner_id: char_id,
+                    solar_system_id: sys_id,
+                    label: format!("Stop Bubble BM {bid}"),
+                    x,
+                    y: 0.0,
+                    z: 0.0,
+                    item_id: None,
+                    memo: "Test BM".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+        }
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, mid_400km, agent_id, sys_id)
+                .bookmark_id(Some(bm_400km))
+                .site_origin_m(Some([400_000, 0, 0]))
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+    });
+
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+    for bm in [bm_300km, bm_400km] {
+        let _ = handle_sys.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+        let _ = handle_sys.set_ball_position(ship_id, glam::DVec3::ZERO).await;
+        handle_sys.try_update_combat_state(ship_id, |cs| {
+            cs.capacitor = 250.0;
+            cs.max_capacitor = 250.0;
+        });
+        let _ = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                None,
+                "CmdWarpToStuff",
+                &[PyRep::String("bookmark".into()), PyRep::Integer(bm)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("300/400 km CmdWarpToStuff caught by <150 km stop bubble must warp into bubble");
+        match handle_sys.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.mode {
+            eve_destiny::MovementMode::Warp { destination, .. } => {
+                assert!(
+                    destination.distance(glam::DVec3::new(100_000.0, 0.0, 0.0)) < 1.0,
+                    "expected stop-bubble perimeter at (100_000, 0, 0), got {destination:?}"
+                );
+            }
+            other => panic!("expected Warp mode into stop bubble, got {other:?}"),
+        }
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(mission_fixture::get(snap, char_id, mid_400km).unwrap().spawned_npc_ball_ids.is_empty());
+    });
+    assert!(handle_sys.remove_warp_bubble(stop_bubble_id).await.unwrap());
+
+    // 2. resolve_accepted_mission_warp_origin enforces bookmark expiry and ACL checks.
+    let now = ctx.now_unix();
+    let other_char_id = 90_000_099_i64;
+    let bm_expired = 995_804_i64;
+    let bm_foreign = 995_805_i64;
+    let bm_valid = 995_806_i64;
+    let mid_exp = 98_431_u32;
+    let mid_for = 98_432_u32;
+    let mid_ok = 98_433_u32;
+    let custom_origin = glam::DVec3::new(9.1e12, 1_000.0, 2_000.0);
+    let (exp_inst, for_inst) = ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::clear_character(snap, char_id);
+        snap.bookmarks.insert(
+            bm_expired,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_expired,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Expired Mission BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: None,
+                memo: "Expired".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmark_expiries.insert(bm_expired, now.saturating_sub(10));
+        snap.bookmarks.insert(
+            bm_foreign,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_foreign,
+                owner_id: other_char_id,
+                solar_system_id: sys_id,
+                label: "Foreign Unshared BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: None,
+                memo: "Private".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            bm_valid,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm_valid,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Valid Mission BM".into(),
+                x: custom_origin.x,
+                y: custom_origin.y,
+                z: custom_origin.z,
+                item_id: None,
+                memo: "Valid".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        mission_fixture::insert(snap, MissionFixture::accepted(char_id, mid_exp, agent_id, sys_id).bookmark_id(Some(bm_expired)));
+        mission_fixture::insert(snap, MissionFixture::accepted(char_id, mid_for, agent_id, sys_id).bookmark_id(Some(bm_foreign)));
+        mission_fixture::insert(snap, MissionFixture::accepted(char_id, mid_ok, agent_id, sys_id).bookmark_id(Some(bm_valid)));
+        (
+            snap.missions.get_by_character_template(char_id, mid_exp).unwrap().instance_id,
+            snap.missions.get_by_character_template(char_id, mid_for).unwrap().instance_id,
+        )
+    });
+    assert_eq!(
+        agents_missions_warp::resolve_accepted_mission_warp_origin(&ctx, &sess, char_id, sys_id, i64::from(mid_exp)).unwrap(),
+        Some(agents_missions_warp::mission_site_origin_for_instance(&ctx, sys_id, exp_inst)),
+        "expired bookmark fallback must not expose expired bookmark coordinates"
+    );
+    assert_eq!(
+        agents_missions_warp::resolve_accepted_mission_warp_origin(&ctx, &sess, char_id, sys_id, i64::from(mid_for)).unwrap(),
+        Some(agents_missions_warp::mission_site_origin_for_instance(&ctx, sys_id, for_inst)),
+        "inaccessible foreign bookmark fallback must not bypass ACL"
+    );
+    assert_eq!(
+        agents_missions_warp::resolve_accepted_mission_warp_origin(&ctx, &sess, char_id, sys_id, i64::from(mid_ok)).unwrap(),
+        Some(custom_origin)
+    );
+
+    // 3. Zarzakh DunBlacklistCannotWarp check on CmdWarpToStuff("mission", mid), fleet mission warp,
+    //    and non-Zarzakh mission with attached Zarzakh bookmark.
+    let zz_sys = crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH;
+    let zz_mid = 98_434_u32;
+    let zz_bm = 995_807_i64;
+    let zz_fleet_id = 995_810_i64;
+    let zz_ship_id = 100_000_801_i64;
+    let jita_zz_mid = 98_435_u32;
+    let zz_handle = ctx.systems.get_or_spawn(zz_sys);
+    zz_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: zz_ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_067_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(587),
+        )
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = zz_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = zz_ship_id;
+        }
+        snap.items.insert(
+            zz_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: zz_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(zz_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.bookmarks.insert(
+            zz_bm,
+            eve_db::BookmarkRecord {
+                bookmark_id: zz_bm,
+                owner_id: char_id,
+                solar_system_id: zz_sys,
+                label: "Zarzakh Mission BM".into(),
+                x: 5.0e12,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: "Zarzakh".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, zz_mid, agent_id, zz_sys).bookmark_id(Some(zz_bm)),
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_id, jita_zz_mid, agent_id, sys_id).bookmark_id(Some(zz_bm)),
+        );
+        let mut member_details = HashMap::new();
+        member_details.insert(
+            char_id,
+            eve_db::FleetMemberRecord {
+                character_id: char_id,
+                role: eve_db::FleetRole::FleetCommander,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            zz_fleet_id,
+            eve_db::FleetRecord {
+                fleet_id: zz_fleet_id,
+                boss_id: char_id,
+                members: vec![char_id],
+                member_details,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(1, 995_820, Some(char_id), true, now)
+        .expect("online lock");
+    let mut zz_sess = docked_session(char_id, zz_sys, None);
+    zz_sess.session_id = 995_820;
+    zz_sess.ship_id = Some(zz_ship_id);
+    zz_sess.fleet_id = Some(zz_fleet_id);
+    let zz_err = ctx
+        .dispatch_rpc(
+            &mut zz_sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("mission".into()), PyRep::Integer(i64::from(zz_mid))],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(zz_err.code, "DunBlacklistCannotWarp");
+    let mut fleet_kw = HashMap::new();
+    fleet_kw.insert("fleet".into(), PyRep::Bool(true));
+    let zz_fleet_err = ctx
+        .dispatch_rpc(
+            &mut zz_sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("mission".into()), PyRep::Integer(i64::from(zz_mid))],
+            &fleet_kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(zz_fleet_err.code, "DunBlacklistCannotWarp");
+
+    // Non-Zarzakh mission with attached Zarzakh bookmark must also reject with DunBlacklistCannotWarp.
+    let _ = handle_sys.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+    let _ = handle_sys.set_ball_position(ship_id, glam::DVec3::ZERO).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+    });
+    sess.session_id = 995_820;
+    let jita_zz_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("mission".into()), PyRep::Integer(i64::from(jita_zz_mid))],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(jita_zz_err.code, "DunBlacklistCannotWarp");
+}

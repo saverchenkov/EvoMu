@@ -787,8 +787,8 @@ async fn handle_cmd_warp_to_stuff(
             }
             if resolved_pos.is_none() && !matches!(stuff_type, "epinstance" | "ep_instance") {
                 resolved_pos = crate::services::agents_missions::agents_missions_warp::resolve_accepted_mission_warp_origin(
-                    ctx, char_id, sys_id, target_id,
-                );
+                    ctx, session, char_id, sys_id, target_id,
+                )?;
             }
         }
         "char" | "fleet" => {
@@ -969,6 +969,17 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos,
     );
     let landing_dist = current_ball.position.distance(landing_pos);
+    let intended_warp_dist_m = (landing_dist - min_range).max(0.0);
+    if intended_warp_dist_m < 150_000.0 {
+        return Err(BridgeRpcError {
+            code: "WarpDistanceTooShort".into(),
+            message: format!(
+                "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
+                intended_warp_dist_m
+            ),
+            client_error: None,
+        });
+    }
 
     let raw_warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
     let mut dest_pos = crate::services::nav_warp_interdiction::check_warp_interdiction_and_adjust_dest(
@@ -979,17 +990,6 @@ async fn handle_cmd_warp_to_stuff(
     )?;
     let warp_dir = (dest_pos - current_ball.position).normalize_or_zero();
     let requested_dist_m = current_ball.position.distance(dest_pos);
-    let effective_warp_dist_m = (landing_dist - min_range).min(requested_dist_m);
-    if effective_warp_dist_m < 150_000.0 {
-        return Err(BridgeRpcError {
-            code: "WarpDistanceTooShort".into(),
-            message: format!(
-                "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                effective_warp_dist_m.max(0.0)
-            ),
-            client_error: None,
-        });
-    }
 
     let (base_warp_cap_need, sde_max_cap) = ctx
         .sde
