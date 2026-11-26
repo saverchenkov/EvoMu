@@ -296,9 +296,9 @@ async fn t2a3_multipilot_on_approach_isolated_latches_and_read_purity() {
     // Pilot A stays latched if queried again, then exits & re-enters cleanly (`I3`).
     assert_eq!(on_dungeon_approach(&ctx, pilot_a, sys_id, ship_a, None).await, 0);
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    sys_h.set_ball_position(ship_a, DVec3::new(r1_pos[0] + 10_000.0, 0.0, 0.0)).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_a, DVec3::new(r1_pos[0] + 10_000.0, 0.0, 0.0)).await);
     assert_eq!(on_dungeon_approach(&ctx, pilot_a, sys_id, ship_a, None).await, 0);
-    sys_h.set_ball_position(ship_a, DVec3::from_array(r1_pos)).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_a, DVec3::from_array(r1_pos)).await);
     assert_eq!(on_dungeon_approach(&ctx, pilot_a, sys_id, ship_a, None).await, 1, "re-entering radius fires 2nd occurrence");
 }
 
@@ -328,14 +328,24 @@ async fn t2a3_subwarp_flight_into_on_approach_fires_on_tick() {
     });
 
     let tx0 = ctx.db.tx_commit_count();
+    crate::services::pve_dungeon_runtime::tick_dungeon_runtime_system_step(&ctx, sys_id).await;
+    assert_eq!(ctx.db.tx_commit_count(), tx0, "tick at 7_500m must stay read-pure (R5 P2-1)");
     for _ in 0..2 {
         sys_h.step_manual(1.0).await.unwrap();
     }
-    read_dungeon_runtime_store(&ctx, |s| assert!(s.instances[&inst_id].rooms[0].gate_locked, "outside 3_000m before 3rd tick"));
-    assert_eq!(ctx.db.tx_commit_count(), tx0, "ticks outside radius must stay read-pure (R5 P2-1)");
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rm = &s.instances[&inst_id].rooms[0];
+        assert!(rm.gate_locked && rm.armed_timers.is_empty(), "outside 3_000m before 3rd tick");
+    });
+    let tx_mid = ctx.db.tx_commit_count();
+    crate::services::pve_dungeon_runtime::tick_dungeon_runtime_system_step(&ctx, sys_id).await;
+    assert_eq!(ctx.db.tx_commit_count(), tx_mid, "tick_dungeon_runtime_system_step outside radius must stay read-pure (R5 P2-1)");
 
     sys_h.step_manual(1.0).await.unwrap();
     read_dungeon_runtime_store(&ctx, |s| assert!(!s.instances[&inst_id].rooms[0].gate_locked && s.instances[&inst_id].rooms[0].triggers[0].fired, "subwarp arrival inside radius fires OnApproach on tick"));
+    let tx_after = ctx.db.tx_commit_count();
+    crate::services::pve_dungeon_runtime::tick_dungeon_runtime_system_step(&ctx, sys_id).await;
+    assert_eq!(ctx.db.tx_commit_count(), tx_after, "latched OnApproach tick must stay read-pure (R5 P2-1)");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -396,7 +406,7 @@ async fn t2a3_shared_named_timer_and_compound_or_early_approach_own_r5_04() {
     });
     on_dungeon_room_entered(&ctx, sys_id, inst_b, 0, char_id).await;
     ctx.advance_secs(5);
-    sys_h.set_ball_position(ship_id, DVec3::from_array(rb_pos)).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(rb_pos)).await);
     let _ = ctx.drain_notifications_for_char(char_id);
     assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 2);
     read_dungeon_runtime_store(&ctx, |s| {
@@ -404,7 +414,7 @@ async fn t2a3_shared_named_timer_and_compound_or_early_approach_own_r5_04() {
         assert_eq!(at.get("early_t").copied(), Some(1_785_100_004 + 30), "early approach must not delete unexpired named timer");
         assert!(!at.keys().any(|k| k.starts_with("__rep_timer:")), "early approach must not reset unexpired unnamed timer");
     });
-    sys_h.set_ball_position(ship_id, DVec3::new(0.0, 0.0, 0.0)).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_id, DVec3::new(0.0, 0.0, 0.0)).await);
     let _ = ctx.drain_notifications_for_char(char_id);
     ctx.advance_secs(15); // total +20s
     sys_h.step_manual(1.0).await.unwrap();

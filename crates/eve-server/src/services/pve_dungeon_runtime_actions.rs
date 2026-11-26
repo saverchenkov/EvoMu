@@ -5,8 +5,8 @@
 
 use super::{
     insert_container_and_loot_in_snap, instance_is_finished, plan_npc_group_spawns_in_snap,
-    record_room_actor, resolve_room_recipient, spawn_gate_ball, spawn_object_ball,
-    wake_dungeon_system_handle, NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
+    resolve_room_recipient, spawn_gate_ball, spawn_object_ball, wake_dungeon_system_handle,
+    NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::build_specialized_npc_spawn_item;
@@ -518,7 +518,7 @@ pub(crate) async fn apply_dungeon_trigger_actions_impl(
     deps.db.with_mut_snapshot(|snap| {
         let Some(mut inst) = snap.dungeon_runtime.instances.remove(&instance_id) else { return };
         if instance_is_finished(&inst) { snap.dungeon_runtime.instances.insert(instance_id, inst); return; }
-        record_room_actor(&mut inst, room_vec_idx, char_id);
+        super::record_room_actor(&mut inst, room_vec_idx, char_id);
         let batch: TriggerBatch = actions.into_iter().map(|(tid, a)| (tid, None, false, char_id, vec![a])).collect();
         fired = run_trigger_batch_in_inst(snap, sys_id, &mut inst, deps.sde, room_vec_idx, char_id, now_unix, batch, &mut effects).1;
         finalize_terminal_in_snap(snap, inst, char_id, now_unix, &mut effects);
