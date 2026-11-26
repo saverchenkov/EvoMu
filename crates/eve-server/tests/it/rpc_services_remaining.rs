@@ -1255,7 +1255,7 @@ fn root_dir() -> PathBuf {
 // parity: plan:P-2, plan:P-3, plan:P-4
 async fn test_systematic_rpc_catalog_dispatch_and_wire_formatting() {
     // parity: rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:account.GetWalletDivisionsInfo, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:slash.SlashCmd, rpc:stationSvc.GetStation
-    let ctx = eve_server::router::TestContext::new().with_rpc_rate_budget_disabled();
+    let ctx = eve_server::router::TestContext::new_with_rpc_rate_budget_disabled();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();
 

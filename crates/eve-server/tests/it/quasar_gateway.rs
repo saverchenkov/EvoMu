@@ -591,7 +591,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
 async fn q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_change() {
     // parity: plan:Q-2, feat:quasar.gateway-events
     eve_testkit::attest(&["plan:Q-2", "feat:quasar.gateway-events"]);
-    let ctx = eve_server::router::TestContext::new().with_rpc_rate_budget_disabled();
+    let ctx = eve_server::router::TestContext::new_with_rpc_rate_budget_disabled();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 

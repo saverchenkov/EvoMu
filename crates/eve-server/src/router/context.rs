@@ -13,6 +13,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+#[path = "rpc_rate_limit.rs"]
+pub(crate) mod rpc_rate_limit;
+pub use rpc_rate_limit::{
+    RpcRateLimitPolicy, RPC_BOOTSTRAP_BURST_ALLOWANCE, RPC_BOOTSTRAP_GRANT_COOLDOWN,
+    RPC_BOOTSTRAP_TRANSITION_ALLOWANCE, RPC_RATE_BURST_TOKENS, RPC_RATE_IDLE_TTL,
+    RPC_RATE_PRUNE_THRESHOLD, RPC_RATE_REFILL_PER_SEC,
+};
+
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
 
 /// Returns current host wallclock time as EVE BlueOS 100ns FILETIME ticks.
@@ -120,96 +128,16 @@ pub struct ServerContext {
     /// Tracks `(session_id, char_id)` pairs that already emitted their initial `OnServerBrainUpdated`
     /// on first `dogmaIM.GetAllInfo` (`#1083`).
     pub brain_primed_sessions: Arc<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
-    /// Per-session RPC token buckets checked before `sync_session` / DB snapshot locks (`#1186`).
-    pub(crate) rpc_rate_buckets: Arc<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+    /// Per-context RPC rate limiter configured once at construction (`#1186`, `#1540`).
+    pub(crate) rpc_rate_limiter: Arc<rpc_rate_limit::RpcRateLimiter>,
     pub scanners_superweapons: Arc<
         crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime,
     >,
     pub(crate) cyno_portal_state: Arc<
         crate::services::inventory_fitting::fitting_cyno_portal::CynoPortalSlot,
     >,
-    /// Test-only fast-path bypass for per-session RPC rate budgeting (`#1264`).
-    #[cfg(any(test, feature = "testkit"))]
-    pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fixture_census: Arc<super::fixture_census::FixtureCensusCollector>,
-}
-
-/// Burst token capacity for standard per-session RPC throttling.
-pub const RPC_RATE_BURST_TOKENS: f64 = 300.0;
-/// Sustained per-session RPC refill rate (tokens per second).
-pub const RPC_RATE_REFILL_PER_SEC: f64 = 120.0;
-/// Per-session bootstrap burst token allowance during login and undock transitions.
-pub const RPC_BOOTSTRAP_BURST_ALLOWANCE: u32 = 512;
-/// Minimum bootstrap burst tokens restored on cooldown-gated major session transitions
-/// (initial auth binding, character switch, or undocking into space).
-pub const RPC_BOOTSTRAP_TRANSITION_ALLOWANCE: u32 = 256;
-/// Idle age after which stale per-session rate buckets are evicted during pruning
-/// regardless of remaining `bootstrap_tokens`.
-pub const RPC_RATE_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
-/// Minimum cooldown between transition-triggered bootstrap token grants for one session.
-pub const RPC_BOOTSTRAP_GRANT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
-/// Minimum bucket map size before idle bucket pruning runs on new-session insertion.
-pub const RPC_RATE_PRUNE_THRESHOLD: usize = 4_096;
-
-/// Per-session RPC rate budget combining a token bucket with a bounded login/undock bootstrap allowance.
-#[derive(Debug, Clone)]
-pub(crate) struct SessionRpcRateBucket {
-    tokens: f64,
-    bootstrap_tokens: u32,
-    last_refill: std::time::Instant,
-    last_seen: std::time::Instant,
-    last_bootstrap_grant: Option<std::time::Instant>,
-}
-
-impl SessionRpcRateBucket {
-    pub(crate) fn new(now: std::time::Instant) -> Self {
-        Self {
-            tokens: RPC_RATE_BURST_TOKENS,
-            bootstrap_tokens: RPC_BOOTSTRAP_BURST_ALLOWANCE,
-            last_refill: now,
-            last_seen: now,
-            last_bootstrap_grant: None,
-        }
-    }
-
-    fn refill(&mut self, now: std::time::Instant) {
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
-        if elapsed > 0.0 {
-            self.tokens =
-                (self.tokens + elapsed * RPC_RATE_REFILL_PER_SEC).min(RPC_RATE_BURST_TOKENS);
-            self.last_refill = now;
-        }
-    }
-
-    pub(crate) fn try_consume(&mut self, now: std::time::Instant, is_bootstrap: bool) -> bool {
-        self.refill(now);
-        self.last_seen = now;
-        if is_bootstrap && self.bootstrap_tokens > 0 {
-            self.bootstrap_tokens -= 1;
-            return true;
-        }
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn grant_transition_bootstrap(&mut self, now: std::time::Instant) -> bool {
-        if let Some(prev) = self.last_bootstrap_grant {
-            if now.saturating_duration_since(prev) < RPC_BOOTSTRAP_GRANT_COOLDOWN {
-                return false;
-            }
-        }
-        self.last_bootstrap_grant = Some(now);
-        self.bootstrap_tokens = self
-            .bootstrap_tokens
-            .max(RPC_BOOTSTRAP_TRANSITION_ALLOWANCE)
-            .min(RPC_BOOTSTRAP_BURST_ALLOWANCE);
-        true
-    }
 }
 
 /// Non-owning weak handle to all shared [`ServerContext`] state (`RFC-1 E-4`, `#839`, `#919`).
@@ -282,15 +210,13 @@ pub(crate) struct ServerContextWeak {
     pending_structure_view_outside_set_state:
         std::sync::Weak<RankedRwLock<HashMap<(u64, i64), (i64, std::time::Instant)>, RANK_LEAF>>,
     brain_primed_sessions: std::sync::Weak<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
-    rpc_rate_buckets: std::sync::Weak<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+    rpc_rate_limiter: std::sync::Weak<rpc_rate_limit::RpcRateLimiter>,
     scanners_superweapons: std::sync::Weak<
         crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime,
     >,
     cyno_portal_state: std::sync::Weak<
         crate::services::inventory_fitting::fitting_cyno_portal::CynoPortalSlot,
     >,
-    #[cfg(any(test, feature = "testkit"))]
-    rpc_rate_budget_disabled: std::sync::Weak<AtomicBool>,
     #[cfg(any(test, feature = "testkit"))]
     fixture_census: std::sync::Weak<super::fixture_census::FixtureCensusCollector>,
 }
@@ -357,11 +283,9 @@ impl ServerContextWeak {
                 .pending_structure_view_outside_set_state
                 .upgrade()?,
             brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
-            rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
+            rpc_rate_limiter: self.rpc_rate_limiter.upgrade()?,
             scanners_superweapons: self.scanners_superweapons.upgrade()?,
             cyno_portal_state: self.cyno_portal_state.upgrade()?,
-            #[cfg(any(test, feature = "testkit"))]
-            rpc_rate_budget_disabled: self.rpc_rate_budget_disabled.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: self.fixture_census.upgrade()?,
         })
@@ -532,22 +456,36 @@ impl ServerContext {
                 &self.pending_structure_view_outside_set_state,
             ),
             brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
-            rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
+            rpc_rate_limiter: Arc::downgrade(&self.rpc_rate_limiter),
             scanners_superweapons: Arc::downgrade(&self.scanners_superweapons),
             cyno_portal_state: Arc::downgrade(&self.cyno_portal_state),
-            #[cfg(any(test, feature = "testkit"))]
-            rpc_rate_budget_disabled: Arc::downgrade(&self.rpc_rate_budget_disabled),
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::downgrade(&self.fixture_census),
         }
     }
 
     /// Initializes a `ServerContext` with explicit `SdeRegistry`, `WorldRepository`, and
-    /// `QuasarDescriptorRegistry`, and seeds NPC regional markets.
+    /// `QuasarDescriptorRegistry`, using [`RpcRateLimitPolicy::Default`] and seeding NPC regional markets.
     pub fn with_sde_repository_and_descriptors(
         sde: Arc<SdeRegistry>,
         db: Arc<WorldRepository>,
         quasar_descriptors: Arc<eve_proto::quasar::QuasarDescriptorRegistry>,
+    ) -> Self {
+        Self::with_sde_repository_descriptors_and_rate_limit(
+            sde,
+            db,
+            quasar_descriptors,
+            RpcRateLimitPolicy::Default,
+        )
+    }
+
+    /// Initializes a `ServerContext` with explicit `SdeRegistry`, `WorldRepository`,
+    /// `QuasarDescriptorRegistry`, and an immutable [`RpcRateLimitPolicy`], and seeds NPC regional markets.
+    pub fn with_sde_repository_descriptors_and_rate_limit(
+        sde: Arc<SdeRegistry>,
+        db: Arc<WorldRepository>,
+        quasar_descriptors: Arc<eve_proto::quasar::QuasarDescriptorRegistry>,
+        rate_limit_policy: RpcRateLimitPolicy,
     ) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
         let clock = db.clock();
@@ -688,13 +626,11 @@ impl ServerContext {
             space_ballpark_bootstrapped: Arc::new(RankedRwLock::new(HashMap::new())),
             pending_structure_view_outside_set_state: Arc::new(RankedRwLock::new(HashMap::new())),
             brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
-            rpc_rate_buckets: Arc::new(RankedMutex::new(HashMap::new())),
+            rpc_rate_limiter: Arc::new(rpc_rate_limit::RpcRateLimiter::new(rate_limit_policy)),
             scanners_superweapons: Arc::new(
                 crate::services::inventory_fitting::fitting_scanners_superweapons::ScannersSuperweaponsRuntime::new(),
             ),
             cyno_portal_state,
-            #[cfg(any(test, feature = "testkit"))]
-            rpc_rate_budget_disabled: Arc::new(AtomicBool::new(false)),
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::new(super::fixture_census::FixtureCensusCollector::new()),
         };
@@ -1206,16 +1142,29 @@ impl ServerContext {
     }
 
     #[cfg(any(test, feature = "testkit"))]
-    pub fn new() -> Self {
-        let _env_read_guard = acquire_test_env_read_guard();
+    pub(crate) fn test_sde_and_db_for_context(
+    ) -> (crate::TestEnvReadGuard, Arc<SdeRegistry>, Arc<WorldRepository>) {
+        let env_read_guard = acquire_test_env_read_guard();
         let sde = Self::canonical_test_sde();
         #[cfg(any(test, feature = "demo-seed"))]
         let db = {
-            let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
-            if disable_demo { Arc::new(WorldRepository::new_empty()) } else { Arc::new(WorldRepository::with_demo_seed_for_sde(&sde)) }
+            let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if disable_demo {
+                Arc::new(WorldRepository::new_empty())
+            } else {
+                Arc::new(WorldRepository::with_demo_seed_for_sde(&sde))
+            }
         };
         #[cfg(not(any(test, feature = "demo-seed")))]
         let db = Arc::new(WorldRepository::new_empty());
+        (env_read_guard, sde, db)
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn new() -> Self {
+        let (_env_read_guard, sde, db) = Self::test_sde_and_db_for_context();
         let ctx = Self::with_sde_and_repository(sde, db);
         #[cfg(any(test, feature = "demo-seed"))]
         let ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
@@ -3163,6 +3112,12 @@ impl ServerContext {
             .filter(|&until| now < until)
     }
 
+    /// Returns the immutable RPC rate-budget policy configured on this `ServerContext` (`#1540`).
+    #[inline]
+    pub fn rpc_rate_limit_policy(&self) -> RpcRateLimitPolicy {
+        self.rpc_rate_limiter.policy()
+    }
+
     /// Attempts to consume one RPC rate-budget token for `session_id` at `now`.
     pub(crate) fn try_consume_rpc_token_at(
         &self,
@@ -3170,31 +3125,8 @@ impl ServerContext {
         now: std::time::Instant,
         is_bootstrap: bool,
     ) -> bool {
-        #[cfg(any(test, feature = "testkit"))]
-        if self.rpc_rate_budget_disabled.load(Ordering::Acquire) {
-            return true;
-        }
-        let mut guard = self
-            .rpc_rate_buckets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if guard.len() > RPC_RATE_PRUNE_THRESHOLD && !guard.contains_key(&session_id) {
-            guard.retain(|_, bucket| {
-                // Evict stale entries past idle TTL BEFORE `refill(now)` updates timestamps,
-                // regardless of remaining `bootstrap_tokens`, so one bootstrap call never pins
-                // an inactive bucket indefinitely (`BF-1186B-03`).
-                if now.saturating_duration_since(bucket.last_seen) >= RPC_RATE_IDLE_TTL {
-                    return false;
-                }
-                bucket.refill(now);
-                bucket.tokens < RPC_RATE_BURST_TOKENS - 1e-6
-                    || bucket.bootstrap_tokens < RPC_BOOTSTRAP_BURST_ALLOWANCE
-            });
-        }
-        guard
-            .entry(session_id)
-            .or_insert_with(|| SessionRpcRateBucket::new(now))
-            .try_consume(now, is_bootstrap)
+        self.rpc_rate_limiter
+            .try_consume_at(session_id, now, is_bootstrap)
     }
 
     /// Refreshes the bootstrap burst allowance for `session_id` on major transitions,
@@ -3204,15 +3136,7 @@ impl ServerContext {
         session_id: u64,
         now: std::time::Instant,
     ) -> bool {
-        let mut guard = self
-            .rpc_rate_buckets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(bucket) = guard.get_mut(&session_id) {
-            bucket.grant_transition_bootstrap(now)
-        } else {
-            false
-        }
+        self.rpc_rate_limiter.grant_bootstrap_at(session_id, now)
     }
 
     /// Refreshes the bootstrap burst allowance for `session_id` at `Instant::now()`.
@@ -3222,34 +3146,17 @@ impl ServerContext {
 
     #[cfg(test)]
     pub(crate) fn rpc_rate_bucket_count(&self) -> usize {
-        self.rpc_rate_buckets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.rpc_rate_limiter.bucket_count()
     }
 
     #[cfg(test)]
     pub(crate) fn bootstrap_tokens_remaining(&self, session_id: u64) -> Option<u32> {
-        self.rpc_rate_buckets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&session_id)
-            .map(|b| b.bootstrap_tokens)
+        self.rpc_rate_limiter.bootstrap_tokens_remaining(session_id)
     }
 
     /// Removes the per-session RPC rate bucket when a client connection closes.
     pub fn release_session_rate_bucket(&self, session_id: u64) {
-        self.rpc_rate_buckets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&session_id);
-    }
-
-    /// Disables per-session RPC rate-budget enforcement on this `ServerContext` instance
-    /// for high-iteration sweep and latency-benchmark tests (`#1264`).
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn disable_rpc_rate_budget_for_test(&self) {
-        self.rpc_rate_budget_disabled.store(true, Ordering::Release);
+        self.rpc_rate_limiter.release_session(session_id);
     }
 
     /// Returns the remaining lock acquisition milliseconds for `ship_id -> target_id`, if locking (`§C`).

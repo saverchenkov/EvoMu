@@ -582,11 +582,16 @@ async fn now_system_sim_filetime_ticks_stays_client_anchored_with_tidi_and_advan
 #[tokio::test]
 async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
     use eve_machonet::{service_roles, SessionState};
-    use std::sync::atomic::Ordering;
-    let ctx_a = crate::router::TestContext::from_server(edge_ctx(1_750_000_000));
-    let ctx_b = crate::router::TestContext::from_server(edge_ctx(1_750_000_000));
+    let edge_default = edge_ctx(1_750_000_000);
+    assert_eq!(edge_default.rpc_rate_limit_policy(), RpcRateLimitPolicy::Default);
+    let default_server = ServerContext::new();
+    assert_eq!(default_server.rpc_rate_limit_policy(), RpcRateLimitPolicy::Default);
+
+    let ctx_a = crate::router::TestContext::from_server(edge_default);
+    let ctx_b = crate::router::TestContext::new();
     assert!(!ctx_a.is_rpc_rate_budget_disabled());
     assert!(!ctx_b.is_rpc_rate_budget_disabled());
+    assert_eq!(ctx_b.rpc_rate_limit_policy(), RpcRateLimitPolicy::Default);
 
     let t0 = std::time::Instant::now();
     let sid_unit = 9_501_u64;
@@ -596,25 +601,39 @@ async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
             ctx_a.try_consume_rpc_token_at(sid_unit, t0, false),
             "default context must allow burst token {i}"
         );
+        assert!(
+            ctx_b.try_consume_rpc_token_at(sid_unit, t0, false),
+            "default TestContext::new() must allow burst token {i}"
+        );
     }
     assert!(
         !ctx_a.try_consume_rpc_token_at(sid_unit, t0, false),
-        "default context must reject token consumption past burst"
+        "default edge_ctx must reject token consumption past burst"
+    );
+    assert!(
+        !ctx_b.try_consume_rpc_token_at(sid_unit, t0, false),
+        "default TestContext::new() must reject token consumption past burst"
     );
 
     let char_id = 90_000_001_i64;
-    let (uid, corp_id, sol_id, ship_id) = ctx_a.db.with_snapshot(|snap| {
-        let ch = &snap.characters[&char_id];
-        (ch.user_id, ch.corporation_id, ch.solar_system_id, ch.active_ship_id)
-    });
     let make_sess = |ctx: &ServerContext, session_id: u64| {
+        let (uid, corp_id, sol_id, station_id, ship_id) = ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&char_id];
+            (
+                ch.user_id,
+                ch.corporation_id,
+                ch.solar_system_id,
+                ch.station_id,
+                ch.active_ship_id,
+            )
+        });
         let mut s = SessionState {
             session_id,
             user_id: Some(uid),
             character_id: Some(char_id),
             corporation_id: Some(corp_id),
             solar_system_id: Some(sol_id),
-            station_id: Some(60_003_760),
+            station_id,
             ship_id: Some(ship_id),
             role: service_roles::ROLE_PLAYER,
             ..Default::default()
@@ -636,35 +655,102 @@ async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
             break;
         }
     }
-    assert!(saw_rate_limited, "default context must enforce RateLimited in dispatch_rpc");
+    assert!(saw_rate_limited, "default edge_ctx must enforce RateLimited in dispatch_rpc");
 
-    let buckets_before = ctx_a.rpc_rate_bucket_count();
-    ctx_a.disable_rpc_rate_budget();
-    assert!(ctx_a.is_rpc_rate_budget_disabled());
-
-    // Exhausted bucket and previously unseen sessions both bypass without inserting buckets.
-    assert!(ctx_a.try_consume_rpc_token_at(sid_unit, t0, false));
-    assert!(ctx_a.try_consume_rpc_token_at(9_599, t0, false));
-    assert_eq!(ctx_a.rpc_rate_bucket_count(), buckets_before);
-
-    for _ in 0..50 {
-        ctx_a
-            .dispatch_rpc(&mut sess_a, "account", None, "GetCashBalance", &[], &kw, None)
+    let mut sess_b = make_sess(&ctx_b, 9_503);
+    let mut saw_rate_limited_b = false;
+    for _ in 0..(burst + 150) {
+        if let Err(err) = ctx_b
+            .dispatch_rpc(&mut sess_b, "account", None, "GetCashBalance", &[], &kw, None)
             .await
-            .expect("disabled rate budget must allow dispatch_rpc beyond burst");
+        {
+            assert_eq!(err.code, "RateLimited");
+            saw_rate_limited_b = true;
+            break;
+        }
     }
+    assert!(saw_rate_limited_b, "default TestContext::new() must enforce RateLimited in dispatch_rpc");
 
-    // Weak downgrade/upgrade preserves the disabled fast-path state.
-    let upgraded = ctx_a.downgrade().upgrade().expect("upgrade ServerContext");
-    assert!(upgraded.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    // Construction-time Unlimited TestContexts bypass rate budgeting without inserting buckets.
+    let ctx_unlim = crate::router::TestContext::new_with_rpc_rate_budget_disabled();
+    let ctx_unlim_sde = crate::router::TestContext::with_sde_and_repository_rate_budget_disabled(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    assert!(ctx_unlim.is_rpc_rate_budget_disabled());
+    assert!(ctx_unlim_sde.is_rpc_rate_budget_disabled());
+    assert_eq!(ctx_unlim.rpc_rate_limit_policy(), RpcRateLimitPolicy::Unlimited);
+    assert_eq!(ctx_unlim_sde.rpc_rate_limit_policy(), RpcRateLimitPolicy::Unlimited);
+    assert_eq!(ctx_unlim.rpc_rate_bucket_count(), 0);
+    assert_eq!(ctx_unlim_sde.rpc_rate_bucket_count(), 0);
+
+    for i in 0..(burst + 100) {
+        assert!(
+            ctx_unlim.try_consume_rpc_token_at(sid_unit, t0, false),
+            "unlimited TestContext must allow token {i} past burst"
+        );
+        assert!(
+            ctx_unlim_sde.try_consume_rpc_token_at(9_599, t0, false),
+            "unlimited with_sde TestContext must allow token {i} past burst"
+        );
+    }
+    assert_eq!(
+        ctx_unlim.rpc_rate_bucket_count(),
+        0,
+        "Unlimited policy must not allocate or insert rate buckets"
+    );
+    assert_eq!(
+        ctx_unlim_sde.rpc_rate_bucket_count(),
+        0,
+        "Unlimited policy must not allocate or insert rate buckets"
+    );
+
+    let mut sess_unlim = make_sess(&ctx_unlim, 9_504);
+    for _ in 0..(burst + 50) {
+        ctx_unlim
+            .dispatch_rpc(&mut sess_unlim, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+            .expect("Unlimited TestContext must allow dispatch_rpc beyond burst");
+    }
+    assert_eq!(ctx_unlim.rpc_rate_bucket_count(), 0);
+
+    // Weak downgrade/upgrade preserves the immutable Unlimited policy and bypasses buckets.
+    let upgraded = ctx_unlim.downgrade().upgrade().expect("upgrade ServerContext");
+    assert_eq!(upgraded.rpc_rate_limit_policy(), RpcRateLimitPolicy::Unlimited);
     assert!(upgraded.try_consume_rpc_token_at(sid_unit, t0, false));
+    assert_eq!(upgraded.rpc_rate_bucket_count(), 0);
+    upgraded
+        .dispatch_rpc(&mut sess_unlim, "account", None, "GetCashBalance", &[], &kw, None)
+        .await
+        .expect("upgraded Weak ServerContext must preserve Unlimited rate policy");
 
-    // Separate ServerContext remains rate-limited by default.
-    assert!(!ctx_b.is_rpc_rate_budget_disabled());
+    let upgraded_sde = ctx_unlim_sde
+        .downgrade()
+        .upgrade()
+        .expect("upgrade sde ServerContext");
+    assert_eq!(upgraded_sde.rpc_rate_limit_policy(), RpcRateLimitPolicy::Unlimited);
+    assert!(upgraded_sde.try_consume_rpc_token_at(9_600, t0, false));
+    assert_eq!(upgraded_sde.rpc_rate_bucket_count(), 0);
+
+    // Sibling default TestContext constructed alongside Unlimited remains strictly rate-limited.
+    let ctx_sibling_default = crate::router::TestContext::new();
+    let ctx_explicit_default =
+        crate::router::TestContext::new_with_rpc_rate_limit_policy(RpcRateLimitPolicy::Default);
+    let ctx_sde_default = crate::router::TestContext::with_sde_and_repository_rate_limit(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+        RpcRateLimitPolicy::Default,
+    );
+    assert!(!ctx_sibling_default.is_rpc_rate_budget_disabled());
+    assert!(!ctx_explicit_default.is_rpc_rate_budget_disabled());
+    assert!(!ctx_sde_default.is_rpc_rate_budget_disabled());
+    assert_eq!(ctx_sibling_default.rpc_rate_limit_policy(), RpcRateLimitPolicy::Default);
+    assert_eq!(ctx_explicit_default.rpc_rate_limit_policy(), RpcRateLimitPolicy::Default);
+    assert_eq!(ctx_sde_default.rpc_rate_limit_policy(), RpcRateLimitPolicy::Default);
     for _ in 0..burst {
-        assert!(ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
+        assert!(ctx_sibling_default.try_consume_rpc_token_at(sid_unit, t0, false));
     }
-    assert!(!ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
+    assert!(!ctx_sibling_default.try_consume_rpc_token_at(sid_unit, t0, false));
 }
 
 #[tokio::test]

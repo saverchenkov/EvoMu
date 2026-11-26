@@ -392,7 +392,7 @@ async fn reprocess_stale_station_or_structure_output_hangar_and_guards_1563() {
 
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
     let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = TestContext::with_sde_and_repository(sde, db).with_rpc_rate_budget_disabled();
+    let ctx = TestContext::with_sde_and_repository_rate_budget_disabled(sde, db);
 
     let uid = ctx.db.provision_player_account("reproc1563", "reproc1563-secret");
     let char_id = 940_001;

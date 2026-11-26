@@ -67,7 +67,14 @@ async fn test_agent_mission_change_notifications() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
+        .filter(|a| {
+            a.level == 1
+                && a.agent_type_id == 2
+                && a.division_id == 22
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
         .map(|a| {
             (
                 a.agent_id,
@@ -138,13 +145,26 @@ async fn test_agent_mission_change_notifications() {
         .map(|s| s.solar_system_id)
         .unwrap_or(dist_sys_id);
 
+    let cargo_tag = format!("courier_cargo:{P1}:{mission_id}");
     ctx.db.with_mut_snapshot(|snap| {
+        let m_meta = eve_server::services::mission_fixture::get(snap, P1, mission_id as u32);
+        let granted_id = m_meta.as_ref().and_then(|m| m.granted_courier_item_id);
+        let req_type_id = m_meta.as_ref().and_then(|m| m.required_delivery_type_id);
+        let tagged_id = snap
+            .item_custom_names
+            .iter()
+            .find(|(_, v)| *v == &cargo_tag)
+            .map(|(&k, _)| k);
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.solar_system_id = dest_sys_id;
             ch.station_id = Some(dest_station_id);
             let ship_id = ch.active_ship_id;
             for it in snap.items.values_mut() {
-                if it.owner_id == P1 && it.type_id == 3814 {
+                if it.owner_id == P1
+                    && (Some(it.item_id) == granted_id
+                        || Some(it.item_id) == tagged_id
+                        || req_type_id == Some(it.type_id))
+                {
                     it.location_id = ship_id;
                     it.flag = eve_db::InventoryFlag::Cargo;
                 }
