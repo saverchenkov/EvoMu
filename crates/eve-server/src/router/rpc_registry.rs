@@ -773,6 +773,8 @@ impl RpcRegistry {
             crate::router::rpc_read_set::READ_ONLY_RPCS,
         )
         .unwrap_or_else(|err| panic!("compiled RPC registry validation failed: {err}"));
+        reg.validate_fault_policy_table(crate::router::rpc_fault_policy::RPC_FAULT_POLICY_TABLE)
+            .unwrap_or_else(|err| panic!("compiled RPC fault policy validation failed: {err}"));
         reg.entries.shrink_to_fit();
         reg
     }
@@ -919,6 +921,60 @@ impl RpcRegistry {
             reg.entries[idx].access = RpcAccess::Read;
         }
         Ok(reg)
+    }
+
+    /// Validates declarative [`crate::router::rpc_fault_policy::RPC_FAULT_POLICY_TABLE`] entries
+    /// against this compiled registry (`#1195`).
+    pub fn validate_fault_policy_table(
+        &self,
+        rules: &[crate::router::rpc_fault_policy::RpcFaultPolicyRule],
+    ) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for rule in rules {
+            if rule.service.is_empty() || rule.method.is_empty() {
+                return Err(format!(
+                    "fault policy rule has empty service/method: ({:?}, {:?})",
+                    rule.service, rule.method
+                ));
+            }
+            let Some(entry) = self.lookup(rule.service, rule.method) else {
+                return Err(format!(
+                    "fault policy rule references unregistered RPC: {}.{}",
+                    rule.service, rule.method
+                ));
+            };
+            if matches!(
+                rule.action,
+                crate::router::rpc_fault_policy::RpcFaultAction::SoftEmpty(_)
+            ) && entry.access == RpcAccess::Write
+            {
+                return Err(format!(
+                    "fault policy rule cannot apply SoftEmpty to Write RPC: {}.{}",
+                    rule.service, rule.method
+                ));
+            }
+            if rule.error_codes.is_empty() {
+                return Err(format!(
+                    "fault policy rule for {}.{} must declare at least one error code",
+                    rule.service, rule.method
+                ));
+            }
+            for &code in rule.error_codes {
+                if code.is_empty() {
+                    return Err(format!(
+                        "fault policy rule for {}.{} contains an empty error code",
+                        rule.service, rule.method
+                    ));
+                }
+                if !seen.insert((rule.service, rule.method, code)) {
+                    return Err(format!(
+                        "duplicate fault policy rule for {}.{}:{code}",
+                        rule.service, rule.method
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Performs an O(1) lookup for `(service, method)`.

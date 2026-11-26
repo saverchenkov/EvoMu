@@ -69,6 +69,7 @@ pub fn to_wire_exchange(out: ClientWireCallOutcome) -> ClientWireExchange {
             code: err.code,
             message: err.message,
             wire_body: out.error_wire_body.unwrap_or(PyRep::None),
+            used_unmapped_custom_info_fallback: out.used_unmapped_custom_info_fallback,
         }),
     };
     let frames = out

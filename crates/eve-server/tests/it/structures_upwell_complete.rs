@@ -667,6 +667,7 @@ async fn structure_control_take_and_release_wire_tcp_client_harness() {
                     code: "ErrorResponse".into(),
                     message: format!("{body:?}"),
                     wire_body: body.clone(),
+                    used_unmapped_custom_info_fallback: false,
                 };
                 *rpc_result = Some(Err(err));
                 ClientWireFrameKind::ErrorResponse { call_id, body }

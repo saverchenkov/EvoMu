@@ -15,11 +15,13 @@ use crate::client_contract::{
     LoadedClientContracts, SemanticLookupContext,
 };
 use crate::shadow_client::{ShadowClient, ShadowDivergence};
+use crate::unmapped_custom_info_ratchet::UnmappedCustomInfoRatchet;
 use eve_db::WorldRepository;
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -35,6 +37,9 @@ pub struct ClientErrorResponse {
     /// Exact payload tuple written in the wire `ErrorResponse` packet by
     /// `macho_listener::map_call_req_error_body`.
     pub wire_body: PyRep,
+    /// `true` iff no explicit `BridgeRpcError.client_error`, mapping arm, or
+    /// `UserErrorKey::from_code` matched on the wire path (`#1195`).
+    pub used_unmapped_custom_info_fallback: bool,
 }
 
 /// Decoded payload of an outbound frame emitted by the server socket loop (`C-2`).
@@ -186,6 +191,7 @@ pub struct ClientHarness<T> {
     transport: T,
     mode: ContractValidationMode,
     contracts: &'static LoadedClientContracts,
+    unmapped_custom_info_ratchet: Cow<'static, UnmappedCustomInfoRatchet>,
     buffered_notifications: Vec<(String, Vec<PyRep>)>,
     buffered_frames: Vec<ClientWireFrame>,
     recorded_commits: Vec<(String, u64)>,
@@ -203,6 +209,9 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             transport,
             mode: ContractValidationMode::Ratcheted,
             contracts: ClientContractRatchet::load_default_cached(),
+            unmapped_custom_info_ratchet: Cow::Borrowed(
+                UnmappedCustomInfoRatchet::load_default_cached(),
+            ),
             buffered_notifications: Vec::new(),
             buffered_frames: Vec::new(),
             recorded_commits: Vec::new(),
@@ -212,6 +221,15 @@ impl<T: ClientWireTransport> ClientHarness<T> {
             shadow_enforce: false,
             bound_inv_containers: HashMap::new(),
         }
+    }
+
+    /// Overrides the [`UnmappedCustomInfoRatchet`] checked for silent fallback failures (`#1195`).
+    pub fn with_unmapped_custom_info_ratchet(
+        mut self,
+        ratchet: UnmappedCustomInfoRatchet,
+    ) -> Self {
+        self.unmapped_custom_info_ratchet = Cow::Owned(ratchet);
+        self
     }
 
     /// Enables or disables automatic [`ShadowClient`] convergence checks after every wire call (`G-05`).
@@ -560,6 +578,20 @@ impl<T: ClientWireTransport> ClientHarness<T> {
                 };
                 if keep {
                     violations.push(v);
+                }
+            }
+        }
+        if let Err(ref err) = exchange.rpc_result {
+            if err.used_unmapped_custom_info_fallback {
+                let key = UnmappedCustomInfoRatchet::fallback_key(service, method, &err.code);
+                let keep = match self.mode {
+                    ContractValidationMode::Ratcheted => !self
+                        .unmapped_custom_info_ratchet
+                        .is_allowed(service, method, &err.code),
+                    ContractValidationMode::Strict | ContractValidationMode::ReportOnly => true,
+                };
+                if keep {
+                    violations.push(format!("unmapped_custom_info_fallback: {key}"));
                 }
             }
         }
@@ -1512,6 +1544,7 @@ mod tests {
                             code: "UserError".into(),
                             message: "simulated error".into(),
                             wire_body: PyRep::None,
+                            used_unmapped_custom_info_fallback: false,
                         };
                         ClientWireExchange {
                             rpc_result: Err(err),
@@ -1725,5 +1758,101 @@ mod tests {
         let strict_panic_err =
             strict_panic_res.expect_err("Strict Read RPC that commits on Ok must panic ClientHarness");
         assert!(strict_panic_err.is_panic());
+    }
+
+    #[tokio::test]
+    async fn unmapped_custom_info_fallback_enforced_across_harness_modes() {
+        fn make_fallback_harness(
+            code: &'static str,
+            used_fallback: bool,
+        ) -> ClientHarness<impl ClientWireTransport> {
+            ClientHarness::in_memory_session(
+                move |_service, _bound_id, _method, _args, _kwargs| async move {
+                    let err = ClientErrorResponse {
+                        code: code.into(),
+                        message: "simulated wire failure".into(),
+                        wire_body: PyRep::None,
+                        used_unmapped_custom_info_fallback: used_fallback,
+                    };
+                    ClientWireExchange {
+                        rpc_result: Err(err),
+                        frames: vec![ClientWireFrame {
+                            kind: ClientWireFrameKind::ErrorResponse {
+                                call_id: 1,
+                                body: PyRep::None,
+                            },
+                            wire_packet: PyRep::None,
+                        }],
+                        marshal_errors: Vec::new(),
+                    }
+                },
+            )
+        }
+
+        // 1. Explicit CustomInfo (`used_fallback == false`) never fails even when unallowlisted.
+        let mut explicit_harness = make_fallback_harness("CustomInfo", false);
+        let explicit_err = explicit_harness
+            .call("dogmaIM", None, "LoadAmmo", &[], &HashMap::new())
+            .await
+            .expect_err("error outcome is returned to caller");
+        assert!(!explicit_err.used_unmapped_custom_info_fallback);
+
+        // 2. Allowlisted silent fallback passes in Ratcheted mode (checked-in ratchet entry).
+        let mut allowlisted_harness = make_fallback_harness("InvalidArgument", true);
+        let allowlisted_err = allowlisted_harness
+            .call("charUnboundMgr", None, "SelectCharacterID", &[], &HashMap::new())
+            .await
+            .expect_err("allowlisted fallback is permitted under Ratcheted");
+        assert!(allowlisted_err.used_unmapped_custom_info_fallback);
+
+        // 3. ReportOnly records the violation without panicking.
+        let mut report_harness =
+            make_fallback_harness("UnlistedSilentFallback", true).with_mode(ContractValidationMode::ReportOnly);
+        let report_out = report_harness
+            .call_exchange("dogmaIM", None, "LoadAmmo", &[], &HashMap::new())
+            .await;
+        assert!(report_out.result.is_err());
+        assert!(
+            report_out
+                .violations
+                .contains(&"unmapped_custom_info_fallback: dogmaIM.LoadAmmo:UnlistedSilentFallback".to_string()),
+            "expected fallback violation in ReportOnly: {:?}",
+            report_out.violations
+        );
+
+        // 4. Ratcheted panics on any unallowlisted silent fallback.
+        let unallowlisted_panic = tokio::spawn(async move {
+            let mut h = make_fallback_harness("UnlistedSilentFallback", true);
+            let _ = h.call("dogmaIM", None, "LoadAmmo", &[], &HashMap::new()).await;
+        })
+        .await
+        .expect_err("Ratcheted must panic on unallowlisted unmapped_custom_info_fallback");
+        assert!(unallowlisted_panic.is_panic());
+
+        // 5. Strict panics even on an allowlisted silent fallback.
+        let strict_panic = tokio::spawn(async move {
+            let mut h = make_fallback_harness("InvalidArgument", true)
+                .with_mode(ContractValidationMode::Strict);
+            let _ = h
+                .call("charUnboundMgr", None, "SelectCharacterID", &[], &HashMap::new())
+                .await;
+        })
+        .await
+        .expect_err("Strict must reject even allowlisted unmapped_custom_info_fallback");
+        assert!(strict_panic.is_panic());
+
+        // 6. Custom per-harness ratchet override allows its explicitly listed key.
+        let custom_ratchet = UnmappedCustomInfoRatchet {
+            version: 1,
+            description: "test override".into(),
+            allowed_fallbacks: BTreeSet::from(["dogmaIM.LoadAmmo:ScopedTestFallback".into()]),
+        };
+        let mut custom_harness =
+            make_fallback_harness("ScopedTestFallback", true).with_unmapped_custom_info_ratchet(custom_ratchet);
+        let scoped_err = custom_harness
+            .call("dogmaIM", None, "LoadAmmo", &[], &HashMap::new())
+            .await
+            .expect_err("custom ratchet permits its own entry");
+        assert!(scoped_err.used_unmapped_custom_info_fallback);
     }
 }

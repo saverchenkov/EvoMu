@@ -36,6 +36,9 @@ pub struct ClientWireCallOutcome {
     pub notifications: Vec<(String, Vec<PyRep>)>,
     /// Raw per-character notifications consumed from `ServerContext::pending_notifications`.
     pub drained_char_notifications: Vec<PendingMachoNotification>,
+    /// `true` iff this call failed with an unmapped [`BridgeRpcError`] that fell back to wire
+    /// `CustomInfo` (`#1195`).
+    pub used_unmapped_custom_info_fallback: bool,
 }
 
 /// Persistent client wire session mirroring a single TCP client's `machoNet` connection state (`C-2`).
@@ -331,5 +334,6 @@ async fn execute_wire_step(
         marshal_errors,
         notifications: raw.notifications,
         drained_char_notifications: raw.drained_char_notifications,
+        used_unmapped_custom_info_fallback: raw.used_unmapped_custom_info_fallback,
     }
 }

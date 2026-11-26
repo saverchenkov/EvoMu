@@ -10,8 +10,9 @@
 
 #![forbid(unsafe_code)]
 
+use crate::flight_recorder::FlightRecorder;
 use crate::outbound_sequencer::{DestinyDrain, DestinyStream, RpcCompletion};
-use crate::router::ServerContext;
+use crate::router::{rpc_fault_policy::map_call_req_error_with_telemetry, ServerContext};
 use anyhow::Result;
 use eve_machonet::{
     CryptoChallengePacket, GPSTransportClosed, HandshakeIdentity, HandshakeStepOutput,
@@ -1393,6 +1394,8 @@ pub struct CallReqWireOutcome {
     pub notifications: Vec<(String, Vec<PyRep>)>,
     /// Raw per-character [`crate::router::PendingMachoNotification`] items drained from `ctx` during this call.
     pub drained_char_notifications: Vec<crate::router::PendingMachoNotification>,
+    /// `true` iff this call failed with an unmapped [`BridgeRpcError`] that fell back to wire `CustomInfo` (`#1195`).
+    pub used_unmapped_custom_info_fallback: bool,
 }
 
 fn session_owns_char_notifications(ctx: &ServerContext, session: &SessionState) -> bool {
@@ -1413,19 +1416,15 @@ fn session_owns_char_notifications(ctx: &ServerContext, session: &SessionState) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_call_req_reply_packet(
+    flight_recorder: &FlightRecorder,
     req_source: &MachoAddress,
     req_dest: &MachoAddress,
-    user_id: Option<u64>,
-    character_id: Option<i64>,
-    service: &str,
-    method: &str,
+    user_id: Option<u64>, character_id: Option<i64>,
+    service: &str, method: &str,
     rpc_res: std::result::Result<PyRep, BridgeRpcError>,
-) -> (
-    std::result::Result<PyRep, BridgeRpcError>,
-    Option<PyRep>,
-    MachoPacket,
-) {
+) -> (std::result::Result<PyRep, BridgeRpcError>, Option<PyRep>, bool, MachoPacket) {
     match rpc_res {
         Ok(val) => {
             let mut named_payload = HashMap::new();
@@ -1460,21 +1459,12 @@ fn build_call_req_reply_packet(
                 payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val.clone()))]),
                 named_payload,
             };
-            (Ok(val), None, pkt)
+            (Ok(val), None, false, pkt)
         }
         Err(err) => {
-            let mut client_err = err.to_client_error(service, method);
-            if let eve_proto::ClientError::User {
-                key: eve_proto::UserErrorKey::InsureShipFailedSingleContract,
-                ref mut args,
-            } = client_err
-            {
-                if !args.iter().any(|(k, _)| k == "ownerName") {
-                    if let Some(cid) = character_id {
-                        args.push(("ownerName".into(), PyRep::Integer(cid)));
-                    }
-                }
-            }
+            let (client_err, used_fallback) = map_call_req_error_with_telemetry(
+                flight_recorder, character_id, service, method, &err,
+            );
             let payload = client_err.to_macho_error_body(MachoPacketType::CallReq as i64);
             let pkt = MachoPacket {
                 packet_type: MachoPacketType::ErrorResponse,
@@ -1484,7 +1474,7 @@ fn build_call_req_reply_packet(
                 payload: payload.clone(),
                 named_payload: HashMap::new(),
             };
-            (Err(err), Some(payload), pkt)
+            (Err(err), Some(payload), used_fallback, pkt)
         }
     }
 }
@@ -1944,15 +1934,17 @@ async fn execute_call_req_wire_inner(
         elapsed_ms
     });
 
-    let (mut rpc_result, mut error_wire_body, mut rsp_pkt) = build_call_req_reply_packet(
-        req_source,
-        req_dest,
-        session.user_id,
-        session.character_id,
-        effective_service,
-        method,
-        rpc_res,
-    );
+    let (mut rpc_result, mut error_wire_body, mut used_unmapped_custom_info_fallback, mut rsp_pkt) =
+        build_call_req_reply_packet(
+            &ctx.flight_recorder,
+            req_source,
+            req_dest,
+            session.user_id,
+            session.character_id,
+            effective_service,
+            method,
+            rpc_res,
+        );
     if let Some(elapsed_ms) = bootstrap_elapsed_ms {
         rsp_pkt.named_payload.insert(
             "elapsed_since_request_ms".into(),
@@ -2454,17 +2446,20 @@ async fn execute_call_req_wire_inner(
             session_change_frame = None;
             deferred_flush_frame = None;
             typed_notifications.retain(|n| n.event != "OnSessionChanged");
-            let (next_res, next_err_body, next_pkt) = build_call_req_reply_packet(
-                req_source,
-                req_dest,
-                session.user_id,
-                session.character_id,
-                effective_service,
-                method,
-                Err(timeout_err),
-            );
+            let (next_res, next_err_body, next_used_fallback, next_pkt) =
+                build_call_req_reply_packet(
+                    &ctx.flight_recorder,
+                    req_source,
+                    req_dest,
+                    session.user_id,
+                    session.character_id,
+                    effective_service,
+                    method,
+                    Err(timeout_err),
+                );
             rpc_result = next_res;
             error_wire_body = next_err_body;
+            used_unmapped_custom_info_fallback = next_used_fallback;
             rsp_pkt = next_pkt;
         }
     }
@@ -2604,6 +2599,7 @@ async fn execute_call_req_wire_inner(
         out_frames,
         notifications,
         drained_char_notifications,
+        used_unmapped_custom_info_fallback,
     }
 }
 
@@ -2745,6 +2741,8 @@ async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
     let user_id_before = session.user_id;
     let mut grace_session = session.clone();
     grace_session.character_id = Some(grace_char_id);
+    let effective_grace_service =
+        bound_id.and_then(|bid| ctx.owned_bound_service_for_metrics(&grace_session, bid));
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
         ctx.dispatch_rpc_with_options(
@@ -2766,14 +2764,10 @@ async fn dispatch_safe_logoff_teardown_grace_rpc<W: AsyncWriteExt + Unpin>(
         session.role = 0;
     }
     let succeeded = rpc_res.is_ok();
-    let (_rpc_result, _err_body, rsp_pkt) = build_call_req_reply_packet(
-        source,
-        destination,
-        session.user_id.or(user_id_before),
-        Some(grace_char_id),
-        service,
-        method,
-        rpc_res,
+    let (_rpc_result, _err_body, _used_fallback, rsp_pkt) = build_call_req_reply_packet(
+        &ctx.flight_recorder, source, destination,
+        session.user_id.or(user_id_before), Some(grace_char_id),
+        effective_grace_service.as_deref().unwrap_or(service), method, rpc_res,
     );
     let out_frame = crate::outbound_sequencer::OutFrame::CallRsp {
         call_id: 0,
@@ -4200,7 +4194,8 @@ pub async fn handle_macho_client_with_tracker(
                                 Ok(plan) => plan,
                                 Err(timeout_err) => {
                                     pending_dock = None;
-                                    let (_, _, err_pkt) = build_call_req_reply_packet(
+                                    let (_, _, _, err_pkt) = build_call_req_reply_packet(
+                                        &ctx.flight_recorder,
                                         &pkt.source,
                                         &pkt.destination,
                                         session.user_id,
