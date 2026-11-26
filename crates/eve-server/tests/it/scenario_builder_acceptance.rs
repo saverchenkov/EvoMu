@@ -533,10 +533,10 @@ fn deterministic_sde_pick_invariant_across_distinct_hash_seeds() {
     for (tid, bp) in all_blueprints.iter().rev() {
         rev_bps.insert(*tid, bp.clone());
     }
-    sde_fwd.types = fwd_types;
-    sde_fwd.blueprints = fwd_bps;
-    sde_rev.types = rev_types;
-    sde_rev.blueprints = rev_bps;
+    sde_fwd.types = fwd_types.into();
+    sde_fwd.blueprints = fwd_bps.into();
+    sde_rev.types = rev_types.into();
+    sde_rev.blueprints = rev_bps.into();
 
     let fwd_raw_types: Vec<TypeId> = sde_fwd.types.keys().copied().collect();
     let rev_raw_types: Vec<TypeId> = sde_rev.types.keys().copied().collect();

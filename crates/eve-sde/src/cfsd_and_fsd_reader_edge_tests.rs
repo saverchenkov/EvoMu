@@ -39,7 +39,7 @@ fn make_temp_sde_with_resource(res_path: &str, bytes: &[u8]) -> (PathBuf, SdeReg
     );
     let sde = SdeRegistry {
         db_path: Some(db_path),
-        resources,
+        resources: resources.into(),
         ..SdeRegistry::default()
     };
     (dir, sde)
@@ -230,7 +230,7 @@ fn localized_group_category_and_market_group_cfsd_id_lookups() {
     }
 
     let sde = SdeRegistry {
-        resources,
+        resources: resources.into(),
         ..SdeRegistry::default()
     };
 
@@ -289,7 +289,7 @@ fn make_temp_sde_with_files(entries: &[(&str, &str, Vec<u8>)]) -> (PathBuf, SdeR
     }
     let sde = SdeRegistry {
         db_path: Some(db_path),
-        resources,
+        resources: resources.into(),
         ..SdeRegistry::default()
     };
     (dir, sde)

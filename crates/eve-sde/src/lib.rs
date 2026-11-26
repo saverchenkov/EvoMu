@@ -1068,38 +1068,38 @@ pub struct SdeRegistry {
     #[serde(default)]
     pub db_path: Option<PathBuf>,
     #[serde(default)]
-    pub resources: HashMap<String, SdeResourceInfo>,
+    pub resources: SharedMap<String, SdeResourceInfo>,
     #[serde(default)]
-    pub categories: HashMap<CategoryId, CategoryInfo>,
+    pub categories: SharedMap<CategoryId, CategoryInfo>,
     #[serde(default)]
-    pub groups: HashMap<GroupId, GroupInfo>,
-    pub types: HashMap<TypeId, InvType>,
+    pub groups: SharedMap<GroupId, GroupInfo>,
+    pub types: SharedMap<TypeId, InvType>,
     #[serde(default)]
-    pub type_isis_groups: HashMap<TypeId, u32>,
+    pub type_isis_groups: SharedMap<TypeId, u32>,
     #[serde(default)]
-    pub variations_by_parent: HashMap<TypeId, Vec<TypeId>>,
-    pub attributes: HashMap<AttributeId, DogmaAttributeType>,
-    pub effects: HashMap<EffectId, DogmaEffectType>,
-    pub races: HashMap<u32, RaceInfo>,
-    pub bloodlines: HashMap<u32, BloodlineInfo>,
-    pub ancestries: HashMap<u32, AncestryInfo>,
-    pub schools: HashMap<u32, SchoolInfo>,
+    pub variations_by_parent: SharedMap<TypeId, Vec<TypeId>>,
+    pub attributes: SharedMap<AttributeId, DogmaAttributeType>,
+    pub effects: SharedMap<EffectId, DogmaEffectType>,
+    pub races: SharedMap<u32, RaceInfo>,
+    pub bloodlines: SharedMap<u32, BloodlineInfo>,
+    pub ancestries: SharedMap<u32, AncestryInfo>,
+    pub schools: SharedMap<u32, SchoolInfo>,
     #[serde(default, with = "arc_serde")]
     pub school_starting_stations: Arc<HashMap<u32, (u32, Vec<i64>)>>,
     #[serde(default, with = "arc_serde")]
     pub school_career_agents: Arc<HashMap<u32, (u32, Vec<i64>)>>,
     #[serde(default)]
-    pub regions: HashMap<u32, RegionInfo>,
+    pub regions: SharedMap<u32, RegionInfo>,
     #[serde(default)]
-    pub constellations: HashMap<u32, ConstellationInfo>,
-    pub solar_systems: HashMap<SolarSystemId, SolarSystem>,
+    pub constellations: SharedMap<u32, ConstellationInfo>,
+    pub solar_systems: SharedMap<SolarSystemId, SolarSystem>,
     #[serde(default, with = "arc_serde")]
     pub solar_system_factions: Arc<HashMap<SolarSystemId, u32>>,
     #[serde(default, with = "arc_serde")]
     pub solar_system_security_classes: Arc<HashMap<SolarSystemId, String>>,
     #[serde(default)]
-    pub stations: HashMap<i64, StationInfo>,
-    pub jumps: HashMap<i64, StargateJump>,
+    pub stations: SharedMap<i64, StationInfo>,
+    pub jumps: SharedMap<i64, StargateJump>,
     #[serde(default, with = "arc_serde")]
     pub stargate_meta: Arc<HashMap<i64, (TypeId, String)>>,
     #[serde(default)]
@@ -1111,41 +1111,41 @@ pub struct SdeRegistry {
     #[serde(default, with = "arc_serde")]
     pub stars: Arc<HashMap<i64, StarInfo>>,
     #[serde(default)]
-    pub factions: HashMap<u32, FactionInfo>,
+    pub factions: SharedMap<u32, FactionInfo>,
     #[serde(default)]
-    pub npc_factions: HashMap<u32, FactionInfo>,
+    pub npc_factions: SharedMap<u32, FactionInfo>,
     #[serde(default)]
-    pub npc_corporations: HashMap<i64, NpcCorporationInfo>,
+    pub npc_corporations: SharedMap<i64, NpcCorporationInfo>,
     #[serde(default)]
-    pub agents: HashMap<i64, AgentInfo>,
+    pub agents: SharedMap<i64, AgentInfo>,
     #[serde(default)]
-    pub market_groups: HashMap<u32, MarketGroupInfo>,
+    pub market_groups: SharedMap<u32, MarketGroupInfo>,
     #[serde(default)]
-    pub planet_schematics: HashMap<u32, PlanetSchematicInfo>,
+    pub planet_schematics: SharedMap<u32, PlanetSchematicInfo>,
     #[serde(default)]
-    pub wormhole_types: HashMap<TypeId, WormholeTypeInfo>,
+    pub wormhole_types: SharedMap<TypeId, WormholeTypeInfo>,
     #[serde(default)]
-    pub npc_spawn_groups: HashMap<u32, NpcSpawnGroupInfo>,
-    pub clone_grades: HashMap<u32, CloneGradeInfo>,
-    pub blueprints: HashMap<TypeId, BlueprintInfo>,
-    pub dbuff_collections: HashMap<u32, DbuffCollectionInfo>,
-    pub fighter_abilities: HashMap<u32, FighterAbilityInfo>,
+    pub npc_spawn_groups: SharedMap<u32, NpcSpawnGroupInfo>,
+    pub clone_grades: SharedMap<u32, CloneGradeInfo>,
+    pub blueprints: SharedMap<TypeId, BlueprintInfo>,
+    pub dbuff_collections: SharedMap<u32, DbuffCollectionInfo>,
+    pub fighter_abilities: SharedMap<u32, FighterAbilityInfo>,
     #[serde(default)]
-    pub fighter_abilities_by_type: HashMap<TypeId, Vec<FighterAbilitySlot>>,
-    pub wrecks: HashMap<TypeId, TypeId>,
+    pub fighter_abilities_by_type: SharedMap<TypeId, Vec<FighterAbilitySlot>>,
+    pub wrecks: SharedMap<TypeId, TypeId>,
     #[serde(default, with = "arc_serde")]
     pub wrecks_by_group_and_race: Arc<HashMap<GroupId, HashMap<u32, TypeId>>>,
     #[serde(default, with = "arc_serde")]
     pub wreck_group_race_by_wreck_type: Arc<HashMap<TypeId, (GroupId, u32)>>,
     #[serde(default, with = "arc_serde")]
     pub salvage_pools: Arc<SalvageMaterialPools>,
-    pub compressible_types: HashMap<TypeId, TypeId>,
+    pub compressible_types: SharedMap<TypeId, TypeId>,
     #[serde(default)]
-    pub type_lists: HashMap<u32, TypeListInfo>,
+    pub type_lists: SharedMap<u32, TypeListInfo>,
     #[serde(default)]
-    pub dungeon_asteroids: HashMap<u32, Vec<DungeonAsteroidEntry>>,
+    pub dungeon_asteroids: SharedMap<u32, Vec<DungeonAsteroidEntry>>,
     #[serde(default)]
-    pub dungeon_gas_types: HashMap<u32, Vec<TypeId>>,
+    pub dungeon_gas_types: SharedMap<u32, Vec<TypeId>>,
     #[serde(default, with = "arc_serde")]
     pub asteroid_counts_by_belt: Arc<HashMap<i64, HashMap<TypeId, u32>>>,
     #[serde(default, with = "arc_serde")]
@@ -1161,20 +1161,20 @@ pub struct SdeRegistry {
     #[serde(default, with = "arc_serde")]
     pub industry_installation_types: Arc<HashMap<TypeId, Vec<u32>>>,
     #[serde(default)]
-    pub type_materials: HashMap<TypeId, Vec<TypeMaterialEntry>>,
+    pub type_materials: SharedMap<TypeId, Vec<TypeMaterialEntry>>,
     #[serde(default)]
-    pub randomized_type_materials: HashMap<TypeId, Vec<RandomizedMaterialEntry>>,
-    pub dynamic_item_attributes: HashMap<TypeId, MutaplasmidInfo>,
-    pub space_components_by_type: HashMap<TypeId, Vec<String>>,
-    pub missions: HashMap<u32, MissionTemplate>,
-    pub dungeons: HashMap<u32, DungeonTemplate>,
-    pub epic_arcs: HashMap<u32, EpicArcTemplate>,
-    pub node_graphs: HashMap<u32, NodeGraphTemplate>,
-    pub career_goals: HashMap<u32, CareerGoalTemplate>,
+    pub randomized_type_materials: SharedMap<TypeId, Vec<RandomizedMaterialEntry>>,
+    pub dynamic_item_attributes: SharedMap<TypeId, MutaplasmidInfo>,
+    pub space_components_by_type: SharedMap<TypeId, Vec<String>>,
+    pub missions: SharedMap<u32, MissionTemplate>,
+    pub dungeons: SharedMap<u32, DungeonTemplate>,
+    pub epic_arcs: SharedMap<u32, EpicArcTemplate>,
+    pub node_graphs: SharedMap<u32, NodeGraphTemplate>,
+    pub career_goals: SharedMap<u32, CareerGoalTemplate>,
     #[serde(default)]
     pub achievements_static: Vec<AchievementStaticDef>,
     #[serde(default)]
-    pub achievement_events_static: HashMap<u32, AchievementEventDef>,
+    pub achievement_events_static: SharedMap<u32, AchievementEventDef>,
     #[serde(default)]
     pub achievement_category_labels: Vec<AchievementCategoryLabel>,
     #[serde(default)]
@@ -1182,21 +1182,21 @@ pub struct SdeRegistry {
     #[serde(default)]
     pub career_goal_definitions: Vec<CareerGoalDefinitionDef>,
     #[serde(default)]
-    pub contribution_methods: HashMap<String, ContributionMethodDef>,
+    pub contribution_methods: SharedMap<String, ContributionMethodDef>,
     #[serde(default)]
     pub daily_goal_catalog: Vec<DailyGoalCatalogEntry>,
     #[serde(default)]
-    pub station_operations: HashMap<u32, StationOperationInfo>,
+    pub station_operations: SharedMap<u32, StationOperationInfo>,
     #[serde(default)]
-    pub station_services: HashMap<u32, StationServiceInfo>,
+    pub station_services: SharedMap<u32, StationServiceInfo>,
     #[serde(default)]
-    pub skin_licenses: HashMap<TypeId, SkinLicenseInfo>,
+    pub skin_licenses: SharedMap<TypeId, SkinLicenseInfo>,
     #[serde(default)]
-    pub skin_materials: HashMap<u32, SkinMaterialInfo>,
+    pub skin_materials: SharedMap<u32, SkinMaterialInfo>,
     #[serde(default)]
-    pub skins: HashMap<u32, SkinInfo>,
+    pub skins: SharedMap<u32, SkinInfo>,
     #[serde(default)]
-    pub graphics: HashMap<u32, GraphicIdInfo>,
+    pub graphics: SharedMap<u32, GraphicIdInfo>,
     #[serde(skip)]
     pub(crate) derived_caches: SdeDerivedCaches,
 }
@@ -1894,10 +1894,12 @@ pub mod sqlite_loader;
 pub mod sqlite_loader_skins;
 pub mod sqlite_queries;
 pub mod belt_ores;
+pub mod shared_map;
 pub mod static_domain_loaders;
 pub use cfsd_domain_loaders::*;
 pub use cfsd_flat_tables::*;
 pub use cfsd_nested_tables::*;
+pub use shared_map::SharedMap;
 pub use sqlite_queries::SdeCache;
 pub use static_domain_loaders::*;
 #[cfg(test)]
