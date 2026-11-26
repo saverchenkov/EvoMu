@@ -527,8 +527,7 @@ async fn record_ship_damage_progression_routes_capsuleer_damage_and_guards_npc_d
     assert_eq!(proj_prog(), 770);
 
     // 4. execute_pending_cycle_actions: LanceBeamFired + pre-notified CycleWeaponDamage
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.pending_cycle_actions
             .push(crate::system_actor::PendingCycleAction::LanceBeamFired {
                 attacker_char_id,
@@ -549,7 +548,8 @@ async fn record_ship_damage_progression_routes_capsuleer_damage_and_guards_npc_d
                 applied_dmg: 75.0,
                 notified: true,
             });
-    }
+    })
+    .await;
     crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
         &ctx, sys_id,
     )

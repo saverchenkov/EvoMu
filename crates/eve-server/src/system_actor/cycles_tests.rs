@@ -287,75 +287,74 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
     assert!((final_pos.x - 100_000.0).abs() < 1e-3);
 
     // Add both a nullified cycle and a normal cycle, then verify remove_non_warp_ship_module_cycles keeps nullifier
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.combat_states.insert(
-            2001,
-            CombatState {
-                base_max_velocity: Some(350.0),
-                base_mass: Some(1_200_000.0),
-                base_signature_radius: Some(39.0),
-                base_shield_resonance: Some([0.9; 4]),
-                base_armor_resonance: Some([0.8; 4]),
-                base_structure_resonance: Some([0.7; 4]),
-                ..CombatState::default()
-            },
-        );
-        if let Some(b) = bp.balls.get_mut(&2001) {
-            b.max_velocity = 1_200.0;
-            b.mass = 50_000_000.0;
-        }
-        let mut st = handle.actor_state.write().unwrap();
-        let st_mut = &mut *st;
-        st_mut.active_module_cycles.push(ActiveModuleCycle {
-            ship_id: 2001,
-            owner_char_id: Some(90_000_001),
-            module_id: 7001,
-            is_mwd_or_mjd: true,
-            speed_boost_factor: 2.5,
-            self_mass_multiplier: Some(1.5),
-            is_adc: true,
-            duration_s: 10.0,
-            ..ActiveModuleCycle::default()
-        });
-        st_mut.active_module_cycles.push(ActiveModuleCycle {
-            ship_id: 2001,
-            owner_char_id: Some(90_000_001),
-            module_id: 7002,
-            grants_interdiction_nullification: true,
-            duration_s: 10.0,
-            ..ActiveModuleCycle::default()
-        });
+    handle
+        .test_with_ballpark_and_state_mut_async(move |bp, st_mut| {
+            bp.combat_states.insert(
+                2001,
+                CombatState {
+                    base_max_velocity: Some(350.0),
+                    base_mass: Some(1_200_000.0),
+                    base_signature_radius: Some(39.0),
+                    base_shield_resonance: Some([0.9; 4]),
+                    base_armor_resonance: Some([0.8; 4]),
+                    base_structure_resonance: Some([0.7; 4]),
+                    ..CombatState::default()
+                },
+            );
+            if let Some(b) = bp.balls.get_mut(&2001) {
+                b.max_velocity = 1_200.0;
+                b.mass = 50_000_000.0;
+            }
+            st_mut.active_module_cycles.push(ActiveModuleCycle {
+                ship_id: 2001,
+                owner_char_id: Some(90_000_001),
+                module_id: 7001,
+                is_mwd_or_mjd: true,
+                speed_boost_factor: 2.5,
+                self_mass_multiplier: Some(1.5),
+                is_adc: true,
+                duration_s: 10.0,
+                ..ActiveModuleCycle::default()
+            });
+            st_mut.active_module_cycles.push(ActiveModuleCycle {
+                ship_id: 2001,
+                owner_char_id: Some(90_000_001),
+                module_id: 7002,
+                grants_interdiction_nullification: true,
+                duration_s: 10.0,
+                ..ActiveModuleCycle::default()
+            });
 
-        remove_non_warp_ship_module_cycles(
-            bp.solar_system_id,
-            &mut bp,
-            &mut st_mut.active_module_cycles,
-            &st_mut.base_scramble_strengths,
-            &st_mut.base_core_strengths,
-            &None,
-            2001,
-            None,
-        );
-        assert_eq!(st_mut.active_module_cycles.len(), 1);
-        assert_eq!(st_mut.active_module_cycles[0].module_id, 7002);
-        assert!((bp.balls[&2001].max_velocity - 350.0).abs() < 1e-6);
-        assert!((bp.balls[&2001].mass - 1_200_000.0).abs() < 1e-3);
+            remove_non_warp_ship_module_cycles(
+                bp.solar_system_id,
+                bp,
+                &mut st_mut.active_module_cycles,
+                &st_mut.base_scramble_strengths,
+                &st_mut.base_core_strengths,
+                &None,
+                2001,
+                None,
+            );
+            assert_eq!(st_mut.active_module_cycles.len(), 1);
+            assert_eq!(st_mut.active_module_cycles[0].module_id, 7002);
+            assert!((bp.balls[&2001].max_velocity - 350.0).abs() < 1e-6);
+            assert!((bp.balls[&2001].mass - 1_200_000.0).abs() < 1e-3);
 
-        // Now remove all remaining cycles on 2001
-        let removed_all = remove_all_ship_module_cycles(
-            bp.solar_system_id,
-            &mut bp,
-            &mut st_mut.active_module_cycles,
-            &st_mut.base_scramble_strengths,
-            &st_mut.base_core_strengths,
-            &None,
-            2001,
-            None,
-        );
-        assert_eq!(removed_all.len(), 1);
-        assert!(st_mut.active_module_cycles.is_empty());
-    }
+            // Now remove all remaining cycles on 2001
+            let removed_all = remove_all_ship_module_cycles(
+                bp.solar_system_id,
+                bp,
+                &mut st_mut.active_module_cycles,
+                &st_mut.base_scramble_strengths,
+                &st_mut.base_core_strengths,
+                &None,
+                2001,
+                None,
+            );
+            assert_eq!(removed_all.len(), 1);
+            assert!(st_mut.active_module_cycles.is_empty());
+        })
+        .await;
 
     // Step full tick + auto-stepped timestamp helpers
     handle.set_last_auto_stepped_unix(1_700_000_000);

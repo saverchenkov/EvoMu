@@ -162,13 +162,14 @@ async fn docked_upwell_repair_ignores_stale_ballpark_combat_state_gh1220() {
 
     // Inject stale damaged combat state in the solar system ballpark while the pilot/ship is docked.
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        let mut cs = ctx.build_type_combat_state(587);
-        cs.max_shield_hp = 500.0;
-        cs.shield_hp = 50.0;
-        bp.combat_states.insert(ship_id, cs);
-    }
+    let mut cs = ctx.build_type_combat_state(587);
+    cs.max_shield_hp = 500.0;
+    cs.shield_hp = 50.0;
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.insert(ship_id, cs);
+        })
+        .await;
 
     let quotes = handle_repair_get_quotes(&ctx, &session, &[PyRep::List(vec![PyRep::Integer(mod_id)])]).unwrap();
     assert!(matches!(quotes, PyRep::Dict(ref entries) if entries.len() == 1));
@@ -186,9 +187,10 @@ async fn docked_upwell_repair_ignores_stale_ballpark_combat_state_gh1220() {
         "docked owner structure repair must ignore stale ballpark shield damage"
     );
     // Stale ballpark shield HP remains untouched while docked; module DB damage was repaired.
-    let bp = sys_handle.ballpark.read().unwrap();
-    assert!((bp.combat_states[&ship_id].shield_hp - 50.0).abs() < 1e-6);
-    drop(bp);
+    let shield_hp = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&ship_id].shield_hp)
+        .await;
+    assert!((shield_hp - 50.0).abs() < 1e-6);
     let rem_mod_dmg = ctx.db.with_snapshot(|snap| {
         snap.items
             .get(&mod_id)

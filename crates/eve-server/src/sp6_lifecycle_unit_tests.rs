@@ -305,36 +305,39 @@ async fn timers_aggression_and_filament_preconditions_enforce_all_guards() {
         st.weapon_timers_until.remove(&att);
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 1;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 1;
+        })
+        .await;
     assert_eq!(
         require_ship_ready_for_filament_jump(&ctx, att, ship_id, sys_id)
             .unwrap_err()
             .code,
         "WarpScrambled"
     );
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
-        bp.combat_states.get_mut(&ship_id).unwrap().gate_cloak_remaining_ticks = 10;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
+            bp.combat_states.get_mut(&ship_id).unwrap().gate_cloak_remaining_ticks = 10;
+        })
+        .await;
     assert_eq!(
         require_ship_ready_for_filament_jump(&ctx, att, ship_id, sys_id)
             .unwrap_err()
             .code,
         "ShipInvulnerable"
     );
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().gate_cloak_remaining_ticks = 0;
-        bp.balls.get_mut(&ship_id).unwrap().mode = MovementMode::new_warp(
-            DVec3::new(100_000.0, 0.0, 0.0),
-            DVec3::new(900_000_000.0, 0.0, 0.0),
-            3.0,
-        );
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().gate_cloak_remaining_ticks = 0;
+            bp.balls.get_mut(&ship_id).unwrap().mode = MovementMode::new_warp(
+                DVec3::new(100_000.0, 0.0, 0.0),
+                DVec3::new(900_000_000.0, 0.0, 0.0),
+                3.0,
+            );
+        })
+        .await;
     assert_eq!(
         require_ship_ready_for_filament_jump(&ctx, att, ship_id, sys_id)
             .unwrap_err()
@@ -812,11 +815,13 @@ async fn bf04_reconnect_stops_outbound_emergency_warp_and_delivers_set_state() {
     // 2. Reconnecting after moving > 10 km away initiates return warp without entering
     // `active_warps`, and `UpdateStateRequest` still delivers `SetState`.
     let _ = handle_character_logoff_or_disconnect_sync(&ctx, char_id).expect("logoff again");
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(b) = bp.balls.get_mut(&ship_id) {
-            b.position = orig_pos + DVec3::new(50_000_000.0, 0.0, 0.0);
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&ship_id) {
+                b.position = orig_pos + DVec3::new(50_000_000.0, 0.0, 0.0);
+            }
+        })
+        .await;
     reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect return warp");
     assert!(!sys_handle.is_active_warp(ship_id));
     let _ = sys_handle.drain_observer_updates(ship_id).await;

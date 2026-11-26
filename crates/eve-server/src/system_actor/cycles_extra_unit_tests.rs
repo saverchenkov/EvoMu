@@ -1180,56 +1180,55 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
     assert!(handle.take_auto_stepped_at(12345));
     assert!(!handle.take_auto_stepped_at(12345));
 
-    let (ops_warp, ops_all) = {
-        let mut st = handle.actor_state.write().unwrap();
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id,
-            owner_char_id: Some(90_000_001),
-            module_id: mod_norm,
-            duration_s: 10.0,
-            ..Default::default()
-        });
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id,
-            owner_char_id: Some(90_000_001),
-            module_id: mod_null,
-            grants_interdiction_nullification: true,
-            duration_s: 10.0,
-            ..Default::default()
-        });
-        let state = &mut *st;
-        let mut bp = handle.ballpark.write().unwrap();
-        let mut ops_warp = super::post_unlock::PostUnlockOps::default();
-        super::cycles::remove_non_warp_ship_module_cycles_collecting(
-            bp.solar_system_id,
-            &mut bp,
-            &mut state.active_module_cycles,
-            &state.base_scramble_strengths,
-            &state.base_core_strengths,
-            &state.db_opt,
-            ship_id,
-            None,
-            &mut ops_warp,
-        );
-        assert_eq!(state.active_module_cycles.len(), 1);
-        assert_eq!(state.active_module_cycles[0].module_id, mod_null);
+    let (ops_warp, ops_all) = handle
+        .test_with_ballpark_and_state_mut_async(move |bp, state| {
+            state.active_module_cycles.push(ActiveModuleCycle {
+                ship_id,
+                owner_char_id: Some(90_000_001),
+                module_id: mod_norm,
+                duration_s: 10.0,
+                ..Default::default()
+            });
+            state.active_module_cycles.push(ActiveModuleCycle {
+                ship_id,
+                owner_char_id: Some(90_000_001),
+                module_id: mod_null,
+                grants_interdiction_nullification: true,
+                duration_s: 10.0,
+                ..Default::default()
+            });
+            let mut ops_warp = super::post_unlock::PostUnlockOps::default();
+            super::cycles::remove_non_warp_ship_module_cycles_collecting(
+                bp.solar_system_id,
+                bp,
+                &mut state.active_module_cycles,
+                &state.base_scramble_strengths,
+                &state.base_core_strengths,
+                &state.db_opt,
+                ship_id,
+                None,
+                &mut ops_warp,
+            );
+            assert_eq!(state.active_module_cycles.len(), 1);
+            assert_eq!(state.active_module_cycles[0].module_id, mod_null);
 
-        // Put mod_norm back in DB and collect remove_all_ship_module_cycles cleanup before flushing outside locks
-        let mut ops_all = super::post_unlock::PostUnlockOps::default();
-        let removed = super::cycles::remove_all_ship_module_cycles_collecting(
-            bp.solar_system_id,
-            &mut bp,
-            &mut state.active_module_cycles,
-            &state.base_scramble_strengths,
-            &state.base_core_strengths,
-            &state.db_opt,
-            ship_id,
-            None,
-            &mut ops_all,
-        );
-        assert_eq!(removed.len(), 1);
-        (ops_warp, ops_all)
-    };
+            // Put mod_norm back in DB and collect remove_all_ship_module_cycles cleanup before flushing outside locks
+            let mut ops_all = super::post_unlock::PostUnlockOps::default();
+            let removed = super::cycles::remove_all_ship_module_cycles_collecting(
+                bp.solar_system_id,
+                bp,
+                &mut state.active_module_cycles,
+                &state.base_scramble_strengths,
+                &state.base_core_strengths,
+                &state.db_opt,
+                ship_id,
+                None,
+                &mut ops_all,
+            );
+            assert_eq!(removed.len(), 1);
+            (ops_warp, ops_all)
+        })
+        .await;
     let _ = super::post_unlock::execute_post_unlock_ops(Some(&db), None, ops_warp, None, None);
     db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(mod_norm);
@@ -1252,7 +1251,12 @@ async fn system_handle_warp_module_removal_auto_step_and_full_tick_hooks() {
         DVec3::ZERO,
         DVec3::new(1_000_000.0, 0.0, 0.0),
     );
-    assert!(handle.get_ball_position_sync(71_009).is_none() || handle.ballpark.read().unwrap().balls.contains_key(&71_009));
+    assert!(
+        handle.get_ball_position_sync(71_009).is_none()
+            || handle
+                .test_with_ballpark_async(|bp| bp.balls.contains_key(&71_009))
+                .await
+    );
 }
 
 #[tokio::test]

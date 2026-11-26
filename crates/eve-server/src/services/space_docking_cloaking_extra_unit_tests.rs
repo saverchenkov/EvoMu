@@ -674,17 +674,21 @@ async fn mutant_kill_wormhole_jump_phenomena_multipliers_and_fallback_branches()
             .unwrap();
         assert_eq!(res.dict_get("destinationSystemID"), Some(&PyRep::Integer(bh_sys as i64)));
         let dest_h = ctx.systems.get_or_spawn(bh_sys);
-        let bp = dest_h.ballpark.read().unwrap();
-        let cs = bp.combat_states.get(&ship_id).expect("Black Hole combat state");
+        let (ext_v, ext_in) = dest_h
+            .test_with_ballpark_async(move |bp| {
+                let cs = bp.combat_states.get(&ship_id).expect("Black Hole combat state");
+                (cs.external_velocity_multiplier, cs.external_inertia_multiplier)
+            })
+            .await;
         assert!(
-            (cs.external_velocity_multiplier.unwrap() - expected_v_mult).abs() < 1e-6,
+            (ext_v.unwrap() - expected_v_mult).abs() < 1e-6,
             "got {:?}, expected {expected_v_mult}",
-            cs.external_velocity_multiplier
+            ext_v
         );
         assert!(
-            (cs.external_inertia_multiplier.unwrap() - expected_in_mult).abs() < 1e-6,
+            (ext_in.unwrap() - expected_in_mult).abs() < 1e-6,
             "got {:?}, expected {expected_in_mult}",
-            cs.external_inertia_multiplier
+            ext_in
         );
     }
     {
@@ -700,10 +704,14 @@ async fn mutant_kill_wormhole_jump_phenomena_multipliers_and_fallback_branches()
             .unwrap();
         assert_eq!(res.dict_get("destinationSystemID"), Some(&PyRep::Integer(pulsar_sys as i64)));
         let dest_h = ctx.systems.get_or_spawn(pulsar_sys);
-        let bp = dest_h.ballpark.read().unwrap();
-        let cs = bp.combat_states.get(&ship_id).expect("Pulsar combat state");
-        assert!(cs.external_velocity_multiplier.is_none());
-        assert!(cs.external_inertia_multiplier.is_none());
+        let (ext_v, ext_in) = dest_h
+            .test_with_ballpark_async(move |bp| {
+                let cs = bp.combat_states.get(&ship_id).expect("Pulsar combat state");
+                (cs.external_velocity_multiplier, cs.external_inertia_multiplier)
+            })
+            .await;
+        assert!(ext_v.is_none());
+        assert!(ext_in.is_none());
     }
 
     // Part 2: Clear wormhole_class_id on cloned SDE for 4 distinct system IDs so

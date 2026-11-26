@@ -201,26 +201,49 @@ async fn r11_k12_escalation_slim_meta_sleeper_sde_stats_and_downtime_relay_clean
     }
 
     let sys_handle = ctx.systems.get_or_spawn(wh_sys);
-    {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let av_meta = bp.ball_slim_meta.get(&avenger_ids[0]).expect("avenger slim meta");
-        assert_eq!(av_meta.owner_id, 500_005);
-        assert_eq!(av_meta.category_id, 11);
-        assert!(av_meta.name.is_some());
-
-        let rel_meta = bp.ball_slim_meta.get(&relay_bid).expect("relay slim meta");
-        assert_eq!(rel_meta.owner_id, 500_024);
-        assert_eq!(rel_meta.group_id, 494);
-        assert!(rel_meta.name.is_some());
-
-        let dr_meta = bp.ball_slim_meta.get(&drifter_bid).expect("drifter slim meta");
-        assert_eq!(dr_meta.owner_id, 500_024);
-        assert!(dr_meta.name.is_some());
-
-        let sl_meta = bp.ball_slim_meta.get(&wave_bids[0]).expect("sleeper slim meta");
-        assert_eq!(sl_meta.owner_id, 500_005);
-        assert!(sl_meta.name.is_some());
-    }
+    let av0 = avenger_ids[0];
+    let w0 = wave_bids[0];
+    let (
+        av_owner,
+        av_cat,
+        av_has_name,
+        rel_owner,
+        rel_gid,
+        rel_has_name,
+        dr_owner,
+        dr_has_name,
+        sl_owner,
+        sl_has_name,
+    ) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            let av_meta = bp.ball_slim_meta.get(&av0).expect("avenger slim meta");
+            let rel_meta = bp.ball_slim_meta.get(&relay_bid).expect("relay slim meta");
+            let dr_meta = bp.ball_slim_meta.get(&drifter_bid).expect("drifter slim meta");
+            let sl_meta = bp.ball_slim_meta.get(&w0).expect("sleeper slim meta");
+            (
+                av_meta.owner_id,
+                av_meta.category_id,
+                av_meta.name.is_some(),
+                rel_meta.owner_id,
+                rel_meta.group_id,
+                rel_meta.name.is_some(),
+                dr_meta.owner_id,
+                dr_meta.name.is_some(),
+                sl_meta.owner_id,
+                sl_meta.name.is_some(),
+            )
+        })
+        .await;
+    assert_eq!(av_owner, 500_005);
+    assert_eq!(av_cat, 11);
+    assert!(av_has_name);
+    assert_eq!(rel_owner, 500_024);
+    assert_eq!(rel_gid, 494);
+    assert!(rel_has_name);
+    assert_eq!(dr_owner, 500_024);
+    assert!(dr_has_name);
+    assert_eq!(sl_owner, 500_005);
+    assert!(sl_has_name);
 
     // Downtime 3 despawns cleared C6 site along with its relay, spawned Drifter, and fire timers
     assert_eq!(process_wormhole_sites_on_downtime(&ctx), 0);
@@ -232,11 +255,16 @@ async fn r11_k12_escalation_slim_meta_sleeper_sde_stats_and_downtime_relay_clean
         assert!(!reg.sentry_last_fire_unix.contains_key(&relay_bid));
         assert!(!reg.sentry_last_fire_sim_s.contains_key(&relay_bid));
     });
-    {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        assert!(!bp.balls.contains_key(&relay_bid));
-        assert!(!bp.balls.contains_key(&drifter_bid));
-    }
+    let (has_relay, has_drifter) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls.contains_key(&relay_bid),
+                bp.balls.contains_key(&drifter_bid),
+            )
+        })
+        .await;
+    assert!(!has_relay);
+    assert!(!has_drifter);
     {
         let rt = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
         assert!(!rt.npc_entities.contains_key(&relay_bid));

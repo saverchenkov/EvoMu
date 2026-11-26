@@ -1939,16 +1939,27 @@ async fn r4_f2_02_serialized_rev_and_retired_gen_rejects_stale_and_post_stop_flu
     let (db, ctx) = f2_open_ctx(&sde, &dir, "r4_f2_02.sqlite", |s| seed_fighter_system_snapshot(s, sys_a, ship_id, &[(f1_id, ship_id, eve_db::InventoryFlag::FighterBay, false), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
     let h_a = ctx.systems.get_or_spawn(sys_a);
     fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_a, ship_id, 0, f1_id);
-    let (snap1, coord) = { let st = h_a.actor_state.read().unwrap(); (st.take_fighter_checkpoint_snapshot().unwrap(), Arc::clone(&st.fighters_persist)) };
+    let (snap1, coord) = h_a
+        .test_with_actor_state_async(|st| {
+            (
+                st.take_fighter_checkpoint_snapshot().unwrap(),
+                Arc::clone(&st.fighters_persist),
+            )
+        })
+        .await;
     fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_a, ship_id, 1, f2_id);
-    let snap2 = h_a.actor_state.read().unwrap().take_fighter_checkpoint_snapshot().unwrap();
+    let snap2 = h_a
+        .test_with_actor_state_async(|st| st.take_fighter_checkpoint_snapshot().unwrap())
+        .await;
     assert!(persist_live_fighter_snapshot_sync(&db, sys_a, &coord, &snap2, &h_a.fighter_ctx.dirty_stamp, Some(&sde), false).unwrap() >= 2);
-    assert!(!h_a.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!h_a.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     assert_eq!(persist_live_fighter_snapshot_sync(&db, sys_a, &coord, &snap1, &h_a.fighter_ctx.dirty_stamp, Some(&sde), false).unwrap(), 0);
     assert_eq!(crate::system_actor::load_cold_fighters_for_system(&db, Some(&sde), sys_a).unwrap().tube_loads.len(), 2);
 
     fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_a, f1_id, 55.0);
-    let stale_after_stop = h_a.actor_state.read().unwrap().take_fighter_checkpoint_snapshot().unwrap();
+    let stale_after_stop = h_a
+        .test_with_actor_state_async(|st| st.take_fighter_checkpoint_snapshot().unwrap())
+        .await;
     drop(h_a);
     assert!(ctx.systems.stop_system(sys_a).await);
     assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_a, FighterTubeOp::Unload { ship_id, tube_index: 1 }).await.unwrap(), Some(f2_id));
@@ -2007,7 +2018,7 @@ async fn r5_f2_01_writer_contention_hydrates_lazily_without_deadlock_or_sqlite_w
 
     let held = f2_hold_db_writer(&db_mem);
     let sys_h = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx_mem.systems); move || r.get_or_spawn(sys_a) }).await.unwrap();
-    assert!(sys_h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(sys_h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     fighter_test_helpers::set_fighter_tube_rearm_until_in_system(&ctx_mem, sys_a, ship_id, 1, 77_777);
     assert_eq!(sys_h.flush_fighter_checkpoint().await.unwrap(), 0, "unhydrated actor must not wipe SQLite");
     let _ = held.0.send(());
@@ -2015,7 +2026,7 @@ async fn r5_f2_01_writer_contention_hydrates_lazily_without_deadlock_or_sqlite_w
     assert_eq!(crate::system_actor::load_cold_fighters_for_system(&db_mem, Some(&sde), sys_a).unwrap().tube_loads.get(&(ship_id, 0)), Some(&(f1_id, 23_057)));
 
     assert!(ctx_mem.systems.flush_system_fighter_checkpoint_sync(sys_a) >= 3);
-    assert!(!sys_h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(!sys_h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     let cold_after = crate::system_actor::load_cold_fighters_for_system(&db_mem, Some(&sde), sys_a).unwrap();
     assert_eq!((cold_after.tube_loads.get(&(ship_id, 0)), cold_after.tube_rearm_until.get(&(ship_id, 0)), cold_after.tube_rearm_until.get(&(ship_id, 1))), (Some(&(f1_id, 23_057)), Some(&88_888), Some(&77_777)));
 
@@ -2024,7 +2035,7 @@ async fn r5_f2_01_writer_contention_hydrates_lazily_without_deadlock_or_sqlite_w
     f2_seed_cp(&db_wal, sys_a, &rows, 100);
     let held_wal = f2_hold_db_writer(&db_wal);
     let h_wal = tokio::task::spawn_blocking({ let r = Arc::clone(&ctx_wal.systems); move || r.get_or_spawn(sys_a) }).await.unwrap();
-    assert!(!h_wal.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h_wal.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+    assert!(!h_wal.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && h_wal.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
     let _ = held_wal.0.send(());
     held_wal.1.join().unwrap();
 }
@@ -2036,7 +2047,14 @@ async fn r5_f2_03_live_legacy_migration_preserves_live_mutations_and_rejects_sta
     let (db, ctx) = f2_open_ctx(&sde, &dir, "r5_f2_03.sqlite", |s| seed_fighter_system_snapshot(s, sys_jita, ship_id, &[(f1_id, sys_jita as i64, eve_db::InventoryFlag::None, true), (f2_id, ship_id, eve_db::InventoryFlag::FighterBay, false)]));
     let h = ctx.systems.get_or_spawn(sys_jita);
     fighter_test_helpers::set_fighter_tube_load_in_system(&ctx, sys_jita, ship_id, 1, f2_id);
-    let (stale_snap, coord) = { let st = h.actor_state.read().unwrap(); (st.take_fighter_checkpoint_snapshot().unwrap(), Arc::clone(&st.fighters_persist)) };
+    let (stale_snap, coord) = h
+        .test_with_actor_state_async(|st| {
+            (
+                st.take_fighter_checkpoint_snapshot().unwrap(),
+                Arc::clone(&st.fighters_persist),
+            )
+        })
+        .await;
     fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_jita, f2_id, 99.0);
 
     let mut legacy = std::collections::HashMap::new();
@@ -2085,10 +2103,10 @@ async fn r6_f2_01_concurrent_and_late_hydration_noop_prevents_resurrection() {
     let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
 
     let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
-    assert!(h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     // Error during HydrateFlight must release flight slot cleanly so waiters retry and hydrate.
     f2_break_cp_table(&db, true);
-    assert!(ctx.systems.ensure_live_fighters_hydrated_async(sys_a, &h).await.is_err() && h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(ctx.systems.ensure_live_fighters_hydrated_async(sys_a, &h).await.is_err() && h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     f2_break_cp_table(&db, false);
 
     let bar = Arc::new(tokio::sync::Barrier::new(3));
@@ -2096,7 +2114,7 @@ async fn r6_f2_01_concurrent_and_late_hydration_noop_prevents_resurrection() {
     let a2 = tokio::spawn({ let (r, hh, b) = (Arc::clone(&ctx.systems), h.clone(), Arc::clone(&bar)); async move { b.wait().await; r.ensure_live_fighters_hydrated_async(sys_a, &hh).await } });
     let s1 = tokio::task::spawn_blocking({ let (r, hh, b) = (Arc::clone(&ctx.systems), h.clone(), Arc::clone(&bar)); move || { tokio::runtime::Handle::current().block_on(b.wait()); r.ensure_live_fighters_hydrated_sync(sys_a, &hh) } });
     assert!(a1.await.unwrap().is_ok() && a2.await.unwrap().is_ok() && s1.await.unwrap().is_ok());
-    assert!(!h.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
+    assert!(!h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && h.view().fighters.tube_loads.get(&(ship_id, 0)) == Some(&(f1_id, 23_057)));
 
     // Unload tube 0, verify stale hydration MergeFighterState does not resurrect it, and PreCheckLoad stays clean.
     assert_eq!(ctx.systems.load_or_unload_fighter_tube(sys_a, FighterTubeOp::Unload { ship_id, tube_index: 0 }).await.unwrap(), Some(f1_id));
@@ -2106,7 +2124,7 @@ async fn r6_f2_01_concurrent_and_late_hydration_noop_prevents_resurrection() {
     assert!(h.view().fighters.tube_loads.get(&(ship_id, 0)).is_none());
     h.flush_fighter_checkpoint().await.unwrap();
     let _ = ctx.systems.load_or_unload_fighter_tube(sys_a, FighterTubeOp::PreCheckLoad { ship_id, tube_index: 1, fighter_item_id: f2_id }).await;
-    assert!(!h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2162,7 +2180,7 @@ async fn r6_f2_03_unhydrated_eviction_and_shutdown_preserve_mutations_and_live_p
     for case in 0..4 {
         let (db, ctx) = spawn_unhydrated(base_rows.clone());
         let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
-        assert!(h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+        assert!(h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
         match case {
             0 => assert!(crate::services::inventory_stacking::inventory_stacking_ops::snapshot_loaded_tube_items(&ctx).contains(&f1_id)),
             1 => {
@@ -2175,7 +2193,7 @@ async fn r6_f2_03_unhydrated_eviction_and_shutdown_preserve_mutations_and_live_p
             }
             _ => assert_eq!(crate::services::agents_missions::agents_standings_arcs::resolve_runtime_killer_char_id(&ctx, f_ab), 90_000_001),
         }
-        assert!(!h.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+        assert!(!h.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     }
     // 4. BF-01 & F2-R7-01: Pre-hydration ball removal (`remove_ball` & `try_remove_destroyed_ball`) marks dirty, blocks resurrection across hydration/eviction/shutdown, and persists deletion.
     {
@@ -2183,7 +2201,12 @@ async fn r6_f2_03_unhydrated_eviction_and_shutdown_preserve_mutations_and_live_p
         let h = f2_spawn_unhydrated(&db, &ctx, sys_a).await;
         let _ = h.remove_ball(f_ab).await;
         h.try_remove_destroyed_ball(f_kill);
-        assert!(h.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h.actor_state.read().unwrap().is_fighters_dirty());
+        assert!(
+            h.test_with_actor_state_async(|st| {
+                st.fighters_needs_sqlite_hydration && st.is_fighters_dirty()
+            })
+            .await
+        );
         let _ = h.step_with_output(1.0).await;
         assert!(h.is_hibernated());
         drop(h);

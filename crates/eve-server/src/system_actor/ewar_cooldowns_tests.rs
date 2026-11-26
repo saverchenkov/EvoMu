@@ -108,12 +108,12 @@ async fn cooldown_persist_gate_rejects_stale_out_of_order_writes_and_keeps_dirty
     h_jita.cmd_sender().send(SystemCommand::SnapshotModuleCooldownCheckpoint { only_if_dirty: true, reply: snap_tx }).await.unwrap();
     let snap_payload = snap_rx.await.unwrap().unwrap().expect("still dirty before persist");
     assert!(snap_payload.seq > payload_seq1.seq);
-    assert!(h_jita.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+    assert!(h_jita.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_dirty).await);
 
     let payload_seq2 = send_rm(&h_jita, key).await.expect("had entry");
     assert!(payload_seq2.seq > snap_payload.seq);
     assert!(h_jita.persist_cooldown_payload(payload_seq2));
-    assert!(!h_jita.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+    assert!(!h_jita.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_dirty).await);
     assert!(!h_jita.persist_cooldown_payload(payload_seq1));
     assert!(load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
 }
@@ -203,8 +203,8 @@ async fn boot_db_pending_merge_handle_view_same_key_no_resurrection_and_cold_epo
         (k_un, cd_entry(now, 25.0, jita, 0.0)),
     ]);
     assert!(persist_system_module_cooldowns_in_db(&db, jita, &serialize_module_cooldown_rows(&cold_map)));
-    h.actor_state.write().unwrap().module_cooldowns.boot_db_pending_merge = true;
-    h.publish_view();
+    h.test_with_actor_state_mut_async(|st| st.module_cooldowns.boot_db_pending_merge = true)
+        .await;
     assert!(h.view().module_cooldowns.boot_db_pending_merge);
 
     assert!(!reg.remove_cold_module_cooldown_key_across_systems(&db, None, k_un));
@@ -228,7 +228,7 @@ async fn boot_db_pending_merge_handle_view_same_key_no_resurrection_and_cold_epo
     assert!((db_after[&k_un].delay_s - 25.0).abs() < 1e-6);
 
     h.clear_all_module_cooldowns_sync().unwrap();
-    assert!(!h.actor_state.read().unwrap().module_cooldowns.pending_db_clear_all);
+    assert!(!h.test_with_actor_state_async(|st| st.module_cooldowns.pending_db_clear_all).await);
     assert!(load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
 
     let k_after = (520_004_i64, 620_004_i64, 11_370_u32);
@@ -360,7 +360,7 @@ async fn uncommitted_live_cooldown_and_in_flight_post_unlock_survive_rehydrate()
     let h = reg.get_or_spawn(jita);
     reg.seed_cold_system_module_cooldown_in_db(&db, jita, k_stale, cd_entry(now, 10.0, jita, 0.0));
     let _unsent = send_rec(&h, k_live, now, 35.0).await;
-    assert!(h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+    assert!(h.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_dirty).await);
 
     let stale_token = { let g = reg.cooldown_persist_gate(jita); let cg = g.inner.lock().unwrap(); (g.current_epoch(), cg.last_persisted) };
     assert_eq!(h.replace_module_cooldowns_checked_sync(HashMap::new(), Some(stale_token)), Err("STALE_REHYDRATE_TOKEN".to_string()));
@@ -372,7 +372,11 @@ async fn uncommitted_live_cooldown_and_in_flight_post_unlock_survive_rehydrate()
     let reg_c = Arc::clone(&reg);
     tokio::task::spawn_blocking(move || reg_c.rehydrate_active_system_cooldowns_from_db()).await.unwrap();
     release.await.unwrap();
-    assert!(h.module_reactivation_cooldown(&k_live).is_some_and(|e| e.delay_s >= 34.0) && load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_live) && !h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
+    assert!(
+        h.module_reactivation_cooldown(&k_live).is_some_and(|e| e.delay_s >= 34.0)
+            && load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_live)
+            && !h.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_dirty).await
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -400,7 +404,7 @@ async fn rehydrate_clean_seq_zero_actor_after_stop_restart_preserves_seeded_sqli
     drop(reg.get_or_spawn(jita));
     assert!(reg.stop_system(jita).await);
     let h = reg.get_or_spawn(jita);
-    assert_eq!(h.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
+    assert_eq!(h.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_seq).await, 0);
     seed_db_rows(&db, jita, &[(k, cd_entry(now, 25.0, jita, 0.0))], now as u64);
     let r = Arc::clone(&reg);
     tokio::task::spawn_blocking(move || r.rehydrate_active_system_cooldowns_from_db()).await.unwrap();
@@ -496,14 +500,25 @@ async fn dropped_and_full_apply_persisted_cooldown_commit_recovers_via_dirty_flu
     seed_ships_in_db(&db, jita, &[k_pre.0, k_new.0]);
     seed_db_rows(&db, jita, &[(k_pre, cd_entry(now, 25.0, jita, 0.0))], now as u64);
     let h = reg.get_or_spawn(jita);
-    h.actor_state.write().unwrap().module_cooldowns.boot_db_pending_merge = true;
+    h.test_with_actor_state_mut_async(|st| st.module_cooldowns.boot_db_pending_merge = true)
+        .await;
     let payload = send_rec(&h, k_new, now, 20.0).await;
     assert!(persist_cooldown_payload_with_gate_in_db(jita, &reg.cooldown_persist_gate(jita), payload.clone()).is_some());
-    assert!(h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty && h.actor_state.read().unwrap().module_cooldowns.boot_db_pending_merge);
+    assert!(
+        h.test_with_actor_state_async(|st| {
+            st.module_cooldown_checkpoint_dirty && st.module_cooldowns.boot_db_pending_merge
+        })
+        .await
+    );
 
     let (r, h_c) = (Arc::clone(&reg), h.clone());
     tokio::task::spawn_blocking(move || { assert!(h_c.flush_dirty_module_cooldown_checkpoint_sync().is_ok()); r.rehydrate_active_system_cooldowns_from_db(); }).await.unwrap();
-    assert!(!h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty && !h.actor_state.read().unwrap().module_cooldowns.boot_db_pending_merge);
+    assert!(
+        h.test_with_actor_state_async(|st| {
+            !st.module_cooldown_checkpoint_dirty && !st.module_cooldowns.boot_db_pending_merge
+        })
+        .await
+    );
     assert!(h.module_reactivation_cooldown(&k_pre).is_some() && h.module_reactivation_cooldown(&k_new).is_some());
 
     let (full_tx, mut full_rx) = tokio::sync::mpsc::channel(1);

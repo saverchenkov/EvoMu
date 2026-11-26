@@ -514,10 +514,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
 
     // 6. Tether guard
     let sys = ctx.systems.get_or_spawn(null_sys);
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&titan_id).unwrap().is_tethered = true;
-    }
+    })
+    .await;
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", None)
             .await
@@ -525,10 +525,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
             .code,
         "CantActivateWhileTethered"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&titan_id).unwrap().is_tethered = false;
-    }
+    })
+    .await;
 
     // 7. Single-target error checks: TargetRequired, InvalidTarget (self), TargetNotInSpace
     assert_eq!(
@@ -581,10 +581,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
         519,
         DVec3::new(10_000.0, 0.0, 0.0),
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&tgt_id).unwrap().is_cloaked = true;
-    }
+    })
+    .await;
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", Some(tgt_id))
             .await
@@ -592,12 +592,12 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
             .code,
         "CannotTargetCloaked"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&tgt_id).unwrap();
         cs.is_cloaked = false;
         cs.is_tethered = true;
-    }
+    })
+    .await;
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", Some(tgt_id))
             .await
@@ -605,10 +605,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
             .code,
         "TargetInvulnerable"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&tgt_id).unwrap().is_tethered = false;
-    }
+    })
+    .await;
     // Not locked -> TargetNotLocked
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", Some(tgt_id))
@@ -642,10 +642,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&tgt_id).unwrap().type_id = dread_tid;
     });
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&tgt_id).unwrap().position = DVec3::new(300_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", Some(tgt_id))
             .await
@@ -655,11 +655,11 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
     );
 
     // Move target into range, insufficient cap -> NotEnoughCapacitor
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&tgt_id).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
         bp.combat_states.get_mut(&titan_id).unwrap().capacitor = 10.0;
-    }
+    })
+    .await;
     assert_eq!(
         activate_superweapon_or_lance(&ctx, char_id, titan_id, null_sys, mod_id, "Activate", Some(tgt_id))
             .await
@@ -669,14 +669,14 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
     );
 
     // Restore cap, add fuel, and fire single-target Doomsday!
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&titan_id).unwrap().capacitor = 200_000.0;
         let tcs = bp.combat_states.get_mut(&tgt_id).unwrap();
         tcs.shield_hp = 100.0;
         tcs.armor_hp = 100.0;
         tcs.structure_hp = 100.0;
-    }
+    })
+    .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             880_100,
@@ -899,54 +899,66 @@ async fn lancer_dreadnought_activation_and_fire_lance_warmup_in_ballpark() {
         DVec3::new(0.0, 10_000.0, 0.0),
     );
     let sys = ctx.systems.get_or_spawn(low_sys);
-    let mut bp = sys.ballpark.write().unwrap();
-    let mut pending = Vec::new();
-    let mut destroyed = Vec::new();
+    let ctx_closure = ctx.clone();
+    let sde_opt = Some(Arc::clone(&ctx.sde));
+    let db_opt = Some(Arc::clone(&ctx.db));
+    let (pending_empty, pending_len, destroyed_tgt) = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            let mut pending = Vec::new();
+            let mut destroyed = Vec::new();
 
-    // Missing caster ship -> no-op
-    let missing_cycle = ActiveModuleCycle {
-        ship_id: 999_111_222,
-        module_id: lance_mod,
-        module_type_id: lance_tid,
-        ..Default::default()
-    };
-    fire_lance_warmup_in_ballpark_for_ctx(
-        &ctx,
-        &mut bp,
-        &missing_cycle,
-        &Some(Arc::clone(&ctx.sde)),
-        &Some(Arc::clone(&ctx.db)),
-        &mut pending,
-        &mut destroyed,
-    );
-    assert!(pending.is_empty());
+            // Missing caster ship -> no-op
+            let missing_cycle = ActiveModuleCycle {
+                ship_id: 999_111_222,
+                module_id: lance_mod,
+                module_type_id: lance_tid,
+                ..Default::default()
+            };
+            fire_lance_warmup_in_ballpark_for_ctx(
+                &ctx_closure,
+                bp,
+                &missing_cycle,
+                &sde_opt,
+                &db_opt,
+                &mut pending,
+                &mut destroyed,
+            );
+            let pending_empty = pending.is_empty();
 
-    // Valid caster cycle hits & destroys target_id_2 along +Y
-    if let Some(tcs) = bp.combat_states.get_mut(&target_id_2) {
-        tcs.shield_hp = 10.0;
-        tcs.armor_hp = 10.0;
-        tcs.structure_hp = 10.0;
-    }
-    let valid_cycle = ActiveModuleCycle {
-        ship_id: lancer_id,
-        module_id: lance_mod,
-        module_type_id: lance_tid,
-        owner_char_id: Some(char_id),
-        damage_vector: DamageVector::new(100_000.0, 0.0, 0.0, 0.0),
-        lance_beam_dir: Some(DVec3::Y),
-        ..Default::default()
-    };
-    fire_lance_warmup_in_ballpark_for_ctx(
-        &ctx,
-        &mut bp,
-        &valid_cycle,
-        &Some(Arc::clone(&ctx.sde)),
-        &Some(Arc::clone(&ctx.db)),
-        &mut pending,
-        &mut destroyed,
-    );
-    assert_eq!(pending.len(), 1);
-    assert!(destroyed.contains(&(target_id_2, Some(char_id))));
+            // Valid caster cycle hits & destroys target_id_2 along +Y
+            if let Some(tcs) = bp.combat_states.get_mut(&target_id_2) {
+                tcs.shield_hp = 10.0;
+                tcs.armor_hp = 10.0;
+                tcs.structure_hp = 10.0;
+            }
+            let valid_cycle = ActiveModuleCycle {
+                ship_id: lancer_id,
+                module_id: lance_mod,
+                module_type_id: lance_tid,
+                owner_char_id: Some(char_id),
+                damage_vector: DamageVector::new(100_000.0, 0.0, 0.0, 0.0),
+                lance_beam_dir: Some(DVec3::Y),
+                ..Default::default()
+            };
+            fire_lance_warmup_in_ballpark_for_ctx(
+                &ctx_closure,
+                bp,
+                &valid_cycle,
+                &sde_opt,
+                &db_opt,
+                &mut pending,
+                &mut destroyed,
+            );
+            (
+                pending_empty,
+                pending.len(),
+                destroyed.contains(&(target_id_2, Some(char_id))),
+            )
+        })
+        .await;
+    assert!(pending_empty);
+    assert_eq!(pending_len, 1);
+    assert!(destroyed_tgt);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1124,17 +1136,23 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     let _ = ctx
         .db
         .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
-    let set_lancer_gate_cloak = |tethered: bool, cap: f64| {
-        let mut bp = sys_low.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&lancer_id).unwrap();
-        cs.is_tethered = tethered;
-        cs.is_cloaked = true;
-        cs.gate_cloak_remaining_ticks = 30;
-        cs.undock_invulnerable_remaining_ticks = 15;
-        cs.capacitor = cap;
-        cs.max_capacitor = 200_000.0;
-        drop(bp);
-    };
+    async fn set_gate_cloak(
+        sys: &crate::system_actor::SystemHandle,
+        ship_id: i64,
+        tethered: bool,
+        cap: f64,
+    ) {
+        sys.test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&ship_id).unwrap();
+            cs.is_tethered = tethered;
+            cs.is_cloaked = true;
+            cs.gate_cloak_remaining_ticks = 30;
+            cs.undock_invulnerable_remaining_ticks = 15;
+            cs.capacitor = cap;
+            cs.max_capacitor = 200_000.0;
+        })
+        .await;
+    }
     let _ = ctx.drain_notifications_for_char(char_id);
 
     for (tethered, cap, expected_code, label) in [
@@ -1142,7 +1160,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         (false, 10.0, "NotEnoughCapacitor", "capacitor"),
         (false, 200_000.0, "InsufficientFuel", "fuel"),
     ] {
-        set_lancer_gate_cloak(tethered, cap);
+        set_gate_cloak(&sys_low, lancer_id, tethered, cap).await;
         let err = activate_superweapon_with_args(&ctx, char_id, lancer_id, low_sys, lance_mod, "Activate", None, &[])
             .await
             .expect_err("rejected Lancer activation must return Err");
@@ -1169,7 +1187,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
             },
         );
     });
-    set_lancer_gate_cloak(false, 200_000.0);
+    set_gate_cloak(&sys_low, lancer_id, false, 200_000.0).await;
     activate_superweapon_with_args(&ctx, char_id, lancer_id, low_sys, lance_mod, "Activate", None, &[])
         .await
         .expect("valid gate-cloaked Lancer activation must succeed");
@@ -1200,20 +1218,9 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     let _ = ctx
         .db
         .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
-    let set_titan_gate_cloak = |tethered: bool, cap: f64| {
-        let mut bp = sys_null.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&titan_id).unwrap();
-        cs.is_tethered = tethered;
-        cs.is_cloaked = true;
-        cs.gate_cloak_remaining_ticks = 30;
-        cs.undock_invulnerable_remaining_ticks = 15;
-        cs.capacitor = cap;
-        cs.max_capacitor = 200_000.0;
-        drop(bp);
-    };
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    set_titan_gate_cloak(true, 200_000.0);
+    set_gate_cloak(&sys_null, titan_id, true, 200_000.0).await;
     let dd_teth_err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
         .await
         .expect_err("tethered Doomsday must reject");
@@ -1223,7 +1230,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert_eq!(cs_teth.undock_invulnerable_remaining_ticks, 15);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
 
-    set_titan_gate_cloak(false, 200_000.0);
+    set_gate_cloak(&sys_null, titan_id, false, 200_000.0).await;
     let dd_lock_err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
         .await
         .expect_err("unlocked target Doomsday must reject");
@@ -1251,7 +1258,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         (10.0, "NotEnoughCapacitor", "capacitor"),
         (200_000.0, "InsufficientFuel", "fuel"),
     ] {
-        set_titan_gate_cloak(false, cap);
+        set_gate_cloak(&sys_null, titan_id, false, cap).await;
         let err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
             .await
             .expect_err("rejected Doomsday activation must return Err");
@@ -1278,7 +1285,7 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
             },
         );
     });
-    set_titan_gate_cloak(false, 200_000.0);
+    set_gate_cloak(&sys_null, titan_id, false, 200_000.0).await;
     activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
         .await
         .expect("valid gate-cloaked Doomsday activation must succeed");
@@ -1295,15 +1302,16 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     sys_null.step_manual(35.0).await.unwrap();
     assert!(!sys_null.has_module_cycle(titan_id, dd_mod).await);
     ctx.clear_all_reactivation_delays();
-    {
-        let mut bp = sys_null.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&titan_id).unwrap();
-        cs.is_tethered = true;
-        cs.is_cloaked = false;
-        cs.gate_cloak_remaining_ticks = 0;
-        cs.undock_invulnerable_remaining_ticks = 15;
-        cs.capacitor = 200_000.0;
-    }
+    sys_null
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+            cs.is_tethered = true;
+            cs.is_cloaked = false;
+            cs.gate_cloak_remaining_ticks = 0;
+            cs.undock_invulnerable_remaining_ticks = 15;
+            cs.capacitor = 200_000.0;
+        })
+        .await;
     let _ = ctx.drain_notifications_for_char(char_id);
     assert_eq!(
         activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
@@ -1315,11 +1323,12 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
     assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
 
-    {
-        let mut bp = sys_null.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&titan_id).unwrap();
-        cs.is_tethered = false;
-    }
+    sys_null
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+            cs.is_tethered = false;
+        })
+        .await;
     activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
         .await
         .expect("non-gate undock invuln Doomsday commit must succeed");
@@ -1701,12 +1710,14 @@ async fn doomsday_and_lancer_reject_active_cycle_warp_and_cloak_atomically_bf02(
     sys_null.add_module_cycle(ActiveModuleCycle { ship_id: f.titan_id, module_id: f.dd_mod, module_type_id: f.dd_tid, owner_char_id: Some(f.char_id), effect_name: "superWeaponImmobilize".into(), duration_s: 30.0, immobilize_self: true, ..Default::default() }).await.unwrap();
     for (case, expected_code) in [(0, "ModuleAlreadyActive"), (1, "CantActivateInWarp"), (2, "CannotActivateCloaked")] {
         if case == 1 { sys_null.step_manual(35.0).await.unwrap(); }
-        {
-            let mut bp = sys_null.ballpark.write().unwrap();
-            bp.balls.get_mut(&f.titan_id).unwrap().mode = if case == 1 { MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1_000_000.0, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1_000_000.0, elapsed_warp_time: 1.0, phase: eve_destiny::WarpPhase::Cruising } } else { MovementMode::Stop };
-            let cs = bp.combat_states.get_mut(&f.titan_id).unwrap();
-            cs.capacitor = 200_000.0; cs.is_cloaked = case == 2; cs.gate_cloak_remaining_ticks = if case == 0 { 30 } else { 0 }; cs.undock_invulnerable_remaining_ticks = 15;
-        }
+        let titan_id = f.titan_id;
+        sys_null
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.balls.get_mut(&titan_id).unwrap().mode = if case == 1 { MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1_000_000.0, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1_000_000.0, elapsed_warp_time: 1.0, phase: eve_destiny::WarpPhase::Cruising } } else { MovementMode::Stop };
+                let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+                cs.capacitor = 200_000.0; cs.is_cloaked = case == 2; cs.gate_cloak_remaining_ticks = if case == 0 { 30 } else { 0 }; cs.undock_invulnerable_remaining_ticks = 15;
+            })
+            .await;
         let _ = ctx.drain_notifications_for_char(f.char_id);
         assert_eq!(activate_superweapon_with_args(&ctx, f.char_id, f.titan_id, f.null_sys, f.dd_mod, "Activate", Some(f.tgt_id), &[]).await.unwrap_err().code, expected_code);
         let cs = sys_null.get_combat_state(f.titan_id).await.unwrap().unwrap();
@@ -1717,12 +1728,14 @@ async fn doomsday_and_lancer_reject_active_cycle_warp_and_cloak_atomically_bf02(
 
     // 2. Lancer (`P2-03`): warp & non-gate cloak reject BEFORE damage/fuel/cap/invuln.
     for (in_warp, expected_code) in [(true, "CantActivateInWarp"), (false, "CannotActivateCloaked")] {
-        {
-            let mut bp = sys_low.ballpark.write().unwrap();
-            bp.balls.get_mut(&f.lancer_id).unwrap().mode = if in_warp { MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1_000_000.0, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1_000_000.0, elapsed_warp_time: 1.0, phase: eve_destiny::WarpPhase::Cruising } } else { MovementMode::Stop };
-            let cs = bp.combat_states.get_mut(&f.lancer_id).unwrap();
-            cs.capacitor = 200_000.0; cs.is_cloaked = !in_warp; cs.gate_cloak_remaining_ticks = 0; cs.undock_invulnerable_remaining_ticks = 12;
-        }
+        let lancer_id = f.lancer_id;
+        sys_low
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.balls.get_mut(&lancer_id).unwrap().mode = if in_warp { MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1_000_000.0, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1_000_000.0, elapsed_warp_time: 1.0, phase: eve_destiny::WarpPhase::Cruising } } else { MovementMode::Stop };
+                let cs = bp.combat_states.get_mut(&lancer_id).unwrap();
+                cs.capacitor = 200_000.0; cs.is_cloaked = !in_warp; cs.gate_cloak_remaining_ticks = 0; cs.undock_invulnerable_remaining_ticks = 12;
+            })
+            .await;
         let _ = ctx.drain_notifications_for_char(f.char_id);
         assert_eq!(activate_superweapon_with_args(&ctx, f.char_id, f.lancer_id, f.low_sys, f.lance_mod, "Activate", None, &[]).await.unwrap_err().code, expected_code);
         let cs = sys_low.get_combat_state(f.lancer_id).await.unwrap().unwrap();
@@ -1739,11 +1752,13 @@ async fn superweapon_concurrent_lancer_fob_precheck_and_reserved_fuel_f01_f05() 
     let init_ltgt = sys_low.get_combat_state(f.lance_tgt).await.unwrap().unwrap().shield_hp;
 
     // 1. Concurrent Lancer double-fire via tokio::join! breaks gate cloak once and deducts cap/fuel once.
-    {
-        let mut bp = sys_low.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&f.lancer_id).unwrap();
-        cs.capacitor = 200_000.0; cs.is_cloaked = true; cs.gate_cloak_remaining_ticks = 20; cs.undock_invulnerable_remaining_ticks = 10;
-    }
+    let lancer_id = f.lancer_id;
+    sys_low
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&lancer_id).unwrap();
+            cs.capacitor = 200_000.0; cs.is_cloaked = true; cs.gate_cloak_remaining_ticks = 20; cs.undock_invulnerable_remaining_ticks = 10;
+        })
+        .await;
     let _ = ctx.drain_notifications_for_char(f.char_id);
     let (r1, r2) = tokio::join!(
         activate_superweapon_with_args(&ctx, f.char_id, f.lancer_id, f.low_sys, f.lance_mod, "Activate", None, &[]),
@@ -1778,7 +1793,14 @@ async fn superweapon_concurrent_lancer_fob_precheck_and_reserved_fuel_f01_f05() 
         eve_destiny::CombatState { shield_hp: 2_500.0, max_shield_hp: 2_500.0, armor_hp: 2_500.0, max_armor_hp: 2_500.0, structure_hp: 3_500.0, max_structure_hp: 3_500.0, ..Default::default() },
     );
     let _ = sys_null.add_target_lock(f.titan_id, TargetLock { target_id: fob_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
-    { let mut bp = sys_null.ballpark.write().unwrap(); let cs = bp.combat_states.get_mut(&f.titan_id).unwrap(); cs.capacitor = 200_000.0; cs.undock_invulnerable_remaining_ticks = 9; }
+    let titan_id = f.titan_id;
+    sys_null
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+            cs.capacitor = 200_000.0;
+            cs.undock_invulnerable_remaining_ticks = 9;
+        })
+        .await;
     let _ = ctx.drain_notifications_for_char(f.char_id);
     assert_eq!(activate_superweapon_with_args(&ctx, f.char_id, f.titan_id, f.null_sys, f.dd_mod, "Activate", Some(fob_id), &[]).await.unwrap_err().code, "CannotAttackFriendlyStructure");
     let tcs = sys_null.get_combat_state(f.titan_id).await.unwrap().unwrap();

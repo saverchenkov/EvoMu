@@ -419,28 +419,54 @@ async fn sleeper_sentry_and_site_loot_container_slim_item_meta_fields() {
     let container_id = ctx.db.with_snapshot(|snap| snap.items[&loot_item_id].location_id);
 
     let sys_handle = ctx.systems.get_or_spawn(wh_sys);
-    let bp = sys_handle.ballpark.read().unwrap();
+    let (sm_tuple, cm_tuple) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            let sm = bp.ball_slim_meta.get(&sentry_id).expect("sentry SlimItemMeta");
+            let cm = bp.ball_slim_meta.get(&container_id).expect("container SlimItemMeta");
+            (
+                (
+                    sm.group_id,
+                    sm.category_id,
+                    sm.owner_id,
+                    sm.char_id,
+                    sm.corp_id,
+                    sm.alliance_id,
+                    sm.security_status,
+                    sm.is_cloaked,
+                    sm.name.clone(),
+                ),
+                (
+                    cm.group_id,
+                    cm.category_id,
+                    cm.owner_id,
+                    cm.char_id,
+                    cm.corp_id,
+                    cm.alliance_id,
+                    cm.security_status,
+                    cm.is_cloaked,
+                ),
+            )
+        })
+        .await;
 
-    let sm = bp.ball_slim_meta.get(&sentry_id).expect("sentry SlimItemMeta");
-    assert_eq!(sm.group_id, expected_group);
-    assert_eq!(sm.category_id, expected_cat);
-    assert_eq!(sm.owner_id, 500_005);
-    assert_eq!(sm.char_id, None);
-    assert_eq!(sm.corp_id, expected_corp);
-    assert_eq!(sm.alliance_id, -1);
-    assert!((sm.security_status - (-1.0)).abs() < 1e-6);
-    assert!(!sm.is_cloaked);
-    assert_eq!(sm.name.as_deref(), Some(sde_t.name.as_str()));
+    assert_eq!(sm_tuple.0, expected_group);
+    assert_eq!(sm_tuple.1, expected_cat);
+    assert_eq!(sm_tuple.2, 500_005);
+    assert_eq!(sm_tuple.3, None);
+    assert_eq!(sm_tuple.4, expected_corp);
+    assert_eq!(sm_tuple.5, -1);
+    assert!((sm_tuple.6 - (-1.0)).abs() < 1e-6);
+    assert!(!sm_tuple.7);
+    assert_eq!(sm_tuple.8.as_deref(), Some(sde_t.name.as_str()));
 
-    let cm = bp.ball_slim_meta.get(&container_id).expect("container SlimItemMeta");
-    assert_eq!(cm.group_id, 340);
-    assert_eq!(cm.category_id, 2);
-    assert_eq!(cm.owner_id, char_id);
-    assert_eq!(cm.char_id, None);
-    assert_eq!(cm.corp_id, -1);
-    assert_eq!(cm.alliance_id, -1);
-    assert_eq!(cm.security_status, 0.0);
-    assert!(!cm.is_cloaked);
+    assert_eq!(cm_tuple.0, 340);
+    assert_eq!(cm_tuple.1, 2);
+    assert_eq!(cm_tuple.2, char_id);
+    assert_eq!(cm_tuple.3, None);
+    assert_eq!(cm_tuple.4, -1);
+    assert_eq!(cm_tuple.5, -1);
+    assert_eq!(cm_tuple.6, 0.0);
+    assert!(!cm_tuple.7);
 }
 
 #[test]

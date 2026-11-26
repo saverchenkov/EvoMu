@@ -381,11 +381,12 @@ async fn living_world_materialize_filters_mining_stacking_evasion_and_batch_filt
     let _ = peri_handle
         .set_ball_position(cid, dest_sta_pos + DVec3::new(1_000.0, 0.0, 0.0))
         .await;
-    {
-        let mut bp = peri_handle.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&cid).unwrap();
-        cs.shield_hp = 0.0;
-    }
+    peri_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&cid).unwrap();
+            cs.shield_hp = 0.0;
+        })
+        .await;
     clock.advance_secs(5);
     dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
     let (_, mb_near) = peri_handle.get_ball_snapshot(cid).await.unwrap().unwrap();

@@ -1248,13 +1248,20 @@ async fn combat_skyhook_hub_and_mercden_destruction_cleans_dens_tax_balls_notifs
         assert_eq!(snap.sov_runtime.mercenary_den_tax_pct.get(&skyhook_2), Some(&15));
         assert!(snap.sov_runtime.mercenary_dens.contains_key(&den_2));
     });
-    {
-        let bp = sys_handle.ballpark.read().unwrap();
-        assert!(!bp.balls.contains_key(&skyhook_1));
-        assert!(!bp.balls.contains_key(&den_1));
-        assert!(!bp.balls.contains_key(&mto_ball_1));
-        assert!(bp.balls.contains_key(&den_2));
-    }
+    let (has_skyhook_1, has_den_1, has_mto_1, has_den_2) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls.contains_key(&skyhook_1),
+                bp.balls.contains_key(&den_1),
+                bp.balls.contains_key(&mto_ball_1),
+                bp.balls.contains_key(&den_2),
+            )
+        })
+        .await;
+    assert!(!has_skyhook_1);
+    assert!(!has_den_1);
+    assert!(!has_mto_1);
+    assert!(has_den_2);
     {
         let q = ctx.pending_notifications.read().unwrap();
         assert!(
@@ -1338,7 +1345,11 @@ async fn combat_skyhook_hub_and_mercden_destruction_cleans_dens_tax_balls_notifs
         assert!(!snap.structures.contains_key(&den_2));
         assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_2));
     });
-    assert!(!sys_handle.ballpark.read().unwrap().balls.contains_key(&den_2));
+    assert!(
+        !sys_handle
+            .test_with_ballpark_async(move |bp| bp.balls.contains_key(&den_2))
+            .await
+    );
     assert!(ctx
         .pending_notifications
         .read()

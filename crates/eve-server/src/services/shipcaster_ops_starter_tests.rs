@@ -628,10 +628,14 @@ async fn test_shipcaster_ops_starter_prevalidation_and_jump_state_preservation()
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(cid).weapon_timer_until_unix = 0;
     }
-    {
-        let mut bp = origin_sys.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
-    }
+    origin_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states
+                .get_mut(&ship_id)
+                .unwrap()
+                .warp_scramble_strength = 0;
+        })
+        .await;
 
     // Navigation lock check (lance firing lock)
     set_lance_caster_lock_until(&ctx, ship_id, now + 60);

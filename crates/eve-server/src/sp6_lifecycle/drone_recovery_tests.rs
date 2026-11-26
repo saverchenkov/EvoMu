@@ -397,20 +397,20 @@ async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_f
     spawn_ball(&ctx, sys_id, ship_commit_warp, 587, DVec3::new(200_000.0, 0.0, 0.0));
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     // Static station/structure within 2,500m of ship_id so emergency-warp deflection runs (`disconnect_hold.rs:238-251`)
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.set_ball_slim_meta(
-            static_struct_id,
-            eve_destiny::SlimItemMeta {
-                group_id: 15,
-                category_id: 3,
-                ..Default::default()
-            },
-        );
-        bp.add_ball(Ball {
-            id: static_struct_id,
-            type_id: 2496,
-            position: DVec3::new(100_500.0, 0.0, 0.0),
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.set_ball_slim_meta(
+                static_struct_id,
+                eve_destiny::SlimItemMeta {
+                    group_id: 15,
+                    category_id: 3,
+                    ..Default::default()
+                },
+            );
+            bp.add_ball(Ball {
+                id: static_struct_id,
+                type_id: 2496,
+                position: DVec3::new(100_500.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 0.0,
             inertia: 1.0,
@@ -419,7 +419,8 @@ async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_f
             speed_fraction: 0.0,
             mode: eve_destiny::MovementMode::Stop,
         });
-    }
+    })
+    .await;
 
     ctx.db.with_mut_snapshot(|snap| {
         let tmpl = snap.characters[&90_000_001].clone();
@@ -684,7 +685,9 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
         .await
         .unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
-    sys_handle.ballpark.write().unwrap().pending_events.clear();
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| bp.pending_events.clear())
+        .await;
 
     abandon_drones_on_warp_sync(&ctx, char_id, ship_id, sys_id);
 
@@ -730,15 +733,11 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
         "OnDroneStateChange(0,0) must precede OnDroneControlLost so michelle removes the drone before ClientDogmaLocation unloads it (#1564)"
     );
 
-    let destiny_events = std::mem::take(
-        &mut ctx
-            .systems
-            .get_or_spawn(sys_id)
-            .ballpark
-            .write()
-            .unwrap()
-            .pending_events,
-    );
+    let destiny_events = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .test_with_ballpark_mut_async(move |bp| std::mem::take(&mut bp.pending_events))
+        .await;
     assert!(
         destiny_events.into_iter().any(|ev| matches!(
             ev,
@@ -795,7 +794,9 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
     drone_test_helpers::seed_active_drone(&ctx, make_drone(d_disc, d_disc_item));
     let _ = ctx.drain_notifications_for_char(char_id);
     if let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(sys_id) {
-        sys_handle.ballpark.write().unwrap().pending_events.clear();
+        sys_handle
+            .test_with_ballpark_mut_async(move |bp| bp.pending_events.clear())
+            .await;
     }
 
     disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
@@ -840,15 +841,11 @@ async fn abandon_drones_on_warp_sync_and_cmd_abandon_emit_state_change_before_co
         "warp disconnect must emit OnDroneStateChange(0, 0) < OnDroneActivityChange(0) < OnDroneControlLost"
     );
 
-    let disc_destiny_events = std::mem::take(
-        &mut ctx
-            .systems
-            .get_or_spawn(sys_id)
-            .ballpark
-            .write()
-            .unwrap()
-            .pending_events,
-    );
+    let disc_destiny_events = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .test_with_ballpark_mut_async(move |bp| std::mem::take(&mut bp.pending_events))
+        .await;
     assert!(
         disc_destiny_events.into_iter().any(|ev| matches!(
             ev,

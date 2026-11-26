@@ -1085,44 +1085,51 @@ async fn system_view_updates_across_commands_steps_sync_mutators_and_lock_free_u
     handle.set_tidi_factor_raw(0.5);
     assert!((handle.view().tidi_factor - 0.5).abs() < 1e-12);
 
-    // Lock-free view reads succeed even while handle.ballpark is exclusively write-locked,
-    // keep seeing the pre-write snapshot until the write guard drops cleanly, and immediately
-    // reflect direct `.ballpark.write()` mutations once the guard releases.
-    {
-        let mut bp_write = handle.ballpark.write().unwrap();
-        bp_write.set_warp_scramble_strength(ship_a, 2);
-        bp_write.combat_states.get_mut(&ship_a).unwrap().is_cloaked = true;
-        let lock_free_view = handle.view();
-        assert_eq!(lock_free_view.current_tick, 3);
-        assert!(lock_free_view.contains_ball(ship_a));
-        assert!(!lock_free_view.is_ball_scrambled(ship_a));
-        assert!(!lock_free_view.is_ball_cloaked(ship_a));
-    }
+    // Lock-free view reads succeed while the actor mutates ballpark inside `test_with_ballpark_mut_async`,
+    // keep seeing the pre-mutation snapshot until the closure finishes, and immediately reflect
+    // mutations once the mailbox command completes.
+    let handle_view = handle.clone();
+    handle
+        .test_with_ballpark_mut_async(move |bp_write| {
+            bp_write.set_warp_scramble_strength(ship_a, 2);
+            bp_write.combat_states.get_mut(&ship_a).unwrap().is_cloaked = true;
+            let lock_free_view = handle_view.view();
+            assert_eq!(lock_free_view.current_tick, 3);
+            assert!(lock_free_view.contains_ball(ship_a));
+            assert!(!lock_free_view.is_ball_scrambled(ship_a));
+            assert!(!lock_free_view.is_ball_cloaked(ship_a));
+        })
+        .await;
     let after_direct_write = handle.view();
     assert!(after_direct_write.is_ball_scrambled(ship_a));
     assert!(after_direct_write.is_ball_cloaked(ship_a));
     assert!((after_direct_write.tidi_factor - 0.5).abs() < 1e-12);
 
-    // Panicking while holding a direct write guard does NOT publish half-mutated dirty state,
-    // whereas recovering and completing a write guard publishes cleanly.
+    // Panicking inside a mailbox mutation does NOT publish half-mutated dirty state,
+    // whereas recovering and completing a subsequent mutation publishes cleanly.
     let pre_poison_pos = handle.view().ball_position(ship_a);
     assert!(pre_poison_pos.is_some());
     assert_ne!(pre_poison_pos, Some(DVec3::new(999_999.0, 0.0, 0.0)));
-    let poison_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut bp_write = handle.ballpark.write().unwrap();
-        bp_write.set_ball_position(ship_a, DVec3::new(999_999.0, 0.0, 0.0));
-        panic!("simulated ballpark poison for #1342 view test");
-    }));
+    let h_panic = handle.clone();
+    let poison_res = tokio::spawn(async move {
+        h_panic
+            .test_with_ballpark_mut_async(move |bp_write| {
+                bp_write.set_ball_position(ship_a, DVec3::new(999_999.0, 0.0, 0.0));
+                panic!("simulated ballpark poison for #1342 view test");
+            })
+            .await;
+    })
+    .await;
     assert!(poison_res.is_err());
-    assert!(handle.ballpark.try_read().is_err());
     let view_while_poisoned = handle.view();
     assert_eq!(view_while_poisoned.current_tick, 3);
     assert!(view_while_poisoned.contains_ball(ship_a));
     assert_eq!(view_while_poisoned.ball_position(ship_a), pre_poison_pos);
-    {
-        let mut recovered = handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        recovered.set_ball_position(ship_a, DVec3::new(12_345.0, 0.0, 0.0));
-    }
+    handle
+        .test_with_ballpark_mut_async(move |recovered| {
+            recovered.set_ball_position(ship_a, DVec3::new(12_345.0, 0.0, 0.0));
+        })
+        .await;
     assert_eq!(
         handle.view().ball_position(ship_a),
         Some(DVec3::new(12_345.0, 0.0, 0.0))
@@ -1424,12 +1431,8 @@ async fn unified_break_protection_and_force_decloak_return_unique_events() {
     assert!((cs_after.shield_hp - 123.0).abs() < 1e-6);
     assert!((cs_after.capacitor - 321.0).abs() < 1e-6);
     let slim_after = h
-        .ballpark
-        .read()
-        .unwrap()
-        .ball_slim_meta
-        .get(&ship_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&ship_id).cloned())
+        .await
         .unwrap();
     assert!(!slim_after.is_cloaked);
 }
@@ -1464,7 +1467,8 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
     )
     .await
     .unwrap();
-    h.ballpark.write().unwrap().pending_events.clear();
+    h.test_with_ballpark_mut_async(move |bp| bp.pending_events.clear())
+        .await;
     h.add_module_cycle(ActiveModuleCycle {
         ship_id: ship_gate,
         module_id: 71_001,
@@ -1490,7 +1494,9 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
     assert!(ev_gate.gate_cloak_broken);
     assert!(ev_gate.slim_cloak_cleared);
     assert!(ev_gate.should_emit_jump_cloak_cancelled());
-    let pending = h.ballpark.read().unwrap().pending_events.clone();
+    let pending = h
+        .test_with_ballpark_async(|bp| bp.pending_events.clone())
+        .await;
     assert!(pending.iter().any(|ev| matches!(
         ev,
         DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == ship_gate
@@ -1501,12 +1507,8 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
             if *ball_id == ship_gate && guid == "effects.Cloak"
     )));
     let slim_gate = h
-        .ballpark
-        .read()
-        .unwrap()
-        .ball_slim_meta
-        .get(&ship_gate)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&ship_gate).cloned())
+        .await
         .unwrap();
     assert!(!slim_gate.is_cloaked);
 
@@ -1578,7 +1580,8 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
     assert!(h.is_ship_actively_cloaked(ship_nc).await);
     assert!(db.with_snapshot(|s| s.module_active_states.contains(&cloak_mod_id)));
 
-    h.ballpark.write().unwrap().pending_events.clear();
+    h.test_with_ballpark_mut_async(move |bp| bp.pending_events.clear())
+        .await;
     let ev_warp = h
         .break_protection(
             ship_nc,
@@ -1625,11 +1628,17 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
 
     // 4. F1486-05: `try_step_full_tick`, `SetSpeedFraction`, `reconcile_disconnected_warp_sync`,
     //    and `apply_damage` destruction keep `protection_registry` synced/evicted without stale entries.
-    h.ballpark.write().unwrap().balls.get_mut(&ship_nc).unwrap().speed_fraction = 0.0;
+    h.test_with_ballpark_mut_async(move |bp| {
+        bp.balls.get_mut(&ship_nc).unwrap().speed_fraction = 0.0;
+    })
+    .await;
     h.modify_combat_state(ship_nc, |c| c.apply_jump_cloak_and_invuln_timers(45))
         .await
         .unwrap();
-    h.ballpark.write().unwrap().ball_slim_meta.get_mut(&ship_nc).unwrap().is_cloaked = true;
+    h.test_with_ballpark_mut_async(move |bp| {
+        bp.ball_slim_meta.get_mut(&ship_nc).unwrap().is_cloaked = true;
+    })
+    .await;
     h.try_step_full_tick(1.0);
     assert!(h.get_protection_snapshot(ship_nc).await.unwrap().unwrap().snapshot.has_gate_cloak());
 
@@ -1638,15 +1647,24 @@ async fn protection_add_module_cycle_then_break_from_gate_cloak_and_non_covert_c
     assert!(!snap_spd.snapshot.has_gate_cloak());
     assert_eq!(snap_spd.snapshot.undock_invulnerable_remaining_ticks, 0);
 
-    h.ballpark.write().unwrap().balls.get_mut(&ship_nc).unwrap().speed_fraction = 0.0;
+    h.test_with_ballpark_mut_async(move |bp| {
+        bp.balls.get_mut(&ship_nc).unwrap().speed_fraction = 0.0;
+    })
+    .await;
     h.modify_combat_state(ship_nc, |c| c.apply_jump_cloak_and_invuln_timers(45))
         .await
         .unwrap();
-    h.ballpark.write().unwrap().ball_slim_meta.get_mut(&ship_nc).unwrap().is_cloaked = true;
+    h.test_with_ballpark_mut_async(move |bp| {
+        bp.ball_slim_meta.get_mut(&ship_nc).unwrap().is_cloaked = true;
+    })
+    .await;
     let (_, arrived) =
         h.reconcile_disconnected_warp_sync(ship_nc, DVec3::new(10_000_000_000.0, 0.0, 0.0));
     assert!(arrived);
-    assert!(!h.ballpark.read().unwrap().ball_slim_meta[&ship_nc].is_cloaked);
+    assert!(
+        !h.test_with_ballpark_async(move |bp| bp.ball_slim_meta[&ship_nc].is_cloaked)
+            .await
+    );
     let snap_reconciled = h.get_protection_snapshot(ship_nc).await.unwrap().unwrap();
     assert!(!snap_reconciled.snapshot.has_gate_cloak());
     assert_eq!(snap_reconciled.snapshot.undock_invulnerable_remaining_ticks, 0);
@@ -1689,19 +1707,33 @@ async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and
     }
     // 1. F1486-R4-01: same-thread `try_emit_destiny_event` with `actor_state`, `ballpark`, and `RANK_LEAF` locks held.
     {
-        let _st = h.actor_state.write().unwrap();
+        let st_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_ACTOR_STATE }> =
+            eve_db::lock_rank::RankedRwLock::new(());
+        let _st = st_lock.write().unwrap();
         assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::SetSpeedFraction { ball_id: s_emit, fraction: 0.5 }));
     }
     let _ = h.query_current_tick().await.unwrap();
-    assert!((h.ballpark.read().unwrap().balls[&s_emit].speed_fraction - 0.5).abs() < 1e-6);
+    assert!(
+        (h.test_with_ballpark_async(move |bp| bp.balls[&s_emit].speed_fraction)
+            .await
+            - 0.5)
+            .abs()
+            < 1e-6
+    );
     {
-        let _bp = h.ballpark.read().unwrap();
+        let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
+            eve_db::lock_rank::RankedRwLock::new(());
+        let _bp = bp_lock.read().unwrap();
         let leaf = eve_db::lock_rank::RankedMutex::<(), { eve_db::lock_rank::RANK_LEAF }>::new(());
         let _leaf = leaf.lock().unwrap();
         assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::Stop { ball_id: s_emit }));
     }
     let _ = h.query_current_tick().await.unwrap();
-    assert!(matches!(h.ballpark.read().unwrap().balls[&s_emit].mode, MovementMode::Stop));
+    assert!(matches!(
+        h.test_with_ballpark_async(move |bp| bp.balls[&s_emit].mode.clone())
+            .await,
+        MovementMode::Stop
+    ));
 
     // 2. F1486-R4-02a: `try_remove_module_cycle` updates `protection_registry` + `has_active_non_gate_cloak_sync`.
     h.add_module_cycle(ActiveModuleCycle {
@@ -1710,28 +1742,48 @@ async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and
     }).await.unwrap();
     h.modify_combat_state(s_cyc, |c| { c.is_covert_cloak = true; c.cloak_velocity_multiplier = Some(0.25); }).await.unwrap();
     assert!(h.has_active_non_gate_cloak_sync(s_cyc));
-    assert!(h.actor_state.read().unwrap().protection_registry[&s_cyc].has_active_cloak_cycle);
+    assert!(
+        h.test_with_actor_state_async(move |st| st.protection_registry[&s_cyc].has_active_cloak_cycle)
+            .await
+    );
     let _ = h.try_remove_module_cycle(s_cyc, 99_001);
-    let snap_cyc = h.actor_state.read().unwrap().protection_registry[&s_cyc];
+    let snap_cyc = h
+        .test_with_actor_state_async(move |st| st.protection_registry[&s_cyc])
+        .await;
     assert!(!snap_cyc.has_active_cloak_cycle && !snap_cyc.snapshot.has_cloak_velocity_multiplier && !snap_cyc.snapshot.is_covert_cloak);
     assert!(!h.has_active_non_gate_cloak_sync(s_cyc));
 
     // 3. F1486-R4-02b: `try_remove_ball_for_db` evicts `protection_registry` outside and inside held locks.
-    for bid in [s_db1, s_db2, s_db3] { assert!(h.actor_state.read().unwrap().protection_registry.contains_key(&bid)); }
+    let _ = other_h;
+    for bid in [s_db1, s_db2, s_db3] {
+        assert!(
+            h.test_with_actor_state_async(move |st| st.protection_registry.contains_key(&bid))
+                .await
+        );
+    }
     try_remove_ball_for_db(&db, sys_id, s_db1);
     {
-        let _bp_other = other_h.ballpark.write().unwrap();
+        let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
+            eve_db::lock_rank::RankedRwLock::new(());
+        let _bp_other = bp_lock.write().unwrap();
         try_remove_ball_for_db(&db, sys_id, s_db2);
-        let _st_other = other_h.actor_state.write().unwrap();
+        let st_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_ACTOR_STATE }> =
+            eve_db::lock_rank::RankedRwLock::new(());
+        let _st_other = st_lock.write().unwrap();
         try_remove_ball_for_db(&db, sys_id, s_db3);
     }
-    let (bp_r, st_r) = (h.ballpark.read().unwrap(), h.actor_state.read().unwrap());
     for bid in [s_db1, s_db2, s_db3] {
-        assert!(!bp_r.balls.contains_key(&bid) && !st_r.protection_registry.contains_key(&bid));
+        assert!(
+            !h.test_with_ballpark_async(move |bp| bp.balls.contains_key(&bid))
+                .await
+                && !h
+                    .test_with_actor_state_async(move |st| st.protection_registry.contains_key(&bid))
+                    .await
+        );
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_and_destiny_event() {
     let reg = SystemRegistry::new();
     let h = reg.get_or_spawn(30_000_142);
@@ -1743,11 +1795,17 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     assert!(h.get_protection_snapshot(ship_a).await.unwrap().is_some() && h.has_active_non_gate_cloak_sync(ship_b));
 
     h.try_remove_ball(ship_a);
-    assert!(h.actor_state.read().unwrap().protection_registry.get(&ship_a).is_none());
+    assert!(
+        h.test_with_actor_state_async(move |st| st.protection_registry.get(&ship_a).is_none())
+            .await
+    );
     assert!(h.get_protection_snapshot(ship_a).await.unwrap().is_none());
 
     h.try_remove_destroyed_ball(ship_b);
-    assert!(h.actor_state.read().unwrap().protection_registry.get(&ship_b).is_none());
+    assert!(
+        h.test_with_actor_state_async(move |st| st.protection_registry.get(&ship_b).is_none())
+            .await
+    );
     assert!(!h.has_active_non_gate_cloak_sync(ship_b) && h.get_protection_snapshot(ship_b).await.unwrap().is_none());
 
     // 2. `try_step_manual` steps and syncs `protection_registry`.
@@ -1756,17 +1814,26 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
         CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 2, undock_invulnerable_remaining_ticks: 2, ..Default::default() },
     ).await.unwrap();
     h.try_step_manual(1.0);
-    let snap_c1 = h.actor_state.read().unwrap().protection_registry[&ship_c];
+    let snap_c1 = h
+        .test_with_actor_state_async(move |st| st.protection_registry[&ship_c])
+        .await;
     assert_eq!((snap_c1.snapshot.gate_cloak_remaining_ticks, snap_c1.snapshot.undock_invulnerable_remaining_ticks), (1, 1));
     h.try_step_manual(1.0);
-    let snap_c2 = h.actor_state.read().unwrap().protection_registry[&ship_c];
+    let snap_c2 = h
+        .test_with_actor_state_async(move |st| st.protection_registry[&ship_c])
+        .await;
     assert_eq!((snap_c2.snapshot.gate_cloak_remaining_ticks, snap_c2.snapshot.undock_invulnerable_remaining_ticks, snap_c2.snapshot.is_cloaked), (0, 0, false));
 
     // 3. `prepare_disconnected_warp_sync` clears gate cloak/invuln via `set_mode` and syncs registry.
     h.spawn_ball_with_combat(make_actor_ball(ship_d, 587, DVec3::ZERO), CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 20, undock_invulnerable_remaining_ticks: 20, ..Default::default() }).await.unwrap();
-    assert!(h.actor_state.read().unwrap().protection_registry[&ship_d].snapshot.has_gate_cloak());
+    assert!(
+        h.test_with_actor_state_async(move |st| st.protection_registry[&ship_d].snapshot.has_gate_cloak())
+            .await
+    );
     h.prepare_disconnected_warp_sync(ship_d, 587, 40.0, 1_200_000.0, 2.5, 350.0, 3.0, DVec3::ZERO, DVec3::new(1_000_000.0, 0.0, 0.0));
-    let snap_d = h.actor_state.read().unwrap().protection_registry[&ship_d];
+    let snap_d = h
+        .test_with_actor_state_async(move |st| st.protection_registry[&ship_d])
+        .await;
     assert!(!snap_d.snapshot.has_gate_cloak() && !snap_d.snapshot.is_cloaked && snap_d.snapshot.undock_invulnerable_remaining_ticks == 0);
 
     // 4. `SystemCommand::EmitDestinyEvent` (`SetSpeedFraction`) breaks protection and syncs `protection_registry`.
@@ -1813,10 +1880,19 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
         CombatState { is_cloaked: true, gate_cloak_remaining_ticks: 20, undock_invulnerable_remaining_ticks: 20, ..Default::default() },
         SlimItemMeta { char_id: Some(95_907), owner_id: 95_907, is_cloaked: true, ..Default::default() },
     );
-    assert_eq!(h.actor_state.read().unwrap().protection_registry[&ship_g].owner_char_id, Some(95_907));
-    assert!(h.actor_state.read().unwrap().protection_registry[&ship_g].snapshot.has_gate_cloak());
+    assert_eq!(
+        h.test_with_actor_state_async(move |st| st.protection_registry[&ship_g].owner_char_id)
+            .await,
+        Some(95_907)
+    );
+    assert!(
+        h.test_with_actor_state_async(move |st| st.protection_registry[&ship_g].snapshot.has_gate_cloak())
+            .await
+    );
     assert!(h.try_emit_destiny_event(ship_g, DestinyEvent::Stop { ball_id: ship_g }));
-    let snap_g = h.actor_state.read().unwrap().protection_registry[&ship_g].snapshot;
+    let snap_g = h
+        .test_with_actor_state_async(move |st| st.protection_registry[&ship_g].snapshot)
+        .await;
     assert!(!snap_g.has_gate_cloak() && snap_g.undock_invulnerable_remaining_ticks == 0);
 
     h.try_spawn_ball_with_combat(
@@ -1827,12 +1903,22 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     assert!(h.try_update_combat_state(ship_h, |cs| { cs.is_cloaked = false; cs.cloak_velocity_multiplier = None; }));
     assert!(!h.has_active_non_gate_cloak_sync(ship_h));
     assert!(h.try_recompute_combat_attributes(ship_h, |cs| { cs.is_cloaked = true; cs.gate_cloak_remaining_ticks = 15; }));
-    assert!(h.actor_state.read().unwrap().protection_registry[&ship_h].snapshot.has_gate_cloak());
+    assert!(
+        h.test_with_actor_state_async(move |st| st.protection_registry[&ship_h].snapshot.has_gate_cloak())
+            .await
+    );
     let ((tx1, rx1), (tx2, rx2), h2) = (std::sync::mpsc::channel(), std::sync::mpsc::channel(), h.clone());
-    let holder = std::thread::spawn(move || { let _g = h2.actor_state.write().unwrap(); let _ = tx1.send(()); let _ = rx2.recv(); });
+    let holder = std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h2.test_with_actor_state(move |_| {
+                let _ = tx1.send(());
+                let _ = rx2.recv();
+            });
+        }));
+    });
     rx1.recv().unwrap();
     assert!(h.try_emit_destiny_event(ship_h, DestinyEvent::SetSpeedFraction { ball_id: ship_h, fraction: 0.5 }));
-    assert_eq!(h.ballpark.read().unwrap().combat_states[&ship_h].gate_cloak_remaining_ticks, 15);
+    assert_eq!(h.view().combat_state(ship_h).unwrap().gate_cloak_remaining_ticks, 15);
     let _ = tx2.send(());
     holder.join().unwrap();
     assert!(!h.get_protection_snapshot(ship_h).await.unwrap().unwrap().snapshot.has_gate_cloak());
@@ -2468,10 +2554,11 @@ async fn observatory_decloak_and_migrated_ball_ops_execute_through_system_handle
         )
         .await
         .expect("spawn logi npc");
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.register_observer(ship_id);
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.register_observer(ship_id);
+        })
+        .await;
     assert!(
         handle
             .emit_observer_destiny_event(ship_id, DestinyEvent::OnSlimItemChange { ball_id: npc_id })

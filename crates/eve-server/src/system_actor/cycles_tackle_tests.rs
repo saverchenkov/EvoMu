@@ -2085,8 +2085,7 @@ async fn destiny_events_warp_queries_and_cycle_expiry_helpers_cover_remaining_pa
     assert_eq!(sys.committed_warp_destination_sync(ship_id), None);
     assert!(!sys.is_ball_aligning_warp_sync(ship_id));
 
-    {
-        let mut bp_w = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp_w| {
         bp_w.balls.get_mut(&ship_id).unwrap().mode = MovementMode::Warp {
             origin: DVec3::ZERO,
             destination: DVec3::new(100_000.0, 0.0, 0.0),
@@ -2095,14 +2094,14 @@ async fn destiny_events_warp_queries_and_cycle_expiry_helpers_cover_remaining_pa
             phase: eve_destiny::WarpPhase::Aligning,
             elapsed_warp_time: 0.0,
         };
-    }
+    })
+    .await;
     assert!(sys.is_ball_warping_sync(ship_id));
     assert!(sys.is_ball_aligning_warp_sync(ship_id));
     assert_eq!(sys.committed_warp_destination_sync(ship_id), None);
     assert!(!ctx.systems.is_ball_in_committed_warp_sync(30_000_142, ship_id));
 
-    {
-        let mut bp_w = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp_w| {
         bp_w.balls.get_mut(&ship_id).unwrap().mode = MovementMode::Warp {
             origin: DVec3::ZERO,
             destination: DVec3::new(100_000.0, 0.0, 0.0),
@@ -2111,7 +2110,8 @@ async fn destiny_events_warp_queries_and_cycle_expiry_helpers_cover_remaining_pa
             phase: eve_destiny::WarpPhase::Cruising,
             elapsed_warp_time: 5.0,
         };
-    }
+    })
+    .await;
     assert!(!sys.is_ball_aligning_warp_sync(ship_id));
     assert_eq!(
         sys.committed_warp_destination_sync(ship_id),

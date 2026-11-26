@@ -414,8 +414,7 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
     // Test tethered in-space repair at the structure (session.structure_id = None, tethered ball)
     sess.structure_id = None;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.insert(
             ship_id,
             Ball {
@@ -444,7 +443,8 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
                 ..CombatState::default()
             },
         );
-    }
+    })
+    .await;
 
     // Hangar item cannot be repaired while undocked on tether -> NotDockedInStructure
     let hangar_item = 820_001_i64;
@@ -483,13 +483,15 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
         assert!(snap.corporations[&player_corp].division_balance(1).0 > 0);
         assert!(!snap.corp_wallet_journals[&(player_corp, 1)].is_empty());
     });
-    {
-        let bp = sys.ballpark.read().unwrap();
-        let cs = &bp.combat_states[&ship_id];
-        assert_eq!(cs.shield_hp, 500.0);
-        assert_eq!(cs.armor_hp, 500.0);
-        assert_eq!(cs.structure_hp, 500.0);
-    }
+    let (shield_hp, armor_hp, structure_hp) = sys
+        .test_with_ballpark_async(move |bp| {
+            let cs = &bp.combat_states[&ship_id];
+            (cs.shield_hp, cs.armor_hp, cs.structure_hp)
+        })
+        .await;
+    assert_eq!(shield_hp, 500.0);
+    assert_eq!(armor_hp, 500.0);
+    assert_eq!(structure_hp, 500.0);
 }
 
 #[tokio::test]
@@ -545,8 +547,7 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
     // Live ballpark damage (`L23-34`, `L43-46`) when `sess.corporation_id = None` (`L378`, `L545`)
     sess.corporation_id = None;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.insert(
             ship_id,
             Ball {
@@ -575,7 +576,8 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
                 ..CombatState::default()
             },
         );
-    }
+    })
+    .await;
     let quotes = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_id), PyRep::Integer(corp_nested_id)]).unwrap();
     assert!(matches!(quotes, PyRep::Dict(ref rows) if !rows.is_empty()));
     let rep = call_repair(&ctx, &sess, false, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(mod_id)])]).await.unwrap();
@@ -583,10 +585,10 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
     assert_eq!(ctx.ship_fittings.read().unwrap()[&ship_id].modules[&mod_id].damage_hp, 0.0);
 
     // Upwell structure auth errors (`StructureNotFound`, `StructureAbandoned`, `StructureRepairAccessDenied`) & tether closest tie-breaker (`L282`, `L287`, `L294-297`)
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&ship_id).unwrap().armor_hp = 50.0;
-    }
+    })
+    .await;
     sess.station_id = None;
     sess.structure_id = Some(1_000_999_888_777);
     assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "StructureNotFound");
@@ -685,12 +687,12 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
         snap.structures.get_mut(&struct_far).unwrap().owner_corp_id = corp_a;
     });
     sess.structure_id = None;
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_tethered = true;
         cs.armor_hp = 50.0;
-    }
+    })
+    .await;
     let tethered_rep = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap();
     assert_eq!(tethered_rep.dict_get("locationID").and_then(|v| v.as_i64()), Some(struct_near));
 
@@ -1069,13 +1071,13 @@ async fn mutants_cov_ship_combat_damage_tether_acl_and_structure_tax() {
 
     // 3. Dock in taxed_struct (500 bps = 5% tax) with damage=100 (75.00 ISK base; Upwell service charge = 3 cents/HP -> 3.00 ISK)
     // Kills resolve_structure_repair_tax_bps -> Ok(-1/0/1) and handle_repair_items_in_location -> Ok(Default)
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&ship_with_shield).unwrap();
         cs.shield_hp = 500.0;
         cs.structure_hp = 500.0;
         cs.armor_hp = 400.0; // damage = 100.0 -> base 75.00 ISK -> Upwell 3 cents/HP * 100 = 3.00 ISK
-    }
+    })
+    .await;
     sess.structure_id = Some(taxed_struct);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().structure_id = Some(taxed_struct);
@@ -1219,9 +1221,12 @@ impl BallparkWriteHoldGuard {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let sys_bg = sys.clone();
         let bg = std::thread::spawn(move || {
-            let _bp = sys_bg.ballpark.write().unwrap();
-            held_tx.send(()).unwrap();
-            let _ = release_rx.recv();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sys_bg.test_with_ballpark_mut(move |_| {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                });
+            }));
         });
         held_rx.recv().unwrap();
         Self {
@@ -1378,7 +1383,7 @@ async fn tethered_repair_and_goto_point_100_iterations_complete_without_deadlock
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_unified_ship_damage_state_skips_ballpark_inside_mut_snapshot() {
     let (ctx, _sess, _char_id, ship_id, sys_id, _struct_id) =
         setup_tethered_ship_repair_fixture(15.0, 25.0).await;
@@ -1669,15 +1674,7 @@ async fn tethered_repair_completes_via_async_fallback_when_ballpark_contended_an
         setup_tethered_ship_repair_fixture(20.0, 30.0).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
 
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let sys_bg = sys.clone();
-    let bg = std::thread::spawn(move || {
-        let _bp = sys_bg.ballpark.write().unwrap();
-        held_tx.send(()).unwrap();
-        release_rx.recv().unwrap();
-    });
-    held_rx.recv().unwrap();
+    let hold = BallparkWriteHoldGuard::acquire(&sys);
 
     // Block the actor on `ballpark.write()` with an initial command and saturate its 256-slot mpsc buffer.
     let mut dummy_replies = Vec::new();
@@ -1720,8 +1717,7 @@ async fn tethered_repair_completes_via_async_fallback_when_ballpark_contended_an
     .expect("DB transaction should commit even with ballpark locked and mailbox full");
 
     // Release `ballpark.write()` so the actor drains and services the awaited `RepairCombatState`.
-    release_tx.send(()).unwrap();
-    bg.join().unwrap();
+    hold.release();
 
     let rep = tokio::time::timeout(std::time::Duration::from_secs(3), repair_task)
         .await

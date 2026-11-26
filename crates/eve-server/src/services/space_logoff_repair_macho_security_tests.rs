@@ -181,10 +181,10 @@ async fn r7_tb_02_disconnect_emergency_warp_and_reconcile_respect_bubbles_and_ta
     .await
     .unwrap();
     sys.set_combat_state(ship_id, CombatState::default()).await.unwrap();
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.add_warp_bubble(900_991, pos, 20_000.0);
-    }
+    })
+    .await;
 
     let bubbled_disc = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
         .await
@@ -195,29 +195,31 @@ async fn r7_tb_02_disconnect_emergency_warp_and_reconcile_respect_bubbles_and_ta
     );
 
     // 2. Ship already in emergency warp alignment caught in bubble -> tackle reconciliation stops warp
-    {
-        let mut bp = sys.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_emergency_warping = true;
-        }
-        if let Some(b) = bp.balls.get_mut(&ship_id) {
-            b.mode = MovementMode::new_warp(pos, pos + DVec3::new(1e9, 0.0, 0.0), 3.0);
-        }
-        let mut cycles = Vec::new();
-        crate::system_actor::reconcile_tackle_and_bubbles(
-            bp.solar_system_id,
-            &mut bp,
-            &mut cycles,
-            &HashMap::new(),
-            &HashMap::new(),
-            &None,
-            None,
-        );
-        assert!(
-            !matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }),
-            "reconcile_tackle_and_bubbles must abort emergency warp inside a bubble"
-        );
-    }
+    let aborted_warp = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_emergency_warping = true;
+            }
+            if let Some(b) = bp.balls.get_mut(&ship_id) {
+                b.mode = MovementMode::new_warp(pos, pos + DVec3::new(1e9, 0.0, 0.0), 3.0);
+            }
+            let mut cycles = Vec::new();
+            crate::system_actor::reconcile_tackle_and_bubbles(
+                bp.solar_system_id,
+                bp,
+                &mut cycles,
+                &HashMap::new(),
+                &HashMap::new(),
+                &None,
+                None,
+            );
+            !matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. })
+        })
+        .await;
+    assert!(
+        aborted_warp,
+        "reconcile_tackle_and_bubbles must abort emergency warp inside a bubble"
+    );
 
     // 3. Interdiction nullifier bypasses bubble alone, but CANNOT bypass targeted warp scrambler
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {

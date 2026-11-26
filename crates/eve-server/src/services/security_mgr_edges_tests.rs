@@ -206,29 +206,35 @@ async fn sync_corruption_security_status_change_and_sentries_and_ewar() {
         .unwrap();
     assert!(!has_active_counter_insurgency_sentries(&ctx, sys_id));
 
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&sentry_bid).unwrap().structure_hp = 5_000.0;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&sentry_bid).unwrap().structure_hp = 5_000.0;
+        })
+        .await;
     assert!(has_active_counter_insurgency_sentries(&ctx, sys_id));
 
     // apply_counter_insurgency_sentry_ewar: out of range, TP-only range, and sig==0 fallback
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        let target_id = 9_100_002i64;
-        let mut tcs = CombatState::default();
-        tcs.signature_radius = 0.0;
-        bp.combat_states.insert(target_id, tcs);
+    let sde = Arc::clone(&ctx.sde);
+    let (sig_far, sig_tp, base_sig_tp) = sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let target_id = 9_100_002i64;
+            let mut tcs = CombatState::default();
+            tcs.signature_radius = 0.0;
+            bp.combat_states.insert(target_id, tcs);
 
-        // Beyond 250km -> untouched
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, 20.0, 300_000.0);
-        assert_eq!(bp.combat_states[&target_id].signature_radius, 0.0);
+            // Beyond 250km -> untouched
+            apply_counter_insurgency_sentry_ewar(&sde, bp, target_id, 20.0, 300_000.0);
+            let sig_far = bp.combat_states[&target_id].signature_radius;
 
-        // Between 75km and 250km -> TP applied with target_radius.max(35.0) = 35.0
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, 20.0, 100_000.0);
-        assert!(bp.combat_states[&target_id].signature_radius > 35.0);
-        assert!(bp.combat_states[&target_id].base_signature_radius == Some(35.0));
-    }
+            // Between 75km and 250km -> TP applied with target_radius.max(35.0) = 35.0
+            apply_counter_insurgency_sentry_ewar(&sde, bp, target_id, 20.0, 100_000.0);
+            let cs = &bp.combat_states[&target_id];
+            (sig_far, cs.signature_radius, cs.base_signature_radius)
+        })
+        .await;
+    assert_eq!(sig_far, 0.0);
+    assert!(sig_tp > 35.0);
+    assert_eq!(base_sig_tp, Some(35.0));
 }
 
 #[test]
@@ -424,30 +430,39 @@ async fn counter_insurgency_ewar_sig_branches_multiplier_and_stage_site_sync() {
         .unwrap_or(50.0);
     let expected_mult = 1.0 + (tp_sig_pct * 0.01);
 
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
+    let sde = Arc::clone(&ctx.sde);
+    let (base_zero, mult_zero, base_pos, mult_pos, ecm_pos) = sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            // Case A: signature_radius == 0.0 -> falls back to target_radius.max(35.0) = 50.0 (kills `> -> >=` and `> -> ==`)
+            let target_zero = 9_101_001_i64;
+            let mut cs_zero = CombatState::default();
+            cs_zero.signature_radius = 0.0;
+            bp.combat_states.insert(target_zero, cs_zero);
+            apply_counter_insurgency_sentry_ewar(&sde, bp, target_zero, 50.0, 100_000.0);
+            let base_zero = bp.combat_states[&target_zero].base_signature_radius;
+            let mult_zero = bp.combat_states[&target_zero].tp_sig_multiplier.unwrap();
 
-        // Case A: signature_radius == 0.0 -> falls back to target_radius.max(35.0) = 50.0 (kills `> -> >=` and `> -> ==`)
-        let target_zero = 9_101_001_i64;
-        let mut cs_zero = CombatState::default();
-        cs_zero.signature_radius = 0.0;
-        bp.combat_states.insert(target_zero, cs_zero);
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_zero, 50.0, 100_000.0);
-        assert_eq!(bp.combat_states[&target_zero].base_signature_radius, Some(50.0));
-        let mult_zero = bp.combat_states[&target_zero].tp_sig_multiplier.unwrap();
-        assert!((mult_zero - expected_mult).abs() < 1e-6);
-
-        // Case B: signature_radius == 42.0 > 0.0 -> preserves 42.0 instead of target_radius 90.0 (kills `> -> <` and `> -> ==`)
-        let target_pos = 9_101_002_i64;
-        let mut cs_pos = CombatState::default();
-        cs_pos.signature_radius = 42.0;
-        bp.combat_states.insert(target_pos, cs_pos);
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_pos, 90.0, 10_000.0);
-        assert_eq!(bp.combat_states[&target_pos].base_signature_radius, Some(42.0));
-        let mult_pos = bp.combat_states[&target_pos].tp_sig_multiplier.unwrap();
-        assert!((mult_pos - expected_mult).abs() < 1e-6);
-        assert!(bp.combat_states[&target_pos].ecm_jammed_remaining_s > 0.0);
-    }
+            // Case B: signature_radius == 42.0 > 0.0 -> preserves 42.0 instead of target_radius 90.0 (kills `> -> <` and `> -> ==`)
+            let target_pos = 9_101_002_i64;
+            let mut cs_pos = CombatState::default();
+            cs_pos.signature_radius = 42.0;
+            bp.combat_states.insert(target_pos, cs_pos);
+            apply_counter_insurgency_sentry_ewar(&sde, bp, target_pos, 90.0, 10_000.0);
+            let cs_pos_after = &bp.combat_states[&target_pos];
+            (
+                base_zero,
+                mult_zero,
+                cs_pos_after.base_signature_radius,
+                cs_pos_after.tp_sig_multiplier.unwrap(),
+                cs_pos_after.ecm_jammed_remaining_s,
+            )
+        })
+        .await;
+    assert_eq!(base_zero, Some(50.0));
+    assert!((mult_zero - expected_mult).abs() < 1e-6);
+    assert_eq!(base_pos, Some(42.0));
+    assert!((mult_pos - expected_mult).abs() < 1e-6);
+    assert!(ecm_pos > 0.0);
 
     // `sync_stage_gated_insurgency_sites_in_snap` actually populates stage-gated sites for active campaign
     ctx.db.with_mut_snapshot(|snap| {

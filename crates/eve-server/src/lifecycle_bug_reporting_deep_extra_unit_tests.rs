@@ -127,25 +127,31 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
     assert_eq!(require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).unwrap_err().code, "SessionChangeInProgress");
     crate::services::space_destiny::record_session_change_timer(&ctx, char_id, now, sys_id, 0, "login");
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.balls.insert(ship_id, eve_destiny::Ball {
-            id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO,
-            max_velocity: 300.0, inertia: 2.5, mass: 1_200_000.0, radius: 40.0,
-            speed_fraction: 0.0, mode: MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0),
-        });
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(ship_id, eve_destiny::Ball {
+                id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO,
+                max_velocity: 300.0, inertia: 2.5, mass: 1_200_000.0, radius: 40.0,
+                speed_fraction: 0.0, mode: MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0),
+            });
+        })
+        .await;
     assert_eq!(require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).unwrap_err().code, "ShipInWarp");
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.combat_states.entry(ship_id).or_default().warp_scramble_strength = 2;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.entry(ship_id).or_default().warp_scramble_strength = 2;
+        })
+        .await;
     assert_eq!(require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).unwrap_err().code, "WarpScrambled");
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.warp_scramble_strength = 0;
-            cs.gate_cloak_remaining_ticks = 4;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.warp_scramble_strength = 0;
+                cs.gate_cloak_remaining_ticks = 4;
+            }
+        })
+        .await;
     assert_eq!(require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).unwrap_err().code, "ShipInvulnerable");
 
     // Safe logoff docked check & comprehensive space blocking conditions
@@ -393,7 +399,9 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
     });
     let _ = sys_handle.set_ball_position(ship_id, DVec3::new(500_000_000.0, 0.0, 0.0)).await;
     let _ = reconnect_character_in_space(&ctx, char_id).await.unwrap();
-    let mode = sys_handle.ballpark.read().unwrap().balls[&ship_id].mode.clone();
+    let mode = sys_handle
+        .test_with_ballpark_async(move |bp| bp.balls[&ship_id].mode.clone())
+        .await;
     assert!(matches!(mode, MovementMode::Warp { .. }));
 
     // 5. Drone abandon & reconnect (errors + OutOfRange + InsufficientBandwidth + success)

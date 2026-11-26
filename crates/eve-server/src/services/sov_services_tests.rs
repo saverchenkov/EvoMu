@@ -1038,12 +1038,18 @@ async fn destroy_skyhooks_rejects_zero_or_damaged_hp_prunes_mto_and_reconciles_w
         assert_eq!(imports(s, &ctx.sde, hub_b), vec![(sys_a, 0)]);
         assert!(s.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
     });
-    {
-        let bp = sys_handle.ballpark.read().unwrap();
-        assert!(!bp.balls.contains_key(&skyhook_id));
-        assert!(!bp.balls.contains_key(&den_id));
-        assert!(!bp.balls.contains_key(&mto_ball_id));
-    }
+    let (has_skyhook, has_den, has_mto) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls.contains_key(&skyhook_id),
+                bp.balls.contains_key(&den_id),
+                bp.balls.contains_key(&mto_ball_id),
+            )
+        })
+        .await;
+    assert!(!has_skyhook);
+    assert!(!has_den);
+    assert!(!has_mto);
 
     let mut notice_urls = Vec::new();
     while let Ok(notice) = rx.try_recv() {
