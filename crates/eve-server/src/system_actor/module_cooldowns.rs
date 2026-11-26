@@ -359,66 +359,30 @@ pub(crate) fn module_cooldown_checkpoint_key(
     format!("{ship_id}|{module_id}|{module_type_id}")
 }
 
-pub(crate) fn serialize_module_cooldown_rows(
-    cooldowns: &HashMap<(i64, i64, u32), ModuleCooldownEntry>,
-) -> Vec<ModuleCooldownCheckpointRow> {
+pub(crate) fn serialize_module_cooldown_rows(cooldowns: &HashMap<(i64, i64, u32), ModuleCooldownEntry>) -> Vec<ModuleCooldownCheckpointRow> {
     let mut sorted: Vec<_> = cooldowns.iter().map(|(&k, &v)| (k, v)).collect();
     sorted.sort_by_key(|(k, _)| *k);
-    sorted
-        .into_iter()
-        .map(|(k @ (ship_id, mod_id, mod_tid), entry)| {
-            (
-                module_cooldown_checkpoint_key(ship_id, mod_id, mod_tid),
-                (k, entry),
-            )
-        })
-        .collect()
+    sorted.into_iter().map(|(k @ (ship_id, mod_id, mod_tid), entry)| (module_cooldown_checkpoint_key(ship_id, mod_id, mod_tid), (k, entry))).collect()
 }
 
-fn can_write_sqlite_safely() -> bool {
-    !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER)
-}
+fn can_write_sqlite_safely() -> bool { !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER) }
 
-fn persist_module_cooldowns_rows_in_db(
-    db: &WorldRepository,
-    solar_system_id: SolarSystemId,
-    rows: &[ModuleCooldownCheckpointRow],
-) -> bool {
-    if !can_write_sqlite_safely() {
-        return false;
-    }
+fn persist_module_cooldowns_rows_in_db(db: &WorldRepository, solar_system_id: SolarSystemId, rows: &[ModuleCooldownCheckpointRow]) -> bool {
+    if !can_write_sqlite_safely() { return false; }
     let now_unix = current_unix_secs();
     db.with_sqlite_conn(|conn| {
         ensure_system_checkpoint_schema(conn)?;
-        replace_system_checkpoints_for_kind(
-            conn,
-            solar_system_id,
-            KIND_MODULE_COOLDOWNS,
-            rows,
-            now_unix,
-        )
-    })
-    .is_ok()
+        replace_system_checkpoints_for_kind(conn, solar_system_id, KIND_MODULE_COOLDOWNS, rows, now_unix)
+    }).is_ok()
 }
 
 /// Post-unlock DB writer replacing `KIND_MODULE_COOLDOWNS` rows for a single `solar_system_id`.
-pub(crate) fn persist_system_module_cooldowns_in_db(
-    db: &WorldRepository,
-    solar_system_id: SolarSystemId,
-    rows: &[ModuleCooldownCheckpointRow],
-) -> bool {
+pub(crate) fn persist_system_module_cooldowns_in_db(db: &WorldRepository, solar_system_id: SolarSystemId, rows: &[ModuleCooldownCheckpointRow]) -> bool {
     solar_system_id != 0 && persist_module_cooldowns_rows_in_db(db, solar_system_id, rows)
 }
 
-fn collect_cold_cooldown_rows(
-    conn: &rusqlite::Connection,
-    solar_system_id: SolarSystemId,
-) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
-    let Ok(rows) = load_system_checkpoints::<((i64, i64, u32), ModuleCooldownEntry)>(
-        conn,
-        solar_system_id,
-        KIND_MODULE_COOLDOWNS,
-    ) else {
+fn collect_cold_cooldown_rows(conn: &rusqlite::Connection, solar_system_id: SolarSystemId) -> HashMap<(i64, i64, u32), ModuleCooldownEntry> {
+    let Ok(rows) = load_system_checkpoints::<((i64, i64, u32), ModuleCooldownEntry)>(conn, solar_system_id, KIND_MODULE_COOLDOWNS) else {
         return HashMap::new();
     };
     rows.into_iter().map(|(_, (k, v))| (k, v)).collect()
@@ -498,15 +462,7 @@ pub(crate) fn load_active_system_module_cooldowns_for_boot(
         return HashMap::new();
     }
     let raw = load_cold_system_module_cooldowns_from_db(db, solar_system_id);
-    filter_active_cooldowns_for_boot(
-        db,
-        raw,
-        solar_system_id,
-        tidi_factor,
-        has_tidi_history,
-        eval_sys_sim_s,
-        anchor_sys_sim_s,
-    )
+    filter_active_cooldowns_for_boot(db, raw, solar_system_id, tidi_factor, has_tidi_history, eval_sys_sim_s, anchor_sys_sim_s)
 }
 
 pub(crate) fn load_active_system_module_cooldowns_for_boot_nonblocking(
@@ -521,15 +477,7 @@ pub(crate) fn load_active_system_module_cooldowns_for_boot_nonblocking(
         return Some(HashMap::new());
     }
     let raw = load_cold_system_module_cooldowns_from_db_nonblocking(db, solar_system_id)?;
-    Some(filter_active_cooldowns_for_boot(
-        db,
-        raw,
-        solar_system_id,
-        tidi_factor,
-        has_tidi_history,
-        eval_sys_sim_s,
-        anchor_sys_sim_s,
-    ))
+    Some(filter_active_cooldowns_for_boot(db, raw, solar_system_id, tidi_factor, has_tidi_history, eval_sys_sim_s, anchor_sys_sim_s))
 }
 
 /// Removes expired (and future-clock-stale `#1036`) module reactivation cooldowns in memory.
@@ -543,14 +491,7 @@ pub(crate) fn prune_expired_module_cooldowns_in_state(
 ) -> bool {
     let before = cooldowns.reactivation_cooldowns.len();
     cooldowns.reactivation_cooldowns.retain(|_, entry| {
-        remaining_cooldown_secs_with_tidi(
-            entry,
-            now_unix_f64,
-            Some(solar_system_id),
-            cur_sys_sim_s,
-            tidi_factor,
-            has_tidi_history,
-        ) > 1e-6
+        remaining_cooldown_secs_with_tidi(entry, now_unix_f64, Some(solar_system_id), cur_sys_sim_s, tidi_factor, has_tidi_history) > 1e-6
     });
     cooldowns.reactivation_cooldowns.len() != before
 }
@@ -568,24 +509,10 @@ pub(crate) fn rebase_module_cooldowns_on_stop_in_state(
     let mut rebased = HashMap::new();
     let mut changed = false;
     for (&key, entry) in &cooldowns.reactivation_cooldowns {
-        let rem = remaining_cooldown_secs_with_tidi(
-            entry,
-            now_unix_f64,
-            Some(solar_system_id),
-            cur_sys_sim_s,
-            tidi_factor,
-            has_tidi_history,
-        );
+        let rem = remaining_cooldown_secs_with_tidi(entry, now_unix_f64, Some(solar_system_id), cur_sys_sim_s, tidi_factor, has_tidi_history);
         if rem > 1e-6 {
-            let next = ModuleCooldownEntry {
-                recorded_unix_f64: now_unix_f64,
-                delay_s: rem,
-                solar_system_id: Some(solar_system_id),
-                recorded_sys_sim_s: 0.0,
-            };
-            if next != *entry {
-                changed = true;
-            }
+            let next = ModuleCooldownEntry { recorded_unix_f64: now_unix_f64, delay_s: rem, solar_system_id: Some(solar_system_id), recorded_sys_sim_s: 0.0 };
+            changed |= next != *entry;
             rebased.insert(key, next);
         } else {
             changed = true;
@@ -822,26 +749,12 @@ pub(in crate::system_actor) fn apply_pending_transitions_to_actor_state(
                     st.module_cooldowns.pending_db_removed_keys.retain(|&(sid, _, _)| sid != ship_id);
                 }
             }
-            PendingCooldownTransition::PruneExpired {
-                now_unix_f64,
-                tidi_factor: prune_tidi,
-                has_tidi_history: prune_hist,
-            } => {
-                if prune_tidi < 0.999_999 || prune_hist {
-                    st.has_tidi_history = true;
-                }
+            PendingCooldownTransition::PruneExpired { now_unix_f64, tidi_factor: prune_tidi, has_tidi_history: prune_hist } => {
+                if prune_tidi < 0.999_999 || prune_hist { st.has_tidi_history = true; }
                 let eff_tidi = if tidi_factor < 0.999_999 { tidi_factor } else { prune_tidi };
-                let eff_hist =
-                    st.has_tidi_history || has_tidi_history || prune_hist || eff_tidi < 0.999_999;
+                let eff_hist = st.has_tidi_history || has_tidi_history || prune_hist || eff_tidi < 0.999_999;
                 let cur_sim_s = st.sim_elapsed_secs;
-                let _ = prune_expired_module_cooldowns_in_state(
-                    &mut st.module_cooldowns,
-                    solar_system_id,
-                    now_unix_f64,
-                    cur_sim_s,
-                    eff_tidi,
-                    eff_hist,
-                );
+                let _ = prune_expired_module_cooldowns_in_state(&mut st.module_cooldowns, solar_system_id, now_unix_f64, cur_sim_s, eff_tidi, eff_hist);
             }
             PendingCooldownTransition::ClearAll => {
                 st.module_cooldowns.reactivation_cooldowns.clear();
@@ -867,60 +780,29 @@ pub(in crate::system_actor) fn apply_pending_transitions_to_cold_map(
     let mut changed = false;
     for tr in transitions {
         match *tr {
-            PendingCooldownTransition::Record {
-                ship_id, module_id, module_type_id, now_unix_f64, delay_s,
-                tidi_factor: tr_tidi, has_tidi_history: tr_hist,
-            } => {
-                if !delay_s.is_finite() || delay_s <= 0.0 || solar_system_id == 0 {
-                    continue;
-                }
+            PendingCooldownTransition::Record { ship_id, module_id, module_type_id, now_unix_f64, delay_s, tidi_factor: tr_tidi, has_tidi_history: tr_hist } => {
+                if !delay_s.is_finite() || delay_s <= 0.0 || solar_system_id == 0 { continue; }
                 let key = (ship_id, module_id, module_type_id);
-                let (entry, eff_tidi, eff_hist) = compute_recorded_cooldown_entry(
-                    solar_system_id, map.get(&key), now_unix_f64, delay_s, 0.0,
-                    tidi_factor, tr_tidi, has_tidi_history, tr_hist,
-                );
+                let (entry, eff_tidi, eff_hist) = compute_recorded_cooldown_entry(solar_system_id, map.get(&key), now_unix_f64, delay_s, 0.0, tidi_factor, tr_tidi, has_tidi_history, tr_hist);
                 map.retain(|_, e| remaining_cooldown_secs_with_tidi(e, now_unix_f64, Some(solar_system_id), 0.0, eff_tidi, eff_hist) > 1e-6);
                 map.insert(key, entry);
                 changed = true;
             }
-            PendingCooldownTransition::Seed { key, entry } => {
-                map.insert(key, entry);
-                changed = true;
-            }
-            PendingCooldownTransition::Remove { key } => {
-                changed |= map.remove(&key).is_some();
-            }
+            PendingCooldownTransition::Seed { key, entry } => { map.insert(key, entry); changed = true; }
+            PendingCooldownTransition::Remove { key } => { changed |= map.remove(&key).is_some(); }
             PendingCooldownTransition::ClearShip { ship_id } => {
                 let before = map.len();
                 map.retain(|&(sid, _, _), _| sid != ship_id);
                 changed |= map.len() != before;
             }
-            PendingCooldownTransition::PruneExpired {
-                now_unix_f64,
-                tidi_factor: prune_tidi,
-                has_tidi_history: prune_hist,
-            } => {
+            PendingCooldownTransition::PruneExpired { now_unix_f64, tidi_factor: prune_tidi, has_tidi_history: prune_hist } => {
                 let eff_tidi = if tidi_factor < 0.999_999 { tidi_factor } else { prune_tidi };
                 let eff_hist = has_tidi_history || prune_hist || eff_tidi < 0.999_999;
                 let before = map.len();
-                map.retain(|_, e| {
-                    remaining_cooldown_secs_with_tidi(
-                        e,
-                        now_unix_f64,
-                        Some(solar_system_id),
-                        0.0,
-                        eff_tidi,
-                        eff_hist,
-                    ) > 1e-6
-                });
+                map.retain(|_, e| remaining_cooldown_secs_with_tidi(e, now_unix_f64, Some(solar_system_id), 0.0, eff_tidi, eff_hist) > 1e-6);
                 changed |= map.len() != before;
             }
-            PendingCooldownTransition::ClearAll => {
-                if !map.is_empty() {
-                    map.clear();
-                    changed = true;
-                }
-            }
+            PendingCooldownTransition::ClearAll => if !map.is_empty() { map.clear(); changed = true; },
         }
     }
     changed
@@ -1229,48 +1111,17 @@ pub(in crate::system_actor) fn record_module_cooldown_in_actor_state(
         return None;
     }
     let cur_sys_sim_s = actor_st.sim_elapsed_secs;
-    let _ = prune_expired_module_cooldowns_in_state(
-        &mut actor_st.module_cooldowns,
-        solar_system_id,
-        now_unix_f64,
-        cur_sys_sim_s,
-        tidi_factor,
-        has_tidi_history,
-    );
+    let _ = prune_expired_module_cooldowns_in_state(&mut actor_st.module_cooldowns, solar_system_id, now_unix_f64, cur_sys_sim_s, tidi_factor, has_tidi_history);
     let key = (ship_id, module_id, module_type_id);
-    let effective_delay = actor_st
-        .module_cooldowns
-        .reactivation_cooldowns
-        .get(&key)
-        .map(|e| {
-            remaining_cooldown_secs_with_tidi(
-                e,
-                now_unix_f64,
-                Some(solar_system_id),
-                cur_sys_sim_s,
-                tidi_factor,
-                has_tidi_history,
-            )
-            .max(delay_s)
-        })
+    let effective_delay = actor_st.module_cooldowns.reactivation_cooldowns.get(&key)
+        .map(|e| remaining_cooldown_secs_with_tidi(e, now_unix_f64, Some(solar_system_id), cur_sys_sim_s, tidi_factor, has_tidi_history).max(delay_s))
         .unwrap_or(delay_s);
-    actor_st.module_cooldowns.reactivation_cooldowns.insert(
-        key,
-        ModuleCooldownEntry {
-            recorded_unix_f64: now_unix_f64,
-            delay_s: effective_delay,
-            solar_system_id: Some(solar_system_id),
-            recorded_sys_sim_s: cur_sys_sim_s,
-        },
-    );
+    actor_st.module_cooldowns.reactivation_cooldowns.insert(key, ModuleCooldownEntry {
+        recorded_unix_f64: now_unix_f64, delay_s: effective_delay, solar_system_id: Some(solar_system_id), recorded_sys_sim_s: cur_sys_sim_s,
+    });
     actor_st.module_cooldown_checkpoint_dirty = true;
-    actor_st.module_cooldown_checkpoint_seq =
-        actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
-    Some(build_persist_payload_from_actor_state(
-        actor_st,
-        tidi_factor,
-        has_tidi_history,
-    ))
+    actor_st.module_cooldown_checkpoint_seq = actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
+    Some(build_persist_payload_from_actor_state(actor_st, tidi_factor, has_tidi_history))
 }
 
 pub(in crate::system_actor) fn record_module_cooldown_in_actor(
@@ -1386,13 +1237,18 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
         let cur_sim_s = ctx.actor_st.sim_elapsed_secs;
         let existing_map = &ctx.actor_st.module_cooldowns.reactivation_cooldowns;
         for (k, entry) in cooldowns.iter_mut() {
-            entry.recorded_sys_sim_s = existing_map
-                .get(k)
-                .filter(|p| {
-                    p.recorded_unix_f64 == entry.recorded_unix_f64
-                        && (p.delay_s - entry.delay_s).abs() <= 1e-6
-                })
-                .map_or(cur_sim_s, |p| p.recorded_sys_sim_s);
+            if let Some(p) = existing_map.get(k) {
+                let live_rem = remaining_cooldown_secs_with_tidi(
+                    p, entry.recorded_unix_f64, Some(ctx.solar_system_id), cur_sim_s,
+                    ctx.tidi_factor, ctx.actor_st.has_tidi_history,
+                );
+                if entry.delay_s <= live_rem + 1e-6 {
+                    *entry = *p;
+                    entry.solar_system_id.get_or_insert(ctx.solar_system_id);
+                    continue;
+                }
+            }
+            entry.recorded_sys_sim_s = cur_sim_s;
             entry.solar_system_id.get_or_insert(ctx.solar_system_id);
         }
         ctx.actor_st.module_cooldown_checkpoint_seq = next_seq;
@@ -1464,10 +1320,8 @@ pub(in crate::system_actor) fn snapshot_module_cooldown_checkpoint_in_actor(
     {
         return Ok(None);
     }
-    if !only_if_dirty {
-        ctx.actor_st.module_cooldown_checkpoint_seq =
-            ctx.actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
-    }
+    ctx.actor_st.module_cooldown_checkpoint_seq =
+        ctx.actor_st.module_cooldown_checkpoint_seq.saturating_add(1);
     // Keep `module_cooldown_checkpoint_dirty` set until SQLite persistence actually commits (`#1541`).
     Ok(Some(build_persist_payload_from_actor_state(
         ctx.actor_st,

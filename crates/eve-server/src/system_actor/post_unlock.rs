@@ -1180,7 +1180,7 @@ pub(crate) fn execute_post_unlock_ops(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     lock_completed_hook: Option<&TargetLockCompletedHook>,
 ) -> Vec<PendingCycleAction> {
-    execute_post_unlock_ops_with_seq(db_opt, sde_opt, ops, deactivation_hook, lock_completed_hook, None).0
+    execute_post_unlock_ops_with_seq(db_opt, sde_opt, ops, deactivation_hook, lock_completed_hook, None, tokio::runtime::Handle::try_current().ok().as_ref()).0
 }
 
 /// Flushes collected [`PostUnlockOps`] for standalone / non-actor entrypoints (`#1170`).
@@ -1206,6 +1206,7 @@ pub(crate) fn execute_post_unlock_ops_for_standalone(
         None,
         None,
         standalone_ballpark_opt.map(PostCommitBallparkTarget::Standalone),
+        tokio::runtime::Handle::try_current().ok().as_ref(),
     );
 }
 
@@ -1217,6 +1218,7 @@ pub(crate) fn execute_post_unlock_ops_with_seq(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     lock_completed_hook: Option<&TargetLockCompletedHook>,
     seq_meta: Option<(SolarSystemId, u64)>,
+    rt_handle: Option<&tokio::runtime::Handle>,
 ) -> (Vec<PendingCycleAction>, bool) {
     execute_post_unlock_ops_inner(
         db_opt.map(|d| &**d),
@@ -1227,6 +1229,7 @@ pub(crate) fn execute_post_unlock_ops_with_seq(
         lock_completed_hook,
         seq_meta,
         None,
+        rt_handle,
     )
 }
 
@@ -1285,6 +1288,7 @@ fn execute_post_unlock_ops_inner(
     lock_completed_hook: Option<&TargetLockCompletedHook>,
     seq_meta: Option<(SolarSystemId, u64)>,
     post_commit_target: Option<PostCommitBallparkTarget<'_>>,
+    rt_handle: Option<&tokio::runtime::Handle>,
 ) -> (Vec<PendingCycleAction>, bool) {
     if ops.is_empty() {
         return (Vec::new(), false);
@@ -1430,10 +1434,9 @@ fn execute_post_unlock_ops_inner(
                     payload,
                 ) {
                     if let Some(tx) = op.cmd_tx_weak.as_ref().and_then(|w| w.upgrade()) {
-                        let _ = tx.try_send(super::SystemCommand::ApplyPersistedCooldownCommit {
-                            commit,
-                            reply: None,
-                        });
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) = tx.try_send(super::SystemCommand::ApplyPersistedCooldownCommit { commit, reply: None }) {
+                            if let Some(rt) = rt_handle { rt.spawn(async move { let _ = tx.send(cmd).await; }); }
+                        }
                     }
                 }
             }
@@ -1728,6 +1731,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
             let unsent = *unsent;
             if safe_sync {
                 let direct_targets = PostCommitActorTargets::from_handle(handle);
+                let rt_opt = tokio::runtime::Handle::try_current().ok();
                 let (extra_actions, tx_committed) = execute_post_unlock_ops_inner(
                     unsent.db_opt.as_deref(),
                     unsent.db_opt.as_ref(),
@@ -1737,6 +1741,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
                     lock_guard,
                     Some((handle.solar_system_id, unsent.work_seq)),
                     Some(PostCommitBallparkTarget::Actor(&direct_targets)),
+                    rt_opt.as_ref(),
                 );
                 if unsent.work_seq > 0 && !tx_committed {
                     handle.completed_post_unlock_seq.store(unsent.work_seq, Ordering::Release);
@@ -1890,6 +1895,7 @@ fn apply_post_commit_bp_ops(
             }
             drop(bp_handle);
             if !cleanup_ops.is_empty() && can_run_post_unlock_sync_now() {
+                let rt_opt = tokio::runtime::Handle::try_current().ok();
                 let _ = execute_post_unlock_ops_inner(
                     db_opt,
                     db_arc_opt,
@@ -1899,6 +1905,7 @@ fn apply_post_commit_bp_ops(
                     lock_completed_hook,
                     None,
                     None,
+                    rt_opt.as_ref(),
                 );
             }
         }
@@ -1978,7 +1985,6 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
         let _done_guard = WorkerDoneGuard(Some(done_tx));
         let _ = worker_thread_id.set(std::thread::current().id());
         let process_item = |item: PostUnlockWorkItem| {
-            let _rt_guard = rt_handle.as_ref().map(|h| h.enter());
             let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard, work_seq } = item;
@@ -1992,13 +1998,18 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
                     lock_hook.as_ref(),
                     Some((solar_system_id, work_seq)),
                     Some(PostCommitBallparkTarget::Actor(&post_commit_targets)),
+                    rt_handle.as_ref(),
                 )
             })).unwrap_or_else(|_| { tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker"); (Vec::new(), false) });
             if work_seq > 0 && !tx_committed {
                 completed_seq_worker.store(work_seq, Ordering::Release);
             }
             extend_pending_cycle_actions(&post_commit_targets.actor_state, extra_actions);
-            super::flush_post_unlock_actions(&post_unlock_actions_worker);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::flush_post_unlock_actions(&post_unlock_actions_worker);
+            })).is_err() {
+                tracing::error!(solar_system_id, "SystemActor flush_post_unlock_actions panicked; continuing FIFO worker");
+            }
             drop(in_flight_guard);
             for send_reply in replies { send_reply(); }
         };

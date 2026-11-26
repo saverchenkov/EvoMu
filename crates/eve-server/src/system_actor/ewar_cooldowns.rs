@@ -1037,6 +1037,19 @@ impl SystemHandle {
             |module_id, reply| SystemCommand::ClearModuleReloadSimDeadline { module_id, reply }, clear_module_reload_sim_deadline_in_actor,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn enqueue_raw_deact_hook_for_test(&self, db: Arc<eve_db::WorldRepository>, sde: Arc<eve_sde::SdeRegistry>, ship_id: i64, module_id: i64, module_type_id: u32, delay_s: f64) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut ops = super::post_unlock::PostUnlockOps::default();
+        ops.intents.push(super::post_unlock::PostUnlockIntent::DeactivationHook(super::post_unlock::DeferredDeactivationHookOp {
+            solar_system_id: self.solar_system_id, char_id: None, fallback_owner_id: None,
+            cycle: ActiveModuleCycle { ship_id, module_id, module_type_id, reactivation_delay_s: delay_s, ..Default::default() },
+        }));
+        let item = super::post_unlock::PostUnlockWorkItem { db_opt: Some(db), sde_opt: Some(sde), ops, replies: vec![Box::new(move || { let _ = tx.send(()); })], in_flight_guard: None, work_seq: 0 };
+        let _ = self.post_unlock_tx.send(super::post_unlock::PostUnlockMsg::Work(item));
+        rx
+    }
 }
 
 // ---------------------------------------------------------------------------

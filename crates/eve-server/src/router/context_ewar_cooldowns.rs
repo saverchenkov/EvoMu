@@ -270,7 +270,7 @@ impl ServerContext {
         module_id: i64,
         type_id: u32,
     ) {
-        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        let Some(rt) = tokio::runtime::Handle::try_current().ok().or_else(|| self.systems.runtime_handle()) else {
             self.purge_module_cooldown_other_systems(keep_sys_id, ship_id, module_id, type_id);
             return;
         };

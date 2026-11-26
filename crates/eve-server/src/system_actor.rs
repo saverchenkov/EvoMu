@@ -391,6 +391,7 @@ pub struct SystemRegistry {
     pub(crate) lifecycle_test_hooks: lifecycle_sm::LifecycleTestHooks,
     /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
     pub system_wide_effects: RankedRwLock<types::SystemWideEffectsState, RANK_LEAF>,
+    runtime_handle: RankedRwLock<Option<tokio::runtime::Handle>, RANK_LEAF>,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -443,8 +444,11 @@ impl SystemRegistry {
             #[cfg(test)]
             lifecycle_test_hooks: Default::default(),
             system_wide_effects: RankedRwLock::new(types::SystemWideEffectsState::default()),
+            runtime_handle: RankedRwLock::new(None),
         }
     }
+
+    pub(crate) fn runtime_handle(&self) -> Option<tokio::runtime::Handle> { self.runtime_handle.read().ok().and_then(|g| g.clone()) }
 
     /// Reads any explicit system-wide effect override and overlapping list for `solar_system_id`
     /// without blocking on or spawning a solar system actor (`#1583` Track 2).
@@ -1310,6 +1314,7 @@ impl SystemRegistry {
             ballpark_shared, actor_state_shared, initial_post_unlock_ops, staged_claims: _,
         } = prepared;
         let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
+        if let Ok(mut g) = self.runtime_handle.write() { *g = Some(rt_handle.clone()); }
         let cmd_tx_weak_actor = cmd_tx.downgrade();
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
         let event_tx_actor = event_tx.clone();
