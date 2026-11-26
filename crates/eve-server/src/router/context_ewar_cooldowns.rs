@@ -117,6 +117,7 @@ impl ServerContext {
         best
     }
 
+    #[cfg(any(test, feature = "testkit"))]
     fn resolve_module_cooldown_entry(
         &self,
         ship_id: i64,

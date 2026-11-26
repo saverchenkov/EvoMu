@@ -322,6 +322,19 @@ impl SystemHandle {
         self.view_rx.borrow().clone()
     }
 
+    pub(in crate::system_actor) fn take_stopped_cooldown_persist_payload(
+        actor_state: &RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>,
+        solar_system_id: SolarSystemId,
+        gate: &super::CooldownPersistGate,
+        eff_tidi: f64,
+        reg_has_tidi_history: bool,
+    ) -> Option<super::module_cooldowns::ModuleCooldownPersistPayload> {
+        let mut st = actor_state.write().unwrap_or_else(|e| e.into_inner());
+        super::module_cooldowns::take_stopped_cooldown_persist_payload_in_state(
+            &mut st, solar_system_id, gate, eff_tidi, reg_has_tidi_history,
+        )
+    }
+
     pub(in crate::system_actor) fn has_in_flight_post_unlock(&self) -> bool {
         self.post_unlock_in_flight
             .load(std::sync::atomic::Ordering::SeqCst)

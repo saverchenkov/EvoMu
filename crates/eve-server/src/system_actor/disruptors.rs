@@ -239,6 +239,7 @@ impl super::SystemHandle {
                 );
                 (db_opt.clone(), sde_opt.clone())
             };
+            let cmd_tx_weak = self.cmd_tx.downgrade();
             let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
                 self.solar_system_id,
                 &mut st,
@@ -246,8 +247,7 @@ impl super::SystemHandle {
                 raw_hook.clone(),
                 post_hook,
                 &self.cooldown_persist_gate,
-                Some(&self.ballpark),
-                Some(&self.actor_state),
+                Some(&cmd_tx_weak),
                 tidi,
             );
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);

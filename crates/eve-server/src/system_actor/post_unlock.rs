@@ -142,8 +142,7 @@ pub(crate) struct DeferredCooldownDeactOp {
     pub post_hook: super::types::ModuleDeactivationPostUnlockHook,
     pub cooldown_payload: Option<super::module_cooldowns::ModuleCooldownPersistPayload>,
     pub cooldown_persist_gate: Arc<super::module_cooldowns::CooldownPersistGate>,
-    pub ballpark_weak: std::sync::Weak<super::celestials::BallparkHandle>,
-    pub actor_state_weak: std::sync::Weak<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+    pub cmd_tx_weak: Option<tokio::sync::mpsc::WeakSender<super::SystemCommand>>,
 }
 
 impl std::fmt::Debug for DeferredCooldownDeactOp {
@@ -1425,15 +1424,18 @@ fn execute_post_unlock_ops_inner(
         }
         for op in deferred_cooldown_hooks {
             if let Some(payload) = op.cooldown_payload {
-                let bp_up = op.ballpark_weak.upgrade();
-                let st_up = op.actor_state_weak.upgrade();
-                let _ = super::ewar_cooldowns::persist_cooldown_payload_with_gate(
+                if let Some(commit) = super::module_cooldowns::persist_cooldown_payload_with_gate_in_db(
                     op.solar_system_id,
                     &op.cooldown_persist_gate,
-                    bp_up.as_deref(),
-                    st_up.as_deref(),
                     payload,
-                );
+                ) {
+                    if let Some(tx) = op.cmd_tx_weak.as_ref().and_then(|w| w.upgrade()) {
+                        let _ = tx.try_send(super::SystemCommand::ApplyPersistedCooldownCommit {
+                            commit,
+                            reply: None,
+                        });
+                    }
+                }
             }
             (op.post_hook)(op.solar_system_id, op.char_id, op.cycle, op.ewar_snap);
         }

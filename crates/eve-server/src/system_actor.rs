@@ -1310,6 +1310,7 @@ impl SystemRegistry {
             ballpark_shared, actor_state_shared, initial_post_unlock_ops, staged_claims: _,
         } = prepared;
         let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
+        let cmd_tx_weak_actor = cmd_tx.downgrade();
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
         let event_tx_actor = event_tx.clone();
         let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
@@ -2210,7 +2211,7 @@ impl SystemRegistry {
                 let deact_mutated = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
                     solar_system_id, &mut actor_st, &mut cmd_post_unlock_ops,
                     raw_hook_cmd, post_hook_cmd, &cooldown_persist_gate_actor,
-                    Some(&ballpark_actor), Some(&actor_state_actor), post_tidi_cmd,
+                    Some(&cmd_tx_weak_actor), post_tidi_cmd,
                 );
                 if deact_mutated || cmd_post_unlock_ops.has_deactivation_hook() {
                     let prev_view = { view_tx_actor.borrow().clone() };

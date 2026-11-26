@@ -2190,3 +2190,68 @@ async fn current_thread_actor_decloak_spawns_cross_system_purge_without_45s_dead
         while h_b.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).is_some() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
     }).await.expect("cross-system purge must complete asynchronously on current_thread");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_live_stop_wake_race_flushes_and_allows_rehydrate() {
+    let ctx = Arc::new(test_ctx());
+    let (sys_id, s1, m1, m2, tid, now) = (30_000_142_u32, 100_998_101_i64, 100_998_102_i64, 100_998_103_i64, 11_370_u32, ctx.now_unix_secs() as f64);
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(s1, singleton_item(s1, 587, 90_000_001, sys_id as i64, InventoryFlag::None)); });
+    let spawn_dead = |ctx: Arc<ServerContext>, mid: i64, delay: f64| std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ctx.systems.get_or_spawn(sys_id).cmd_sender().send(crate::system_actor::SystemCommand::RecordModuleCooldown {
+                ship_id: s1, module_id: mid, module_type_id: tid, now_unix_f64: now, delay_s: delay, tidi_factor: 1.0, has_tidi_history: false, reply: tx,
+            }).await.unwrap();
+            let _unpersisted = rx.await.unwrap().unwrap();
+        });
+    }).join().unwrap();
+    spawn_dead(Arc::clone(&ctx), m1, 30.0);
+    let (_stopped, woke) = tokio::join!(ctx.systems.stop_system(sys_id), ctx.systems.wake_for_session_arrival_async(sys_id, crate::system_actor::SessionArrivalWakeReason::Undock));
+    let h1 = woke.unwrap();
+    assert!(h1.module_reactivation_cooldown(&(s1, m1, tid)).is_some_and(|e| e.delay_s >= 29.0));
+    h1.record_module_cooldown(s1, m2, tid, now, 25.0, 1.0, false).await.unwrap();
+    ctx.systems.rehydrate_active_system_cooldowns_from_db();
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(cold.contains_key(&(s1, m1, tid)) && cold.contains_key(&(s1, m2, tid)));
+    drop(h1);
+    assert!(ctx.systems.stop_system(sys_id).await);
+    spawn_dead(Arc::clone(&ctx), m2 + 1, 20.0);
+    let h2 = ctx.systems.wake_for_session_arrival_async(sys_id, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    assert!(h2.module_reactivation_cooldown(&(s1, m2 + 1, tid)).is_some_and(|e| e.delay_s >= 19.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hydrate_server_runtime_preserves_ticked_tidi_cooldown_and_removed_row() {
+    use eve_db::sqlite_store::system_checkpoint::{ensure_system_checkpoint_schema, replace_system_checkpoints_for_kind, KIND_MODULE_COOLDOWNS};
+    let ctx = test_ctx();
+    let t0 = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+    let (sys_id, s1, m_act, m_rm, m_exp, tid, now) = (30_000_142_u32, 100_998_201_i64, 100_998_202_i64, 100_998_203_i64, 100_998_204_i64, 11_370_u32, t0 as f64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.owner_notes.insert(-(7_500_000_000_000 + i64::from(sys_id)), eve_db::OwnerNoteRecord { note_id: -(7_500_000_000_000 + i64::from(sys_id)), character_id: -75, item_id: i64::from(sys_id), label: format!("tidi:{sys_id}"), note: "0.5".into(), timestamp_unix: t0 });
+        snap.items.insert(s1, singleton_item(s1, 587, 90_000_001, sys_id as i64, InventoryFlag::None));
+    });
+    let h = ctx.systems.get_or_spawn(sys_id);
+    h.record_module_cooldown(s1, m_act, tid, now, 20.0, 0.5, true).await.unwrap();
+    h.record_module_cooldown(s1, m_rm, tid, now, 25.0, 0.5, true).await.unwrap();
+    assert!(h.remove_module_cooldown((s1, m_rm, tid)).await.unwrap());
+    for _ in 0..20 { let _ = h.step_manual(1.0).await.unwrap(); }
+    assert!((h.sim_elapsed_secs() - 10.0).abs() < 1e-6);
+    let rows = vec![
+        (crate::system_actor::module_cooldown_checkpoint_key(s1, m_act, tid), ((s1, m_act, tid), cd_entry(now, 20.0, sys_id))),
+        (crate::system_actor::module_cooldown_checkpoint_key(s1, m_rm, tid), ((s1, m_rm, tid), cd_entry(now, 25.0, sys_id))),
+        (crate::system_actor::module_cooldown_checkpoint_key(s1, m_exp, tid), ((s1, m_exp, tid), cd_entry(now - 200.0, 5.0, sys_id))),
+    ];
+    ctx.db.with_sqlite_conn(|c| { ensure_system_checkpoint_schema(c)?; replace_system_checkpoints_for_kind(c, sys_id, KIND_MODULE_COOLDOWNS, &rows, t0) }).unwrap();
+    ctx.hydrate_server_runtime_from_db();
+    let live = h.module_reactivation_cooldown(&(s1, m_act, tid)).unwrap();
+    assert!((live.delay_s - (h.sim_elapsed_secs() - live.recorded_sys_sim_s) - 10.0).abs() < 1e-6);
+    assert!(h.module_reactivation_cooldown(&(s1, m_rm, tid)).is_none());
+    let cold_pre = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(cold_pre.len() == 1 && cold_pre.contains_key(&(s1, m_act, tid)));
+    drop(h);
+    assert!(ctx.systems.stop_system(sys_id).await);
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(cold.len() == 1 && cold.get(&(s1, m_act, tid)).is_some_and(|e| (e.delay_s - 10.0).abs() < 1e-6));
+}

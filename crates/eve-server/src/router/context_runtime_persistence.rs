@@ -1011,12 +1011,12 @@ impl ServerContext {
                     &self.db,
                     Some(self.sde.as_ref()),
                 );
+                self.systems.rehydrate_active_system_cooldowns_from_db();
                 crate::system_actor::migrate_and_prune_module_cooldowns_in_db(
                     &self.systems,
                     &self.db,
                     self.now_unix_secs() as f64,
                 );
-                self.systems.rehydrate_active_system_cooldowns_from_db();
                 self.retire_legacy_runtime_monolith_in_db();
                 return;
             }

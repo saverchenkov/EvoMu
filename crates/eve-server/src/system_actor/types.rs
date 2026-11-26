@@ -1841,6 +1841,16 @@ pub enum SystemCommand {
         module_id: i64,
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    ApplyLoadingCooldownTransitions {
+        tidi_factor: f64,
+        has_tidi_history: bool,
+        transitions: Vec<super::module_cooldowns::PendingCooldownTransition>,
+        reply: oneshot::Sender<Result<(bool, Option<super::ModuleCooldownPersistPayload>), String>>,
+    },
+    ApplyPersistedCooldownCommit {
+        commit: super::module_cooldowns::PersistedCooldownCommit,
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },

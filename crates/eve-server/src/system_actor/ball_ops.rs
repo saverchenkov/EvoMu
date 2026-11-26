@@ -169,6 +169,7 @@ fn run_direct_ball_op_on_current_thread<R>(
             ctx.actor_st.has_tidi_history = true;
         }
         let out = op(&mut ctx);
+        let cmd_tx_weak = handle.cmd_tx.downgrade();
         let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
             handle.solar_system_id,
             &mut actor_st,
@@ -176,8 +177,7 @@ fn run_direct_ball_op_on_current_thread<R>(
             raw_hook,
             post_hook,
             &handle.cooldown_persist_gate,
-            Some(&handle.ballpark),
-            Some(&handle.actor_state),
+            Some(&cmd_tx_weak),
             tidi,
         );
         protection::sync_active_module_ships_cache(

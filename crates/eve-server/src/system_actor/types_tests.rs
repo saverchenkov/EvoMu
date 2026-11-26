@@ -540,6 +540,12 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ClearModuleReloadSimDeadline { .. } => {
                 "ClearModuleReloadSimDeadline"
             }
+            SystemCommand::ApplyLoadingCooldownTransitions { .. } => {
+                "ApplyLoadingCooldownTransitions"
+            }
+            SystemCommand::ApplyPersistedCooldownCommit { .. } => {
+                "ApplyPersistedCooldownCommit"
+            }
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -1036,6 +1042,21 @@ fn system_command_all_variants_construct_and_match() {
             module_id: 10,
             reply: oneshot::channel().0,
         },
+        SystemCommand::ApplyLoadingCooldownTransitions {
+            tidi_factor: 1.0,
+            has_tidi_history: false,
+            transitions: Vec::new(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ApplyPersistedCooldownCommit {
+            commit: crate::system_actor::module_cooldowns::PersistedCooldownCommit {
+                epoch: 1,
+                seq: 1,
+                boot_db_pending_merge: false,
+                merged_from_db: HashMap::new(),
+            },
+            reply: None,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -1048,9 +1069,9 @@ fn system_command_all_variants_construct_and_match() {
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
     if cfg!(any(test, feature = "testkit")) {
-        assert_eq!(tags.len(), 135);
+        assert_eq!(tags.len(), 137);
     } else {
-        assert_eq!(tags.len(), 134);
+        assert_eq!(tags.len(), 136);
     }
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
@@ -1082,9 +1103,11 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[114], "TestHelperFighterOp");
     assert_eq!(tags[115], "UpsertProjectedEwar");
     assert_eq!(tags[132], "ClearModuleReloadSimDeadline");
-    assert_eq!(tags[133], "ShutdownActor");
+    assert_eq!(tags[133], "ApplyLoadingCooldownTransitions");
+    assert_eq!(tags[134], "ApplyPersistedCooldownCommit");
+    assert_eq!(tags[135], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[134], "TestAccess");
+    assert_eq!(tags[136], "TestAccess");
 }
 
 #[test]

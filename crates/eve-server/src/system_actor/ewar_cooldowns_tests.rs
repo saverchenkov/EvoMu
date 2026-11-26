@@ -178,9 +178,9 @@ async fn cooldown_persist_gate_rejects_stale_out_of_order_writes_and_keeps_dirty
 
     let payload_seq2 = send_rm(&h_jita, key).await.expect("had entry");
     assert!(payload_seq2.seq > payload_seq1.seq);
-    assert!(persist_cooldown_payload_with_gate(jita, &h_jita.cooldown_persist_gate, None, Some(&h_jita.actor_state), payload_seq2));
+    assert!(h_jita.persist_cooldown_payload(payload_seq2));
     assert!(!h_jita.actor_state.read().unwrap().module_cooldown_checkpoint_dirty);
-    assert!(!persist_cooldown_payload_with_gate(jita, &h_jita.cooldown_persist_gate, None, Some(&h_jita.actor_state), payload_seq1));
+    assert!(!h_jita.persist_cooldown_payload(payload_seq1));
     assert!(load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
 }
 
@@ -192,18 +192,18 @@ fn boot_with_db_read_unsafe_merges_existing_cold_cooldowns_without_wiping() {
 
     reg.seed_cold_system_module_cooldown_in_db(&db, jita, k_pre, cd_entry(now, 25.0, jita, 0.0));
     let gate = reg.cooldown_persist_gate(jita);
-    let actor_state = Arc::new(RankedRwLock::new(SystemActorState {
+    let mut st = SystemActorState {
         db_opt: Some(Arc::clone(&db)),
         module_cooldown_persist_epoch: gate.bump_epoch(),
         module_cooldowns: ActorModuleCooldownState { boot_db_pending_merge: true, ..Default::default() },
         ..Default::default()
-    }));
-    let payload = record_module_cooldown_in_actor_state(jita, &mut actor_state.write().unwrap(), k_new.0, k_new.1, k_new.2, now, 15.0, 1.0, false).expect("payload generated");
-    assert!(persist_cooldown_payload_with_gate(jita, &gate, None, Some(&actor_state), payload));
+    };
+    let payload = record_module_cooldown_in_actor_state(jita, &mut st, k_new.0, k_new.1, k_new.2, now, 15.0, 1.0, false).expect("payload generated");
+    let commit = persist_cooldown_payload_with_gate_in_db(jita, &gate, payload).expect("db commit");
+    assert!(apply_persisted_cooldown_commit_to_state(&mut st, &commit));
 
     let db_rows = load_cold_system_module_cooldowns_from_db(&db, jita);
     assert!(db_rows.contains_key(&k_pre) && db_rows.contains_key(&k_new));
-    let st = actor_state.read().unwrap();
     assert!(st.module_cooldowns.reactivation_cooldowns.contains_key(&k_pre) && st.module_cooldowns.reactivation_cooldowns.contains_key(&k_new));
     assert!(!st.module_cooldowns.boot_db_pending_merge && !st.module_cooldown_checkpoint_dirty);
 }
@@ -378,7 +378,8 @@ async fn rehydrate_active_cooldowns_on_ticked_actor_and_migration_max_merge_prun
     let h = reg.get_or_spawn(jita);
     step_n(&h, 25).await;
     assert!((h.sim_elapsed_secs() - 25.0).abs() < 1e-6);
-    reg.seed_cold_system_module_cooldown_in_db(&db, jita, (s_live, m_live, cloak_tid), cd_entry(now, 12.0, jita, 0.0));
+    let k_live = (s_live, m_live, cloak_tid);
+    db.with_sqlite_conn(|c| { ensure_system_checkpoint_schema(c)?; replace_system_checkpoints_for_kind(c, jita, KIND_MODULE_COOLDOWNS, &[(module_cooldown_checkpoint_key(s_live, m_live, cloak_tid), (k_live, cd_entry(now, 12.0, jita, 0.0)))], now as u64) }).unwrap();
     reg.rehydrate_active_system_cooldowns_from_db();
     let rehyd = h.module_reactivation_cooldown(&(s_live, m_live, cloak_tid)).expect("anchored at live sim clock");
     assert!((rehyd.recorded_sys_sim_s - 25.0).abs() < 1e-6 && (rehyd.delay_s - 12.0).abs() < 1e-6);
@@ -427,7 +428,7 @@ async fn stopping_to_cold_with_empty_pending_bumps_epoch_and_rejects_stale_persi
     h.replace_module_cooldowns_sync(HashMap::new()).unwrap();
     drop(h);
     assert!(reg.stop_system(jita).await);
-    assert!(!persist_cooldown_payload_with_gate(jita, &reg.cooldown_persist_gate(jita), None, None, stale_payload));
+    assert!(persist_cooldown_payload_with_gate_in_db(jita, &reg.cooldown_persist_gate(jita), stale_payload).is_none());
     assert!(load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
 }
 
@@ -512,9 +513,40 @@ async fn rehydrate_clean_seq_zero_actor_after_stop_restart_preserves_seeded_sqli
     assert!(reg.stop_system(jita).await);
     let h = reg.get_or_spawn(jita);
     assert_eq!(h.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
-    reg.seed_cold_system_module_cooldown_in_db(&db, jita, k, cd_entry(now, 25.0, jita, 0.0));
+    db.with_sqlite_conn(|c| { ensure_system_checkpoint_schema(c)?; replace_system_checkpoints_for_kind(c, jita, KIND_MODULE_COOLDOWNS, &[(module_cooldown_checkpoint_key(k.0, k.1, cloak_tid), (k, cd_entry(now, 25.0, jita, 0.0)))], now as u64) }).unwrap();
     let r = Arc::clone(&reg);
     tokio::task::spawn_blocking(move || r.rehydrate_active_system_cooldowns_from_db()).await.unwrap();
     assert!(h.module_reactivation_cooldown(&k).is_some_and(|e| e.delay_s >= 24.0));
     assert!(load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dirty_removal_survives_rehydrate_and_locked_unknown_char_deact_preserved() {
+    use crate::system_actor::post_unlock::{DeferredDeactivationHookOp, PostUnlockIntent, PostUnlockOps};
+    let (reg, db, _sde) = test_registry_with_db();
+    let (jita, tid, now) = (30_000_142_u32, 11_370_u32, db.clock().now_unix_secs() as f64);
+    let (k_rm, k_exp) = ((548_001, 648_001, tid), (548_002, 648_002, tid));
+    seed_ships_in_db(&db, jita, &[k_rm.0, k_exp.0]);
+    let h = reg.get_or_spawn(jita);
+    let _ = send_rec(&h, k_rm, now, 30.0).await;
+    h.flush_module_cooldown_checkpoint().await.unwrap();
+    assert!(send_rm(&h, k_rm).await.is_some());
+    let rows = vec![
+        (module_cooldown_checkpoint_key(k_rm.0, k_rm.1, tid), (k_rm, cd_entry(now, 30.0, jita, 0.0))),
+        (module_cooldown_checkpoint_key(k_exp.0, k_exp.1, tid), (k_exp, cd_entry(now - 50.0, 5.0, jita, 0.0))),
+    ];
+    db.with_sqlite_conn(|c| { ensure_system_checkpoint_schema(c)?; replace_system_checkpoints_for_kind(c, jita, KIND_MODULE_COOLDOWNS, &rows, now as u64) }).unwrap();
+    let (r, db_c) = (Arc::clone(&reg), Arc::clone(&db));
+    tokio::task::spawn_blocking(move || { r.rehydrate_active_system_cooldowns_from_db(); migrate_and_prune_module_cooldowns_in_db(&r, &db_c, now); }).await.unwrap();
+    assert!(h.module_reactivation_cooldown(&k_rm).is_none() && load_cold_system_module_cooldowns_from_db(&db, jita).is_empty());
+
+    let mut ops = PostUnlockOps::default();
+    ops.intents.push(PostUnlockIntent::DeactivationHook(DeferredDeactivationHookOp { solar_system_id: jita, char_id: None, fallback_owner_id: None, cycle: ActiveModuleCycle { ship_id: k_rm.0, module_id: k_rm.1, module_type_id: tid, ..Default::default() } }));
+    let raw: ModuleDeactivationHook = Arc::new(|_, _, _| {});
+    let post: ModuleDeactivationPostUnlockHook = Arc::new(|_, _, _, _| {});
+    let (mut dummy_st, cmd_w) = (SystemActorState::default(), h.cmd_sender().downgrade());
+    db.with_mut_snapshot(|_| {
+        let _ = finalize_post_unlock_ops_deactivations_in_actor(jita, &mut dummy_st, &mut ops, Some(Arc::clone(&raw)), Some((raw, post)), &h.cooldown_persist_gate, Some(&cmd_w), 1.0);
+    });
+    assert!(matches!(ops.intents.as_slice(), [PostUnlockIntent::DeactivationHook(d)] if d.char_id.is_none()));
 }
