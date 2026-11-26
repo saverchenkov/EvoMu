@@ -70,6 +70,7 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
         system_step_hook: Arc::new(RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+        actor_flush_thread: Arc::new(std::sync::Mutex::new(None)),
         cooldown_persist_gate: Arc::new(super::CooldownPersistGate::default()),
     }
 }

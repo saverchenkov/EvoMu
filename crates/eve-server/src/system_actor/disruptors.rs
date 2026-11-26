@@ -1,6 +1,6 @@
 //! Mobile warp disruptor anchoring and ECM burst area-of-effect execution.
 
-use crate::system_actor::{ActiveModuleCycle, PendingAnchoringDisruptor};
+use crate::system_actor::{ActiveModuleCycle, PendingAnchoringDisruptor, SystemCommand};
 use eve_destiny::{Ball, BallId, Ballpark, MovementMode};
 use eve_sde::SdeRegistry;
 use glam::DVec3;
@@ -191,77 +191,32 @@ pub(crate) fn handle_apply_ecm_burst(
 
 impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let tidi = self.tidi_factor();
-        let (deact_guard, ticket) = {
-            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
-                &self.module_deactivation_hook,
-                &self.module_deactivation_post_unlock_hook,
-            );
-            let deact_guard = super::ewar_cooldowns::active_sink_hook(raw_hook.as_ref(), post_hook.as_ref());
-            let mut ops = super::post_unlock::PostUnlockOps::default();
-            let (db_opt_c, sde_opt_c) = {
-                let super::SystemActorState {
-                    active_module_cycles,
-                    external_active_modules,
-                    base_scramble_strengths,
-                    base_core_strengths,
-                    db_opt,
-                    sde_opt,
-                    ..
-                } = &mut *st;
-                if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
-                    let rem = active_module_cycles.remove(pos);
-                    super::cycles::cleanup_removed_module_cycle_collecting(
-                        &mut bp,
-                        &rem,
-                        db_opt,
-                        &mut ops,
-                    );
-                    super::cycles_tackle::reconcile_tackle_and_bubbles_collecting(
-                        self.solar_system_id,
-                        &mut bp,
-                        active_module_cycles,
-                        base_scramble_strengths,
-                        base_core_strengths,
-                        db_opt,
-                        deact_guard.as_ref(),
-                        &mut ops,
-                    );
-                }
-                super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-                super::protection::sync_active_module_ships_cache(
-                    active_module_cycles,
-                    external_active_modules,
-                    &self.active_module_ships,
-                );
-                (db_opt.clone(), sde_opt.clone())
-            };
-            let cmd_tx_weak = self.cmd_tx.downgrade();
-            let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-                self.solar_system_id,
-                &mut st,
-                &mut ops,
-                raw_hook.clone(),
-                post_hook,
-                &self.cooldown_persist_gate,
-                Some(&cmd_tx_weak),
-                tidi,
-            );
-            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
-            self.publish_view_from(&bp, Some(&st));
-            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                self,
-                db_opt_c.as_ref(),
-                sde_opt_c.as_ref(),
-                ops,
-                caller_can_wait,
-            );
-            (raw_hook, ticket)
-        };
-        super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
+        if !eve_db::lock_rank::held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let _ = self.cmd_tx.try_send(SystemCommand::TryRemoveModuleCycle {
+                ship_id,
+                module_id,
+                wait_for_post_unlock: false,
+                reply: tx,
+            });
+            return;
+        }
+        let wait_for_post_unlock = super::post_unlock::caller_can_wait_for_handle(self);
+        let _ = super::ball_ops::dispatch_actor_sync_reply_with_deadline(
+            self,
+            "TryRemoveModuleCycle",
+            super::ball_ops::ACTOR_CMD_TIMEOUT,
+            (ship_id, module_id, wait_for_post_unlock),
+            |(ship_id, module_id, wait_for_post_unlock), reply| SystemCommand::TryRemoveModuleCycle {
+                ship_id,
+                module_id,
+                wait_for_post_unlock,
+                reply,
+            },
+            |ctx, (ship_id, module_id, _)| {
+                super::handle_cmds::try_remove_module_cycle_in_ctx(ctx, ship_id, module_id);
+            },
+        );
     }
 }
 

@@ -946,7 +946,7 @@ async fn activate_single_fighter_ability(
                         effective_module: synth,
                     },
                 );
-                sys_handle.try_recompute_combat_attributes(tid, |cs| {
+                sys_handle.try_recompute_combat_attributes(tid, move |cs| {
                     cs.tp_sig_multiplier = Some(paint_mult);
                 });
                 DamageVector::default()
@@ -1186,11 +1186,13 @@ async fn activate_single_fighter_ability(
                     } else {
                         attr(2151).or_else(|| attr(2124)).unwrap_or(400.0)
                     };
-                    if !sys_handle.try_recompute_combat_attributes(fighter_ball_id, |cs| {
-                        cs.capture_missing_baselines(&fighter_ball);
+                    let sig_mult_opt = (ability_id == 13)
+                        .then(|| (1.0 + attr(2225).unwrap_or(-80.0) / 100.0).clamp(0.10, 0.90));
+                    let fighter_ball_cl = fighter_ball.clone();
+                    if !sys_handle.try_recompute_combat_attributes(fighter_ball_id, move |cs| {
+                        cs.capture_missing_baselines(&fighter_ball_cl);
                         cs.external_velocity_multiplier = Some(1.0 + speed_bonus_pct / 100.0);
-                        if ability_id == 13 {
-                            let sig_mult = (1.0 + attr(2225).unwrap_or(-80.0) / 100.0).clamp(0.10, 0.90);
+                        if let Some(sig_mult) = sig_mult_opt {
                             cs.external_sig_multiplier = Some(sig_mult);
                         }
                     }) {
@@ -1792,7 +1794,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
     };
     if matches!(ability_id, 4 | 9 | 13) || slot_id == 1 {
         if out.was_mwd {
-            let _ = sys_handle.try_recompute_combat_attributes(fighter_ball_id, |cs| {
+            let _ = sys_handle.try_recompute_combat_attributes(fighter_ball_id, move |cs| {
                 cs.external_velocity_multiplier = None;
                 if ability_id == 13 {
                     cs.external_sig_multiplier = None;

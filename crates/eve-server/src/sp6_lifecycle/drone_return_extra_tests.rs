@@ -2305,30 +2305,40 @@ async fn unhydrated_unsafe_read_wake_hydrates_for_warp_disconnect_remove_logoff_
     drone_test_helpers::seed_active_drones(&ctx2, seed_drones());
     assert!(ctx2.systems.stop_system(sys_id).await);
     let (owner_sess, kw) = (SessionState { user_id: Some(base_ch.user_id), character_id: Some(owner_char), ship_id: Some(owner_ship), solar_system_id: Some(sys_id), ..Default::default() }, HashMap::new());
-    async fn wake_unsafe(c: &ServerContext, sys_id: u32) -> crate::system_actor::SystemHandle {
+    async fn wake_unsafe_with_balls(
+        c: &ServerContext,
+        sys_id: u32,
+        balls: &[(i64, u32, DVec3)],
+    ) -> crate::system_actor::SystemHandle {
         let (rtx, holder) = hold_db_lock(&c.db).await;
         let h = c.db.with_snapshot(|_| c.systems.get_or_spawn(sys_id));
         let _ = h.get_ball_snapshot(0).await;
+        for &(id, tid, pos) in balls {
+            spawn_ball(c, sys_id, id, tid, pos);
+        }
         assert!(h.view().active_drones_needs_sqlite_hydration && h.view().active_drones_in_space.is_empty());
         let _ = rtx.send(()); holder.await.unwrap(); h
     }
 
-    wake_unsafe(&ctx2, sys_id).await;
+    wake_unsafe_with_balls(&ctx2, sys_id, &[]).await;
     assert!(super::super::safe_logoff_blocking_space_conditions(&ctx2, owner_char, owner_ship, sys_id).contains(&"SAFE_LOGOFF_DRONES_IN_SPACE") && ctx2.systems.stop_system(sys_id).await);
 
-    let h = wake_unsafe(&ctx2, sys_id).await;
-    spawn_ball(&ctx2, sys_id, owner_ship, 593, DVec3::ZERO);
+    let h = wake_unsafe_with_balls(&ctx2, sys_id, &[(owner_ship, 593, DVec3::ZERO)]).await;
     assert!(h.view().active_drones_needs_sqlite_hydration && handle_npcs_drones(&ctx2, &mut owner_sess.clone(), "entity", "CmdSalvage", &[], &kw).await.unwrap().unwrap_err().code == "TargetRequired" && ctx2.systems.stop_system(sys_id).await);
 
-    let h = wake_unsafe(&ctx2, sys_id).await;
-    spawn_ball(&ctx2, sys_id, owner_ship, 593, DVec3::ZERO); spawn_ball(&ctx2, sys_id, d_aban, 2454, DVec3::new(100.0, 0.0, 0.0));
+    let h = wake_unsafe_with_balls(
+        &ctx2,
+        sys_id,
+        &[(owner_ship, 593, DVec3::ZERO), (d_aban, 2454, DVec3::new(100.0, 0.0, 0.0))],
+    )
+    .await;
     assert!(h.view().active_drones_needs_sqlite_hydration && handle_npcs_drones(&ctx2, &mut owner_sess.clone(), "entity", "CmdReconnectToDrones", &[PyRep::List(vec![PyRep::Integer(d_aban)])], &kw).await.unwrap().is_ok() && ctx2.systems.stop_system(sys_id).await);
 
-    wake_unsafe(&ctx2, sys_id).await;
+    wake_unsafe_with_balls(&ctx2, sys_id, &[]).await;
     super::disconnect_drones_for_ship_on_warp_sync(&ctx2, owner_char, owner_ship, sys_id);
     assert!(drone_test_helpers::active_drone(&ctx2, d_ctrl).unwrap().parent_ship_id == 0 && ctx2.systems.stop_system(sys_id).await);
 
-    wake_unsafe(&ctx2, sys_id).await;
+    wake_unsafe_with_balls(&ctx2, sys_id, &[]).await;
     assert_eq!(ctx2.systems.remove_active_drone_across_systems_sync(d_salv).unwrap().ball_id, d_salv);
     assert!(ctx2.systems.stop_system(sys_id).await);
 }

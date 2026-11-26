@@ -1921,7 +1921,7 @@ pub(crate) async fn commit_post_cycle_activation_effects(
         ctx.upsert_projected_ewar_on_ship(ship_id, target_id, effect);
         if mod_type.group_id == 379 {
             let tp_mult = ctx.effective_target_painter_multiplier(target_id);
-            sys.try_recompute_combat_attributes(target_id, |t_cs| {
+            sys.try_recompute_combat_attributes(target_id, move |t_cs| {
                 t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
             });
         }

@@ -1693,12 +1693,16 @@ pub(crate) fn on_abyssal_boundary_death_hook(
     });
 
     if let Some((origin_sys, trace_ids, room_balls)) = final_cleanup {
-        for rbid in room_balls {
-            crate::system_actor::try_remove_ball_for_db(&ctx.db, solar_system_id, rbid);
+        if let Some(sys_h) = ctx.systems.get_handle(solar_system_id) {
+            for rbid in room_balls {
+                let _ = sys_h.remove_ball_sync(rbid);
+            }
         }
         if origin_sys != solar_system_id {
-            for tid in trace_ids {
-                crate::system_actor::try_remove_ball_for_db(&ctx.db, origin_sys, tid);
+            if let Some(origin_h) = ctx.systems.get_handle(origin_sys) {
+                for tid in trace_ids {
+                    let _ = origin_h.remove_ball_sync(tid);
+                }
             }
         }
     }

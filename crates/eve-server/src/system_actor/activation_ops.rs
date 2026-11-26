@@ -1340,70 +1340,66 @@ impl SystemHandle {
             || view.external_active_modules.contains(&(ship_id, module_id))
     }
 
-    fn mutate_external_active_modules_sync<R>(
-        &self,
-        f: impl FnOnce(&mut super::SystemActorState) -> (bool, R),
-    ) -> R {
-        let (changed, res) = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let (changed, res) = f(&mut st);
-            if changed {
-                super::protection::sync_active_module_ships_cache(
-                    &st.active_module_cycles,
-                    &st.external_active_modules,
-                    &self.active_module_ships,
-                );
-            }
-            (changed, res)
-        };
-        if changed {
-            self.publish_view();
+    fn enqueue_external_active_module_op(&self, op: super::ExternalActiveModuleOp) {
+        if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let _ = self
+                .cmd_tx
+                .try_send(SystemCommand::MutateExternalActiveModule { op, reply: tx });
+            return;
         }
-        res
+        let _ = self.dispatch_external_active_module_op(op);
+    }
+
+    fn dispatch_external_active_module_op(&self, op: super::ExternalActiveModuleOp) -> bool {
+        if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+            return false;
+        }
+        if self.is_on_actor_flush_thread() {
+            if self.cmd_tx.is_closed() {
+                return false;
+            }
+            return super::ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
+                super::handle_cmds::mutate_external_active_module_in_ctx(ctx, op)
+            });
+        }
+        super::ball_ops::dispatch_actor_sync_reply_with_deadline(
+            self,
+            "MutateExternalActiveModule",
+            super::ball_ops::ACTOR_CMD_TIMEOUT,
+            op,
+            |op, reply| SystemCommand::MutateExternalActiveModule { op, reply },
+            super::handle_cmds::mutate_external_active_module_in_ctx,
+        )
+        .unwrap_or(false)
     }
 
     /// Registers an actor-owned external active module entry `(ship_id, module_id)` such as
     /// a mining laser or Entosis Link (`#1486`, `PVE-133`).
     pub fn register_external_active_module_sync(&self, ship_id: BallId, module_id: ItemId) {
-        self.mutate_external_active_modules_sync(|st| {
-            let inserted = st.external_active_modules.insert((ship_id, module_id));
-            (inserted, ())
-        });
+        self.enqueue_external_active_module_op(
+            super::ExternalActiveModuleOp::Register(ship_id, module_id),
+        );
     }
 
     /// Unregisters an external active module entry `(ship_id, module_id)` (`#1486`, `PVE-133`).
+    /// Returns `false` if absent or if synchronous confirmation is unavailable under held locks.
     pub fn unregister_external_active_module_sync(&self, ship_id: BallId, module_id: ItemId) -> bool {
-        let contains = self
-            .actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .external_active_modules
-            .contains(&(ship_id, module_id));
-        if !contains {
-            return false;
-        }
-        self.mutate_external_active_modules_sync(|st| {
-            let removed = st.external_active_modules.remove(&(ship_id, module_id));
-            (removed, removed)
-        })
+        self.dispatch_external_active_module_op(
+            super::ExternalActiveModuleOp::Unregister(ship_id, module_id),
+        )
+    }
+
+    /// Fire-and-forget enqueue variant for unregistering `(ship_id, module_id)` safely under held locks.
+    pub fn enqueue_unregister_external_active_module(&self, ship_id: BallId, module_id: ItemId) {
+        self.enqueue_external_active_module_op(
+            super::ExternalActiveModuleOp::Unregister(ship_id, module_id),
+        );
     }
 
     /// Clears all external active module entries on this system handle (`#1486`, `PVE-133`).
     pub fn clear_external_active_modules_sync(&self) {
-        let is_empty = self
-            .actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .external_active_modules
-            .is_empty();
-        if is_empty {
-            return;
-        }
-        self.mutate_external_active_modules_sync(|st| {
-            let had_entries = !st.external_active_modules.is_empty();
-            st.external_active_modules.clear();
-            (had_entries, ())
-        });
+        self.enqueue_external_active_module_op(super::ExternalActiveModuleOp::ClearAll);
     }
 }
 
@@ -1440,7 +1436,7 @@ impl SystemRegistry {
         module_id: ItemId,
     ) {
         if let Some(h) = self.get_handle(solar_system_id) {
-            let _ = h.unregister_external_active_module_sync(ship_id, module_id);
+            h.enqueue_unregister_external_active_module(ship_id, module_id);
         }
     }
 
@@ -1451,7 +1447,7 @@ impl SystemRegistry {
         module_id: ItemId,
     ) {
         for (_, h) in self.active_system_handles() {
-            let _ = h.unregister_external_active_module_sync(ship_id, module_id);
+            h.enqueue_unregister_external_active_module(ship_id, module_id);
         }
     }
 

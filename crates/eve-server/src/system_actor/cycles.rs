@@ -1962,302 +1962,68 @@ impl SystemHandle {
         now_unix > 0 && self.last_auto_stepped_unix.swap(0, std::sync::atomic::Ordering::SeqCst) == now_unix
     }
 
+    /// Synchronously advances the simulation by `dt` seconds, finalizing deactivations and
+    /// publishing [`SystemView`] before broadcasting `TickBroadcast`.
+    ///
+    /// Requires no ranked locks held by the caller (panics under held locks).
     pub fn try_step_full_tick(&self, dt: f64) -> u64 {
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let tidi = self.tidi_factor();
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let (tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas) =
-            super::post_unlock::begin_tick_charge_reservations(
-                self.solar_system_id, &mut st, &self.completed_post_unlock_seq,
-            );
-        let dt_sim = super::ewar_cooldowns::prepare_tick_cooldowns_in_actor(self, &mut st, dt, tidi);
-        let SystemActorState {
-            active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
-            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
-            sim_elapsed_secs, pending_cycle_actions, tactical_state,
-            pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
-            fit_projections, weapon_cycle_start_modules,
-            module_cooldowns, module_reload_sim_remaining,
-            pending_missile_launches, pending_missile_deploy_fx,
-            active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
-            next_post_unlock_seq, post_unlock_shadows, ..
-        } = &mut *st;
-        let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
-        let dt = dt_sim;
-        super::belts::respawn_due_asteroids_collecting(
-            &mut bp,
-            asteroids,
-            asteroid_templates,
-            sde_opt,
-            db_opt,
-            &mut post_unlock_ops,
-        );
-        sync_player_slim_items(&mut bp, db_opt);
-        if let Some(db) = db_opt.as_ref() {
-            let now_unix = db.clock().now_unix_secs();
-            if now_unix > bp.sim_unix_secs {
-                bp.sim_unix_secs = now_unix;
-            }
-        }
-        let pre_tick_caps = snapshot_player_ship_capacitors(&bp, db_opt.as_ref());
-        let pre_missile_positions =
-            super::missiles::snapshot_missile_positions(&bp, active_guided_missiles);
-        let events = bp.step(dt);
-        super::missiles::flush_pending_missile_deploy_fx(&mut bp, pending_missile_deploy_fx);
-        super::collect_landed_warps_for_post_unlock_with_in_flight(
-            &bp,
-            &events,
-            db_opt,
-            ball_space_entry_epochs,
-            self.has_in_flight_post_unlock() || !post_unlock_ops.is_empty(),
-            &mut post_unlock_ops,
-        );
-        super::clear_landed_warp_tracking_from_events(&bp, &events, warp_state);
-        flush_target_lost_notifications(
-            &bp,
-            &events,
-            db_opt.as_ref(),
-            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-            notify_tx_opt.as_ref(),
-        );
-        let lock_hook_opt = self
-            .target_lock_completed_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if lock_hook_opt.is_some() {
-            for ev in &events {
-                if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
-                    if mode == "locked" {
-                        let _ = super::cycles_tackle::emit_target_lock_completed_collecting(
-                            &bp,
-                            db_opt,
-                            *source_id,
-                            *target_id,
-                            true,
-                            &mut post_unlock_ops,
-                        );
-                    }
-                }
-            }
-        }
-        let next_pu_seq = next_post_unlock_seq.saturating_add(1);
-        let sup_dead = crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
-            &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
-            Some((&mut post_unlock_shadows.abyssal_boundary_ticks, next_pu_seq)),
-            Some((&mut post_unlock_shadows.abyssal_active_clouds, next_pu_seq)),
-            &mut post_unlock_ops,
-        );
-        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(
-            &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
-            pending_notifications_opt.as_ref(), notify_tx_opt.as_ref(),
-            Some((&mut post_unlock_shadows.arena_hazard_ticks, next_pu_seq)), &mut post_unlock_ops,
-        );
-        let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
-        let (raw_hook_tick, post_hook_tick, deact_hook_guard) = super::ewar_cooldowns::read_tick_deactivation_hooks(
-            &self.module_deactivation_hook,
-            &self.module_deactivation_post_unlock_hook,
-        );
-        for ev in &events {
-            if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
-                if mode == "lost" {
-                    super::cycles_tackle::on_target_unlocked_in_actor_collecting(
-                        self.solar_system_id,
-                        &mut bp,
-                        active_module_cycles,
-                        base_scramble_strengths,
-                        base_core_strengths,
-                        db_opt,
-                        *source_id,
-                        Some(*target_id),
-                        deact_hook_guard.as_ref(),
-                        &mut post_unlock_ops,
-                    );
-                }
-            }
-        }
-        let fallback_rng = crate::rng::MechanicRng::default();
-        let rng_ref = mechanic_rng_opt.as_deref().unwrap_or(&fallback_rng);
-        crate::services::mobile_deployables::step_mobile_deployables_in_actor_collecting(
-            &mut bp, active_module_cycles, rng_ref, sde_opt.as_deref(), db_opt.as_ref(),
-            mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
-            Some((&mut post_unlock_shadows.mmju_spool_fired_at, next_post_unlock_seq.saturating_add(1))),
-            Some((&mut post_unlock_shadows.observatory_pings_done, next_post_unlock_seq.saturating_add(1))), &mut post_unlock_ops,
-        );
-        let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        super::post_unlock::step_module_reloads_sim_clock_collecting(
-            module_reload_sim_remaining,
-            Some(&mut module_cooldowns.reload_sim_deadlines),
-            db_opt,
-            dt,
-            tidi,
-            &mut post_unlock_ops,
-        );
-        let mut destroyed = Vec::new();
-        let pending_destroyed = pending_destroyed_balls.clone();
-        super::missiles::step_guided_missiles_in_actor(
-            &mut bp,
-            active_guided_missiles,
-            &pre_missile_positions,
-            rah_incoming_damage,
-            sde_opt,
-            db_opt,
-            pending_cycle_actions,
-            &mut destroyed,
-            Some(&pending_destroyed),
-            dt,
-            Some((&mut post_unlock_shadows.depot_reinforced_until, next_pu_seq)),
-            &mut post_unlock_ops,
-        );
-        destroyed.extend(step_cycles_with_reservations_collecting(
-            self.solar_system_id,
-            &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
-            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
-            pending_missile_launches,
-            mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
-            Some(module_reload_sim_remaining), deact_hook_guard.as_ref(), Some(&pending_destroyed),
-            tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas, Some((post_unlock_shadows, next_pu_seq)), &mut post_unlock_ops,
-        ));
-        super::missiles::flush_pending_missile_launches(
-            &mut bp,
-            pending_missile_launches,
-            active_guided_missiles,
-            pending_missile_deploy_fx,
-            next_missile_ball_id,
-            sde_opt,
-        );
-        super::ewar_cooldowns::record_auto_reload_deadlines_from_actions(
-            pending_cycle_actions, *sim_elapsed_secs, module_cooldowns,
-        );
-        record_player_ship_capacitor_deltas(&bp, &pre_tick_caps, pending_cycle_actions);
-        flush_pending_cycle_damage_notifications_with_ballpark(
-            &bp,
-            sde_opt.as_deref(),
-            db_opt.as_ref(),
-            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-            notify_tx_opt.as_ref(),
-            pending_cycle_actions,
-        );
-        for bid in sup_dead.into_iter().chain(pg_dead) {
-            destroyed.push((bid, None));
-            pending_destroyed.record_one(bid, None);
-        }
-        let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
-            &mut bp,
-            sde_opt.as_deref(),
-            db_opt.as_ref(),
-            self.solar_system_id,
-            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-            notify_tx_opt.as_ref(),
-        );
-        for bid in zk_dead {
-            destroyed.push((bid, None));
-            pending_destroyed.record_one(bid, None);
-        }
-        let dead_ids: Vec<BallId> = destroyed.iter().map(|&(bid, _)| bid).collect();
-        if !dead_ids.is_empty() {
-            external_active_modules.retain(|(sid, _)| !dead_ids.contains(sid));
-            for &did in &dead_ids {
-                active_drone_miners.remove(&did);
-                drone_next_ready_unix.remove(&did);
-            }
-        }
-        teardown_attacker_locks_and_cycles_for_destroyed_balls_collecting(
-            self.solar_system_id,
-            &mut bp,
-            active_module_cycles,
-            base_scramble_strengths,
-            base_core_strengths,
-            db_opt,
-            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-            notify_tx_opt.as_ref(),
-            deact_hook_guard.as_ref(),
-            &dead_ids,
-            &mut post_unlock_ops,
-        );
-        for &(target_ball_id, _) in &destroyed {
-            crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
-                &mut bp,
-                db_opt,
-                tactical_state.as_ref(),
-                target_ball_id,
-            );
-            if let Some(db) = db_opt.as_ref() {
-                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(&mut bp, db, self.solar_system_id, target_ball_id, &mut post_unlock_ops);
-            }
-        }
-        let (drained_destroyed, destroyed_lease) = pending_destroyed.checkout_for_step();
-        let has_destroyed = !drained_destroyed.is_empty();
-        let mut death_futs = Vec::new();
-        for &(target_ball_id, owner_char_id) in &drained_destroyed {
-            if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
-                death_futs.push(fut);
-            }
-        }
-        let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let step_fut = step_hook_guard.map(|hook| hook(self.solar_system_id, dt, drained_destroyed));
-        if db_opt.is_some() {
-            for (&bid, cs) in &bp.combat_states {
-                if bp.balls.contains_key(&bid)
-                    && !bp.is_static_ball(bid)
-                    && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
-                {
-                    post_unlock_ops.push_ship_combat_hp(super::post_unlock::CombatHpDbUpdate {
-                        ball_id: bid,
-                        combat_state: cs.clone(),
-                        expected_system: Some(self.solar_system_id),
-                        require_persisted_entity: true,
-                    });
-                }
-            }
-        }
-        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        {
-            let mut mod_guard = self.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
-            mod_guard.clear();
-            mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
-            mod_guard.extend(external_active_modules.iter().map(|&(sid, _)| sid));
-        }
-        let tick = bp.current_tick;
-        let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
-        let _ = self.finalize_tick_post_unlock_deactivations(
-            &mut st, &mut post_unlock_ops, raw_hook_tick.clone(), post_hook_tick, tidi,
-        );
-        let ops_was_empty = post_unlock_ops.is_empty();
-        super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
-        self.publish_view_from(&bp, Some(&st));
-        let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
+        let wait_for_post_unlock = super::post_unlock::caller_can_wait_for_handle(self);
+        let Ok(out) = super::ball_ops::dispatch_actor_step_full_tick_sync(
             self,
-            &mut st,
-            post_unlock_ops,
-            caller_can_wait,
-        );
-        let waited_sync = wait_ticket.is_wait_worker();
-        drop(st);
-        let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
-        let warp_events = broadcast.events.clone();
-        crate::system_actor::send_tick_broadcast_sequenced_owned(
-            &self.event_tx,
-            &broadcast_seq_gate,
-            broadcast,
-        );
-        drop(bp);
-        super::post_unlock::finish_post_unlock_after_unlock(
-            self,
-            raw_hook_tick.as_ref(),
-            lock_hook_opt.as_ref(),
-            wait_ticket,
-        );
-        self.record_warp_stops_from_events(&warp_events);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            "StepFullTick",
+            super::ball_ops::ACTOR_CMD_TIMEOUT,
+            dt,
+            move |dt, reply| SystemCommand::StepFullTick {
+                dt,
+                wait_for_post_unlock,
+                reply,
+            },
+            move |ctx, dt| {
+                let gate = std::sync::Arc::clone(&ctx.actor_st.broadcast_seq_gate);
+                let env = super::handle_cmds::TickEnvRefs::from_handle(self, gate);
+                super::handle_cmds::step_full_tick_in_ctx(
+                    &env,
+                    ctx.ballpark,
+                    ctx.actor_st,
+                    ctx.post_unlock_ops,
+                    dt,
+                    wait_for_post_unlock,
+                )
+            },
+        ) else {
+            return self.view().current_tick;
+        };
+        self.record_warp_stops_from_events(&out.warp_events);
+        if let Ok(rt_handle) = tokio::runtime::Handle::try_current() {
+            let hook_guard = self
+                .npc_death_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut death_futs = Vec::new();
+            for &(target_ball_id, owner_char_id) in &out.drained_destroyed {
+                if let Some(fut) = on_ball_destroyed_by_damage(
+                    self.solar_system_id,
+                    target_ball_id,
+                    owner_char_id,
+                    hook_guard.as_ref(),
+                ) {
+                    death_futs.push(fut);
+                }
+            }
+            let step_hook_guard = self
+                .system_step_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let step_fut =
+                step_hook_guard.map(|hook| hook(self.solar_system_id, out.dt_sim, out.drained_destroyed));
+            let destroyed_lease = out.destroyed_lease;
             if !death_futs.is_empty() || step_fut.is_some() || destroyed_lease.is_some() {
-                let barrier_h = (!waited_sync && (!ops_was_empty || has_destroyed || self.has_in_flight_post_unlock()))
-                    .then(|| self.clone());
-                let _ = handle.spawn(async move {
+                let barrier_h = (!out.waited_sync
+                    && (!out.ops_was_empty || out.has_destroyed || self.has_in_flight_post_unlock()))
+                .then(|| self.clone());
+                let _ = rt_handle.spawn(async move {
                     if let Some(h) = barrier_h {
                         let _ = h.wait_for_post_unlock_barrier().await;
                     }
@@ -2275,9 +2041,9 @@ impl SystemHandle {
         } else {
             // Without an active Tokio runtime we cannot execute downstream async hooks;
             // drop `destroyed_lease` un-acked so records roll back into `pending_destroyed_balls`.
-            drop(destroyed_lease);
+            drop(out.destroyed_lease);
         }
-        tick
+        out.tick
     }
 }
 

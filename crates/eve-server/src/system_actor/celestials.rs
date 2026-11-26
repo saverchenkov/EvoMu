@@ -5,7 +5,6 @@
 use super::{
     ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
     MiningExtractionResult, ProtectionBreakEvents, SystemCommand, TickBroadcast,
-    TryRepairCombatOutcome,
 };
 use eve_db::lock_rank::{
     assert_no_locks_held, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
@@ -313,14 +312,6 @@ impl BallparkHandle {
     {
         self.inner.write()
     }
-
-    /// Internal unranked non-blocking write lock without drop-time `SystemView` publish for
-    /// callers that already publish alongside `SystemActorState`.
-    pub(crate) fn try_write_unranked_untracked(
-        &self,
-    ) -> std::sync::TryLockResult<std::sync::RwLockWriteGuard<'_, Ballpark>> {
-        self.inner.try_write_unranked()
-    }
 }
 
 impl SystemHandle {
@@ -491,171 +482,9 @@ impl SystemHandle {
         Self::read_leaf_ball_set(&self.tethered_balls, ball_id)
     }
 
-    /// Non-blockingly restores up to the priced `(hull_heal, armor_heal, shield_heal)` HP deltas
-    /// on `ball_id`'s `CombatState`: tries `ballpark.try_write()` directly (emitting
-    /// `OnDamageStateChange` and persisting the updated `CombatState` after releasing `ballpark`),
-    /// and if write-contended falls back to queuing [`SystemCommand::RepairCombatState`] onto the
-    /// system actor mailbox (`#1167`).
-    ///
-    /// Returns [`TryRepairCombatOutcome::NeedsAsyncFallback`] if the mailbox is full (or locks are
-    /// held) so callers outside DB locks can `.await` [`Self::repair_combat_state`].
-    /// Restoring exact priced deltas rather than snapping to `max_*_hp` ensures unsampled live
-    /// damage (when pre-sampling hit `WouldBlock` or concurrent damage landed mid-RPC) is never
-    /// repaired for free (`#1167`).
-    pub fn try_repair_combat_state_sync(
-        &self,
-        ball_id: BallId,
-        hull_heal: f64,
-        armor_heal: f64,
-        shield_heal: f64,
-    ) -> TryRepairCombatOutcome {
-        let hull_delta = hull_heal.max(0.0);
-        let armor_delta = armor_heal.max(0.0);
-        let shield_delta = shield_heal.max(0.0);
-        if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
-            return TryRepairCombatOutcome::Applied;
-        }
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let (updated_opt, ticket) = match self.ballpark.try_write() {
-            Ok(mut bp) => {
-                let res = super::apply_repair_combat_state_in_ballpark(
-                    &mut bp,
-                    ball_id,
-                    hull_delta,
-                    armor_delta,
-                    shield_delta,
-                );
-                let Some(updated) = res else {
-                    return TryRepairCombatOutcome::NotPresent;
-                };
-                let mut ops = super::post_unlock::PostUnlockOps::default();
-                let db_opt = {
-                    let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-                    if st.db_opt.is_some() {
-                        ops.push_ship_combat_hp(super::post_unlock::CombatHpDbUpdate {
-                            ball_id,
-                            combat_state: updated.clone(),
-                            expected_system: Some(self.solar_system_id),
-                            require_persisted_entity: true,
-                        });
-                    }
-                    st.db_opt.clone()
-                };
-                let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                    self,
-                    db_opt.as_ref(),
-                    None,
-                    ops,
-                    caller_can_wait,
-                );
-                (Some(updated), ticket)
-            }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                if self.get_ball_position_sync(ball_id).is_none() {
-                    return TryRepairCombatOutcome::NotPresent;
-                }
-                if !eve_db::lock_rank::held_lock_ranks().is_empty() {
-                    return TryRepairCombatOutcome::NeedsAsyncFallback;
-                }
-                let (tx, _rx) = oneshot::channel();
-                return match self.cmd_sender().try_send(SystemCommand::RepairCombatState {
-                    ball_id,
-                    hull_heal: hull_delta,
-                    armor_heal: armor_delta,
-                    shield_heal: shield_delta,
-                    reply: tx,
-                }) {
-                    Ok(()) => TryRepairCombatOutcome::QueuedAsync,
-                    Err(_) => TryRepairCombatOutcome::NeedsAsyncFallback,
-                };
-            }
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return TryRepairCombatOutcome::NotPresent;
-            }
-        };
-        if updated_opt.is_some() {
-            super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
-            return TryRepairCombatOutcome::Applied;
-        }
-        TryRepairCombatOutcome::NotPresent
-    }
-
-    pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let ticket = {
-            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let ok = bp.set_ball_position(ball_id, position);
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            let mut ops = super::post_unlock::PostUnlockOps::default();
-            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-            if ok {
-                celestials_helpers::collect_ball_positions_for_post_unlock(
-                    &bp, &[ball_id], &st.db_opt, &st.ball_space_entry_epochs, &mut ops,
-                );
-                self.publish_view_from(&bp, Some(&st));
-            }
-            super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                self, st.db_opt.as_ref(), None, ops, caller_can_wait,
-            )
-        };
-        super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
-    }
-
-    pub fn try_stop_ball(&self, ball_id: BallId) {
-        if let Ok(mut bp) = self.ballpark.write() {
-            let _ = bp.force_stop_warp(ball_id);
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        }
-        {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            st.warp_state.clear_ball(ball_id, true);
-        }
-        self.publish_view();
-    }
-
     /// Reads the tracked activation state for stargate `gate_id`, if present (`#1080`).
     pub fn stargate_activation_state(&self, gate_id: BallId) -> Option<eve_destiny::StargateActivationState> {
         self.view().stargate_activation_state(gate_id)
-    }
-
-    /// Transitions a `CLOSED` stargate into `ACTIVATING` (`#1080`).
-    pub fn activate_stargate_transition(
-        &self,
-        gate_id: BallId,
-        transition_ms: u64,
-        now_ms_opt: Option<u64>,
-    ) -> bool {
-        let Ok(mut bp) = self.ballpark.write() else { return false; };
-        let changed = bp.activate_stargate_transition(gate_id, transition_ms, now_ms_opt);
-        if changed { self.publish_view_from(&bp, None); }
-        changed
-    }
-
-    /// Explicitly sets stargate activation state (`#1080`).
-    pub fn set_stargate_activation_state(
-        &self,
-        gate_id: BallId,
-        activation_state: i64,
-        transition_remaining_ms: u64,
-        activation_transition_at_ms: u64,
-    ) -> bool {
-        let Ok(mut bp) = self.ballpark.write() else { return false; };
-        let changed = bp.set_stargate_activation_state(
-            gate_id,
-            activation_state,
-            transition_remaining_ms,
-            activation_transition_at_ms,
-        );
-        if changed { self.publish_view_from(&bp, None); }
-        changed
-    }
-
-    /// Settles any elapsed `ACTIVATING` stargates against `now_ms`, returning opened gate IDs (`#1080`).
-    pub fn settle_stargate_activation_states(&self, now_ms: u64) -> Vec<BallId> {
-        let Ok(mut bp) = self.ballpark.write() else { return Vec::new(); };
-        let opened = bp.settle_stargate_activation_transitions(0.0, Some(now_ms));
-        if !opened.is_empty() { self.publish_view_from(&bp, None); }
-        opened
     }
 
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
@@ -1106,100 +935,6 @@ impl SystemHandle {
         rx.await.unwrap_or(false)
     }
 
-    pub fn try_remove_ball(&self, ball_id: BallId) {
-        self.try_remove_ball_impl(ball_id, false);
-    }
-
-    /// Removes `ball_id` and emits a preceding `TerminalExplosion` (`#1082`) if it is still in space.
-    pub fn try_remove_destroyed_ball(&self, ball_id: BallId) {
-        self.try_remove_ball_impl(ball_id, true);
-    }
-
-    fn try_remove_ball_impl(&self, ball_id: BallId, emit_destruction_fx: bool) {
-        self.cancel_ship_nanite_repairs_sync(ball_id, true);
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let tidi_cur = self.tidi_factor();
-        let remove_from_bp_and_st =
-            |bp: &mut Ballpark, st: &mut super::SystemActorState| {
-                let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
-                    &self.module_deactivation_hook,
-                    &self.module_deactivation_post_unlock_hook,
-                );
-                let (removed_cycles, fallback_slim_owner, db_opt_cloned, sde_opt_cloned) = {
-                    let super::SystemActorState {
-                        active_module_cycles,
-                        external_active_modules,
-                        base_scramble_strengths,
-                        base_core_strengths,
-                        protection_registry,
-                        db_opt,
-                        sde_opt,
-                        ..
-                    } = &mut *st;
-                    external_active_modules.retain(|&(sid, _)| sid != ball_id);
-                    let mut unused_ops = super::post_unlock::PostUnlockOps::default();
-                    let removed_cycles = super::cycles::remove_all_ship_module_cycles_collecting(
-                        self.solar_system_id, bp, active_module_cycles, base_scramble_strengths,
-                        base_core_strengths, &None, ball_id, None, &mut unused_ops,
-                    );
-                    let fallback_slim_owner = bp
-                        .ball_slim_meta
-                        .get(&ball_id)
-                        .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
-                    base_scramble_strengths.remove(&ball_id);
-                    base_core_strengths.remove(&ball_id);
-                    protection_registry.remove(&ball_id);
-                    if emit_destruction_fx {
-                        let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
-                    } else {
-                        let _ = bp.remove_ball(ball_id);
-                    }
-                    super::protection::sync_active_module_ships_cache(active_module_cycles, external_active_modules, &self.active_module_ships);
-                    (removed_cycles, fallback_slim_owner, db_opt.clone(), sde_opt.clone())
-                };
-                let _ = st.clear_fighter_ball_and_track(ball_id);
-                super::drones::clear_removed_ball_drones_in_state(st, ball_id);
-                let ops = super::ewar_cooldowns::build_and_finalize_removed_ball_ops(
-                    self, st, ball_id, removed_cycles, fallback_slim_owner,
-                    raw_hook.clone(), post_hook, tidi_cur,
-                );
-                celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
-                celestials_helpers::update_system_hibernation_flag(st, bp, self.event_tx.receiver_count());
-                super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
-                self.publish_view_from(bp, Some(st));
-                let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                    self,
-                    db_opt_cloned.as_ref(),
-                    sde_opt_cloned.as_ref(),
-                    ops,
-                    caller_can_wait,
-                );
-                (raw_hook, ticket)
-            };
-        let (deact_guard, ticket) = if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            let mut bp = match self.ballpark.try_write_unranked_untracked() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return,
-            };
-            let mut st = match self.actor_state.try_write_unranked() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return,
-            };
-            remove_from_bp_and_st(&mut bp, &mut st)
-        } else {
-            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            remove_from_bp_and_st(&mut bp, &mut st)
-        };
-        super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
-        super::drones::try_flush_from_handle(self);
-    }
-
     pub fn has_active_nanite_repair_sync(&self, ship_id: BallId, module_id: i64) -> bool {
         self.view()
             .active_nanite_repairs
@@ -1259,59 +994,6 @@ impl SystemHandle {
         });
     }
 
-    pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let drain_fn = |st: &mut super::SystemActorState| {
-            let mut ops = super::post_unlock::PostUnlockOps::default();
-            Self::drain_ship_nanite_repairs_collecting(
-                &mut st.active_nanite_repairs,
-                ship_id,
-                refund_paste,
-                &mut ops,
-            );
-            self.view_tx.send_modify(|cur| {
-                let mut next = (**cur).clone();
-                next.active_nanite_repairs = st.active_nanite_repairs.clone();
-                *cur = Arc::new(next);
-            });
-            super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                self,
-                st.db_opt.as_ref(),
-                st.sde_opt.as_ref(),
-                ops,
-                caller_can_wait,
-            )
-        };
-        let ticket = if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_ACTOR_STATE)
-        {
-            match self.actor_state.try_write_unranked() {
-                Ok(mut st) => drain_fn(&mut st),
-                Err(std::sync::TryLockError::Poisoned(e)) => drain_fn(&mut e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    if let Err(err) = self.cmd_tx.try_send(SystemCommand::CancelShipNaniteRepairs {
-                        ship_id,
-                        refund_paste,
-                    }) {
-                        tracing::warn!(
-                            solar_system_id = self.solar_system_id,
-                            ship_id,
-                            error = %err,
-                            "Failed to enqueue CancelShipNaniteRepairs on actor_state WouldBlock"
-                        );
-                    }
-                    return;
-                }
-            }
-        } else {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            drain_fn(&mut st)
-        };
-        self.publish_view();
-        super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
-    }
-
     /// Inserts a rigid static asteroid ball and neutral `SlimItemMeta` into `bp` without adding it
     /// to dynamic `grids`/`ball_grid_ids`, and broadcasts `AddBalls2` to all grid observers.
     pub(crate) fn spawn_asteroid_ball_in_ballpark(
@@ -1355,296 +1037,6 @@ impl SystemHandle {
                 balls: vec![ast_ball.clone()],
             },
         );
-    }
-
-    pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {
-        let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let ball_id = ball.id;
-        let mut ast_ball = ball;
-        Self::spawn_asteroid_ball_in_ballpark(&mut bp, &st.sde_opt, &mut ast_ball);
-        st.asteroid_templates
-            .insert(ball_id, (asteroid.clone(), ast_ball));
-        st.asteroids.insert(ball_id, asteroid);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        self.publish_view_from(&bp, Some(&st));
-    }
-
-    pub fn sync_asteroid_quantity(&self, asteroid_id: BallId, remaining_units: u64, due_unix_on_belt_empty: u64) {
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let mut belt_id_opt = None;
-        if let Some(ast) = st.asteroids.get_mut(&asteroid_id) {
-            ast.remaining_units = remaining_units;
-            ast.depleted = remaining_units == 0;
-            if remaining_units == 0 {
-                belt_id_opt = Some(ast.belt_id);
-            }
-        }
-        if let Some(belt_id) = belt_id_opt {
-            let belt_fully_depleted = st
-                .asteroids
-                .values()
-                .filter(|a| a.belt_id == belt_id)
-                .all(|a| a.remaining_units == 0);
-            if belt_fully_depleted {
-                for belt_ast in st.asteroids.values_mut().filter(|a| a.belt_id == belt_id) {
-                    belt_ast.respawn_at_tick = Some(due_unix_on_belt_empty);
-                }
-            }
-        }
-        self.view_tx.send_modify(|cur| {
-            let mut next = (**cur).clone();
-            next.asteroids = st.asteroids.clone();
-            *cur = Arc::new(next);
-        });
-    }
-
-    pub fn try_spawn_ball_with_meta(
-        &self,
-        ball: Ball,
-        combat_state: CombatState,
-        slim_meta: SlimItemMeta,
-    ) {
-        let ball_id = ball.id;
-        let apply_spawn = |bp: &mut Ballpark| {
-            let ball_id = ball.id;
-            if bp.balls.contains_key(&ball_id) {
-                let _ = bp.remove_ball(ball_id);
-            }
-            if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
-                bp.add_static_ball_with_meta(ball.clone(), slim_meta);
-                bp.combat_states.insert(ball_id, combat_state);
-                bp.pending_events
-                    .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
-                bp.queue_event_for_all_grid_observers(
-                    Some(ball_id),
-                    &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
-                );
-            } else {
-                if super::should_pin_stationary_ball(&ball, Some(&slim_meta)) {
-                    bp.mark_ball_non_free(ball_id, false);
-                }
-                bp.set_ball_slim_meta(ball_id, slim_meta);
-                bp.add_ball(ball);
-                bp.combat_states.insert(ball_id, combat_state);
-            }
-            super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
-            let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
-            self.dynamic_ball_count
-                .store(dyn_count, std::sync::atomic::Ordering::Relaxed);
-            if dyn_count > 0 {
-                self.hibernated
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                self.hibernated_since_unix
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-                self.idle_ticks
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-            }
-        };
-        if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            let mut bp = match self.ballpark.try_write_unranked_untracked() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return,
-            };
-            let mut st = match self.actor_state.try_write_unranked() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return,
-            };
-            apply_spawn(&mut bp);
-            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ball_id);
-            self.publish_view_from(&bp, Some(&st));
-        } else {
-            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-            apply_spawn(&mut bp);
-            super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
-        }
-    }
-
-    pub(crate) fn try_mark_ball_non_free(&self, ball_id: BallId, is_free: bool) {
-        if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            let mut bp = match self.ballpark.try_write_unranked_untracked() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return,
-            };
-            bp.mark_ball_non_free(ball_id, is_free);
-            self.publish_view_from(&bp, None);
-        } else {
-            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-            bp.mark_ball_non_free(ball_id, is_free);
-            self.publish_view_from(&bp, None);
-        }
-    }
-
-    pub fn try_push_set_state(&self, observer_ball_id: BallId) -> bool {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.queue_set_state(observer_ball_id)
-    }
-
-    /// Registers or clears a sim-clock-governed module reload deadline on the system actor (`#1081`).
-    pub fn try_track_module_reload_sim(
-        &self,
-        module_id: i64,
-        _ship_id: BallId,
-        remaining_sim_s: f64,
-    ) {
-        let tidi = self.tidi_factor();
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        if remaining_sim_s.is_finite() && remaining_sim_s > 0.0 {
-            let now_unix = st
-                .db_opt
-                .as_ref()
-                .map(|db| db.clock().now_unix_secs())
-                .unwrap_or(0);
-            st.module_reload_sim_remaining.insert(
-                module_id,
-                super::ModuleReloadSimEntry {
-                    remaining_sim_s,
-                    min_wall_until_unix: now_unix
-                        .saturating_add(remaining_sim_s.ceil().max(1.0) as u64),
-                    tidi_stretched: tidi < 0.995,
-                },
-            );
-        } else {
-            st.module_reload_sim_remaining.remove(&module_id);
-        }
-    }
-
-    pub fn try_handoff_in_space_observer(
-        &self,
-        old_ball_id: BallId,
-        new_ball_id: BallId,
-        added_ball_ids: &[BallId],
-    ) -> bool {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.queue_in_space_ship_handoff(old_ball_id, new_ball_id, added_ball_ids)
-    }
-
-    pub fn try_spawn_ball_with_combat(&self, ball: Ball, combat_state: CombatState) {
-        let sde_opt = self
-            .actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .sde_opt
-            .clone();
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let ball_id = ball.id;
-        let existing_meta = bp.ball_slim_meta.get(&ball_id).cloned();
-        if bp.balls.contains_key(&ball_id) {
-            let _ = bp.remove_ball(ball_id);
-        }
-        if let Some(meta) = existing_meta {
-            bp.set_ball_slim_meta(ball_id, meta);
-        } else {
-            super::ensure_default_slim_meta(&mut bp, &ball, &sde_opt);
-        }
-        if super::should_pin_stationary_ball(&ball, bp.ball_slim_meta.get(&ball_id)) {
-            bp.mark_ball_non_free(ball_id, false);
-        }
-        bp.add_ball(ball);
-        bp.combat_states.insert(ball_id, combat_state);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
-        let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
-        self.dynamic_ball_count
-            .store(dyn_count, std::sync::atomic::Ordering::Relaxed);
-        if dyn_count > 0 {
-            self.hibernated
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            self.hibernated_since_unix
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-            self.idle_ticks
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    pub fn try_update_combat_state<F: FnOnce(&mut CombatState)>(&self, ball_id: BallId, f: F) -> bool {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
-            f(cs);
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn try_add_mobile_warp_disruptor(&self, id: BallId, position: DVec3, radius: f64) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.add_mobile_warp_disruptor(id, position, radius);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        self.publish_view_from(&bp, None);
-    }
-
-    /// Atomically mutates declarative modifiers on `ball_id`'s [`CombatState`] and recomputes
-    /// its derived `Ball` and `CombatState` attributes from immutable baselines (`#584`).
-    pub fn try_recompute_combat_attributes(
-        &self,
-        ball_id: BallId,
-        f: impl FnOnce(&mut CombatState),
-    ) -> bool {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let Some(cs) = bp.combat_states.get_mut(&ball_id) else {
-            return false;
-        };
-        f(cs);
-        bp.recompute_ball_attributes(ball_id);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
-        true
-    }
-
-    /// Pushes recomputed ship kinematics & `CombatState` baselines from `ServerContext`
-    /// after skill completions, booster expirations, or expert system expirations (`#736`).
-    pub fn try_sync_ship_ballpark_stats(&self, ball_id: BallId, fresh: &CombatState) -> bool {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let prev_max_vel = bp.balls.get(&ball_id).map(|b| b.max_velocity);
-        let Some(cs) = bp.combat_states.get_mut(&ball_id) else {
-            return false;
-        };
-        cs.base_max_velocity = fresh.base_max_velocity;
-        cs.base_mass = fresh.base_mass;
-        cs.base_inertia = fresh.base_inertia;
-        cs.base_signature_radius = fresh.base_signature_radius;
-        cs.base_max_shield_hp = fresh.base_max_shield_hp;
-        cs.base_max_armor_hp = fresh.base_max_armor_hp;
-        cs.base_max_structure_hp = fresh.base_max_structure_hp;
-        cs.base_max_capacitor = fresh.base_max_capacitor;
-        cs.shield_recharge_time_ms = fresh.shield_recharge_time_ms;
-        cs.base_capacitor_recharge_time_ms = fresh.base_capacitor_recharge_time_ms;
-        cs.base_shield_resonance = fresh.base_shield_resonance;
-        cs.base_armor_resonance = fresh.base_armor_resonance;
-        cs.base_structure_resonance = fresh.base_structure_resonance;
-        bp.recompute_ball_attributes(ball_id);
-        if let (Some(prev), Some(new_v)) = (prev_max_vel, bp.balls.get(&ball_id).map(|b| b.max_velocity)) {
-            if (prev - new_v).abs() > 1e-6 {
-                bp.emit_event(
-                    Some(ball_id),
-                    eve_destiny::DestinyEvent::SetMaxSpeed {
-                        ball_id,
-                        max_speed: new_v,
-                    },
-                );
-            }
-        }
-        self.publish_view_from(&bp, None);
-        true
-    }
-
-    pub fn try_remove_warp_bubble(&self, id: BallId) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let _ = bp.remove_warp_bubble(id);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        self.publish_view_from(&bp, None);
     }
 
     pub fn tidi_factor(&self) -> f64 {
@@ -1731,126 +1123,11 @@ impl SystemHandle {
         dyn_balls.saturating_add(cycle_load)
     }
 
-    /// Synchronously respawns fully depleted SDE ore belts and depleted ice blocks during 11:00 UTC downtime.
-    pub fn respawn_depleted_belts_on_downtime(&self) -> usize {
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let (count, ticket) = {
-            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let mut ops = super::post_unlock::PostUnlockOps::default();
-            let (count, db_opt_cloned, sde_opt_cloned) = {
-                let super::SystemActorState {
-                    asteroids,
-                    asteroid_templates,
-                    sde_opt,
-                    db_opt,
-                    ..
-                } = &mut *st;
-                let count = super::belts::respawn_depleted_belts_on_downtime_inner_collecting(
-                    &mut bp,
-                    asteroids,
-                    asteroid_templates,
-                    sde_opt,
-                    db_opt,
-                    &mut ops,
-                );
-                (count, db_opt.clone(), sde_opt.clone())
-            };
-            if count > 0 {
-                super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-                self.publish_view_from(&bp, Some(&st));
-            }
-            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                self,
-                db_opt_cloned.as_ref(),
-                sde_opt_cloned.as_ref(),
-                ops,
-                caller_can_wait,
-            );
-            (count, ticket)
-        };
-        super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
-        count
-    }
-
-    pub(super) fn build_tick_broadcast_for_handle(
-        &self,
-        bp: &mut Ballpark,
-        events: Vec<DestinyEvent>,
-    ) -> TickBroadcast {
-        let fx_floor = self
-            .last_visible_stamp
-            .load(std::sync::atomic::Ordering::Acquire)
-            .max(self.last_fx_stamp.load(std::sync::atomic::Ordering::Acquire))
-            .min(u64::from(u32::MAX)) as u32;
-        super::belts::build_tick_broadcast_with_fx_floor(
-            self.solar_system_id,
-            bp,
-            events,
-            fx_floor,
-            Some(&self.last_visible_stamp),
-            Some(&self.last_fx_stamp),
-        )
-    }
-
-    pub fn try_step_manual(&self, dt: f64) {
-        let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
-        let dt_sim = if dt > 0.0 && dt.is_finite() {
-            dt * self.tidi_factor()
-        } else {
-            dt
-        };
-        let (ticket, warp_events) = {
-            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            if dt_sim > 0.0 && dt_sim.is_finite() {
-                st.sim_elapsed_secs += dt_sim;
-                self.sim_elapsed_secs_bits.store(
-                    st.sim_elapsed_secs.to_bits(),
-                    std::sync::atomic::Ordering::Release,
-                );
-            }
-            let events = bp.step(dt_sim);
-            let mut ops = super::post_unlock::PostUnlockOps::default();
-            celestials_helpers::collect_landed_warps_for_post_unlock_with_in_flight(
-                &bp,
-                &events,
-                &st.db_opt,
-                &st.ball_space_entry_epochs,
-                self.has_in_flight_post_unlock(),
-                &mut ops,
-            );
-            clear_landed_warp_tracking_from_events(&bp, &events, &mut st.warp_state);
-            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
-            self.publish_view_from(&bp, Some(&st));
-            let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
-            let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                self,
-                st.db_opt.as_ref(),
-                st.sde_opt.as_ref(),
-                ops,
-                caller_can_wait,
-            );
-            drop(st);
-            let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
-            let warp_events = broadcast.events.clone();
-            super::send_tick_broadcast_sequenced_owned(&self.event_tx, &broadcast_seq_gate, broadcast);
-            (ticket, warp_events)
-        };
-        super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
-        self.record_warp_stops_from_events(&warp_events);
-    }
-
     pub fn sim_elapsed_secs(&self) -> f64 {
         f64::from_bits(
             self.sim_elapsed_secs_bits
                 .load(std::sync::atomic::Ordering::Acquire),
         )
-    }
-
-    pub fn take_pending_cycle_actions(&self) -> Vec<super::PendingCycleAction> {
-        std::mem::take(&mut self.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions)
     }
 
     pub async fn set_movement_mode(
@@ -1893,130 +1170,24 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())?
     }
 
-    fn mutate_warp_state<R>(&self, f: impl FnOnce(&mut super::types::ActorWarpState) -> R) -> R {
-        let out = {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            f(&mut st.warp_state)
-        };
-        self.publish_view();
-        out
-    }
-
-    fn read_warp_state_field<T>(
-        &self,
-        _from_actor: impl FnOnce(&super::types::ActorWarpState) -> T,
-        from_view: impl FnOnce(&super::SystemView) -> T,
-    ) -> T {
-        let view = self.view();
-        from_view(&view)
-    }
-
-    pub fn set_warp_provenance(&self, ball_id: BallId, provenance: super::WarpProvenance) {
-        self.mutate_warp_state(|w| {
-            w.provenance.insert(ball_id, provenance);
-        });
-    }
-
-    pub fn clear_warp_provenance(&self, ball_id: BallId) {
-        self.mutate_warp_state(|w| {
-            w.provenance.remove(&ball_id);
-        });
-    }
-
-    pub fn track_player_or_fleet_warp(&self, ball_id: BallId, char_id: CharacterId) {
-        self.mutate_warp_state(|w| w.track_player_or_fleet_warp(ball_id, char_id));
-    }
-
-    pub fn track_return_warp(&self, ball_id: BallId) {
-        self.mutate_warp_state(|w| w.track_return_warp(ball_id));
-    }
-
-    pub fn clear_warp_tracking(&self, ball_id: BallId) {
-        self.mutate_warp_state(|w| w.clear_ball(ball_id, true));
-    }
-
-    pub fn clear_return_and_pending_warp(&self, ball_id: BallId) {
-        self.mutate_warp_state(|w| {
-            w.return_warps.remove(&ball_id);
-            w.pending_warp_finished.remove(&ball_id);
-        });
-    }
-
-    pub fn consume_warp_finished(&self, ball_id: BallId) -> bool {
-        self.mutate_warp_state(|w| w.consume_warp_finished(ball_id))
-    }
-
     pub fn warp_provenance(&self, ball_id: BallId) -> Option<super::WarpProvenance> {
-        self.read_warp_state_field(
-            |w| w.provenance.get(&ball_id).copied(),
-            |v| v.warp_provenance(ball_id),
-        )
+        self.view().warp_provenance(ball_id)
     }
 
     pub fn active_warp_char(&self, ball_id: BallId) -> Option<CharacterId> {
-        self.read_warp_state_field(
-            |w| w.active_warps.get(&ball_id).copied(),
-            |v| v.active_warp_char(ball_id),
-        )
+        self.view().active_warp_char(ball_id)
     }
 
     pub fn is_active_warp(&self, ball_id: BallId) -> bool {
-        self.read_warp_state_field(
-            |w| w.active_warps.contains_key(&ball_id),
-            |v| v.is_active_warp(ball_id),
-        )
+        self.view().is_active_warp(ball_id)
     }
 
     pub fn is_return_warp(&self, ball_id: BallId) -> bool {
-        self.read_warp_state_field(
-            |w| w.return_warps.contains(&ball_id),
-            |v| v.is_return_warp(ball_id),
-        )
+        self.view().is_return_warp(ball_id)
     }
 
     pub fn is_pending_warp_finished(&self, ball_id: BallId) -> bool {
-        self.read_warp_state_field(
-            |w| w.pending_warp_finished.contains(&ball_id),
-            |v| v.is_pending_warp_finished(ball_id),
-        )
-    }
-
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn insert_active_warp_for_test(&self, ball_id: BallId, char_id: CharacterId) {
-        self.mutate_warp_state(|w| {
-            w.active_warps.insert(ball_id, char_id);
-        });
-    }
-
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn insert_return_warp_for_test(&self, ball_id: BallId) {
-        self.mutate_warp_state(|w| {
-            w.return_warps.insert(ball_id);
-        });
-    }
-
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn clear_all_warp_tracking_for_test(&self) {
-        self.mutate_warp_state(|w| {
-            *w = super::types::ActorWarpState::default();
-        });
-    }
-
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn snapshot_warp_state_for_test(&self) -> super::types::ActorWarpState {
-        self.read_warp_state_field(|w| w.clone(), |v| super::types::ActorWarpState {
-            provenance: v.warp_provenance.clone(),
-            active_warps: v.active_warps.clone(),
-            return_warps: v.return_warps.clone(),
-            pending_warp_finished: v.pending_warp_finished.clone(),
-        })
-    }
-
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn restore_warp_state_for_test(&self, state: super::types::ActorWarpState) {
-        self.mutate_warp_state(|w| {
-            *w = state;
-        });
+        self.view().is_pending_warp_finished(ball_id)
     }
 
     pub async fn set_warp_scramble_strength(
@@ -3057,27 +2228,6 @@ impl SystemHandle {
         })
     }
 
-    pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let mut cancelled = Vec::new();
-        let all = std::mem::take(&mut st.active_nanite_repairs);
-        for job in all {
-            if job.ship_id == ship_id {
-                cancelled.push(job);
-            } else {
-                st.active_nanite_repairs.push(job);
-            }
-        }
-        if !cancelled.is_empty() {
-            self.view_tx.send_modify(|cur| {
-                let mut next = (**cur).clone();
-                next.active_nanite_repairs = st.active_nanite_repairs.clone();
-                *cur = Arc::new(next);
-            });
-        }
-        cancelled
-    }
-
     pub async fn record_incoming_armor_damage(
         &self,
         ship_id: BallId,
@@ -3108,13 +2258,13 @@ pub(crate) use celestials_helpers::{
     collect_landed_warps_for_post_unlock_with_in_flight,
     fast_forward_clock_in_actor_collecting,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
-    BallPositionSyncCache, register_db_system_ballpark,
+    BallPositionSyncCache, register_db_system_ballpark_arc,
     remove_ball_checkpoint_tracking, send_tick_broadcast_sequenced,
     send_tick_broadcast_sequenced_owned, sync_ball_positions, clear_db_system_ballpark_if_matching,
-    update_system_hibernation_flag,
+    try_enqueue_remove_ball_for_db, update_system_hibernation_flag,
 };
 #[cfg(test)]
-pub(crate) use celestials_helpers::db_ballpark_entry_for_test;
+pub(crate) use celestials_helpers::{db_ballpark_entry_for_test, register_db_system_ballpark};
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
 
@@ -3170,6 +2320,8 @@ pub struct SystemHandle {
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
+    pub(in crate::system_actor) actor_flush_thread:
+        Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
     pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,
 }
 

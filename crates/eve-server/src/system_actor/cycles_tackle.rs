@@ -1689,7 +1689,9 @@ pub(in crate::system_actor) fn handle_tackle_or_damage_command(
             None
         }
         SystemCommand::RemoveWarpBubble { id, reply } => {
-            defer_reply(exec_ctx.deferred_replies, reply, exec_ctx.ballpark.remove_warp_bubble(id).is_some());
+            let removed = exec_ctx.ballpark.remove_warp_bubble(id).is_some();
+            sync_positions_only(exec_ctx);
+            defer_reply(exec_ctx.deferred_replies, reply, removed);
             None
         }
         SystemCommand::ApplyDamage { ball_id, damage, reply } => {

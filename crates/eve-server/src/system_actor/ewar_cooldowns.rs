@@ -189,35 +189,31 @@ pub(in crate::system_actor) fn active_sink_hook(
         .or_else(|| post_hook.map(|(paired_raw, _)| Arc::clone(paired_raw)))
 }
 
-pub(in crate::system_actor) fn read_tick_deactivation_hooks(
-    raw_lock: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    post_lock: &Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
-) -> (Option<ModuleDeactivationHook>, Option<PairedModuleDeactivationPostUnlockHook>, Option<ModuleDeactivationHook>) {
-    let (raw_hook, post_hook) = read_deactivation_hooks(raw_lock, post_lock);
-    let sink_hook = active_sink_hook(raw_hook.as_ref(), post_hook.as_ref());
-    (raw_hook, post_hook, sink_hook)
-}
-
 /// Updates TiDi history, advances per-system `sim_elapsed_secs`, and prunes expired
 /// actor cooldowns at tick start, returning the effective simulated `dt` (`cycles.rs` helper).
-pub(in crate::system_actor) fn prepare_tick_cooldowns_in_actor(
-    handle: &SystemHandle, st: &mut SystemActorState, dt: f64, tidi: f64,
+pub(in crate::system_actor) fn prepare_tick_cooldowns_with_gate(
+    solar_system_id: SolarSystemId,
+    cooldown_persist_gate: &CooldownPersistGate,
+    sim_elapsed_secs_bits: &std::sync::atomic::AtomicU64,
+    st: &mut SystemActorState,
+    dt: f64,
+    tidi: f64,
 ) -> f64 {
     if tidi < 0.999_999 {
-        handle.cooldown_persist_gate.mark_tidi_history();
+        cooldown_persist_gate.mark_tidi_history();
         st.has_tidi_history = true;
-    } else if handle.cooldown_persist_gate.has_tidi_history() {
+    } else if cooldown_persist_gate.has_tidi_history() {
         st.has_tidi_history = true;
     }
     let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { 0.0 };
     if dt_sim > 0.0 {
         st.sim_elapsed_secs += dt_sim;
-        handle.sim_elapsed_secs_bits.store(st.sim_elapsed_secs.to_bits(), std::sync::atomic::Ordering::Release);
+        sim_elapsed_secs_bits.store(st.sim_elapsed_secs.to_bits(), std::sync::atomic::Ordering::Release);
     }
     let now_unix_f64 = st.db_opt.as_ref().map(|db| db.clock().now_unix_secs() as f64).unwrap_or(0.0);
     if !st.module_cooldowns.reactivation_cooldowns.is_empty()
         && prune_expired_module_cooldowns_in_state(
-            &mut st.module_cooldowns, handle.solar_system_id, now_unix_f64,
+            &mut st.module_cooldowns, solar_system_id, now_unix_f64,
             st.sim_elapsed_secs, tidi, st.has_tidi_history || tidi < 0.999_999,
         )
     {
@@ -274,13 +270,14 @@ pub(in crate::system_actor) fn resolve_effective_deactivation_hooks(
     Option<ModuleDeactivationHook>,
     Option<ModuleDeactivationPostUnlockHook>,
 ) {
-    let effective_post = post_hook.and_then(|(paired_raw, post)| {
-        raw_hook
-            .as_ref()
-            .is_some_and(|raw| Arc::ptr_eq(raw, &paired_raw))
-            .then_some(post)
-    });
-    (raw_hook, effective_post)
+    match (raw_hook, post_hook) {
+        (Some(raw), Some((paired_raw, post))) => {
+            let effective_post = Arc::ptr_eq(&raw, &paired_raw).then_some(post);
+            (Some(raw), effective_post)
+        }
+        (None, Some((paired_raw, post))) => (Some(paired_raw), Some(post)),
+        (raw, None) => (raw, None),
+    }
 }
 
 pub(in crate::system_actor) fn cloak_reactivation_delay_for_cycle(
@@ -432,45 +429,6 @@ pub(in crate::system_actor) fn finalize_post_unlock_ops_deactivations_in_actor(
     super::weapon_effects::collect_dirty_weapon_effects_post_unlock_op(solar_system_id, actor_st, ops);
     mutated_actor
 }
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::system_actor) fn build_and_finalize_removed_ball_ops(
-    handle: &SystemHandle,
-    st: &mut SystemActorState,
-    ball_id: eve_destiny::BallId,
-    removed_cycles: Vec<(ActiveModuleCycle, Option<CharacterId>)>,
-    fallback_slim_owner: Option<CharacterId>,
-    raw_hook: Option<ModuleDeactivationHook>,
-    post_hook: Option<PairedModuleDeactivationPostUnlockHook>,
-    tidi_factor: f64,
-) -> super::post_unlock::PostUnlockOps {
-    super::weapon_effects::clear_removed_ball_weapon_effects_in_state(st, ball_id);
-    let include_deact = raw_hook.is_some() || post_hook.is_some();
-    if st.db_opt.is_none() && !include_deact {
-        return super::post_unlock::PostUnlockOps::default();
-    }
-    let mut ops = super::post_unlock::build_removed_ball_post_unlock_ops(
-        handle.solar_system_id,
-        ball_id,
-        removed_cycles,
-        fallback_slim_owner,
-        include_deact,
-    );
-    let cmd_tx_weak = handle.cmd_tx.downgrade();
-    let _ = finalize_post_unlock_ops_deactivations_in_actor(
-        handle.solar_system_id,
-        st,
-        &mut ops,
-        raw_hook,
-        post_hook,
-        &handle.cooldown_persist_gate,
-        Some(&cmd_tx_weak),
-        tidi_factor,
-    );
-    ops
-}
-
-
 
 pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
     exec_ctx: &mut ActorExecCtx<'_>,
@@ -777,12 +735,38 @@ impl SystemHandle {
         }).await
     }
 
+    /// Synchronously removes active/projected EWAR state for `(source_ship_id, source_module_id)`
+    /// and guarantees [`SystemView`] reflects the removal before returning.
+    /// Requires no ranked locks held by the caller.
     pub fn flush_module_ewar_sync(
         &self,
         source_ship_id: i64,
         source_module_id: i64,
         allow_db_source_fallback: bool,
     ) -> Result<ModuleEwarFlushSnapshot, String> {
+        if !held_lock_ranks().is_empty() {
+            return Err(format!(
+                "refusing flush_module_ewar_sync on system {} while holding ranked locks",
+                self.solar_system_id
+            ));
+        }
+        if self.is_on_actor_flush_thread() {
+            if self.cmd_tx.is_closed() {
+                return Err(format!("system {} actor closed", self.solar_system_id));
+            }
+            return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
+                self,
+                false,
+                |ctx| {
+                    flush_module_ewar_in_state(
+                        &mut ctx.actor_st.ewar_state,
+                        source_ship_id,
+                        source_module_id,
+                        allow_db_source_fallback,
+                    )
+                },
+            ));
+        }
         dispatch_actor_sync_with_deadline(
             self, "FlushModuleEwar", ACTOR_CMD_TIMEOUT,
             (source_ship_id, source_module_id, allow_db_source_fallback),
@@ -1001,17 +985,6 @@ impl SystemHandle {
     pub fn flush_module_cooldown_checkpoint_sync(&self) -> Result<usize, String> { self.flush_module_cooldown_checkpoint_sync_inner(false) }
     pub fn flush_dirty_module_cooldown_checkpoint_sync(&self) -> Result<usize, String> { self.flush_module_cooldown_checkpoint_sync_inner(true) }
 
-    pub(in crate::system_actor) fn finalize_tick_post_unlock_deactivations(
-        &self, actor_st: &mut SystemActorState, ops: &mut super::post_unlock::PostUnlockOps,
-        raw_hook: Option<ModuleDeactivationHook>, post_hook: Option<PairedModuleDeactivationPostUnlockHook>, tidi_factor: f64,
-    ) -> bool {
-        let cmd_tx_weak = self.cmd_tx.downgrade();
-        finalize_post_unlock_ops_deactivations_in_actor(
-            self.solar_system_id, actor_st, ops, raw_hook, post_hook,
-            &self.cooldown_persist_gate, Some(&cmd_tx_weak), tidi_factor,
-        )
-    }
-
     pub fn record_module_reload_sim_deadlines_sync(&self, module_ids: Vec<i64>, sim_start_s: f64, sim_deadline_s: f64) -> Result<(), String> {
         if module_ids.is_empty() { return Ok(()); }
         dispatch_actor_sync_with_deadline(
@@ -1176,6 +1149,21 @@ impl SystemRegistry {
 pub(crate) fn flush_post_unlock_actions(
     actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
 ) -> usize {
+    flush_post_unlock_actions_inner(actions, None)
+}
+
+pub(in crate::system_actor) fn flush_post_unlock_actions_catching(
+    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    solar_system_id: SolarSystemId,
+    command_panics: &std::sync::atomic::AtomicU64,
+) -> usize {
+    flush_post_unlock_actions_inner(actions, Some((solar_system_id, command_panics)))
+}
+
+fn flush_post_unlock_actions_inner(
+    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    panic_ctx: Option<(SolarSystemId, &std::sync::atomic::AtomicU64)>,
+) -> usize {
     if !held_lock_ranks().is_empty() {
         return 0;
     }
@@ -1189,7 +1177,24 @@ pub(crate) fn flush_post_unlock_actions(
             std::mem::take(&mut *guard)
         };
         for action in batch {
-            action();
+            if let Some((solar_system_id, command_panics)) = panic_ctx {
+                if let Err(panic_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+                    let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let msg = panic_payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("non-string panic payload");
+                    tracing::error!(
+                        solar_system_id,
+                        panic_count,
+                        panic = %msg,
+                        "SystemActor post_unlock_action panicked; continuing actor loop"
+                    );
+                }
+            } else {
+                action();
+            }
             executed += 1;
         }
     }

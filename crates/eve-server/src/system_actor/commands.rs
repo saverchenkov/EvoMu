@@ -915,6 +915,162 @@ pub enum SystemCommand {
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
+    RefreshStargateActivationStates {
+        lazy_enabled: bool,
+        loaded_systems: HashSet<SolarSystemId>,
+        reply: Option<oneshot::Sender<()>>,
+    },
+    ActivateStargateTransitionForDest {
+        dest_sys_id: SolarSystemId,
+        now_ms: u64,
+        reply: Option<oneshot::Sender<()>>,
+    },
+    ActivateStargateTransition {
+        gate_id: BallId,
+        transition_ms: u64,
+        now_ms_opt: Option<u64>,
+        reply: oneshot::Sender<bool>,
+    },
+    SetStargateActivationState {
+        gate_id: BallId,
+        activation_state: i64,
+        transition_remaining_ms: u64,
+        activation_transition_at_ms: u64,
+        reply: oneshot::Sender<bool>,
+    },
+    SettleStargateActivationStates {
+        now_ms: u64,
+        reply: oneshot::Sender<Vec<BallId>>,
+    },
+    MutateExternalActiveModule {
+        op: ExternalActiveModuleOp,
+        reply: oneshot::Sender<bool>,
+    },
+    RepairCombatStateSync {
+        ball_id: BallId,
+        hull_heal: f64,
+        armor_heal: f64,
+        shield_heal: f64,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<Option<CombatState>>,
+    },
+    SetBallPositionSync {
+        ball_id: BallId,
+        position: DVec3,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<()>,
+    },
+    StopBall {
+        ball_id: BallId,
+        reply: oneshot::Sender<()>,
+    },
+    RemoveBallSync {
+        ball_id: BallId,
+        emit_destruction_fx: bool,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<()>,
+    },
+    CancelShipNaniteRepairsSync {
+        ship_id: BallId,
+        refund_paste: bool,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<()>,
+    },
+    CancelNaniteRepairsForShip {
+        ship_id: BallId,
+        reply: oneshot::Sender<Vec<ActiveNaniteRepair>>,
+    },
+    TrySpawnAsteroid {
+        asteroid: AsteroidState,
+        ball: Ball,
+        reply: oneshot::Sender<()>,
+    },
+    SyncAsteroidQuantity {
+        asteroid_id: BallId,
+        remaining_units: u64,
+        due_unix_on_belt_empty: u64,
+        reply: oneshot::Sender<()>,
+    },
+    TrySpawnBallWithMeta {
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        reply: oneshot::Sender<()>,
+    },
+    MarkBallNonFree {
+        ball_id: BallId,
+        is_free: bool,
+        reply: oneshot::Sender<()>,
+    },
+    TrackModuleReloadSimSync {
+        module_id: i64,
+        ship_id: BallId,
+        remaining_sim_s: f64,
+        reply: oneshot::Sender<()>,
+    },
+    TryHandoffInSpaceObserver {
+        old_ball_id: BallId,
+        new_ball_id: BallId,
+        added_ball_ids: Vec<BallId>,
+        reply: oneshot::Sender<bool>,
+    },
+    TrySpawnBallWithCombat {
+        ball: Ball,
+        combat_state: CombatState,
+        reply: oneshot::Sender<()>,
+    },
+    UpdateCombatState {
+        ball_id: BallId,
+        recompute_attrs: bool,
+        mutator: Box<dyn FnOnce(&mut CombatState) + Send>,
+        reply: oneshot::Sender<bool>,
+    },
+    ApplyDirectCombatDamage {
+        ball_id: BallId,
+        damage: f64,
+        reply: oneshot::Sender<Option<bool>>,
+    },
+    SyncShipBallparkStats {
+        ball_id: BallId,
+        fresh: Box<CombatState>,
+        reply: oneshot::Sender<bool>,
+    },
+    RespawnDepletedBeltsOnDowntime {
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<usize>,
+    },
+    TryStepManual {
+        dt: f64,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<Vec<DestinyEvent>>,
+    },
+    TakePendingCycleActions {
+        reply: oneshot::Sender<Vec<PendingCycleAction>>,
+    },
+    MutateWarpState {
+        op: WarpStateMutOp,
+        reply: oneshot::Sender<bool>,
+    },
+    FinishWarpForDock {
+        ball_id: BallId,
+        landing_pos: Option<DVec3>,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    FlushDirtyConditionCheckpointSync {
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<usize>,
+    },
+    StepFullTick {
+        dt: f64,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<StepFullTickOutput>,
+    },
+    TryRemoveModuleCycle {
+        ship_id: BallId,
+        module_id: i64,
+        wait_for_post_unlock: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Test-only exclusive access to actor `Ballpark` and `SystemActorState` through the mailbox (`#1342`).
     #[cfg(any(test, feature = "testkit"))]
     TestAccess {
@@ -922,6 +1078,64 @@ pub enum SystemCommand {
         mutated: bool,
         reply: oneshot::Sender<()>,
     },
+}
+
+/// External active-module registry operations dispatched through [`SystemCommand::MutateExternalActiveModule`].
+#[derive(Clone, Copy, Debug)]
+pub enum ExternalActiveModuleOp {
+    Register(BallId, ItemId),
+    Unregister(BallId, ItemId),
+    ClearAll,
+}
+
+/// Actor warp-tracking operations dispatched through [`SystemCommand::MutateWarpState`].
+#[derive(Clone, Debug)]
+pub enum WarpStateMutOp {
+    SetProvenance {
+        ball_id: BallId,
+        provenance: WarpProvenance,
+    },
+    ClearProvenance {
+        ball_id: BallId,
+    },
+    TrackPlayerOrFleet {
+        ball_id: BallId,
+        char_id: CharacterId,
+    },
+    TrackReturn {
+        ball_id: BallId,
+    },
+    ClearBall {
+        ball_id: BallId,
+    },
+    ClearReturnAndPending {
+        ball_id: BallId,
+    },
+    ConsumeFinished {
+        ball_id: BallId,
+    },
+    InsertActiveForTest {
+        ball_id: BallId,
+        char_id: CharacterId,
+    },
+    InsertReturnForTest {
+        ball_id: BallId,
+    },
+    ClearAllForTest,
+    RestoreForTest(Box<ActorWarpState>),
+}
+
+/// Output returned by [`SystemCommand::StepFullTick`] so the caller spawns hooks and checks runtime
+/// availability on its own thread (`#1168`, `#1342`).
+pub struct StepFullTickOutput {
+    pub(crate) tick: u64,
+    pub(crate) dt_sim: f64,
+    pub(crate) warp_events: Vec<DestinyEvent>,
+    pub(crate) drained_destroyed: Vec<(BallId, Option<CharacterId>)>,
+    pub(crate) destroyed_lease: Option<Arc<PendingDestroyedDeliveryGuard>>,
+    pub(crate) has_destroyed: bool,
+    pub(crate) ops_was_empty: bool,
+    pub(crate) waited_sync: bool,
 }
 
 /// Opaque test-only closure passed inside [`SystemCommand::TestAccess`] (`#1342`).
@@ -977,6 +1191,8 @@ impl SystemCommand {
                 | Self::CommitActiveDronesFlushed { .. }
                 | Self::SnapshotModuleCooldownCheckpoint { .. }
                 | Self::FlushWeaponEffectsCheckpoint { .. }
+                | Self::TakePendingCycleActions { .. }
+                | Self::FlushDirtyConditionCheckpointSync { .. }
                 | Self::ShutdownActor { .. }
         )
     }

@@ -49,6 +49,7 @@ mod types;
 pub use types::*;
 mod commands;
 pub use commands::*;
+mod handle_cmds;
 mod view;
 pub use view::*;
 
@@ -250,7 +251,11 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) warp_stopped_at_actor: &'a Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(in crate::system_actor) active_module_ships_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook_actor: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(in crate::system_actor) raw_deact_hook: &'a Option<ModuleDeactivationHook>,
+    pub(in crate::system_actor) post_deact_hook: &'a Option<PairedModuleDeactivationPostUnlockHook>,
     pub(in crate::system_actor) deactivation_sink_hook: &'a Option<ModuleDeactivationHook>,
+    pub(in crate::system_actor) cmd_tx_weak: &'a tokio::sync::mpsc::WeakSender<SystemCommand>,
+    pub(in crate::system_actor) handled_view_and_deact: bool,
     pub(in crate::system_actor) target_lock_completed_hook_actor: &'a Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(in crate::system_actor) tidi_factor_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) sim_elapsed_secs_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
@@ -258,6 +263,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) last_fx_stamp_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) broadcast_seq_gate_actor: &'a Arc<std::sync::Mutex<u64>>,
     pub(in crate::system_actor) event_tx_actor: &'a broadcast::Sender<TickBroadcast>,
+    pub(in crate::system_actor) view_tx_actor: &'a Arc<tokio::sync::watch::Sender<Arc<SystemView>>>,
     pub(in crate::system_actor) pending_destroyed_actor: &'a PendingDestroyedOutbox,
     pub(in crate::system_actor) unrebased_clock_offset_secs_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) explicit_update_state_guards_actor:
@@ -266,6 +272,28 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
     pub(in crate::system_actor) post_unlock_in_flight_actor: &'a std::sync::atomic::AtomicUsize,
     pub(in crate::system_actor) completed_post_unlock_seq_actor: &'a std::sync::atomic::AtomicU64,
+}
+
+struct ActorFlushThreadGuard<'a>(&'a std::sync::Mutex<Option<std::thread::ThreadId>>, Option<std::thread::ThreadId>);
+impl Drop for ActorFlushThreadGuard<'_> {
+    fn drop(&mut self) { *self.0.lock().unwrap_or_else(|e| e.into_inner()) = self.1; }
+}
+
+fn with_actor_flush_thread<R>(flush_thread: &std::sync::Mutex<Option<std::thread::ThreadId>>, f: impl FnOnce() -> R) -> R {
+    let prev = std::mem::replace(&mut *flush_thread.lock().unwrap_or_else(|e| e.into_inner()), Some(std::thread::current().id()));
+    let _guard = ActorFlushThreadGuard(flush_thread, prev);
+    f()
+}
+
+fn flush_post_unlock_actions_on_actor(
+    queue: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    flush_thread: &std::sync::Mutex<Option<std::thread::ThreadId>>,
+    solar_system_id: SolarSystemId,
+    command_panics: &std::sync::atomic::AtomicU64,
+) -> usize {
+    with_actor_flush_thread(flush_thread, || {
+        ewar_cooldowns::flush_post_unlock_actions_catching(queue, solar_system_id, command_panics)
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -527,25 +555,7 @@ impl SystemRegistry {
             .filter_map(|&(sys_id, ref h)| (!h.cmd_tx.is_closed()).then_some(sys_id))
             .collect();
         for &(_, ref handle) in &handles {
-            if let Ok(mut bp) = handle.ballpark.write() {
-                let gate_targets: Vec<(BallId, SolarSystemId)> = bp
-                    .ball_slim_meta
-                    .iter()
-                    .filter_map(|(&bid, meta)| {
-                        (meta.group_id == 10)
-                            .then_some(meta.jump_target.map(|(_, dest_sys)| (bid, dest_sys)))
-                            .flatten()
-                    })
-                    .collect();
-                for (gate_id, dest_sys) in gate_targets {
-                    let target_state = if !enabled || loaded_systems.contains(&dest_sys) {
-                        eve_destiny::STARGATE_ACTIVATION_STATE_OPEN
-                    } else {
-                        eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED
-                    };
-                    bp.set_stargate_activation_state(gate_id, target_state, 0, 0);
-                }
-            }
+            handle.refresh_stargate_activation_sync(enabled, loaded_systems.clone());
         }
     }
 
@@ -584,24 +594,7 @@ impl SystemRegistry {
             if sys_id == loaded_sys_id {
                 continue;
             }
-            if let Ok(mut bp) = handle.ballpark.write() {
-                let matching_gates: Vec<BallId> = bp
-                    .ball_slim_meta
-                    .iter()
-                    .filter_map(|(&bid, meta)| {
-                        (meta.group_id == 10
-                            && meta.jump_target.is_some_and(|(_, dest)| dest == loaded_sys_id))
-                        .then_some(bid)
-                    })
-                    .collect();
-                for gate_id in matching_gates {
-                    bp.activate_stargate_transition(
-                        gate_id,
-                        eve_destiny::STARGATE_ACTIVATION_TRANSITION_MS,
-                        (now_ms > 0).then_some(now_ms),
-                    );
-                }
-            }
+            handle.activate_stargate_transition_for_dest_sync(loaded_sys_id, now_ms);
         }
     }
 
@@ -710,6 +703,10 @@ impl SystemRegistry {
         &self,
         hook: PairedModuleDeactivationPostUnlockHook,
     ) {
+        *self
+            .module_deactivation_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&hook.0));
         *self
             .module_deactivation_post_unlock_hook
             .write()
@@ -1298,6 +1295,9 @@ impl SystemRegistry {
         let db_opt_actor = self.db.clone();
         let post_unlock_actions_actor: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>> =
             Arc::new(RankedMutex::new(Vec::new()));
+        let actor_flush_thread: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let actor_flush_thread_actor = Arc::clone(&actor_flush_thread);
         let cooldown_persist_gate_actor = self.cooldown_persist_gate(solar_system_id);
         let post_unlock_actions_for_handle = Arc::clone(&post_unlock_actions_actor);
         let cooldown_persist_gate_for_handle = Arc::clone(&cooldown_persist_gate_actor);
@@ -1368,6 +1368,7 @@ impl SystemRegistry {
             cmd_tx_weak: Some(cmd_tx.downgrade()),
             event_tx: event_tx.clone(),
         };
+        let direct_post_commit_targets = post_commit_targets.clone();
         let (post_unlock_tx, post_unlock_worker_join) =
             post_unlock::spawn_post_unlock_worker(
                 solar_system_id,
@@ -1437,6 +1438,7 @@ impl SystemRegistry {
                 let mut batch_view_dirty = false;
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                let mut batch_unsent_direct_items: Vec<post_unlock::PostUnlockWorkItem> = Vec::new();
                 let mut batch_delivery: Option<PendingActorDelivery> = None;
                 for cmd in cmd_batch {
                 let cmd_may_mutate_view = cmd.may_mutate_system_view();
@@ -1470,7 +1472,12 @@ impl SystemRegistry {
                 let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut cmd_post_unlock_ops = post_unlock::PostUnlockOps::default();
                 let mut cmd_slim_changed = false;
-                let (deact_mutated_actor, actor_delivery_out): (bool, Option<PendingActorDelivery>) = {
+                let (deact_mutated_actor, handled_view_and_deact_actor, actor_delivery_out, unsent_for_db_waiter): (
+                    bool,
+                    bool,
+                    Option<PendingActorDelivery>,
+                    Option<post_unlock::PostUnlockWorkItem>,
+                ) = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 post_unlock::prune_actor_shadows_for_cmd(solar_system_id, &mut actor_st, &completed_post_unlock_seq_actor);
@@ -1480,6 +1487,7 @@ impl SystemRegistry {
                 } else if cooldown_persist_gate_actor.has_tidi_history() {
                     actor_st.has_tidi_history = true;
                 }
+                let mut handled_view_and_deact_actor = false;
                 let out = (|| -> Option<PendingActorDelivery> {
                 let mut pending_step: Option<(f64, StepReply)> = None;
                 let mut pending_volley: Option<(
@@ -1507,7 +1515,11 @@ impl SystemRegistry {
                     warp_stopped_at_actor: &warp_stopped_at_actor,
                     active_module_ships_actor: &active_module_ships_actor,
                     module_deactivation_hook_actor: &module_deactivation_hook_actor,
+                    raw_deact_hook: &raw_hook_cmd,
+                    post_deact_hook: &post_hook_cmd,
                     deactivation_sink_hook: &deactivation_sink_hook,
+                    cmd_tx_weak: &cmd_tx_weak_actor,
+                    handled_view_and_deact: false,
                     target_lock_completed_hook_actor: &target_lock_completed_hook_actor,
                     tidi_factor_bits_actor: &tidi_factor_bits_actor,
                     sim_elapsed_secs_bits_actor: &sim_elapsed_secs_bits_actor,
@@ -1515,6 +1527,7 @@ impl SystemRegistry {
                     last_fx_stamp_actor: &last_fx_stamp_actor,
                     broadcast_seq_gate_actor: &broadcast_seq_gate_actor,
                     event_tx_actor: &event_tx_actor,
+                    view_tx_actor: &view_tx_actor,
                     pending_destroyed_actor: &pending_destroyed_actor,
                     unrebased_clock_offset_secs_actor: &unrebased_clock_offset_secs_actor,
                     explicit_update_state_guards_actor: &explicit_update_state_guards_actor,
@@ -1532,6 +1545,7 @@ impl SystemRegistry {
                     .and_then(|c| fighters::handle_fighter_runtime_command(&mut exec_ctx, c))
                     .and_then(|c| ewar_cooldowns::handle_ewar_and_cooldown_command(&mut exec_ctx, c))
                     .and_then(|c| weapon_effects::handle_weapon_effects_command(&mut exec_ctx, c))
+                    .and_then(|c| handle_cmds::handle_sync_handle_command(&mut exec_ctx, c))
                     .and_then(|c| {
                         #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, c) }
                         #[cfg(not(any(test, feature = "testkit")))] { Some(c) }
@@ -2208,65 +2222,63 @@ impl SystemRegistry {
                             defer_reply(exec_ctx.deferred_db_replies, reply, 0);
                         }
                     }
-                    if cmd_may_mutate_view {
+                    if cmd_may_mutate_view && !exec_ctx.handled_view_and_deact {
                         celestials::update_system_hibernation_flag(
                             exec_ctx.actor_st,
                             exec_ctx.ballpark,
                             exec_ctx.event_tx_actor.receiver_count(),
                         );
                     }
+                    handled_view_and_deact_actor = exec_ctx.handled_view_and_deact;
                     pending_volley.map(|(reply, volley_out)| {
                         PendingActorDelivery::Volley(reply, volley_out)
                     })
                 }
                 })();
                 let post_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
-                let deact_mutated = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-                    solar_system_id, &mut actor_st, &mut cmd_post_unlock_ops,
-                    raw_hook_cmd, post_hook_cmd, &cooldown_persist_gate_actor,
-                    Some(&cmd_tx_weak_actor), post_tidi_cmd,
-                );
-                if deact_mutated || cmd_post_unlock_ops.has_deactivation_hook() {
-                    let prev_view = { view_tx_actor.borrow().clone() };
-                    let next_view = SystemView::from_ballpark(&ballpark, Some(&actor_st), post_tidi_cmd, Some(prev_view.as_ref()));
-                    let _ = view_tx_actor.send(Arc::new(next_view));
-                }
-                post_unlock::enqueue_actor_cmd_post_unlock_ops(
-                    &mut actor_st,
-                    post_unlock_tx_opt.0.as_ref(),
-                    &post_unlock_in_flight_actor,
-                    cmd_post_unlock_ops,
-                );
-                (deact_mutated, out)
+                let deact_mutated = if handled_view_and_deact_actor {
+                    false
+                } else {
+                    let mut_flag = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+                        solar_system_id, &mut actor_st, &mut cmd_post_unlock_ops,
+                        raw_hook_cmd, post_hook_cmd, &cooldown_persist_gate_actor,
+                        Some(&cmd_tx_weak_actor), post_tidi_cmd,
+                    );
+                    if mut_flag || cmd_post_unlock_ops.has_deactivation_hook() {
+                        let prev_view = { view_tx_actor.borrow().clone() };
+                        let next_view = SystemView::from_ballpark(&ballpark, Some(&actor_st), post_tidi_cmd, Some(prev_view.as_ref()));
+                        let _ = view_tx_actor.send(Arc::new(next_view));
+                    }
+                    mut_flag
                 };
-                (
-                    cmd_slim_changed,
-                    deact_mutated_actor,
-                    deferred_replies,
-                    deferred_db_replies,
-                    actor_delivery_out,
-                )
+                let unsent_for_db_waiter = post_unlock::enqueue_actor_cmd_post_unlock_ops(
+                    &mut actor_st, post_unlock_tx_opt.0.as_ref(), &post_unlock_in_flight_actor,
+                    cmd_post_unlock_ops, !deferred_db_replies.is_empty(),
+                );
+                (deact_mutated, handled_view_and_deact_actor, out, unsent_for_db_waiter)
+                };
+                (cmd_slim_changed, deact_mutated_actor, handled_view_and_deact_actor, deferred_replies, deferred_db_replies, unsent_for_db_waiter, actor_delivery_out)
                 }));
-                let _ = flush_post_unlock_actions(&post_unlock_actions_actor);
+                let _ = flush_post_unlock_actions_on_actor(&post_unlock_actions_actor, &actor_flush_thread_actor, solar_system_id, &command_panics_actor);
                 match cmd_outcome {
-                    Ok((
-                        cmd_slim_changed,
-                        deact_mutated_actor,
-                        deferred_replies,
-                        deferred_db_replies,
-                        actor_delivery_out,
-                    )) => {
-                        if cmd_may_mutate_view || cmd_slim_changed || deact_mutated_actor {
+                    Ok((cmd_slim_changed, deact_mutated_actor, handled_view_and_deact_actor, deferred_replies, deferred_db_replies, unsent_for_db_waiter, actor_delivery_out)) => {
+                        if handled_view_and_deact_actor {
+                            batch_view_dirty = false;
+                        } else if cmd_may_mutate_view || cmd_slim_changed || deact_mutated_actor {
                             batch_view_dirty = true;
                         }
                         batch_deferred_replies.extend(deferred_replies);
                         batch_deferred_db_replies.extend(deferred_db_replies);
-                        if let Some(delivery) = actor_delivery_out {
-                            batch_delivery = Some(delivery);
-                        }
+                        batch_unsent_direct_items.extend(unsent_for_db_waiter);
+                        if let Some(delivery) = actor_delivery_out { batch_delivery = Some(delivery); }
                     }
                     Err(panic_payload) => {
-                        let _ = flush_post_unlock_actions(&post_unlock_actions_actor);
+                        let _ = flush_post_unlock_actions_on_actor(
+                            &post_unlock_actions_actor,
+                            &actor_flush_thread_actor,
+                            solar_system_id,
+                            &command_panics_actor,
+                        );
                         let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         let msg = panic_payload
                             .downcast_ref::<&str>()
@@ -2282,7 +2294,12 @@ impl SystemRegistry {
                     }
                 }
                 }
-                flush_post_unlock_actions(&post_unlock_actions_actor);
+                flush_post_unlock_actions_on_actor(
+                    &post_unlock_actions_actor,
+                    &actor_flush_thread_actor,
+                    solar_system_id,
+                    &command_panics_actor,
+                );
                 if batch_view_dirty {
                     let next_view = {
                         let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
@@ -2305,6 +2322,21 @@ impl SystemRegistry {
                 );
                 for send_reply in batch_deferred_replies {
                     send_reply();
+                }
+                if !batch_unsent_direct_items.is_empty() {
+                    with_actor_flush_thread(&actor_flush_thread_actor, || {
+                        post_unlock::flush_unsent_direct_items_on_actor(
+                            &direct_post_commit_targets, &completed_post_unlock_seq_actor,
+                            &module_deactivation_hook_actor, &target_lock_completed_hook_actor,
+                            &command_panics_actor, batch_unsent_direct_items,
+                        );
+                    });
+                    let _ = flush_post_unlock_actions_on_actor(
+                        &post_unlock_actions_actor,
+                        &actor_flush_thread_actor,
+                        solar_system_id,
+                        &command_panics_actor,
+                    );
                 }
                 if !batch_deferred_db_replies.is_empty() {
                     let barrier_item = post_unlock::PostUnlockWorkItem {
@@ -2397,7 +2429,12 @@ impl SystemRegistry {
                         );
                     }
                 }
-                flush_post_unlock_actions(&post_unlock_actions_actor);
+                flush_post_unlock_actions_on_actor(
+                    &post_unlock_actions_actor,
+                    &actor_flush_thread_actor,
+                    solar_system_id,
+                    &command_panics_actor,
+                );
                 flush_actor_active_drones(false);
                 if shutdown_requested {
                     break;
@@ -2463,6 +2500,7 @@ impl SystemRegistry {
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
             system_step_hook: Arc::clone(&self.system_step_hook),
             post_unlock_actions: post_unlock_actions_for_handle,
+            actor_flush_thread,
             cooldown_persist_gate: cooldown_persist_gate_for_handle,
         };
         (handle, lazy_gates)

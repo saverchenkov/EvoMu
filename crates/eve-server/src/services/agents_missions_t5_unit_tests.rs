@@ -2038,7 +2038,7 @@ async fn fleet_agent_warp_dungeon_and_bookmark_respect_200km_landing_radius() {
         ] {
             let _ = sys_handle.set_movement_mode(sid, eve_destiny::MovementMode::Stop).await;
             let _ = sys_handle.set_ball_position(sid, start_pos + offset).await;
-            sys_handle.try_update_combat_state(sid, |cs| {
+            sys_handle.try_update_combat_state(sid, move |cs| {
                 cs.capacitor = cap;
                 cs.max_capacitor = 250.0;
             });
@@ -2543,7 +2543,7 @@ async fn cmd_warp_to_stuff_mission_dungeon_and_fleet_bookmark_materialize() {
         ] {
             let _ = solo_handle.set_movement_mode(sid, eve_destiny::MovementMode::Stop).await;
             let _ = solo_handle.set_ball_position(sid, offset).await;
-            solo_handle.try_update_combat_state(sid, |cs| {
+            solo_handle.try_update_combat_state(sid, move |cs| {
                 cs.capacitor = cap;
                 cs.max_capacitor = 250.0;
             });
