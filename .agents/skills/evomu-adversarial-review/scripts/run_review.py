@@ -586,7 +586,7 @@ def _norm_src_stem(rel_unix):
         if stem.endswith(suf) and len(stem) > len(suf):
             stem = stem[:-len(suf)]
             break
-    if stem == "mod" and len(parts) >= 2:
+    if stem in ("mod", "tests") and len(parts) >= 2:
         stem = parts[-2]
     return stem
 
@@ -990,7 +990,7 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
             quasar_crate_touched = True
             if os.path.isfile(os.path.join(root, "crates", "eve-quasar", "Cargo.toml")):
                 if len(parts) >= 4 and parts[2] == "src" and rel.endswith(".rs"):
-                    st = _norm_src_stem("/".join(parts[3:]))
+                    st = "tests::" if parts[3:] == ["tests.rs"] else _norm_src_stem("/".join(parts[3:]))
                     if st in ("lib", "main"):
                         whole_lib_crates.add("eve-quasar")
                     else:
@@ -1044,7 +1044,7 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                 else:
                     direct_lib_filters_by_crate.setdefault(crate, set()).add("config::tests")
                 continue
-            base_stem = _norm_src_stem("/".join(parts[3:]))
+            base_stem = "tests::" if parts[3:] == ["tests.rs"] else _norm_src_stem("/".join(parts[3:]))
             if not (crate == "eve-server" and base_stem == SENTINEL_LIB_FILTER):
                 direct_lib_filters_by_crate.setdefault(crate, set()).add(base_stem)
             if crate == "eve-server":

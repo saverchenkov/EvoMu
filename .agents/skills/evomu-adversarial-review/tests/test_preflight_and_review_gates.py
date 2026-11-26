@@ -2946,6 +2946,40 @@ fn t() {
         self.assertIn("process_global", dumped)
         self.assertEqual(dumped["process_global"]["scanned_crates"], live_rep["scanned_crates"])
 
+    def test_1496_crate_root_and_submodule_src_tests_rs_filters_preserved(self):
+        # 1. `_norm_src_stem` maps nested `<mod>/tests.rs` to `<mod>` instead of `"tests"`
+        self.assertEqual(run_review._norm_src_stem("foo/tests.rs"), "foo")
+        self.assertEqual(run_review._norm_src_stem("services/bar/tests.rs"), "bar")
+        self.assertEqual(run_review._norm_src_stem("tests.rs"), "tests")
+
+        def run_for(paths):
+            def fake_sh(cmd, cwd, env=None, timeout=None):
+                if cmd[:3] == ["git", "diff", "--name-only"]:
+                    return 0, "\n".join(paths) + "\n"
+                if cmd[:3] == ["git", "diff", "-U0"]:
+                    return 0, ""
+                return 0, ""
+
+            with mock.patch.object(run_review, "sh", side_effect=fake_sh):
+                return run_review.derive_affected_test_commands(REPO_ROOT, "origin/main", "cargo", head="FAKE_SHA")
+
+        # 2. Crate-root `crates/eve-db/src/tests.rs` alongside another submodule (`missions.rs`)
+        #    MUST preserve `tests::` (never stripped by `if f != "tests"` at line 1272!)
+        db_cmds = run_for(["crates/eve-db/src/tests.rs", "crates/eve-db/src/missions.rs"])
+        self.assertIn(["cargo", "test", "-j", "4", "-p", "eve-db", "--lib", "tests::"], db_cmds)
+        self.assertIn(["cargo", "test", "-j", "4", "-p", "eve-db", "--lib", "missions"], db_cmds)
+        # Verify coalescing preserves both filters into a single `eve-db --lib` invocation
+        coalesced = run_review._coalesce_cargo_test_commands(db_cmds)
+        self.assertIn(
+            ["cargo", "test", "-j", "4", "-p", "eve-db", "--lib", "--", "missions", "tests::"],
+            coalesced,
+        )
+
+        # 3. Submodule `crates/eve-server/src/foo/tests.rs` selects `foo` (not dropped `"tests"`)
+        srv_cmds = run_for(["crates/eve-server/src/foo/tests.rs", "crates/eve-server/src/bar.rs"])
+        self.assertIn(["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "foo"], srv_cmds)
+        self.assertIn(["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "bar"], srv_cmds)
+
 
 if __name__ == "__main__":
     unittest.main()
