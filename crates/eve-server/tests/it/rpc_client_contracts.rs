@@ -3316,24 +3316,26 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
     let undocked_sys_id = sess.solar_system_id.expect("solar_system_id in space");
     let sys_handle = ctx.systems.get_or_spawn(undocked_sys_id);
     // Simulate disconnect emergency warp + reconnect return-warp active when `beyonce.MachoBindObject` runs:
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.observer_events.remove(&undocked_ship_id);
-        let cur_pos = bp
-            .balls
-            .get(&undocked_ship_id)
-            .map(|b| b.position)
-            .unwrap_or(glam::DVec3::ZERO);
-        let _ = bp.set_mode(
-            undocked_ship_id,
-            eve_destiny::MovementMode::new_warp(
-                cur_pos,
-                cur_pos + glam::DVec3::new(500_000.0, 0.0, 0.0),
-                3.0,
-            ),
-        );
-        // Simulate 1Hz tick draining the pre-bind `observer_events` before `beyonce.MachoBindObject`
-        bp.observer_events.remove(&undocked_ship_id);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.observer_events.remove(&undocked_ship_id);
+            let cur_pos = bp
+                .balls
+                .get(&undocked_ship_id)
+                .map(|b| b.position)
+                .unwrap_or(glam::DVec3::ZERO);
+            let _ = bp.set_mode(
+                undocked_ship_id,
+                eve_destiny::MovementMode::new_warp(
+                    cur_pos,
+                    cur_pos + glam::DVec3::new(500_000.0, 0.0, 0.0),
+                    3.0,
+                ),
+            );
+            // Simulate 1Hz tick draining the pre-bind `observer_events` before `beyonce.MachoBindObject`
+            bp.observer_events.remove(&undocked_ship_id);
+        })
+        .await;
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",

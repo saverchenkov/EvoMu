@@ -1504,11 +1504,13 @@ async fn test_r2_track3_lifecycle_filaments_salvage_and_drones() {
             },
         );
     });
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.warp_scramble_strength = 2;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.warp_scramble_strength = 2;
+            }
+        })
+        .await;
     let scram_fil = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1522,11 +1524,13 @@ async fn test_r2_track3_lifecycle_filaments_salvage_and_drones() {
         .await
         .expect_err("Warp-scrambled ship must not activate Abyssal filament");
     assert_eq!(scram_fil.code, "WarpScrambled");
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.warp_scramble_strength = 0;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.warp_scramble_strength = 0;
+            }
+        })
+        .await;
 
     // 3. Issue #81: LaunchDrones deduplicates drone_ids, requires DroneBay + category 18, and splits stacks
     let stack_drone_id = 990_810;

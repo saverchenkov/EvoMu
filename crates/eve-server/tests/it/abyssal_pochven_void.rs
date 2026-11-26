@@ -323,8 +323,13 @@ async fn test_void_space_player_jump_and_gate_activation() {
         .expect("void combat state present")
         .structure_hp;
     for _ in 0..5 {
-        let mut bp = void_handle.ballpark.write().expect("ballpark write lock");
-        eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), VOID_SPACE_SYS_ID);
+        let sde = ctx.sde.clone();
+        let db = ctx.db.clone();
+        void_handle
+            .test_with_ballpark_mut_async(move |bp| {
+                eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(bp, Some(&sde), Some(&db), VOID_SPACE_SYS_ID);
+            })
+            .await;
     }
     assert_eq!(
         void_handle

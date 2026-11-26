@@ -1572,12 +1572,13 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
         "NPC must switch target to higher-threat EWAR+DPS Ship B"
     );
 
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(cs) = bp.combat_states.get_mut(&ship_b) {
-            cs.is_cloaked = true;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_b) {
+                cs.is_cloaked = true;
+            }
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
         get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id),
@@ -1585,12 +1586,13 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
         "NPC must drop cloaked Ship B (loss of lock) and switch back to Ship A"
     );
 
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(b) = bp.balls.get_mut(&ship_a) {
-            b.mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(1_000_000_000.0, 0.0, 0.0), 3.0);
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&ship_a) {
+                b.mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(1_000_000_000.0, 0.0, 0.0), 3.0);
+            }
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, sys_id);
     assert_eq!(
         get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id),

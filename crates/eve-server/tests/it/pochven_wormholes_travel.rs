@@ -253,17 +253,27 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
 
     let wh_id = wormhole_item_id_for_signature(otela_sys, &pch_k_sig.signature_id);
     let exit_id = wormhole_exit_item_id_for_signature(pch_dest_sys, &pch_k_sig.signature_id);
-    let inside_types: Vec<u32> = {
-        let h = ctx.systems.get_or_spawn(otela_sys);
-        let bp = h.ballpark.read().unwrap();
-        [10_i64, 11, 12, 13, 14, 15].iter().filter_map(|off| bp.balls.get(&(wh_id + off)).map(|b| b.type_id)).collect()
-    };
+    let inside_types: Vec<u32> = ctx
+        .systems
+        .get_or_spawn(otela_sys)
+        .test_with_ballpark_async(move |bp| {
+            [10_i64, 11, 12, 13, 14, 15]
+                .iter()
+                .filter_map(|off| bp.balls.get(&(wh_id + off)).map(|b| b.type_id))
+                .collect()
+        })
+        .await;
     assert_eq!(inside_types, vec![48_087, 47_958, 56_337, 56_328, 56_319, 47_876], "Inside Pochven wormhole guarded by Pochven NPC mix");
-    let outside_types: Vec<u32> = {
-        let h = ctx.systems.get_or_spawn(pch_dest_sys);
-        let bp = h.ballpark.read().unwrap();
-        [10_i64, 11].iter().filter_map(|off| bp.balls.get(&(exit_id + off)).map(|b| b.type_id)).collect()
-    };
+    let outside_types: Vec<u32> = ctx
+        .systems
+        .get_or_spawn(pch_dest_sys)
+        .test_with_ballpark_async(move |bp| {
+            [10_i64, 11]
+                .iter()
+                .filter_map(|off| bp.balls.get(&(exit_id + off)).map(|b| b.type_id))
+                .collect()
+        })
+        .await;
     assert_eq!(outside_types, vec![48_087, 48_092], "Outside Pochven wormhole guarded by Triglavian NPCs");
 
     sess.solar_system_id = Some(otela_sys);

@@ -2523,11 +2523,13 @@ async fn test_mobile_micro_jump_unit_component_spool_mass_scram_and_concurrent_u
             .await
             .expect("Start second MMJU spool");
     }
-    if let Ok(mut bp) = sys_h.ballpark.write() {
-        if let Some(cs) = bp.combat_states.get_mut(&830_001) {
-            cs.is_cloaked = true;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(|bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&830_001) {
+                cs.is_cloaked = true;
+            }
+        })
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         eve_server::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
             if let Some(rec) = st.deployables.get_mut(&mmju_id) {

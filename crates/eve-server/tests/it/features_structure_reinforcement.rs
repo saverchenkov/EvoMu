@@ -1485,7 +1485,10 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
     assert_eq!(pod_type, Some(670), "Jumper spawned in Capsule (type 670)");
     let (_, pod_ball) = sys_handle.get_ball_snapshot(pod_id).await.unwrap().expect("Capsule ball in space");
     assert!((pod_ball.position - moved_titan_pos).length() < 10_000.0, "Capsule spawned adjacent to live Titan Ball coordinates, not stale [0,0,0]");
-    let pod_meta = sys_handle.ballpark.read().unwrap().ball_slim_meta.get(&pod_id).cloned().expect("Capsule SlimItemMeta");
+    let pod_meta = sys_handle
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&pod_id).cloned())
+        .await
+        .expect("Capsule SlimItemMeta");
     assert_eq!(pod_meta.corp_id, mate_corp, "SlimItemMeta populated with jumper corporation_id");
     assert_eq!(pod_meta.alliance_id, mate_alliance, "SlimItemMeta populated with jumper alliance_id");
     assert!((pod_meta.security_status - 2.75).abs() < 1e-6, "SlimItemMeta populated with jumper security_status");

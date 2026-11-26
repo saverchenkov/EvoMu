@@ -445,7 +445,9 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
     let ok_launch = ctx.dispatch_rpc(&mut sess, "ship", None, "LaunchFromContainer", &[PyRep::Integer(ship_id), PyRep::Integer(launchable_cont_id)], &kw, None).await.unwrap();
     assert!(matches!(ok_launch, PyRep::KeyVal(_)));
     assert!(ctx.db.with_snapshot(|s| s.item_positions.contains_key(&launchable_cont_id)));
-    let launched_ball_meta = sys.ballpark.read().unwrap().ball_slim_meta.get(&launchable_cont_id).cloned();
+    let launched_ball_meta = sys
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&launchable_cont_id).cloned())
+        .await;
     assert_eq!(launched_ball_meta.map(|m| m.owner_id), Some(char_id));
 }
 
@@ -856,10 +858,12 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
         "in-space BoardStoredShip must suppress stored-ship (#13 gate) and capsule-tombstone (#12/#931) OnItemChange: {space_board_notifs:?}"
     );
 
-    let bp = sys.ballpark.read().unwrap();
-    let vacated_char = bp.ball_slim_meta.get(&live_frigate_id).and_then(|m| m.char_id);
+    let vacated_char = sys
+        .test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta.get(&live_frigate_id).and_then(|m| m.char_id)
+        })
+        .await;
     assert_eq!(vacated_char, None, "vacated ship slim item char_id must be None");
-    drop(bp);
 
     // Foreign pilot now in second_frigate_id. Test StoreVessel against forcefield:
     ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "SetShipPassword", &[PyRep::String("wrong-pass".into())], &kw, None).await.unwrap();

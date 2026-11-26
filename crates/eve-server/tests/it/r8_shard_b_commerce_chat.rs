@@ -515,10 +515,10 @@ async fn r8b_484_486_lp_bpc_minting_and_lootall_range_mtu_alsc_locks() {
         assert_eq!(s.items[&unlocked_id].location_id, ship_id);
     });
 
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&wreck_id).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     call(&ctx, &mut space_sess, "invbroker", "LootAll", &[PyRep::Integer(wreck_id)])
         .await
         .expect("LootAll within 2500m");

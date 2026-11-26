@@ -183,13 +183,14 @@ async fn test_navy_npc_and_faction_police_response() {
 
     // Record initial HP before police engagement
     let jita_handle = ctx.systems.get_or_spawn(SYS_JITA);
-    let (init_outlaw_shield, init_pod_struct, init_lawful_shield) = {
-        let bp = jita_handle.ballpark.read().unwrap();
-        let os = bp.combat_states.get(&outlaw_ship_id).map(|c| c.shield_hp).unwrap();
-        let ps = bp.combat_states.get(&pod_ship_id).map(|c| c.structure_hp).unwrap();
-        let ls = bp.combat_states.get(&lawful_ship_id).map(|c| c.shield_hp).unwrap();
-        (os, ps, ls)
-    };
+    let (init_outlaw_shield, init_pod_struct, init_lawful_shield) = jita_handle
+        .test_with_ballpark_async(move |bp| {
+            let os = bp.combat_states.get(&outlaw_ship_id).map(|c| c.shield_hp).unwrap();
+            let ps = bp.combat_states.get(&pod_ship_id).map(|c| c.structure_hp).unwrap();
+            let ls = bp.combat_states.get(&lawful_ship_id).map(|c| c.shield_hp).unwrap();
+            (os, ps, ls)
+        })
+        .await;
 
     // Drive police spawning through the production entry/tick path
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -220,20 +221,23 @@ async fn test_navy_npc_and_faction_police_response() {
 
     // Assert: outlaw ship takes damage and is webbed; pod and lawful pilot take no damage
     {
-        let bp = jita_handle.ballpark.read().unwrap();
-        let cur_outlaw_shield = bp.combat_states.get(&outlaw_ship_id).map(|c| c.shield_hp).unwrap();
-        let cur_pod_struct = bp.combat_states.get(&pod_ship_id).map(|c| c.structure_hp).unwrap();
-        let cur_lawful_shield = bp.combat_states.get(&lawful_ship_id).map(|c| c.shield_hp).unwrap();
-        let outlaw_ball = bp.balls.get(&outlaw_ship_id).unwrap();
+        let (cur_outlaw_shield, cur_pod_struct, cur_lawful_shield, outlaw_speed_fraction) = jita_handle
+            .test_with_ballpark_async(move |bp| {
+                let cur_outlaw_shield = bp.combat_states.get(&outlaw_ship_id).map(|c| c.shield_hp).unwrap();
+                let cur_pod_struct = bp.combat_states.get(&pod_ship_id).map(|c| c.structure_hp).unwrap();
+                let cur_lawful_shield = bp.combat_states.get(&lawful_ship_id).map(|c| c.shield_hp).unwrap();
+                let outlaw_speed_fraction = bp.balls.get(&outlaw_ship_id).unwrap().speed_fraction;
+                (cur_outlaw_shield, cur_pod_struct, cur_lawful_shield, outlaw_speed_fraction)
+            })
+            .await;
 
         assert!(
             cur_outlaw_shield < init_outlaw_shield,
             "Outlaw ship must take weapon damage from Faction Police (was {init_outlaw_shield}, now {cur_outlaw_shield})"
         );
         assert!(
-            outlaw_ball.speed_fraction < 1.0,
-            "Outlaw ship must be webbed (speed_fraction = {})",
-            outlaw_ball.speed_fraction
+            outlaw_speed_fraction < 1.0,
+            "Outlaw ship must be webbed (speed_fraction = {outlaw_speed_fraction})"
         );
         assert_eq!(
             cur_pod_struct, init_pod_struct,
@@ -581,11 +585,21 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
     }
 
     {
-        let bp = handle.ballpark.read().unwrap();
-        for &bid in &wave2_new_balls {
-            let cs = bp.combat_states.get(&bid).expect("Wave 2 CombatState");
+        let hp_check = wave2_new_balls.clone();
+        let wave2_hp: Vec<(f64, f64)> = handle
+            .test_with_ballpark_async(move |bp| {
+                hp_check
+                    .into_iter()
+                    .map(|bid| {
+                        let cs = bp.combat_states.get(&bid).expect("Wave 2 CombatState");
+                        (cs.max_structure_hp, cs.max_shield_hp)
+                    })
+                    .collect()
+            })
+            .await;
+        for (max_structure_hp, max_shield_hp) in wave2_hp {
             assert!(
-                cs.max_structure_hp > 0.0 && cs.max_shield_hp > 0.0,
+                max_structure_hp > 0.0 && max_shield_hp > 0.0,
                 "Wave 2 NPC CombatState must have authentic HP derived from SDE"
             );
         }

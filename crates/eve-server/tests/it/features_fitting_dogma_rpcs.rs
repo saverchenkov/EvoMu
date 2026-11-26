@@ -183,9 +183,16 @@ async fn test_zarzakh_deathless_shipcaster_entry_beacons() {
         (ZARZAKH_SYS, ZARZAKH_PAD_ID),
     ] {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let bp = sys_h.ballpark.read().unwrap();
-        assert_eq!(bp.balls.get(&item_id).map(|b| b.type_id), Some(79_018));
-        assert_eq!(bp.ball_slim_meta.get(&item_id).map(|m| m.category_id), Some(65));
+        let (ball_type, slim_cat) = sys_h
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.balls.get(&item_id).map(|b| b.type_id),
+                    bp.ball_slim_meta.get(&item_id).map(|m| m.category_id),
+                )
+            })
+            .await;
+        assert_eq!(ball_type, Some(79_018));
+        assert_eq!(slim_cat, Some(65));
     }
     ctx.db.with_mut_snapshot(|s| {
         s.cluster_and_runtime.cluster_misc_state = Some(
@@ -369,14 +376,22 @@ async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
 
     // 2. Exiting via Alsavoinon gate (50016567) is refused; exiting via locked Turnur gate (50016566) succeeds
     let z_sys = ctx.systems.get_or_spawn(ZARZAKH_SYS);
-    z_sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = z_alsa_pos;
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = z_alsa_pos;
+        })
+        .await;
     ctx.advance_secs(12);
     let lock_err = gate_jump(&ctx, &mut sess, ZARZAKH_ALSAVOINON_GATE_ID, ALSAVOINON_GATE_ID, ship_id)
         .await
         .expect_err("Different Zarzakh exit gate must be refused while 6h lock is active");
     assert_eq!(lock_err.code, ERR_GATE_LOCKED);
 
-    z_sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = z_turnur_pos;
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = z_turnur_pos;
+        })
+        .await;
     gate_jump(&ctx, &mut sess, ZARZAKH_TURNUR_GATE_ID, TURNUR_GATE_ID, ship_id)
         .await
         .expect("Same Zarzakh gate exit must succeed");
@@ -392,7 +407,11 @@ async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
     assert_eq!(ctx.db.with_snapshot(|s| s.zarzakh_gate_locks.get(&char_id).map(|v| v.0)), Some(ZARZAKH_ALSAVOINON_GATE_ID));
 
     // 4. After 6h (21,601s) expiry, exiting via Turnur gate (50016566) is allowed
-    z_sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = z_turnur_pos;
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = z_turnur_pos;
+        })
+        .await;
     ctx.advance_secs(21_605);
     gate_jump(&ctx, &mut alsa_sess, ZARZAKH_TURNUR_GATE_ID, TURNUR_GATE_ID, ship_id)
         .await
@@ -405,7 +424,11 @@ async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
     gate_jump(&ctx, &mut caster_sess, TURNUR_GATE_ID, ZARZAKH_TURNUR_GATE_ID, ship_id)
         .await
         .expect("Re-enter Zarzakh to acquire fresh gate lock");
-    z_sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = DVec3::new(250_000.0, 0.0, 0.0);
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(250_000.0, 0.0, 0.0);
+        })
+        .await;
     ctx.advance_secs(12);
     rpc(
         &ctx,
@@ -440,8 +463,11 @@ async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
         .await
         .expect("Enter Zarzakh via Turnur gate to acquire live gate lock");
     let fulcrum_pos = ctx.sde.stations[&FULCRUM_STATION_ID].position;
-    z_sys.ballpark.write().unwrap().balls.get_mut(&pod_b_id).unwrap().position =
-        fulcrum_pos + DVec3::new(100.0, 0.0, 0.0);
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&pod_b_id).unwrap().position = fulcrum_pos + DVec3::new(100.0, 0.0, 0.0);
+        })
+        .await;
     ctx.advance_secs(12);
     rpc(&ctx, &mut fulcrum_swap_sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)])
         .await
@@ -474,8 +500,11 @@ async fn test_zarzakh_emanation_lock_lifecycle_and_exits() {
     gate_jump(&ctx, &mut clone_sess, TURNUR_GATE_ID, ZARZAKH_TURNUR_GATE_ID, pod_id)
         .await
         .expect("Enter Zarzakh via Turnur gate before Jita CloneJump");
-    z_sys.ballpark.write().unwrap().balls.get_mut(&pod_id).unwrap().position =
-        fulcrum_pos + DVec3::new(100.0, 0.0, 0.0);
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&pod_id).unwrap().position = fulcrum_pos + DVec3::new(100.0, 0.0, 0.0);
+        })
+        .await;
     ctx.advance_secs(12);
     rpc(&ctx, &mut clone_sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)])
         .await
@@ -537,7 +566,11 @@ async fn test_zarzakh_fulcrum_gates_dscan_size_bubbles_and_docking() {
     assert_eq!(orca_sess.solar_system_id, Some(ZARZAKH_SYS));
 
     let z_sys = ctx.systems.get_or_spawn(ZARZAKH_SYS);
-    z_sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = z_alsa_pos;
+    z_sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = z_alsa_pos;
+        })
+        .await;
     ctx.advance_secs(12);
     let back_err = gate_jump(&ctx, &mut orca_sess, ZARZAKH_ALSAVOINON_GATE_ID, ALSAVOINON_GATE_ID, ship_id)
         .await

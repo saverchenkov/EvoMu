@@ -1433,7 +1433,8 @@ fn verify_suppression_stage_tackle_range_and_ci_sentry<'a>(
             assert_eq!(scram_res.unwrap_err().code, "TargetOutOfRange");
         } else {
             scram_res.expect("Empire Warp Scrambler succeeds at 8,000 m at Suppression Stage 4+");
-            assert!(cmd_h.ballpark.read().unwrap().is_ball_scrambled(h.pir_ship));
+            let pir_ship = h.pir_ship;
+            assert!(cmd_h.test_with_ballpark_async(move |bp| bp.is_ball_scrambled(pir_ship)).await);
             let _ = boxed_rpc(&h.ctx, &mut h.s_emp, "dogmaIM", "Deactivate", &[PyRep::Integer(h.emp_scram)]).await;
         }
 
@@ -1443,17 +1444,21 @@ fn verify_suppression_stage_tackle_range_and_ci_sentry<'a>(
         if let Some((_ci_bid, ci_pos)) = ci_sentry {
             h.ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.ship_combat_hp.remove(&h.pir_ship); });
             boxed_place_ship_ball(&h.ctx, h.cmd_sys, h.pir_cid, h.pir_ship, 22_456, ci_pos + DVec3::new(8_000.0, 0.0, 0.0)).await;
-            let (sig_before, sh_before) = {
-                let bp = cmd_h.ballpark.read().unwrap();
-                let cs = &bp.combat_states[&h.pir_ship];
-                (cs.signature_radius, cs.shield_hp)
-            };
+            let pir_ship = h.pir_ship;
+            let (sig_before, sh_before) = cmd_h
+                .test_with_ballpark_async(move |bp| {
+                    let cs = &bp.combat_states[&pir_ship];
+                    (cs.signature_radius, cs.shield_hp)
+                })
+                .await;
             boxed_tick_cluster(&h.ctx).await;
-            {
-                let bp = cmd_h.ballpark.read().unwrap();
-                let cs_after = &bp.combat_states[&h.pir_ship];
-                assert!(cs_after.shield_hp < sh_before && cs_after.signature_radius > sig_before * 1.4 && cs_after.ecm_jammed_remaining_s > 0.0);
-            }
+            let (sh_after, sig_after, ecm_rem) = cmd_h
+                .test_with_ballpark_async(move |bp| {
+                    let cs_after = &bp.combat_states[&pir_ship];
+                    (cs_after.shield_hp, cs_after.signature_radius, cs_after.ecm_jammed_remaining_s)
+                })
+                .await;
+            assert!(sh_after < sh_before && sig_after > sig_before * 1.4 && ecm_rem > 0.0);
 
             let PyRep::List(vis_pre) = boxed_rpc(&h.ctx, &mut h.s_emp, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[]).await.unwrap() else { panic!() };
             let sys_count_pre = match vis_pre[0].dict_get("systems").unwrap() { PyRep::List(l) => l.len(), _ => 0 };

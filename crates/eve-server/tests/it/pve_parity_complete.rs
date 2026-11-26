@@ -698,7 +698,9 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     assert!(fob_supp >= 500, "Stronghold destruction awards massive suppression to FOB system (got {fob_supp})");
 
     // FOB wreck ball (type 79386) spawned in space
-    let wreck_ball = fob_handle.ballpark.read().ok().and_then(|bp| bp.balls.values().find(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE).cloned());
+    let wreck_ball = fob_handle
+        .test_with_ballpark_async(|bp| bp.balls.values().find(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE).cloned())
+        .await;
     assert!(wreck_ball.is_some(), "FOB wreck ball (type 79386) spawned in space upon stronghold destruction");
 
     // BF-PVE-STRONGHOLD-NOTIFY-TEST-03 / BF-PVE-INSURGENCY-NOTIFY-SHAPE-01: Stronghold destruction queued Machonet & Quasar notifications

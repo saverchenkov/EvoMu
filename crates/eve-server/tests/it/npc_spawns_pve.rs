@@ -1302,6 +1302,12 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&901).cloned()), Some("EmpireWin".to_string()));
     let PyRep::Tuple(fob_snap1) = rpc(&ctx, &mut fob_sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[]).await.unwrap() else { panic!() };
     assert_eq!(fob_snap1[1].dict_get("phase"), Some(&PyRep::String(PHASE_WINDDOWN.into())));
-    assert!(fob_handle.ballpark.read().unwrap().balls.values().any(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE));
+    assert!(
+        fob_handle
+            .test_with_ballpark_async(|bp| {
+                bp.balls.values().any(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE)
+            })
+            .await
+    );
 }
 }

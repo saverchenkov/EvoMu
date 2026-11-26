@@ -40,17 +40,19 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
     let mut pilot = gm_pilot_in_space(&ctx, 51_001, 90_108_801, 587, JITA_SYS).await;
     let sys = ctx.systems.get_or_spawn(JITA_SYS);
 
-    let (damaged_shield, damaged_armor, ship_pos) = {
-        let mut bp = sys.ballpark.write().expect("ballpark write");
-        let ship_pos = bp.balls.get(&pilot.ship_id).expect("ship ball").position;
-        let cs = bp
-            .combat_states
-            .get_mut(&pilot.ship_id)
-            .expect("ship combat state");
-        cs.shield_hp = (cs.max_shield_hp * 0.25).max(1.0);
-        cs.armor_hp = (cs.max_armor_hp * 0.25).max(1.0);
-        (cs.shield_hp, cs.armor_hp, ship_pos)
-    };
+    let ship_id = pilot.ship_id;
+    let (damaged_shield, damaged_armor, ship_pos) = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            let ship_pos = bp.balls.get(&ship_id).expect("ship ball").position;
+            let cs = bp
+                .combat_states
+                .get_mut(&ship_id)
+                .expect("ship combat state");
+            cs.shield_hp = (cs.max_shield_hp * 0.25).max(1.0);
+            cs.armor_hp = (cs.max_armor_hp * 0.25).max(1.0);
+            (cs.shield_hp, cs.armor_hp, ship_pos)
+        })
+        .await;
     let _ = ctx.drain_notifications_for_char(pilot.char_id);
 
     let spawned = slash_cmd(&ctx, &mut pilot.sess, "/soak logi 3").await;
@@ -63,10 +65,19 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
     assert_eq!(npc_ids.len(), 3);
 
     {
-        let bp = sys.ballpark.read().expect("ballpark read");
-        for &nid in &npc_ids {
-            let b = bp.balls.get(&nid).expect("logi npc ball present");
-            let horiz = DVec3::new(b.position.x - ship_pos.x, 0.0, b.position.z - ship_pos.z).length();
+        let npc_ids_check = npc_ids.clone();
+        let horiz_dists: Vec<f64> = sys
+            .test_with_ballpark_async(move |bp| {
+                npc_ids_check
+                    .into_iter()
+                    .map(|nid| {
+                        let b = bp.balls.get(&nid).expect("logi npc ball present");
+                        DVec3::new(b.position.x - ship_pos.x, 0.0, b.position.z - ship_pos.z).length()
+                    })
+                    .collect()
+            })
+            .await;
+        for horiz in horiz_dists {
             assert!(
                 (horiz - 12_000.0).abs() < 2.0,
                 "expected logi cruiser on 12 km ring, got horizontal distance {horiz}"
@@ -78,21 +89,25 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
     for _ in 0..4 {
         ctx.advance_secs(1);
         step_active_systems_physics_tick(&ctx, 1).await;
-        if let Ok(bp) = sys.ballpark.read() {
-            for ev in &bp.pending_events {
-                if let DestinyEvent::OnDbuffUpdated { ball_id, dbuffs } = ev {
-                    if *ball_id == pilot.ship_id
-                        && dbuffs
-                            .iter()
-                            .any(|&(id, val, _)| id == 10 && (val - 15.0).abs() < 1e-9)
-                        && dbuffs
-                            .iter()
-                            .any(|&(id, val, _)| id == 13 && (val - 15.0).abs() < 1e-9)
-                    {
-                        saw_destiny_dbuffs = true;
-                    }
-                }
-            }
+        let saw_tick_dbuffs = sys
+            .test_with_ballpark_async(move |bp| {
+                bp.pending_events.iter().any(|ev| {
+                    matches!(
+                        ev,
+                        DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+                            if *ball_id == ship_id
+                                && dbuffs
+                                    .iter()
+                                    .any(|&(id, val, _)| id == 10 && (val - 15.0).abs() < 1e-9)
+                                && dbuffs
+                                    .iter()
+                                    .any(|&(id, val, _)| id == 13 && (val - 15.0).abs() < 1e-9)
+                    )
+                })
+            })
+            .await;
+        if saw_tick_dbuffs {
+            saw_destiny_dbuffs = true;
         }
     }
     assert!(
@@ -100,14 +115,15 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         "expected Destiny OnDbuffUpdated with command burst dbuffs 10 and 13"
     );
 
-    let (healed_shield, healed_armor) = {
-        let bp = sys.ballpark.read().expect("ballpark read");
-        let cs = bp
-            .combat_states
-            .get(&pilot.ship_id)
-            .expect("ship combat state after soak");
-        (cs.shield_hp, cs.armor_hp)
-    };
+    let (healed_shield, healed_armor) = sys
+        .test_with_ballpark_async(move |bp| {
+            let cs = bp
+                .combat_states
+                .get(&ship_id)
+                .expect("ship combat state after soak");
+            (cs.shield_hp, cs.armor_hp)
+        })
+        .await;
     assert!(
         healed_shield > damaged_shield,
         "expected remote shield transfer heal: before={damaged_shield}, after={healed_shield}"
@@ -118,80 +134,88 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
     );
 
     {
-        let bp = sys.ballpark.read().expect("ballpark read for specialfx");
-        for &nid in &npc_ids {
-            for (guid, expected_tid) in [
-                ("effects.ShieldTransfer", 3_596_u32),
-                ("effects.RemoteArmourRepair", 11_357_u32),
-            ] {
-                let ev = bp
-                    .pending_events
-                    .iter()
-                    .find(|ev| {
-                        matches!(
-                            ev,
-                            DestinyEvent::OnSpecialFX {
-                                ball_id,
-                                module_id: Some(mod_id),
-                                guid: ev_guid,
-                                is_active: true,
-                            } if *ball_id == nid
-                                && *mod_id != pilot.ship_id
-                                && *mod_id != nid
-                                && ev_guid == guid
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "expected active Destiny OnSpecialFX {guid} from npc {nid}: {:?}",
-                            bp.pending_events
-                        )
-                    });
-                let DestinyEvent::OnSpecialFX {
-                    module_id: Some(mod_id),
-                    ..
-                } = ev
-                else {
-                    unreachable!();
-                };
-                let meta = bp
-                    .special_fx_meta
-                    .get(&(nid, Some(*mod_id), guid.to_string()))
-                    .unwrap_or_else(|| {
-                        panic!("expected special_fx_meta for ({nid}, {mod_id}, {guid})")
-                    });
-                assert_eq!(meta.target_id, Some(pilot.ship_id));
-                assert_eq!(meta.module_type_id, Some(expected_tid));
-                assert!(!meta.is_offensive);
-                assert_eq!(meta.duration_ms, Some(2_000.0));
-                assert_eq!(meta.repeat, Some(0));
+        let npc_ids_fx = npc_ids.clone();
+        let fx_checks = sys
+            .test_with_ballpark_async(move |bp| {
+                let mut out = Vec::new();
+                for &nid in &npc_ids_fx {
+                    for (guid, expected_tid) in [
+                        ("effects.ShieldTransfer", 3_596_u32),
+                        ("effects.RemoteArmourRepair", 11_357_u32),
+                    ] {
+                        let Some(ev) = bp.pending_events.iter().find(|ev| {
+                            matches!(
+                                ev,
+                                DestinyEvent::OnSpecialFX {
+                                    ball_id,
+                                    module_id: Some(mod_id),
+                                    guid: ev_guid,
+                                    is_active: true,
+                                } if *ball_id == nid
+                                    && *mod_id != ship_id
+                                    && *mod_id != nid
+                                    && ev_guid == guid
+                            )
+                        }) else {
+                            return Err(format!(
+                                "expected active Destiny OnSpecialFX {guid} from npc {nid}: {:?}",
+                                bp.pending_events
+                            ));
+                        };
+                        let DestinyEvent::OnSpecialFX {
+                            module_id: Some(mod_id),
+                            ..
+                        } = ev
+                        else {
+                            unreachable!();
+                        };
+                        let Some(meta) = bp
+                            .special_fx_meta
+                            .get(&(nid, Some(*mod_id), guid.to_string()))
+                            .cloned()
+                        else {
+                            return Err(format!("expected special_fx_meta for ({nid}, {mod_id}, {guid})"));
+                        };
+                        let encoded =
+                            eve_destiny::wire::encode_destiny_event(bp.current_tick as u32, ev, Some(bp));
+                        out.push((nid, guid, expected_tid, *mod_id, meta, encoded));
+                    }
+                }
+                Ok(out)
+            })
+            .await
+            .unwrap_or_else(|msg| panic!("{msg}"));
 
-                let encoded =
-                    eve_destiny::wire::encode_destiny_event(bp.current_tick as u32, ev, Some(&bp));
-                let PyRep::Tuple(stamp_and_action) = &encoded else {
-                    panic!("expected (stamp, action) OnSpecialFX tuple: {encoded:?}");
-                };
-                assert_eq!(stamp_and_action.len(), 2);
-                let PyRep::Tuple(outer) = &stamp_and_action[1] else {
-                    panic!("expected outer OnSpecialFX action tuple: {:?}", stamp_and_action[1]);
-                };
-                assert_eq!(outer[0].as_str(), Some("OnSpecialFX"));
-                let PyRep::Tuple(args) = &outer[1] else {
-                    panic!("expected 14-arg OnSpecialFX tuple: {:?}", outer[1]);
-                };
-                assert_eq!(args.len(), 14);
-                assert_eq!(args[0].as_i64(), Some(nid));
-                assert_eq!(args[1].as_i64(), Some(*mod_id));
-                assert_ne!(args[1].as_i64(), Some(pilot.ship_id));
-                assert_eq!(args[2].as_i64(), Some(i64::from(expected_tid)));
-                assert_eq!(args[3].as_i64(), Some(pilot.ship_id));
-                assert_eq!(args[5].as_str(), Some(guid));
-                assert_eq!(args[6].as_bool(), Some(false));
-                assert_eq!(args[7].as_i64(), Some(1));
-                assert_eq!(args[8].as_i64(), Some(1));
-                assert_eq!(args[9].as_f64(), Some(2_000.0));
-                assert_eq!(args[10].as_i64(), Some(0));
-            }
+        for (nid, guid, expected_tid, mod_id, meta, encoded) in fx_checks {
+            assert_eq!(meta.target_id, Some(ship_id));
+            assert_eq!(meta.module_type_id, Some(expected_tid));
+            assert!(!meta.is_offensive);
+            assert_eq!(meta.duration_ms, Some(2_000.0));
+            assert_eq!(meta.repeat, Some(0));
+
+            let PyRep::Tuple(stamp_and_action) = &encoded else {
+                panic!("expected (stamp, action) OnSpecialFX tuple: {encoded:?}");
+            };
+            assert_eq!(stamp_and_action.len(), 2);
+            let PyRep::Tuple(outer) = &stamp_and_action[1] else {
+                panic!("expected outer OnSpecialFX action tuple: {:?}", stamp_and_action[1]);
+            };
+            assert_eq!(outer[0].as_str(), Some("OnSpecialFX"));
+            let PyRep::Tuple(args) = &outer[1] else {
+                panic!("expected 14-arg OnSpecialFX tuple: {:?}", outer[1]);
+            };
+            assert_eq!(args.len(), 14);
+            assert_eq!(args[0].as_i64(), Some(nid));
+            assert_eq!(args[1].as_i64(), Some(mod_id));
+            assert_ne!(args[1].as_i64(), Some(ship_id));
+            assert_eq!(args[2].as_i64(), Some(i64::from(expected_tid)));
+            assert_eq!(args[3].as_i64(), Some(ship_id));
+            assert_eq!(args[5].as_str(), Some(guid));
+            assert_eq!(args[6].as_bool(), Some(false));
+            assert_eq!(args[7].as_i64(), Some(1));
+            assert_eq!(args[8].as_i64(), Some(1));
+            assert_eq!(args[9].as_f64(), Some(2_000.0));
+            assert_eq!(args[10].as_i64(), Some(0));
         }
     }
 
@@ -239,40 +263,52 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         Some(3)
     );
     {
-        let bp = sys.ballpark.read().expect("ballpark read after stop");
-        for &nid in &npc_ids {
-            assert!(!bp.balls.contains_key(&nid), "logi npc {nid} should despawn on stop");
+        let npc_ids_stop = npc_ids.clone();
+        let (npc_present, pending_events, pruned_fx, fx_meta_dbg) = sys
+            .test_with_ballpark_async(move |bp| {
+                let npc_present: Vec<(i64, bool)> = npc_ids_stop
+                    .iter()
+                    .map(|&nid| (nid, bp.balls.contains_key(&nid)))
+                    .collect();
+                let pruned_fx = !bp
+                    .special_fx_meta
+                    .keys()
+                    .any(|(bid, _, _)| npc_ids_stop.contains(bid));
+                let fx_meta_dbg = if pruned_fx {
+                    String::new()
+                } else {
+                    format!("{:?}", bp.special_fx_meta)
+                };
+                (npc_present, bp.pending_events.clone(), pruned_fx, fx_meta_dbg)
+            })
+            .await;
+        for (nid, still_present) in npc_present {
+            assert!(!still_present, "logi npc {nid} should despawn on stop");
             for guid in ["effects.ShieldTransfer", "effects.RemoteArmourRepair"] {
                 assert!(
-                    bp.pending_events.iter().any(|ev| matches!(
+                    pending_events.iter().any(|ev| matches!(
                         ev,
                         DestinyEvent::OnSpecialFX {
                             ball_id,
                             module_id: Some(mod_id),
                             guid: ev_guid,
                             is_active: false,
-                        } if *ball_id == nid && *mod_id != pilot.ship_id && ev_guid == guid
+                        } if *ball_id == nid && *mod_id != ship_id && ev_guid == guid
                     )),
                     "expected stop Destiny OnSpecialFX {guid} for npc {nid}: {:?}",
-                    bp.pending_events
+                    pending_events
                 );
             }
         }
+        assert!(pruned_fx, "expected special_fx_meta pruned on stop: {fx_meta_dbg}");
         assert!(
-            !bp.special_fx_meta
-                .keys()
-                .any(|(bid, _, _)| npc_ids.contains(bid)),
-            "expected special_fx_meta pruned on stop: {:?}",
-            bp.special_fx_meta
-        );
-        assert!(
-            bp.pending_events.iter().any(|ev| matches!(
+            pending_events.iter().any(|ev| matches!(
                 ev,
                 DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
-                    if *ball_id == pilot.ship_id && dbuffs.is_empty()
+                    if *ball_id == ship_id && dbuffs.is_empty()
             )),
             "expected Destiny OnDbuffUpdated clear on /soak logi stop: {:?}",
-            bp.pending_events
+            pending_events
         );
     }
     let stop_notifs = ctx.drain_notifications_for_char(pilot.char_id);
@@ -580,12 +616,18 @@ async fn gm_sysjunkclear_backintime_spawnwreck_session_and_role_gating() {
             "non-expired deployable must survive /sysjunkclear"
         );
     });
-    {
-        let bp = sys.ballpark.read().expect("ballpark read");
-        assert!(!bp.balls.contains_key(&jetcan_id));
-        assert!(!bp.balls.contains_key(&expired_dep_id));
-        assert!(bp.balls.contains_key(&live_dep_id));
-    }
+    let (has_jetcan, has_expired_dep, has_live_dep) = sys
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls.contains_key(&jetcan_id),
+                bp.balls.contains_key(&expired_dep_id),
+                bp.balls.contains_key(&live_dep_id),
+            )
+        })
+        .await;
+    assert!(!has_jetcan);
+    assert!(!has_expired_dep);
+    assert!(has_live_dep);
 
     // Subtest B: `/backintime`
     ctx.db.with_mut_snapshot(|snap| {

@@ -777,24 +777,34 @@ async fn test_ch5_gm_spawn_veldspar_1230_in_space_delivers_add_balls2() {
         assert!(snap.asteroids.contains_key(&ast_id));
     });
 
-    {
-        let bp = handle.ballpark.read().unwrap();
-        assert!(bp.is_static_ball(ast_id), "spawned asteroid must be static");
-        assert!(
-            !bp.ball_grid_ids.contains_key(&ast_id),
-            "static spawned asteroid must stay out of ball_grid_ids"
-        );
-        assert!(
-            !bp.grids.values().any(|g| g.members.contains(&ast_id)),
-            "static spawned asteroid must stay out of dynamic GridBubble.members"
-        );
-        let meta = bp.ball_slim_meta.get(&ast_id).expect("asteroid slim meta");
-        assert_eq!(meta.group_id, 462);
-        assert_eq!(meta.category_id, 25);
-        assert_eq!(meta.owner_id, 1);
-        assert!(bp.balls[&ast_id].radius >= 200.0);
-        assert_eq!(bp.balls[&ast_id].mode, eve_destiny::MovementMode::Rigid);
-    }
+    let (is_static, in_grid_ids, in_grid_members, meta, radius, mode) = handle
+        .test_with_ballpark_async(move |bp| {
+            let meta = bp.ball_slim_meta.get(&ast_id).expect("asteroid slim meta").clone();
+            let b = &bp.balls[&ast_id];
+            (
+                bp.is_static_ball(ast_id),
+                bp.ball_grid_ids.contains_key(&ast_id),
+                bp.grids.values().any(|g| g.members.contains(&ast_id)),
+                meta,
+                b.radius,
+                b.mode.clone(),
+            )
+        })
+        .await;
+    assert!(is_static, "spawned asteroid must be static");
+    assert!(
+        !in_grid_ids,
+        "static spawned asteroid must stay out of ball_grid_ids"
+    );
+    assert!(
+        !in_grid_members,
+        "static spawned asteroid must stay out of dynamic GridBubble.members"
+    );
+    assert_eq!(meta.group_id, 462);
+    assert_eq!(meta.category_id, 25);
+    assert_eq!(meta.owner_id, 1);
+    assert!(radius >= 200.0);
+    assert_eq!(mode, eve_destiny::MovementMode::Rigid);
 
     let (_tick, obs_evs, _wire) = handle.drain_observer_updates(gm_ship_id).await.unwrap();
     assert!(
