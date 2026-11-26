@@ -1319,12 +1319,52 @@ pub fn handle(
             }
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let target = if snap.structures.contains_key(&item_id) {
-                    item_id
-                } else if let Some(item) = snap.items.get(&item_id) {
-                    if item.location_id == tower_id && item.type_id == 14343 {
-                        tower_id
-                    } else {
+                if snap.structures.contains_key(&item_id) {
+                    check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
+                } else {
+                    check_starbase_auth(snap, session, char_id, tower_id, now_unix)?;
+                    let char_corp = session
+                        .corporation_id
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+                        .unwrap_or(0);
+                    let tower_corp = snap
+                        .structures
+                        .get(&tower_id)
+                        .map(|s| s.owner_corp_id)
+                        .or_else(|| snap.items.get(&tower_id).map(|i| i.owner_id))
+                        .unwrap_or(0);
+                    let Some(item) = snap.items.get(&item_id).filter(|i| {
+                        session.has_gm_role()
+                            || i.owner_id == char_id
+                            || (char_corp > 0 && i.owner_id == char_corp)
+                            || (tower_corp > 0 && i.owner_id == tower_corp)
+                    }) else {
+                        return Err(BridgeRpcError::with_rejection(
+                            "InvalidTarget",
+                            format!("Target {item_id} not found"),
+                            eve_proto::UserErrorKey::ItemNotFound,
+                            [] as [(&str, eve_proto::UserErrorArg); 0],
+                            eve_proto::RejectionFacts::InvalidTarget {
+                                target_id: Some(item_id),
+                                module_id: None,
+                                reason: "target_not_found".to_owned(),
+                            },
+                        ));
+                    };
+                    if !(item.location_id == tower_id && item.type_id == 14343) {
+                        if item.type_id == 14343 {
+                            return Err(BridgeRpcError::with_rejection(
+                                "InvalidTarget",
+                                format!("Target {item_id} is not an anchored silo for tower {tower_id}"),
+                                eve_proto::UserErrorKey::ItemNotFound,
+                                [] as [(&str, eve_proto::UserErrorArg); 0],
+                                eve_proto::RejectionFacts::InvalidTarget {
+                                    target_id: Some(item_id),
+                                    module_id: None,
+                                    reason: "not_anchored_at_tower".to_owned(),
+                                },
+                            ));
+                        }
                         let group_name = ctx
                             .sde
                             .types
@@ -1339,20 +1379,7 @@ pub fn handle(
                             format!("Target {item_id} is not an anchored silo for tower {tower_id}"),
                         ));
                     }
-                } else {
-                    return Err(BridgeRpcError::with_rejection(
-                        "InvalidTarget",
-                        format!("Target {item_id} not found"),
-                        eve_proto::UserErrorKey::ItemNotFound,
-                        [] as [(&str, eve_proto::UserErrorArg); 0],
-                        eve_proto::RejectionFacts::InvalidTarget {
-                            target_id: Some(item_id),
-                            module_id: None,
-                            reason: "target_not_found".to_owned(),
-                        },
-                    ));
-                };
-                check_starbase_auth(snap, session, char_id, target, now_unix)?;
+                }
                 snap.orbital_provision_types.insert(item_id, i64::from(provision_type));
                 Ok(())
             });

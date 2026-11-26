@@ -717,7 +717,9 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         let item = s.items.get(&module_id);
         (
             is_module_burned_out(ctx, item),
-            item.map(|i| i.type_id).unwrap_or(0),
+            item.filter(|i| i.owner_id == char_id)
+                .map(|i| i.type_id)
+                .unwrap_or(0),
         )
     });
     if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
@@ -751,10 +753,9 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         } else {
             snap_mod_type_id
         };
-        let module_name = ctx
-            .sde
-            .types
-            .get(&eff_mod_type_id)
+        let module_name = (eff_mod_type_id > 0)
+            .then(|| ctx.sde.types.get(&eff_mod_type_id))
+            .flatten()
             .map(|t| t.name.as_str())
             .unwrap_or("Module");
         return Err(BridgeRpcError::fitting_validation_failed(
@@ -926,7 +927,10 @@ pub async fn handle_dogma_set_module_online(
     let (owns_ship, mod_type_id, was_fitted_in_db) = ctx.db.with_snapshot(|s| {
         let owns = s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id);
         let mod_it = s.items.get(&module_id);
-        let mtid = mod_it.map(|m| m.type_id).unwrap_or(0);
+        let mtid = mod_it
+            .filter(|i| i.owner_id == char_id)
+            .map(|m| m.type_id)
+            .unwrap_or(0);
         let fitted = mod_it.is_some_and(|m| {
             m.location_id == ship_id
                 && matches!(m.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171)
@@ -979,10 +983,9 @@ pub async fn handle_dogma_set_module_online(
             return Err(err("ModuleBurnedOut", e));
         }
         let eff_mod_type_id = fit.modules.get(&module_id).map(|m| m.type_id).unwrap_or(mod_type_id);
-        let module_name = ctx
-            .sde
-            .types
-            .get(&eff_mod_type_id)
+        let module_name = (eff_mod_type_id > 0)
+            .then(|| ctx.sde.types.get(&eff_mod_type_id))
+            .flatten()
             .map(|t| t.name.as_str())
             .unwrap_or("Module");
         return Err(BridgeRpcError::fitting_validation_failed(

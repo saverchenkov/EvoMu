@@ -9,8 +9,8 @@ use crate::router::ServerContext;
 use crate::services;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use eve_db::{
-    FleetMemberRecord, FleetRecord, FleetRole, InventoryFlag, InventoryItemRecord,
-    UpwellStructureRecord,
+    CorporationRecord, FleetMemberRecord, FleetRecord, FleetRole, InventoryFlag,
+    InventoryItemRecord, UpwellStructureRecord,
 };
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::{BridgeRpcError, ClientError, PyRep, RejectionFacts, UserErrorKey};
@@ -415,7 +415,9 @@ fn collect_raw_amended_sites_in_production_src(rel_file: &str, src: &str) -> Vec
             let prev_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
             let prev_is_member =
                 start > 0 && (bytes[start - 1] == b'.' || (start >= 2 && &bytes[start - 2..start] == b"::"));
-            if !prev_ok || (prev_is_member && !pat.contains("::")) {
+            let allow_qualified_struct =
+                pat == "BridgeRpcError" && start >= 2 && &bytes[start - 2..start] == b"::";
+            if !prev_ok || (prev_is_member && !pat.contains("::") && !allow_qualified_struct) {
                 continue;
             }
             let mut open_idx = after;
@@ -1378,6 +1380,9 @@ async fn t3a_fitting_validation_failed_and_burned_out_godma_handlers() {
     let cargo_mod_id = 1_914_000_200_i64;
     let huge_mod_id = 1_914_000_201_i64;
     let burned_mod_id = 1_914_000_202_i64;
+    let foreign_cid = 91_401_099_i64;
+    let foreign_ship_id = 1_914_000_299_i64;
+    let foreign_mod_id = 1_914_000_298_i64;
     let kw = HashMap::new();
 
     let low_mod = ctx
@@ -1466,7 +1471,20 @@ async fn t3a_fitting_validation_failed_and_burned_out_godma_handlers() {
                 flag: InventoryFlag::LoSlot1,
                 quantity: 1,
                 singleton: true,
-                dynamic_attributes: burned_attrs,
+                dynamic_attributes: burned_attrs.clone(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_mod_id,
+            InventoryItemRecord {
+                item_id: foreign_mod_id,
+                type_id: low_mod.0,
+                owner_id: foreign_cid,
+                location_id: foreign_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
                 ..Default::default()
             },
         );
@@ -1594,6 +1612,44 @@ async fn t3a_fitting_validation_failed_and_burned_out_godma_handlers() {
         .expect_err("burned module in space must return ModuleBurnedOut");
     assert_eq!(burned_err.code, "ModuleBurnedOut");
     assert!(burned_err.rejection_facts().is_none());
+
+    // 5. Cross-player negative tests (F-01): foreign item_id must not leak SDE moduleName or module_type_id
+    for method in ["SetModuleOnline", "TakeModuleOffline"] {
+        let foreign_err = ctx
+            .dispatch_rpc(
+                &mut session,
+                "dogmaIM",
+                None,
+                method,
+                &[PyRep::Integer(ship_id), PyRep::Integer(foreign_mod_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("foreign module_id must fail without disclosing metadata");
+        let (facts, args) = assert_rejected_wire_facts(
+            "dogmaIM",
+            method,
+            Some(char_id),
+            &foreign_err,
+            CODE_FITTING_VALIDATION_FAILED,
+            UserErrorKey::ModuleFitFailed,
+        );
+        assert!(
+            args.iter()
+                .any(|(k, v)| k == "moduleName" && v == &PyRep::String("Module".into())),
+            "{method} on foreign item must fall back to generic moduleName, got {args:?}"
+        );
+        assert!(matches!(
+            facts,
+            RejectionFacts::FittingValidationFailed {
+                ship_id: Some(sid),
+                item_id: Some(iid),
+                module_type_id: None,
+                reason,
+            } if *sid == ship_id && *iid == foreign_mod_id && !reason.is_empty()
+        ));
+    }
 }
 
 #[tokio::test]
@@ -1602,9 +1658,15 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
     let uid = 91_501_u64;
     let char_id = 91_501_001_i64;
     let corp_id = 98_501_001_i64;
+    let foreign_uid = 91_502_u64;
+    let foreign_cid = 91_501_099_i64;
+    let foreign_corp_id = 98_501_099_i64;
     let sys_id = 30_000_142_u32;
     let tower_id = 1_915_000_100_i64;
+    let other_tower_id = 1_915_000_200_i64;
     let non_silo_id = 1_915_000_101_i64;
+    let misplaced_silo_id = 1_915_000_102_i64;
+    let foreign_item_id = 1_915_000_103_i64;
     let missing_id = 1_915_000_999_i64;
     let kw = HashMap::new();
 
@@ -1617,12 +1679,41 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
         .expect("canonical SDE includes a group 427 moon material type");
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        let seed = snap.characters.values().next().cloned().expect("seed char");
+        let mut ch = seed.clone();
         ch.character_id = char_id;
         ch.user_id = uid;
         ch.corporation_id = corp_id;
         ch.solar_system_id = sys_id;
         snap.characters.insert(char_id, ch);
+
+        let mut foreign_ch = seed;
+        foreign_ch.character_id = foreign_cid;
+        foreign_ch.user_id = foreign_uid;
+        foreign_ch.corporation_id = foreign_corp_id;
+        foreign_ch.solar_system_id = sys_id;
+        snap.characters.insert(foreign_cid, foreign_ch);
+
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "POS Provision Corp".into();
+        corp.ticker = "POSP".into();
+        corp.ceo_id = char_id;
+        snap.corporations.insert(corp_id, corp);
+
+        for tid in [tower_id, other_tower_id] {
+            snap.structures.insert(
+                tid,
+                UpwellStructureRecord {
+                    structure_id: tid,
+                    type_id: 16_213,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    state: "Online".into(),
+                    ..Default::default()
+                },
+            );
+        }
         snap.items.insert(
             non_silo_id,
             InventoryItemRecord {
@@ -1631,6 +1722,32 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
                 owner_id: corp_id,
                 location_id: tower_id,
                 flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            misplaced_silo_id,
+            InventoryItemRecord {
+                item_id: misplaced_silo_id,
+                type_id: 14_343, // Silo anchored at other_tower_id, not tower_id
+                owner_id: corp_id,
+                location_id: other_tower_id,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_item_id,
+            InventoryItemRecord {
+                item_id: foreign_item_id,
+                type_id: 34,
+                owner_id: foreign_cid,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
                 quantity: 1,
                 singleton: true,
                 ..Default::default()
@@ -1716,4 +1833,113 @@ async fn t3a_invalid_target_pos_change_provision_type_emits_typed_facts() {
             reason: "target_not_found".into(),
         }
     );
+
+    // Foreign item passed against caller's own tower must fail closed as ItemNotFound (no group disclosure)
+    let foreign_item_err = ctx
+        .dispatch_rpc(
+            &mut session,
+            "posMgr",
+            None,
+            "ChangeStructureProvisionType",
+            &[
+                PyRep::Integer(tower_id),
+                PyRep::Integer(foreign_item_id),
+                PyRep::Integer(i64::from(moon_mat_tid)),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("foreign item must fail closed without group disclosure");
+    let (facts, args) = assert_rejected_wire_facts(
+        "posMgr",
+        "ChangeStructureProvisionType",
+        Some(char_id),
+        &foreign_item_err,
+        CODE_INVALID_TARGET,
+        UserErrorKey::ItemNotFound,
+    );
+    assert!(args.is_empty(), "foreign target ItemNotFound must not leak groupName: {args:?}");
+    assert_eq!(
+        facts,
+        &RejectionFacts::InvalidTarget {
+            target_id: Some(foreign_item_id),
+            module_id: None,
+            reason: "target_not_found".into(),
+        }
+    );
+
+    // Misplaced Silo (14343) anchored at another tower must NOT emit InvalidTargetGroup("Silo")
+    let misplaced_err = ctx
+        .dispatch_rpc(
+            &mut session,
+            "posMgr",
+            None,
+            "ChangeStructureProvisionType",
+            &[
+                PyRep::Integer(tower_id),
+                PyRep::Integer(misplaced_silo_id),
+                PyRep::Integer(i64::from(moon_mat_tid)),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("misplaced silo must fail without InvalidTargetGroup(Silo)");
+    let (facts, args) = assert_rejected_wire_facts(
+        "posMgr",
+        "ChangeStructureProvisionType",
+        Some(char_id),
+        &misplaced_err,
+        CODE_INVALID_TARGET,
+        UserErrorKey::ItemNotFound,
+    );
+    assert!(args.is_empty());
+    assert_eq!(
+        facts,
+        &RejectionFacts::InvalidTarget {
+            target_id: Some(misplaced_silo_id),
+            module_id: None,
+            reason: "not_anchored_at_tower".into(),
+        }
+    );
+
+    // Unauthorized caller probing foreign/unowned tower or bogus tower_id fails starbase auth BEFORE item lookup
+    let mut foreign_sess = auth_session(foreign_uid, foreign_cid, foreign_corp_id, sys_id);
+    ctx.sync_session(&mut foreign_sess);
+    let unauth_err = ctx
+        .dispatch_rpc(
+            &mut foreign_sess,
+            "posMgr",
+            None,
+            "ChangeStructureProvisionType",
+            &[
+                PyRep::Integer(tower_id),
+                PyRep::Integer(non_silo_id),
+                PyRep::Integer(i64::from(moon_mat_tid)),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unauthorized caller must fail starbase auth");
+    assert_eq!(unauth_err.code, "NotStarbaseOwner");
+
+    let bogus_tower_err = ctx
+        .dispatch_rpc(
+            &mut foreign_sess,
+            "posMgr",
+            None,
+            "ChangeStructureProvisionType",
+            &[
+                PyRep::Integer(9_999_999),
+                PyRep::Integer(non_silo_id),
+                PyRep::Integer(i64::from(moon_mat_tid)),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("bogus tower_id must fail starbase auth before probing item_id");
+    assert_eq!(bogus_tower_err.code, "StructureNotFound");
 }
