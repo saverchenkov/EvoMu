@@ -25,7 +25,9 @@ use eve_server::services::industry_pi::load_job_cost_meta;
 use eve_server::world_seeder::seed_full_market_catalog;
 use std::sync::{Arc, OnceLock};
 
-fn fast_full_market_ctx() -> ServerContext {
+fn fast_full_market_ctx_with_rate_limit(
+    policy: eve_server::router::RpcRateLimitPolicy,
+) -> eve_server::router::TestContext {
     static BASE: OnceLock<(Arc<eve_sde::SdeRegistry>, eve_db::WorldStateSnapshot)> = OnceLock::new();
     let (sde, snap) = BASE.get_or_init(|| {
         let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
@@ -36,10 +38,22 @@ fn fast_full_market_ctx() -> ServerContext {
     });
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap.clone());
-    let ctx = ServerContext::with_sde_and_repository(Arc::clone(sde), db)
-        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    let ctx = eve_server::router::TestContext::from_server(
+        eve_server::router::TestContext::with_sde_and_repository_rate_limit(
+            Arc::clone(sde),
+            db,
+            policy,
+        )
+        .into_server()
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED),
+    );
     common::pin_clock(&ctx);
     ctx
+}
+
+fn fast_full_market_ctx() -> ServerContext {
+    fast_full_market_ctx_with_rate_limit(eve_server::router::RpcRateLimitPolicy::Default)
+        .into_server()
 }
 
 const RIFTER_BP: u32 = 691;
@@ -368,8 +382,7 @@ async fn test_p0_1176_bp_37030_multirun_overflow_rejected_and_unlocked() {
 
 #[tokio::test]
 async fn test_p0_1176_sde_blueprints_property_sweep_no_u64_wrap_or_skip() {
-    let ctx = eve_server::router::TestContext::from_server(fast_full_market_ctx())
-        .with_rpc_rate_budget_disabled();
+    let ctx = fast_full_market_ctx_with_rate_limit(eve_server::router::RpcRateLimitPolicy::Unlimited);
     fund_pilots(&ctx, &[(PILOT_1, 500_000_000_000.0)]).await;
     let mut s1 = login(&ctx, 9202, "demo", PILOT_1).await;
     train_skills(

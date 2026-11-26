@@ -28,13 +28,6 @@ impl<'c> ServerScenarioBackend<'c> {
     pub fn from_test_ctx(test_ctx: &'c eve_server::router::TestContext) -> Self {
         Self::new(test_ctx.server())
     }
-
-    /// Creates a backend with RPC rate-budget enforcement disabled via [`TestContext::disable_rpc_rate_budget`]
-    /// for multi-actor sweeps exceeding per-session burst limits.
-    pub fn with_rpc_rate_budget_disabled(test_ctx: &'c eve_server::router::TestContext) -> Self {
-        test_ctx.disable_rpc_rate_budget();
-        Self::from_test_ctx(test_ctx)
-    }
 }
 
 async fn login_gm_treasury<'c>(ctx: &'c ServerContext, gm_sid: u64) -> ClientWireSession<'c> {

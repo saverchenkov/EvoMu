@@ -1,11 +1,12 @@
 //! End-to-end acceptance tests for `#1540` Track 1 (`ScenarioBuilder` presets,
 //! legal-fixture checks, deterministic SDE/RNG picks, and `TestContext`).
 
-use std::collections::HashMap;
+use std::collections::{hash_map::RandomState, HashMap, HashSet};
 
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
+use eve_sde::{InvType, SdeRegistry, TypeId};
 use eve_server::router::TestContext;
 use eve_testkit::legal_fixture::{
     assert_legal_fixture, check_legal_fixture, is_npc_corporation, LegalFixtureViolation,
@@ -162,9 +163,9 @@ async fn preset_corporation_director_performs_director_actions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preset_two_pilots_in_fleet_coordinates_broadcast() {
-    let ctx = TestContext::new();
+    let ctx = TestContext::new_with_rpc_rate_budget_disabled();
     crate::common::pin_clock(&ctx);
-    let mut backend = ServerScenarioBackend::with_rpc_rate_budget_disabled(&ctx);
+    let mut backend = ServerScenarioBackend::from_test_ctx(&ctx);
     let mut scenario = ScenarioBuilder::two_pilots_in_fleet().build(&mut backend).await;
     let [fc, wing] = &mut scenario.actors[..] else { panic!("expected 2 fleet actors"); };
     let fleet_id = fc.fleet_id.expect("commander fleet_id");
@@ -260,9 +261,9 @@ async fn negative_legal_fixture_checks_live_snapshot() {
 async fn omega_actor_trains_multiple_omega_skills_and_skill_gated_charges() {
     use eve_testkit::scenario::{ActorSpec, CorpSetup, ShipLoadoutSpec};
 
-    let ctx = TestContext::new();
+    let ctx = TestContext::new_with_rpc_rate_budget_disabled();
     crate::common::pin_clock(&ctx);
-    let mut backend = ServerScenarioBackend::with_rpc_rate_budget_disabled(&ctx);
+    let mut backend = ServerScenarioBackend::from_test_ctx(&ctx);
 
     let builder = ScenarioBuilder::with_seed(DEFAULT_TEST_SEED)
         .add_actor(ActorSpec {
@@ -326,9 +327,9 @@ async fn corp_join_actor_promotes_delayed_division_roles_after_stasis() {
     use eve_db::corp_roles;
     use eve_testkit::scenario::{ActorSpec, CorpSetup};
 
-    let ctx = TestContext::new();
+    let ctx = TestContext::new_with_rpc_rate_budget_disabled();
     crate::common::pin_clock(&ctx);
-    let mut backend = ServerScenarioBackend::with_rpc_rate_budget_disabled(&ctx);
+    let mut backend = ServerScenarioBackend::from_test_ctx(&ctx);
 
     let delayed_roles = corp_roles::ROLE_HANGAR_CAN_TAKE[0] | corp_roles::ROLE_HANGAR_CAN_QUERY[0];
     let builder = ScenarioBuilder::with_seed(DEFAULT_TEST_SEED)
@@ -391,6 +392,217 @@ fn deterministic_seed_and_sde_pick_reproducibility() {
     let seq1: Vec<u64> = (0..8).map(|_| r1.next_u64()).collect();
     let seq2: Vec<u64> = (0..8).map(|_| r2.next_u64()).collect();
     assert_eq!(seq1, seq2);
+}
+
+#[test]
+fn deterministic_sde_pick_invariant_across_distinct_hash_seeds() {
+    let ctx = TestContext::new();
+
+    // Collect published frigates and modules in deterministic sorted order, then populate 10
+    // HashMaps with distinct RandomState::new() hash seeds and alternating forward/reverse order.
+    let mut sample_types: Vec<(TypeId, InvType)> = ctx
+        .sde
+        .matching_types_sorted(|t| t.published && t.category_id == 6 && t.group_id == 25)
+        .into_iter()
+        .map(|t| (t.type_id, t.clone()))
+        .collect();
+    assert!(
+        sample_types.len() >= 10,
+        "canonical SDE must expose multiple published frigate types"
+    );
+    for t in ctx
+        .sde
+        .matching_types_sorted(|t| t.published && t.category_id == 7)
+        .into_iter()
+        .take(128)
+    {
+        sample_types.push((t.type_id, t.clone()));
+    }
+
+    let mut seeded_maps: Vec<HashMap<TypeId, InvType, RandomState>> = Vec::with_capacity(10);
+    for idx in 0..10 {
+        let mut map = HashMap::with_hasher(RandomState::new());
+        if idx % 2 == 0 {
+            for (tid, inv) in &sample_types {
+                map.insert(*tid, inv.clone());
+            }
+        } else {
+            for (tid, inv) in sample_types.iter().rev() {
+                map.insert(*tid, inv.clone());
+            }
+        }
+        seeded_maps.push(map);
+    }
+
+    let raw_key_orders: HashSet<Vec<TypeId>> = seeded_maps
+        .iter()
+        .map(|m| m.keys().copied().collect())
+        .collect();
+    assert!(
+        raw_key_orders.len() > 1,
+        "distinct RandomState::new() seeds must produce distinct raw HashMap iteration orders"
+    );
+
+    let frigate_pred =
+        |_tid: &TypeId, t: &InvType| t.published && t.category_id == 6 && t.group_id == 25;
+    let baseline_sorted: Vec<TypeId> =
+        SdeRegistry::pick_lowest_entries_sorted(&seeded_maps[0], frigate_pred)
+            .into_iter()
+            .map(|(tid, _)| tid)
+            .collect();
+    let baseline_lowest = SdeRegistry::pick_lowest_entry(&seeded_maps[0], frigate_pred)
+        .map(|(tid, _)| tid)
+        .expect("lowest frigate");
+    assert_eq!(baseline_sorted.first().copied(), Some(baseline_lowest));
+
+    let mut base_rng = DeterministicRng::new(DEFAULT_TEST_SEED);
+    let baseline_rng_picks: Vec<TypeId> = (0..16)
+        .map(|_| {
+            base_rng
+                .pick_sorted_map_entry(&seeded_maps[0], frigate_pred)
+                .expect("sorted frigate pick")
+                .0
+        })
+        .collect();
+    let baseline_rng_seq: Vec<u64> = (0..8).map(|_| base_rng.next_u64()).collect();
+
+    for map in &seeded_maps {
+        let sorted_ids: Vec<TypeId> = SdeRegistry::pick_lowest_entries_sorted(map, frigate_pred)
+            .into_iter()
+            .map(|(tid, _)| tid)
+            .collect();
+        assert_eq!(sorted_ids, baseline_sorted);
+
+        let lowest = SdeRegistry::pick_lowest_entry(map, frigate_pred)
+            .map(|(tid, _)| tid)
+            .expect("lowest frigate");
+        assert_eq!(lowest, baseline_lowest);
+
+        let mut rng = DeterministicRng::new(DEFAULT_TEST_SEED);
+        let rng_picks: Vec<TypeId> = (0..16)
+            .map(|_| {
+                rng.pick_sorted_map_entry(map, frigate_pred)
+                    .expect("sorted frigate pick")
+                    .0
+            })
+            .collect();
+        let rng_seq: Vec<u64> = (0..8).map(|_| rng.next_u64()).collect();
+        assert_eq!(rng_picks, baseline_rng_picks);
+        assert_eq!(rng_seq, baseline_rng_seq);
+    }
+
+    // Build two distinct SdeRegistry instances with separate RandomState::new() hash seeds
+    // and forward vs. reversed insertion order across types and blueprints.
+    let mut all_relevant_types: Vec<(TypeId, InvType)> = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(&tid, t)| {
+            t.category_id == 6
+                || t.category_id == 7
+                || t.category_id == 9
+                || ctx.sde.blueprints.contains_key(&tid)
+        })
+        .map(|(&tid, t)| (tid, t.clone()))
+        .collect();
+    all_relevant_types.sort_by_key(|(tid, _)| *tid);
+
+    let mut all_blueprints: Vec<(TypeId, _)> = ctx
+        .sde
+        .blueprints
+        .iter()
+        .map(|(&tid, bp)| (tid, bp.clone()))
+        .collect();
+    all_blueprints.sort_by_key(|(tid, _)| *tid);
+
+    let mut sde_fwd = SdeRegistry::default();
+    let mut sde_rev = SdeRegistry::default();
+    let mut fwd_types = HashMap::with_hasher(RandomState::new());
+    let mut rev_types = HashMap::with_hasher(RandomState::new());
+    for (tid, t) in &all_relevant_types {
+        fwd_types.insert(*tid, t.clone());
+    }
+    for (tid, t) in all_relevant_types.iter().rev() {
+        rev_types.insert(*tid, t.clone());
+    }
+    let mut fwd_bps = HashMap::with_hasher(RandomState::new());
+    let mut rev_bps = HashMap::with_hasher(RandomState::new());
+    for (tid, bp) in &all_blueprints {
+        fwd_bps.insert(*tid, bp.clone());
+    }
+    for (tid, bp) in all_blueprints.iter().rev() {
+        rev_bps.insert(*tid, bp.clone());
+    }
+    sde_fwd.types = fwd_types;
+    sde_fwd.blueprints = fwd_bps;
+    sde_rev.types = rev_types;
+    sde_rev.blueprints = rev_bps;
+
+    let fwd_raw_types: Vec<TypeId> = sde_fwd.types.keys().copied().collect();
+    let rev_raw_types: Vec<TypeId> = sde_rev.types.keys().copied().collect();
+    assert_ne!(
+        fwd_raw_types, rev_raw_types,
+        "distinct SdeRegistry hash seeds must permute raw types iteration order"
+    );
+
+    let expected_type = ctx
+        .sde
+        .lowest_matching_type(|t| t.published && t.category_id == 6 && t.group_id == 25)
+        .expect("canonical lowest frigate")
+        .type_id;
+    assert_eq!(
+        sde_fwd
+            .lowest_matching_type(|t| t.published && t.category_id == 6 && t.group_id == 25)
+            .expect("fwd lowest frigate")
+            .type_id,
+        expected_type
+    );
+    assert_eq!(
+        sde_rev
+            .lowest_matching_type(|t| t.published && t.category_id == 6 && t.group_id == 25)
+            .expect("rev lowest frigate")
+            .type_id,
+        expected_type
+    );
+
+    let bp_pred = |bp: &eve_sde::BlueprintInfo| bp.product_type_id > 0 && !bp.materials.is_empty();
+    let expected_bp = ctx
+        .sde
+        .lowest_matching_blueprint(bp_pred)
+        .expect("canonical lowest blueprint")
+        .blueprint_type_id;
+    assert_eq!(
+        sde_fwd
+            .lowest_matching_blueprint(bp_pred)
+            .expect("fwd lowest blueprint")
+            .blueprint_type_id,
+        expected_bp
+    );
+    assert_eq!(
+        sde_rev
+            .lowest_matching_blueprint(bp_pred)
+            .expect("rev lowest blueprint")
+            .blueprint_type_id,
+        expected_bp
+    );
+
+    let indy_ctx = ScenarioBuilder::industrialist_docked(&ctx.sde);
+    let indy_fwd = ScenarioBuilder::industrialist_docked(&sde_fwd);
+    let indy_rev = ScenarioBuilder::industrialist_docked(&sde_rev);
+    assert_eq!(indy_fwd.seed, DEFAULT_TEST_SEED);
+    assert_eq!(indy_rev.seed, DEFAULT_TEST_SEED);
+    assert_eq!(
+        indy_fwd.actors[0].station_hangar_items,
+        indy_ctx.actors[0].station_hangar_items
+    );
+    assert_eq!(
+        indy_rev.actors[0].station_hangar_items,
+        indy_ctx.actors[0].station_hangar_items
+    );
+    assert_eq!(
+        indy_fwd.actors[0].ship.as_ref().map(|s| s.hull_type_id),
+        indy_rev.actors[0].ship.as_ref().map(|s| s.hull_type_id)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

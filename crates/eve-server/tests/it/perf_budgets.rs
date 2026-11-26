@@ -23,10 +23,10 @@ fn new_perf_ctx() -> TestContext {
         eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("sde"),
     );
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = TestContext::with_sde_and_repository(sde, db).with_rpc_rate_budget_disabled();
+    let ctx = TestContext::with_sde_and_repository_rate_budget_disabled(sde, db);
     common::pin_clock(&ctx);
-    // Bypass per-session RPC token buckets so multi-thousand-call latency benchmarks
-    // neither trip `RateLimited` nor pay `rpc_rate_buckets` mutex overhead.
+    // Construct with `RpcRateLimitPolicy::Unlimited` so multi-thousand-call latency benchmarks
+    // neither trip `RateLimited` nor pay `rpc_rate_limiter` mutex overhead.
     ctx
 }
 
