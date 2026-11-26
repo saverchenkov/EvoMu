@@ -1383,7 +1383,6 @@ impl SystemRegistry {
                 solar_system_id,
                 post_unlock_worker_thread_id.clone(),
                 Arc::clone(&completed_post_unlock_seq),
-                actor_state_actor.clone(),
                 module_deactivation_hook_actor.clone(),
                 target_lock_completed_hook_actor.clone(),
                 post_unlock_actions_actor.clone(),

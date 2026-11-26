@@ -709,6 +709,95 @@ fn start_disconnected_emergency_warp_in_actor(
     Ok(warped)
 }
 
+fn prepare_disconnected_warp_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ship_id: BallId,
+    warp_speed_au_s: f64,
+    current_pos: DVec3,
+    dest: DVec3,
+) {
+    if !ctx.ballpark.balls.contains_key(&ship_id) {
+        // Do not synthesize a phantom ball from stale disconnected-ship state if the ship
+        // already transitioned out of this solar system.
+        return;
+    }
+    let needs_warp_init = ctx.ballpark.balls.get(&ship_id).is_some_and(|b| {
+        !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
+    });
+    let warp_started = if needs_warp_init {
+        let start_pos = ctx
+            .ballpark
+            .balls
+            .get(&ship_id)
+            .map(|b| b.position)
+            .unwrap_or(current_pos);
+        let ok = ctx
+            .ballpark
+            .set_mode(
+                ship_id,
+                MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)),
+            )
+            .is_ok();
+        if ok {
+            if let Some(cs) = ctx.ballpark.combat_states.get_mut(&ship_id) {
+                cs.is_emergency_warping = true;
+            }
+        }
+        ok
+    } else {
+        false
+    };
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    if warp_started {
+        super::protection::sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ship_id);
+        ctx.actor_st.warp_state.clear_ball(ship_id, true);
+        ctx.actor_st
+            .warp_state
+            .provenance
+            .insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
+    }
+}
+
+fn reconcile_disconnected_warp_in_actor(
+    ctx: &mut BallOpsCtx<'_>,
+    ship_id: BallId,
+    dest: DVec3,
+) -> (DVec3, bool) {
+    let arrived = ctx.ballpark.balls.get(&ship_id).is_none_or(|b| {
+        !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
+    });
+    if arrived {
+        if ctx.ballpark.balls.get(&ship_id).is_some_and(|b| {
+            matches!(b.mode, MovementMode::Warp { .. })
+                || (!ctx.ballpark.is_ball_scrambled(ship_id)
+                    && (b.position - dest).length() <= 50_000.0)
+        }) {
+            let _ = ctx.ballpark.set_ball_position(ship_id, dest);
+        }
+        let _ = ctx.ballpark.set_mode(ship_id, MovementMode::Stop);
+        if let Some(b) = ctx.ballpark.balls.get_mut(&ship_id) {
+            b.velocity = DVec3::ZERO;
+            b.speed_fraction = 0.0;
+        }
+    }
+    super::sync_ball_positions(ctx.ballpark, ctx.ball_positions, ctx.scrambled_balls);
+    let final_pos = ctx
+        .ballpark
+        .balls
+        .get(&ship_id)
+        .map(|b| b.position)
+        .unwrap_or(dest);
+    super::protection::finish_disconnected_warp_protection_sync(
+        ctx.ballpark,
+        ctx.actor_st,
+        ship_id,
+    );
+    if arrived {
+        ctx.actor_st.warp_state.clear_ball(ship_id, false);
+    }
+    (final_pos, arrived)
+}
+
 fn clear_removed_ball_actor_state(
     ctx: &mut BallOpsCtx<'_>,
     ball_id: BallId,
@@ -1128,6 +1217,28 @@ pub(in crate::system_actor) fn handle_ball_ops_command(
                 dest,
                 warp_speed_au_s,
             );
+            defer_reply(exec_ctx.deferred_replies, reply, res);
+            None
+        }
+        SystemCommand::PrepareDisconnectedWarp {
+            ship_id,
+            warp_speed_au_s,
+            current_pos,
+            dest,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            prepare_disconnected_warp_in_actor(&mut ctx, ship_id, warp_speed_au_s, current_pos, dest);
+            defer_reply(exec_ctx.deferred_replies, reply, ());
+            None
+        }
+        SystemCommand::ReconcileDisconnectedWarp {
+            ship_id,
+            dest,
+            reply,
+        } => {
+            let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
+            let res = reconcile_disconnected_warp_in_actor(&mut ctx, ship_id, dest);
             defer_reply(exec_ctx.deferred_replies, reply, res);
             None
         }
@@ -1656,72 +1767,38 @@ impl SystemHandle {
         &self, ship_id: BallId, _type_id: u32, _radius: f64, _mass: f64,
         _inertia: f64, _max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
     ) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if !bp.balls.contains_key(&ship_id) {
-            // Do not synthesize a phantom ball from stale disconnected-ship state if the ship
-            // already transitioned out of this solar system.
-            return;
-        }
-        let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
-            !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
-        });
-        let warp_started = if needs_warp_init {
-            let start_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(current_pos);
-            let ok = bp
-                .set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)))
-                .is_ok();
-            if ok {
-                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-                    cs.is_emergency_warping = true;
-                }
-            }
-            ok
-        } else {
-            false
-        };
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        if warp_started {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
-            st.warp_state.clear_ball(ship_id, true);
-            st.warp_state.provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
-        }
-        drop(bp);
-        if warp_started {
-            self.publish_view();
-        }
+        let _ = dispatch_actor_sync_reply_with_deadline(
+            self,
+            "PrepareDisconnectedWarp",
+            ACTOR_CMD_TIMEOUT,
+            (),
+            |(), reply| SystemCommand::PrepareDisconnectedWarp {
+                ship_id,
+                warp_speed_au_s,
+                current_pos,
+                dest,
+                reply,
+            },
+            |ctx, ()| {
+                prepare_disconnected_warp_in_actor(ctx, ship_id, warp_speed_au_s, current_pos, dest)
+            },
+        );
     }
 
     pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let arrived = bp.balls.get(&ship_id).is_none_or(|b| {
-            !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
-        });
-        if arrived {
-            if bp.balls.get(&ship_id).is_some_and(|b| {
-                matches!(b.mode, MovementMode::Warp { .. })
-                    || (!bp.is_ball_scrambled(ship_id) && (b.position - dest).length() <= 50_000.0)
-            }) {
-                let _ = bp.set_ball_position(ship_id, dest);
-            }
-            let _ = bp.set_mode(ship_id, MovementMode::Stop);
-            if let Some(b) = bp.balls.get_mut(&ship_id) {
-                b.velocity = DVec3::ZERO;
-                b.speed_fraction = 0.0;
-            }
-        }
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
-        {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            super::protection::finish_disconnected_warp_protection_sync(&mut bp, &mut st, ship_id);
-            if arrived {
-                st.warp_state.clear_ball(ship_id, false);
-            }
-            self.publish_view_from(&bp, Some(&st));
-        }
-        drop(bp);
-        (final_pos, arrived)
+        dispatch_actor_sync_reply_with_deadline(
+            self,
+            "ReconcileDisconnectedWarp",
+            ACTOR_CMD_TIMEOUT,
+            (),
+            |(), reply| SystemCommand::ReconcileDisconnectedWarp {
+                ship_id,
+                dest,
+                reply,
+            },
+            |ctx, ()| reconcile_disconnected_warp_in_actor(ctx, ship_id, dest),
+        )
+        .unwrap_or((dest, true))
     }
 
     /// Removes `ball_id` synchronously with bounded [`ACTOR_CMD_TIMEOUT`] (`#1342`, `ECO-72`).

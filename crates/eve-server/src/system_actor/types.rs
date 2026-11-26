@@ -1586,6 +1586,18 @@ pub enum SystemCommand {
         warp_speed_au_s: f64,
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    PrepareDisconnectedWarp {
+        ship_id: BallId,
+        warp_speed_au_s: f64,
+        current_pos: DVec3,
+        dest: DVec3,
+        reply: oneshot::Sender<()>,
+    },
+    ReconcileDisconnectedWarp {
+        ship_id: BallId,
+        dest: DVec3,
+        reply: oneshot::Sender<(DVec3, bool)>,
+    },
     /// Transfers pilot observer registration and pending `observer_events` across balls (`#1342`).
     HandoffInSpacePilotObserver {
         from_ball_id: BallId,

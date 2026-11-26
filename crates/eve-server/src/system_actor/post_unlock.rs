@@ -1627,6 +1627,19 @@ pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::Syste
     enqueue_work_ticket_with_seq(handle, None, None, PostUnlockOps::default(), true, 0).1
 }
 
+fn extend_pending_cycle_actions(
+    state_lock: &RankedRwLock<SystemActorState, RANK_ACTOR_STATE>,
+    extra_actions: Vec<PendingCycleAction>,
+) {
+    if !extra_actions.is_empty() {
+        state_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_cycle_actions
+            .extend(extra_actions);
+    }
+}
+
 /// Finishes waiting or fallback execution strictly **after** all actor locks are dropped (`W2`, `W3`).
 pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::SystemHandle, deact_guard: Option<&ModuleDeactivationHook>, lock_guard: Option<&TargetLockCompletedHook>, ticket: PostUnlockWaitTicket) {
     let safe_sync = can_run_post_unlock_sync_now() && handle.post_unlock_worker_thread_id.get() != Some(&std::thread::current().id());
@@ -1650,7 +1663,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
                 if unsent.work_seq > 0 && !tx_committed {
                     handle.completed_post_unlock_seq.store(unsent.work_seq, Ordering::Release);
                 }
-                if !extra_actions.is_empty() { handle.actor_state.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions); }
+                extend_pending_cycle_actions(&handle.actor_state, extra_actions);
                 super::flush_post_unlock_actions(&handle.post_unlock_actions);
             } else {
                 tracing::warn!(solar_system_id = handle.solar_system_id, intents = unsent.ops.intents.len(), "skipping RunDirectAfterUnlock after worker shutdown under held ranked locks or worker reentrancy");
@@ -1870,7 +1883,6 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
     solar_system_id: SolarSystemId,
     worker_thread_id: Arc<OnceLock<std::thread::ThreadId>>,
     completed_seq_worker: Arc<AtomicU64>,
-    actor_state_worker: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
     deact_hook_worker: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     post_unlock_actions_worker: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
@@ -1905,9 +1917,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
             if work_seq > 0 && !tx_committed {
                 completed_seq_worker.store(work_seq, Ordering::Release);
             }
-            if !extra_actions.is_empty() {
-                actor_state_worker.write().unwrap_or_else(|e| e.into_inner()).pending_cycle_actions.extend(extra_actions);
-            }
+            extend_pending_cycle_actions(&post_commit_targets.actor_state, extra_actions);
             super::flush_post_unlock_actions(&post_unlock_actions_worker);
             drop(in_flight_guard);
             for send_reply in replies { send_reply(); }
