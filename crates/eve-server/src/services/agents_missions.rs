@@ -166,7 +166,7 @@ async fn handle_agent_warp_to_location(
         ));
     }
     let is_subwarp_goto = parsed.is_goto && warp_dist_m < MIN_AGENT_WARP_DISTANCE_M;
-    let (leave_entries, landing_positions): (Vec<(i64, [f64; 3], [f64; 3])>, Vec<DVec3>) =
+    let (leave_entries, landing_positions): (Vec<(i64, [f64; 3], [f64; 3])>, Vec<glam::DVec3>) =
         if is_subwarp_goto {
         crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
         if matches!(current_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
@@ -366,7 +366,9 @@ async fn handle_agent_warp_to_location(
                 .await;
             }
         }
-        WarpTarget::StationOrCelestial { .. } => {}
+        WarpTarget::StationOrCelestial { .. }
+        | WarpTarget::AgentInSpace { .. }
+        | WarpTarget::SpacePoint { .. } => {}
     }
 
     for (warped_cid, start_pos, dest_pos) in leave_entries {
@@ -425,7 +427,7 @@ pub(super) fn reconcile_stale_mission_npcs(
     }
 }
 
-fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<DVec3>) {
+fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<glam::DVec3>) {
     let PyRep::KeyVal(kv) = fleet_reply else {
         return (0, Vec::new());
     };
@@ -436,7 +438,7 @@ fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<DVec3>) {
             if let PyRep::Tuple(elems) = entry {
                 if let [_, x, y, z] = elems.as_slice() {
                     if let (Some(x), Some(y), Some(z)) = (x.as_f64(), y.as_f64(), z.as_f64()) {
-                        positions.push(DVec3::new(x, y, z));
+                        positions.push(glam::DVec3::new(x, y, z));
                     }
                 }
             }
