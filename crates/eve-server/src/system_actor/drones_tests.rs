@@ -487,13 +487,13 @@ async fn already_persisted_seq_without_commit_clears_dirty_and_restores_hibernat
     let reg = Arc::new(SystemRegistry::with_sde_and_db(Arc::new(eve_sde::SdeRegistry::with_canonical_seed()), Arc::clone(&db)));
     let (sys_id, d) = (30_000_142u32, make_space_drone(951_801, 100_001, 900_001, 30_000_142, true));
     let sys = reg.get_or_spawn(sys_id);
+    let shared = sys
+        .test_with_actor_state_async(|st| st.drone_hydration.clone())
+        .await;
     let (lrx, rtx, h) = hold_writer(&db); lrx.await.unwrap();
     sys.upsert_active_drone(d.clone()).await.unwrap();
     assert!(!sys.is_hibernated());
     let _ = rtx.send(()); h.await.unwrap();
-    let shared = sys
-        .test_with_actor_state_async(|st| st.drone_hydration.clone())
-        .await;
     assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 1, &[(d.ball_id, d.clone())], true), drones::FlushWriteOutcome::Written);
     assert!(!sys.is_hibernated());
     assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 1, &[(d.ball_id, d)], true), drones::FlushWriteOutcome::AlreadyAtOrPastSeq);

@@ -252,25 +252,30 @@ async fn bf4_nanite_repair_paste_conservation_defers_contention_and_prevents_fre
     let (ship_id, mod_a, mod_b, mod_c, cyc_id, paste_id) = (778_203_001_i64, 778_203_002_i64, 778_203_003_i64, 778_203_005_i64, 778_203_099_i64, 778_203_004_i64);
     let (ctx, sys) = boot_ship(ship_id, &[(mod_a, 2048, InventoryFlag::LoSlot0, 100.0), (mod_b, 2048, InventoryFlag::LoSlot0, 90.0), (mod_c, 2048, InventoryFlag::LoSlot0, 50.0)], Some((paste_id, 4)), None).await;
     push_nanite(&sys, ship_id, mod_a, 100.0, 0.0, 10, 0).await;
-    {
-        let (pub_tx, pub_rx) = mpsc::channel();
-        let (rel_tx, rel_rx) = mpsc::channel();
-        let db_pub = Arc::clone(&ctx.db);
-        let pub_holder = std::thread::spawn(move || {
-            let _pub = db_pub.hold_published_write_for_test();
-            let _ = pub_tx.send(());
-            let _ = rel_rx.recv();
-        });
-        pub_rx.recv().unwrap();
-        let db_collect = Arc::clone(&ctx.db);
-        sys.test_with_actor_state_mut_async(move |st| {
-            let (mut vu, mut ops) = (HashMap::new(), PostUnlockOps::default());
-            let res = super::collect_nanite_repair_tick(&db_collect, &mut st.active_nanite_repairs[0], 4.0, 0.4, 4, &mut vu, &mut ops);
-            assert!(matches!(res, super::NaniteTickCollect::Defer) && ops.is_empty() && st.active_nanite_repairs[0].paste_consumed_so_far == 0 && st.active_nanite_repairs[0].elapsed_s.abs() < 1e-9);
-        })
+    let mut nr = sys
+        .test_with_actor_state_async(|st| st.active_nanite_repairs[0].clone())
         .await;
-        let _ = rel_tx.send(());
-        pub_holder.join().unwrap();
+    {
+        let (_pub, mut vu, mut ops) = (
+            ctx.db.hold_published_write_for_test(),
+            HashMap::new(),
+            PostUnlockOps::default(),
+        );
+        let res = super::collect_nanite_repair_tick(
+            &ctx.db,
+            &mut nr,
+            4.0,
+            0.4,
+            4,
+            &mut vu,
+            &mut ops,
+        );
+        assert!(
+            matches!(res, super::NaniteTickCollect::Defer)
+                && ops.is_empty()
+                && nr.paste_consumed_so_far == 0
+                && nr.elapsed_s.abs() < 1e-9
+        );
     }
     let (go_tx, stop_fut) = pause_post_unlock_worker(&sys, ship_id, cyc_id).await;
     let step1 = tokio::spawn({ let s = sys.clone(); async move { s.step_manual_tick_only(4.0).await } });
