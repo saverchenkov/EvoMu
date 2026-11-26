@@ -132,6 +132,8 @@ pub use cycle_ops::{step_drone_auto_aggression_and_assist, step_engaged_drones_i
 #[cfg(any(test, feature = "testkit"))]
 pub use cycle_ops::step_engaged_drones;
 pub(crate) use cycle_ops::{clear_drone_web_cycle, is_recently_destroyed_in_persisted};
+#[cfg(test)]
+pub(crate) use cycle_ops::{apply_drone_web_cycle, check_unclaimed_engaged_drone_ready};
 
 /// Evaluates effective drone control range in meters for `char_id` flying `ship_id` (`feat:drones.drone-control-range`).
 /// Evaluates `charID` attribute `458` (`droneControlDistance`) via `ShipFittingEngine` (Drone Avionics `3437`,
@@ -2028,16 +2030,13 @@ pub async fn handle_npcs_drones(
                 }
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
-                let still_engaged = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
-                    !st.is_abandoned
-                        && st.parent_ship_id == ship_id
-                        && st.activity_state == 1
-                        && st.target_id == Some(target_id)
-                });
-                let next_ready = sys_handle.drone_next_ready_unix(d.ball_id).unwrap_or(0);
-                if !still_engaged {
+                let (_, Some(next_ready)) = cycle_ops::check_unclaimed_engaged_drone_ready(
+                    &sys_handle, d.ball_id, sys_id, Some(ship_id), Some(char_id), target_id,
+                )
+                .await
+                else {
                     continue;
-                }
+                };
                 let cycle_ready = now_unix >= next_ready && !target_destroyed;
                 let mut this_drone_ewar = false;
                 if cycle_ready {

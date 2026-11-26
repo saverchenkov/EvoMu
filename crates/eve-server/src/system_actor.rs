@@ -1401,7 +1401,7 @@ impl SystemRegistry {
                 if !dirty { return; }
                 let batch = drones::capture_dirty_active_drones_snapshot(&actor_state_actor.read().unwrap_or_else(|e| e.into_inner()));
                 if let Some((seq, _, entries)) = batch {
-                    if drones::write_sqlite_for_shared(&drone_hydration_actor, solar_system_id, &entries, blocking) {
+                    if drones::write_sqlite_for_shared(&drone_hydration_actor, solar_system_id, seq, &entries, blocking) {
                         let (bp, mut st) = (ballpark_actor.read().unwrap_or_else(|e| e.into_inner()), actor_state_actor.write().unwrap_or_else(|e| e.into_inner()));
                         drones::finish_flush_in_actor(&bp, &mut st, event_tx_actor.receiver_count(), seq);
                     }

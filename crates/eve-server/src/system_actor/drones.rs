@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Default)]
 pub(crate) struct ActiveDronesSharedCtx {
-    pub(in crate::system_actor) flush_mutex: Arc<std::sync::Mutex<()>>,
+    pub(in crate::system_actor) flush_mutex: Arc<std::sync::Mutex<u64>>,
     pub(in crate::system_actor) db_opt: Option<Arc<eve_db::WorldRepository>>,
     pub(in crate::system_actor) migrated_opt:
         Option<Arc<RankedMutex<HashSet<SolarSystemId>, RANK_LEAF>>>,
@@ -390,6 +390,7 @@ fn load_legacy_drones_into_map_if_unmigrated(
     migrated: &RankedMutex<HashSet<SolarSystemId>, RANK_LEAF>,
     solar_system_id: SolarSystemId,
     drones: &mut HashMap<BallId, DroneSpaceState>,
+    mark_migrated: bool,
 ) -> bool {
     let already_migrated = migrated
         .lock()
@@ -411,10 +412,12 @@ fn load_legacy_drones_into_map_if_unmigrated(
             }
         }
     }
-    migrated
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(solar_system_id);
+    if mark_migrated {
+        migrated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(solar_system_id);
+    }
     dirty
 }
 
@@ -458,6 +461,7 @@ fn read_sqlite_drones_for_hydration(
                 migrated,
                 solar_system_id,
                 &mut hydrated,
+                false,
             );
         }
     }
@@ -488,6 +492,9 @@ pub(in crate::system_actor) fn hydrate_active_drones_in_state(
     }
     if legacy_dirty || dropped_pre_hydration {
         mark_active_drones_dirty_in_state(actor_st);
+    }
+    if let Some(migrated) = &actor_st.drone_hydration.migrated_opt {
+        migrated.lock().unwrap_or_else(|e| e.into_inner()).insert(solar_system_id);
     }
     actor_st.active_drones_needs_sqlite_hydration = false;
     actor_st.drone_hydration.needs_hydration.store(false, Ordering::Release);
@@ -538,17 +545,21 @@ pub(in crate::system_actor) fn read_sqlite_for_shared(
 pub(in crate::system_actor) fn write_sqlite_for_shared(
     shared: &ActiveDronesSharedCtx,
     solar_system_id: SolarSystemId,
+    seq: u64,
     entries: &[(BallId, DroneSpaceState)],
     blocking: bool,
 ) -> bool {
     let Some(ref db) = shared.db_opt else { return false; };
-    let _guard = if blocking {
+    let mut last_seq = if blocking {
         shared.flush_mutex.lock().unwrap_or_else(|e| e.into_inner())
     } else if let Ok(g) = shared.flush_mutex.try_lock() {
         g
     } else {
         return false;
     };
+    if seq == 0 || seq <= *last_seq {
+        return false;
+    }
     let now_unix = db.clock().now_unix_secs();
     let keyed: Vec<(String, &DroneSpaceState)> = entries.iter().map(|(bid, d)| (bid.to_string(), d)).collect();
     let kind = eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES;
@@ -558,7 +569,12 @@ pub(in crate::system_actor) fn write_sqlite_for_shared(
         )
     };
     let res = if blocking { Some(db.with_sqlite_conn(write_op)) } else { db.try_with_sqlite_conn_mut(write_op) };
-    matches!(res, Some(Ok(())))
+    if matches!(res, Some(Ok(()))) {
+        *last_seq = seq;
+        true
+    } else {
+        false
+    }
 }
 
 pub(in crate::system_actor) fn hydrate_in_actor_and_refresh(
@@ -666,7 +682,7 @@ fn flush_sync_with_target(sys_id: SolarSystemId, shared: &ActiveDronesSharedCtx,
         |_, reply| SystemCommand::SnapshotDirtyActiveDrones { reply },
         |ctx, _| Ok(capture_dirty_active_drones_snapshot(ctx.actor_st).map(|(s, _, e)| (s, e))),
     ) {
-        if write_sqlite_for_shared(shared, sys_id, &entries, blocking) {
+        if write_sqlite_for_shared(shared, sys_id, seq, &entries, blocking) {
             let _ = target.send_sync(
                 seq,
                 |seq, reply| SystemCommand::CommitActiveDronesFlushed { seq, reply },
@@ -693,7 +709,7 @@ pub(in crate::system_actor) async fn flush_from_handle_async(handle: &SystemHand
         handle, "SnapshotDirtyActiveDrones", ACTOR_CMD_TIMEOUT, |reply| SystemCommand::SnapshotDirtyActiveDrones { reply },
     ).await else { return; };
     let (shared, sys_id) = (shared_ref.clone(), handle.solar_system_id);
-    if tokio::task::spawn_blocking(move || write_sqlite_for_shared(&shared, sys_id, &entries, true)).await.unwrap_or(false) {
+    if tokio::task::spawn_blocking(move || write_sqlite_for_shared(&shared, sys_id, seq, &entries, true)).await.unwrap_or(false) {
         let _ = call_actor_result_with_deadline(
             handle, "CommitActiveDronesFlushed", ACTOR_CMD_TIMEOUT, |reply| SystemCommand::CommitActiveDronesFlushed { seq, reply },
         ).await;
@@ -846,6 +862,7 @@ pub(crate) fn load_initial_active_drones_for_system(
             &registry.drone_rt_state.migrated_legacy_drone_systems,
             solar_system_id,
             &mut drones,
+            true,
         );
     }
     (drones, dirty, needs_sqlite_hydration)

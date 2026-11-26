@@ -365,9 +365,10 @@ pub fn try_remove_ball_for_db(
             let remove_with =
                 |bp: &mut Ballpark, mut st_opt: Option<&mut crate::system_actor::SystemActorState>| {
                     let removed_ball = bp.remove_ball(ball_id).is_some();
-                    let mut removed_ext = false;
+                    let (mut removed_ext, mut removed_drone) = (false, false);
                     if let Some(st) = st_opt.as_mut() {
                         st.protection_registry.remove(&ball_id);
+                        removed_drone = st.active_drones_in_space.contains_key(&ball_id);
                         crate::system_actor::drones::clear_removed_ball_drones_in_state(st, ball_id);
                         let before = st.external_active_modules.len();
                         st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
@@ -381,7 +382,7 @@ pub fn try_remove_ball_for_db(
                             }
                         }
                     }
-                    if removed_ball || removed_ext {
+                    if removed_ball || removed_ext || removed_drone {
                         if let Some(vtx) = entry.view_tx.upgrade() {
                             let tidi = entry
                                 .tidi_factor_bits

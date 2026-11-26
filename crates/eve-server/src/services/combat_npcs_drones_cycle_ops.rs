@@ -298,15 +298,19 @@ pub(crate) async fn apply_drone_web_cycle(
         clear_drone_web_cycle(sys_handle, d.ball_id).await;
         return false;
     }
-    let still_controlled = sys_handle.active_drone(d.ball_id).is_some_and(|st| {
-        !st.is_abandoned
-            && st.solar_system_id == d.solar_system_id
-            && st.parent_ship_id == d.parent_ship_id
-            && st.activity_state == 1
-            && st.target_id == Some(target_id)
-    });
-    if !still_controlled {
-        clear_drone_web_cycle(sys_handle, d.ball_id).await;
+    let (claimed_hit, ready) = check_unclaimed_engaged_drone_ready(
+        sys_handle,
+        d.ball_id,
+        d.solar_system_id,
+        Some(d.parent_ship_id),
+        None,
+        target_id,
+    )
+    .await;
+    if ready.is_none() {
+        if !claimed_hit {
+            clear_drone_web_cycle(sys_handle, d.ball_id).await;
+        }
         return false;
     }
     let mult = (1.0 + d.web_speed_factor / 100.0).clamp(0.1, 1.0);
@@ -408,26 +412,41 @@ pub(crate) fn disengage_drones_targeting(ctx: &ServerContext, solar_system_id: u
     }
 }
 
+pub(crate) async fn check_unclaimed_engaged_drone_ready(
+    sys_handle: &crate::system_actor::SystemHandle,
+    bid: i64,
+    expected_sys: u32,
+    expected_ship: Option<i64>,
+    expected_owner: Option<i64>,
+    target_id: i64,
+) -> (bool, Option<u64>) {
+    sys_handle
+        .mutate_active_drones_with_claims(move |drones, _, timers, claimed| {
+            let is_claimed = claimed.contains_key(&bid);
+            let ok = !is_claimed
+                && drones.get(&bid).is_some_and(|st| {
+                    !st.is_abandoned
+                        && st.solar_system_id == expected_sys
+                        && expected_ship.is_none_or(|s| st.parent_ship_id == s)
+                        && expected_owner.is_none_or(|o| st.owner_char_id == o)
+                        && st.activity_state == 1
+                        && st.target_id == Some(target_id)
+                });
+            (false, (is_claimed, ok.then(|| timers.get(&bid).copied().unwrap_or(0))))
+        })
+        .await
+        .unwrap_or((false, None))
+}
+
 async fn check_unclaimed_engaged_drone(
     sys_handle: &crate::system_actor::SystemHandle,
     bid: i64,
     expected_sys: u32,
     target_id: i64,
 ) -> (bool, bool) {
-    sys_handle
-        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-            let is_claimed = claimed.contains_key(&bid);
-            let ok = !is_claimed
-                && drones.get(&bid).is_some_and(|st| {
-                    !st.is_abandoned
-                        && st.solar_system_id == expected_sys
-                        && st.activity_state == 1
-                        && st.target_id == Some(target_id)
-                });
-            (false, (is_claimed, ok))
-        })
-        .await
-        .unwrap_or((false, false))
+    let (is_claimed, ready) =
+        check_unclaimed_engaged_drone_ready(sys_handle, bid, expected_sys, None, None, target_id).await;
+    (is_claimed, ready.is_some())
 }
 
 /// Disengages a single drone by `drone_ball_id` in `sys_handle`.

@@ -2438,3 +2438,39 @@ async fn unhydrated_unsafe_read_wake_hydrates_for_warp_disconnect_remove_logoff_
     assert_eq!(ctx2.systems.remove_active_drone_across_systems_sync(d_salv).unwrap().ball_id, d_salv);
     assert!(ctx2.systems.stop_system(sys_id).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoop_claim_blocks_cmd_engage_and_web_cycle_without_cooldown_bypass() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::{apply_drone_web_cycle, check_unclaimed_engaged_drone_ready, handle_npcs_drones};
+    use crate::system_actor::{ActiveModuleCycle, DroneScoopClaimAction};
+    let ctx = Arc::new(test_ctx());
+    let (sys_id, owner_char, owner_ship, npc_id, d_web) = (30_000_142u32, 90_998_501i64, 958_500_001i64, 958_500_002i64, 958_500_011i64);
+    let mut owner_sess = setup_race_pilot(&ctx, owner_char, owner_ship, sys_id, 5);
+    ctx.db.with_mut_snapshot(|snap| insert_drone_item(snap, d_web, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, None));
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_ball(&ctx, sys_id, d_web, 2454, DVec3::new(100.0, 0.0, 0.0));
+    sys_handle.spawn_ball_with_combat(Ball {
+        id: npc_id, type_id: 593, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 0.0, inertia: 0.0, mass: 1.0e6, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }, CombatState { shield_hp: 500.0, max_shield_hp: 500.0, armor_hp: 500.0, max_armor_hp: 500.0, structure_hp: 500.0, max_structure_hp: 500.0, ..Default::default() }).await.unwrap();
+    sys_handle.add_target_lock(owner_ship, eve_destiny::TargetLock { target_id: npc_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await.unwrap();
+    let (drone_ball, target_ball) = (sys_handle.get_ball_snapshot(d_web).await.unwrap().unwrap().1, sys_handle.get_ball_snapshot(npc_id).await.unwrap().unwrap().1);
+    let mut s_web = make_drone_state(d_web, d_web, 2454, owner_char, owner_ship, sys_id, false, 1);
+    (s_web.target_id, s_web.optimal_range, s_web.web_speed_factor, s_web.damage_vector) = (Some(npc_id), 5_000.0, -30.0, DamageVector { kinetic: 50.0, ..Default::default() });
+    drone_test_helpers::seed_active_drone(&ctx, s_web.clone());
+    sys_handle.add_module_cycle(ActiveModuleCycle { ship_id: d_web, module_id: -d_web, target_id: Some(npc_id), duration_s: 5.0, ..Default::default() }).await.unwrap();
+
+    sys_handle.drone_scoop_claim_op(d_web, DroneScoopClaimAction::ClaimPlayerScoop { char_id: owner_char }).await.unwrap();
+    assert_eq!(check_unclaimed_engaged_drone_ready(&sys_handle, d_web, sys_id, Some(owner_ship), Some(owner_char), npc_id).await, (true, None));
+    assert!(!apply_drone_web_cycle(&ctx, &sys_handle, &s_web, &drone_ball, npc_id, &target_ball).await);
+    assert!(sys_handle.has_active_module_cycle_on_target(d_web, -d_web, npc_id), "claimed drone must preserve existing web cycle");
+    sys_handle.try_remove_module_cycle(d_web, -d_web);
+    assert!(!apply_drone_web_cycle(&ctx, &sys_handle, &s_web, &drone_ball, npc_id, &target_ball).await && !sys_handle.has_active_module_cycle_on_target(d_web, -d_web, npc_id));
+    handle_npcs_drones(&ctx, &mut owner_sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(d_web)]), PyRep::Integer(npc_id)], &HashMap::new()).await.unwrap().unwrap();
+    assert_eq!((sys_handle.get_combat_state(npc_id).await.unwrap().unwrap().shield_hp, sys_handle.drone_next_ready_unix(d_web)), (500.0, None));
+
+    sys_handle.drone_scoop_claim_op(d_web, DroneScoopClaimAction::ReleaseClaim).await.unwrap();
+    assert!(apply_drone_web_cycle(&ctx, &sys_handle, &s_web, &drone_ball, npc_id, &target_ball).await && sys_handle.has_active_module_cycle_on_target(d_web, -d_web, npc_id));
+    handle_npcs_drones(&ctx, &mut owner_sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(d_web)]), PyRep::Integer(npc_id)], &HashMap::new()).await.unwrap().unwrap();
+    assert!(sys_handle.get_combat_state(npc_id).await.unwrap().unwrap().shield_hp < 500.0 && sys_handle.drone_next_ready_unix(d_web).is_some());
+}
