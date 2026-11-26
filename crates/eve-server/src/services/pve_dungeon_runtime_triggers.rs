@@ -87,31 +87,6 @@ fn kind_needs_timer_poll(k: &DungeonTriggerKind) -> bool {
     kind_matches_leaf(k, |x| matches!(x, DungeonTriggerKind::OnTimer { .. }))
 }
 
-fn collect_due_named_timers(
-    kind: &DungeonTriggerKind,
-    armed_timers: &BTreeMap<String, u64>,
-    now_unix: u64,
-    out_expired: &mut Vec<String>,
-) {
-    match kind {
-        DungeonTriggerKind::OnTimer { timer_id: Some(ref tid), .. } => {
-            if !tid.is_empty()
-                && !tid.starts_with("__")
-                && armed_timers.get(tid).is_some_and(|&due| now_unix >= due)
-                && !out_expired.contains(tid)
-            {
-                out_expired.push(tid.clone());
-            }
-        }
-        DungeonTriggerKind::CompoundAnd { clauses } | DungeonTriggerKind::CompoundOr { clauses } => {
-            for c in clauses {
-                collect_due_named_timers(c, armed_timers, now_unix, out_expired);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn collect_newly_latched_due_named_timers(
     kind: &DungeonTriggerKind,
@@ -148,10 +123,9 @@ fn collect_newly_latched_due_named_timers(
     }
 }
 
-/// Resets repeatable trigger latches ONLY for clauses whose occurrence/timer has genuinely elapsed (`OWN-R5-04`).
-/// Named timers (`timer_id`) and unnamed repeatable `__rep_timer` deadlines are consumed ONLY when
-/// `consume_timers` (`DungeonEvent::TimerTick`) is true so peer `OnTimer` triggers are never starved (`BF-03`).
-#[allow(clippy::too_many_arguments)]
+/// Resets repeatable trigger latches ONLY for clauses whose occurrence/timer actually fired (`OWN-R5-04`, `BF-R4-01`).
+/// Never consumes named `timer_id` entries here: `collect_newly_latched_due_named_timers` handles
+/// named-timer expiration strictly when a leaf transitions from unlatched to latched on `TimerTick`.
 fn reset_repeatable_trigger_state(
     kind: &DungeonTriggerKind,
     armed_timers: &mut BTreeMap<String, u64>,
@@ -160,8 +134,6 @@ fn reset_repeatable_trigger_state(
     t_idx: usize,
     path: &str,
     now_unix: u64,
-    consume_timers: bool,
-    out_expired_named: &mut Vec<String>,
 ) {
     if path == "root" {
         let and_pfx = format!("__and:{r_idx}:{t_idx}:");
@@ -178,15 +150,9 @@ fn reset_repeatable_trigger_state(
                     return;
                 }
                 armed_timers.remove(&format!("__latch:{r_idx}:{t_idx}:{path}:timer:{tid}"));
-                if consume_timers
-                    && armed_timers.get(tid).is_some_and(|&due| now_unix >= due)
-                    && !out_expired_named.contains(tid)
-                {
-                    out_expired_named.push(tid.clone());
-                }
             } else if after_group_cleared.is_none() {
                 let unnamed_latch = format!("__latch:{r_idx}:{t_idx}:{path}:unnamed_timer");
-                if consume_timers || armed_timers.contains_key(&unnamed_latch) {
+                if armed_timers.contains_key(&unnamed_latch) {
                     let rep_key = format!("__rep_timer:{r_idx}:{t_idx}:{path}");
                     let due = armed_timers
                         .get(&rep_key)
@@ -210,8 +176,6 @@ fn reset_repeatable_trigger_state(
                     t_idx,
                     &sub,
                     now_unix,
-                    consume_timers,
-                    out_expired_named,
                 );
             }
         }
@@ -575,6 +539,7 @@ fn evaluate_trigger_with_occurrence_latch(
     path: &str,
     event: &DungeonEvent<'_>,
     now_unix: u64,
+    already_satisfied: bool,
 ) -> bool {
     match kind {
         DungeonTriggerKind::CompoundAnd { clauses } => {
@@ -586,21 +551,19 @@ fn evaluate_trigger_with_occurrence_latch(
                 let sub_path = format!("{path}.{ci}");
                 let key = format!("__and:{room_vec_idx}:{trig_idx}:{sub_path}");
                 let already = armed_timers.contains_key(&key);
-                let ok_now = if already
-                    && matches!(
-                        clause,
-                        DungeonTriggerKind::OnKillTagged { .. }
-                            | DungeonTriggerKind::OnKillCount { .. }
-                            | DungeonTriggerKind::OnTimer { .. }
-                    )
-                {
-                    true
-                } else {
-                    evaluate_trigger_with_occurrence_latch(
-                        clause, inst, room, armed_timers, room_vec_idx, trig_idx, &sub_path, event, now_unix,
-                    )
-                };
-                if !already {
+                let ok_now = evaluate_trigger_with_occurrence_latch(
+                    clause,
+                    inst,
+                    room,
+                    armed_timers,
+                    room_vec_idx,
+                    trig_idx,
+                    &sub_path,
+                    event,
+                    now_unix,
+                    already_satisfied || already,
+                );
+                if !already_satisfied && !already {
                     if ok_now {
                         armed_timers.insert(key, now_unix);
                     } else {
@@ -615,16 +578,39 @@ fn evaluate_trigger_with_occurrence_latch(
             for (ci, c) in clauses.iter().enumerate() {
                 let sub_path = format!("{path}.{ci}");
                 if evaluate_trigger_with_occurrence_latch(
-                    c, inst, room, armed_timers, room_vec_idx, trig_idx, &sub_path, event, now_unix,
+                    c,
+                    inst,
+                    room,
+                    armed_timers,
+                    room_vec_idx,
+                    trig_idx,
+                    &sub_path,
+                    event,
+                    now_unix,
+                    already_satisfied,
                 ) {
                     any_ok = true;
                 }
             }
             any_ok
         }
-        leaf => evaluate_leaf_clause_with_latch(
-            leaf, inst, room, armed_timers, room_vec_idx, trig_idx, path, event, now_unix,
-        ),
+        leaf => {
+            if already_satisfied
+                && matches!(
+                    leaf,
+                    DungeonTriggerKind::OnTimer { .. }
+                        | DungeonTriggerKind::OnKillTagged { .. }
+                        | DungeonTriggerKind::OnKillCount { .. }
+                        | DungeonTriggerKind::OnRoomEntered { .. }
+                        | DungeonTriggerKind::OnLoot { .. }
+                )
+            {
+                return true;
+            }
+            evaluate_leaf_clause_with_latch(
+                leaf, inst, room, armed_timers, room_vec_idx, trig_idx, path, event, now_unix,
+            )
+        }
     }
 }
 
@@ -676,9 +662,6 @@ fn evaluate_room_triggers_in_inst(
                 let acts: Vec<DungeonTriggerAction> = t.all_actions().cloned().collect();
                 if !repeatable {
                     t.fired = true;
-                    if is_timer_tick {
-                        collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
-                    }
                 } else {
                     let entered_unix = inst.rooms[r_idx].entered_unix;
                     reset_repeatable_trigger_state(
@@ -689,8 +672,6 @@ fn evaluate_room_triggers_in_inst(
                         t_idx,
                         "root",
                         now_unix,
-                        is_timer_tick,
-                        &mut expired_named_timers,
                     );
                 }
                 let eff_trig_actor = armed_by.filter(|&c| c > 0).unwrap_or(actor_char_id);
@@ -702,7 +683,7 @@ fn evaluate_room_triggers_in_inst(
         let prev_armed = is_timer_tick.then(|| inst.rooms[r_idx].armed_timers.clone());
         let mut scratch = prev_armed.as_ref().cloned().unwrap_or_else(|| inst.rooms[r_idx].armed_timers.clone());
         let matched = evaluate_trigger_with_occurrence_latch(
-            &kind, inst, &inst.rooms[r_idx], &mut scratch, r_idx, t_idx, "root", event, now_unix,
+            &kind, inst, &inst.rooms[r_idx], &mut scratch, r_idx, t_idx, "root", event, now_unix, false,
         );
         if let Some(ref prev) = prev_armed {
             collect_newly_latched_due_named_timers(
@@ -739,8 +720,6 @@ fn evaluate_room_triggers_in_inst(
                 t_idx,
                 "root",
                 now_unix,
-                is_timer_tick,
-                &mut expired_named_timers,
             );
         } else {
             inst.rooms[r_idx].triggers[t_idx].fired = true;
@@ -781,7 +760,7 @@ fn trigger_needs_eval_dryrun(
 ) -> bool {
     let mut scratch = room.armed_timers.clone();
     let matched = evaluate_trigger_with_occurrence_latch(
-        kind, inst, room, &mut scratch, r_idx, t_idx, "root", event, now_unix,
+        kind, inst, room, &mut scratch, r_idx, t_idx, "root", event, now_unix, false,
     );
     matched || scratch != room.armed_timers
 }
@@ -1221,7 +1200,6 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
                     break;
                 }
                 let room_fallback_actor = resolve_room_recipient(&inst, Some(r_idx), 0);
-                let mut ignored_expired_named = Vec::new();
                 let mut batch: TriggerBatch = Vec::new();
                 let trig_len = inst.rooms[r_idx].triggers.len();
                 for t_idx in 0..trig_len {
@@ -1244,7 +1222,7 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
                     };
                     if repeatable {
                         let entered_unix = inst.rooms[r_idx].entered_unix;
-                        // BF-03: never consume shared named timers or advance unnamed __rep_timer outside TimerTick.
+                        // BF-03 / BF-R4-01: reset latches and bump unnamed __rep_timer only if its leaf actually latched.
                         reset_repeatable_trigger_state(
                             &kind,
                             &mut inst.rooms[r_idx].armed_timers,
@@ -1253,8 +1231,6 @@ pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeD
                             t_idx,
                             "root",
                             now_unix,
-                            false,
-                            &mut ignored_expired_named,
                         );
                     }
                     let actor = if armed_by > 0 { armed_by } else { room_fallback_actor };

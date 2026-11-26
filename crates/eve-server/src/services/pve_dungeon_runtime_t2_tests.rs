@@ -932,3 +932,237 @@ async fn t2a3_compound_and_repeatable_named_timer_and_shared_peer_bf_r3_01() {
     assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p2_pos)).await);
     assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_repeatable_compound_and_two_timers_preserves_rearmed_bf_r4_01() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_120i64, 991_015i64);
+    let (r_pos, p1_pos, p2_pos) = ([54_000_000.0, 0.0, 0.0], [54_010_000.0, 0.0, 0.0], [54_020_000.0, 0.0, 0.0]);
+    let (ctx, _, ship_id) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r4_01a", DVec3::ZERO).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut r0 = t2_room(1, 9941, r_pos, vec![
+        t2_trig(1, DungeonTriggerKind::CompoundAnd { clauses: vec![
+            DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("t1".into()), after_group_cleared: None },
+            DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("t2".into()), after_group_cleared: None },
+        ]}, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9401 }, true),
+        t2_trig(2, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: p1_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "t1".into(), delay_secs: 2 }, true),
+        t2_trig(3, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: p2_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "t2".into(), delay_secs: 5 }, true),
+    ]);
+    r0.spawned = true;
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p1_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p2_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    ctx.advance_secs(2);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p1_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(3);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let at = &s.instances[&inst_id].rooms[0].armed_timers;
+        assert!(at.contains_key("t1") && !at.contains_key("t2"), "re-armed t1 must stay intact when t2 finishes cycle 1");
+    });
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p2_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    ctx.advance_secs(1);
+    sys_h.step_manual(1.0).await.unwrap();
+    ctx.advance_secs(4);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_delayed_timer_step_manual_preserves_rearmed_cycle2_bf_r4_01() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_130i64, 991_016i64);
+    let (r_pos, p1_pos, p2_pos) = ([55_000_000.0, 0.0, 0.0], [55_010_000.0, 0.0, 0.0], [55_020_000.0, 0.0, 0.0]);
+    let (ctx, _, ship_id) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r4_01b", DVec3::ZERO).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut del_rep = t2_trig(1, DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("rep_del".into()), after_group_cleared: None }, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9402 }, true);
+    del_rep.delay_secs = 4;
+    let mut del_once = t2_trig(3, DungeonTriggerKind::CompoundOr { clauses: vec![
+        DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("peer_t".into()), after_group_cleared: None },
+        DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: p2_pos, radius_m: 3_000.0 },
+    ]}, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9403 }, false);
+    del_once.delay_secs = 3;
+    let mut r0 = t2_room(1, 9942, r_pos, vec![
+        del_rep,
+        t2_trig(2, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: p1_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "rep_del".into(), delay_secs: 2 }, true),
+        del_once,
+        t2_trig(4, DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("peer_t".into()), after_group_cleared: None }, DungeonTriggerAction::UnlockGate, false),
+        t2_trig(5, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: p2_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "peer_t".into(), delay_secs: 2 }, false),
+    ]);
+    r0.spawned = true;
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p1_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    ctx.advance_secs(2);
+    sys_h.step_manual(1.0).await.unwrap();
+
+    ctx.advance_secs(1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p1_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p2_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 2);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(3);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 2);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let rm = &s.instances[&inst_id].rooms[0];
+        assert!(!rm.gate_locked && rm.triggers[2].fired && rm.armed_timers.contains_key("rep_del"));
+    });
+
+    ctx.advance_secs(1);
+    sys_h.step_manual(1.0).await.unwrap();
+    ctx.advance_secs(4);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_delayed_compound_or_unnamed_timer_not_bumped_bf_r4_01() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_140i64, 991_017i64);
+    let r_pos = [56_000_000.0, 0.0, 0.0];
+    let (ctx, _, ship_id) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r4_01c", DVec3::ZERO).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut del_or = t2_trig(1, DungeonTriggerKind::CompoundOr { clauses: vec![
+        DungeonTriggerKind::OnTimer { delay_secs: 10, timer_id: None, after_group_cleared: None },
+        DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: r_pos, radius_m: 3_000.0 },
+    ]}, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9404 }, true);
+    del_or.delay_secs = 5;
+    let mut r0 = t2_room(1, 9943, r_pos, vec![del_or]);
+    r0.spawned = true;
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+
+    ctx.advance_secs(6);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(r_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(5);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+    read_dungeon_runtime_store(&ctx, |s| {
+        assert!(!s.instances[&inst_id].rooms[0].armed_timers.contains_key("__rep_timer:0:0:root.0"));
+    });
+
+    ctx.advance_secs(1);
+    sys_h.step_manual(1.0).await.unwrap();
+    ctx.advance_secs(5);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_nested_compound_or_in_compound_and_read_pure_bf_r4_02() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_150i64, 991_018i64);
+    let (r_pos, a_pos, b_pos, arm_pos) = ([57_000_000.0, 0.0, 0.0], [57_010_000.0, 0.0, 0.0], [57_020_000.0, 0.0, 0.0], [57_030_000.0, 0.0, 0.0]);
+    let (ctx, _, ship_id) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r4_02", DVec3::ZERO).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut r0 = t2_room(1, 9944, r_pos, vec![
+        t2_trig(1, DungeonTriggerKind::CompoundAnd { clauses: vec![
+            DungeonTriggerKind::CompoundOr { clauses: vec![
+                DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("t1".into()), after_group_cleared: None },
+                DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: a_pos, radius_m: 3_000.0 },
+            ]},
+            DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: b_pos, radius_m: 3_000.0 },
+        ]}, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9405 }, true),
+        t2_trig(2, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: arm_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "t1".into(), delay_secs: 3 }, true),
+    ]);
+    r0.spawned = true;
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(arm_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    ctx.advance_secs(3);
+    sys_h.step_manual(1.0).await.unwrap();
+    for _ in 0..2 {
+        ctx.advance_secs(1);
+        let tx_idle = ctx.db.tx_commit_count();
+        tick_dungeon_runtime_system_step(&ctx, sys_id).await;
+        assert_eq!(ctx.db.tx_commit_count(), tx_idle, "BF-R4-02: idle tick after nested CompoundOr latched must stay read-pure");
+    }
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(arm_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    ctx.advance_secs(3);
+    let tx_rearm = ctx.db.tx_commit_count();
+    sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(ctx.db.tx_commit_count(), tx_rearm, "BF-R4-02: re-armed t1 must not trigger DB writes while root.0 is latched");
+    read_dungeon_runtime_store(&ctx, |s| {
+        assert!(s.instances[&inst_id].rooms[0].armed_timers.contains_key("t1"), "BF-R4-02: re-armed t1 preserved");
+    });
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(b_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(b_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
+}
