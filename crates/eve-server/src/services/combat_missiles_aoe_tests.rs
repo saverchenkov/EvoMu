@@ -243,44 +243,42 @@ async fn non_ship_ball_cleanup_fails_courier_and_npc_destruction_clears_state() 
 
     // NPC entity destruction cleans runtime tables
     let npc_id = 1_895_000_042i64;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.insert(
-            npc_id,
-            ExtendedNpcEntity {
-                ball_id: npc_id,
-                type_id: 587,
-                faction_id: 500_010,
-                archetype: "raider".into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 1,
-                target_id: None,
-                aggression_threat: HashMap::new(),
-                threat_table: HashMap::new(),
-                bounty_isk: 0.0,
-                optimal_range: 5_000.0,
-                orbit_range: 2_500.0,
-                damage_vector: DamageVector::new(0.0, 10.0, 0.0, 0.0),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: DVec3::ZERO,
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
-            },
-        );
-    });
+    crate::combat::npc_ai::npc_test_helpers::seed_npc_entity(
+        &ctx,
+        ExtendedNpcEntity {
+            ball_id: npc_id,
+            type_id: 587,
+            faction_id: 500_010,
+            archetype: "raider".into(),
+            solar_system_id: sys_id,
+            spawn_group_id: 1,
+            target_id: None,
+            aggression_threat: HashMap::new(),
+            threat_table: HashMap::new(),
+            bounty_isk: 0.0,
+            optimal_range: 5_000.0,
+            orbit_range: 2_500.0,
+            damage_vector: DamageVector::new(0.0, 10.0, 0.0, 0.0),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 0.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            spawn_position: DVec3::ZERO,
+            sleeper_wh_class: 0,
+            custom_cargo_loot: None,
+        },
+    );
     handle_destroyed_ball_from_missile_or_aoe(&ctx, sys_id, char_id, npc_id, 587, DVec3::ZERO, ctx.now_unix()).await;
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&npc_id)));
+    assert!(!crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, npc_id));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

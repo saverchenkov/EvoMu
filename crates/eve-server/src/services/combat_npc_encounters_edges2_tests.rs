@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{remove_npc_entity, seed_npc_entity};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{ExtendedNpcEntity, with_mut_combat_runtime};
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
@@ -71,7 +72,7 @@ async fn handle_destroyed_dedup_wh_zero_bounty_and_wave_advancement_without_npc(
     let cid = 90_000_001_i64;
     let sys_id = 30_000_142_u32;
 
-    // 1. Missing npc_entities entry still steps encounter waves without panicking
+    // 1. Missing NPC entity entry still steps encounter waves without panicking
     let spawned_balls = create_custom_encounter_site(
         &ctx,
         88_001,
@@ -81,9 +82,7 @@ async fn handle_destroyed_dedup_wh_zero_bounty_and_wave_advancement_without_npc(
     )
     .await;
     if let Some(&bid) = spawned_balls.first() {
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.npc_entities.remove(&bid);
-        });
+        remove_npc_entity(&ctx, bid);
         handle_npc_destroyed_in_space(
             &ctx.systems,
             &ctx.db,
@@ -102,15 +101,15 @@ async fn handle_destroyed_dedup_wh_zero_bounty_and_wave_advancement_without_npc(
         (9_800_001_i64, 9_800_002_i64, 9_800_003_i64, 9_800_004_i64);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.bounty_credited_balls.insert(dup_npc);
-        for (bid, s, bounty) in [
-            (wh_npc, wh_sys, 100_000.0),
-            (zero_bounty_npc, sys_id, 0.0),
-            (zero_killer_npc, sys_id, 100_000.0),
-            (dup_npc, sys_id, 100_000.0),
-        ] {
-            rt.npc_entities.insert(bid, make_ext_npc(bid, s, bounty, "Pirate"));
-        }
     });
+    for (bid, s, bounty) in [
+        (wh_npc, wh_sys, 100_000.0),
+        (zero_bounty_npc, sys_id, 0.0),
+        (zero_killer_npc, sys_id, 100_000.0),
+        (dup_npc, sys_id, 100_000.0),
+    ] {
+        seed_npc_entity(&ctx, make_ext_npc(bid, s, bounty, "Pirate"));
+    }
 
     for (s, bid, killer) in [
         (wh_sys, wh_npc, Some(cid)),

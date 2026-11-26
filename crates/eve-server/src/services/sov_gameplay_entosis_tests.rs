@@ -1723,9 +1723,7 @@ async fn hacked_sov_hub_despawns_all_five_major_threat_detection_sites_and_gates
                 "site {s_idx} NPC ball {npc_id} (including +41..=+45) must despawn on hub hack"
             );
             assert!(
-                crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-                    !rt.npc_entities.contains_key(&npc_id)
-                }),
+                !crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, npc_id),
                 "site {s_idx} combat NPC entity {npc_id} must be removed"
             );
         }

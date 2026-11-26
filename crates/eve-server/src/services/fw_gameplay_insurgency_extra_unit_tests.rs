@@ -576,16 +576,11 @@ async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_c
     let fallback0 = DVec3::new(12_000.0, 0.0, 4_000.0) + pirate_offset;
 
     let find_pirate_bid = |sys: u32| -> i64 {
-        crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-            rt.npc_entities
-                .iter()
-                .find(|(_, npc)| {
-                    npc.solar_system_id == sys
-                        && ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4637)
-                })
-                .map(|(&bid, _)| bid)
-                .expect("pirate roamer present")
+        crate::combat::npc_ai::npc_test_helpers::find_npc_entity_in_system(&ctx, sys, |npc| {
+            ctx.sde.types.get(&npc.type_id).map(|t| t.group_id) == Some(4637)
         })
+        .map(|npc| npc.ball_id)
+        .expect("pirate roamer present")
     };
 
     async fn next_idle_dest(
@@ -602,9 +597,10 @@ async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_c
                 b.mode = eve_destiny::MovementMode::Stop;
             })
             .await;
-        crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
-            rt.npc_entities.get_mut(&bid).unwrap().spawn_position = stop_at;
-        });
+        crate::combat::npc_ai::npc_test_helpers::update_npc_entity(ctx, bid, |npc| {
+            npc.spawn_position = stop_at;
+        })
+        .unwrap();
         stop_at
     }
 

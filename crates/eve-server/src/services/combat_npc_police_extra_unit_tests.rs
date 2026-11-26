@@ -8,11 +8,11 @@ use super::super::{
     is_sentry_disabled_by_corruption, scan_and_enforce_highsec_contraband,
     step_empire_navy_patrols,
 };
+use crate::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
-use crate::services::combat_crimewatch::with_combat_runtime;
 use eve_db::{InventoryFlag, IskCents, PersistedInsurgencyCampaign, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use glam::DVec3;
@@ -372,17 +372,15 @@ async fn mutant_killers_sec_threshold_contraband_table_blockade_runner_navy_only
         sys_h.get_combat_state(br_ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks,
         0
     );
-    with_combat_runtime(&ctx, |rt| {
-        let fp = &rt.npc_entities[&fp_id];
-        assert_eq!(fp.archetype, "FactionPolice");
-        assert_eq!(fp.faction_id, 500_001);
-        assert_eq!(fp.target_id, Some(br_ship_id));
-        assert_eq!(fp.aggression_threat.get(&br_ship_id), Some(&500.0));
-        assert_eq!(fp.threat_table.get(&br_ship_id), Some(&500.0));
-        assert!((fp.orbit_range - 5_000.0).abs() < 1e-6);
-        assert!((fp.web_speed_factor - (-50.0)).abs() < 1e-6);
-        assert!((fp.scram_strength - 2.0).abs() < 1e-6);
-    });
+    let fp = get_npc_entity(&ctx, fp_id).unwrap();
+    assert_eq!(fp.archetype, "FactionPolice");
+    assert_eq!(fp.faction_id, 500_001);
+    assert_eq!(fp.target_id, Some(br_ship_id));
+    assert_eq!(fp.aggression_threat.get(&br_ship_id), Some(&500.0));
+    assert_eq!(fp.threat_table.get(&br_ship_id), Some(&500.0));
+    assert!((fp.orbit_range - 5_000.0).abs() < 1e-6);
+    assert!((fp.web_speed_factor - (-50.0)).abs() < 1e-6);
+    assert!((fp.scram_strength - 2.0).abs() < 1e-6);
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
     assert!(notifs.iter().any(|n| n.event == "OnRemoteMessage"));
@@ -441,12 +439,10 @@ async fn mutant_killers_sec_threshold_contraband_table_blockade_runner_navy_only
     let navy_only = check_and_spawn_faction_police(&ctx, sys_id).await;
     assert_eq!(navy_only.len(), 1);
     let navy_id = navy_only[0];
-    with_combat_runtime(&ctx, |rt| {
-        let navy = &rt.npc_entities[&navy_id];
-        assert_eq!(navy.archetype, "CaldariNavy");
-        assert_eq!(navy.aggression_threat.get(&br_ship_id), Some(&800.0));
-        assert_eq!(navy.threat_table.get(&br_ship_id), Some(&800.0));
-    });
+    let navy = get_npc_entity(&ctx, navy_id).unwrap();
+    assert_eq!(navy.archetype, "CaldariNavy");
+    assert_eq!(navy.aggression_threat.get(&br_ship_id), Some(&800.0));
+    assert_eq!(navy.threat_table.get(&br_ship_id), Some(&800.0));
     assert!(check_and_spawn_faction_police(&ctx, sys_id).await.is_empty());
 
     // 6. step_empire_navy_patrols: non-empire nullsec returns empty; unpiloted highsec system anchors on gate/station and spawns 2 ships idempotently

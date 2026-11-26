@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{seed_npc_entity, update_npc_entity};
 use crate::combat::npc_ai::{NpcAiState, NpcCombatEntity, NpcSpawnManager};
 use crate::living_world::{LivingWorldConvoy, NpcArchetype};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
@@ -126,12 +127,12 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
     .await;
     with_mut_combat_runtime(&ctx, |rt| {
         rt.encounter_waves.get_mut(&4).unwrap().max_waves = 3; // wave 3 uses fallback 941_001 (non-zero dmg)
-        let mut drifter = make_test_npc_entity(space_w1[0], 941_001, sys_id, "Drifter");
-        drifter.bounty_isk = 100_000.0;
-        drifter.custom_cargo_loot = Some((30_744, 2));
-        drifter.sleeper_wh_class = 5;
-        rt.npc_entities.insert(space_w1[0], drifter);
     });
+    let mut drifter = make_test_npc_entity(space_w1[0], 941_001, sys_id, "Drifter");
+    drifter.bounty_isk = 100_000.0;
+    drifter.custom_cargo_loot = Some((30_744, 2));
+    drifter.sleeper_wh_class = 5;
+    seed_npc_entity(&ctx, drifter);
 
     handle_npc_destroyed_in_space(
         &ctx.systems,
@@ -158,10 +159,8 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().security_status = 5.0;
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(n) = rt.npc_entities.get_mut(&space_w2_trigger) {
-            n.bounty_isk = 50_000.0;
-        }
+    update_npc_entity(&ctx, space_w2_trigger, |n| {
+        n.bounty_isk = 50_000.0;
     });
     handle_npc_destroyed_in_space(
         &ctx.systems,
@@ -176,12 +175,10 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
 
     // Kill all wave 3 balls with killer_char_id = None -> marks encounter 4 completed without crediting bounty;
     // also verify Sleeper archetype does not credit pending_bounty_ticks!
-    let w3_ids = with_mut_combat_runtime(&ctx, |rt| {
-        let mut sl = make_test_npc_entity(888_901, 941_001, sys_id, "Sleeper");
-        sl.bounty_isk = 999_999.0;
-        rt.npc_entities.insert(888_901, sl);
-        rt.encounter_waves[&4].active_wave_ball_ids.clone()
-    });
+    let mut sl = make_test_npc_entity(888_901, 941_001, sys_id, "Sleeper");
+    sl.bounty_isk = 999_999.0;
+    seed_npc_entity(&ctx, sl);
+    let w3_ids = with_combat_runtime(&ctx, |rt| rt.encounter_waves[&4].active_wave_ball_ids.clone());
     let bounty_before = ctx
         .db
         .with_snapshot(|snap| snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)]);
@@ -491,12 +488,10 @@ async fn drops_convoys_spawn_groups_cycle_finalize_and_kill_progression_all_bran
         (960_022, 945_030, "PochvenHypnosianSleeper"),
         (960_023, 945_030, "Triglavian"),
     ] {
-        with_mut_combat_runtime(&ctx, |rt| {
-            let mut e = make_test_npc_entity(bid, ntid, sys_id, arch);
-            e.tag_drop_type_id = Some(28_001);
-            e.custom_cargo_loot = Some((35, 4));
-            rt.npc_entities.insert(bid, e);
-        });
+        let mut e = make_test_npc_entity(bid, ntid, sys_id, arch);
+        e.tag_drop_type_id = Some(28_001);
+        e.custom_cargo_loot = Some((35, 4));
+        seed_npc_entity(&ctx, e);
         let mut d = Vec::new();
         assert_eq!(
             populate_npc_wreck_on_turret_kill(&ctx, sys_id, bid, ntid, DVec3::ZERO, wreck_id, char_id, &mut d).await,

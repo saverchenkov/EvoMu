@@ -198,9 +198,7 @@ async fn supply_sites_ihub_regen_battlefield_wave_and_space_entity_destroyed() {
         DVec3::new(10_000.0, 0.0, 0.0),
     )
     .await;
-    let has_npc = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.contains_key(&750_002)
-    });
+    let has_npc = crate::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, 750_002);
     assert!(has_npc);
 }
 

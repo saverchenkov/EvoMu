@@ -1,6 +1,9 @@
 //! Unit and mutation-killing tests for `combat_npc_ai`.
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{
+    get_npc_entity, has_npc_entity, seed_npc_entity, update_npc_entity,
+};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
 };
@@ -194,17 +197,15 @@ fn is_candidate_hostile_to_edencom_evaluates_standings_fleets_drones_and_npcs() 
     // Triglavian NPC is hostile to EDENCOM; another EDENCOM NPC is not
     let trig_ball_id = 500_002_i64;
     let ally_ball_id = 500_003_i64;
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        let mut trig = edencom_npc.clone();
-        trig.ball_id = trig_ball_id;
-        trig.archetype = "Triglavian".into();
-        trig.faction_id = 500_026;
-        rt.npc_entities.insert(trig_ball_id, trig);
+    let mut trig = edencom_npc.clone();
+    trig.ball_id = trig_ball_id;
+    trig.archetype = "Triglavian".into();
+    trig.faction_id = 500_026;
+    seed_npc_entity(&ctx, trig);
 
-        let mut ally = edencom_npc.clone();
-        ally.ball_id = ally_ball_id;
-        rt.npc_entities.insert(ally_ball_id, ally);
-    });
+    let mut ally = edencom_npc.clone();
+    ally.ball_id = ally_ball_id;
+    seed_npc_entity(&ctx, ally);
     assert!(is_candidate_hostile_to_edencom(
         &ctx,
         &edencom_npc,
@@ -299,19 +300,15 @@ async fn spawn_threat_ai_step_and_destroy_specialized_npc_loot_and_bounties() {
         spawn_npc_entity_from_sde(&ctx, sys_id, 920_002, 1, DVec3::new(4_000.0, 0.0, 0.0)).await;
 
     // Record threat events (normal, EWAR 1.5x, logistics 1.3x) and verify Drifter overshield reduction
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_entities.get_mut(&drifter_id).unwrap().drifter_overshield_hp = 1_000.0;
-    });
+    update_npc_entity(&ctx, drifter_id, |d| d.drifter_overshield_hp = 1_000.0).unwrap();
     record_npc_threat_event(&ctx, drifter_id, ship_id, 300.0, false, false);
     record_npc_threat_event(&ctx, drifter_id, ship_id, 0.0, true, false);
     record_npc_threat_event(&ctx, drifter_id, ship_id, 0.0, false, true);
-    with_combat_ephemeral(&ctx, |rt| {
-        let d = rt.npc_entities.get(&drifter_id).unwrap();
-        assert!((d.drifter_overshield_hp - 700.0).abs() < 1e-6);
-        let threat = d.threat_table.get(&ship_id).copied().unwrap_or(0.0);
-        // 100 base + (300+10)*1.0 + (120+10)*1.5 + (120+10)*1.3 = 100 + 310 + 195 + 169 = 774
-        assert!((threat - 774.0).abs() < 1e-6);
-    });
+    let d = get_npc_entity(&ctx, drifter_id).unwrap();
+    assert!((d.drifter_overshield_hp - 700.0).abs() < 1e-6);
+    let threat = d.threat_table.get(&ship_id).copied().unwrap_or(0.0);
+    // 100 base + (300+10)*1.0 + (120+10)*1.5 + (120+10)*1.3 = 100 + 310 + 195 + 169 = 774
+    assert!((threat - 774.0).abs() < 1e-6);
 
     // Step AI tick
     step_extended_npc_ai(&ctx, sys_id).await;
@@ -631,10 +628,8 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
         .unwrap();
 
     step_extended_npc_ai(&ctx, sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        let p = rt.npc_entities.get(&pirate_id).expect("pirate tracked");
-        assert_eq!(p.target_id, Some(ship_id), "NPC must persist acquired target_id");
-    });
+    let p = get_npc_entity(&ctx, pirate_id).expect("pirate tracked");
+    assert_eq!(p.target_id, Some(ship_id), "NPC must persist acquired target_id");
     let ship_shield_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
     assert!(ship_shield_after < 5_000.0, "step_extended_npc_ai must apply NPC damage");
 
@@ -649,13 +644,9 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
         DVec3::new(1_000.0, 0.0, 0.0),
     )
     .await;
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_entities.get_mut(&stale_npc_id).unwrap().target_id = Some(999_888);
-    });
+    update_npc_entity(&ctx, stale_npc_id, |n| n.target_id = Some(999_888)).unwrap();
     step_extended_npc_ai(&ctx, stale_sys).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&stale_npc_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, stale_npc_id).unwrap().target_id, None);
 
     // 4. Empty-NPC system with leftover scrammed ship clears scram flag (L385 &&->|| and !has_scrammed)
     let scram_sys = 30_000_145_u32;
@@ -836,19 +827,17 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         DVec3::new(200_000.0, 0.0, 0.0),
     )
     .await;
-    with_combat_ephemeral(&ctx, |rt| {
-        let s1 = &rt.npc_entities[&sentry_id];
-        assert_eq!(s1.archetype, "EmpireSentry");
-        assert_eq!(s1.faction_id, 500_001);
-        assert_eq!(s1.orbit_range, 0.0);
-        assert!(s1.optimal_range >= 500_000.0);
+    let s1 = get_npc_entity(&ctx, sentry_id).unwrap();
+    assert_eq!(s1.archetype, "EmpireSentry");
+    assert_eq!(s1.faction_id, 500_001);
+    assert_eq!(s1.orbit_range, 0.0);
+    assert!(s1.optimal_range >= 500_000.0);
 
-        let s2 = &rt.npc_entities[&amarr_sentry_id];
-        assert_eq!(s2.archetype, "EmpireSentry");
-        assert_eq!(s2.faction_id, 500_003);
-        assert_eq!(s2.orbit_range, 0.0);
-        assert!(s2.optimal_range >= 500_000.0);
-    });
+    let s2 = get_npc_entity(&ctx, amarr_sentry_id).unwrap();
+    assert_eq!(s2.archetype, "EmpireSentry");
+    assert_eq!(s2.faction_id, 500_003);
+    assert_eq!(s2.orbit_range, 0.0);
+    assert!(s2.optimal_range >= 500_000.0);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     {
@@ -890,10 +879,8 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
 
     // Clean non-criminal Venture pilot is never targeted or damaged.
     step_extended_npc_ai(&ctx, sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
-        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, sentry_id).unwrap().target_id, None);
+    assert_eq!(get_npc_entity(&ctx, amarr_sentry_id).unwrap().target_id, None);
 
     // -10.0 empire and pirate standings alone (without active criminal or on-grid aggression) must not trigger sentries.
     ctx.db.with_mut_snapshot(|snap| {
@@ -903,10 +890,8 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         ch.standings.insert(500_010, -10.0);
     });
     step_extended_npc_ai(&ctx, sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
-        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, sentry_id).unwrap().target_id, None);
+    assert_eq!(get_npc_entity(&ctx, amarr_sentry_id).unwrap().target_id, None);
 
     // Non-outlaw -2.0 sec status in 1.0 highsec (Faction Police threshold) and -10.0 sec status without
     // active criminal timer or on-grid illegal aggression must not be engaged by Empire Sentry Guns.
@@ -915,10 +900,8 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
             snap.characters.get_mut(&char_id).unwrap().security_status = sec;
         });
         step_extended_npc_ai(&ctx, sys_id).await;
-        with_combat_ephemeral(&ctx, |rt| {
-            assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
-            assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
-        });
+        assert_eq!(get_npc_entity(&ctx, sentry_id).unwrap().target_id, None);
+        assert_eq!(get_npc_entity(&ctx, amarr_sentry_id).unwrap().target_id, None);
     }
     assert_eq!(
         sys_handle
@@ -942,10 +925,8 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         cw.get_or_create(char_id).criminal_flag_until_unix = now + 900;
     }
     step_extended_npc_ai(&ctx, sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, Some(ship_id));
-        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, Some(ship_id));
-    });
+    assert_eq!(get_npc_entity(&ctx, sentry_id).unwrap().target_id, Some(ship_id));
+    assert_eq!(get_npc_entity(&ctx, amarr_sentry_id).unwrap().target_id, Some(ship_id));
     assert!(
         sys_handle
             .get_combat_state(ship_id)
@@ -1061,19 +1042,17 @@ async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corrupti
         .unwrap();
 
     step_extended_npc_ai(&ctx, sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        let amarr_ent = &rt.npc_entities[&amarr_sentry_id];
-        assert_eq!(amarr_ent.archetype, "EmpireSentry");
-        assert_eq!(amarr_ent.faction_id, 500_003);
-        assert_eq!(amarr_ent.orbit_range, 0.0);
-        assert_eq!(amarr_ent.target_id, None);
+    let amarr_ent = get_npc_entity(&ctx, amarr_sentry_id).unwrap();
+    assert_eq!(amarr_ent.archetype, "EmpireSentry");
+    assert_eq!(amarr_ent.faction_id, 500_003);
+    assert_eq!(amarr_ent.orbit_range, 0.0);
+    assert_eq!(amarr_ent.target_id, None);
 
-        let generic_ent = &rt.npc_entities[&generic_sentry_id];
-        assert_eq!(generic_ent.archetype, "EmpireSentry");
-        assert_eq!(generic_ent.faction_id, 500_001);
-        assert_eq!(generic_ent.orbit_range, 0.0);
-        assert_eq!(generic_ent.target_id, None);
-    });
+    let generic_ent = get_npc_entity(&ctx, generic_sentry_id).unwrap();
+    assert_eq!(generic_ent.archetype, "EmpireSentry");
+    assert_eq!(generic_ent.faction_id, 500_001);
+    assert_eq!(generic_ent.orbit_range, 0.0);
+    assert_eq!(generic_ent.target_id, None);
     {
         let (v1, v2) = sys_handle
             .test_with_ballpark_async(move |bp| {
@@ -1138,9 +1117,7 @@ async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corrupti
 
     // Peaceful pilot in lowsec is not targeted.
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, low_sentry_id).unwrap().target_id, None);
 
     // On-grid illegal aggression triggers sentry targeting and damage.
     let now = ctx.now_unix();
@@ -1163,9 +1140,7 @@ async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corrupti
             .record_aggression(char_id, 90_000_002, low_sys_id, false, false, now);
     }
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, Some(ship_id));
-    });
+    assert_eq!(get_npc_entity(&ctx, low_sentry_id).unwrap().target_id, Some(ship_id));
     let shield_before_corruption = low_sys_handle
         .get_combat_state(ship_id)
         .await
@@ -1202,10 +1177,9 @@ async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corrupti
     ));
     record_npc_threat_event(&ctx, low_sentry_id, ship_id, 100.0, false, false);
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, None);
-        assert!(rt.npc_entities[&low_sentry_id].aggression_threat.is_empty());
-    });
+    let low_sentry_ent = get_npc_entity(&ctx, low_sentry_id).unwrap();
+    assert_eq!(low_sentry_ent.target_id, None);
+    assert!(low_sentry_ent.aggression_threat.is_empty());
     let shield_after_corruption = low_sys_handle
         .get_combat_state(ship_id)
         .await
@@ -1318,10 +1292,8 @@ async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
             .record_aggression(char_id, 90_000_002, low_sys_id, false, false, now);
     }
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
-        assert_eq!(rt.npc_entities[&gate_b_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, gate_a_sentry_id).unwrap().target_id, None);
+    assert_eq!(get_npc_entity(&ctx, gate_b_sentry_id).unwrap().target_id, None);
     assert_eq!(
         sys_handle
             .get_combat_state(ship_id)
@@ -1347,10 +1319,8 @@ async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
         );
     });
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, Some(ship_id));
-        assert_eq!(rt.npc_entities[&gate_b_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, gate_a_sentry_id).unwrap().target_id, Some(ship_id));
+    assert_eq!(get_npc_entity(&ctx, gate_b_sentry_id).unwrap().target_id, None);
     let shield_after_gate_a_hit = sys_handle
         .get_combat_state(ship_id)
         .await
@@ -1371,9 +1341,7 @@ async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
         snap.characters.get_mut(&char_id).unwrap().active_ship_id = reship_id;
     });
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_ne!(rt.npc_entities[&gate_a_sentry_id].target_id, Some(reship_id));
-    });
+    assert_ne!(get_npc_entity(&ctx, gate_a_sentry_id).unwrap().target_id, Some(reship_id));
     assert_eq!(
         sys_handle
             .get_combat_state(reship_id)
@@ -1392,11 +1360,10 @@ async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
     // and must clear `active_on_grid` + Gate A target lock.
     let _ = sys_handle.set_ball_position(ship_id, gate_b_origin).await;
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&gate_b_sentry_id].target_id, None);
-        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
-        assert!(rt.npc_entities[&gate_a_sentry_id].aggression_threat.is_empty());
-    });
+    assert_eq!(get_npc_entity(&ctx, gate_b_sentry_id).unwrap().target_id, None);
+    let gate_a_ent = get_npc_entity(&ctx, gate_a_sentry_id).unwrap();
+    assert_eq!(gate_a_ent.target_id, None);
+    assert!(gate_a_ent.aggression_threat.is_empty());
     assert!(!crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
         rt.sentry_gun_aggression[&(low_sys_id, ship_id)].active_on_grid
     }));
@@ -1404,9 +1371,7 @@ async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
     // Returning to Gate A after moving > 500 km off-grid keeps Gate A sentry passive.
     let _ = sys_handle.set_ball_position(ship_id, gate_a_origin).await;
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, gate_a_sentry_id).unwrap().target_id, None);
 
     // (b4) Entering `MovementMode::Warp` while still < 500 km clears `active_on_grid` so arriving back keeps Gate A passive.
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
@@ -1434,9 +1399,7 @@ async fn empire_sentry_offgrid_belt_cross_gate_reship_and_grid_exit_scoping() {
     }));
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&gate_a_sentry_id].target_id, None);
-    });
+    assert_eq!(get_npc_entity(&ctx, gate_a_sentry_id).unwrap().target_id, None);
 
     // (b5) Docking / removal from ballpark clears `active_on_grid` as well.
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
@@ -1525,15 +1488,13 @@ async fn khanid_500008_sentry_classification_and_non_empire_group_99_exclusions(
         DVec3::new(10_000.0, 0.0, 0.0),
     )
     .await;
-    with_combat_ephemeral(&ctx, |rt| {
-        let ent = &rt.npc_entities[&khanid_id];
-        assert_eq!(ent.archetype, "EmpireSentry");
-        assert_eq!(ent.faction_id, 500_008);
-        assert_eq!(ent.orbit_range, 0.0);
-        assert!(ent.optimal_range >= 500_000.0);
-        assert_eq!(ent.bounty_isk, 0.0);
-        assert!(is_empire_sentry_npc(&ctx, ent));
-    });
+    let ent = get_npc_entity(&ctx, khanid_id).unwrap();
+    assert_eq!(ent.archetype, "EmpireSentry");
+    assert_eq!(ent.faction_id, 500_008);
+    assert_eq!(ent.orbit_range, 0.0);
+    assert!(ent.optimal_range >= 500_000.0);
+    assert_eq!(ent.bounty_isk, 0.0);
+    assert!(is_empire_sentry_npc(&ctx, &ent));
     assert_eq!(
         ctx.systems
             .get_or_spawn(low_sys_id)
@@ -1655,12 +1616,10 @@ async fn khanid_500008_sentry_classification_and_non_empire_group_99_exclusions(
         .await
         .unwrap();
     step_extended_npc_ai(&ctx, low_sys_id).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        let ed = &rt.npc_entities[&edencom_g180_id];
-        assert_eq!(ed.archetype, "EDENCOM");
-        assert!(!is_empire_sentry_npc(&ctx, ed));
-        assert_eq!(ed.target_id, Some(ship_id));
-    });
+    let ed = get_npc_entity(&ctx, edencom_g180_id).unwrap();
+    assert_eq!(ed.archetype, "EDENCOM");
+    assert!(!is_empire_sentry_npc(&ctx, &ed));
+    assert_eq!(ed.target_id, Some(ship_id));
 }
 
 fn make_isolated_extended_npc_ctx(
@@ -2044,9 +2003,7 @@ async fn extended_npc_ai_destroys_with_sde_wreck_scaled_loot_and_clears_runtime(
     );
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle.spawn_ball_with_combat(ball, cs).await.unwrap();
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_entities.insert(reused_id, ent);
-    });
+    seed_npc_entity(&ctx, ent);
     let shield_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
     step_extended_npc_ai_sync(&ctx, sys_id);
     let shield_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp;
@@ -2358,7 +2315,7 @@ async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_p
         DVec3::ZERO,
     )
     .expect("death pipeline cleanup");
-    with_combat_ephemeral(&ctx, |rt| assert!(!rt.npc_entities.contains_key(&npc_a)));
+    assert!(!has_npc_entity(&ctx, npc_a));
     crate::combat::npc_ai_weapons_loot::with_extended_npc_weapon_runtime(&ctx, |wrt| {
         assert!(!wrt.contains_key(&(sys_id, npc_a)));
     });
@@ -2382,7 +2339,7 @@ async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_p
     ctx.systems.get_or_spawn(sys_id).try_remove_ball(ship_id);
     let npc_b =
         spawn_specialized_npc_entity(&ctx, sys_id, 2_386, "Pirate", 500_010, DVec3::ZERO).await;
-    let npc_b_ent = with_combat_ephemeral(&ctx, |rt| rt.npc_entities[&npc_b].clone());
+    let npc_b_ent = get_npc_entity(&ctx, npc_b).unwrap();
     let wrt_b = crate::combat::npc_ai_weapons_loot::take_or_init_extended_npc_weapon_runtime(
         &ctx, sys_id, &npc_b_ent,
     );
@@ -2398,7 +2355,6 @@ async fn extended_npc_weapon_runtime_pruned_on_death_pipeline_empty_system_and_p
     let mut persisted = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.to_persisted());
     let wrong_sys_id = sys_id + 1;
     let mut rt_clone = crate::services::combat_crimewatch::CombatRuntimeState::default();
-    rt_clone.npc_entities.insert(npc_b, npc_b_ent.clone());
     {
         let mut wrt = rt_clone.extended_npc_weapon_runtime.map.write().unwrap_or_else(|e| e.into_inner());
         wrt.insert((sys_id, npc_b), wrt_b.clone());

@@ -1,8 +1,8 @@
 //! Unit and integration tests for `pve_exploration_sites`.
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity, npc_entity_count};
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::CombatRuntimeState;
 use crate::services::pve_exploration::{
     ensure_system_pve_sites_seeded, handle_pve_exploration, read_pve_exploration_reg,
     with_pve_exploration_reg, EscalatingPathEntry, HackingGameSession, HackingNodeKind,
@@ -16,7 +16,7 @@ use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 fn shared_sde() -> Arc<SdeRegistry> {
     static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
@@ -137,17 +137,19 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
     assert!(!loot_low.is_empty() && !loot_hi.is_empty());
 
     // Sleeper wave 1 (includes sentry) & wave 2 (no sentry) + sleeper wreck drop
+    // Second ServerContext starts before w1/w2 so its combat_ephemeral is cold behind &ctx.db.
+    let ctx_rehydrated =
+        ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), Arc::clone(&ctx.db));
     let w1_balls = spawn_sleeper_wave_in_system(&ctx, sys_id, 3, 1, DVec3::ZERO).await;
     let w2_balls = spawn_sleeper_wave_in_system(&ctx, sys_id, 3, 2, DVec3::new(1000.0, 0.0, 0.0)).await;
     assert_eq!(w1_balls.len(), 4);
     assert_eq!(w2_balls.len(), 3);
 
-    let combat_rt = Arc::new(RwLock::new(CombatRuntimeState::default()));
     let w3_balls = spawn_sleeper_wave_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
-        &combat_rt,
+        &ctx_rehydrated.combat_ephemeral,
         sys_id,
         5,
         2,
@@ -155,12 +157,16 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
     )
     .await;
     assert_eq!(w3_balls.len(), 3);
-    {
-        let rt = combat_rt.read().unwrap();
-        // `w1` (4) + `w2` (3) were persisted to `&ctx.db` and rehydrated when `w3` (3) ran.
-        assert_eq!(rt.npc_entities.len(), w1_balls.len() + w2_balls.len() + w3_balls.len());
-        assert!(w1_balls.iter().chain(w2_balls.iter()).chain(w3_balls.iter()).all(|bid| rt.npc_entities.contains_key(bid)));
-    }
+    // `w1` (4) + `w2` (3) were persisted to `&ctx.db` and rehydrated when `w3` (3) ran.
+    assert_eq!(
+        npc_entity_count(&ctx_rehydrated),
+        w1_balls.len() + w2_balls.len() + w3_balls.len()
+    );
+    assert!(w1_balls
+        .iter()
+        .chain(w2_balls.iter())
+        .chain(w3_balls.iter())
+        .all(|&bid| has_npc_entity(&ctx_rehydrated, bid)));
 
     let sw_id = drop_sleeper_wreck_core(
         &ctx.db,
@@ -400,20 +406,18 @@ async fn empty_sde_wrecks_multi_cans_and_sleeper_remote_rep_attributes() {
     t.default_attributes.insert(68, 250.0); // remote shield rep
     t.default_attributes.insert(84, 180.0); // remote armor rep
     rep_sde.types.insert(trigger_tid, t);
-    let combat_rt = Arc::new(RwLock::new(CombatRuntimeState::default()));
     let balls = spawn_sleeper_wave_core(
         &ctx.systems,
         &ctx.db,
         &Arc::new(rep_sde),
-        &combat_rt,
+        &ctx.combat_ephemeral,
         sys_id,
         4,
         1,
         DVec3::ZERO,
     )
     .await;
-    let rt = combat_rt.read().unwrap();
-    let npc = &rt.npc_entities[&balls[0]];
+    let npc = get_npc_entity(&ctx, balls[0]).unwrap();
     assert_eq!(npc.web_speed_factor, -65.0);
     assert_eq!(npc.remote_shield_rep, 250.0);
     assert_eq!(npc.remote_armor_rep, 180.0);

@@ -1016,7 +1016,7 @@ async fn materialize_room_preserves_positive_ball_id_and_increments_next_entity_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t2a2_repeatable_waves_same_tx_spawn_despawn_and_r5_actions() {
-    use crate::services::combat_crimewatch::with_combat_runtime;
+    use crate::combat::npc_ai::npc_test_helpers::has_npc_entity;
     use eve_destiny::{Ball, MovementMode};
 
     let sys_id: SolarSystemId = 30_000_142;
@@ -1090,7 +1090,7 @@ async fn t2a2_repeatable_waves_same_tx_spawn_despawn_and_r5_actions() {
         rt.rooms[0].npc_groups[0].npc_ball_ids[0]
     });
     assert!(sys_handle.get_ball_snapshot(wave2_npc).await.unwrap().is_some());
-    assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&wave2_npc)));
+    assert!(has_npc_entity(&ctx, wave2_npc));
 
     on_dungeon_npc_killed(&ctx, sys_id, wave2_npc, char_id).await;
     let wave3_npc = read_dungeon_runtime_store(&ctx, |s| {
@@ -1111,7 +1111,7 @@ async fn t2a2_repeatable_waves_same_tx_spawn_despawn_and_r5_actions() {
     });
     for bid in &grp2_dead {
         assert!(sys_handle.get_ball_snapshot(*bid).await.unwrap().is_none());
-        assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(bid)));
+        assert!(!has_npc_entity(&ctx, *bid));
     }
 
     // OWN-R5-02: clearing Room 2 without Room 1 must NOT auto-complete instance.
@@ -1127,7 +1127,7 @@ async fn t2a2_repeatable_waves_same_tx_spawn_despawn_and_r5_actions() {
         (41, DungeonTriggerAction::CompleteDungeon),
     ], char_id).await, 2);
     assert!(sys_handle.get_ball_snapshot(wave3_npc).await.unwrap().is_none());
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&wave3_npc)));
+    assert!(!has_npc_entity(&ctx, wave3_npc));
 
     // Part B: Same-tx SpawnNpcGroup + FailDungeon leaves 0 orphaned balls/ExtendedNpcEntity and emits OnDungeonExited.
     let fail_id = 980_502i64;
@@ -1154,7 +1154,7 @@ async fn t2a2_repeatable_waves_same_tx_spawn_despawn_and_r5_actions() {
     let after_fail_id = ctx.db.with_snapshot(|s| s.next_entity_id);
     for bid in (before_fail_id + 1)..=after_fail_id {
         assert!(sys_handle.get_ball_snapshot(bid).await.unwrap().is_none());
-        assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&bid)));
+        assert!(!has_npc_entity(&ctx, bid));
     }
     read_dungeon_runtime_store(&ctx, |s| assert!(s.instances[&fail_id].failed && s.instances[&fail_id].despawned && !s.instances[&fail_id].completed));
     assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnDungeonExited"));
@@ -1284,7 +1284,7 @@ async fn t2a2_public_dungeon_delayed_reward_escalation_and_notifications() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t2a2_r1_lock_gate_pirate_archetype_despawn_purge_and_zero_based_cross_room() {
-    use crate::services::combat_crimewatch::with_combat_runtime;
+    use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity};
     use crate::services::pve_dungeon_runtime_rpc::on_dungeon_approach;
     use eve_destiny::{Ball, MovementMode};
 
@@ -1355,7 +1355,7 @@ async fn t2a2_r1_lock_gate_pirate_archetype_despawn_purge_and_zero_based_cross_r
 
     // BF-03: SDE-derived Pirate archetype ("Pirate", not overwritten by "Dungeon").
     let m0 = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.unwrap();
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_entities[&m0.npc_ids[0]].archetype.clone()), "Pirate");
+    assert_eq!(get_npc_entity(&ctx, m0.npc_ids[0]).unwrap().archetype, "Pirate");
     on_dungeon_room_entered(&ctx, sys_id, inst_id, 0, char_id).await;
 
     // BF-02: Real OnKill -> LockGate survives unlock_room_gates_on_clear_in_inst and subsequent OnApproach triggers.
@@ -1378,19 +1378,19 @@ async fn t2a2_r1_lock_gate_pirate_archetype_despawn_purge_and_zero_based_cross_r
 
     let _ = sys_handle.set_ball_position(ship_id, DVec3::new(r1_pos[0] + 30_000.0, 0.0, 0.0)).await;
     assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&m1.npc_ids[0])));
+    assert!(!has_npc_entity(&ctx, m1.npc_ids[0]));
     read_dungeon_runtime_store(&ctx, |s| {
         let rt = &s.instances[&inst_id];
         assert!(rt.rooms[0].gate_locked, "0-based Some(1) must target rooms[1], never rooms[0]");
         assert!(rt.rooms[1].cleared && !rt.rooms[1].gate_locked && !rt.rooms[1].gate_links[0].locked);
     });
 
-    // BF-04: despawn_completed_dungeon purges ctx.combat_ephemeral.npc_entities cleanly.
+    // BF-04: despawn_completed_dungeon purges runtime NPC entity tracking cleanly.
     let m2 = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 2).await.unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&m2.npc_ids[0])));
+    assert!(has_npc_entity(&ctx, m2.npc_ids[0]));
     despawn_completed_dungeon(&ctx, sys_id, inst_id, char_id).await;
     assert!(sys_handle.get_ball_snapshot(m2.npc_ids[0]).await.unwrap().is_none());
-    assert!(!with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&m2.npc_ids[0])));
+    assert!(!has_npc_entity(&ctx, m2.npc_ids[0]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
