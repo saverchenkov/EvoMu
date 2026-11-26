@@ -762,10 +762,10 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     let fac_shot2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(fac_laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(fac_shot2.dict_get("crystalShattered"), Some(&PyRep::Bool(true)));
-    ctx.db.with_snapshot(|s| {
-        let rem = &s.items[&fac_crys_id];
+    ctx.db.with_snapshot(|snap| {
+        let rem = &snap.items[&fac_crys_id];
         assert_eq!(rem.quantity, 1);
-        assert_eq!(rem.dynamic_attributes.get(&attr_ids::DAMAGE).copied(), Some(0.0));
+        assert_eq!(rem.dynamic_attributes.get(&attr_ids::DAMAGE).copied(), None);
     });
 
     // 5. Entropic Disintegrator fresh activation, AlreadyActive rejection, and reset on reactivation
@@ -4619,6 +4619,171 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
         .drain_notifications_for_char(char_id)
         .iter()
         .any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+}
+
+#[tokio::test]
+async fn crystal_volatility_wear_sets_singleton_and_version_and_shatter_removes_damage_attr() {
+    use eve_sde::attr_ids;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        53_099,
+        make_fighter_type(
+            53_099,
+            53,
+            7,
+            5.0,
+            vec![
+                (6, 10.0),
+                (51, 3_000.0),
+                (54, 15_000.0),
+                (64, 1.0),
+                (128, 1.0),
+                (158, 5_000.0),
+                (160, 100.0),
+                (604, 86.0),
+            ],
+        ),
+    );
+    sde.types.insert(
+        86_099,
+        make_fighter_type(
+            86_099,
+            86,
+            8,
+            1.0,
+            vec![
+                (9, 1.0),
+                (114, 50.0),
+                (128, 1.0),
+                (783, 1.0),
+                (784, 0.25),
+                (786, 1.0),
+            ],
+        ),
+    );
+    sde.types.insert(
+        10_099,
+        make_fighter_type(10_099, 550, 11, 1_000.0, vec![(attr_ids::ENTITY_KILL_BOUNTY, 10_000.0)]),
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let laser_single_id = 890_001_i64;
+    let crystal_single_id = 890_002_i64;
+    let laser_stack_id = 890_003_i64;
+    let crystal_stack_id = 890_004_i64;
+    let npc_id = 990_099_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            laser_single_id,
+            make_fighter_item(laser_single_id, 53_099, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        let mut single_crys = make_fighter_item(crystal_single_id, 86_099, char_id, ship_id, InventoryFlag::HiSlot0, 1);
+        single_crys.singleton = false;
+        snap.items.insert(crystal_single_id, single_crys);
+
+        snap.items.insert(
+            laser_stack_id,
+            make_fighter_item(laser_stack_id, 53_099, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        let mut stacked_crys = make_fighter_item(crystal_stack_id, 86_099, char_id, ship_id, InventoryFlag::HiSlot1, 2);
+        stacked_crys.dynamic_attributes.insert(attr_ids::DAMAGE, 0.80);
+        snap.items.insert(crystal_stack_id, stacked_crys);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos) in [
+        (ship_id, 23_915_u32, DVec3::ZERO),
+        (npc_id, 10_099_u32, DVec3::new(5_000.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 5_000.0,
+                    max_shield_hp: 5_000.0,
+                    armor_hp: 5_000.0,
+                    max_armor_hp: 5_000.0,
+                    structure_hp: 5_000.0,
+                    max_structure_hp: 5_000.0,
+                    capacitor: 500.0,
+                    max_capacitor: 500.0,
+                    signature_radius: 100.0,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: npc_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    // 1. Non-fatal volatility wear on quantity=1, singleton=false crystal sets singleton=true, DAMAGE, and increments version
+    let wear_res = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_single_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(wear_res.dict_get("crystalShattered"), Some(&PyRep::Bool(false)));
+    ctx.db.with_snapshot(|snap| {
+        let crys = &snap.items[&crystal_single_id];
+        assert!(crys.singleton);
+        assert_eq!(crys.version, 2);
+        assert_eq!(crys.dynamic_attributes.get(&attr_ids::DAMAGE).copied(), Some(0.25));
+    });
+
+    // 2. Multi-unit shatter (0.80 + 0.25 >= 1.0) decrements quantity 2->1 and removes DAMAGE key completely
+    let shatter_res = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_stack_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(shatter_res.dict_get("crystalShattered"), Some(&PyRep::Bool(true)));
+    ctx.db.with_snapshot(|snap| {
+        let rem = &snap.items[&crystal_stack_id];
+        assert_eq!(rem.quantity, 1);
+        assert_eq!(rem.version, 2);
+        assert!(!rem.dynamic_attributes.contains_key(&attr_ids::DAMAGE));
+    });
 }
 
 

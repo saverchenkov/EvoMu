@@ -633,4 +633,66 @@ fn freelance_helpers_and_item_delivery_rejections_and_completion() {
         assert_eq!(s.items[&910_090].quantity, 10);
         assert!(!s.items.contains_key(&910_091));
     });
+
+    // Unbounded max_per_character (None -> i64::MAX) with req_qty > i32::MAX must not wrap allowed_qty as i32 negative
+    let pid_big = 605_i64;
+    let uuid_big = corp_projects::freelance_uuid(now, pid_big).to_vec();
+    let big_req_qty = (i64::from(i32::MAX)) + 5_000;
+    db.with_mut_snapshot(|s| {
+        s.corp_projects.insert(
+            pid_big,
+            CorpProjectRecord {
+                project_id: pid_big,
+                corporation_id: corp_id,
+                name: "Big Target".into(),
+                target_quantity: big_req_qty as u64 + 10_000,
+                current_quantity: 0,
+                isk_per_unit: eve_db::IskCents(0),
+                escrow_remaining: eve_db::IskCents(0),
+            },
+        );
+        s.alliance_war_state
+            .project_meta
+            .insert(pid_big, ("DeliverItem".into(), true, false));
+        let mut det = PersistedProjectDetails::default();
+        det.creator_id = cid;
+        det.created_unix = now;
+        det.status = "Active".into();
+        det.filter_id = Some(999_125);
+        det.batch_size = 10;
+        det.max_per_character = None;
+        det.uuid_bytes = uuid_big.clone();
+        det.committed_participants.push(cid);
+        s.alliance_war_state.project_details.insert(pid_big, det);
+        s.items.insert(
+            910_092,
+            InventoryItemRecord {
+                item_id: 910_092,
+                type_id: 999_125,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+    });
+    let big_req = pb::message("eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest")
+        .set("project.uuid", uuid_big)
+        .set("delivery_location.station.sequential", station_id as u64)
+        .set("quantity", big_req_qty as u64)
+        .must_encode();
+    let big_rsp = call(
+        &router,
+        &player,
+        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+        big_req,
+        now,
+    );
+    assert_eq!(big_rsp.status_code, STATUS_OK);
+    assert_eq!(WireMessage::decode(&big_rsp.payload.unwrap().value).unwrap().fields[0].field_number, 1);
+    db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&910_092));
+        assert_eq!(s.corp_projects[&pid_big].current_quantity, 50);
+    });
 }

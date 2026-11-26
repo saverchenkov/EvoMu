@@ -1005,7 +1005,12 @@ fn skin_initiate_create(
             format!("Listing quantity must be in 1..={MAX_LISTING_QUANTITY}"),
         ));
     }
-    let quantity = quantity_u64 as u32;
+    let quantity = u32::try_from(quantity_u64).map_err(|_| {
+        (
+            STATUS_BAD_REQUEST,
+            format!("Listing quantity must be in 1..={MAX_LISTING_QUANTITY}"),
+        )
+    })?;
     if let Some(isk_unit) = price_isk {
         if isk_unit > MAX_LISTING_PRICE_UNITS
             || isk_unit.checked_mul(quantity_u64).and_then(checked_isk_cents).is_none()
@@ -1185,7 +1190,12 @@ fn skin_initiate_purchase(
             format!("Purchase quantity must be in 1..={MAX_LISTING_QUANTITY}"),
         ));
     }
-    let quantity = quantity_u64 as u32;
+    let quantity = u32::try_from(quantity_u64).map_err(|_| {
+        (
+            STATUS_BAD_REQUEST,
+            format!("Purchase quantity must be in 1..={MAX_LISTING_QUANTITY}"),
+        )
+    })?;
     if let Some(ver) = msg.get(3).and_then(as_str) {
         if !ver.is_empty() && ver != BUYER_FEES_VERSION {
             return Err((

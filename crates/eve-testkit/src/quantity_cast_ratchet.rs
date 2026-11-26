@@ -907,6 +907,15 @@ mod tests {
             .verify_default()
             .expect("live crates/eve-server/src/services must satisfy quantity_cast_ratchet.json");
         assert!(summary.scanned_files >= 100);
+        assert!(
+            ratchet.rules[RULE_DIRECT_QUANTITY_CASTS].zero_required,
+            "direct_quantity_casts must remain locked with zero_required = true"
+        );
+        assert_eq!(
+            summary.rules[RULE_DIRECT_QUANTITY_CASTS].observed_total,
+            0,
+            "direct_quantity_casts observed_total must be 0 across live services"
+        );
         for name in [RULE_DIRECT_QUANTITY_CASTS, RULE_CLAMPED_QUANTITY_CASTS] {
             let rule_report = &summary.rules[name];
             assert!(

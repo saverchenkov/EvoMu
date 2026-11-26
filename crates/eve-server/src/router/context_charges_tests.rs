@@ -535,3 +535,271 @@ fn load_charge_into_weapon_slot_emits_exact_item_change_diffs_and_splits_from_ha
         Some(&vec![(3, station_id), (4, InventoryFlag::Hangar as i64)])
     );
 }
+
+#[test]
+fn load_charge_enforces_item_class_policy_atomically_and_preserves_crystal_and_script_state() {
+    let ctx = test_ctx();
+    let char1 = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let dock = Some(station_id);
+    let ship_id = 922_000_001_i64;
+    let turret_id = 922_000_002_i64;
+    let laser_id = 922_000_003_i64;
+    let sebo_id = 922_000_004_i64;
+
+    // 1. Projectile turret (484 = 125mm Gatling AutoCannon I, ammo 178 = Carbonized Lead S)
+    // 2. Energy laser (450 = Gatling Pulse Laser I, crystals 239 = Radio S, 246 = Multifrequency S)
+    // 3. Sensor Booster (1973 = Sensor Booster I, script 29011 = Scan Resolution Script)
+    let w_proj_tid = 484_u32;
+    let c_proj_tid = 178_u32;
+    let w_laser_tid = 450_u32;
+    let c_crys1_tid = 239_u32;
+    let c_crys2_tid = 246_u32;
+    let w_sebo_tid = 1973_u32;
+    let c_script_tid = 29_011_u32;
+
+    let loaded_proj_id = 922_000_010_i64;
+    let bpc_ammo_id = 922_000_011_i64;
+    let mutaplasmid_ammo_id = 922_000_012_i64;
+    let attr_mutated_ammo_id = 922_000_013_i64;
+    let insured_ammo_id = 922_000_014_i64;
+    let courier_ammo_id = 922_000_015_i64;
+    let singleton_ammo_id = 922_000_016_i64;
+
+    let crystal_stack_id = 922_000_020_i64;
+    let worn_crystal_id = 922_000_021_i64;
+    let alt_crystal_id = 922_000_022_i64;
+    let mut_crystal_id = 922_000_023_i64;
+    let ins_crystal_id = 922_000_024_i64;
+    let wear_ns_crystal_id = 922_000_025_i64;
+
+    let script_id = 922_000_030_i64;
+    let mut_script_id = 922_000_031_i64;
+    let ins_script_id = 922_000_032_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char1) {
+            ch.station_id = Some(station_id);
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char1, station_id, InventoryFlag::Hangar, 1),
+        );
+        snap.items.insert(
+            turret_id,
+            make_item(turret_id, w_proj_tid, char1, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            laser_id,
+            make_item(laser_id, w_laser_tid, char1, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            sebo_id,
+            make_item(sebo_id, w_sebo_tid, char1, ship_id, InventoryFlag::MedSlot0, 1),
+        );
+        snap.items.insert(
+            loaded_proj_id,
+            make_item(loaded_proj_id, c_proj_tid, char1, ship_id, InventoryFlag::HiSlot0, 25),
+        );
+
+        // Bad stackable ammo variants in Cargo
+        let mut bpc = make_item(bpc_ammo_id, c_proj_tid, char1, ship_id, InventoryFlag::Cargo, 10);
+        bpc.is_blueprint_copy = true;
+        bpc.blueprint_runs_remaining = Some(3);
+        snap.items.insert(bpc_ammo_id, bpc);
+
+        let mut mut_m = make_item(mutaplasmid_ammo_id, c_proj_tid, char1, ship_id, InventoryFlag::Cargo, 10);
+        mut_m.source_mutaplasmid_id = Some(47_740);
+        snap.items.insert(mutaplasmid_ammo_id, mut_m);
+
+        let mut mut_a = make_item(attr_mutated_ammo_id, c_proj_tid, char1, ship_id, InventoryFlag::Cargo, 10);
+        mut_a.dynamic_attributes.insert(51, 99.0);
+        snap.items.insert(attr_mutated_ammo_id, mut_a);
+
+        let mut ins = make_item(insured_ammo_id, c_proj_tid, char1, ship_id, InventoryFlag::Cargo, 10);
+        ins.insured_payout_isk = 500.0;
+        snap.items.insert(insured_ammo_id, ins);
+
+        snap.items.insert(
+            courier_ammo_id,
+            make_item(courier_ammo_id, c_proj_tid, char1, ship_id, InventoryFlag::Cargo, 10),
+        );
+        snap.item_custom_names.insert(courier_ammo_id, "courier_cargo:9001".to_string());
+
+        let mut sing = make_item(singleton_ammo_id, c_proj_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        sing.singleton = true;
+        snap.items.insert(singleton_ammo_id, sing);
+
+        // Crystal fixtures
+        snap.items.insert(
+            crystal_stack_id,
+            make_item(crystal_stack_id, c_crys1_tid, char1, ship_id, InventoryFlag::Cargo, 5),
+        );
+
+        let mut worn = make_item(worn_crystal_id, c_crys1_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        worn.singleton = true;
+        worn.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 0.5);
+        snap.items.insert(worn_crystal_id, worn);
+
+        let mut wear_ns = make_item(wear_ns_crystal_id, c_crys1_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        wear_ns.singleton = false;
+        wear_ns.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 0.25);
+        snap.items.insert(wear_ns_crystal_id, wear_ns);
+
+        snap.items.insert(
+            alt_crystal_id,
+            make_item(alt_crystal_id, c_crys2_tid, char1, ship_id, InventoryFlag::Cargo, 3),
+        );
+
+        let mut mut_c = make_item(mut_crystal_id, c_crys1_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        mut_c.singleton = true;
+        mut_c.source_mutaplasmid_id = Some(47_740);
+        mut_c.dynamic_attributes.insert(51, 999.0);
+        snap.items.insert(mut_crystal_id, mut_c);
+
+        let mut ins_c = make_item(ins_crystal_id, c_crys1_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        ins_c.singleton = true;
+        ins_c.insured_payout_isk = 250.0;
+        snap.items.insert(ins_crystal_id, ins_c);
+
+        // Script fixtures
+        let mut s_ok = make_item(script_id, c_script_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        s_ok.singleton = true;
+        snap.items.insert(script_id, s_ok);
+
+        let mut s_mut = make_item(mut_script_id, c_script_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        s_mut.singleton = true;
+        s_mut.dynamic_attributes.insert(51, 999.0);
+        snap.items.insert(mut_script_id, s_mut);
+
+        let mut s_ins = make_item(ins_script_id, c_script_tid, char1, ship_id, InventoryFlag::Cargo, 1);
+        s_ins.singleton = true;
+        s_ins.insured_payout_isk = 100.0;
+        snap.items.insert(ins_script_id, s_ins);
+
+        for tid in [
+            w_proj_tid,
+            c_proj_tid,
+            w_laser_tid,
+            c_crys1_tid,
+            c_crys2_tid,
+            w_sebo_tid,
+            c_script_tid,
+        ] {
+            for (sk_tid, _) in ctx.sde.required_skills_for_type(tid) {
+                snap.skills.entry(char1).or_default().insert(
+                    sk_tid,
+                    TrainedSkillRecord {
+                        type_id: sk_tid,
+                        level: 5,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+        }
+    });
+
+    // 1. Atomic rejection of invalid charges: loaded charge in HiSlot0 stays untouched!
+    for bad_id in [
+        bpc_ammo_id,
+        mutaplasmid_ammo_id,
+        attr_mutated_ammo_id,
+        insured_ammo_id,
+        courier_ammo_id,
+        singleton_ammo_id,
+    ] {
+        let err = ctx
+            .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot0, bad_id, dock)
+            .expect_err("invalid charge must be rejected");
+        assert_eq!(err.code, "FittingValidationFailed");
+        ctx.db.with_snapshot(|snap| {
+            let cur = &snap.items[&loaded_proj_id];
+            assert_eq!(cur.location_id, ship_id);
+            assert_eq!(cur.flag, InventoryFlag::HiSlot0);
+            assert_eq!(cur.quantity, 25);
+            assert_eq!(cur.version, 1);
+            assert_eq!(snap.items[&bad_id].flag, InventoryFlag::Cargo);
+        });
+    }
+
+    // 2. Loading crystal from stack (qty=5) creates singleton=true row (qty=1) & decrements stack (5->4)
+    let (c1_id, c1_tid, c1_qty, c1_ver) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot1, crystal_stack_id, dock)
+        .expect("loading crystal from pristine stack succeeds");
+    assert_ne!(c1_id, crystal_stack_id);
+    assert_eq!((c1_tid, c1_qty, c1_ver), (c_crys1_tid, 1, 1));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&crystal_stack_id].quantity, 4);
+        let loaded = &snap.items[&c1_id];
+        assert_eq!((loaded.location_id, loaded.flag, loaded.quantity, loaded.singleton), (ship_id, InventoryFlag::HiSlot1, 1, true));
+    });
+
+    // 3. Atomic rejection of mutated & insured crystals keeps c1_id untouched in HiSlot1
+    for bad_crys in [mut_crystal_id, ins_crystal_id] {
+        let err = ctx
+            .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot1, bad_crys, dock)
+            .expect_err("mutated or insured crystal must fail");
+        assert_eq!(err.code, "FittingValidationFailed");
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&c1_id].flag, InventoryFlag::HiSlot1);
+            assert_eq!(snap.items[&bad_crys].flag, InventoryFlag::Cargo);
+        });
+    }
+
+    // 4. Reload worn singleton=true crystal into HiSlot1 -> swaps c1_id to Cargo (without merging into crystal_stack_id!)
+    //    and preserves worn_crystal_id's DAMAGE=0.5 + singleton=true
+    let (w1_id, w1_tid, w1_qty, _) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot1, worn_crystal_id, dock)
+        .expect("loading worn crystal succeeds");
+    assert_eq!((w1_id, w1_tid, w1_qty), (worn_crystal_id, c_crys1_tid, 1));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&crystal_stack_id].quantity, 4);
+        assert_eq!((snap.items[&c1_id].flag, snap.items[&c1_id].singleton), (InventoryFlag::Cargo, true));
+        let loaded = &snap.items[&worn_crystal_id];
+        assert_eq!((loaded.flag, loaded.singleton), (InventoryFlag::HiSlot1, true));
+        assert_eq!(loaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE), Some(&0.5));
+    });
+
+    // 5. Unload worn crystal by swapping in alt_crystal_id (when crystal_stack_id of c_crys1_tid is in Cargo):
+    //    worn crystal must NOT merge into pristine crystal_stack_id and must preserve singleton=true + DAMAGE=0.5
+    let (alt_loaded_id, _, alt_qty, _) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot1, alt_crystal_id, dock)
+        .expect("swap worn crystal to alt crystal succeeds");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&crystal_stack_id].quantity, 4);
+        let unloaded = &snap.items[&worn_crystal_id];
+        assert_eq!((unloaded.flag, unloaded.singleton), (InventoryFlag::Cargo, true));
+        assert_eq!(unloaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE), Some(&0.5));
+        assert_eq!(snap.items[&alt_crystal_id].quantity, 2);
+        assert_eq!((snap.items[&alt_loaded_id].flag, snap.items[&alt_loaded_id].singleton, alt_qty), (InventoryFlag::HiSlot1, true, 1));
+    });
+
+    // 6. Wear-only non-singleton crystal reloads cleanly and self-heals singleton=true
+    let (ns_id, _, ns_qty, _) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::HiSlot1, wear_ns_crystal_id, dock)
+        .expect("wear-only non-singleton crystal loads and self-heals");
+    assert_eq!((ns_id, ns_qty), (wear_ns_crystal_id, 1));
+    ctx.db.with_snapshot(|snap| {
+        let loaded = &snap.items[&wear_ns_crystal_id];
+        assert_eq!((loaded.flag, loaded.singleton), (InventoryFlag::HiSlot1, true));
+        assert_eq!(loaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE), Some(&0.25));
+    });
+
+    // 7. Single singleton=true script loads cleanly while mutated/insured scripts fail atomically
+    for bad_script in [mut_script_id, ins_script_id] {
+        let err = ctx
+            .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::MedSlot0, bad_script, dock)
+            .expect_err("mutated or insured script must fail");
+        assert_eq!(err.code, "FittingValidationFailed");
+    }
+    let (s_out_id, s_out_tid, s_out_qty, _) = ctx
+        .load_charge_into_weapon_slot(char1, ship_id, InventoryFlag::MedSlot0, script_id, dock)
+        .expect("clean singleton script loads into MedSlot0");
+    assert_eq!((s_out_id, s_out_tid, s_out_qty), (script_id, c_script_tid, 1));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            (snap.items[&script_id].flag, snap.items[&script_id].singleton),
+            (InventoryFlag::MedSlot0, true)
+        );
+    });
+}

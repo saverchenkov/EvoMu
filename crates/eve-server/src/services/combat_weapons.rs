@@ -1559,7 +1559,7 @@ fn apply_weapon_charge_volatility_and_base_damage(
                             let post_rec = if ci.quantity > 1 {
                                 ci.quantity -= 1;
                                 ci.version += 1;
-                                ci.dynamic_attributes.insert(3, 0.0);
+                                ci.dynamic_attributes.remove(&3);
                                 Some(ci.clone())
                             } else {
                                 snap.items.remove(&charge_item_id);
@@ -1569,6 +1569,10 @@ fn apply_weapon_charge_volatility_and_base_damage(
                             (cur, 0.0, Some((Some(pre_rec), post_rec)))
                         } else {
                             ci.dynamic_attributes.insert(3, next_dmg);
+                            if ci.quantity == 1 {
+                                ci.singleton = true;
+                            }
+                            ci.version += 1;
                             (cur, next_dmg, None)
                         }
                     } else {
