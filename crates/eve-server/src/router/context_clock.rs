@@ -130,27 +130,18 @@ impl ServerContext {
         sim_clock
     }
 
-    /// Maps a virtual Unix timer expiry timestamp into `char_id`'s current [`eve_db::clock::SimFileTime`]
-    /// domain (`blue.os.GetSimTime()`), preserving zero-skew equality when the character's system
-    /// has no simulation-clock offset or TiDi active, shifting by `(sim - wall)` when anchored,
-    /// and scaling remaining wall ticks by the system's active TiDi factor (`0.10..=1.0`, `#1196`).
-    pub fn virtual_unix_expiry_to_sim_filetime_for_char(
+    /// Maps a virtual Unix timer expiry timestamp into `solar_system_id`'s
+    /// [`eve_db::clock::SimFileTime`] domain (`blue.os.GetSimTime()`), preserving zero-skew
+    /// equality when the system has no simulation-clock offset or TiDi active, shifting by
+    /// `(sim - wall)` when anchored, and scaling remaining wall ticks by the system's active TiDi
+    /// factor (`0.10..=1.0`, `#1196`). Falls back to MachoNet client wall filetime when `None`.
+    pub fn virtual_unix_expiry_to_sim_filetime_for_system(
         &self,
-        char_id: i64,
+        solar_system_id: Option<u32>,
         expiry_unix_secs: u64,
     ) -> eve_db::clock::SimFileTime {
         let macho_exp_ft = self.virtual_unix_to_machonet_wall_filetime(expiry_unix_secs);
-        let space_sys_opt = (char_id > 0)
-            .then(|| {
-                self.db.with_snapshot(|s| {
-                    s.characters
-                        .get(&char_id)
-                        .filter(|c| c.station_id.is_none() && c.structure_id.is_none())
-                        .map(|c| c.solar_system_id)
-                })
-            })
-            .flatten();
-        if let Some(sys_id) = space_sys_opt {
+        if let Some(sys_id) = solar_system_id {
             let now_wall_ft = self.now_machonet_wallclock_filetime_ticks();
             let anchor_opt = {
                 let cn = self
@@ -196,6 +187,26 @@ impl ServerContext {
             );
         }
         eve_db::clock::SimFileTime::from_ticks(macho_exp_ft.as_ticks())
+    }
+
+    /// Maps a virtual Unix timer expiry timestamp into `char_id`'s current [`eve_db::clock::SimFileTime`]
+    /// domain (`blue.os.GetSimTime()`), resolving undocked characters to their active solar system (`#1196`).
+    pub fn virtual_unix_expiry_to_sim_filetime_for_char(
+        &self,
+        char_id: i64,
+        expiry_unix_secs: u64,
+    ) -> eve_db::clock::SimFileTime {
+        let space_sys_opt = (char_id > 0)
+            .then(|| {
+                self.db.with_snapshot(|s| {
+                    s.characters
+                        .get(&char_id)
+                        .filter(|c| c.station_id.is_none() && c.structure_id.is_none())
+                        .map(|c| c.solar_system_id)
+                })
+            })
+            .flatten();
+        self.virtual_unix_expiry_to_sim_filetime_for_system(space_sys_opt, expiry_unix_secs)
     }
 
     /// Returns MachoNet client wall-clock time wrapped in [`eve_db::clock::WallFileTime`].

@@ -1100,6 +1100,7 @@ pub(in crate::system_actor) fn handle_activation_and_movement_command(
 
 impl SystemHandle {
     /// Queries the actor's authoritative `Ballpark::current_tick` without locking `ballpark` externally (`#1169`, `#1173`).
+    #[cfg(test)]
     pub(crate) async fn query_current_tick(&self) -> Result<u64, String> {
         super::protection::call_actor_reply(self, "CurrentTick", |reply| {
             SystemCommand::CurrentTick { reply }

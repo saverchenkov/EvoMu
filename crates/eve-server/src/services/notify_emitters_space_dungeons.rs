@@ -82,7 +82,7 @@ pub fn emit_fw_capture_changed(
     points: f64,
     capture_time_ms: f64,
 ) {
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_system_sim_filetime(Some(solar_system_id));
     ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
         OnCaptureChanged {
@@ -985,9 +985,7 @@ pub fn emit_local_hack_progress_updated(
 /// Emits `OnMatchFound()`, `OnProvingGroundsMatchFound()`, and
 /// `OnAddExpiryDurationForAbyssalPvpContent(endTimeFt)` to matched pilots.
 pub fn emit_pvp_match_found_and_expiry(ctx: &ServerContext, char_id: i64, expires_at_unix: u64) {
-    let end_ft = (expires_at_unix as i64)
-        .saturating_mul(10_000_000)
-        .saturating_add(116_444_736_000_000_000);
+    let end_ft = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, expires_at_unix);
     ctx.emit_typed(NotificationTarget::Character(char_id), OnMatchFound);
     crate::services::notify_emitters_tournaments_anomalies::emit_proving_grounds_match_found(ctx, char_id);
     ctx.emit_typed(

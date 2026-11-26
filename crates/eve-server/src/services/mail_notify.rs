@@ -71,7 +71,9 @@ pub(crate) struct SentMail<'a> {
 /// Sends `OnMailSent` to every distinct character in `recipients` (each client files it into its
 /// inbox / sent folder and raises its own `OnNewMailReceived`).
 pub(crate) fn emit_mail_sent(ctx: &ServerContext, mail: &SentMail<'_>, recipients: &[i64]) {
-    let sent_date = ctx.now_blueos_filetime_ticks() / FILETIME_MINUTE * FILETIME_MINUTE;
+    let sent_date = eve_db::clock::WallFileTime::from_ticks(
+        ctx.now_blueos_filetime_ticks() / FILETIME_MINUTE * FILETIME_MINUTE,
+    );
     let to_chars = mail.to_character_ids.to_vec();
     let mut seen = Vec::with_capacity(recipients.len());
     for &cid in recipients {

@@ -252,7 +252,7 @@ pub(crate) fn emit_server_skills_changed(
     if entries.is_empty() {
         return;
     }
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_blueos_wall_filetime();
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnServerSkillsChanged {
@@ -307,7 +307,7 @@ pub(crate) fn emit_server_skills_removed(ctx: &ServerContext, char_id: i64, remo
             )
         })
         .collect();
-    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_ft = ctx.now_blueos_wall_filetime();
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnServerSkillsRemoved {

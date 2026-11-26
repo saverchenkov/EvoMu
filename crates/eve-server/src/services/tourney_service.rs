@@ -220,7 +220,7 @@ pub async fn handle(
                 Ok(PyRep::Bool(true))
             });
             if let Some((mid, qty, cur_bans, round, tid, r_boss, b_boss)) = notify_info {
-                let deadline = (now_unix + 60) as i64;
+                let deadline = ctx.virtual_unix_to_machonet_wall_filetime(now_unix.saturating_add(60));
                 let mut recipients = vec![caller_cid];
                 for cid in [r_boss, b_boss].into_iter().flatten() {
                     if !recipients.contains(&cid) {
@@ -948,16 +948,17 @@ pub async fn handle(
                     m.banned_ships.sort_unstable();
                     m.banned_ships.dedup();
                     let dur_s = ban_duration_kw.unwrap_or(m.countdown_seconds.max(1)).clamp(5, 3_600) as u64;
-                    let deadline = now_unix.saturating_add(dur_s) as i64;
+                    let deadline_unix = now_unix.saturating_add(dur_s);
                     let key = m.match_id.saturating_mul(1_000_000).saturating_add(900_000).saturating_add(round);
-                    notify_info = Some((m.match_id, m.tourney_id, m.red_fleet_boss_id, m.blue_fleet_boss_id, m.banned_ships.clone(), round, deadline));
+                    notify_info = Some((m.match_id, m.tourney_id, m.red_fleet_boss_id, m.blue_fleet_boss_id, m.banned_ships.clone(), round, deadline_unix));
                     (key, m.banned_ships.clone())
                 };
                 store.ban_sessions.insert(auto_ban_key.0, auto_ban_key.1);
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
-            if let Some((mid, tid, r_boss, b_boss, cur_bans, round, deadline)) = notify_info {
+            if let Some((mid, tid, r_boss, b_boss, cur_bans, round, deadline_unix)) = notify_info {
+                let deadline = ctx.virtual_unix_to_machonet_wall_filetime(deadline_unix);
                 let mut recipients = vec![caller_cid];
                 for cid in [r_boss, b_boss].into_iter().flatten() {
                     if !recipients.contains(&cid) {

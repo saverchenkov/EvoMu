@@ -37,8 +37,26 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
     let container_id = 990_700_i64;
 
     // 1. emit_setattr_notifications: loc_id <= 0 emits ONLY OnModuleAttributeChange (not OnLocationAttributeChange)
-    emit_setattr_notifications(&ctx, char_id, 0, 5001, 6, 1000, 50.0, 25.0);
-    emit_setattr_notifications(&ctx, char_id, -1, 5001, 6, 1000, 50.0, 25.0);
+    emit_setattr_notifications(
+        &ctx,
+        char_id,
+        0,
+        5001,
+        6,
+        eve_db::clock::SimFileTime::from_ticks(1000),
+        50.0,
+        25.0,
+    );
+    emit_setattr_notifications(
+        &ctx,
+        char_id,
+        -1,
+        5001,
+        6,
+        eve_db::clock::SimFileTime::from_ticks(1000),
+        50.0,
+        25.0,
+    );
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(notifs.len(), 2);
     assert!(notifs.iter().all(|n| n.event == "OnModuleAttributeChange"));

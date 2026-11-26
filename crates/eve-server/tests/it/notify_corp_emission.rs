@@ -305,7 +305,10 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
     )
     .await
     .expect("SetCorpWelcomeMail");
-    let expected_welcome = vec![PyRep::Integer(P1), PyRep::Integer(now_ts)];
+    let expected_welcome = vec![
+        PyRep::Integer(P1),
+        PyRep::Integer(ctx.wall_unix_to_filetime(now_ts as u64).as_ticks()),
+    ];
     assert_eq!(events(&ctx, P1, "OnCorporationWelcomeMailChanged"), vec![expected_welcome.clone()]);
     assert_eq!(events(&ctx, P2, "OnCorporationWelcomeMailChanged"), vec![expected_welcome]);
     assert!(events(&ctx, p3, "OnCorporationWelcomeMailChanged").is_empty());

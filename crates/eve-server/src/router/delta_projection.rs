@@ -1378,7 +1378,7 @@ fn project_skill_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaS
                 OnServerSkillsChanged {
                     skill_infos: PyRep::Dict(changed_entries),
                     event: PyRep::None,
-                    timestamp: now_ft,
+                    timestamp: eve_db::clock::WallFileTime::from_ticks(now_ft),
                 },
             ));
         }
@@ -1387,7 +1387,7 @@ fn project_skill_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaS
                 ProjectedTarget::Character(char_id),
                 OnServerSkillsRemoved {
                     skill_infos: PyRep::Dict(removed_entries),
-                    timestamp: now_ft,
+                    timestamp: eve_db::clock::WallFileTime::from_ticks(now_ft),
                 },
             ));
         }

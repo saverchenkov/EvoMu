@@ -2856,10 +2856,10 @@ fn reconcile_physics_overrun_sim_clock(
             NotificationTarget::Character(char_id),
             "solarsystemid2",
             crate::router::notify_registry::DoSimClockRebase {
-                times: eve_proto::PyRep::Tuple(vec![
-                    eve_proto::PyRep::Integer(old_ft),
-                    eve_proto::PyRep::Integer(new_ft),
-                ]),
+                times: (
+                    eve_db::clock::SimFileTime::from_ticks(old_ft),
+                    eve_db::clock::SimFileTime::from_ticks(new_ft),
+                ),
             },
         );
     }

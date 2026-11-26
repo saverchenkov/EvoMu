@@ -3097,3 +3097,243 @@ async fn pilot_commands_end_protection_while_non_pilot_movement_preserves_protec
     let cs_cross = other_sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(!cs_cross.is_cloaked && cs_cross.gate_cloak_remaining_ticks == 0 && !cs_cross.is_protected());
 }
+
+#[tokio::test]
+async fn update_state_cooldown_uses_sim_clock_domain_not_wall_time_rt91() {
+    let ctx = test_ctx();
+    ctx.set_clock_paused(true);
+    let sys_id = 30_000_142_u32;
+    let char_id = 91_196_091_i64;
+    let ship_id = 91_196_191_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.name = format!("Pilot-{char_id}");
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        put_item(
+            snap,
+            Some(ship_id),
+            588,
+            char_id,
+            i64::from(sys_id),
+            InventoryFlag::None,
+            1,
+            true,
+        );
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(ship_id, 588, DVec3::ZERO))
+        .await;
+    // Initialize `sim_unix_secs` via a first physics step so ticks and `sim_unix_secs` co-advance.
+    sys_h.step_manual(1.0).await.expect("initial step_manual");
+
+    let mut sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), 0);
+    sess.session_id = 91_196_901;
+    sess.user_id = Some(char_id as u64);
+    let bound = bound_sys(sys_id);
+    let kw = HashMap::new();
+
+    // 1. Initial explicit UpdateStateRequest bootstraps and records `last_push_tick`.
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, init_evs, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    assert!(init_evs
+        .iter()
+        .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })));
+
+    // 2. Wall time advancing while sim ticks & sim clock are frozen holds cooldown.
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sys_h
+            .drain_observer_updates(ship_id)
+            .await
+            .unwrap()
+            .1
+            .is_empty(),
+        "wall time sleep without sim advance must hold RT-91 UpdateStateRequest cooldown"
+    );
+
+    // 3. Advancing 4 sim steps (< 5 ticks & < 5 sim_unix_secs) still holds cooldown.
+    for _ in 0..4 {
+        sys_h.step_manual(1.0).await.expect("step_manual");
+    }
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sys_h
+            .drain_observer_updates(ship_id)
+            .await
+            .unwrap()
+            .1
+            .is_empty(),
+        "4 sim steps (< UPDATE_STATE_COOLDOWN_TICKS=5) must keep UpdateStateRequest in cooldown"
+    );
+
+    // 4. Advancing the 5th sim step (>= 5 ticks & >= 5 sim_unix_secs) deterministically clears cooldown.
+    sys_h.step_manual(1.0).await.expect("step_manual 5th");
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, cleared_evs, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        cleared_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "5 sim steps must clear RT-91 UpdateStateRequest cooldown deterministically"
+    );
+
+    // 5. While freshly in cooldown again, both `reset_update_state_rate_limit` and `force_bypass` bypass immediately.
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(sys_h.drain_observer_updates(ship_id).await.unwrap().1.is_empty());
+
+    push_set_state_with_guard_and_bootstrap(&ctx, &sess, char_id, sys_id, ship_id, &sys_h, true, true, true)
+        .await
+        .unwrap();
+    assert!(
+        sys_h
+            .drain_observer_updates(ship_id)
+            .await
+            .unwrap()
+            .1
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "force_bypass_cooldown=true must bypass active cooldown"
+    );
+
+    reset_update_state_rate_limit(&ctx, sess.session_id, char_id);
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sys_h
+            .drain_observer_updates(ship_id)
+            .await
+            .unwrap()
+            .1
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "reset_update_state_rate_limit must clear RT-91 cooldown immediately"
+    );
+
+    // 6. Unpaused wall clock under TiDi = 0.25: advancing wall time (+60s) must NOT expire cooldown
+    //    before 5 true simulation ticks (19 steps = 4.75 sim-s = 4 ticks -> still suppressed;
+    //    20th step = 5.00 sim-s = 5 ticks -> deterministically clears cooldown).
+    ctx.set_clock_paused(false);
+    crate::services::serverops_cluster::set_system_tidi_factor(&ctx, sys_id, 0.25);
+    let tick_start = sys_h.view().current_tick;
+    ctx.clock().advance_secs(60);
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    for _ in 0..19 {
+        sys_h.step_manual(1.0).await.expect("tidi 0.25 step");
+    }
+    assert_eq!(sys_h.view().current_tick, tick_start + 4);
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sys_h.drain_observer_updates(ship_id).await.unwrap().1.is_empty(),
+        "19 steps at 0.25 TiDi (4 sim ticks) must hold RT-91 cooldown despite unpaused +60s wall jump"
+    );
+
+    ctx.clock().advance_secs(15);
+    sys_h.step_manual(1.0).await.expect("tidi 0.25 20th step");
+    assert_eq!(sys_h.view().current_tick, tick_start + 5);
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sys_h
+            .drain_observer_updates(ship_id)
+            .await
+            .unwrap()
+            .1
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "20th step at 0.25 TiDi (5 sim ticks) must clear RT-91 cooldown"
+    );
+
+    // 7. Cross-system > 4,096 guard GC prunes strictly per each guard's own solar system tick domain:
+    //    advance sys_id >= 650 ticks, keep sys_b at tick 2 -> sys_id stale guards & dead-sys guards
+    //    prune cleanly while sys_b's fresh guard survives despite caller sys_id being >= 650 ticks ahead.
+    crate::services::serverops_cluster::set_system_tidi_factor(&ctx, sys_id, 1.0);
+    for _ in 0..650 {
+        sys_h.step_manual_tick_only(1.0).await.expect("advance sys_id tick");
+    }
+    let sys_b = 30_000_144_u32;
+    let sys_b_h = ctx.systems.get_or_spawn(sys_b);
+    sys_b_h.step_manual_tick_only(1.0).await.expect("sys_b tick 1");
+    sys_b_h.step_manual_tick_only(1.0).await.expect("sys_b tick 2");
+    let sys_b_tick = sys_b_h.view().current_tick;
+    let fresh_key = (888_001_u64, char_id);
+    let dead_key = (888_002_u64, char_id);
+    {
+        let mut guards = ctx
+            .systems
+            .explicit_update_state_guards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for i in 0..4_105_u64 {
+            guards.insert(
+                (900_000 + i, char_id),
+                crate::system_actor::ExplicitUpdateStateGuard {
+                    sys_id,
+                    ship_id,
+                    last_push_tick: 1,
+                },
+            );
+        }
+        guards.insert(
+            fresh_key,
+            crate::system_actor::ExplicitUpdateStateGuard {
+                sys_id: sys_b,
+                ship_id: ship_id + 1,
+                last_push_tick: sys_b_tick,
+            },
+        );
+        guards.insert(
+            dead_key,
+            crate::system_actor::ExplicitUpdateStateGuard {
+                sys_id: 30_999_999,
+                ship_id: ship_id + 2,
+                last_push_tick: 1,
+            },
+        );
+    }
+    handle(&ctx, &mut sess, Some(&bound), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let guards = ctx
+        .systems
+        .explicit_update_state_guards
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert!(guards.contains_key(&fresh_key), "fresh guard in slower sys_b must survive cross-system GC");
+    assert!(!guards.contains_key(&dead_key), "inactive-system guard must be pruned");
+    assert!(!guards.contains_key(&(900_000, char_id)), "stale guard in sys_id must be pruned");
+    assert!(guards.len() <= 4);
+}

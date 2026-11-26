@@ -629,7 +629,7 @@ pub(crate) async fn handle_scanning_and_wormholes(
                 * (1.0 - 0.10 * acquisition_lvl as f64).max(0.5))
             .round() as i64;
             let radius_au = scan_radius_meters / AU_IN_METERS;
-            let now_ft = ctx.now_blueos_filetime_ticks();
+            let now_ft = ctx.now_system_sim_filetime(Some(sys_id));
             let probe_ids_rep: Vec<PyRep> = (0..probes.len()).map(|i| PyRep::Integer(900_000 + i as i64)).collect();
 
             let updated_results = ctx.db.try_with_mut_snapshot(|snap| {

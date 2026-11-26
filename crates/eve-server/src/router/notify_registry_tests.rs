@@ -248,7 +248,7 @@ fn typed_notification_into_args_preserves_registered_arity() {
     let mail = OnMailSent {
         message_id: 1,
         sender_id: 2,
-        sent_date: 4,
+        sent_date: WallFileTime::from_ticks(4),
         to_character_ids: vec![3],
         to_list_id: None,
         to_corp_or_alliance_id: None,
@@ -1052,7 +1052,7 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
     let mail = OnMailSent {
         message_id: 9001,
         sender_id: 90_000_001,
-        sent_date: 1_335_000_000_000_000_00,
+        sent_date: WallFileTime::from_ticks(1_335_000_000_000_000_00),
         to_character_ids: vec![90_000_002],
         to_list_id: None,
         to_corp_or_alliance_id: None,

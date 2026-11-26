@@ -1053,7 +1053,6 @@ pub(crate) fn dispatch_setattr_slash(
         return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Attribute value for /setattr must be a finite number".into(), client_error: None });
     };
 
-    let now_ft = ctx.now_blueos_filetime_ticks();
     let (item_id, owner_id, loc_id, old_val) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(item_id) = resolve_item_or_char_active_ship(snap, cid, item_tok) else {
             return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: format!("Invalid item_id '{item_tok}' for /setattr"), client_error: None });
@@ -1076,8 +1075,9 @@ pub(crate) fn dispatch_setattr_slash(
     })?;
     ctx.invalidate_and_push_fit(item_id);
     ctx.invalidate_and_push_fit(loc_id);
+    let now_sim = ctx.now_system_sim_filetime_for_char(owner_id);
     crate::services::notify_emitters_character_services::emit_setattr_notifications(
-        ctx, owner_id, loc_id, item_id, attr_id, now_ft, val, old_val,
+        ctx, owner_id, loc_id, item_id, attr_id, now_sim, val, old_val,
     );
     Ok(PyRep::keyval([
         ("command", PyRep::String(inv.raw.to_string())),

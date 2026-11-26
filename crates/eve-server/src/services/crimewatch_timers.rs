@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::router::notify_registry::{
-    OnCrimewatchEngagementCreated, OnCrimewatchEngagementUpdated,
+    CrimewatchEngagementTimeout, OnCrimewatchEngagementCreated, OnCrimewatchEngagementUpdated,
     OnDisapprovalTimerUpdate, OnDuelChallenge, OnKillRightActivated, OnKillRightForYouSold,
     OnKillRightSold, OnKillRightUsed, OnNpcTimerUpdate, OnSafetyLevelChanged,
     OnSecurityStatusUpdate, ToNotifyArg,
@@ -1436,7 +1436,7 @@ pub async fn handle_crimewatch(
                     NotificationTarget::Character(char_id),
                     OnCrimewatchEngagementUpdated {
                         other_char_id: challenger_id,
-                        timeout: PyRep::Bool(true),
+                        timeout: CrimewatchEngagementTimeout::Active,
                         do_alert: None,
                     },
                 );
@@ -1444,7 +1444,7 @@ pub async fn handle_crimewatch(
                     NotificationTarget::Character(challenger_id),
                     OnCrimewatchEngagementUpdated {
                         other_char_id: char_id,
-                        timeout: PyRep::Bool(true),
+                        timeout: CrimewatchEngagementTimeout::Active,
                         do_alert: None,
                     },
                 );

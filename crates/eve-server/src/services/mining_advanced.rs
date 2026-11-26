@@ -646,7 +646,7 @@ pub async fn handle(
                         crate::router::notify_registry::OnNewCalendarEvent {
                             event_id: ev_id,
                             owner_id: st_corp,
-                            event_date_time: arrival_ft,
+                            event_date_time: eve_db::clock::WallFileTime::from_ticks(arrival_ft),
                             event_duration: decay_mins,
                             event_title: ev_title.clone(),
                             importance: 1,
@@ -761,7 +761,7 @@ pub async fn handle(
                         NotificationTarget::Corporation(caller_corp),
                         crate::router::notify_registry::OnRemoveCalendarEvent {
                             event_id: ev_id,
-                            event_date_time: arrival_ft,
+                            event_date_time: eve_db::clock::WallFileTime::from_ticks(arrival_ft),
                             is_deleted: true,
                         },
                     );

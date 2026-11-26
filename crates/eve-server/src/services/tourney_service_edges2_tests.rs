@@ -247,8 +247,8 @@ async fn dispatch_member_change_guards_ban_slots_and_autoban_defaults() {
     assert!(matches!(
         perform_ban.args.get(3),
         Some(PyRep::Integer(deadline))
-            if *deadline >= (before_ban + 3_600) as i64
-                && *deadline <= (ctx.now_unix() + 3_600) as i64
+            if *deadline >= ctx.virtual_unix_to_machonet_wall_filetime(before_ban + 3_600).as_ticks()
+                && *deadline <= ctx.virtual_unix_to_machonet_wall_filetime(ctx.now_unix() + 3_600).as_ticks()
     ));
 
     // Additional BanShip once autobanning filled all 3 team slots -> TourneyBanLimitExceeded

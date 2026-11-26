@@ -24,6 +24,7 @@ pub mod destiny_delivery_policy;
 pub mod dispatch;
 mod dispatch_active_char;
 pub mod notify_registry;
+pub mod notify_registry_emit;
 pub mod notify_types;
 pub mod reply_registry;
 pub mod rpc_args;
