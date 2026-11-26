@@ -61,9 +61,11 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         before_step_reply_hook_for_test: Arc::new(RankedMutex::new(None)),
         npc_death_hook: Arc::new(RankedRwLock::new(None)),
         module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
+        module_deactivation_post_unlock_hook: Arc::new(RankedRwLock::new(None)),
         target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
         system_step_hook: Arc::new(RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+        cooldown_persist_gate: Arc::new(super::CooldownPersistGate::default()),
     }
 }
 

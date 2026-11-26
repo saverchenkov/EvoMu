@@ -192,10 +192,15 @@ pub(crate) fn handle_apply_ecm_burst(
 impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
+        let tidi = self.tidi_factor();
         let (deact_guard, ticket) = {
             let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
+                &self.module_deactivation_hook,
+                &self.module_deactivation_post_unlock_hook,
+            );
+            let deact_guard = super::ewar_cooldowns::active_sink_hook(raw_hook.as_ref(), post_hook.as_ref());
             let mut ops = super::post_unlock::PostUnlockOps::default();
             let (db_opt_c, sde_opt_c) = {
                 let super::SystemActorState {
@@ -234,6 +239,17 @@ impl super::SystemHandle {
                 );
                 (db_opt.clone(), sde_opt.clone())
             };
+            let cmd_tx_weak = self.cmd_tx.downgrade();
+            let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+                self.solar_system_id,
+                &mut st,
+                &mut ops,
+                raw_hook.clone(),
+                post_hook,
+                &self.cooldown_persist_gate,
+                Some(&cmd_tx_weak),
+                tidi,
+            );
             super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
             self.publish_view_from(&bp, Some(&st));
             let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
@@ -243,7 +259,7 @@ impl super::SystemHandle {
                 ops,
                 caller_can_wait,
             );
-            (deact_guard, ticket)
+            (raw_hook, ticket)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
     }
@@ -381,6 +397,24 @@ pub(in crate::system_actor) fn apply_destiny_event_in_actor(
         }
     }
     known
+}
+
+#[cfg(test)]
+mod set_ball_interactive_tests {
+    use super::*;
+
+    #[test]
+    fn set_ball_interactive_unapplied_ball_emits_single_event() {
+        let mut bp = Ballpark::new(30_000_142);
+        bp.add_ball(Ball {
+            id: 1001, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 100.0,
+            inertia: 1.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        });
+        assert!(apply_destiny_event_in_actor(&mut bp, 1001, eve_destiny::DestinyEvent::SetBallInteractive { ball_id: 2002, is_interactive: true }));
+        let count = bp.pending_events.iter().filter(|ev| matches!(ev, eve_destiny::DestinyEvent::SetBallInteractive { ball_id: 2002, is_interactive: true })).count();
+        assert_eq!(count, 1);
+        assert_eq!(bp.ball_interactive_overrides.get(&2002), Some(&true));
+    }
 }
 
 #[cfg(test)]

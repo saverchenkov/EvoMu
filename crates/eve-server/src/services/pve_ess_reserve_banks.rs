@@ -902,14 +902,8 @@ async fn force_decloak_on_ess_gate_activation(
 
         // Replace any unbonused raw-SDE cooldown inserted by `wire_module_deactivation_hook` with
         // effective ShipFittingEngine Attr 669 (`5s` Recon/T3C bonus or dynamic overrides, #1431).
-        {
-            let mut guard = ctx
-                .module_reactivation_cooldowns
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for &(mid, mtid, _, _) in &all_cloaks {
-                guard.remove(&(ship_id, mid, mtid));
-            }
+        for &(mid, mtid, _, _) in &all_cloaks {
+            ctx.remove_module_reactivation_delay(ship_id, mid, mtid);
         }
         for &(mid, mtid, _, _) in &all_cloaks {
             let react_delay_s = compute_react_delay_s(mid, mtid);

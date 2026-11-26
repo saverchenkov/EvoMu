@@ -779,32 +779,34 @@ async fn dogma_online_cargo_docked_burnout_zero_type_tp_ewar_and_lockdown_text_m
     eff1.base_attributes.insert(158, 20_000.0);
     let mut eff2 = eff1.clone();
     eff2.item_id = tp_mod_2;
-    {
-        let mut src = ctx.projected_ewar_sources.write().unwrap();
-        src.insert(tp_mod_1, ship_id);
-        src.insert(tp_mod_2, ship_id);
-    }
-    ctx.projected_ewar.write().unwrap().insert(
+    sys.upsert_projected_ewar(
+        ship_id,
         target_ship_id,
-        vec![
-            eve_dogma::ProjectedEwarEffect {
-                source_module_id: tp_mod_1,
-                source_module_type_id: tp_tid,
-                charge_type_id: None,
-                distance: 1_000.0,
-                overloaded: false,
-                effective_module: eff1,
-            },
-            eve_dogma::ProjectedEwarEffect {
-                source_module_id: tp_mod_2,
-                source_module_type_id: tp_tid,
-                charge_type_id: None,
-                distance: 1_000.0,
-                overloaded: false,
-                effective_module: eff2,
-            },
-        ],
-    );
+        eve_dogma::ProjectedEwarEffect {
+            source_module_id: tp_mod_1,
+            source_module_type_id: tp_tid,
+            charge_type_id: None,
+            distance: 1_000.0,
+            overloaded: false,
+            effective_module: eff1,
+        },
+    )
+    .await
+    .expect("upsert tp1 EWAR");
+    sys.upsert_projected_ewar(
+        ship_id,
+        target_ship_id,
+        eve_dogma::ProjectedEwarEffect {
+            source_module_id: tp_mod_2,
+            source_module_type_id: tp_tid,
+            charge_type_id: None,
+            distance: 1_000.0,
+            overloaded: false,
+            effective_module: eff2,
+        },
+    )
+    .await
+    .expect("upsert tp2 EWAR");
     let mut tp_fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
     tp_fit.set_character_skills(std::collections::HashMap::from([(3454, 3)]));
     tp_fit.modules.insert(tp_mod_1, make_mod(tp_mod_1, tp_tid, InventoryFlag::MedSlot1 as u16, eve_dogma::ModuleState::Online));

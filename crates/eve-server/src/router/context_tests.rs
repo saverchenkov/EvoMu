@@ -345,8 +345,8 @@ async fn advance_secs_expires_jetcans_moon_extractions_and_delivers_moon_probes(
     assert_eq!(ctx.active_moon_probes.read().unwrap().len(), 1);
 }
 
-#[test]
-fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
+#[tokio::test]
+async fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = 950_000_001_i64;
@@ -403,18 +403,23 @@ fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
     assert!(fit.drones.contains(&(drone_id, 2488)));
 
     // Cached lookup and recalculation when projected_ewar changes
+    let sys_h = ctx.systems.get_or_spawn(30_000_142);
     let ewar_mod = DogmaItemState::from_sde(888_888, 526, &ctx.sde);
-    ctx.projected_ewar.write().unwrap().insert(
-        ship_id,
-        vec![ProjectedEwarEffect {
-            source_module_id: 888_888,
-            source_module_type_id: 526,
-            charge_type_id: None,
-            distance: 5_000.0,
-            overloaded: false,
-            effective_module: ewar_mod,
-        }],
-    );
+    sys_h
+        .upsert_projected_ewar(
+            999_888_001,
+            ship_id,
+            ProjectedEwarEffect {
+                source_module_id: 888_888,
+                source_module_type_id: 526,
+                charge_type_id: None,
+                distance: 5_000.0,
+                overloaded: false,
+                effective_module: ewar_mod,
+            },
+        )
+        .await
+        .expect("upsert projected EWAR into system actor");
     let fit2 = ctx
         .get_or_rebuild_ship_fitting(char_id, ship_id)
         .expect("cached fitting recalculation must succeed");
@@ -1235,8 +1240,10 @@ async fn persisted_future_module_reactivation_cooldown_does_not_freeze_after_res
         ctx1.advance_secs_without_sim_clock_rebase(667_793);
         assert!(!ctx1.is_module_in_reactivation_delay(ship_id, mod_normal_id));
 
-        ctx1.module_reactivation_cooldowns.write().unwrap().insert(
-            (ship_id, mod_id, mod_type_id),
+        ctx1.seed_module_cooldown_entry_for_test(
+            ship_id,
+            mod_id,
+            mod_type_id,
             ModuleCooldownEntry {
                 recorded_unix_f64: 1_795_276_227.0,
                 delay_s: 2.76,
@@ -1257,18 +1264,20 @@ async fn persisted_future_module_reactivation_cooldown_does_not_freeze_after_res
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_normal_id));
-    assert!(ctx2.module_reactivation_cooldowns.read().unwrap().is_empty());
+    assert!(!ctx2.has_any_reactivation_delays_for_test());
 
     // Advancing wall clock later past the old future timestamp must not resurrect pruned entries.
     ctx2.clock().advance_secs(667_793);
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_id));
     assert!(!ctx2.is_module_in_reactivation_delay(ship_id, mod_cloak_id));
 
-    // Even if a future-recorded entry is present in memory directly, lookup treats it as expired
+    // Even if a future-recorded entry is present directly, lookup treats it as expired
     // and re-recording replaces it cleanly with the new delay.
     let future_ts = (ctx2.now_unix_secs() + 3_600) as f64;
-    ctx2.module_reactivation_cooldowns.write().unwrap().insert(
-        (ship_id, mod_id, mod_type_id),
+    ctx2.seed_module_cooldown_entry_for_test(
+        ship_id,
+        mod_id,
+        mod_type_id,
         ModuleCooldownEntry {
             recorded_unix_f64: future_ts,
             delay_s: 10.0,
@@ -1622,6 +1631,11 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         "fighter_charge_state:",
         "active_fighters:",
         "fighter_tube_loads:",
+        "projected_ewar:",
+        "projected_ewar_sources:",
+        "active_ewar_starts:",
+        "module_reactivation_cooldowns:",
+        "module_reload_sim_deadlines:",
     ] {
         assert!(
             !ctx_body.contains(forbidden),
@@ -1670,7 +1684,593 @@ fn server_context_lock_guarded_field_ratchet_and_no_warp_maps() {
         .filter(|f| f.contains("Mutex<") || f.contains("RwLock<"))
         .count();
     assert!(
-        locked_fields <= 39,
-        "ServerContext lock-guarded field count regressed above 39: {locked_fields} (#1541)"
+        locked_fields <= 35,
+        "ServerContext lock-guarded field count regressed above 35: {locked_fields} (#1541)"
     );
+}
+
+fn singleton_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag) -> InventoryItemRecord {
+    InventoryItemRecord { item_id, type_id, owner_id, location_id, flag, quantity: 1, singleton: true, ..Default::default() }
+}
+
+fn cd_entry(now: f64, delay_s: f64, sys_id: u32) -> crate::system_actor::ModuleCooldownEntry {
+    crate::system_actor::ModuleCooldownEntry { recorded_unix_f64: now, delay_s, solar_system_id: Some(sys_id), recorded_sys_sim_s: 0.0 }
+}
+
+fn cloak_cycle(ship_id: i64, module_id: i64, module_type_id: u32, owner: i64, delay_s: f64) -> crate::system_actor::ActiveModuleCycle {
+    crate::system_actor::ActiveModuleCycle {
+        ship_id, module_id, module_type_id, owner_char_id: Some(owner),
+        effect_name: "cloaking".into(), repeat: 1, duration_s: 5.0, reactivation_delay_s: delay_s, ..Default::default()
+    }
+}
+
+fn set_tidi_note(db: &eve_db::WorldRepository, sys_id: u32, factor: &str, ts: u64) {
+    db.with_mut_snapshot(|s| { s.owner_notes.insert(-(7_500_000_000_000 + i64::from(sys_id)), eve_db::OwnerNoteRecord { note_id: -(7_500_000_000_000 + i64::from(sys_id)), character_id: -75, item_id: i64::from(sys_id), label: format!("tidi:{sys_id}"), note: factor.into(), timestamp_unix: ts }); });
+}
+
+fn seed_ships_and_mods(db: &eve_db::WorldRepository, sys_id: u32, ships: &[i64], mods: &[(i64, i64, u32)]) {
+    db.with_mut_snapshot(|s| {
+        for &sid in ships { s.items.insert(sid, singleton_item(sid, 587, 90_000_001, sys_id as i64, InventoryFlag::None)); }
+        for &(mid, ship_id, tid) in mods { s.items.insert(mid, singleton_item(mid, tid, 90_000_001, ship_id, InventoryFlag::HiSlot0)); }
+    });
+}
+
+fn write_cooldown_rows(db: &eve_db::WorldRepository, sys_id: u32, rows: &[((i64, i64, u32), crate::system_actor::ModuleCooldownEntry)], now: u64) {
+    use eve_db::sqlite_store::system_checkpoint::{ensure_system_checkpoint_schema, replace_system_checkpoints_for_kind, KIND_MODULE_COOLDOWNS};
+    let encoded: Vec<_> = rows.iter().map(|&(k, v)| (crate::system_actor::module_cooldown_checkpoint_key(k.0, k.1, k.2), (k, v))).collect();
+    db.with_sqlite_conn(|c| { ensure_system_checkpoint_schema(c)?; replace_system_checkpoints_for_kind(c, sys_id, KIND_MODULE_COOLDOWNS, &encoded, now) }).unwrap();
+}
+
+async fn spawn_ship_ball(h: &crate::system_actor::SystemHandle, id: i64, owner: i64) {
+    h.spawn_ball_with_meta(
+        eve_destiny::Ball { id, type_id: 587, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO, max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta { group_id: 25, category_id: 6, owner_id: owner, char_id: Some(owner), ..Default::default() },
+    ).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cross_system_expired_cooldown_does_not_shadow_active_entry_and_cold_removal_cleans_db() {
+    let ctx = test_ctx();
+    let (sys_a, sys_b, sys_c) = (30_000_142_u32, 30_002_187_u32, 30_000_144_u32);
+    let (ship_id, mod_id, cloak_tid, now_unix) = (100_980_001_i64, 100_980_002_i64, 11_370_u32, ctx.now_unix_secs() as f64);
+    seed_ships_and_mods(&ctx.db, sys_b, &[ship_id], &[(mod_id, ship_id, cloak_tid)]);
+    let (_h_a, _h_b) = (ctx.systems.get_or_spawn(sys_a), ctx.systems.get_or_spawn(sys_b));
+
+    ctx.seed_module_cooldown_entry_for_test(ship_id, mod_id, cloak_tid, cd_entry(now_unix - 120.0, 10.0, sys_a));
+    ctx.record_module_reactivation_delay(ship_id, mod_id, 25.0);
+    assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+    assert!(ctx.module_reactivation_cooldown_until_unix(ship_id, mod_id).unwrap() > now_unix + 20.0);
+
+    ctx.seed_module_cooldown_entry_for_test(ship_id, mod_id, cloak_tid, cd_entry(now_unix, 40.0, sys_c));
+    assert!(ctx.systems.get_handle(sys_c).is_none());
+    assert!(ctx.module_reactivation_cooldown_until_unix(ship_id, mod_id).unwrap() >= now_unix + 39.0);
+
+    ctx.record_module_reactivation_delay_for_system(Some(sys_b), ship_id, mod_id, cloak_tid, 5.0);
+    assert!(ctx.systems.get_handle(sys_a).unwrap().module_reactivation_cooldown(&(ship_id, mod_id, cloak_tid)).is_none());
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_c).is_empty());
+    assert!(ctx.systems.get_handle(sys_b).unwrap().module_reactivation_cooldown(&(ship_id, mod_id, cloak_tid)).is_some_and(|e| e.delay_s >= 39.0));
+
+    ctx.seed_module_cooldown_entry_for_test(ship_id, mod_id, cloak_tid, cd_entry(now_unix, 45.0, sys_c));
+    assert!(ctx.remove_module_reactivation_delay(ship_id, mod_id, cloak_tid));
+    assert!(!ctx.is_module_in_reactivation_delay(ship_id, mod_id));
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_c).is_empty());
+    assert!(!ctx.has_any_reactivation_delays_for_test());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_batch_cycle_deactivation_and_recon_cooldown_override_plus_actor_isolation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = test_ctx();
+    let (jita, amarr, char_id) = (30_000_142_u32, 30_002_187_u32, 90_000_001_i64);
+    let (ship_id, target_id, cloak_id, cloak_tid, now_unix) = (100_990_001_i64, 100_990_002_i64, 100_990_003_i64, 11_370_u32, ctx.now_unix_secs() as f64);
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.active_ship_id, ch.solar_system_id) = (ship_id, jita); } });
+    seed_ships_and_mods(&ctx.db, jita, &[ship_id], &[(cloak_id, ship_id, cloak_tid)]);
+    let (h_jita, h_amarr) = (ctx.systems.get_or_spawn(jita), ctx.systems.get_or_spawn(amarr));
+    assert!(!Arc::ptr_eq(&h_jita.post_unlock_actions, &h_amarr.post_unlock_actions));
+    let (jita_drained, amarr_marker) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (jc, ac) = (Arc::clone(&jita_drained), Arc::clone(&amarr_marker));
+    h_jita.enqueue_post_unlock_action(Box::new(move || jc.store(true, Ordering::SeqCst)));
+    h_amarr.enqueue_post_unlock_action(Box::new(move || ac.store(true, Ordering::SeqCst)));
+    let _ = h_amarr.has_active_modules_or_cloak_sync(ship_id);
+    h_jita.step_manual(0.1).await.unwrap();
+    assert!(jita_drained.load(Ordering::SeqCst) && !amarr_marker.load(Ordering::SeqCst));
+
+    spawn_ship_ball(&h_jita, ship_id, char_id).await;
+    h_jita.record_active_ewar_start(ship_id, cloak_id, target_id, "electronic").await.unwrap();
+    let (tx_add, rx_add) = tokio::sync::oneshot::channel();
+    h_jita.cmd_sender().send(crate::system_actor::SystemCommand::AddModuleCycle { cycle: cloak_cycle(ship_id, cloak_id, cloak_tid, char_id, 30.0), reply: tx_add }).await.unwrap();
+    rx_add.await.unwrap().unwrap();
+    let ((tx_decloak, rx_decloak), (tx_remove, rx_remove), (tx_record, rx_record)) = (tokio::sync::oneshot::channel(), tokio::sync::oneshot::channel(), tokio::sync::oneshot::channel());
+    h_jita.cmd_sender().try_send(crate::system_actor::SystemCommand::ForceDecloak { ball_id: ship_id, char_id: Some(char_id), reason: crate::system_actor::ProtectionBreakReason::Manual, real_now_unix: now_unix as u64, reply: tx_decloak }).unwrap();
+    h_jita.cmd_sender().try_send(crate::system_actor::SystemCommand::RemoveModuleCooldown { key: (ship_id, cloak_id, cloak_tid), reply: tx_remove }).unwrap();
+    h_jita.cmd_sender().try_send(crate::system_actor::SystemCommand::RecordModuleCooldown { ship_id, module_id: cloak_id, module_type_id: cloak_tid, now_unix_f64: now_unix, delay_s: 5.0, tidi_factor: 1.0, has_tidi_history: false, reply: tx_record }).unwrap();
+    rx_decloak.await.unwrap().unwrap();
+    assert!(rx_remove.await.unwrap().unwrap().is_some());
+    let _payload = rx_record.await.unwrap().unwrap();
+    let entry = h_jita.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).expect("5s Recon override recorded");
+    assert!((entry.delay_s - 5.0).abs() < 1e-6 && ctx.systems.ewar_starts_count() == 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_ewar_deactivation_publishes_clean_fit_projection_and_concurrent_cross_sys_cloak_purges() {
+    let ctx = test_ctx();
+    let (jita, amarr, char_id, char2_id) = (30_000_142_u32, 30_002_187_u32, 90_000_001_i64, 90_000_002_i64);
+    let (attacker_ship, target_ship, amarr_ship) = (100_991_001_i64, 100_991_002_i64, 100_991_006_i64);
+    let (tp_mod_id, cloak_jita, cloak_amarr, cloak_tid) = (100_991_003_i64, 100_991_004_i64, 100_991_005_i64, 11_370_u32);
+    let tp_tid = ctx.sde.types.values().find(|t| t.group_id == 379).map(|t| t.type_id).unwrap_or(2185);
+    let now_unix = ctx.now_unix_secs() as f64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, ship) in [(char_id, target_ship), (char2_id, attacker_ship)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id) = (None, None, jita, ship);
+            }
+        }
+        for (sid, owner, loc) in [(target_ship, char_id, jita as i64), (attacker_ship, char2_id, jita as i64), (amarr_ship, char_id, amarr as i64)] {
+            snap.items.insert(sid, singleton_item(sid, 587, owner, loc, InventoryFlag::None));
+        }
+        snap.items.insert(tp_mod_id, singleton_item(tp_mod_id, tp_tid, char2_id, attacker_ship, InventoryFlag::MedSlot0));
+    });
+
+    let (h_jita, h_amarr) = (ctx.systems.get_or_spawn(jita), ctx.systems.get_or_spawn(amarr));
+    for (h, id, owner) in [(&h_jita, target_ship, char_id), (&h_jita, attacker_ship, char2_id), (&h_amarr, amarr_ship, char_id)] { spawn_ship_ball(h, id, owner).await; }
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, target_ship);
+    let base_sig = ctx.effective_target_signature_radius(target_ship, 40.0);
+
+    let mut tp_state = eve_dogma::DogmaItemState::from_sde(tp_mod_id, tp_tid, &ctx.sde);
+    tp_state.base_attributes.insert(554, 40.0);
+    tp_state.base_attributes.insert(eve_sde::attr_ids::MAX_RANGE, 30_000.0);
+    ctx.upsert_projected_ewar_on_ship(attacker_ship, target_ship, eve_dogma::ProjectedEwarEffect {
+        source_module_id: tp_mod_id, source_module_type_id: tp_tid, charge_type_id: None, distance: 5_000.0, overloaded: false, effective_module: tp_state,
+    });
+    ctx.record_active_ewar_start_for_test(Some(jita), attacker_ship, tp_mod_id, target_ship, "targetPainter");
+    assert!(ctx.effective_target_signature_radius(target_ship, 40.0) > base_sig);
+
+    h_jita.add_module_cycle(crate::system_actor::ActiveModuleCycle { ship_id: attacker_ship, module_id: tp_mod_id, module_type_id: tp_tid, owner_char_id: Some(char2_id), target_id: Some(target_ship), effect_name: "targetPaint".into(), repeat: 0, duration_s: 1.0, ..Default::default() }).await.unwrap();
+    h_jita.step_manual(1.5).await.unwrap();
+    let _ = h_jita.get_ball_snapshot(target_ship).await.unwrap();
+
+    assert!(ctx.systems.ship_ewar_projections(target_ship).is_empty() && ctx.ship_fittings.read().unwrap().get(&target_ship).is_some_and(|f| f.projected_ewar.is_empty()));
+    let proj_after = h_jita.actor_state.read().unwrap().fit_projections.get(&target_ship).cloned().expect("FitProjection pushed after EWAR flush");
+    assert!((proj_after.baseline.signature_radius - base_sig).abs() < 1e-6 && h_jita.get_combat_state(target_ship).await.unwrap().unwrap().tp_sig_multiplier.is_none());
+    assert!((ctx.effective_target_signature_radius(target_ship, 40.0) - base_sig).abs() < 1e-6);
+
+    h_amarr.seed_module_cooldown_entry_sync((attacker_ship, cloak_jita, cloak_tid), cd_entry(now_unix, 30.0, amarr)).unwrap();
+    h_jita.seed_module_cooldown_entry_sync((amarr_ship, cloak_amarr, cloak_tid), cd_entry(now_unix, 30.0, jita)).unwrap();
+    h_jita.add_module_cycle(cloak_cycle(attacker_ship, cloak_jita, cloak_tid, char2_id, 20.0)).await.unwrap();
+    h_amarr.add_module_cycle(cloak_cycle(amarr_ship, cloak_amarr, cloak_tid, char_id, 20.0)).await.unwrap();
+    let (r_jita, r_amarr) = tokio::join!(h_jita.force_decloak(attacker_ship, Some(char2_id), crate::system_actor::ProtectionBreakReason::Manual, now_unix as u64), h_amarr.force_decloak(amarr_ship, Some(char_id), crate::system_actor::ProtectionBreakReason::Manual, now_unix as u64));
+    r_jita.unwrap(); r_amarr.unwrap();
+    assert!(h_jita.module_reactivation_cooldown(&(attacker_ship, cloak_jita, cloak_tid)).is_some() && h_amarr.module_reactivation_cooldown(&(amarr_ship, cloak_amarr, cloak_tid)).is_some());
+    for _ in 0..40 {
+        if h_amarr.module_reactivation_cooldown(&(attacker_ship, cloak_jita, cloak_tid)).is_none() && h_jita.module_reactivation_cooldown(&(amarr_ship, cloak_amarr, cloak_tid)).is_none() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(h_amarr.module_reactivation_cooldown(&(attacker_ship, cloak_jita, cloak_tid)).is_none() && h_jita.module_reactivation_cooldown(&(amarr_ship, cloak_amarr, cloak_tid)).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_tidi_query_and_hydrate_server_runtime_preserve_active_dilated_cooldown() {
+    let (ctx1, t0) = (test_ctx(), 1_800_000_000_u64);
+    ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+    let (sys_id, ship_id, mod_ok, mod_exp, cloak_tid) = (30_000_142_u32, 100_992_001_i64, 100_992_002_i64, 100_992_003_i64, 11_370_u32);
+    set_tidi_note(&ctx1.db, sys_id, "0.25", t0);
+    seed_ships_and_mods(&ctx1.db, sys_id, &[ship_id], &[(mod_ok, ship_id, cloak_tid), (mod_exp, ship_id, cloak_tid)]);
+    ctx1.seed_module_cooldown_entry_for_test(ship_id, mod_ok, cloak_tid, cd_entry(t0 as f64, 30.0, sys_id));
+    ctx1.seed_module_cooldown_entry_for_test(ship_id, mod_exp, cloak_tid, cd_entry(t0 as f64 - 200.0, 5.0, sys_id));
+    assert_eq!(ctx1.resolve_sys_tidi_mode(Some(sys_id)), (0.25, true));
+    let (sde, db) = (Arc::clone(&ctx1.sde), Arc::clone(&ctx1.db));
+    drop(ctx1);
+
+    let ctx2 = ServerContext::with_sde_and_repository(sde, db);
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0 + 60)));
+    ctx2.hydrate_server_runtime_from_db();
+    assert!(ctx2.systems.get_handle(sys_id).is_none() && ctx2.resolve_sys_tidi_mode(Some(sys_id)) == (0.25, true));
+    assert!(ctx2.is_module_in_reactivation_delay(ship_id, mod_ok) && !ctx2.is_module_in_reactivation_delay(ship_id, mod_exp));
+    let until = ctx2.module_reactivation_cooldown_until_unix(ship_id, mod_ok).expect("dilated cold cooldown");
+    assert!((until - ((t0 + 60) as f64 + 60.0)).abs() < 1.0, "expected ~60s wall left, got {}", until - (t0 + 60) as f64);
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx2.db, sys_id);
+    assert!(cold.contains_key(&(ship_id, mod_ok, cloak_tid)) && !cold.contains_key(&(ship_id, mod_exp, cloak_tid)));
+    let h = ctx2.systems.wake_for_session_arrival_async(sys_id, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    assert!((h.tidi_factor() - 0.25).abs() < 1e-6 && h.module_reactivation_cooldown(&(ship_id, mod_ok, cloak_tid)).is_some_and(|e| (e.delay_s - 15.0).abs() < 1.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loading_transition_hook_serializes_record_remove_clear_ship_and_cross_system_purge() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = test_ctx();
+    let (now, sys_a, sys_b, cloak_tid) = (ctx.now_unix_secs() as f64, 30_000_142_u32, 30_002_187_u32, 11_370_u32);
+    let (s_keep, s_purge, s_clear, s_new) = (100_993_001_i64, 100_993_002_i64, 100_993_003_i64, 100_993_004_i64);
+    let (m1, m2, m3, m4, m5) = (100_993_101_i64, 100_993_102_i64, 100_993_103_i64, 100_993_104_i64, 100_993_105_i64);
+    seed_ships_and_mods(&ctx.db, sys_a, &[s_keep, s_purge, s_clear, s_new], &[(m1, s_keep, cloak_tid), (m2, s_purge, cloak_tid), (m3, s_clear, cloak_tid), (m4, s_new, cloak_tid), (m5, s_clear, cloak_tid)]);
+    for (s, m, d) in [(s_keep, m1, 10.0), (s_purge, m2, 25.0), (s_clear, m3, 30.0)] { ctx.seed_module_cooldown_entry_for_test(s, m, cloak_tid, cd_entry(now, d, sys_a)); }
+    let h_b = ctx.systems.get_or_spawn(sys_b);
+    let (ran, saw_new, hid_rm) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (ctx_h, ran_c, saw_c, hid_c) = (ctx.clone(), Arc::clone(&ran), Arc::clone(&saw_new), Arc::clone(&hid_rm));
+    ctx.systems.set_before_publish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid != sys_a { return; }
+        ran_c.store(true, Ordering::SeqCst);
+        ctx_h.record_module_reactivation_delay_for_system(Some(sys_a), s_new, m4, cloak_tid, 40.0);
+        assert!(ctx_h.remove_module_reactivation_delay(s_keep, m1, cloak_tid));
+        ctx_h.record_module_reactivation_delay_for_system(Some(sys_b), s_purge, m2, cloak_tid, 12.0);
+        ctx_h.record_module_reactivation_delay_for_system(Some(sys_a), s_clear, m5, cloak_tid, 35.0);
+        ctx_h.clear_ship_reactivation_delays(s_clear);
+        saw_c.store(ctx_h.is_module_in_reactivation_delay(s_new, m4), Ordering::SeqCst);
+        hid_c.store(!ctx_h.is_module_in_reactivation_delay(s_keep, m1), Ordering::SeqCst);
+    })));
+    let h_a = ctx.systems.wake_for_session_arrival_async(sys_a, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    ctx.systems.set_before_publish_hook_for_test(None);
+    assert!(ran.load(Ordering::SeqCst) && saw_new.load(Ordering::SeqCst) && hid_rm.load(Ordering::SeqCst));
+    assert!(h_a.module_reactivation_cooldown(&(s_new, m4, cloak_tid)).is_some_and(|e| e.delay_s >= 38.0));
+    for k in [(s_keep, m1, cloak_tid), (s_purge, m2, cloak_tid), (s_clear, m3, cloak_tid), (s_clear, m5, cloak_tid)] { assert!(h_a.module_reactivation_cooldown(&k).is_none()); }
+    assert!(h_b.module_reactivation_cooldown(&(s_purge, m2, cloak_tid)).is_some_and(|e| e.delay_s >= 24.0));
+    let persisted = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_a);
+    assert!(persisted.contains_key(&(s_new, m4, cloak_tid)) && persisted.len() == 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_transition_hook_journals_record_remove_clear_ship_and_cross_system_purge() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = test_ctx();
+    let (sys_a, sys_b, cloak_tid) = (30_000_142_u32, 30_002_187_u32, 11_370_u32);
+    let (s_keep, s_rm, s_purge, s_clear, s_new) = (100_994_001_i64, 100_994_002_i64, 100_994_003_i64, 100_994_004_i64, 100_994_005_i64);
+    let (m1, m2, m3, m4, m5) = (100_994_101_i64, 100_994_102_i64, 100_994_103_i64, 100_994_104_i64, 100_994_105_i64);
+    let (h_a, h_b) = (ctx.systems.get_or_spawn(sys_a), ctx.systems.get_or_spawn(sys_b));
+    h_a.set_tidi_factor_raw(0.5);
+    for (s, m, d) in [(s_keep, m1, 10.0), (s_rm, m2, 15.0), (s_purge, m3, 30.0), (s_clear, m4, 20.0)] { ctx.record_module_reactivation_delay_for_system(Some(sys_a), s, m, cloak_tid, d); }
+    let (stop_flushed, ran) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (sf_c, ctx_h, ran_c) = (Arc::clone(&stop_flushed), ctx.clone(), Arc::clone(&ran));
+    h_a.enqueue_post_unlock_action(Box::new(move || sf_c.store(true, Ordering::SeqCst)));
+    drop(h_a);
+    ctx.systems.set_before_stop_finish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid != sys_a { return; }
+        ran_c.store(true, Ordering::SeqCst);
+        ctx_h.record_module_reactivation_delay_for_system(Some(sys_a), s_new, m5, cloak_tid, 45.0);
+        assert!(ctx_h.remove_module_reactivation_delay(s_rm, m2, cloak_tid));
+        ctx_h.record_module_reactivation_delay_for_system(Some(sys_b), s_purge, m3, cloak_tid, 8.0);
+        ctx_h.clear_ship_reactivation_delays(s_clear);
+    })));
+    assert!(ctx.systems.stop_system(sys_a).await);
+    ctx.systems.set_before_stop_finish_hook_for_test(None);
+    assert!(ran.load(Ordering::SeqCst) && stop_flushed.load(Ordering::SeqCst) && ctx.systems.get_handle(sys_a).is_none());
+    assert!(h_b.module_reactivation_cooldown(&(s_purge, m3, cloak_tid)).is_some_and(|e| e.delay_s >= 29.0));
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_a);
+    assert!(cold.contains_key(&(s_keep, m1, cloak_tid)) && cold.contains_key(&(s_new, m5, cloak_tid)));
+    for k in [(s_rm, m2, cloak_tid), (s_purge, m3, cloak_tid), (s_clear, m4, cloak_tid)] { assert!(!cold.contains_key(&k)); }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn early_loading_transitions_before_prepare_survive_publish_and_abort_flush() {
+    use eve_db::sqlite_store::system_checkpoint::CLUSTER_SYSTEM_ID;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = test_ctx();
+    let now = ctx.now_unix_secs() as f64;
+    let (sys_a, sys_b, cloak_tid) = (30_000_142_u32, 30_002_187_u32, 11_370_u32);
+    let (s_keep, s_new, s_abort, s_u) = (100_995_001_i64, 100_995_002_i64, 100_995_003_i64, 100_995_004_i64);
+    let (m_keep, m_new, m_abort, m_u) = (100_995_101_i64, 100_995_102_i64, 100_995_103_i64, 100_995_104_i64);
+    seed_ships_and_mods(&ctx.db, sys_a, &[s_keep, s_new], &[(m_keep, s_keep, cloak_tid), (m_new, s_new, cloak_tid)]);
+    seed_ships_and_mods(&ctx.db, sys_b, &[s_abort], &[(m_abort, s_abort, cloak_tid)]);
+    ctx.seed_module_cooldown_entry_for_test(s_keep, m_keep, cloak_tid, cd_entry(now, 25.0, sys_a));
+    write_cooldown_rows(&ctx.db, CLUSTER_SYSTEM_ID, &[((s_u, m_u, cloak_tid), crate::system_actor::ModuleCooldownEntry { recorded_unix_f64: now, delay_s: 20.0, solar_system_id: None, recorded_sys_sim_s: 0.0 })], now as u64);
+
+    let (ran_claim, saw_pub) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (c1, c2, r_c, s_c) = (ctx.clone(), ctx.clone(), Arc::clone(&ran_claim), Arc::clone(&saw_pub));
+    ctx.systems.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == sys_a {
+            r_c.store(true, Ordering::SeqCst);
+            c1.record_module_reactivation_delay_for_system(Some(sys_a), s_new, m_new, cloak_tid, 45.0);
+            assert!(c1.remove_module_reactivation_delay(s_keep, m_keep, cloak_tid));
+        } else if sid == sys_b {
+            c1.record_module_reactivation_delay_for_system(Some(sys_b), s_abort, m_abort, cloak_tid, 35.0);
+            c1.systems.set_force_publish_wouldblock_for_test(true);
+        }
+    })));
+    ctx.systems.set_before_publish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == sys_a { s_c.store(c2.is_module_in_reactivation_delay(s_new, m_new) && !c2.is_module_in_reactivation_delay(s_keep, m_keep), Ordering::SeqCst); }
+    })));
+
+    let h_a = ctx.systems.wake_for_session_arrival_async(sys_a, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    assert!(ran_claim.load(Ordering::SeqCst) && saw_pub.load(Ordering::SeqCst));
+    assert!(h_a.module_reactivation_cooldown(&(s_new, m_new, cloak_tid)).is_some_and(|e| e.delay_s >= 44.0) && h_a.module_reactivation_cooldown(&(s_keep, m_keep, cloak_tid)).is_none());
+    let db_a = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_a);
+    assert!(db_a.contains_key(&(s_new, m_new, cloak_tid)) && !db_a.contains_key(&(s_keep, m_keep, cloak_tid)));
+
+    assert!(ctx.systems.wake_for_session_arrival_async(sys_b, crate::system_actor::SessionArrivalWakeReason::Undock).await.is_err());
+    ctx.systems.set_force_publish_wouldblock_for_test(false);
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_b).contains_key(&(s_abort, m_abort, cloak_tid)));
+
+    let (sys_c, s_pre, m_pre, hit_notify) = (30_000_144_u32, 100_995_005_i64, 100_995_105_i64, Arc::new(tokio::sync::Notify::new()));
+    let (go_tx, go_rx_raw) = std::sync::mpsc::channel::<()>();
+    let go_rx = Arc::new(std::sync::Mutex::new(Some(go_rx_raw)));
+    let (c3, hn_c) = (ctx.clone(), Arc::clone(&hit_notify));
+    ctx.systems.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid != sys_c { return; }
+        c3.record_module_reactivation_delay_for_system(Some(sys_c), s_pre, m_pre, cloak_tid, 50.0);
+        hn_c.notify_one();
+        if let Some(rx) = go_rx.lock().unwrap().take() { let _ = tokio::task::block_in_place(|| rx.recv_timeout(std::time::Duration::from_secs(3))); }
+    })));
+    let ctx_w = ctx.clone();
+    let wake_pre = tokio::spawn(async move { ctx_w.systems.wake_for_session_arrival_async(sys_c, crate::system_actor::SessionArrivalWakeReason::Undock).await });
+    hit_notify.notified().await;
+    assert!(ctx.systems.stop_system(sys_c).await);
+    let _ = go_tx.send(());
+    assert!(wake_pre.await.unwrap().is_err());
+    ctx.systems.set_after_claim_loading_hook_for_test(None);
+    ctx.systems.set_before_publish_hook_for_test(None);
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_c).contains_key(&(s_pre, m_pre, cloak_tid)));
+    ctx.purge_module_cooldown_other_systems(sys_a, s_u, m_u, cloak_tid);
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, CLUSTER_SYSTEM_ID).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observatory_decloak_hook_records_cloak_cooldown_and_emits_on_godma_ship_effect_off_lock() {
+    use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord, GROUP_MOBILE_OBSERVATORY, TYPE_MOBILE_OBSERVATORY};
+    let ctx = test_ctx();
+    ctx.wire_module_deactivation_hook();
+    let (sys_id, char_id, ship_id, cloak_id, obs_id, now) = (30_000_142_u32, 90_000_001_i64, 100_996_001_i64, 100_996_002_i64, 100_996_003_i64, ctx.now_unix_secs());
+    let cloak_tid = ctx.sde.types.values().find(|t| t.group_id == 330 && t.default_attributes.get(&669).copied().is_some_and(|ms| ms > 0.0)).map(|t| t.type_id).expect("SDE cloak type with attr 669");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.station_id, ch.solar_system_id, ch.active_ship_id) = (None, sys_id, ship_id); }
+        snap.items.insert(ship_id, singleton_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None));
+        snap.items.insert(cloak_id, singleton_item(cloak_id, cloak_tid, char_id, ship_id, InventoryFlag::HiSlot0));
+        snap.items.insert(obs_id, singleton_item(obs_id, TYPE_MOBILE_OBSERVATORY, char_id, sys_id as i64, InventoryFlag::Hangar));
+        snap.module_active_states.insert(cloak_id);
+        write_deployable_state_snap(snap, |st| {
+            st.deployables.insert(obs_id, MobileDeployableRecord {
+                item_id: obs_id, type_id: TYPE_MOBILE_OBSERVATORY, group_id: GROUP_MOBILE_OBSERVATORY, owner_id: char_id, solar_system_id: sys_id,
+                anchor_start_unix: now.saturating_sub(1_000), anchor_duration_secs: 60, anchor_completed: true, is_unanchored: false,
+                expires_at_unix: now + 3_600, last_interaction_unix: now, reinforced_until_unix: None, last_ping_unix: None, position: [0.0; 3], deployed_fleet_id: None,
+            });
+        });
+    });
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle.spawn_ball_with_meta(
+        eve_destiny::Ball { id: ship_id, type_id: 587, position: glam::DVec3::new(1_000.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+        eve_destiny::CombatState { is_cloaked: true, ..eve_destiny::CombatState::default() },
+        eve_destiny::SlimItemMeta { group_id: 25, category_id: 6, owner_id: char_id, char_id: Some(char_id), ..Default::default() },
+    ).await.expect("spawn cloaked ship");
+    ctx.pending_notifications.write().unwrap().clear();
+    handle.step_ext_deployables_sync(Arc::clone(&ctx.sde), Arc::clone(&ctx.db), Arc::new(crate::rng::MechanicRng::seeded(3)), now).expect("step_ext_deployables_sync");
+    assert!(!handle.has_active_non_gate_cloak_sync(ship_id) && !handle.view().is_ball_cloaked(ship_id));
+    assert!(handle.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).is_some_and(|e| e.delay_s > 0.0));
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&cloak_id)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hydrate_server_runtime_preserves_live_system_active_cooldown_and_prunes_expired() {
+    let ctx = test_ctx();
+    let (sys_id, cloak_tid, now) = (30_000_142_u32, 11_370_u32, ctx.now_unix_secs() as f64);
+    let (s_act, m_act, s_exp, m_exp) = (100_997_101_i64, 100_997_102_i64, 100_997_103_i64, 100_997_104_i64);
+    seed_ships_and_mods(&ctx.db, sys_id, &[s_act, s_exp], &[]);
+    let h = ctx.systems.get_or_spawn(sys_id);
+    assert!(h.module_cooldowns_snapshot().is_empty());
+    write_cooldown_rows(&ctx.db, sys_id, &[((s_act, m_act, cloak_tid), cd_entry(now, 30.0, sys_id)), ((s_exp, m_exp, cloak_tid), cd_entry(now - 50.0, 5.0, sys_id))], now as u64);
+    ctx.hydrate_server_runtime_from_db();
+    assert!(h.module_reactivation_cooldown(&(s_act, m_act, cloak_tid)).is_some_and(|e| e.delay_s >= 29.0));
+    let db_rows = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(db_rows.contains_key(&(s_act, m_act, cloak_tid)) && !db_rows.contains_key(&(s_exp, m_exp, cloak_tid)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_thread_actor_decloak_spawns_cross_system_purge_without_45s_deadlock() {
+    let ctx = test_ctx();
+    ctx.wire_module_deactivation_hook();
+    let (sys_a, sys_b, char_id, now) = (30_000_142_u32, 30_002_187_u32, 90_000_001_i64, ctx.now_unix_secs() as f64);
+    let (ship_id, cloak_id, cloak_tid) = (100_997_201_i64, 100_997_202_i64, 11_370_u32);
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; ch.solar_system_id = sys_a; ch.active_ship_id = ship_id; } });
+    seed_ships_and_mods(&ctx.db, sys_a, &[ship_id], &[(cloak_id, ship_id, cloak_tid)]);
+    let (h_a, h_b) = (ctx.systems.get_or_spawn(sys_a), ctx.systems.get_or_spawn(sys_b));
+    spawn_ship_ball(&h_a, ship_id, char_id).await;
+    h_b.record_module_cooldown(ship_id, cloak_id, cloak_tid, now, 30.0, 1.0, false).await.unwrap();
+    let mut cyc = cloak_cycle(ship_id, cloak_id, cloak_tid, char_id, 15.0);
+    (cyc.repeat, cyc.duration_s) = (0, 1.0);
+    h_a.add_module_cycle(cyc).await.unwrap();
+    let t0 = std::time::Instant::now();
+    h_a.try_step_full_tick(2.0);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(3), "current_thread tick decloak must not stall");
+    assert!(h_a.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).is_some());
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while h_b.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).is_some() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+    }).await.expect("cross-system purge must complete asynchronously on current_thread");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_live_stop_wake_race_flushes_and_allows_rehydrate() {
+    let ctx = Arc::new(test_ctx());
+    let (sys_id, s1, m1, m2, tid, now) = (30_000_142_u32, 100_998_101_i64, 100_998_102_i64, 100_998_103_i64, 11_370_u32, ctx.now_unix_secs() as f64);
+    ctx.db.with_mut_snapshot(|s| { s.items.insert(s1, singleton_item(s1, 587, 90_000_001, sys_id as i64, InventoryFlag::None)); });
+    let spawn_dead = |ctx: Arc<ServerContext>, mid: i64, delay: f64| std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ctx.systems.get_or_spawn(sys_id).cmd_sender().send(crate::system_actor::SystemCommand::RecordModuleCooldown {
+                ship_id: s1, module_id: mid, module_type_id: tid, now_unix_f64: now, delay_s: delay, tidi_factor: 1.0, has_tidi_history: false, reply: tx,
+            }).await.unwrap();
+            let _unpersisted = rx.await.unwrap().unwrap();
+        });
+    }).join().unwrap();
+    spawn_dead(Arc::clone(&ctx), m1, 30.0);
+    let (_stopped, woke) = tokio::join!(ctx.systems.stop_system(sys_id), ctx.systems.wake_for_session_arrival_async(sys_id, crate::system_actor::SessionArrivalWakeReason::Undock));
+    let h1 = woke.unwrap();
+    assert!(h1.module_reactivation_cooldown(&(s1, m1, tid)).is_some_and(|e| e.delay_s >= 29.0));
+    h1.record_module_cooldown(s1, m2, tid, now, 25.0, 1.0, false).await.unwrap();
+    ctx.systems.rehydrate_active_system_cooldowns_from_db();
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(cold.contains_key(&(s1, m1, tid)) && cold.contains_key(&(s1, m2, tid)));
+    drop(h1);
+    assert!(ctx.systems.stop_system(sys_id).await);
+    spawn_dead(Arc::clone(&ctx), m2 + 1, 20.0);
+    let h2 = ctx.systems.wake_for_session_arrival_async(sys_id, crate::system_actor::SessionArrivalWakeReason::Undock).await.unwrap();
+    assert!(h2.module_reactivation_cooldown(&(s1, m2 + 1, tid)).is_some_and(|e| e.delay_s >= 19.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hydrate_server_runtime_preserves_ticked_tidi_cooldown_and_removed_row() {
+    let (ctx, t0) = (test_ctx(), 1_800_000_000_u64);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+    let (sys_id, s1, m_act, m_rm, m_exp, tid, now) = (30_000_142_u32, 100_998_201_i64, 100_998_202_i64, 100_998_203_i64, 100_998_204_i64, 11_370_u32, t0 as f64);
+    set_tidi_note(&ctx.db, sys_id, "0.5", t0);
+    seed_ships_and_mods(&ctx.db, sys_id, &[s1], &[]);
+    let h = ctx.systems.get_or_spawn(sys_id);
+    h.record_module_cooldown(s1, m_act, tid, now, 20.0, 0.5, true).await.unwrap();
+    h.record_module_cooldown(s1, m_rm, tid, now, 25.0, 0.5, true).await.unwrap();
+    assert!(h.remove_module_cooldown((s1, m_rm, tid)).await.unwrap());
+    for _ in 0..20 { let _ = h.step_manual(1.0).await.unwrap(); }
+    assert!((h.sim_elapsed_secs() - 10.0).abs() < 1e-6);
+    write_cooldown_rows(&ctx.db, sys_id, &[((s1, m_act, tid), cd_entry(now, 20.0, sys_id)), ((s1, m_rm, tid), cd_entry(now, 25.0, sys_id)), ((s1, m_exp, tid), cd_entry(now - 200.0, 5.0, sys_id))], t0);
+    ctx.hydrate_server_runtime_from_db();
+    let live = h.module_reactivation_cooldown(&(s1, m_act, tid)).unwrap();
+    assert!((live.delay_s - (h.sim_elapsed_secs() - live.recorded_sys_sim_s) - 10.0).abs() < 1e-6 && h.module_reactivation_cooldown(&(s1, m_rm, tid)).is_none());
+    assert!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id).len() == 1);
+    drop(h);
+    assert!(ctx.systems.stop_system(sys_id).await);
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(cold.len() == 1 && cold.get(&(s1, m_act, tid)).is_some_and(|e| (e.delay_s - 10.0).abs() < 1e-6));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_thread_post_unlock_worker_deactivation_hook_with_none_char_records_cooldown_ewar_and_notify() {
+    let ctx = test_ctx();
+    ctx.wire_module_deactivation_hook();
+    let (sys_a, sys_b, char_id, now) = (30_000_142_u32, 30_002_187_u32, 90_000_001_i64, ctx.now_unix_secs() as f64);
+    let (ship_id, target_id, cloak_id, extra_id, cloak_tid) = (100_999_001_i64, 100_999_002_i64, 100_999_003_i64, 100_999_004_i64, 11_370_u32);
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { (ch.station_id, ch.solar_system_id, ch.active_ship_id) = (None, sys_a, ship_id); } snap.module_active_states.insert(cloak_id); });
+    seed_ships_and_mods(&ctx.db, sys_a, &[ship_id], &[(cloak_id, ship_id, cloak_tid)]);
+    let (h_a, h_b) = (ctx.systems.get_or_spawn(sys_a), ctx.systems.get_or_spawn(sys_b));
+    spawn_ship_ball(&h_a, ship_id, char_id).await;
+    h_a.record_active_ewar_start(ship_id, cloak_id, target_id, "electronic").await.unwrap();
+    h_b.record_module_cooldown(ship_id, extra_id, cloak_tid, now, 30.0, 1.0, false).await.unwrap();
+    ctx.pending_notifications.write().unwrap().clear();
+    let ctx_act = ctx.clone();
+    h_a.enqueue_post_unlock_action(Box::new(move || ctx_act.spawn_purge_module_cooldown_other_systems(sys_a, ship_id, extra_id, cloak_tid)));
+    let done_rx = h_a.enqueue_raw_deact_hook_for_test(Arc::clone(&ctx.db), Arc::clone(&ctx.sde), ship_id, cloak_id, cloak_tid, 25.0);
+    tokio::time::timeout(std::time::Duration::from_secs(5), done_rx).await.expect("post_unlock_worker must not panic on MultiThread").unwrap();
+    assert!(h_a.module_reactivation_cooldown(&(ship_id, cloak_id, cloak_tid)).is_some_and(|e| e.delay_s >= 24.0));
+    assert!(ctx.systems.ewar_starts_count() == 0 && !ctx.db.with_snapshot(|s| s.module_active_states.contains(&cloak_id)));
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while h_b.module_reactivation_cooldown(&(ship_id, extra_id, cloak_tid)).is_some() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+    }).await.expect("flush_post_unlock_actions spawn_purge must clear h_b via runtime_handle");
+    assert!(h_a.flush_module_cooldown_checkpoint().await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_live_cooldown_reads_records_and_removals_succeed_before_stop_or_wake() {
+    let ctx = Arc::new(test_ctx());
+    let (sys_id, s1, s2, m1, m2, m_c, tid, now) = (30_000_142_u32, 100_999_101_i64, 100_999_102_i64, 100_999_201_i64, 100_999_202_i64, 100_999_203_i64, 11_370_u32, ctx.now_unix_secs() as f64);
+    seed_ships_and_mods(&ctx.db, sys_id, &[s1, s2], &[(m1, s1, tid), (m2, s1, tid), (m_c, s2, tid)]);
+    let spawn_dead = |c: Arc<ServerContext>| std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let h = c.systems.get_or_spawn(sys_id);
+            for (ship, mid, d) in [(s1, m1, 30.0), (s2, m_c, 25.0)] {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                h.cmd_sender().send(crate::system_actor::SystemCommand::RecordModuleCooldown { ship_id: ship, module_id: mid, module_type_id: tid, now_unix_f64: now, delay_s: d, tidi_factor: 1.0, has_tidi_history: false, reply: tx }).await.unwrap();
+                let _ = rx.await.unwrap().unwrap();
+            }
+        });
+    }).join().unwrap();
+
+    spawn_dead(Arc::clone(&ctx));
+    assert!(!ctx.systems.dead_live_system_handles().is_empty());
+    ctx.db.with_snapshot(|_| { assert!(ctx.is_module_in_reactivation_delay(s1, m1)); });
+    assert!(ctx.resolve_active_reactivation_cooldown(s1, m1).is_some_and(|u| u >= now + 29.0) && ctx.systems.dead_live_system_handles().is_empty());
+
+    ctx.clear_all_reactivation_delays();
+    spawn_dead(Arc::clone(&ctx));
+    ctx.record_module_reactivation_delay(s1, m2, 40.0);
+    let db1 = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id);
+    assert!(ctx.systems.dead_live_system_handles().is_empty() && db1.contains_key(&(s1, m1, tid)) && db1.contains_key(&(s1, m2, tid)) && ctx.is_module_in_reactivation_delay(s1, m2));
+
+    ctx.clear_all_reactivation_delays();
+    spawn_dead(Arc::clone(&ctx));
+    assert!(ctx.remove_module_reactivation_delay(s1, m1, tid) && !ctx.is_module_in_reactivation_delay(s1, m1));
+    assert_eq!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id).keys().copied().collect::<Vec<_>>(), vec![(s2, m_c, tid)]);
+
+    ctx.clear_all_reactivation_delays();
+    spawn_dead(Arc::clone(&ctx));
+    ctx.clear_ship_reactivation_delays(s1);
+    assert!(!ctx.is_module_in_reactivation_delay(s1, m1) && ctx.is_module_in_reactivation_delay(s2, m_c));
+    assert_eq!(crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys_id).keys().copied().collect::<Vec<_>>(), vec![(s2, m_c, tid)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hydrate_server_runtime_preserves_seq_zero_tidi_progress_and_dilated_cooldown() {
+    let (ctx, t0, tid) = (test_ctx(), 1_800_000_000_u64, 11_370_u32);
+    let (sys1, sys2, s1, s2, m1, m2) = (30_000_142_u32, 30_002_187_u32, 100_999_301_i64, 100_999_302_i64, 100_999_401_i64, 100_999_402_i64);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+    set_tidi_note(&ctx.db, sys1, "0.5", t0);
+    seed_ships_and_mods(&ctx.db, sys1, &[s1], &[]);
+    write_cooldown_rows(&ctx.db, sys1, &[((s1, m1, tid), cd_entry(t0 as f64, 20.0, sys1))], t0);
+    let h1 = ctx.systems.get_or_spawn(sys1);
+    assert_eq!(h1.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
+    for _ in 0..20 { let _ = h1.step_manual(1.0).await.unwrap(); }
+    ctx.hydrate_server_runtime_from_db();
+    let c1 = h1.module_reactivation_cooldown(&(s1, m1, tid)).unwrap();
+    assert!((c1.delay_s - (h1.sim_elapsed_secs() - c1.recorded_sys_sim_s) - 10.0).abs() < 1e-6);
+    drop(h1);
+    assert!(ctx.systems.stop_system(sys1).await && crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys1).get(&(s1, m1, tid)).is_some_and(|e| (e.delay_s - 10.0).abs() < 1e-6));
+
+    let t1 = t0 + 1_000;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t1)));
+    set_tidi_note(&ctx.db, sys2, "0.2", t1);
+    seed_ships_and_mods(&ctx.db, sys2, &[s2], &[]);
+    write_cooldown_rows(&ctx.db, sys2, &[((s2, m2, tid), cd_entry(t1 as f64, 20.0, sys2))], t1);
+    let h2 = ctx.systems.get_or_spawn(sys2);
+    assert_eq!(h2.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
+    for _ in 0..10 { let _ = h2.step_manual(1.0).await.unwrap(); }
+    h2.set_tidi_factor_raw(1.0);
+    set_tidi_note(&ctx.db, sys2, "1.0", t1);
+    for _ in 0..10 { let _ = h2.step_manual(1.0).await.unwrap(); }
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t1 + 20)));
+    ctx.hydrate_server_runtime_from_db();
+    let c2 = h2.module_reactivation_cooldown(&(s2, m2, tid)).expect("dilated seq==0 cooldown must survive wall expiry");
+    assert!((c2.delay_s - (h2.sim_elapsed_secs() - c2.recorded_sys_sim_s) - 8.0).abs() < 1e-6);
+    drop(h2);
+    assert!(ctx.systems.stop_system(sys2).await && crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys2).get(&(s2, m2, tid)).is_some_and(|e| (e.delay_s - 8.0).abs() < 1e-6));
+
+    let (sys3, s3, m3, m_exp, t2) = (30_000_144_u32, 100_999_303_i64, 100_999_403_i64, 100_999_404_i64, t1 + 1_000);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t2)));
+    set_tidi_note(&ctx.db, sys3, "1.0", t2);
+    seed_ships_and_mods(&ctx.db, sys3, &[s3], &[]);
+    write_cooldown_rows(&ctx.db, sys3, &[((s3, m3, tid), cd_entry(t2 as f64, 20.0, sys3)), ((s3, m_exp, tid), cd_entry((t2 - 50) as f64, 5.0, sys3))], t2);
+    let h3 = ctx.systems.get_or_spawn(sys3);
+    assert!(h3.actor_state.read().unwrap().module_cooldown_checkpoint_seq == 0 && h3.module_reactivation_cooldown(&(s3, m_exp, tid)).is_none());
+    for _ in 0..10 { let _ = h3.step_manual(1.0).await.unwrap(); }
+    h3.set_tidi_factor_raw(0.2); set_tidi_note(&ctx.db, sys3, "0.2", t2);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t2 + 12)));
+    ctx.hydrate_server_runtime_from_db();
+    let c3 = h3.module_reactivation_cooldown(&(s3, m3, tid)).expect("1.0->0.2 slowdown must preserve 10s rem");
+    assert!((c3.delay_s - (h3.sim_elapsed_secs() - c3.recorded_sys_sim_s) - 10.0).abs() < 1e-6 && h3.module_reactivation_cooldown(&(s3, m_exp, tid)).is_none());
+    drop(h3);
+    assert!(ctx.systems.stop_system(sys3).await && crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys3).get(&(s3, m3, tid)).is_some_and(|e| (e.delay_s - 10.0).abs() < 1e-6));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_thread_wait_worker_deact_and_post_commit_remove_ball_finalize_cooldowns() {
+    let (ctx, sys, char_id, ship_id, target_id, cloak1, cloak2, tid) = (test_ctx(), 30_000_142_u32, 90_000_001_i64, 100_999_501_i64, 100_999_502_i64, 100_999_601_i64, 100_999_602_i64, 11_370_u32);
+    ctx.wire_module_deactivation_hook();
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) { (ch.station_id, ch.solar_system_id, ch.active_ship_id) = (None, sys, ship_id); }
+        s.module_active_states.insert(cloak1); s.module_active_states.insert(cloak2);
+    });
+    seed_ships_and_mods(&ctx.db, sys, &[ship_id], &[(cloak1, ship_id, tid), (cloak2, ship_id, tid)]);
+    let h = ctx.systems.get_or_spawn(sys);
+    spawn_ship_ball(&h, ship_id, char_id).await;
+    h.record_active_ewar_start(ship_id, cloak1, target_id, "electronic").await.unwrap();
+    ctx.pending_notifications.write().unwrap().clear();
+    crate::system_actor::post_unlock::run_wait_worker_deact_hook_for_test(&h, Arc::clone(&ctx.db), Arc::clone(&ctx.sde), ship_id, cloak1, tid, 25.0);
+    assert!(h.view().module_cooldowns.reactivation_cooldowns.get(&(ship_id, cloak1, tid)).is_some_and(|e| e.delay_s >= 24.0) && ctx.systems.ewar_starts_count() == 0);
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+
+    h.record_active_ewar_start(ship_id, cloak2, target_id, "electronic").await.unwrap();
+    h.add_module_cycle(crate::system_actor::ActiveModuleCycle { ship_id, module_id: cloak2, module_type_id: tid, effect_name: "cloaking".into(), reactivation_delay_s: 30.0, ..Default::default() }).await.unwrap();
+    ctx.pending_notifications.write().unwrap().clear();
+    crate::system_actor::post_unlock::apply_remove_ball_post_commit_for_test(&h, &ctx.db, &ctx.sde, ship_id);
+    assert!(!h.view().balls.contains_key(&ship_id) && ctx.systems.ewar_starts_count() == 0);
+    assert!(h.view().module_cooldowns.reactivation_cooldowns.get(&(ship_id, cloak2, tid)).is_some_and(|e| e.delay_s >= 29.0));
+    assert!(ctx.pending_notifications.read().unwrap().get(&char_id).is_some_and(|v| v.iter().any(|n| n.event == "OnGodmaShipEffect")));
+    let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys);
+    assert!(cold.contains_key(&(ship_id, cloak1, tid)) && cold.contains_key(&(ship_id, cloak2, tid)));
 }

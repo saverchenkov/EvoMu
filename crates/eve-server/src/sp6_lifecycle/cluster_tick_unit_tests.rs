@@ -2348,11 +2348,7 @@ async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank
     );
     let _ = handle_a.get_ball_snapshot(ship_a2).await;
     assert!(
-        ctx.projected_ewar
-            .read()
-            .unwrap()
-            .get(&ship_a2)
-            .is_none_or(|v| v.is_empty()),
+        handle_a.projected_ewar_for(ship_a2).is_empty(),
         "ship_a1 death in on_advance_secs must flush projected EWAR on ship_a2"
     );
     assert!(
@@ -2372,11 +2368,7 @@ async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank
     );
     let _ = handle_b.get_ball_snapshot(ship_b2).await;
     assert!(
-        ctx.projected_ewar
-            .read()
-            .unwrap()
-            .get(&ship_b2)
-            .is_none_or(|v| v.is_empty()),
+        handle_b.projected_ewar_for(ship_b2).is_empty(),
         "ship_b1 death in step_active_systems_physics_tick must flush projected EWAR on ship_b2"
     );
     assert!(

@@ -1742,15 +1742,7 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
     if let Some(sys_handle) = ctx.systems.get_handle(SYSTEM_ID) {
         sys_handle.clear_warp_tracking(SHIP_ID);
     }
-    let cooldown_cleared = {
-        let mut cd = ctx
-            .module_reactivation_cooldowns
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cd.len();
-        cd.retain(|&(sid, _, _), _| sid != SHIP_ID);
-        cd.len() != before
-    };
+    ctx.clear_ship_reactivation_delays(SHIP_ID);
     if ctx
         .cluster_state
         .read()
@@ -1818,9 +1810,6 @@ fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile
             snap.sp6_lifecycle.weapon_timers_until.remove(&CHAR_ID);
             snap.sp6_lifecycle.criminal_timers_until.remove(&CHAR_ID);
         });
-    }
-    if cooldown_cleared {
-        ctx.persist_server_runtime_to_db();
     }
 }
 

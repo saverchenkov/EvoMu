@@ -133,10 +133,11 @@ fn damage_tuple_fw_jammer_ess_anomalies_and_dungeon_progression() {
     assert!(events.contains("OnDungeonEdit"));
 }
 
-#[test]
-fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
+#[tokio::test]
+async fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     let (ctx, char_id) = make_online_ctx();
     let sys_id = 30_000_142_u32;
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let ship_id = 100_000_001_i64;
     let mod_id = 920_001_i64;
 
@@ -192,10 +193,7 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
 
     let mut pre_ewar_notifs = fitted_notifs;
     pre_ewar_notifs.extend(ctx.drain_notifications_for_char(char_id));
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship_id, mod_id), vec![(999_001, "warpScrambler")]);
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship_id, mod_id, 999_001, "warpScrambler");
     let pairs = flush_ship_all_ewar_sync(&ctx, char_id, Some(sys_id), ship_id);
     assert_eq!(pairs, vec![(ship_id, mod_id)]);
     let ewar_sync_notifs = ctx.drain_notifications_for_char(char_id);
@@ -210,10 +208,7 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     );
 
     // Genuine module unfit/destroy flushes the module profile AND ends EWAR.
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship_id, mod_id), vec![(999_001, "warpScrambler")]);
+    ctx.record_active_ewar_start_for_test(Some(sys_id), ship_id, mod_id, 999_001, "warpScrambler");
     let _ = flush_module_profile_and_ewar_end(&ctx, char_id, Some(sys_id), ship_id, mod_id);
 
     emit_ecm_jam_landed(&ctx, sys_id, char_id, ship_id, mod_id, 999_001, 20.0);

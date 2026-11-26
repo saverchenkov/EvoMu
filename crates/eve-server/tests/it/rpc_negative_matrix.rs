@@ -1303,46 +1303,49 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
     let brain_version = {
         fix.ctx.brain_versions.read().expect("brain_versions").get(&CHAR_B_ID).copied()
     };
-    let projected_ewar_lens = {
-        let pe = fix.ctx.projected_ewar.read().expect("projected_ewar");
-        b_ships.iter().filter_map(|&id| pe.get(&id).map(|v| (id, v.len()))).collect()
-    };
-    let projected_ewar_sources = {
-        let ps = fix.ctx.projected_ewar_sources.read().expect("projected_ewar_sources");
-        ps.iter()
-            .filter(|&(&m, &s)| b_ships.contains(&m) || b_ships.contains(&s))
-            .map(|(&k, &v)| (k, v))
-            .collect()
-    };
-    let active_ewar_starts = {
-        let ae = fix.ctx.active_ewar_starts.read().expect("active_ewar_starts");
-        ae.iter()
-            .filter(|(&(s, t), _)| b_ships.contains(&s) || b_ships.contains(&t))
-            .map(|(&k, v)| (k, v.len()))
-            .collect()
+    let (projected_ewar_lens, projected_ewar_sources, active_ewar_starts, module_cooldowns) = {
+        let mut pe_lens: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut ps_map: BTreeMap<i64, i64> = BTreeMap::new();
+        let mut ae_map: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+        let mut cd_map: BTreeMap<(i64, i64, u32), (u64, u64, Option<u32>, u64)> = BTreeMap::new();
+        for (_, h) in fix.ctx.systems.active_system_handles() {
+            let view = h.view();
+            for &id in &b_ships {
+                if let Some(v) = view.ewar.projected_ewar.get(&id) {
+                    *pe_lens.entry(id).or_default() += v.len();
+                }
+            }
+            for (&m, &s) in &view.ewar.projected_ewar_sources {
+                if b_ships.contains(&m) || b_ships.contains(&s) {
+                    ps_map.insert(m, s);
+                }
+            }
+            for (&k @ (s, t), v) in &view.ewar.active_ewar_starts {
+                if b_ships.contains(&s) || b_ships.contains(&t) {
+                    ae_map.insert(k, v.len());
+                }
+            }
+            for (&k @ (sid, _, _), v) in &view.module_cooldowns.reactivation_cooldowns {
+                if b_ships.contains(&sid) {
+                    cd_map.insert(
+                        k,
+                        (
+                            v.recorded_unix_f64.to_bits(),
+                            v.delay_s.to_bits(),
+                            v.solar_system_id,
+                            v.recorded_sys_sim_s.to_bits(),
+                        ),
+                    );
+                }
+            }
+        }
+        (pe_lens, ps_map, ae_map, cd_map)
     };
     let mining_cycles_present = {
         let mc = fix.ctx.mining_cycles.read().expect("mining_cycles");
         mc.iter()
             .filter(|(_, c)| c.char_id == CHAR_B_ID || b_ships.contains(&c.ship_id))
             .map(|(&mid, _)| mid)
-            .collect()
-    };
-    let module_cooldowns = {
-        let cd = fix.ctx.module_reactivation_cooldowns.read().expect("module_cooldowns");
-        cd.iter()
-            .filter(|(&(sid, _, _), _)| b_ships.contains(&sid))
-            .map(|(&k, v)| {
-                (
-                    k,
-                    (
-                        v.recorded_unix_f64.to_bits(),
-                        v.delay_s.to_bits(),
-                        v.solar_system_id,
-                        v.recorded_sys_sim_s.to_bits(),
-                    ),
-                )
-            })
             .collect()
     };
     let scanner_probes = {
@@ -1467,12 +1470,15 @@ fn current_ephemeral_counts(ctx: &ServerContext) -> [usize; 7] {
         .read()
         .expect("phased_fields")
         .len();
-    let c4 = ctx.projected_ewar.read().expect("projected_ewar").len();
-    let c5 = ctx
-        .active_ewar_starts
-        .read()
-        .expect("active_ewar_starts")
-        .len();
+    let handles = ctx.systems.active_system_handles();
+    let c4: usize = handles
+        .iter()
+        .map(|(_, h)| h.view().ewar.projected_ewar.len())
+        .sum();
+    let c5: usize = handles
+        .iter()
+        .map(|(_, h)| h.view().ewar.active_ewar_starts.len())
+        .sum();
     let c6 = ctx
         .db
         .with_snapshot(|s| s.sp6_lifecycle.session_change_timers.len());
@@ -1724,16 +1730,7 @@ async fn restore_world_state(
         .write()
         .expect("phased_fields")
         .clear();
-    fix.ctx
-        .projected_ewar
-        .write()
-        .expect("projected_ewar")
-        .clear();
-    fix.ctx
-        .active_ewar_starts
-        .write()
-        .expect("active_ewar_starts")
-        .clear();
+    fix.ctx.systems.clear_all_ewar_state_sync();
     fix.ctx
         .pending_notifications
         .write()

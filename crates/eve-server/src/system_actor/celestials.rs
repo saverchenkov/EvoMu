@@ -208,10 +208,11 @@ impl Drop for BallparkWriteGuard<'_> {
 /// Rank-checked `Ballpark` lock wrapper that automatically refreshes the published
 /// [`super::SystemView`] snapshot whenever a write guard drops cleanly.
 pub struct BallparkHandle {
-    inner: RankedRwLock<Ballpark, RANK_BALLPARK>,
-    view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
-    tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
-    actor_state: std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
+    pub(in crate::system_actor) inner: RankedRwLock<Ballpark, RANK_BALLPARK>,
+    pub(in crate::system_actor) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
+    pub(in crate::system_actor) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::system_actor) actor_state:
+        std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
     drone_hydration: std::sync::OnceLock<super::drones::ActiveDronesSharedCtx>,
 }
 
@@ -328,6 +329,19 @@ impl SystemHandle {
         self.view_rx.borrow().clone()
     }
 
+    pub(in crate::system_actor) fn take_stopped_cooldown_persist_payload(
+        actor_state: &RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>,
+        solar_system_id: SolarSystemId,
+        gate: &super::CooldownPersistGate,
+        eff_tidi: f64,
+        reg_has_tidi_history: bool,
+    ) -> Option<super::module_cooldowns::ModuleCooldownPersistPayload> {
+        let mut st = actor_state.write().unwrap_or_else(|e| e.into_inner());
+        super::module_cooldowns::take_stopped_cooldown_persist_payload_in_state(
+            &mut st, solar_system_id, gate, eff_tidi, reg_has_tidi_history,
+        )
+    }
+
     pub(in crate::system_actor) fn has_in_flight_post_unlock(&self) -> bool {
         self.post_unlock_in_flight
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -339,14 +353,7 @@ impl SystemHandle {
     /// [`Self::publish_view_from`] instead to avoid self-deadlocking.
     #[allow(dead_code)] // Follow-up `cycles.rs` sync helpers (deferred on lock) & Track 2 callers call this (#1342).
     pub(crate) fn publish_view(&self) {
-        if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            return;
-        }
-        let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        self.publish_view_from(&bp, None);
+        super::module_cooldowns::publish_ballpark_view(&self.ballpark);
     }
 
     /// Publishes a fresh [`super::SystemView`] from an already-locked `ballpark` (and
@@ -1111,22 +1118,13 @@ impl SystemHandle {
     fn try_remove_ball_impl(&self, ball_id: BallId, emit_destruction_fx: bool) {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
         let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(self);
+        let tidi_cur = self.tidi_factor();
         let remove_from_bp_and_st =
             |bp: &mut Ballpark, st: &mut super::SystemActorState| {
-                let deact_guard = if eve_db::lock_rank::held_lock_ranks()
-                    .iter()
-                    .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
-                {
-                    self.module_deactivation_hook
-                        .read_unranked()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                } else {
-                    self.module_deactivation_hook
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                };
+                let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
+                    &self.module_deactivation_hook,
+                    &self.module_deactivation_post_unlock_hook,
+                );
                 let (removed_cycles, fallback_slim_owner, db_opt_cloned, sde_opt_cloned) = {
                     let super::SystemActorState {
                         active_module_cycles,
@@ -1161,29 +1159,22 @@ impl SystemHandle {
                 };
                 let _ = st.clear_fighter_ball_and_track(ball_id);
                 super::drones::clear_removed_ball_drones_in_state(st, ball_id);
+                let ops = super::ewar_cooldowns::build_and_finalize_removed_ball_ops(
+                    self, st, ball_id, removed_cycles, fallback_slim_owner,
+                    raw_hook.clone(), post_hook, tidi_cur,
+                );
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
                 celestials_helpers::update_system_hibernation_flag(st, bp, self.event_tx.receiver_count());
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
                 self.publish_view_from(bp, Some(st));
-                let ticket = if db_opt_cloned.is_some() {
-                    let ops = super::post_unlock::build_removed_ball_post_unlock_ops(
-                        self.solar_system_id,
-                        ball_id,
-                        removed_cycles,
-                        fallback_slim_owner,
-                        deact_guard.is_some(),
-                    );
-                    super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                        self,
-                        db_opt_cloned.as_ref(),
-                        sde_opt_cloned.as_ref(),
-                        ops,
-                        caller_can_wait,
-                    )
-                } else {
-                    super::post_unlock::PostUnlockWaitTicket::None
-                };
-                (deact_guard, ticket)
+                let ticket = super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
+                    self,
+                    db_opt_cloned.as_ref(),
+                    sde_opt_cloned.as_ref(),
+                    ops,
+                    caller_can_wait,
+                );
+                (raw_hook, ticket)
             };
         let (deact_guard, ticket) = if eve_db::lock_rank::held_lock_ranks()
             .iter()
@@ -1675,6 +1666,9 @@ impl SystemHandle {
         } else {
             1.0
         };
+        if clamped < 0.999_999 {
+            self.cooldown_persist_gate.mark_tidi_history();
+        }
         if (clamped - prev_clamped).abs() > f64::EPSILON
             && !eve_db::lock_rank::held_lock_ranks()
                 .iter()
@@ -3171,8 +3165,11 @@ pub struct SystemHandle {
         Arc<RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_post_unlock_hook:
+        Arc<RankedRwLock<Option<super::PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
+    pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,
 }
 

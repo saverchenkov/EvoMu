@@ -464,7 +464,7 @@ async fn cargo_fueled_superweapon_slash_dispatch_rpc_rollback_is_silent_and_succ
 
     // Remove conflicting cycle, clear cooldown/lock if any, and fire again -> exact 1 OnItemChange.
     sys.remove_module_cycle(ship_id, mod_id).await.unwrap();
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     ctx.tactical_state
         .write()
         .unwrap()

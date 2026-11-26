@@ -395,7 +395,7 @@ async fn laser_capacitor_crystal_volatility_shatter_and_fof_auto_target() {
         Some(&PyRep::Bool(false))
     );
 
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let shot2 = handle_weapons(
         &ctx,
         &mut session,
@@ -438,7 +438,7 @@ async fn laser_capacitor_crystal_volatility_shatter_and_fof_auto_target() {
         );
     });
     ctx.invalidate_ship_fitting(ship_id);
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let mut ship_cs_exact = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     ship_cs_exact.capacitor = 50.0;
     sys_handle.set_combat_state(ship_id, ship_cs_exact).await.unwrap();
@@ -736,7 +736,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
             .await.unwrap().unwrap_err().code,
         "ModuleAlreadyActive"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let proj_shot2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     let hit_stat = proj_shot2.dict_get("hitChance").and_then(|v| v.as_f64()).unwrap();
@@ -758,7 +758,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     let fac_shot1 = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(fac_laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(fac_shot1.dict_get("crystalShattered"), Some(&PyRep::Bool(false)));
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let fac_shot2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(fac_laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(fac_shot2.dict_get("crystalShattered"), Some(&PyRep::Bool(true)));
@@ -783,7 +783,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
         entry.current_multiplier = 1.21;
     });
     ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&ent_id); });
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let ent2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(ent_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(ent2.dict_get("spoolCycles"), Some(&PyRep::Integer(0)));
@@ -937,7 +937,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     assert!(ctx.drain_notifications_for_char(susp_char).iter().any(|n| n.event == "OnCrimewatchEngagementCreated"));
 
     // 4. Red safety shooting neutral pod in lowsec (0.0 < 0.30 < 0.45) escalates to Criminal (suspect cleared!)
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let pod_shot = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(pod_id)], &kwargs)
         .await.unwrap().unwrap();
     assert!(pod_shot.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap() > 0.0);
@@ -949,7 +949,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     }
 
     // 5. Laser attack on NPC sets 300s NPC timer
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let npc_shot = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(npc_shot.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
@@ -1121,12 +1121,12 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
             .await.unwrap().unwrap_err().code,
         "ModuleAlreadyActive"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let can_hit = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_can_id)], &kwargs)
         .await.unwrap().unwrap();
     assert!(can_hit.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap() > 0.0);
 
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let st_hit = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(structure_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(st_hit.dict_get("targetID"), Some(&PyRep::Integer(structure_id)));
@@ -1146,7 +1146,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
             .await.unwrap().unwrap_err().code,
         "ModuleNotFound"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     let crys_read = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_can_id)], &kwargs)
         .await.unwrap().unwrap();
     assert!(crys_read.dict_get("crystalDamageFraction").and_then(|v| v.as_f64()).unwrap() >= 0.0);
@@ -1163,7 +1163,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
         let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
         sys_handle.spawn_ball_with_combat(ball, cs).await.unwrap();
     }
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
     assert!(
         handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_can_id)], &kwargs)
             .await.unwrap().is_err()
@@ -2811,12 +2811,13 @@ async fn handle_weapons_special_target_ewar_surface_range_gate_1247() {
     .expect("special-target EWAR within surface range must succeed");
     assert_eq!(in_ok.dict_get("ewarAssistRecorded"), Some(&PyRep::Bool(true)));
     assert!(ctx.effective_target_painter_multiplier(cont_in) > 1.0);
+    let sys_h = ctx.systems.get_handle(sys_id).expect("sys handle active");
     assert!(
-        ctx.projected_ewar
-            .read()
-            .unwrap()
-            .get(&cont_in)
-            .is_some_and(|list| list.len() == 1 && (list[0].distance - 34_650.0).abs() < 1e-3)
+        sys_h
+            .projected_ewar_for(cont_in)
+            .iter()
+            .any(|eff| (eff.distance - 34_650.0).abs() < 1e-3)
+            && sys_h.projected_ewar_for(cont_in).len() == 1
     );
 }
 
@@ -3151,7 +3152,7 @@ async fn handle_weapons_burnout_thermo_delay_preoverload_and_heat_branches() {
         .code,
         "ModuleAlreadyActive"
     );
-    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    ctx.clear_all_reactivation_delays();
 
     // 5. Pre-overloaded weapon preserves ModuleState::Overloaded across failed Activate
     handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id)], &kwargs)
@@ -3226,7 +3227,7 @@ async fn handle_weapons_burnout_thermo_delay_preoverload_and_heat_branches() {
             }
         });
         ctx.invalidate_ship_fitting(ship_id);
-        ctx.module_reactivation_cooldowns.write().unwrap().clear();
+        ctx.clear_all_reactivation_delays();
         ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap()
     };
 
@@ -4185,7 +4186,7 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_invuln_deferral() {
                 )
                 .await
                 .unwrap();
-            ctx_c.module_reactivation_cooldowns.write().unwrap().clear();
+            ctx_c.clear_all_reactivation_delays();
             let _ = ctx_c.drain_notifications_for_char(char_id);
         }
     };
@@ -4460,7 +4461,7 @@ async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_144
                 snap.module_active_states.remove(&sb_id);
             });
             ctx_c.invalidate_ship_fitting(ship_id);
-            ctx_c.module_reactivation_cooldowns.write().unwrap().clear();
+            ctx_c.clear_all_reactivation_delays();
             sys_c
                 .set_combat_state(
                     ship_id,

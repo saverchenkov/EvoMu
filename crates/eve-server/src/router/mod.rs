@@ -13,6 +13,7 @@ pub mod client_wire;
 pub mod context;
 mod context_charges;
 mod context_clock;
+mod context_ewar_cooldowns;
 mod context_runtime_persistence;
 pub mod delta_commit_listener;
 mod delta_item_corp;

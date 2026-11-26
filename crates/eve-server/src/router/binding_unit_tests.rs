@@ -471,8 +471,8 @@ async fn get_container_contents_enforces_ownership_colocation_and_2500m_range() 
     assert_eq!(crowset.crowset_rows().unwrap().len(), 1);
 }
 
-#[test]
-fn combat_state_slim_meta_ewar_and_skill_prerequisites_cover_branches() {
+#[tokio::test]
+async fn combat_state_slim_meta_ewar_and_skill_prerequisites_cover_branches() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
@@ -498,6 +498,23 @@ fn combat_state_slim_meta_ewar_and_skill_prerequisites_cover_branches() {
     ctx.wire_module_deactivation_hook();
 
     // Projected EWAR & effective_target_signature_radius
+    let _ewar_sys = ctx.systems.get_or_spawn(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            888_001,
+            InventoryItemRecord {
+                item_id: 888_001,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     let mut tp_mod = DogmaItemState::from_sde(777_001, 379, &ctx.sde);
     tp_mod.base_attributes.insert(554, 30.0);
     tp_mod.base_attributes.insert(eve_sde::attr_ids::MAX_RANGE, 30_000.0);
@@ -772,17 +789,21 @@ async fn session_cleanup_guard_disconnect_cleanup_and_target_painter_multiplier(
     eff_mod.base_attributes.insert(554, 30.0);
     eff_mod.base_attributes.insert(54, 30_000.0);
     eff_mod.base_attributes.insert(2044, 15_000.0);
-    tp_ctx.projected_ewar.write().unwrap().insert(
+    let tp_h = tp_ctx.systems.get_or_spawn(sys_id);
+    tp_h.upsert_projected_ewar(
+        888_001,
         ship_id,
-        vec![ProjectedEwarEffect {
+        ProjectedEwarEffect {
             source_module_id: 888_001,
             source_module_type_id: tp_tid,
             charge_type_id: None,
             distance: 5_000.0,
             overloaded: false,
             effective_module: eff_mod,
-        }],
-    );
+        },
+    )
+    .await
+    .expect("upsert projected EWAR into system actor");
     let mult = tp_ctx.effective_target_painter_multiplier(ship_id);
     assert!(mult > 1.10 && mult < 1.30, "expected ~1.15x with 50% TP resist, got {mult}");
 

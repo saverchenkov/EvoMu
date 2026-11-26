@@ -485,10 +485,7 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
     });
 
     // Mark projected EWAR from ship_id and damage an ally NPC so remote repair fires
-    {
-        let mut proj = ctx.projected_ewar_sources.write().unwrap();
-        proj.insert(72_000_011, ship_id);
-    }
+    ctx.seed_ewar_source_for_test(Some(sys_id), 72_000_011, ship_id);
     let _ = sys_handle
         .apply_damage(72_000_012, DamageVector::new(500.0, 0.0, 0.0, 0.0))
         .await;

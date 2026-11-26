@@ -1128,13 +1128,17 @@ fn step_observatories_in_actor_collecting(
                 is_active: false,
             },
         );
-        if let Some(cid) = pilot_opt {
+        let fallback_owner_id = ballpark
+            .ball_slim_meta
+            .get(&sid)
+            .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
+        if pilot_opt.is_some() || fallback_owner_id.is_some() {
             for rc in removed_cloaks {
                 post_unlock.push(PostUnlockIntent::DeactivationHook(
                     DeferredDeactivationHookOp {
                         solar_system_id,
-                        char_id: Some(cid),
-                        fallback_owner_id: None,
+                        char_id: pilot_opt,
+                        fallback_owner_id,
                         cycle: rc,
                     },
                 ));

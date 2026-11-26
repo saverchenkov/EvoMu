@@ -72,9 +72,6 @@ pub struct ServerContext {
     pub ship_fittings: Arc<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
     pub ship_fit_revs: Arc<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
     pub brain_versions: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
-    pub projected_ewar: Arc<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
-    pub projected_ewar_sources: Arc<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
-    pub active_ewar_starts: Arc<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
     pub active_scanner_probes: Arc<RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>>,
     pub(crate) active_probe_scan_contexts: Arc<RankedRwLock<HashMap<i64, Vec<crate::services::space_destiny::space_probe_scanning::ActiveProbeScanContext>>, RANK_LEAF>>,
     pub active_moon_probes: Arc<RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>>,
@@ -82,7 +79,6 @@ pub struct ServerContext {
     pub character_scan_progress: Arc<RankedRwLock<HashMap<(i64, u32, String), f64>, RANK_LEAF>>,
     pub invention_roll_override: Arc<RankedRwLock<Option<f64>, RANK_LEAF>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
-    pub module_reactivation_cooldowns: Arc<RankedRwLock<HashMap<(i64, i64, u32), ModuleCooldownEntry>, RANK_LEAF>>,
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
     pub mining_cycles: Arc<RankedRwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>, RANK_LEAF>>,
     /// Active Phased Asteroid Fields keyed by solar system ID (`MN-08`).
@@ -250,9 +246,6 @@ pub(crate) struct ServerContextWeak {
     ship_fittings: std::sync::Weak<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
     ship_fit_revs: std::sync::Weak<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
     brain_versions: std::sync::Weak<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
-    projected_ewar: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>, RANK_LEAF>>,
-    projected_ewar_sources: std::sync::Weak<RankedRwLock<HashMap<i64, i64>, RANK_LEAF>>,
-    active_ewar_starts: std::sync::Weak<RankedRwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>, RANK_LEAF>>,
     active_scanner_probes: std::sync::Weak<RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>>,
     active_probe_scan_contexts: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<crate::services::space_destiny::space_probe_scanning::ActiveProbeScanContext>>, RANK_LEAF>>,
     active_moon_probes: std::sync::Weak<RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>>,
@@ -260,7 +253,6 @@ pub(crate) struct ServerContextWeak {
     character_scan_progress: std::sync::Weak<RankedRwLock<HashMap<(i64, u32, String), f64>, RANK_LEAF>>,
     invention_roll_override: std::sync::Weak<RankedRwLock<Option<f64>, RANK_LEAF>>,
     mechanic_rng: std::sync::Weak<crate::rng::MechanicRng>,
-    module_reactivation_cooldowns: std::sync::Weak<RankedRwLock<HashMap<(i64, i64, u32), ModuleCooldownEntry>, RANK_LEAF>>,
     mining_cycles: std::sync::Weak<RankedRwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>, RANK_LEAF>>,
     phased_asteroid_fields: std::sync::Weak<RankedRwLock<HashMap<u32, crate::services::space_mining_harvest::PhasedAsteroidFieldState>, RANK_LEAF>>,
     crimewatch: std::sync::Weak<crate::combat::crimewatch::CrimeWatchLock>,
@@ -328,9 +320,6 @@ impl ServerContextWeak {
             ship_fittings: self.ship_fittings.upgrade()?,
             ship_fit_revs: self.ship_fit_revs.upgrade()?,
             brain_versions: self.brain_versions.upgrade()?,
-            projected_ewar: self.projected_ewar.upgrade()?,
-            projected_ewar_sources: self.projected_ewar_sources.upgrade()?,
-            active_ewar_starts: self.active_ewar_starts.upgrade()?,
             active_scanner_probes: self.active_scanner_probes.upgrade()?,
             active_probe_scan_contexts: self.active_probe_scan_contexts.upgrade()?,
             active_moon_probes: self.active_moon_probes.upgrade()?,
@@ -338,7 +327,6 @@ impl ServerContextWeak {
             character_scan_progress: self.character_scan_progress.upgrade()?,
             invention_roll_override: self.invention_roll_override.upgrade()?,
             mechanic_rng: self.mechanic_rng.upgrade()?,
-            module_reactivation_cooldowns: self.module_reactivation_cooldowns.upgrade()?,
             mining_cycles: self.mining_cycles.upgrade()?,
             phased_asteroid_fields: self.phased_asteroid_fields.upgrade()?,
             crimewatch: self.crimewatch.upgrade()?,
@@ -380,8 +368,7 @@ impl ServerContextWeak {
     }
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct ModuleCooldownEntry { pub recorded_unix_f64: f64, pub delay_s: f64, pub solar_system_id: Option<u32>, pub recorded_sys_sim_s: f64 }
+pub use crate::system_actor::ModuleCooldownEntry;
 
 pub use crate::system_actor::ActiveFighterSquadron;
 
@@ -508,9 +495,6 @@ impl ServerContext {
             ship_fittings: Arc::downgrade(&self.ship_fittings),
             ship_fit_revs: Arc::downgrade(&self.ship_fit_revs),
             brain_versions: Arc::downgrade(&self.brain_versions),
-            projected_ewar: Arc::downgrade(&self.projected_ewar),
-            projected_ewar_sources: Arc::downgrade(&self.projected_ewar_sources),
-            active_ewar_starts: Arc::downgrade(&self.active_ewar_starts),
             active_scanner_probes: Arc::downgrade(&self.active_scanner_probes),
             active_probe_scan_contexts: Arc::downgrade(&self.active_probe_scan_contexts),
             active_moon_probes: Arc::downgrade(&self.active_moon_probes),
@@ -518,7 +502,6 @@ impl ServerContext {
             character_scan_progress: Arc::downgrade(&self.character_scan_progress),
             invention_roll_override: Arc::downgrade(&self.invention_roll_override),
             mechanic_rng: Arc::downgrade(&self.mechanic_rng),
-            module_reactivation_cooldowns: Arc::downgrade(&self.module_reactivation_cooldowns),
             mining_cycles: Arc::downgrade(&self.mining_cycles),
             phased_asteroid_fields: Arc::downgrade(&self.phased_asteroid_fields),
             crimewatch: Arc::downgrade(&self.crimewatch),
@@ -581,9 +564,6 @@ impl ServerContext {
         let pending_notifications = Arc::new(RankedRwLock::new(HashMap::new()));
         let ship_fittings = Arc::new(RankedRwLock::new(HashMap::new()));
         let ship_fit_revs = Arc::new(RankedRwLock::new(HashMap::new()));
-        let projected_ewar = Arc::new(RankedRwLock::new(HashMap::new()));
-        let projected_ewar_sources = Arc::new(RankedRwLock::new(HashMap::new()));
-        let active_ewar_starts = Arc::new(RankedRwLock::new(HashMap::new()));
         let invention_roll_override = Arc::new(RankedRwLock::new(None));
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
         let tactical_state = Arc::new(RankedRwLock::new(
@@ -610,7 +590,6 @@ impl ServerContext {
         let cluster_misc_arc = Arc::new(RankedMutex::new(
             crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db),
         ));
-        let module_reactivation_cooldowns = Arc::new(RankedRwLock::new(HashMap::new()));
         let persisted_notifications = db.with_snapshot(|snap| {
             let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap.owner_notes.values()
                 .filter(|n| n.character_id == -79)
@@ -674,9 +653,6 @@ impl ServerContext {
             ship_fittings,
             ship_fit_revs,
             brain_versions: Arc::new(RankedRwLock::new(HashMap::new())),
-            projected_ewar,
-            projected_ewar_sources,
-            active_ewar_starts,
             active_scanner_probes: Arc::new(RankedRwLock::new(persisted_probes)),
             active_probe_scan_contexts: Arc::new(RankedRwLock::new(HashMap::new())),
             active_moon_probes: Arc::new(RankedRwLock::new(Vec::new())),
@@ -684,7 +660,6 @@ impl ServerContext {
             character_scan_progress: Arc::new(RankedRwLock::new(HashMap::new())),
             invention_roll_override,
             mechanic_rng,
-            module_reactivation_cooldowns,
             mining_cycles: Arc::new(RankedRwLock::new(HashMap::new())),
             phased_asteroid_fields: Arc::new(RankedRwLock::new(HashMap::new())),
             crimewatch,
@@ -1584,164 +1559,6 @@ impl ServerContext {
         m.retain(|&(_, cid)| cid != char_id);
     }
 
-    fn resolve_ship_cooldown_clock(&self, ship_id: i64, module_id: i64) -> (u32, Option<u32>, f64) {
-        let (type_id, db_sys_opt) = self.db.with_snapshot(|s| {
-            let tid = s.items.get(&module_id).map(|i| i.type_id).unwrap_or(0);
-            let char_sys = s
-                .characters
-                .values()
-                .find(|c| c.active_ship_id == ship_id)
-                .map(|c| c.solar_system_id);
-            let item_sys = s.items.get(&ship_id).and_then(|it| {
-                (30_000_000..=33_000_000)
-                    .contains(&it.location_id)
-                    .then_some(it.location_id as u32)
-            });
-            (tid, char_sys.or(item_sys))
-        });
-        let sys_opt = self.systems.find_ball_system_sync(ship_id).or(db_sys_opt);
-        let cur_sys_sim_s = sys_opt
-            .map(|sid| self.systems.get_system_sim_elapsed(sid))
-            .unwrap_or(0.0);
-        (type_id, sys_opt, cur_sys_sim_s)
-    }
-
-    pub(crate) fn resolve_sys_tidi_mode(&self, sys_opt: Option<u32>) -> (f64, bool) {
-        let Some(sid) = sys_opt else {
-            return (1.0, false);
-        };
-        let tidi = self.systems.get_system_tidi_factor(sid);
-        let has_tidi_history = self
-            .systems
-            .cluster_nodes
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .tidi_history_systems
-            .contains(&sid);
-        (tidi, has_tidi_history || tidi < 0.999_999)
-    }
-
-    pub(crate) fn remaining_cooldown_secs_with_tidi(
-        entry: &ModuleCooldownEntry,
-        now_unix_f64: f64,
-        sys_opt: Option<u32>,
-        cur_sys_sim_s: f64,
-        tidi_factor: f64,
-        has_tidi_history: bool,
-    ) -> f64 {
-        // If `recorded_unix_f64` sits in the future relative to `now_unix_f64` (e.g. persisted from
-        // an earlier `/advancetime` session before server restart reset the virtual clock), treat
-        // the stale entry as expired rather than freezing activation until wall clock catches up (#1036).
-        if !entry.delay_s.is_finite()
-            || !entry.recorded_unix_f64.is_finite()
-            || !now_unix_f64.is_finite()
-            || entry.delay_s <= 0.0
-            || now_unix_f64 + 1e-6 < entry.recorded_unix_f64
-        {
-            return 0.0;
-        }
-        let wall_elapsed = (now_unix_f64 - entry.recorded_unix_f64).max(0.0);
-        let has_sim = entry.solar_system_id.is_some()
-            && entry.solar_system_id == sys_opt
-            && cur_sys_sim_s.is_finite()
-            && entry.recorded_sys_sim_s.is_finite()
-            && cur_sys_sim_s >= entry.recorded_sys_sim_s;
-        let sim_elapsed = if has_sim {
-            (cur_sys_sim_s - entry.recorded_sys_sim_s).max(0.0)
-        } else {
-            0.0
-        };
-        let elapsed = if has_sim && (has_tidi_history || tidi_factor < 0.999_999) {
-            if cur_sys_sim_s > 0.0 || entry.recorded_sys_sim_s > 0.0 {
-                sim_elapsed
-            } else {
-                (wall_elapsed * tidi_factor.clamp(0.10, 1.0)).max(sim_elapsed)
-            }
-        } else {
-            wall_elapsed.max(sim_elapsed)
-        };
-        (entry.delay_s - elapsed).max(0.0)
-    }
-
-    /// Resolves the Unix expiry timestamp (`f64`) of `(ship_id, module_id)`'s active reactivation
-    /// cooldown, returning `None` if no cooldown exists or it has already elapsed.
-    fn resolve_active_reactivation_cooldown(&self, ship_id: i64, module_id: i64) -> Option<f64> {
-        let now = self.now_unix_secs() as f64;
-        let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
-        let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(sys_opt);
-        let guard = self
-            .module_reactivation_cooldowns
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.get(&(ship_id, module_id, type_id)).and_then(|entry| {
-            let rem = Self::remaining_cooldown_secs_with_tidi(
-                entry,
-                now,
-                sys_opt,
-                cur_sys_sim_s,
-                tidi_factor,
-                has_tidi_history,
-            );
-            if rem <= 1e-6 {
-                None
-            } else {
-                let eff_tidi = tidi_factor.clamp(0.10, 1.0);
-                if eff_tidi < 0.999_999 {
-                    Some(now + rem / eff_tidi)
-                } else if has_tidi_history {
-                    Some(now + rem)
-                } else {
-                    Some(entry.recorded_unix_f64 + entry.delay_s)
-                }
-            }
-        })
-    }
-
-    /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
-    pub fn is_module_in_reactivation_delay(&self, ship_id: i64, module_id: i64) -> bool {
-        self.resolve_active_reactivation_cooldown(ship_id, module_id)
-            .is_some()
-    }
-
-    /// Records module reactivation delay until `now + delay_s` (`feat:dogma.reactivation-delay`, `DG-4`).
-    pub fn record_module_reactivation_delay(&self, ship_id: i64, module_id: i64, delay_s: f64) {
-        if !delay_s.is_finite() || delay_s <= 0.0 {
-            return;
-        }
-        let now = self.now_unix_secs() as f64;
-        let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
-        let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(sys_opt);
-        let mut guard = self
-            .module_reactivation_cooldowns
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let effective_delay = guard
-            .get(&(ship_id, module_id, type_id))
-            .map(|e| {
-                Self::remaining_cooldown_secs_with_tidi(
-                    e,
-                    now,
-                    sys_opt,
-                    cur_sys_sim_s,
-                    tidi_factor,
-                    has_tidi_history,
-                )
-                .max(delay_s)
-            })
-            .unwrap_or(delay_s);
-        guard.insert(
-            (ship_id, module_id, type_id),
-            ModuleCooldownEntry {
-                recorded_unix_f64: now,
-                delay_s: effective_delay,
-                solar_system_id: sys_opt,
-                recorded_sys_sim_s: cur_sys_sim_s,
-            },
-        );
-        drop(guard);
-        self.persist_server_runtime_to_db();
-    }
-
     /// Returns the active [`eve_db::ServerClock`] implementation (`T-7`).
     pub fn clock(&self) -> Arc<dyn eve_db::ServerClock> {
         self.clock
@@ -2533,12 +2350,8 @@ impl ServerContext {
                 let _ = handle.try_send_fit_projection(ship_id, proj);
             }
         } else {
-            self.systems.enqueue_post_unlock_action(Box::new(move || {
-                let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
-                if let Some(proj) = proj_opt {
-                    let _ = handle.try_send_fit_projection(ship_id, proj);
-                }
-            }));
+            let h = handle.clone();
+            h.enqueue_post_unlock_action(Box::new(move || { let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh); if let Some(proj) = proj_opt { let _ = handle.try_send_fit_projection(ship_id, proj); } }));
         }
     }
 
@@ -2723,9 +2536,8 @@ impl ServerContext {
                     if eve_db::lock_rank::held_lock_ranks().is_empty() {
                         let _ = handle.try_send_fit_projection(ship_id, projection);
                     } else {
-                        self.systems.enqueue_post_unlock_action(Box::new(move || {
-                            let _ = handle.try_send_fit_projection(ship_id, projection);
-                        }));
+                        let h = handle.clone();
+                        h.enqueue_post_unlock_action(Box::new(move || { let _ = handle.try_send_fit_projection(ship_id, projection); }));
                     }
                 }
                 return Some(rev);
@@ -2910,13 +2722,7 @@ impl ServerContext {
                 char_id,
                 self.now_unix(),
             );
-        let active_projected = self
-            .projected_ewar
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ship_id)
-            .cloned()
-            .unwrap_or_default();
+        let active_projected = self.systems.ship_ewar_projections(ship_id);
         let active_ship_dbuffs =
             crate::services::inventory_fitting::fitting_scanners_superweapons::active_ship_dbuff_gang_bursts(
                 self,
@@ -3346,17 +3152,6 @@ impl ServerContext {
         self.db
             .with_snapshot(|s| s.cluster_and_runtime.module_reload_until_unix.get(&module_id).copied())
             .filter(|&until| now < until)
-    }
-
-    /// Returns the Unix timestamp (`f64`) when `(ship_id, module_id)` finishes its
-    /// reactivation cooldown, if active (`§C`).
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn module_reactivation_cooldown_until_unix(
-        &self,
-        ship_id: i64,
-        module_id: i64,
-    ) -> Option<f64> {
-        self.resolve_active_reactivation_cooldown(ship_id, module_id)
     }
 
     /// Returns the Unix timestamp when `char_id`'s session-change timer expires, if active (`§C`).

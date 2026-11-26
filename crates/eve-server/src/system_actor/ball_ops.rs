@@ -12,7 +12,7 @@
 
 use super::{
     celestials, defer_barrier_cmd_reply, defer_cmd_reply, defer_reply, protection, ActorExecCtx,
-    CharacterId, ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput,
+    CharacterId, CooldownPersistGate, ExplicitUpdateStateGuard, ExtendedNpcAttackActorInput,
     ExtendedNpcAttackActorOutput, LogiSoakCycleActorInput, ModuleDeactivationHook,
     ReconnectLiveShipRequest, SpawnReconnectedShipRequest, SystemActorState, SystemCommand,
     SystemHandle, WarpProvenance,
@@ -36,11 +36,14 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     pub(in crate::system_actor) ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(in crate::system_actor) scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    deactivation_sink_hook: Option<ModuleDeactivationHook>,
     explicit_update_state_guards:
         Option<&'a Arc<RankedMutex<HashMap<(u64, i64), ExplicitUpdateStateGuard>, RANK_LEAF>>>,
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
     removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
     pub(in crate::system_actor) post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
+    pub(in crate::system_actor) cooldown_persist_gate: Option<&'a Arc<CooldownPersistGate>>,
+    pub(in crate::system_actor) tidi_factor: f64,
 }
 
 impl<'a> BallOpsCtx<'a> {
@@ -52,18 +55,18 @@ impl<'a> BallOpsCtx<'a> {
             ball_positions: exec_ctx.ball_positions_actor,
             scrambled_balls: exec_ctx.scrambled_balls_actor,
             module_deactivation_hook: exec_ctx.module_deactivation_hook_actor,
+            deactivation_sink_hook: exec_ctx.deactivation_sink_hook.clone(),
             explicit_update_state_guards: Some(exec_ctx.explicit_update_state_guards_actor),
             ball_spawn_tokens: Some(exec_ctx.ball_spawn_tokens),
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
             post_unlock_ops: exec_ctx.post_unlock_ops,
+            cooldown_persist_gate: Some(exec_ctx.cooldown_persist_gate_actor),
+            tidi_factor: celestials::clamp_tidi_factor_bits(exec_ctx.tidi_factor_bits_actor),
         }
     }
 
     fn read_deact_hook(&self) -> Option<ModuleDeactivationHook> {
-        self.module_deactivation_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.deactivation_sink_hook.clone()
     }
 
     pub(in crate::system_actor) fn sync_positions(&self) {
@@ -130,6 +133,11 @@ fn run_direct_ball_op_on_current_thread<R>(
     op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
 ) -> R {
     let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(handle);
+    let tidi = handle.tidi_factor();
+    let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
+        &handle.module_deactivation_hook,
+        &handle.module_deactivation_post_unlock_hook,
+    );
     let (out, ticket) = {
         let mut ballpark = handle
             .ballpark
@@ -152,12 +160,32 @@ fn run_direct_ball_op_on_current_thread<R>(
             ball_positions: &handle.ball_positions,
             scrambled_balls: &handle.scrambled_balls,
             module_deactivation_hook: &handle.module_deactivation_hook,
+            deactivation_sink_hook: super::ewar_cooldowns::active_sink_hook(
+                raw_hook.as_ref(),
+                post_hook.as_ref(),
+            ),
             explicit_update_state_guards: None,
             ball_spawn_tokens: None,
             removed_checkpoint_ball: None,
             post_unlock_ops: &mut ops,
+            cooldown_persist_gate: Some(&handle.cooldown_persist_gate),
+            tidi_factor: tidi,
         };
+        if tidi < 0.999_999 || handle.cooldown_persist_gate.has_tidi_history() {
+            ctx.actor_st.has_tidi_history = true;
+        }
         let out = op(&mut ctx);
+        let cmd_tx_weak = handle.cmd_tx.downgrade();
+        let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+            handle.solar_system_id,
+            &mut actor_st,
+            &mut ops,
+            raw_hook,
+            post_hook,
+            &handle.cooldown_persist_gate,
+            Some(&cmd_tx_weak),
+            tidi,
+        );
         protection::sync_active_module_ships_cache(
             &actor_st.active_module_cycles,
             &actor_st.external_active_modules,
@@ -905,6 +933,8 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
     ball_positions: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: &Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     module_deactivation_hook: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    cooldown_persist_gate: Option<&Arc<CooldownPersistGate>>,
+    tidi_factor: f64,
     post_unlock_ops: &mut super::post_unlock::PostUnlockOps,
     ball_id: BallId,
 ) -> Option<Ball> {
@@ -915,10 +945,13 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
         ball_positions,
         scrambled_balls,
         module_deactivation_hook,
+        deactivation_sink_hook: module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone(),
         explicit_update_state_guards: None,
         ball_spawn_tokens: None,
         removed_checkpoint_ball: None,
         post_unlock_ops,
+        cooldown_persist_gate,
+        tidi_factor,
     };
     remove_ball_in_actor(&mut ctx, ball_id, false)
 }
@@ -2045,6 +2078,45 @@ impl SystemHandle {
     }
 }
 
+pub(crate) fn apply_repair_combat_state_in_ballpark(
+    bp: &mut Ballpark,
+    ball_id: BallId,
+    hull_heal: f64,
+    armor_heal: f64,
+    shield_heal: f64,
+) -> Option<eve_destiny::CombatState> {
+    let grid_id = bp.ball_grid_ids.get(&ball_id).copied();
+    let cs = bp.combat_states.get_mut(&ball_id)?;
+    let prev_s = cs.shield_hp;
+    let prev_a = cs.armor_hp;
+    let prev_h = cs.structure_hp;
+    cs.shield_hp = (cs.shield_hp + shield_heal.max(0.0)).min(cs.max_shield_hp);
+    cs.armor_hp = (cs.armor_hp + armor_heal.max(0.0)).min(cs.max_armor_hp);
+    cs.structure_hp = (cs.structure_hp + hull_heal.max(0.0)).min(cs.max_structure_hp);
+    let hp_changed = (cs.shield_hp - prev_s).abs() > 1e-6
+        || (cs.armor_hp - prev_a).abs() > 1e-6
+        || (cs.structure_hp - prev_h).abs() > 1e-6;
+    let cloned = cs.clone();
+    if hp_changed {
+        let ratio = |cur: f64, max: f64| {
+            if max > 0.0 {
+                (cur / max).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
+        bp.emit_damage_and_destruction_events(
+            ball_id,
+            grid_id,
+            ratio(cloned.shield_hp, cloned.max_shield_hp),
+            ratio(cloned.armor_hp, cloned.max_armor_hp),
+            ratio(cloned.structure_hp, cloned.max_structure_hp),
+            false,
+        );
+    }
+    Some(cloned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2102,9 +2174,11 @@ mod tests {
             before_step_reply_hook_for_test: Arc::new(RankedMutex::new(None)),
             npc_death_hook: Arc::new(RankedRwLock::new(None)),
             module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
+            module_deactivation_post_unlock_hook: Arc::new(RankedRwLock::new(None)),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+            cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),
         };
         handle.ballpark.attach_actor_state(&handle.actor_state);
         (handle, cmd_rx)

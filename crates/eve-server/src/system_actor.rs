@@ -28,6 +28,9 @@ pub use drones::*;
 mod test_seam;
 mod fighters; pub use fighters::*;
 mod fighters_persistence; pub(crate) use fighters_persistence::*;
+mod module_cooldowns;
+mod ewar_cooldowns;
+pub use ewar_cooldowns::*;
 #[cfg(test)]
 pub(crate) use activation_ops::{
     apply_fit_projection_in_actor, apply_fit_projection_with_cycles_in_actor,
@@ -243,6 +246,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) warp_stopped_at_actor: &'a Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(in crate::system_actor) active_module_ships_actor: &'a Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook_actor: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(in crate::system_actor) deactivation_sink_hook: &'a Option<ModuleDeactivationHook>,
     pub(in crate::system_actor) target_lock_completed_hook_actor: &'a Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(in crate::system_actor) tidi_factor_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) sim_elapsed_secs_bits_actor: &'a Arc<std::sync::atomic::AtomicU64>,
@@ -254,6 +258,7 @@ pub(in crate::system_actor) struct ActorExecCtx<'a> {
     pub(in crate::system_actor) unrebased_clock_offset_secs_actor: &'a Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) explicit_update_state_guards_actor:
         &'a Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
+    pub(in crate::system_actor) cooldown_persist_gate_actor: &'a Arc<CooldownPersistGate>,
     pub(in crate::system_actor) mechanic_rng: &'a Arc<crate::rng::MechanicRng>,
     pub(in crate::system_actor) post_unlock_in_flight_actor: &'a std::sync::atomic::AtomicUsize,
     pub(in crate::system_actor) completed_post_unlock_seq_actor: &'a std::sync::atomic::AtomicU64,
@@ -321,9 +326,12 @@ pub struct SystemRegistry {
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_post_unlock_hook:
+        Arc<RankedRwLock<Option<PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
-    pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    cooldown_persist_gates:
+        RankedRwLock<HashMap<SolarSystemId, Arc<CooldownPersistGate>>, RANK_SERVICE_STATE>,
     /// PvE special-site balls (system, ball id) in-flight or already spawned into this registry's
     /// ballparks. Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed.
     special_site_spawned_balls: SpecialSiteBallSpawnMap,
@@ -331,7 +339,6 @@ pub struct SystemRegistry {
     /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
     hydrated_wh_ore_anomalies: RankedMutex<std::collections::HashSet<(SolarSystemId, String)>, RANK_LEAF>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
-    pub module_reload_sim_deadlines: Arc<RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, RANK_LEAF>>,
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
@@ -356,6 +363,7 @@ pub struct SystemRegistry {
     /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
     pub system_wide_effects: RankedRwLock<types::SystemWideEffectsState, RANK_LEAF>,
     pub(crate) drone_rt_state: drones::RegistryDroneRuntimeState,
+    runtime_handle: RankedRwLock<Option<tokio::runtime::Handle>, RANK_LEAF>,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -386,13 +394,13 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RankedRwLock::new(None)),
             module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
+            module_deactivation_post_unlock_hook: Arc::new(RankedRwLock::new(None)),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
-            post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+            cooldown_persist_gates: RankedRwLock::new(HashMap::new()),
             special_site_spawned_balls: Arc::new(RankedMutex::new(HashMap::new())),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
-            module_reload_sim_deadlines: Arc::new(RankedRwLock::new(HashMap::new())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
             cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
@@ -409,8 +417,11 @@ impl SystemRegistry {
             lifecycle_test_hooks: Default::default(),
             system_wide_effects: RankedRwLock::new(types::SystemWideEffectsState::default()),
             drone_rt_state: drones::RegistryDroneRuntimeState::default(),
+            runtime_handle: RankedRwLock::new(None),
         }
     }
+
+    pub(crate) fn runtime_handle(&self) -> Option<tokio::runtime::Handle> { self.runtime_handle.read().ok().and_then(|g| g.clone()) }
 
     /// Reads any explicit system-wide effect override and overlapping list for `solar_system_id`
     /// without blocking on or spawning a solar system actor (`#1583` Track 2).
@@ -675,7 +686,21 @@ impl SystemRegistry {
     }
 
     pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
+        *self
+            .module_deactivation_post_unlock_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    pub fn set_module_deactivation_post_unlock_hook(
+        &self,
+        hook: PairedModuleDeactivationPostUnlockHook,
+    ) {
+        *self
+            .module_deactivation_post_unlock_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     pub fn set_target_lock_completed_hook(&self, hook: TargetLockCompletedHook) {
@@ -684,13 +709,6 @@ impl SystemRegistry {
 
     pub fn set_system_step_hook(&self, hook: SystemStepHook) {
         *self.system_step_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
-    }
-
-    pub(crate) fn enqueue_post_unlock_action(&self, action: PostUnlockHookAction) {
-        self.post_unlock_actions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(action);
     }
 
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
@@ -794,40 +812,6 @@ impl SystemRegistry {
         self.get_handle(solar_system_id)
             .map(|h| h.tidi_factor())
             .unwrap_or(1.0)
-    }
-
-    pub fn record_module_reload_sim_deadlines(
-        &self,
-        module_ids: &[i64],
-        solar_system_id: SolarSystemId,
-        sim_start_s: f64,
-        sim_deadline_s: f64,
-    ) {
-        let mut guard = self
-            .module_reload_sim_deadlines
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for &mid in module_ids {
-            guard.insert(mid, (solar_system_id, sim_start_s, sim_deadline_s));
-        }
-    }
-
-    pub fn clear_module_reload_sim_deadline(&self, module_id: i64) {
-        self.module_reload_sim_deadlines
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&module_id);
-    }
-
-    pub fn check_module_reload_sim_deadline(
-        &self,
-        module_id: i64,
-    ) -> Option<(SolarSystemId, f64, f64)> {
-        self.module_reload_sim_deadlines
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&module_id)
-            .copied()
     }
 
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
@@ -1148,15 +1132,49 @@ impl SystemRegistry {
                 }
             }
         }
+        let (initial_tidi, mut has_tidi_history) =
+            self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
+        let persist_gate = self.cooldown_persist_gate(solar_system_id);
+        let (persist_epoch, initial_cooldowns, loaded_cooldowns_cleanly) = {
+            let mut gate_guard = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let persist_epoch = persist_gate.bump_epoch();
+            if has_tidi_history {
+                persist_gate.mark_tidi_history();
+            } else if persist_gate.has_tidi_history() {
+                has_tidi_history = true;
+            }
+            let boot_loaded_opt = if db_read_safe {
+                db_opt.as_ref().and_then(|db| {
+                    ewar_cooldowns::load_active_system_module_cooldowns_for_boot_nonblocking(
+                        db, solar_system_id, initial_tidi, has_tidi_history, 0.0, 0.0,
+                    )
+                })
+            } else {
+                None
+            };
+            let loaded_cleanly = boot_loaded_opt.is_some();
+            if let Some((_, ref raw_boot_map)) = boot_loaded_opt {
+                gate_guard.boot_raw_cooldowns = raw_boot_map.clone();
+            } else {
+                gate_guard.boot_raw_cooldowns.clear();
+            }
+            (persist_epoch, boot_loaded_opt.map(|(a, _)| a).unwrap_or_default(), loaded_cleanly)
+        };
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
             pending_anchoring_disruptors: initial_pending_disruptors,
             sde_opt,
-            db_opt,
+            db_opt: db_opt.clone(),
             mechanic_rng_opt: Some(mechanic_rng.clone()),
             tactical_state: self.tactical_state.clone(),
-            module_reload_sim_deadlines: self.module_reload_sim_deadlines.clone(),
+            module_cooldowns: ActorModuleCooldownState {
+                reactivation_cooldowns: initial_cooldowns,
+                boot_db_pending_merge: db_opt.is_some() && !loaded_cooldowns_cleanly,
+                ..Default::default()
+            },
+            module_cooldown_persist_epoch: persist_epoch,
+            has_tidi_history,
             pending_notifications_opt: self.pending_notifications_opt.clone(),
             notify_tx_opt: self.notify_tx_opt.clone(),
             hibernated: Arc::clone(&hibernated),
@@ -1216,13 +1234,6 @@ impl SystemRegistry {
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         celestials::update_system_hibernation_flag(&initial_actor_state, &initial_ballpark, 0);
         protection::sync_all_protection_registry_in_actor(&initial_ballpark, &mut initial_actor_state);
-        let initial_tidi = self.cluster_nodes.read().ok()
-            .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
-            .or_else(|| self.db.as_ref().and_then(|db| db.with_snapshot(|snap| {
-                let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-                snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-            })))
-            .unwrap_or(1.0).clamp(0.10, 1.0);
         let initial_view = SystemView::from_ballpark(
             &initial_ballpark,
             Some(&initial_actor_state),
@@ -1279,15 +1290,23 @@ impl SystemRegistry {
             ballpark_shared, actor_state_shared, initial_post_unlock_ops, staged_claims: _,
         } = prepared;
         let (cmd_tx, cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
+        if let Ok(mut g) = self.runtime_handle.write() { *g = Some(rt_handle.clone()); }
+        let cmd_tx_weak_actor = cmd_tx.downgrade();
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
         let event_tx_actor = event_tx.clone();
         let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
         let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
         let mechanic_rng = self.mechanic_rng.clone();
         let module_deactivation_hook_actor = self.module_deactivation_hook.clone();
+        let module_deactivation_post_unlock_hook_actor =
+            self.module_deactivation_post_unlock_hook.clone();
         let target_lock_completed_hook_actor = self.target_lock_completed_hook.clone();
-        let post_unlock_actions_actor = self.post_unlock_actions.clone();
         let db_opt_actor = self.db.clone();
+        let post_unlock_actions_actor: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>> =
+            Arc::new(RankedMutex::new(Vec::new()));
+        let cooldown_persist_gate_actor = self.cooldown_persist_gate(solar_system_id);
+        let post_unlock_actions_for_handle = Arc::clone(&post_unlock_actions_actor);
+        let cooldown_persist_gate_for_handle = Arc::clone(&cooldown_persist_gate_actor);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
         let warp_stopped_at_actor = warp_stopped_at.clone();
@@ -1350,6 +1369,9 @@ impl SystemRegistry {
             view_tx: Arc::clone(&view_tx),
             tidi_factor_bits: Arc::clone(&tidi_factor_bits),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            module_deactivation_post_unlock_hook: Arc::clone(&self.module_deactivation_post_unlock_hook),
+            cooldown_persist_gate: Arc::clone(&cooldown_persist_gate_actor),
+            cmd_tx_weak: Some(cmd_tx.downgrade()),
             event_tx: event_tx.clone(),
         };
         let (post_unlock_tx, post_unlock_worker_join) =
@@ -1361,6 +1383,7 @@ impl SystemRegistry {
                 target_lock_completed_hook_actor.clone(),
                 post_unlock_actions_actor.clone(),
                 post_commit_targets,
+                Some(rt_handle.clone()),
             );
         if !initial_post_unlock_ops.is_empty() {
             let _ = post_unlock::send_post_unlock_item(
@@ -1416,9 +1439,15 @@ impl SystemRegistry {
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_delivery: Option<PendingActorDelivery> = None;
-
                 for cmd in cmd_batch {
                 let cmd_may_mutate_view = cmd.may_mutate_system_view();
+                let (raw_hook_cmd, post_hook_cmd) = ewar_cooldowns::read_deactivation_hooks(
+                    &module_deactivation_hook_actor,
+                    &module_deactivation_post_unlock_hook_actor,
+                );
+                let deactivation_sink_hook =
+                    ewar_cooldowns::active_sink_hook(raw_hook_cmd.as_ref(), post_hook_cmd.as_ref());
+                let cur_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
                 let countdown_hit = {
@@ -1442,10 +1471,16 @@ impl SystemRegistry {
                 let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut cmd_post_unlock_ops = post_unlock::PostUnlockOps::default();
                 let mut cmd_slim_changed = false;
-                let actor_delivery_out: Option<PendingActorDelivery> = {
+                let (deact_mutated_actor, actor_delivery_out): (bool, Option<PendingActorDelivery>) = {
                 let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 post_unlock::prune_actor_shadows_for_cmd(solar_system_id, &mut actor_st, &completed_post_unlock_seq_actor);
+                if cur_tidi_cmd < 0.999_999 {
+                    cooldown_persist_gate_actor.mark_tidi_history();
+                    actor_st.has_tidi_history = true;
+                } else if cooldown_persist_gate_actor.has_tidi_history() {
+                    actor_st.has_tidi_history = true;
+                }
                 let out = (|| -> Option<PendingActorDelivery> {
                 let mut pending_step: Option<(f64, StepReply)> = None;
                 let mut pending_volley: Option<(
@@ -1473,6 +1508,7 @@ impl SystemRegistry {
                     warp_stopped_at_actor: &warp_stopped_at_actor,
                     active_module_ships_actor: &active_module_ships_actor,
                     module_deactivation_hook_actor: &module_deactivation_hook_actor,
+                    deactivation_sink_hook: &deactivation_sink_hook,
                     target_lock_completed_hook_actor: &target_lock_completed_hook_actor,
                     tidi_factor_bits_actor: &tidi_factor_bits_actor,
                     sim_elapsed_secs_bits_actor: &sim_elapsed_secs_bits_actor,
@@ -1483,6 +1519,7 @@ impl SystemRegistry {
                     pending_destroyed_actor: &pending_destroyed_actor,
                     unrebased_clock_offset_secs_actor: &unrebased_clock_offset_secs_actor,
                     explicit_update_state_guards_actor: &explicit_update_state_guards_actor,
+                    cooldown_persist_gate_actor: &cooldown_persist_gate_actor,
                     mechanic_rng: &mechanic_rng,
                     post_unlock_in_flight_actor: &post_unlock_in_flight_actor,
                     completed_post_unlock_seq_actor: &completed_post_unlock_seq_actor,
@@ -1494,6 +1531,7 @@ impl SystemRegistry {
                     .and_then(|c| ball_ops::handle_ball_ops_command(&mut exec_ctx, c))
                     .and_then(|c| drones::handle_drone_runtime_command(&mut exec_ctx, c))
                     .and_then(|c| fighters::handle_fighter_runtime_command(&mut exec_ctx, c))
+                    .and_then(|c| ewar_cooldowns::handle_ewar_and_cooldown_command(&mut exec_ctx, c))
                     .and_then(|c| {
                         #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, c) }
                         #[cfg(not(any(test, feature = "testkit")))] { Some(c) }
@@ -1509,7 +1547,7 @@ impl SystemRegistry {
                                 let spawned_checkpoint_ball = &mut *exec_ctx.spawned_checkpoint_ball;
                                 let ball_positions_actor = exec_ctx.ball_positions_actor;
                                 let scrambled_balls_actor = exec_ctx.scrambled_balls_actor;
-                                let module_deactivation_hook_actor = exec_ctx.module_deactivation_hook_actor;
+                                let deactivation_sink_hook = exec_ctx.deactivation_sink_hook;
                                 let last_visible_stamp_actor = exec_ctx.last_visible_stamp_actor;
                                 let last_fx_stamp_actor = exec_ctx.last_fx_stamp_actor;
                                 let broadcast_seq_gate_actor = exec_ctx.broadcast_seq_gate_actor;
@@ -1924,10 +1962,7 @@ impl SystemRegistry {
                                     if !volley_destroyed.is_empty() {
                                         let dead_ids: Vec<BallId> =
                                             volley_destroyed.iter().map(|&(bid, _)| bid).collect();
-                                        let deact_guard = module_deactivation_hook_actor
-                                            .read()
-                                            .unwrap_or_else(|e| e.into_inner())
-                                            .clone();
+                                        let deact_guard = deactivation_sink_hook.as_ref();
                                         cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls_collecting(
                                             solar_system_id, ballpark,
                                             active_module_cycles,
@@ -1938,7 +1973,7 @@ impl SystemRegistry {
                                                 .as_deref()
                                                 .map(|r| r as &dyn AnyRwLock<_>),
                                             notify_tx_opt.as_ref(),
-                                            deact_guard.as_ref(),
+                                            deact_guard,
                                             &dead_ids,
                                             post_unlock_ops,
                                         );
@@ -2177,29 +2212,43 @@ impl SystemRegistry {
                     })
                 }
                 })();
+                let post_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
+                let deact_mutated = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+                    solar_system_id, &mut actor_st, &mut cmd_post_unlock_ops,
+                    raw_hook_cmd, post_hook_cmd, &cooldown_persist_gate_actor,
+                    Some(&cmd_tx_weak_actor), post_tidi_cmd,
+                );
+                if deact_mutated || cmd_post_unlock_ops.has_deactivation_hook() {
+                    let prev_view = { view_tx_actor.borrow().clone() };
+                    let next_view = SystemView::from_ballpark(&ballpark, Some(&actor_st), post_tidi_cmd, Some(prev_view.as_ref()));
+                    let _ = view_tx_actor.send(Arc::new(next_view));
+                }
                 post_unlock::enqueue_actor_cmd_post_unlock_ops(
                     &mut actor_st,
                     post_unlock_tx_opt.0.as_ref(),
                     &post_unlock_in_flight_actor,
                     cmd_post_unlock_ops,
                 );
-                out
+                (deact_mutated, out)
                 };
                 (
                     cmd_slim_changed,
+                    deact_mutated_actor,
                     deferred_replies,
                     deferred_db_replies,
                     actor_delivery_out,
                 )
                 }));
+                let _ = flush_post_unlock_actions(&post_unlock_actions_actor);
                 match cmd_outcome {
                     Ok((
                         cmd_slim_changed,
+                        deact_mutated_actor,
                         deferred_replies,
                         deferred_db_replies,
                         actor_delivery_out,
                     )) => {
-                        if cmd_may_mutate_view || cmd_slim_changed {
+                        if cmd_may_mutate_view || cmd_slim_changed || deact_mutated_actor {
                             batch_view_dirty = true;
                         }
                         batch_deferred_replies.extend(deferred_replies);
@@ -2209,6 +2258,7 @@ impl SystemRegistry {
                         }
                     }
                     Err(panic_payload) => {
+                        let _ = flush_post_unlock_actions(&post_unlock_actions_actor);
                         let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         let msg = panic_payload
                             .downcast_ref::<&str>()
@@ -2224,6 +2274,7 @@ impl SystemRegistry {
                     }
                 }
                 }
+                flush_post_unlock_actions(&post_unlock_actions_actor);
                 if batch_view_dirty {
                     let next_view = {
                         let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
@@ -2396,57 +2447,13 @@ impl SystemRegistry {
             #[cfg(test)] before_step_reply_hook_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            module_deactivation_post_unlock_hook: Arc::clone(&self.module_deactivation_post_unlock_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
             system_step_hook: Arc::clone(&self.system_step_hook),
-            post_unlock_actions: Arc::clone(&self.post_unlock_actions),
+            post_unlock_actions: post_unlock_actions_for_handle,
+            cooldown_persist_gate: cooldown_persist_gate_for_handle,
         };
         (handle, lazy_gates)
-    }
-}
-
-pub(crate) fn apply_repair_combat_state_in_ballpark(
-    bp: &mut Ballpark,
-    ball_id: BallId,
-    hull_heal: f64,
-    armor_heal: f64,
-    shield_heal: f64,
-) -> Option<eve_destiny::CombatState> {
-    let grid_id = bp.ball_grid_ids.get(&ball_id).copied();
-    let cs = bp.combat_states.get_mut(&ball_id)?;
-    let prev_s = cs.shield_hp;
-    let prev_a = cs.armor_hp;
-    let prev_h = cs.structure_hp;
-    cs.shield_hp = (cs.shield_hp + shield_heal.max(0.0)).min(cs.max_shield_hp);
-    cs.armor_hp = (cs.armor_hp + armor_heal.max(0.0)).min(cs.max_armor_hp);
-    cs.structure_hp = (cs.structure_hp + hull_heal.max(0.0)).min(cs.max_structure_hp);
-    let hp_changed = (cs.shield_hp - prev_s).abs() > 1e-6
-        || (cs.armor_hp - prev_a).abs() > 1e-6
-        || (cs.structure_hp - prev_h).abs() > 1e-6;
-    let cloned = cs.clone();
-    if hp_changed {
-        let ratio = |cur: f64, max: f64| if max > 0.0 { (cur / max).clamp(0.0, 1.0) } else { 1.0 };
-        bp.emit_damage_and_destruction_events(ball_id, grid_id, ratio(cloned.shield_hp, cloned.max_shield_hp), ratio(cloned.armor_hp, cloned.max_armor_hp), ratio(cloned.structure_hp, cloned.max_structure_hp), false);
-    }
-    Some(cloned)
-}
-
-pub(crate) fn flush_post_unlock_actions(
-    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-) {
-    if !held_lock_ranks().is_empty() {
-        return;
-    }
-    loop {
-        let batch = {
-            let mut guard = actions.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.is_empty() {
-                break;
-            }
-            std::mem::take(&mut *guard)
-        };
-        for action in batch {
-            action();
-        }
     }
 }
 

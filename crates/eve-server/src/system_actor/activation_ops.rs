@@ -359,7 +359,7 @@ pub(crate) fn apply_set_movement_mode_command(
     base_scramble_strengths: &mut HashMap<BallId, i32>,
     base_core_strengths: &mut HashMap<BallId, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    module_deactivation_hook_actor: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    deactivation_sink_hook: &Option<ModuleDeactivationHook>,
     pending_notifications_opt: &Option<
         Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>,
     >,
@@ -382,7 +382,7 @@ pub(crate) fn apply_set_movement_mode_command(
         Some(MovementMode::Warp { .. })
     );
     let pre_ev_len = ballpark.pending_events.len();
-    let read_hook = || module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let read_hook = || deactivation_sink_hook.clone();
     match ballpark.set_mode(ball_id, mode) {
         Ok(()) => {
             if ballpark.pending_events.len() > pre_ev_len {
@@ -473,7 +473,7 @@ fn run_set_movement_mode_from_ctx(
         &mut exec_ctx.actor_st.base_scramble_strengths,
         &mut exec_ctx.actor_st.base_core_strengths,
         &exec_ctx.actor_st.db_opt,
-        exec_ctx.module_deactivation_hook_actor,
+        exec_ctx.deactivation_sink_hook,
         &exec_ctx.actor_st.pending_notifications_opt,
         &exec_ctx.actor_st.notify_tx_opt,
         exec_ctx.ball_positions_actor,

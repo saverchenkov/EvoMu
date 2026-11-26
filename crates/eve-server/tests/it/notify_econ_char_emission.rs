@@ -2161,7 +2161,7 @@ async fn notify_batch8_combat_ewar_cloak_and_invuln() {
         "unauthorized Deactivate must not emit OnEwarEnd to victim"
     );
     assert!(
-        ctx.projected_ewar.read().unwrap().get(&ship_b).is_some_and(|v| !v.is_empty()),
+        !ctx.systems.ship_ewar_projections(ship_b).is_empty(),
         "unauthorized Deactivate must not cleanse projected_ewar on victim"
     );
 

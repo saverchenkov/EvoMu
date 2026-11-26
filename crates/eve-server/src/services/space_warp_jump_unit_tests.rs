@@ -6928,25 +6928,25 @@ async fn cmd_stargate_jump_cleans_attacker_cycles_ewar_remote_assist_and_notices
     let mut tp_eff = eve_dogma::DogmaItemState::from_sde(tp_mod_id, tp_type_id, &ctx.sde);
     tp_eff.base_attributes.insert(54, 50_000.0);
     tp_eff.base_attributes.insert(554, 30.0);
-    ctx.projected_ewar_sources
-        .write()
-        .unwrap()
-        .insert(tp_mod_id, ship_b);
-    ctx.projected_ewar.write().unwrap().insert(
-        ship_a,
-        vec![eve_dogma::ProjectedEwarEffect {
-            source_module_id: tp_mod_id,
-            source_module_type_id: tp_type_id,
-            charge_type_id: None,
-            distance: 1_000.0,
-            overloaded: false,
-            effective_module: tp_eff,
-        }],
-    );
-    ctx.active_ewar_starts
-        .write()
-        .unwrap()
-        .insert((ship_b, tp_mod_id), vec![(ship_a, "targetPainter")]);
+    old_handle
+        .upsert_projected_ewar(
+            ship_b,
+            ship_a,
+            eve_dogma::ProjectedEwarEffect {
+                source_module_id: tp_mod_id,
+                source_module_type_id: tp_type_id,
+                charge_type_id: None,
+                distance: 1_000.0,
+                overloaded: false,
+                effective_module: tp_eff,
+            },
+        )
+        .await
+        .expect("seed projected EWAR");
+    old_handle
+        .record_active_ewar_start(ship_b, tp_mod_id, ship_a, "targetPainter")
+        .await
+        .expect("seed active EWAR start");
 
     let rsb_type = ctx.sde.types.get(&rsb_type_id).expect("rsb type");
     let mut rsb_state = eve_dogma::DogmaItemState::from_sde(rsb_mod_id, rsb_type_id, &ctx.sde);
@@ -7024,11 +7024,7 @@ async fn cmd_stargate_jump_cleans_attacker_cycles_ewar_remote_assist_and_notices
         assert!(!snap.module_active_charges.contains_key(&rsb_mod_id));
     });
     assert!(
-        ctx.projected_ewar
-            .read()
-            .unwrap()
-            .get(&ship_a)
-            .is_none_or(|v| v.is_empty()),
+        ctx.systems.ship_ewar_projections(ship_a).is_empty(),
         "projected_ewar on ship_a must be flushed on jump"
     );
     assert!(

@@ -98,10 +98,8 @@ fn module_deactivation_and_target_lock_hooks_cloak_cooldown_and_auto_reload() {
 
     // Verify cooldown recorded, active state cleared, and OnGodmaShipEffect + OnSpecialFX + OnChargeBeingLoadedToModule queued
     assert!(ctx
-        .module_reactivation_cooldowns
-        .read()
-        .unwrap()
-        .contains_key(&(ship1, mod_id, cloak_tid)));
+        .module_cooldown_entry_for_test(ship1, mod_id, cloak_tid)
+        .is_some());
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.module_active_states.contains(&mod_id));
         assert!(!snap.module_active_charges.contains_key(&mod_id));
@@ -134,8 +132,8 @@ fn module_deactivation_and_target_lock_hooks_cloak_cooldown_and_auto_reload() {
     assert!(q[&char2].iter().any(|n| n.event == "OnMultiEvent"));
 }
 
-#[test]
-fn alpha_omega_skill_prerequisites_and_projected_ewar_signature_radius_math() {
+#[tokio::test]
+async fn alpha_omega_skill_prerequisites_and_projected_ewar_signature_radius_math() {
     let mut ctx = test_ctx();
     let now = 1_800_000_000u64;
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
@@ -206,6 +204,24 @@ fn alpha_omega_skill_prerequisites_and_projected_ewar_signature_radius_math() {
     });
 
     // 4) Projected EWAR upsert (insert + update in place) & remove_projected_ewar_by_module ownership check
+    let ewar_sys_id = 30_000_142_u32;
+    let ewar_sys = ctx.systems.get_or_spawn(ewar_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            800_001,
+            InventoryItemRecord {
+                item_id: 800_001,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: ewar_sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     let mut tp_mod = DogmaItemState::from_sde(700_001, 379, &ctx.sde);
     tp_mod.base_attributes.insert(554, 25.0);
     tp_mod
@@ -234,7 +250,7 @@ fn alpha_omega_skill_prerequisites_and_projected_ewar_signature_radius_math() {
         effective_module: tp_mod,
     };
     ctx.upsert_projected_ewar_on_ship(800_001, 900_001, eff2);
-    assert_eq!(ctx.projected_ewar.read().unwrap()[&900_001].len(), 1);
+    assert_eq!(ewar_sys.projected_ewar_for(900_001).len(), 1);
     let sig2 = ctx.effective_target_signature_radius(900_001, 100.0);
     assert!((sig2 - 150.0).abs() < 1e-6);
 
@@ -419,17 +435,15 @@ async fn wire_module_deactivation_hook_uses_passed_solar_system_id_not_db_charac
         },
     );
 
-    let cooldowns = ctx.module_reactivation_cooldowns.read().unwrap();
-    let entry = cooldowns
-        .get(&(ship1, mod_id, cloak_tid))
-        .expect("cloak cooldown recorded");
+    let entry = h_a
+        .module_reactivation_cooldown(&(ship1, mod_id, cloak_tid))
+        .expect("cloak cooldown recorded in sys_a actor");
     assert_eq!(entry.solar_system_id, Some(sys_a));
     assert!(
         (entry.recorded_sys_sim_s - 7.0).abs() < 1e-6,
         "expected sys_a sim elapsed 7.0, got {}",
         entry.recorded_sys_sim_s
     );
-    drop(cooldowns);
 
     assert!(
         ctx.drain_notifications_for_char(obs_a)
@@ -460,13 +474,12 @@ async fn wire_module_deactivation_hook_uses_passed_solar_system_id_not_db_charac
             ..Default::default()
         },
     );
-    let cooldowns2 = ctx.module_reactivation_cooldowns.read().unwrap();
-    let entry_zero = cooldowns2
-        .get(&(ship1, mod_id_zero, cloak_tid))
-        .expect("zero-sys cloak cooldown recorded");
-    assert_eq!(entry_zero.solar_system_id, None);
-    assert!((entry_zero.recorded_sys_sim_s - 0.0).abs() < 1e-6);
-    drop(cooldowns2);
+    assert!(h_b
+        .module_reactivation_cooldown(&(ship1, mod_id_zero, cloak_tid))
+        .is_none());
+    assert!(h_a
+        .module_reactivation_cooldown(&(ship1, mod_id_zero, cloak_tid))
+        .is_none());
     assert!(
         !ctx.drain_notifications_for_char(obs_b)
             .iter()

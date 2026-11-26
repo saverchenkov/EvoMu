@@ -472,8 +472,8 @@ async fn context_advance_secs_and_skill_queues_omega_lapse_alpha_caps_and_partia
     assert!(ctx.active_moon_probes.read().unwrap().is_empty());
 }
 
-#[test]
-fn context_ship_fitting_cache_recalc_structure_fallback_and_charges_drones() {
+#[tokio::test]
+async fn context_ship_fitting_cache_recalc_structure_fallback_and_charges_drones() {
     let base = 1_800_000_000_u64;
     let (ctx, _) = fast_test_context(base);
     let char_id = 90_000_001_i64;
@@ -549,17 +549,22 @@ fn context_ship_fitting_cache_recalc_structure_fallback_and_charges_drones() {
     assert!(fit1.drones.iter().any(|&(id, _)| id == 940_010));
 
     // Warm hit + projected_ewar delta recalc
-    ctx.projected_ewar.write().unwrap().insert(
-        ship_id,
-        vec![ProjectedEwarEffect {
-            source_module_id: 940_001,
-            source_module_type_id: mod_tid,
-            charge_type_id: None,
-            distance: 5_000.0,
-            overloaded: false,
-            effective_module: DogmaItemState::from_sde(940_001, mod_tid, &ctx.sde),
-        }],
-    );
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .upsert_projected_ewar(
+            940_001,
+            ship_id,
+            ProjectedEwarEffect {
+                source_module_id: 940_001,
+                source_module_type_id: mod_tid,
+                charge_type_id: None,
+                distance: 5_000.0,
+                overloaded: false,
+                effective_module: DogmaItemState::from_sde(940_001, mod_tid, &ctx.sde),
+            },
+        )
+        .await
+        .expect("upsert projected EWAR into system actor");
     let fit2 = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).expect("recalc warm cache");
     assert_eq!(fit2.projected_ewar.len(), 1);
 
