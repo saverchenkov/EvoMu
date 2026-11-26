@@ -17,7 +17,7 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{
-    AutoMoonMinerRecord, InventoryFlag, InventoryItemRecord, MoonExtractionRecord,
+    AutoMoonMinerRecord, InventoryFlag, MoonExtractionRecord,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
