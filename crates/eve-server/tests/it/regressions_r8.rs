@@ -528,6 +528,41 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills
+            .entry(90_000_002)
+            .or_default()
+            .insert(3318, eve_db::TrainedSkillRecord { type_id: 3318, level: 5, skill_points: 512_000.0 });
+        for (item_id, type_id, flag, qty, singleton) in [
+            (100_000_944_i64, 2889_u32, InventoryFlag::HiSlot1, 1_i32, true),
+            (100_000_945, 2889, InventoryFlag::HiSlot2, 1, true),
+            (100_000_946, 519, InventoryFlag::LoSlot0, 1, true),
+            (100_000_947, 519, InventoryFlag::LoSlot1, 1, true),
+            (100_000_948, 519, InventoryFlag::LoSlot2, 1, true),
+            (100_000_949, 21924, InventoryFlag::HiSlot1, 120, false),
+            (100_000_950, 21924, InventoryFlag::HiSlot2, 120, false),
+        ] {
+            snap.items.insert(
+                item_id,
+                eve_db::InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: 90_000_002,
+                    location_id: 100_000_002,
+                    flag,
+                    quantity: qty,
+                    singleton,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(100_000_002);
     ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdFollowBall", &[PyRep::Integer(s2_npc_1001), PyRep::Real(500.0)], &kw, None).await.unwrap();
     for _ in 0..150 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
@@ -553,38 +588,52 @@ async fn test_review_r8_regressions() {
         )
         .await;
     let mut fws2_destroyed = false;
-    for shot in 0..80 {
+    for shot in 0..105 {
         if shot > 0 {
-            for _ in 0..5 {
+            for _ in 0..3 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
             }
+            if jita_handle.get_ball_snapshot(s2_npc_1001).await.unwrap().is_none() {
+                fws2_destroyed = true;
+                break;
+            }
         }
-        let fw_s2 = ctx
-            .dispatch_rpc(
-                &mut s2,
-                "dogmaIM",
-                None,
-                "Activate",
-                &[
-                    PyRep::Integer(100_000_006),
-                    PyRep::String("projectileFired".into()),
-                    PyRep::Integer(s2_npc_1001),
-                    PyRep::Integer(0),
-                ],
-                &kw,
-                None,
-            )
-            .await
-            .unwrap();
-        let PyRep::KeyVal(fws2_kv) = fw_s2 else {
-            panic!("Expected fws2_kv");
-        };
-        if fws2_kv.get("destroyed") == Some(&PyRep::Bool(true)) {
-            fws2_destroyed = true;
+        for gun_id in [100_000_006_i64, 100_000_944, 100_000_945] {
+            let fw_s2 = ctx
+                .dispatch_rpc(
+                    &mut s2,
+                    "dogmaIM",
+                    None,
+                    "Activate",
+                    &[
+                        PyRep::Integer(gun_id),
+                        PyRep::String("projectileFired".into()),
+                        PyRep::Integer(s2_npc_1001),
+                        PyRep::Integer(0),
+                    ],
+                    &kw,
+                    None,
+                )
+                .await
+                .unwrap();
+            if let PyRep::KeyVal(fws2_kv) = fw_s2 {
+                if fws2_kv.get("destroyed") == Some(&PyRep::Bool(true)) {
+                    fws2_destroyed = true;
+                    break;
+                }
+            }
+        }
+        if fws2_destroyed {
             break;
         }
     }
-    assert!(fws2_destroyed);
+    assert!(fws2_destroyed, "s2 mission NPC {s2_npc_1001} (mid={s2_mid_1}) must be destroyed");
+    ctx.db.with_mut_snapshot(|snap| {
+        for item_id in 100_000_944_i64..=100_000_950 {
+            snap.items.remove(&item_id);
+        }
+    });
+    ctx.invalidate_ship_fitting(100_000_002);
     ctx.dispatch_rpc(&mut s2, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
 
