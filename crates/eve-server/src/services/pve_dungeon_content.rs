@@ -16,19 +16,23 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "pve_dungeon_content_build.rs"]
+mod pve_dungeon_content_build;
+
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::combat_legacy_ess::{
-    is_invulnerable_npc_authority_group, is_non_combat_npc_prop_group,
-    is_sleeper_or_drifter_npc_group,
-};
-use eve_db::service_domains::{
-    DungeonNpcGroup, DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId,
-    DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind,
-};
+use eve_db::service_domains::{DungeonObjective, DungeonRuntimeRoom, DungeonTemplateId};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+
+pub(crate) use pve_dungeon_content_build::build_wiki_deadspace_rooms;
+#[cfg(test)]
+pub(super) use pve_dungeon_content_build::{
+    build_wiki_objectives, effective_wave_spawn_chance_bps, is_valid_combat_npc_type,
+    resolve_escalation_chance_bps, translate_wiki_action_spec, translate_wiki_trigger_kind,
+    MAX_TRIGGER_COMPOUND_DEPTH,
+};
 
 pub const WIKI_PVE_SCHEMA_VERSION: u32 = 2;
 pub const WIKI_PVE_CONTENT_ENV_VAR: &str = "EVOMU_WIKI_PVE_CONTENT_PATH";
@@ -58,6 +62,33 @@ pub struct WikiPveIndexes {
     pub by_dungeon_id: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct WikiPartInfo {
+    pub part: usize,
+    pub of: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct WikiObjective {
+    pub objective_id: Option<i64>,
+    pub key: Option<String>,
+    pub title: Option<String>,
+    pub kind: Option<String>,
+    pub classification_state: Option<String>,
+    pub inference_rule: Option<String>,
+    pub original_text: Option<String>,
+    pub target_name: Option<String>,
+    pub target_type_id: Option<u32>,
+    pub target_type_ids: Vec<u32>,
+    pub target_count: Option<u32>,
+    pub item_quantity: Option<u32>,
+    /// 1-based wiki `room_index` associated with this objective, if scoped to a room.
+    pub room_index: Option<usize>,
+    pub volume_m3: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WikiPveEntry {
@@ -68,6 +99,13 @@ pub struct WikiPveEntry {
     pub unit_kind: String,
     pub factions: Vec<String>,
     pub levels: Vec<u32>,
+    pub part_info: Option<WikiPartInfo>,
+    pub objective_kind: Option<String>,
+    pub objective: Option<WikiObjective>,
+    pub objectives: Vec<WikiObjective>,
+    pub escalation_links: Vec<String>,
+    pub escalation_target_ids: Vec<String>,
+    pub next_stage_entry_id: Option<String>,
     pub sde_matches: WikiSdeMatches,
     pub rooms: Vec<WikiRoom>,
 }
@@ -79,12 +117,26 @@ pub struct WikiSdeMatches {
     pub mission_ids: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct WikiRoomGate {
+    /// 1-based `WikiRoom.room_index` of the destination room.
+    pub target_room_index: usize,
+    pub gate_position: Option<[f64; 3]>,
+    pub destination_pos: Option<[f64; 3]>,
+    pub gate_type_id: Option<u32>,
+    pub locked: Option<bool>,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WikiRoom {
     pub room_index: usize,
     pub room_name: String,
     pub has_acceleration_gate: bool,
+    #[serde(default, alias = "gate_links")]
+    pub gates: Vec<WikiRoomGate>,
     pub waves: Vec<WikiWave>,
 }
 
@@ -134,6 +186,9 @@ pub struct WikiWave {
     #[serde(default, deserialize_with = "deserialize_opt_wave_distance")]
     pub distance_m: Option<WikiWaveDistance>,
     pub distance_unparsed: bool,
+    pub spawn_chance_bps: Option<u16>,
+    /// Probability fraction in `0.0..=1.0` converted to basis points (`0..=10_000`).
+    pub spawn_chance: Option<f64>,
     pub wave_trigger: Option<WikiTrigger>,
     pub spawns: Vec<WikiSpawn>,
 }
@@ -143,6 +198,7 @@ pub struct WikiWave {
 pub struct WikiSpawn {
     pub raw_class: String,
     pub raw_name: String,
+    pub tag: Option<String>,
     pub count: WikiSpawnCount,
     pub resolution: WikiSpawnResolution,
     pub trigger: Option<WikiTrigger>,
@@ -192,18 +248,139 @@ pub struct WikiSpawnResolution {
     pub had_ellipsis: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum WikiLootItemSpec {
+    Tuple(u32, i32),
+    Object { type_id: u32, quantity: i32 },
+}
+
+impl WikiLootItemSpec {
+    pub fn into_pair(self) -> (u32, i32) {
+        match self {
+            Self::Tuple(tid, qty) => (tid, qty),
+            Self::Object { type_id, quantity } => (type_id, quantity),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct WikiTriggerActionSpec {
+    #[serde(alias = "action")]
+    pub kind: String,
+    #[serde(alias = "group_id")]
+    pub target_group_id: Option<u8>,
+    pub target_wave_index: Option<usize>,
+    pub object_index: Option<usize>,
+    pub target_object_index: Option<usize>,
+    pub items: Vec<WikiLootItemSpec>,
+    pub isk: Option<i64>,
+    pub lp: Option<i64>,
+    pub corp_id: Option<u32>,
+    pub faction_id: Option<u32>,
+    pub standing_milli: Option<i32>,
+    pub reason: Option<String>,
+    pub timer_id: Option<String>,
+    pub delay_secs: Option<u64>,
+    pub time_seconds: Option<f64>,
+    pub objective_id: Option<i64>,
+    #[serde(alias = "key")]
+    pub objective_key: Option<String>,
+    pub title: Option<String>,
+    pub completed: Option<bool>,
+    pub target_dungeon_id: Option<u32>,
+    pub chance_bps: Option<u16>,
+    /// Probability fraction in `0.0..=1.0` converted to basis points (`0..=10_000`).
+    pub escalation_chance: Option<f64>,
+    pub target_title: Option<String>,
+    pub message_type: Option<i64>,
+    pub message_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawWikiActionSpec {
+    KindOnly(String),
+    Full(WikiTriggerActionSpec),
+}
+
+impl RawWikiActionSpec {
+    fn into_spec(self) -> WikiTriggerActionSpec {
+        match self {
+            Self::KindOnly(kind) => WikiTriggerActionSpec {
+                kind,
+                ..Default::default()
+            },
+            Self::Full(spec) => spec,
+        }
+    }
+}
+
+fn deserialize_opt_action_spec<'de, D>(
+    deserializer: D,
+) -> Result<Option<WikiTriggerActionSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<RawWikiActionSpec>::deserialize(deserializer)?;
+    Ok(opt.map(RawWikiActionSpec::into_spec))
+}
+
+fn deserialize_vec_action_spec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<WikiTriggerActionSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let list = Option::<Vec<RawWikiActionSpec>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(list.into_iter().map(RawWikiActionSpec::into_spec).collect())
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WikiTrigger {
     pub kind: Option<String>,
+    pub classification_state: Option<String>,
+    pub original_text: Option<String>,
     pub condition: Option<String>,
     pub time_seconds: Option<f64>,
+    pub delay_secs: Option<u64>,
+    pub trigger_delay_secs: Option<u64>,
     pub unlocks_gate: Option<bool>,
+    pub is_escalation: Option<bool>,
+    pub chance_bps: Option<u16>,
+    /// Probability fraction in `0.0..=1.0` converted to basis points (`0..=10_000`).
+    pub escalation_chance: Option<f64>,
+    pub escalation_dungeon_id: Option<u32>,
+    pub escalation_title: Option<String>,
     pub source_wave_index: Option<usize>,
     pub source_spawn_index: Option<usize>,
     pub target_wave_index: Option<usize>,
     pub target_wave_indices: Vec<usize>,
     pub trigger_type_ids: Vec<u32>,
+    pub trigger_ship_tag: Option<String>,
+    pub trigger_ship_name: Option<String>,
+    #[serde(alias = "tag")]
+    pub target_tag: Option<String>,
+    pub required_kills: Option<u32>,
+    pub timer_id: Option<String>,
+    pub after_group_cleared: Option<u8>,
+    pub after_wave_cleared: Option<usize>,
+    /// 1-based wiki `room_index` for `OnRoomEntered`.
+    pub target_room_index: Option<usize>,
+    pub target_object_index: Option<usize>,
+    pub item_type_id: Option<u32>,
+    pub radius_m: Option<f64>,
+    #[serde(alias = "hull_or_shield_below_pct", alias = "below_pct")]
+    pub hull_below_pct: Option<u8>,
+    pub on_first_attack: Option<bool>,
+    pub repeatable: Option<bool>,
+    pub clauses: Vec<WikiTrigger>,
+    #[serde(default, deserialize_with = "deserialize_opt_action_spec")]
+    pub action: Option<WikiTriggerActionSpec>,
+    #[serde(default, deserialize_with = "deserialize_vec_action_spec")]
+    pub extra_actions: Vec<WikiTriggerActionSpec>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -214,6 +391,8 @@ pub struct WikiPveLoadStats {
     pub indexed_dungeon_ids: usize,
     pub total_rooms: usize,
     pub total_spawns: usize,
+    pub rejected_unsupported_trigger_entries: usize,
+    pub rejected_by_trigger_kind: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -229,6 +408,7 @@ pub struct WikiDungeonBuild {
     pub entry_id: String,
     pub source_label: &'static str,
     pub rooms: Vec<DungeonRuntimeRoom>,
+    pub objectives: Vec<DungeonObjective>,
     pub stats: WikiBuildStats,
 }
 
@@ -286,7 +466,7 @@ fn is_allowed_wave_timing(timing: &str) -> bool {
     )
 }
 
-fn wiki_faction_name_to_id(name: &str) -> Option<u32> {
+pub(super) fn wiki_faction_name_to_id(name: &str) -> Option<u32> {
     match name.trim() {
         "Caldari State" | "Caldari" => Some(500_001),
         "Minmatar Republic" | "Minmatar" => Some(500_002),
@@ -313,16 +493,9 @@ fn wiki_faction_name_to_id(name: &str) -> Option<u32> {
     }
 }
 
-fn validate_trigger(tr: &WikiTrigger, ctx_label: &str) -> Result<(), String> {
-    if let Some(t) = tr.time_seconds {
-        if !t.is_finite() || t < 0.0 {
-            return Err(format!("{ctx_label}: invalid trigger time_seconds {t}"));
-        }
-    }
-    Ok(())
-}
-
 /// Parses and strictly validates a `schema_version = 2` wiki PvE runtime JSON payload.
+/// Entries naming unsupported or unimplemented trigger kinds are excluded and counted
+/// in `WikiPveLoadStats` rather than silently degraded or dropped per-trigger.
 pub fn parse_and_validate_wiki_pve_json(json_str: &str) -> Result<WikiPveCatalog, String> {
     let doc: WikiPveContentDoc = serde_json::from_str(json_str)
         .map_err(|e| format!("failed to parse wiki PvE JSON: {e}"))?;
@@ -333,31 +506,56 @@ pub fn parse_and_validate_wiki_pve_json(json_str: &str) -> Result<WikiPveCatalog
         ));
     }
 
-    let mut by_entry_id = HashMap::with_capacity(doc.entries.len());
+    let mut seen_entry_ids: HashSet<String> = HashSet::with_capacity(doc.entries.len());
+    let mut accepted_entries: Vec<WikiPveEntry> = Vec::with_capacity(doc.entries.len());
+    let mut by_entry_id: HashMap<String, usize> = HashMap::with_capacity(doc.entries.len());
     let mut total_rooms = 0usize;
     let mut total_spawns = 0usize;
     let mut authored_dungeon_entries = 0usize;
+    let mut rejected_unsupported_trigger_entries = 0usize;
+    let mut rejected_by_trigger_kind: BTreeMap<String, usize> = BTreeMap::new();
 
-    for (idx, entry) in doc.entries.iter().enumerate() {
-        let eid = entry.entry_id.trim();
+    for (idx, entry) in doc.entries.into_iter().enumerate() {
+        let eid = entry.entry_id.trim().to_string();
         if eid.is_empty() {
             return Err(format!("entries[{idx}]: empty entry_id"));
         }
-        if by_entry_id.insert(eid.to_string(), idx).is_some() {
+        if !seen_entry_ids.insert(eid.clone()) {
             return Err(format!("duplicate wiki entry_id '{eid}'"));
         }
-        if !entry.rooms.is_empty() {
-            authored_dungeon_entries += 1;
-        }
+
         let mut seen_rooms = HashSet::new();
-        for room in &entry.rooms {
+        let mut room_index_to_vec_idx: HashMap<usize, usize> = HashMap::with_capacity(entry.rooms.len());
+        let mut entry_rooms = 0usize;
+        let mut entry_spawns = 0usize;
+        let mut entry_unsupported_kinds: BTreeSet<String> = BTreeSet::new();
+
+        for (pos_idx, room) in entry.rooms.iter().enumerate() {
             if room.room_index == 0 {
                 return Err(format!("entry '{eid}': room_index must be >= 1"));
             }
             if !seen_rooms.insert(room.room_index) {
                 return Err(format!("entry '{eid}': duplicate room_index {}", room.room_index));
             }
-            total_rooms += 1;
+            room_index_to_vec_idx.insert(room.room_index, pos_idx);
+            for gate in &room.gates {
+                if gate
+                    .gate_position
+                    .is_some_and(|p| !p.iter().all(|v| v.is_finite()))
+                    || gate
+                        .destination_pos
+                        .is_some_and(|p| !p.iter().all(|v| v.is_finite()))
+                {
+                    return Err(format!(
+                        "entry '{eid}' room {}: non-finite gate coordinates",
+                        room.room_index
+                    ));
+                }
+            }
+        }
+
+        for room in &entry.rooms {
+            entry_rooms += 1;
             let mut seen_waves = HashSet::new();
             for wave in &room.waves {
                 if wave.wave_index == 0 {
@@ -391,14 +589,23 @@ pub fn parse_and_validate_wiki_pve_json(json_str: &str) -> Result<WikiPveCatalog
                         ));
                     }
                 }
+                pve_dungeon_content_build::effective_wave_spawn_chance_bps(wave).map_err(|e| {
+                    format!(
+                        "entry '{eid}' room {} wave {}: {e}",
+                        room.room_index, wave.wave_index
+                    )
+                })?;
                 if let Some(ref wtr) = wave.wave_trigger {
-                    validate_trigger(
+                    pve_dungeon_content_build::validate_trigger_and_collect_unsupported(
                         wtr,
                         &format!("entry '{eid}' room {} wave {}", room.room_index, wave.wave_index),
+                        &room_index_to_vec_idx,
+                        false,
+                        &mut entry_unsupported_kinds,
                     )?;
                 }
                 for (sp_idx, sp) in wave.spawns.iter().enumerate() {
-                    total_spawns += 1;
+                    entry_spawns += 1;
                     if let (Some(min_c), Some(max_c)) = (sp.count.min, sp.count.max) {
                         if min_c > max_c {
                             return Err(format!(
@@ -408,17 +615,42 @@ pub fn parse_and_validate_wiki_pve_json(json_str: &str) -> Result<WikiPveCatalog
                         }
                     }
                     if let Some(ref strig) = sp.trigger {
-                        validate_trigger(
+                        pve_dungeon_content_build::validate_trigger_and_collect_unsupported(
                             strig,
                             &format!(
                                 "entry '{eid}' room {} wave {} spawn[{sp_idx}]",
                                 room.room_index, wave.wave_index
                             ),
+                            &room_index_to_vec_idx,
+                            true,
+                            &mut entry_unsupported_kinds,
                         )?;
                     }
                 }
             }
         }
+
+        if !entry_unsupported_kinds.is_empty() {
+            rejected_unsupported_trigger_entries += 1;
+            for kind in &entry_unsupported_kinds {
+                *rejected_by_trigger_kind.entry(kind.clone()).or_insert(0) += 1;
+            }
+            tracing::warn!(
+                entry_id = %eid,
+                unsupported_trigger_kinds = ?entry_unsupported_kinds,
+                "Excluding wiki PvE entry referencing unsupported trigger kind(s)"
+            );
+            continue;
+        }
+
+        let accepted_idx = accepted_entries.len();
+        by_entry_id.insert(eid, accepted_idx);
+        if !entry.rooms.is_empty() {
+            authored_dungeon_entries += 1;
+        }
+        total_rooms += entry_rooms;
+        total_spawns += entry_spawns;
+        accepted_entries.push(entry);
     }
 
     let mut by_dungeon_id: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
@@ -447,15 +679,15 @@ pub fn parse_and_validate_wiki_pve_json(json_str: &str) -> Result<WikiPveCatalog
             }
         }
     }
-    // Priority 3: sde_matches.dungeon_ids fallback from entry bodies
-    for (idx, entry) in doc.entries.iter().enumerate() {
+    // Priority 3: sde_matches.dungeon_ids fallback from accepted entry bodies
+    for (idx, entry) in accepted_entries.iter().enumerate() {
         for &did in &entry.sde_matches.dungeon_ids {
             push_dungeon(did, idx);
         }
     }
 
     let mut by_site_name: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, entry) in doc.entries.iter().enumerate() {
+    for (idx, entry) in accepted_entries.iter().enumerate() {
         if entry.rooms.is_empty() {
             continue;
         }
@@ -472,17 +704,19 @@ pub fn parse_and_validate_wiki_pve_json(json_str: &str) -> Result<WikiPveCatalog
 
     let stats = WikiPveLoadStats {
         schema_version: doc.header.schema_version,
-        entries_total: doc.entries.len(),
+        entries_total: accepted_entries.len(),
         authored_dungeon_entries,
         indexed_dungeon_ids: by_dungeon_id.len(),
         total_rooms,
         total_spawns,
+        rejected_unsupported_trigger_entries,
+        rejected_by_trigger_kind,
     };
 
     Ok(WikiPveCatalog {
         source: doc.header.source,
         license: doc.header.license,
-        entries: doc.entries,
+        entries: accepted_entries,
         by_entry_id,
         by_dungeon_id,
         by_site_name,
@@ -572,309 +806,7 @@ fn normalize_site_lookup_name(raw: &str) -> String {
         .join(" ")
 }
 
-fn raw_class_to_standin_ship_class(raw_class: &str) -> Option<u32> {
-    let norm = raw_class.trim().to_lowercase();
-    match norm.as_str() {
-        "frigate"
-        | "frigates"
-        | "corvette"
-        | "shuttle"
-        | "rookie"
-        | "rookie ship"
-        | "interceptor"
-        | "assault frigate"
-        | "covert ops"
-        | "electronic attack frigate"
-        | "logistics frigate"
-        | "drone"
-        | "fighter" => Some(1),
-        "destroyer"
-        | "destroyers"
-        | "tactical destroyer"
-        | "command destroyer"
-        | "interdictor"
-        | "cruiser"
-        | "cruisers"
-        | "heavy assault cruiser"
-        | "heavy interdictor"
-        | "recon"
-        | "recon ship"
-        | "combat recon"
-        | "force recon"
-        | "logistics cruiser"
-        | "strategic cruiser" => Some(2),
-        "battlecruiser"
-        | "battlecruisers"
-        | "command ship"
-        | "attack battlecruiser"
-        | "battleship"
-        | "battleships"
-        | "marauder"
-        | "black ops"
-        | "commander"
-        | "boss"
-        | "overseer"
-        | "dreadnought"
-        | "carrier"
-        | "supercarrier"
-        | "titan"
-        | "capital" => Some(3),
-        _ => None,
-    }
-}
-
-fn has_non_empty_loot(loot: &Option<serde_json::Value>) -> bool {
-    match loot {
-        None | Some(serde_json::Value::Null) => false,
-        Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
-        Some(serde_json::Value::Array(a)) => !a.is_empty(),
-        Some(serde_json::Value::Object(o)) => !o.is_empty(),
-        Some(_) => true,
-    }
-}
-
-fn is_container_or_prop_row(sp: &WikiSpawn) -> bool {
-    let cls = sp.raw_class.trim().to_lowercase();
-    if matches!(
-        cls.as_str(),
-        "container"
-            | "wreck"
-            | "cache"
-            | "hackable"
-            | "hacking"
-            | "destructible object"
-            | "large collidable object"
-            | "hangar array"
-    ) {
-        return true;
-    }
-    has_non_empty_loot(&sp.loot)
-        && matches!(
-            cls.as_str(),
-            "" | "structure" | "prop" | "object" | "container" | "wreck" | "depot" | "silo" | "warehouse"
-        )
-}
-
-fn is_valid_combat_npc_type(sde: &eve_sde::SdeRegistry, tid: u32) -> bool {
-    if tid == 0 {
-        return false;
-    }
-    let Some(t) = sde.types.get(&tid) else {
-        // Minimal unit-test SDE registries with empty types skip external lookup.
-        return sde.types.is_empty();
-    };
-    t.category_id == 11
-        && !is_non_combat_npc_prop_group(t.group_id)
-        && !is_invulnerable_npc_authority_group(t.group_id)
-}
-
-fn resolve_standin_npc_type(
-    ctx: &ServerContext,
-    entry: &WikiPveEntry,
-    sys_id: u32,
-    dungeon_id: DungeonTemplateId,
-    raw_class: &str,
-) -> Option<u32> {
-    let target_ship_class = raw_class_to_standin_ship_class(raw_class)?;
-    let desired_faction_id = entry
-        .factions
-        .iter()
-        .find_map(|f| wiki_faction_name_to_id(f))
-        .or_else(|| ctx.sde.dungeons.get(&dungeon_id.as_u32()).and_then(|d| d.faction_id))
-        .unwrap_or_else(|| {
-            match crate::services::pve_exploration_seeding::pirate_faction_for_system(
-                &ctx.sde, sys_id,
-            ) {
-                crate::services::pve_exploration_seeding::PirateFaction::AngelCartel => 500_011,
-                crate::services::pve_exploration_seeding::PirateFaction::BloodRaiders => 500_012,
-                crate::services::pve_exploration_seeding::PirateFaction::Sansha => 500_019,
-                crate::services::pve_exploration_seeding::PirateFaction::Serpentis => 500_020,
-                crate::services::pve_exploration_seeding::PirateFaction::Guristas => 500_010,
-            }
-        });
-    let explicit_sleeper_drifter = desired_faction_id == 500_024
-        || entry
-            .factions
-            .iter()
-            .any(|f| matches!(f.trim(), "Drifters" | "Sleepers"));
-
-    ctx.sde
-        .npc_spawn_groups
-        .values()
-        .filter(|sg| {
-            !sg.npc_type_ids.is_empty()
-                && !is_non_combat_npc_prop_group(sg.group_id)
-                && !is_invulnerable_npc_authority_group(sg.group_id)
-                && (explicit_sleeper_drifter || !is_sleeper_or_drifter_npc_group(sg.group_id))
-                && (desired_faction_id == 0 || sg.faction_id == desired_faction_id)
-        })
-        .min_by_key(|sg| {
-            (
-                sg.ship_class.abs_diff(target_ship_class),
-                sg.group_id,
-                sg.spawn_group_id,
-            )
-        })
-        .and_then(|sg| sg.npc_type_ids.first().copied())
-}
-
-fn is_zero_spawn_count(min_count: Option<usize>, max_count: Option<usize>) -> bool {
-    matches!(
-        (min_count, max_count),
-        (Some(0), Some(0)) | (Some(0), None) | (None, Some(0))
-    )
-}
-
-fn pick_spawn_count(
-    ctx: &ServerContext,
-    min_count: Option<usize>,
-    max_count: Option<usize>,
-) -> usize {
-    if is_zero_spawn_count(min_count, max_count) {
-        return 0;
-    }
-    let (lo, hi) = match (min_count, max_count) {
-        (None, None) => return 1,
-        (Some(lo), None) => {
-            let v = lo.max(1);
-            (v, v)
-        }
-        (None, Some(hi)) => (1, hi.max(1)),
-        (Some(lo), Some(hi)) => {
-            let l = lo.max(1);
-            (l, hi.max(l))
-        }
-    };
-    if lo == hi {
-        return lo;
-    }
-    let span = hi - lo + 1;
-    let offset = ctx
-        .mechanic_rng
-        .try_next_u64()
-        .map(|v| (v as usize) % span)
-        .unwrap_or(0);
-    lo + offset
-}
-
-enum ResolvedSpawn {
-    CombatNpc {
-        type_id: u32,
-        count: usize,
-        is_standin: bool,
-    },
-    ContainerObject {
-        type_id: u32,
-        name: String,
-        is_concrete: bool,
-    },
-    Skipped,
-}
-
-fn resolve_spawn_entry(
-    ctx: &ServerContext,
-    entry: &WikiPveEntry,
-    sys_id: u32,
-    dungeon_id: DungeonTemplateId,
-    sp: &WikiSpawn,
-) -> ResolvedSpawn {
-    if is_zero_spawn_count(sp.count.min, sp.count.max) {
-        return ResolvedSpawn::Skipped;
-    }
-    if is_container_or_prop_row(sp) {
-        let concrete_tid = sp
-            .resolution
-            .type_ids
-            .iter()
-            .chain(sp.resolution.candidate_type_ids.iter())
-            .copied()
-            .find(|&tid| tid > 0);
-        let type_id = concrete_tid.unwrap_or(23);
-        let name = if sp.raw_name.trim().is_empty() {
-            "Cargo Container".to_string()
-        } else {
-            sp.raw_name.trim().to_string()
-        };
-        return ResolvedSpawn::ContainerObject {
-            type_id,
-            name,
-            is_concrete: concrete_tid.is_some(),
-        };
-    }
-
-    let count = pick_spawn_count(ctx, sp.count.min, sp.count.max);
-    if count == 0 {
-        return ResolvedSpawn::Skipped;
-    }
-
-    let concrete_tids: Vec<u32> = sp
-        .resolution
-        .type_ids
-        .iter()
-        .copied()
-        .filter(|&tid| is_valid_combat_npc_type(&ctx.sde, tid))
-        .collect();
-    if !concrete_tids.is_empty() {
-        let pick_idx = if concrete_tids.len() > 1 {
-            ctx.mechanic_rng
-                .try_next_u64()
-                .map(|v| (v as usize) % concrete_tids.len())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        return ResolvedSpawn::CombatNpc {
-            type_id: concrete_tids[pick_idx],
-            count,
-            is_standin: false,
-        };
-    }
-
-    let candidate_tids: Vec<u32> = sp
-        .resolution
-        .candidate_type_ids
-        .iter()
-        .copied()
-        .filter(|&tid| is_valid_combat_npc_type(&ctx.sde, tid))
-        .collect();
-    if !candidate_tids.is_empty() {
-        let pick_idx = if candidate_tids.len() > 1 {
-            ctx.mechanic_rng
-                .try_next_u64()
-                .map(|v| (v as usize) % candidate_tids.len())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        return ResolvedSpawn::CombatNpc {
-            type_id: candidate_tids[pick_idx],
-            count,
-            is_standin: false,
-        };
-    }
-
-    if let Some(standin_tid) =
-        resolve_standin_npc_type(ctx, entry, sys_id, dungeon_id, &sp.raw_class)
-    {
-        return ResolvedSpawn::CombatNpc {
-            type_id: standin_tid,
-            count,
-            is_standin: true,
-        };
-    }
-
-    tracing::debug!(
-        entry_id = %entry.entry_id,
-        dungeon_id = dungeon_id.as_u32(),
-        raw_class = %sp.raw_class,
-        raw_name = %sp.raw_name,
-        status = %sp.resolution.status,
-        "Skipping unresolvable wiki spawn row (no concrete type_id or matching SDE stand-in)"
-    );
-    ResolvedSpawn::Skipped
-}
-
-fn select_entry_index_for_dungeon<'a>(
+pub(super) fn select_entry_index_for_dungeon<'a>(
     catalog: &'a WikiPveCatalog,
     sde: &eve_sde::SdeRegistry,
     sys_id: u32,
@@ -943,300 +875,6 @@ fn select_entry_index_for_dungeon<'a>(
         }
     }
     None
-}
-
-/// Resolves authored deadspace dungeon rooms from the loaded EVE University Wiki (`CC BY-SA 4.0`)
-/// content catalog for `(dungeon_id, dungeon_name)`. Returns `None` when no matching wiki entry
-/// exists so callers fall back explicitly to `build_sde_deadspace_rooms`.
-pub(crate) fn build_wiki_deadspace_rooms(
-    ctx: &ServerContext,
-    sys_id: u32,
-    dungeon_id: DungeonTemplateId,
-    dungeon_name: &str,
-    base_pos: [f64; 3],
-    has_entry_gate: bool,
-) -> Option<WikiDungeonBuild> {
-    let catalog = get_active_wiki_pve_catalog(ctx)?;
-    let entry_idx =
-        select_entry_index_for_dungeon(&catalog, &ctx.sde, sys_id, dungeon_id, dungeon_name)?;
-    let entry = &catalog.entries[entry_idx];
-    if entry.rooms.is_empty() {
-        return None;
-    }
-
-    let mut stats = WikiBuildStats::default();
-    let total_rooms = entry.rooms.len();
-    let mut rooms = Vec::with_capacity(total_rooms);
-
-    for (pos_idx, wroom) in entry.rooms.iter().enumerate() {
-        let room_step = pos_idx + usize::from(has_entry_gate);
-        let room_pos = if room_step == 0 {
-            base_pos
-        } else {
-            [
-                base_pos[0] + (room_step as f64) * 600_000.0,
-                base_pos[1],
-                base_pos[2],
-            ]
-        };
-        let room_id = i64::from(dungeon_id.as_u32()) * 100 + (wroom.room_index as i64);
-        let room_name = if wroom.room_name.trim().is_empty() {
-            format!("{dungeon_name} - Room {}", wroom.room_index)
-        } else {
-            wroom.room_name.trim().to_string()
-        };
-        let disallow_mwd = crate::services::pve_dungeon_editor::get_dungeon_or_room_mwd_override(
-            ctx,
-            i64::from(dungeon_id.as_u32()),
-            Some(room_id),
-        );
-
-        let mut objects: Vec<DungeonRuntimeObject> = Vec::new();
-        let mut npc_groups: Vec<DungeonNpcGroup> = Vec::new();
-        let mut triggers: Vec<DungeonTrigger> = Vec::new();
-        let mut wave_to_group_id: HashMap<usize, u8> = HashMap::new();
-        let mut next_group_id = 1u8;
-
-        for wwave in &wroom.waves {
-            let group_id = next_group_id;
-            let mut npc_specs: Vec<(u32, usize)> = Vec::new();
-            let mut group_has_unlock_trigger = false;
-
-            for sp in &wwave.spawns {
-                match resolve_spawn_entry(ctx, entry, sys_id, dungeon_id, sp) {
-                    ResolvedSpawn::CombatNpc {
-                        type_id,
-                        count,
-                        is_standin,
-                    } => {
-                        if is_standin {
-                            stats.standin_rows += 1;
-                        } else {
-                            stats.concrete_rows += 1;
-                        }
-                        if let Some(existing) = npc_specs.iter_mut().find(|(tid, _)| *tid == type_id)
-                        {
-                            existing.1 += count;
-                        } else {
-                            npc_specs.push((type_id, count));
-                        }
-                    }
-                    ResolvedSpawn::ContainerObject {
-                        type_id,
-                        name,
-                        is_concrete,
-                    } => {
-                        if is_concrete {
-                            stats.concrete_rows += 1;
-                        }
-                        stats.container_objects += 1;
-                        let obj_idx = objects.len();
-                        let dist = wwave
-                            .distance_m
-                            .map(WikiWaveDistance::effective_m)
-                            .unwrap_or(2_200.0 + (obj_idx as f64) * 500.0);
-                        let angle = (obj_idx as f64) * 1.1;
-                        objects.push(DungeonRuntimeObject {
-                            ball_id: 0,
-                            type_id,
-                            name,
-                            position: [
-                                room_pos[0] + angle.cos() * dist,
-                                room_pos[1],
-                                room_pos[2] + angle.sin() * dist,
-                            ],
-                            radius: 350.0,
-                            is_container: true,
-                            loot_items: Vec::new(),
-                            spawned: false,
-                            ..Default::default()
-                        });
-                    }
-                    ResolvedSpawn::Skipped => {
-                        stats.skipped_rows += 1;
-                    }
-                }
-
-                if let Some(ref strig) = sp.trigger {
-                    if strig.unlocks_gate == Some(true) {
-                        group_has_unlock_trigger = true;
-                    }
-                }
-            }
-
-            if npc_specs.is_empty() {
-                continue;
-            }
-            if wwave
-                .wave_trigger
-                .as_ref()
-                .and_then(|t| t.unlocks_gate)
-                == Some(true)
-            {
-                group_has_unlock_trigger = true;
-            }
-
-            let is_approach_trigger = wwave
-                .wave_trigger
-                .as_ref()
-                .and_then(|t| t.kind.as_deref())
-                == Some("ship_approached");
-            let spawn_immediately = matches!(
-                wwave.timing.as_str(),
-                "initial_spawn" | "simultaneous_initial_group" | "static_structures"
-            ) || (npc_groups.is_empty() && !is_approach_trigger);
-            wave_to_group_id.insert(wwave.wave_index, group_id);
-            npc_groups.push(DungeonNpcGroup {
-                group_id,
-                wave: u8::try_from(wwave.wave_index).unwrap_or(u8::MAX),
-                npc_specs,
-                npc_ball_ids: Vec::new(),
-                spawn_immediately,
-                spawned: false,
-                cleared: false,
-                ..Default::default()
-            });
-            next_group_id = next_group_id.saturating_add(1);
-
-            if !spawn_immediately {
-                let trig_kind = match wwave
-                    .wave_trigger
-                    .as_ref()
-                    .and_then(|t| t.kind.as_deref())
-                {
-                    Some("ship_approached") => DungeonTriggerKind::OnApproach {
-                        target_ball_id: None,
-                        target_object_index: (!objects.is_empty()).then_some(0),
-                        anchor_pos: room_pos,
-                        radius_m: wwave
-                            .distance_m
-                            .map(WikiWaveDistance::effective_m)
-                            .unwrap_or(3_500.0)
-                            .max(2_500.0),
-                    },
-                    _ => {
-                        let source_group = wwave
-                            .wave_trigger
-                            .as_ref()
-                            .and_then(|t| t.source_wave_index)
-                            .and_then(|sw| wave_to_group_id.get(&sw).copied())
-                            .or_else(|| group_id.checked_sub(1).filter(|&g| g >= 1));
-                        DungeonTriggerKind::OnKill {
-                            target_npc_group: source_group,
-                            target_ball_id: None,
-                        }
-                    }
-                };
-                triggers.push(DungeonTrigger {
-                    trigger_id: (triggers.len() + 1) as u32,
-                    kind: trig_kind,
-                    action: DungeonTriggerAction::SpawnNpcGroup(group_id),
-                    fired: false,
-                    ..Default::default()
-                });
-            }
-
-            if group_has_unlock_trigger {
-                let action = if pos_idx + 1 < total_rooms {
-                    DungeonTriggerAction::UnlockGate
-                } else {
-                    DungeonTriggerAction::CompleteDungeon
-                };
-                triggers.push(DungeonTrigger {
-                    trigger_id: (triggers.len() + 1) as u32,
-                    kind: DungeonTriggerKind::OnKill {
-                        target_npc_group: Some(group_id),
-                        target_ball_id: None,
-                    },
-                    action,
-                    fired: false,
-                    ..Default::default()
-                });
-            }
-        }
-
-        if objects.is_empty() {
-            objects.push(DungeonRuntimeObject {
-                ball_id: 0,
-                type_id: 23,
-                name: format!("{room_name} Beacon"),
-                position: [room_pos[0] + 2_200.0, room_pos[1], room_pos[2]],
-                radius: 250.0,
-                is_container: false,
-                loot_items: Vec::new(),
-                spawned: false,
-                ..Default::default()
-            });
-        }
-
-        let is_last_room = pos_idx + 1 >= total_rooms;
-        let has_terminal_action = triggers.iter().any(|t| {
-            matches!(
-                t.action,
-                DungeonTriggerAction::UnlockGate | DungeonTriggerAction::CompleteDungeon
-            )
-        });
-        if !npc_groups.is_empty() && !has_terminal_action {
-            triggers.push(DungeonTrigger {
-                trigger_id: (triggers.len() + 1) as u32,
-                kind: DungeonTriggerKind::OnKill {
-                    target_npc_group: None,
-                    target_ball_id: None,
-                },
-                action: if is_last_room {
-                    DungeonTriggerAction::CompleteDungeon
-                } else {
-                    DungeonTriggerAction::UnlockGate
-                },
-                fired: false,
-                ..Default::default()
-            });
-        }
-
-        let gated = pos_idx > 0 || has_entry_gate;
-        let gate_locked = !is_last_room && !npc_groups.is_empty();
-
-        rooms.push(DungeonRuntimeRoom {
-            room_index: wroom.room_index,
-            room_id,
-            room_name,
-            position: room_pos,
-            gate_destination_pos: [room_pos[0] - 10_000.0, room_pos[1], room_pos[2]],
-            gated,
-            disallow_mwd,
-            gate_ball_id: None,
-            gate_locked,
-            objects,
-            npc_groups,
-            triggers,
-            spawned: false,
-            cleared: false,
-            ..Default::default()
-        });
-    }
-
-    if rooms.is_empty() {
-        return None;
-    }
-
-    tracing::info!(
-        source = "EVE University Wiki (CC BY-SA 4.0) + SDE stand-in resolver",
-        entry_id = %entry.entry_id,
-        dungeon_id = dungeon_id.as_u32(),
-        rooms = rooms.len(),
-        concrete_rows = stats.concrete_rows,
-        standin_rows = stats.standin_rows,
-        skipped_rows = stats.skipped_rows,
-        container_objects = stats.container_objects,
-        "Instantiated authored wiki PvE dungeon rooms"
-    );
-
-    Some(WikiDungeonBuild {
-        entry_id: entry.entry_id.clone(),
-        source_label: "wiki_pve_v2",
-        rooms,
-        stats,
-    })
 }
 
 #[cfg(test)]

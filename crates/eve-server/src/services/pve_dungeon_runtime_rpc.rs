@@ -10,9 +10,9 @@ use crate::services::pve_dungeon_runtime::{
     on_dungeon_room_entered, prune_stale_despawned_instances, read_dungeon_runtime_store,
     record_dungeon_actor, resolve_runtime_gate_in_snap, triggers, unix_to_filetime_ticks,
     with_dungeon_runtime_store, DungeonGateLink, DungeonInstanceId, DungeonNpcGroup,
-    DungeonNpcSpawnEntry, DungeonObjectiveStatus, DungeonRuntimeInstance, DungeonRuntimeObject,
-    DungeonRuntimeRoom, DungeonTemplateId, DungeonTrigger, DungeonTriggerAction,
-    DungeonTriggerKind, MaterializedDungeonRoomEntities, RuntimeGateMatch,
+    DungeonNpcSpawnEntry, DungeonObjective, DungeonObjectiveStatus, DungeonRuntimeInstance,
+    DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId, DungeonTrigger,
+    DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities, RuntimeGateMatch,
     DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
 };
 use eve_db::lock_rank::AnyRwLock;
@@ -22,6 +22,29 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use std::collections::HashMap;
+
+fn select_active_objective_id(
+    objectives: &[DungeonObjective],
+    room_index: usize,
+    fallback_obj_id: i64,
+) -> i64 {
+    objectives
+        .iter()
+        .find(|o| o.status == DungeonObjectiveStatus::Active && o.room_index == Some(room_index))
+        .or_else(|| {
+            objectives
+                .iter()
+                .find(|o| o.status == DungeonObjectiveStatus::Active && o.room_index.is_none())
+        })
+        .or_else(|| {
+            objectives
+                .iter()
+                .find(|o| o.status == DungeonObjectiveStatus::Active)
+        })
+        .or_else(|| objectives.first())
+        .map(|o| o.objective_id)
+        .unwrap_or(fallback_obj_id)
+}
 
 /// Checks whether `args[0]` targets a `DungeonRuntimeInstance` acceleration gate and executes pocket transition.
 pub async fn try_activate_dungeon_runtime_gate(
@@ -166,7 +189,8 @@ pub async fn try_activate_dungeon_runtime_gate(
         } else {
             target_room_idx + 1
         };
-        let room_obj_id = room.room_id * 10 + 1;
+        let room_obj_id =
+            select_active_objective_id(&inst.objectives, room.room_index, room.room_id * 10 + 1);
         inst.active_objective_id = room_obj_id;
         Some((
             inst.dungeon_id,
@@ -370,7 +394,7 @@ fn parse_dungeon_trigger_action(spec: &PyRep, fallback: &PyRep) -> DungeonTrigge
     }
 }
 
-fn parse_rooms_from_pyrep(
+fn parse_rooms_and_objectives_from_pyrep(
     ctx: &ServerContext,
     sys_id: u32,
     dungeon_id: u32,
@@ -378,7 +402,7 @@ fn parse_rooms_from_pyrep(
     base_pos: [f64; 3],
     has_entry_gate: bool,
     rooms_arg: Option<&PyRep>,
-) -> Vec<DungeonRuntimeRoom> {
+) -> (Vec<DungeonRuntimeRoom>, Vec<DungeonObjective>) {
     if let Some(PyRep::List(room_list) | PyRep::Tuple(room_list)) = rooms_arg {
         let mut parsed = Vec::new();
         for (idx, r_rep) in room_list.iter().take(16).enumerate() {
@@ -653,23 +677,31 @@ fn parse_rooms_from_pyrep(
             for room in &mut parsed {
                 room.gate_links.retain(|gl| gl.target_room_index < room_count);
             }
-            return parsed;
+            return (parsed, Vec::new());
         }
     }
 
-    resolve_rooms_with_content_fallback(ctx, sys_id, dungeon_id, dungeon_name, base_pos, has_entry_gate)
+    resolve_rooms_and_objectives_with_content_fallback(
+        ctx,
+        sys_id,
+        dungeon_id,
+        dungeon_name,
+        base_pos,
+        has_entry_gate,
+    )
 }
 
-/// Resolves dungeon rooms from loaded wiki PvE runtime content first (`pve_dungeon_content`),
-/// falling back cleanly to `build_sde_deadspace_rooms` when no authored wiki entry exists.
-pub(crate) fn resolve_rooms_with_content_fallback(
+/// Resolves dungeon rooms and authored objectives from loaded wiki PvE runtime content first
+/// (`pve_dungeon_content`), falling back cleanly to `build_sde_deadspace_rooms` with empty
+/// objectives when no authored wiki entry exists.
+pub(crate) fn resolve_rooms_and_objectives_with_content_fallback(
     ctx: &ServerContext,
     sys_id: u32,
     dungeon_id: u32,
     dungeon_name: &str,
     base_pos: [f64; 3],
     has_entry_gate: bool,
-) -> Vec<DungeonRuntimeRoom> {
+) -> (Vec<DungeonRuntimeRoom>, Vec<DungeonObjective>) {
     if let Some(built) = crate::services::pve_dungeon_content::build_wiki_deadspace_rooms(
         ctx,
         sys_id,
@@ -678,7 +710,7 @@ pub(crate) fn resolve_rooms_with_content_fallback(
         base_pos,
         has_entry_gate,
     ) {
-        return built.rooms;
+        return (built.rooms, built.objectives);
     }
     tracing::debug!(
         source = "SDE synthetic fallback (no authored wiki entry matched)",
@@ -686,7 +718,32 @@ pub(crate) fn resolve_rooms_with_content_fallback(
         dungeon_name = %dungeon_name,
         "Using synthetic SDE 2-room deadspace dungeon template"
     );
-    build_sde_deadspace_rooms(ctx, sys_id, dungeon_id, dungeon_name, base_pos, has_entry_gate)
+    (
+        build_sde_deadspace_rooms(ctx, sys_id, dungeon_id, dungeon_name, base_pos, has_entry_gate),
+        Vec::new(),
+    )
+}
+
+/// Resolves dungeon rooms from loaded wiki PvE runtime content first (`pve_dungeon_content`),
+/// falling back cleanly to `build_sde_deadspace_rooms` when no authored wiki entry exists.
+#[cfg(test)]
+pub(crate) fn resolve_rooms_with_content_fallback(
+    ctx: &ServerContext,
+    sys_id: u32,
+    dungeon_id: u32,
+    dungeon_name: &str,
+    base_pos: [f64; 3],
+    has_entry_gate: bool,
+) -> Vec<DungeonRuntimeRoom> {
+    resolve_rooms_and_objectives_with_content_fallback(
+        ctx,
+        sys_id,
+        dungeon_id,
+        dungeon_name,
+        base_pos,
+        has_entry_gate,
+    )
+    .0
 }
 
 /// Resolves faction Deadspace NPC ship `TypeId`s (`(frigate_tid, cruiser_tid, commander_tid)`) from
@@ -1241,7 +1298,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
     let sde_disallow = sde_dungeon
         .is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
     let disallow_mwd = editor_disallow || sde_disallow;
-    let rooms = resolve_rooms_with_content_fallback(
+    let (rooms, objectives) = resolve_rooms_and_objectives_with_content_fallback(
         ctx,
         sys_id,
         dungeon_id,
@@ -1250,7 +1307,9 @@ pub async fn spawn_sde_dungeon_runtime_instance(
         has_entry_gate,
     );
     let now = ctx.now_unix();
-    let init_obj_id = rooms.first().map(|r| r.room_id * 10 + 1).unwrap_or(0);
+    let first_room_index = rooms.first().map(|r| r.room_index).unwrap_or(1);
+    let fallback_obj_id = rooms.first().map(|r| r.room_id * 10 + 1).unwrap_or(0);
+    let init_obj_id = select_active_objective_id(&objectives, first_room_index, fallback_obj_id);
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
         prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
@@ -1270,6 +1329,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
             entry_gate_locked: false,
             current_room_index: if has_entry_gate { 0 } else { 1 },
             rooms,
+            objectives,
             completed: false,
             despawned: false,
             active_objective_id: init_obj_id,
@@ -1334,7 +1394,7 @@ pub async fn spawn_dungeon_instance(
         .and_then(|v| v.as_bool())
         .unwrap_or(editor_disallow || sde_disallow);
 
-    let rooms = parse_rooms_from_pyrep(
+    let (rooms, objectives) = parse_rooms_and_objectives_from_pyrep(
         ctx,
         sys_id,
         dungeon_id,
@@ -1344,7 +1404,9 @@ pub async fn spawn_dungeon_instance(
         kwargs.get("rooms").or_else(|| args.get(1)),
     );
     let now = ctx.now_unix();
-    let init_obj_id = rooms.first().map(|r| r.room_id * 10 + 1).unwrap_or(0);
+    let first_room_index = rooms.first().map(|r| r.room_index).unwrap_or(1);
+    let fallback_obj_id = rooms.first().map(|r| r.room_id * 10 + 1).unwrap_or(0);
+    let init_obj_id = select_active_objective_id(&objectives, first_room_index, fallback_obj_id);
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
         prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
@@ -1368,6 +1430,7 @@ pub async fn spawn_dungeon_instance(
             entry_gate_locked: false,
             current_room_index: if has_entry_gate { 0 } else { 1 },
             rooms,
+            objectives,
             completed: false,
             despawned: false,
             active_objective_id: init_obj_id,
@@ -1731,7 +1794,7 @@ pub fn register_sde_operation_dungeon_instance(
         .map(|d| d.name.trim().to_string())
         .unwrap_or_else(|| format!("Operation Dungeon {dungeon_id}"));
     let disallow_mwd = sde_dungeon.is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
-    let mut rooms = resolve_rooms_with_content_fallback(
+    let (mut rooms, objectives) = resolve_rooms_and_objectives_with_content_fallback(
         ctx,
         sys_id,
         dungeon_id,
@@ -1745,7 +1808,9 @@ pub fn register_sde_operation_dungeon_instance(
         r0.entered_unix = Some(now);
     }
     let total_rooms = rooms.len().max(1) as u8;
+    let first_room_index = rooms.first().map(|r| r.room_index).unwrap_or(1);
     let room_id = rooms.first().map(|r| r.room_id).unwrap_or(i64::from(dungeon_id) * 100 + 1);
+    let init_obj_id = select_active_objective_id(&objectives, first_room_index, 0);
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
         prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
@@ -1764,10 +1829,11 @@ pub fn register_sde_operation_dungeon_instance(
             entry_gate_locked: false,
             current_room_index: 1,
             rooms,
+            objectives,
             completed: false,
             despawned: false,
             created_unix: now,
-            active_objective_id: 0,
+            active_objective_id: init_obj_id,
             completed_task_ids: Vec::new(),
             last_completed_task_id: None,
             ..Default::default()
