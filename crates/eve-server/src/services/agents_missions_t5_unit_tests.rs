@@ -1271,7 +1271,40 @@ async fn bf4_clamped_penalty_and_journal_expiry_penalties() {
     let char_id = 90_000_001_i64;
     let kw = HashMap::new();
 
-    // 1. Clamped -10.0 agent/corp/faction standings emit zero changes and zero standing transactions.
+    // 1. Clamped -10.0 agent/corp/faction standings must never emit zero-delta changes or tx rows.
+    let agent_corp_clamped = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.clear();
+            ch.standings.insert(caldari_ag.agent_id, -10.0);
+            ch.standings.insert(caldari_ag.corporation_id, -10.0);
+        }
+        snap.standing_transactions.remove(&char_id);
+        apply_mission_penalty_standings(
+            &ctx,
+            snap,
+            char_id,
+            caldari_ag.agent_id,
+            caldari_ag.corporation_id,
+            None,
+            -0.10,
+            -0.10,
+            0.0,
+            84,
+        )
+    });
+    assert!(
+        agent_corp_clamped.is_empty(),
+        "clamped -10.0 agent/corp penalty must not push zero-delta notifications"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.standing_transactions
+                .get(&char_id)
+                .is_none_or(|txs| txs.is_empty()),
+            "clamped -10.0 agent/corp penalty must not insert zero-delta standing transactions"
+        );
+    });
+
     let changes = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.standings.clear();
@@ -1293,14 +1326,22 @@ async fn bf4_clamped_penalty_and_journal_expiry_penalties() {
             84,
         )
     });
-    assert!(changes.is_empty(), "clamped -10.0 penalty must not push zero-delta notifications");
+    assert!(changes.iter().all(|(_, _, delta)| delta.abs() > 1e-9));
+    assert!(
+        !changes.iter().any(|&(eid, _, _)| {
+            eid == caldari_ag.agent_id || eid == caldari_ag.corporation_id || eid == 500_001
+        }),
+        "clamped agent/corp/primary faction must not emit notifications: {changes:?}"
+    );
     ctx.db.with_snapshot(|snap| {
-        assert!(
-            snap.standing_transactions
-                .get(&char_id)
-                .is_none_or(|txs| txs.is_empty()),
-            "clamped -10.0 penalty must not insert zero-delta standing transactions"
-        );
+        if let Some(txs) = snap.standing_transactions.get(&char_id) {
+            assert!(txs.iter().all(|tx| tx.modification.abs() > 1e-9));
+            assert!(!txs.iter().any(|tx| {
+                tx.from_id == caldari_ag.agent_id
+                    || tx.from_id == caldari_ag.corporation_id
+                    || tx.from_id == 500_001
+            }));
+        }
     });
 
     // 2. GetMyJournalDetails expiry sweep of Accepted mission applies unified penalties + post-commit notify.
