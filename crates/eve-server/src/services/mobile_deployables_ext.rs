@@ -15,7 +15,11 @@ use crate::services::mobile_deployables::{
     GROUP_MOBILE_TRACTOR, MMJU_JUMP_DISTANCE_M, MMJU_LIFETIME_SECS, MMJU_MAX_SHIP_MASS_KG,
     MMJU_SPOOL_TIME_SECS, MTU_LIFETIME_SECS, TYPE_COVERT_MOBILE_CYNO_BEACON,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord};
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, DeferredDeactivationHookOp, PostUnlockIntent,
+    PostUnlockOps,
+};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -617,7 +621,97 @@ pub async fn handle_mmju_activate(
 }
 
 /// Processes pending Observatory pings, MMJU 12s spools, and Siphon cycles inside the solar system actor.
+#[derive(Debug, Clone)]
+pub(crate) enum MobileExtDbOp {
+    MmjuComplete {
+        solar_system_id: u32,
+        now_unix: u64,
+        due_ship_ids: Vec<i64>,
+        jumped_positions: Vec<(i64, [f64; 3])>,
+    },
+    ObservatoryStep {
+        now_unix: u64,
+        updated_obs: Vec<(i64, u32)>,
+        decloaked_ships: Vec<i64>,
+        cleared_active_modules: Vec<i64>,
+        notices: Vec<PendingDecloakNotice>,
+    },
+    StepSiphons {
+        solar_system_id: u32,
+        only_unit_id: Option<i64>,
+        now_unix: u64,
+    },
+}
+
+pub(crate) fn apply_mobile_ext_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde_opt: Option<&SdeRegistry>,
+    op: &MobileExtDbOp,
+) {
+    match op {
+        MobileExtDbOp::MmjuComplete {
+            solar_system_id,
+            now_unix,
+            due_ship_ids,
+            jumped_positions,
+        } => {
+            write_deployable_state_snap(snap, |st| {
+                for &sid in due_ship_ids {
+                    if st.mmju_spools.get(&sid).is_some_and(|e| {
+                        e.solar_system_id == *solar_system_id && *now_unix >= e.complete_at_unix
+                    }) {
+                        st.mmju_spools.remove(&sid);
+                    }
+                }
+            });
+            for &(sid, pos) in jumped_positions {
+                snap.item_positions.insert(sid, pos);
+            }
+        }
+        MobileExtDbOp::ObservatoryStep {
+            now_unix,
+            updated_obs,
+            decloaked_ships,
+            cleared_active_modules,
+            notices,
+        } => {
+            for &mid in cleared_active_modules {
+                snap.module_active_states.remove(&mid);
+                snap.module_active_charges.remove(&mid);
+            }
+            if !updated_obs.is_empty() || !decloaked_ships.is_empty() || !notices.is_empty() {
+                write_deployable_state_snap(snap, |st| {
+                    for &(oid, cnt) in updated_obs {
+                        let prev = st.observatory_pings_done.get(&oid).copied().unwrap_or(0);
+                        if cnt > prev {
+                            st.observatory_pings_done.insert(oid, cnt);
+                            if let Some(rec) = st.deployables.get_mut(&oid) {
+                                rec.last_ping_unix = Some(*now_unix);
+                            }
+                        }
+                    }
+                    for &sid in decloaked_ships {
+                        st.cloak_activated_unix.remove(&sid);
+                    }
+                    st.pending_decloak_notifications.extend(notices.iter().cloned());
+                });
+            }
+        }
+        MobileExtDbOp::StepSiphons {
+            solar_system_id,
+            only_unit_id,
+            now_unix,
+        } => {
+            if let Some(sde) = sde_opt {
+                apply_step_siphons_in_snap(snap, sde, *solar_system_id, *only_unit_id, *now_unix);
+            }
+        }
+    }
+}
+
 /// Runs BEFORE the expiry sweep in `step_mobile_deployables_in_actor` so final boundary pings/cycles execute cleanly.
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
+#[allow(clippy::too_many_arguments)]
 pub fn step_ext_deployables_in_actor(
     ballpark: &mut eve_destiny::Ballpark,
     active_module_cycles: Option<&mut Vec<crate::system_actor::ActiveModuleCycle>>,
@@ -628,59 +722,114 @@ pub fn step_ext_deployables_in_actor(
     solar_system_id: u32,
     now_unix: u64,
 ) {
-    step_mmju_spools_in_actor(
+    let mut ops = PostUnlockOps::default();
+    step_ext_deployables_in_actor_collecting(
+        ballpark,
+        active_module_cycles,
+        sde,
+        db,
+        rng_opt,
+        solar_system_id,
+        now_unix,
+        None,
+        None,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        Some(&**db),
+        Some(db),
+        Some(sde),
+        ops,
+        Some(ballpark),
+        deactivation_hook,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_ext_deployables_in_actor_collecting(
+    ballpark: &mut eve_destiny::Ballpark,
+    active_module_cycles: Option<&mut Vec<crate::system_actor::ActiveModuleCycle>>,
+    sde: &SdeRegistry,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    rng_opt: Option<&MechanicRng>,
+    solar_system_id: u32,
+    now_unix: u64,
+    mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
+    obs_ping_shadow: Option<(&mut std::collections::HashMap<i64, (u32, u64)>, u64)>,
+    post_unlock: &mut PostUnlockOps,
+) {
+    step_mmju_spools_in_actor_collecting(
         ballpark,
         active_module_cycles.as_deref().map(Vec::as_slice),
         sde,
         db,
         solar_system_id,
         now_unix,
+        mmju_shadow,
+        post_unlock,
     );
-    step_observatories_in_actor(
+    step_observatories_in_actor_collecting(
         ballpark,
         active_module_cycles,
-        deactivation_hook,
         sde,
         db,
         rng_opt,
         solar_system_id,
         now_unix,
+        obs_ping_shadow,
+        post_unlock,
     );
-    step_siphons_in_db(sde, db, solar_system_id, None, now_unix);
+    step_siphons_collecting(db, solar_system_id, None, now_unix, post_unlock);
 }
 
-fn step_mmju_spools_in_actor(
+#[allow(clippy::too_many_arguments)]
+fn step_mmju_spools_in_actor_collecting(
     ballpark: &mut eve_destiny::Ballpark,
     active_module_cycles: Option<&[crate::system_actor::ActiveModuleCycle]>,
     sde: &SdeRegistry,
     db: &std::sync::Arc<eve_db::WorldRepository>,
     solar_system_id: u32,
     now_unix: u64,
+    mut mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
+    post_unlock: &mut PostUnlockOps,
 ) {
-    let has_due = db.with_snapshot(|snap| {
-        !snap.deployable_state.mmju_spools.is_empty()
-            && read_deployable_state_snap(snap)
-                .mmju_spools
-                .values()
-                .any(|e| e.solar_system_id == solar_system_id && now_unix >= e.complete_at_unix)
+    let (committed_seq, completed): (u64, Vec<MmjuSpoolEntry>) = db.with_snapshot(|snap| {
+        let cseq = snap
+            .sp6_lifecycle
+            .post_unlock_committed_seq
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(0);
+        if snap.deployable_state.mmju_spools.is_empty() {
+            return (cseq, Vec::new());
+        }
+        let due = read_deployable_state_snap(snap)
+            .mmju_spools
+            .values()
+            .filter(|e| {
+                let pending_same = mmju_shadow
+                    .as_ref()
+                    .and_then(|(m, _)| m.get(&e.ship_id).copied())
+                    .is_some_and(|(at, seq)| at == e.complete_at_unix && seq > cseq);
+                e.solar_system_id == solar_system_id && now_unix >= e.complete_at_unix && !pending_same
+            })
+            .cloned()
+            .collect();
+        (cseq, due)
     });
-    if !has_due {
+    if let Some((m, _)) = mmju_shadow.as_mut() {
+        m.retain(|_, (_, seq)| *seq > committed_seq);
+    }
+    if completed.is_empty() {
         return;
     }
-    let completed: Vec<MmjuSpoolEntry> = db.with_mut_snapshot(|snap| {
-        write_deployable_state_snap(snap, |st| {
-            let due_ships: Vec<i64> = st
-                .mmju_spools
-                .values()
-                .filter(|e| e.solar_system_id == solar_system_id && now_unix >= e.complete_at_unix)
-                .map(|e| e.ship_id)
-                .collect();
-            due_ships
-                .into_iter()
-                .filter_map(|sid| st.mmju_spools.remove(&sid))
-                .collect()
-        })
-    });
+    if let Some((m, pending_seq)) = mmju_shadow.as_mut() {
+        for e in &completed {
+            m.insert(e.ship_id, (e.complete_at_unix, *pending_seq));
+        }
+    }
+    let due_ship_ids: Vec<i64> = completed.iter().map(|e| e.ship_id).collect();
+    let mut jumped_positions: Vec<(i64, [f64; 3])> = Vec::new();
     let siege_attr = crate::services::space_navigation_advanced::find_attr_id_by_name(sde, "siegeModeWarpStatus");
     let disallow_dock_attr = crate::services::space_navigation_advanced::find_attr_id_by_name(sde, "disallowDocking");
     let disallow_jump_attr = crate::services::space_navigation_advanced::find_attr_id_by_name(sde, "disallowDriveJumping");
@@ -771,29 +920,41 @@ fn step_mmju_spools_in_actor(
             continue;
         }
         if let Ok(new_pos) = ballpark.micro_jump(entry.ship_id, MMJU_JUMP_DISTANCE_M) {
-            db.with_mut_snapshot(|snap| {
-                snap.item_positions.insert(entry.ship_id, new_pos.to_array());
-            });
+            jumped_positions.push((entry.ship_id, new_pos.to_array()));
         }
     }
+    post_unlock.push(PostUnlockIntent::MobileExt(MobileExtDbOp::MmjuComplete {
+        solar_system_id,
+        now_unix,
+        due_ship_ids,
+        jumped_positions,
+    }));
 }
 
 #[allow(clippy::too_many_arguments)]
-fn step_observatories_in_actor(
+fn step_observatories_in_actor_collecting(
     ballpark: &mut eve_destiny::Ballpark,
     mut active_module_cycles: Option<&mut Vec<crate::system_actor::ActiveModuleCycle>>,
-    deactivation_hook: Option<&crate::system_actor::ModuleDeactivationHook>,
     sde: &SdeRegistry,
     db: &std::sync::Arc<eve_db::WorldRepository>,
     rng_opt: Option<&MechanicRng>,
     solar_system_id: u32,
     now_unix: u64,
+    mut obs_ping_shadow: Option<(&mut std::collections::HashMap<i64, (u32, u64)>, u64)>,
+    post_unlock: &mut PostUnlockOps,
 ) {
-    let (observatories, mut pings_done_map, cloak_starts): (
+    let (committed_seq, observatories, mut pings_done_map, cloak_starts): (
+        u64,
         Vec<MobileDeployableRecord>,
         std::collections::HashMap<i64, u32>,
         std::collections::HashMap<i64, u64>,
     ) = db.with_snapshot(|snap| {
+        let cseq = snap
+            .sp6_lifecycle
+            .post_unlock_committed_seq
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(0);
         let st = read_deployable_state_snap(snap);
         let obs = st
             .deployables
@@ -806,10 +967,23 @@ fn step_observatories_in_actor(
             })
             .cloned()
             .collect();
-        (obs, st.observatory_pings_done, st.cloak_activated_unix)
+        (cseq, obs, st.observatory_pings_done, st.cloak_activated_unix)
     });
+    if let Some((shadow, _)) = obs_ping_shadow.as_mut() {
+        shadow.retain(|_, (_, seq)| *seq > committed_seq);
+    }
     if observatories.is_empty() {
         return;
+    }
+    if let Some((shadow, _)) = obs_ping_shadow.as_ref() {
+        for (&oid, &(cnt, seq)) in shadow.iter() {
+            if seq > committed_seq {
+                pings_done_map
+                    .entry(oid)
+                    .and_modify(|v| *v = (*v).max(cnt))
+                    .or_insert(cnt);
+            }
+        }
     }
 
     let mut obs_sorted = observatories;
@@ -839,6 +1013,9 @@ fn step_observatories_in_actor(
             continue;
         }
         pings_done_map.insert(obs.item_id, due_pings);
+        if let Some((shadow, pending_seq)) = obs_ping_shadow.as_mut() {
+            shadow.insert(obs.item_id, (due_pings, *pending_seq));
+        }
         updated_obs.push((obs.item_id, due_pings));
 
         for ping_idx in (done + 1)..=due_pings {
@@ -863,6 +1040,7 @@ fn step_observatories_in_actor(
     }
 
     let mut notices = Vec::new();
+    let mut cleared_active_modules = Vec::new();
     for &sid in &decloaked_ships {
         let mut removed_cloaks = Vec::new();
         if let Some(cycles) = active_module_cycles.as_deref_mut() {
@@ -879,36 +1057,34 @@ fn step_observatories_in_actor(
             }
             *cycles = kept;
         }
+        for rc in &removed_cloaks {
+            cleared_active_modules.push(rc.module_id);
+        }
 
-        let (pilot_opt, fallback_cloak_mod) = db.with_mut_snapshot(|snap| {
-            for rc in &removed_cloaks {
-                snap.module_active_states.remove(&rc.module_id);
-                snap.module_active_charges.remove(&rc.module_id);
-            }
+        let need_fallback = removed_cloaks.is_empty();
+        let (pilot_opt, fallback_cloak_mod) = db.with_snapshot(|snap| {
             let pilot = snap
                 .characters
                 .values()
                 .find(|c| c.active_ship_id == sid)
                 .map(|c| c.character_id)
                 .or_else(|| snap.items.get(&sid).map(|i| i.owner_id));
-            let fb = if removed_cloaks.is_empty() {
-                let found = snap
-                    .items
+            let fb = if need_fallback {
+                snap.items
                     .values()
                     .find(|i| {
                         i.location_id == sid
                             && sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
                     })
-                    .map(|i| (i.item_id, i.type_id));
-                if let Some((mid, _)) = found {
-                    snap.module_active_states.remove(&mid);
-                }
-                found
+                    .map(|i| (i.item_id, i.type_id))
             } else {
                 None
             };
             (pilot, fb)
         });
+        if let Some((mid, _)) = fallback_cloak_mod {
+            cleared_active_modules.push(mid);
+        }
 
         if removed_cloaks.is_empty() {
             if let Some((mid, mtid)) = fallback_cloak_mod {
@@ -952,9 +1128,16 @@ fn step_observatories_in_actor(
                 is_active: false,
             },
         );
-        if let (Some(cid), Some(hook)) = (pilot_opt, deactivation_hook) {
-            for rc in &removed_cloaks {
-                hook(solar_system_id, cid, rc);
+        if let Some(cid) = pilot_opt {
+            for rc in removed_cloaks {
+                post_unlock.push(PostUnlockIntent::DeactivationHook(
+                    DeferredDeactivationHookOp {
+                        solar_system_id,
+                        char_id: Some(cid),
+                        fallback_owner_id: None,
+                        cycle: rc,
+                    },
+                ));
             }
         }
         if let Some(cid) = pilot_opt.filter(|&c| c > 0) {
@@ -966,28 +1149,21 @@ fn step_observatories_in_actor(
         }
     }
 
-    db.with_mut_snapshot(|snap| {
-        write_deployable_state_snap(snap, |st| {
-            for (oid, cnt) in updated_obs {
-                st.observatory_pings_done.insert(oid, cnt);
-                if let Some(rec) = st.deployables.get_mut(&oid) {
-                    rec.last_ping_unix = Some(now_unix);
-                }
-            }
-            for &sid in &decloaked_ships {
-                st.cloak_activated_unix.remove(&sid);
-            }
-            st.pending_decloak_notifications.extend(notices);
-        });
-    });
+    post_unlock.push(PostUnlockIntent::MobileExt(MobileExtDbOp::ObservatoryStep {
+        now_unix,
+        updated_obs,
+        decloaked_ships,
+        cleared_active_modules,
+        notices,
+    }));
 }
 
-fn step_siphons_in_db(
-    sde: &SdeRegistry,
+fn step_siphons_collecting(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     solar_system_id: u32,
     only_unit_id: Option<i64>,
     now_unix: u64,
+    post_unlock: &mut PostUnlockOps,
 ) {
     let has_due_siphon = db.with_snapshot(|snap| {
         if !snap.deployable_state.deployables.values().any(|v| v.group_id == GROUP_MOBILE_SIPHON)
@@ -1013,191 +1189,202 @@ fn step_siphons_in_db(
             now_unix.saturating_sub(last_t) >= SIPHON_CYCLE_SECS
         })
     });
-    if !has_due_siphon {
-        return;
+    if has_due_siphon {
+        post_unlock.push(PostUnlockIntent::MobileExt(MobileExtDbOp::StepSiphons {
+            solar_system_id,
+            only_unit_id,
+            now_unix,
+        }));
     }
-    db.with_mut_snapshot(|snap| {
-        let st = read_deployable_state_snap(snap);
-        let mut units: Vec<(MobileDeployableRecord, u64)> = st
-            .deployables
-            .values()
-            .filter(|r| {
-                r.solar_system_id == solar_system_id
-                    && r.group_id == GROUP_MOBILE_SIPHON
-                    && only_unit_id.is_none_or(|uid| r.item_id == uid)
-                    && !r.is_unanchored
-                    && snap.items.contains_key(&r.item_id)
-                    && now_unix < r.expires_at_unix
-                    && (r.anchor_completed
-                        || (r.anchor_start_unix > 0
-                            && now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs)))
-            })
-            .map(|r| {
-                let active_t0 = r.anchor_start_unix.saturating_add(r.anchor_duration_secs);
-                let last_t = st
-                    .siphon_last_cycle_unix
-                    .get(&r.item_id)
-                    .copied()
-                    .unwrap_or(active_t0)
-                    .max(active_t0);
-                (r.clone(), last_t)
-            })
-            .collect();
-        units.sort_by_key(|(r, _)| r.item_id);
+}
 
-        let mut cycle_updates: Vec<(i64, u64)> = Vec::new();
-        for (unit, last_t) in units {
-            let cycles = now_unix.saturating_sub(last_t) / SIPHON_CYCLE_SECS;
-            if cycles == 0 {
-                continue;
-            }
-            let new_last = last_t.saturating_add(cycles * SIPHON_CYCLE_SECS);
-            cycle_updates.push((unit.item_id, new_last));
-
-            let Some(u_type) = sde.types.get(&unit.type_id) else {
-                continue;
-            };
-            let cap_m3 = u_type.capacity.max(0.0);
-            if cap_m3 <= 0.0 {
-                continue;
-            }
-            let raw_rate = u_type.default_attributes.get(&1928).copied().unwrap_or(0.0) as i64;
-            let pro_rate = u_type.default_attributes.get(&1929).copied().unwrap_or(0.0) as i64;
-            let poly_rate = u_type.default_attributes.get(&1933).copied().unwrap_or(0.0) as i64;
-            let waste_pct = u_type.default_attributes.get(&1930).copied().unwrap_or(10.0).max(0.0);
-
-            let upos = snap
-                .item_positions
-                .get(&unit.item_id)
+fn apply_step_siphons_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    solar_system_id: u32,
+    only_unit_id: Option<i64>,
+    now_unix: u64,
+) {
+    let st = read_deployable_state_snap(snap);
+    let mut units: Vec<(MobileDeployableRecord, u64)> = st
+        .deployables
+        .values()
+        .filter(|r| {
+            r.solar_system_id == solar_system_id
+                && r.group_id == GROUP_MOBILE_SIPHON
+                && only_unit_id.is_none_or(|uid| r.item_id == uid)
+                && !r.is_unanchored
+                && snap.items.contains_key(&r.item_id)
+                && now_unix < r.expires_at_unix
+                && (r.anchor_completed
+                    || (r.anchor_start_unix > 0
+                        && now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs)))
+        })
+        .map(|r| {
+            let active_t0 = r.anchor_start_unix.saturating_add(r.anchor_duration_secs);
+            let last_t = st
+                .siphon_last_cycle_unix
+                .get(&r.item_id)
                 .copied()
-                .map(DVec3::from_array)
-                .unwrap_or_else(|| DVec3::from_array(unit.position));
+                .unwrap_or(active_t0)
+                .max(active_t0);
+            (r.clone(), last_t)
+        })
+        .collect();
+    units.sort_by_key(|(r, _)| r.item_id);
 
-            let mut target_locs: Vec<i64> = snap
-                .items
-                .values()
-                .filter(|it| {
-                    it.location_id == solar_system_id as i64
-                        && sde.types.get(&it.type_id).is_some_and(|t| is_siphon_target_pos_group(t.group_id))
-                        && snap
-                            .item_positions
-                            .get(&it.item_id)
-                            .is_some_and(|p| (upos - DVec3::from_array(*p)).length() <= SIPHON_MAX_GRID_DIST_M)
-                })
-                .map(|it| it.item_id)
-                .collect();
-            target_locs.sort_unstable();
-            target_locs.dedup();
-            if target_locs.is_empty() {
+    let mut cycle_updates: Vec<(i64, u64)> = Vec::new();
+    for (unit, last_t) in units {
+        let cycles = now_unix.saturating_sub(last_t) / SIPHON_CYCLE_SECS;
+        if cycles == 0 {
+            continue;
+        }
+        let new_last = last_t.saturating_add(cycles * SIPHON_CYCLE_SECS);
+        cycle_updates.push((unit.item_id, new_last));
+
+        let Some(u_type) = sde.types.get(&unit.type_id) else {
+            continue;
+        };
+        let cap_m3 = u_type.capacity.max(0.0);
+        if cap_m3 <= 0.0 {
+            continue;
+        }
+        let raw_rate = u_type.default_attributes.get(&1928).copied().unwrap_or(0.0) as i64;
+        let pro_rate = u_type.default_attributes.get(&1929).copied().unwrap_or(0.0) as i64;
+        let poly_rate = u_type.default_attributes.get(&1933).copied().unwrap_or(0.0) as i64;
+        let waste_pct = u_type.default_attributes.get(&1930).copied().unwrap_or(10.0).max(0.0);
+
+        let upos = snap
+            .item_positions
+            .get(&unit.item_id)
+            .copied()
+            .map(DVec3::from_array)
+            .unwrap_or_else(|| DVec3::from_array(unit.position));
+
+        let mut target_locs: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.location_id == solar_system_id as i64
+                    && sde.types.get(&it.type_id).is_some_and(|t| is_siphon_target_pos_group(t.group_id))
+                    && snap
+                        .item_positions
+                        .get(&it.item_id)
+                        .is_some_and(|p| (upos - DVec3::from_array(*p)).length() <= SIPHON_MAX_GRID_DIST_M)
+            })
+            .map(|it| it.item_id)
+            .collect();
+        target_locs.sort_unstable();
+        target_locs.dedup();
+        if target_locs.is_empty() {
+            continue;
+        }
+
+        let mut used_m3: f64 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == unit.item_id && i.quantity > 0)
+            .map(|i| sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.01) * (i.quantity as f64))
+            .sum();
+
+        for (rate, kind) in [(raw_rate, 0u8), (pro_rate, 1u8), (poly_rate, 2u8)] {
+            if rate <= 0 {
                 continue;
             }
-
-            let mut used_m3: f64 = snap
+            let mut rem_steal = rate.saturating_mul(cycles as i64);
+            let mut stack_ids: Vec<i64> = snap
                 .items
                 .values()
-                .filter(|i| i.location_id == unit.item_id && i.quantity > 0)
-                .map(|i| sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.01) * (i.quantity as f64))
-                .sum();
+                .filter(|i| {
+                    target_locs.contains(&i.location_id)
+                        && snap.items.get(&i.location_id).is_some_and(|pos| i.owner_id == pos.owner_id)
+                        && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::None)
+                        && i.quantity > 0
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        && sde.types.get(&i.type_id).is_some_and(|t| match kind {
+                            0 => matches!(t.group_id, 427 | 1884 | 1920..=1923),
+                            1 => matches!(t.group_id, 428 | 429),
+                            _ => t.group_id == 974,
+                        })
+                })
+                .map(|i| i.item_id)
+                .collect();
+            stack_ids.sort_unstable();
 
-            for (rate, kind) in [(raw_rate, 0u8), (pro_rate, 1u8), (poly_rate, 2u8)] {
-                if rate <= 0 {
+            for sid in stack_ids {
+                if rem_steal <= 0 {
+                    break;
+                }
+                let Some((mat_tid, avail)) = snap.items.get(&sid).map(|i| (i.type_id, i.quantity as i64)) else {
+                    continue;
+                };
+                let u_vol = sde.types.get(&mat_tid).map(|t| t.volume).unwrap_or(0.01).max(0.0001);
+                let max_fit = ((cap_m3 - used_m3).max(0.0) / u_vol).floor() as i64;
+                if max_fit <= 0 {
+                    break;
+                }
+                // Total removed = stolen + ceil(stolen * waste%), capped by `avail`.
+                let max_from_avail = if waste_pct > 0.0 {
+                    ((avail as f64) / (1.0 + waste_pct / 100.0)).floor().max(1.0) as i64
+                } else {
+                    avail
+                };
+                let stolen = rem_steal.min(max_fit).min(max_from_avail).min(avail);
+                if stolen <= 0 {
                     continue;
                 }
-                let mut rem_steal = rate.saturating_mul(cycles as i64);
-                let mut stack_ids: Vec<i64> = snap
+                let waste = (((stolen as f64) * (waste_pct / 100.0)).ceil() as i64).min(avail - stolen);
+                let total_drain = stolen + waste;
+
+                if let Some(src_it) = snap.items.get_mut(&sid) {
+                    src_it.quantity = (src_it.quantity as i64 - total_drain).max(0) as i32;
+                    src_it.version += 1;
+                    if src_it.quantity <= 0 {
+                        snap.items.remove(&sid);
+                    }
+                }
+
+                let existing_dest = snap
                     .items
                     .values()
-                    .filter(|i| {
-                        target_locs.contains(&i.location_id)
-                            && snap.items.get(&i.location_id).is_some_and(|pos| i.owner_id == pos.owner_id)
-                            && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::None)
-                            && i.quantity > 0
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                            && sde.types.get(&i.type_id).is_some_and(|t| match kind {
-                                0 => matches!(t.group_id, 427 | 1884 | 1920..=1923),
-                                1 => matches!(t.group_id, 428 | 429),
-                                _ => t.group_id == 974,
-                            })
-                    })
-                    .map(|i| i.item_id)
-                    .collect();
-                stack_ids.sort_unstable();
-
-                for sid in stack_ids {
-                    if rem_steal <= 0 {
-                        break;
+                    .find(|i| i.location_id == unit.item_id && i.type_id == mat_tid && !i.singleton)
+                    .map(|i| i.item_id);
+                if let Some(did) = existing_dest {
+                    if let Some(dst) = snap.items.get_mut(&did) {
+                        dst.quantity = dst.quantity.saturating_add(stolen as i32);
+                        dst.version += 1;
                     }
-                    let Some((mat_tid, avail)) = snap.items.get(&sid).map(|i| (i.type_id, i.quantity as i64)) else {
-                        continue;
-                    };
-                    let u_vol = sde.types.get(&mat_tid).map(|t| t.volume).unwrap_or(0.01).max(0.0001);
-                    let max_fit = ((cap_m3 - used_m3).max(0.0) / u_vol).floor() as i64;
-                    if max_fit <= 0 {
-                        break;
-                    }
-                    // Total removed = stolen + ceil(stolen * waste%), capped by `avail`.
-                    let max_from_avail = if waste_pct > 0.0 {
-                        ((avail as f64) / (1.0 + waste_pct / 100.0)).floor().max(1.0) as i64
-                    } else {
-                        avail
-                    };
-                    let stolen = rem_steal.min(max_fit).min(max_from_avail).min(avail);
-                    if stolen <= 0 {
-                        continue;
-                    }
-                    let waste = (((stolen as f64) * (waste_pct / 100.0)).ceil() as i64).min(avail - stolen);
-                    let total_drain = stolen + waste;
-
-                    if let Some(src_it) = snap.items.get_mut(&sid) {
-                        src_it.quantity = (src_it.quantity as i64 - total_drain).max(0) as i32;
-                        src_it.version += 1;
-                        if src_it.quantity <= 0 {
-                            snap.items.remove(&sid);
-                        }
-                    }
-
-                    let existing_dest = snap
-                        .items
-                        .values()
-                        .find(|i| i.location_id == unit.item_id && i.type_id == mat_tid && !i.singleton)
-                        .map(|i| i.item_id);
-                    if let Some(did) = existing_dest {
-                        if let Some(dst) = snap.items.get_mut(&did) {
-                            dst.quantity = dst.quantity.saturating_add(stolen as i32);
-                            dst.version += 1;
-                        }
-                    } else {
-                        snap.next_entity_id += 1;
-                        let nid = snap.next_entity_id;
-                        snap.items.insert(
-                            nid,
-                            InventoryItemRecord {
-                                item_id: nid,
-                                type_id: mat_tid,
-                                owner_id: unit.owner_id,
-                                location_id: unit.item_id,
-                                flag: InventoryFlag::Cargo,
-                                quantity: stolen as i32,
-                                singleton: false,
-                                version: 1,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    used_m3 += u_vol * (stolen as f64);
-                    rem_steal -= stolen;
+                } else {
+                    snap.next_entity_id += 1;
+                    let nid = snap.next_entity_id;
+                    snap.items.insert(
+                        nid,
+                        InventoryItemRecord {
+                            item_id: nid,
+                            type_id: mat_tid,
+                            owner_id: unit.owner_id,
+                            location_id: unit.item_id,
+                            flag: InventoryFlag::Cargo,
+                            quantity: stolen as i32,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
                 }
+                used_m3 += u_vol * (stolen as f64);
+                rem_steal -= stolen;
             }
         }
+    }
 
-        if !cycle_updates.is_empty() {
-            write_deployable_state_snap(snap, |st_mut| {
-                for (uid, ts) in cycle_updates {
-                    st_mut.siphon_last_cycle_unix.insert(uid, ts);
-                }
-            });
-        }
-    });
+    if !cycle_updates.is_empty() {
+        write_deployable_state_snap(snap, |st_mut| {
+            for (uid, ts) in cycle_updates {
+                st_mut.siphon_last_cycle_unix.insert(uid, ts);
+            }
+        });
+    }
 }
 
 /// Flushes pending decloak notifications (`OnCloakModuleForceDeactivated`) and invalidates ship fittings.

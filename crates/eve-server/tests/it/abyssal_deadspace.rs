@@ -572,8 +572,7 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
     }
     let ship2_hp_before = p_h.get_combat_state(ship2).await.unwrap().unwrap().structure_hp;
     for _ in 0..4 {
-        let mut bp = p_h.ballpark.write().unwrap();
-        let _ = eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), p_sys);
+        let _ = p_h.step_manual(1.0).await;
     }
     assert_eq!(p_h.get_combat_state(ship2).await.unwrap().unwrap().structure_hp, ship2_hp_before, "Pilot 2 in Room 1 takes zero boundary damage when Pilot 1 is in Room 3");
 
@@ -594,8 +593,7 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
     if let Ok(Some(mut cs)) = p_h.get_combat_state(ship3).await { cs.structure_hp = 200.0; let _ = p_h.set_combat_state(ship3, cs).await; }
     for _ in 0..30 {
         if ctx.db.with_snapshot(|s| s.characters[&char3].station_id.is_some()) { break; }
-        let mut bp = p_h.ballpark.write().unwrap();
-        let _ = eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), p_sys);
+        let _ = p_h.step_manual(1.0).await;
     }
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&implant_iid), "Plugged-in implant destroyed on boundary pod death");
@@ -701,7 +699,7 @@ use eve_server::services::pve_special_sites::with_abyssal_state;
 use eve_server::services::pve_special_sites_abyssal::{
     evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
     pulse_abyssal_automated_pylons, roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m,
-    step_abyssal_hazards_and_pylons_in_ballpark, suppressor_pulse_damage, suppressor_radius_m,
+    suppressor_pulse_damage, suppressor_radius_m,
     tracking_pylon_radius_and_mult, AbyssalWeatherKind, AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
     BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID,
@@ -867,34 +865,22 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     }
     let _ = abyss_h.set_ball_position(ship1, room2_center + DVec3::new(80_000.0, 0.0, 0.0)).await;
     let hp0 = abyss_h.get_combat_state(ship1).await.unwrap().unwrap().structure_hp;
-    {
-        let mut bp = abyss_h.ballpark.write().unwrap();
-        step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
-    }
+    let _ = abyss_h.step_manual(1.0).await;
     assert!(abyss_h.get_ball_snapshot(probe_id).await.unwrap().is_none(), "Out-of-bounds probe destroyed");
     let hp1 = abyss_h.get_combat_state(ship1).await.unwrap().unwrap().structure_hp;
     let dmg1 = hp0 - hp1;
     assert!(dmg1 > 0.0, "Boundary damage applied outside 75km");
 
-    {
-        let mut bp = abyss_h.ballpark.write().unwrap();
-        step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
-    }
+    let _ = abyss_h.step_manual(1.0).await;
     let hp2 = abyss_h.get_combat_state(ship1).await.unwrap().unwrap().structure_hp;
     let dmg2 = hp1 - hp2;
     assert!(dmg2 > dmg1, "Boundary damage escalates per tick ({dmg2} > {dmg1})");
 
     let _ = abyss_h.set_ball_position(ship1, room2_center + DVec3::new(10_000.0, 0.0, 0.0)).await;
-    {
-        let mut bp = abyss_h.ballpark.write().unwrap();
-        step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
-    }
+    let _ = abyss_h.step_manual(1.0).await;
     assert_eq!(abyss_h.get_combat_state(ship1).await.unwrap().unwrap().structure_hp, hp2, "No boundary damage inside 75km");
     let _ = abyss_h.set_ball_position(ship1, room2_center + DVec3::new(80_000.0, 0.0, 0.0)).await;
-    {
-        let mut bp = abyss_h.ballpark.write().unwrap();
-        step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
-    }
+    let _ = abyss_h.step_manual(1.0).await;
     let hp3 = abyss_h.get_combat_state(ship1).await.unwrap().unwrap().structure_hp;
     assert!((hp2 - hp3 - dmg1).abs() < 1e-3, "Escalation counter reset after returning inside 75km");
 
@@ -906,8 +892,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
         if abyss_h.get_ball_snapshot(ship1).await.unwrap().is_none() {
             break;
         }
-        let mut bp = abyss_h.ballpark.write().unwrap();
-        step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
+        let _ = abyss_h.step_manual(1.0).await;
     }
     let pod_id = ctx.db.with_snapshot(|s| s.characters[&char1].active_ship_id);
     assert_ne!(pod_id, ship1, "Capsule ejected when ship destroyed by boundary");
@@ -915,8 +900,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
 
     for _ in 0..20 {
         if ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()) { break; }
-        let mut bp = abyss_h.ballpark.write().unwrap();
-        step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
+        let _ = abyss_h.step_manual(1.0).await;
     }
     assert!(ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()), "Pilot respawned at home station after pod boundary death");
     let origin_h = ctx.systems.get_or_spawn(sys_id);

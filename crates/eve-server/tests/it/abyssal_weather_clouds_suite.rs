@@ -12,7 +12,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::pve_special_sites_abyssal::{
     apply_abyssal_weather_to_combat_and_nav, apply_abyssal_weather_to_ship_attrs,
     evaluate_abyssal_spatial_clouds_for_ship, pulse_abyssal_automated_pylons,
-    step_abyssal_hazards_and_pylons_in_ballpark, AbyssalWeatherKind,
+    AbyssalWeatherKind,
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
     MULTIBODY_TRACKING_PYLON_TYPE_ID, SPATIAL_CLOUD_RADIUS_M, TACHYON_CLOUD_TYPE_ID,
 };
@@ -264,13 +264,14 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     assert!(cap_used_10s_in_cloud > cap_used_10s_outside * 1.5, "Faster cycle inside FilamentCloud ({cap_used_10s_in_cloud} GJ) must consume ~1.67x capacitor vs outside ({cap_used_10s_outside} GJ)");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.dynamic_attributes.is_empty()).unwrap_or(true)), "Dynamic attributes remain empty outside clouds");
 
-    // 5. Test real-time tick in Ballpark via step_abyssal_hazards_and_pylons_in_ballpark
+    // 5. Test real-time tick in SystemActor via step_manual (W6 post-unlock path)
     let _ = sys_handle.set_ball_position(ship_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
-    let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-    let (pre_vel, pre_in) = { let b = bp.balls.get(&ship_id).unwrap(); (b.max_velocity, b.inertia) };
-    step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyssal_sys);
-    assert!((bp.balls.get(&ship_id).unwrap().max_velocity - pre_vel * 4.0).abs() < 1e-3, "Tick applies Tachyon cloud 4x max velocity");
-    assert!((bp.balls.get(&ship_id).unwrap().inertia - pre_in * 0.5).abs() < 1e-3, "Tick applies Tachyon cloud 0.5x inertia");
+    let (_, pre_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (pre_vel, pre_in) = (pre_ball.max_velocity, pre_ball.inertia);
+    let _ = sys_handle.step_manual(1.0).await;
+    let (_, post_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!((post_ball.max_velocity - pre_vel * 4.0).abs() < 1e-3, "Tick applies Tachyon cloud 4x max velocity");
+    assert!((post_ball.inertia - pre_in * 0.5).abs() < 1e-3, "Tick applies Tachyon cloud 0.5x inertia");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.dynamic_attributes.is_empty()).unwrap_or(true)), "Tick does not pollute dynamic_attributes");
 }
 

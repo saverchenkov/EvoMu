@@ -1472,6 +1472,11 @@ impl WorldRepository {
     where
         E: crate::tx_engine::FromTxError,
     {
+        crate::lock_rank::assert_locks_disallowed(
+            &[crate::lock_rank::RANK_BALLPARK, crate::lock_rank::RANK_ACTOR_STATE],
+            RANK_WORLD_INNER,
+            "WorldRepository::tx forbidden while holding RANK_BALLPARK or RANK_ACTOR_STATE",
+        );
         if let Some(prev_err) = self.check_tx_poison() {
             return Err(E::from_tx_error(TxError::Persist(format!(
                 "dispatch transaction aborted due to earlier persistence failure: {prev_err}"
@@ -1799,6 +1804,11 @@ impl WorldRepository {
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
+        crate::lock_rank::assert_locks_disallowed(
+            &[crate::lock_rank::RANK_BALLPARK, crate::lock_rank::RANK_ACTOR_STATE],
+            RANK_WORLD_INNER,
+            "WorldRepository::with_mut_snapshot forbidden while holding RANK_BALLPARK or RANK_ACTOR_STATE",
+        );
         match self.tx("with_mut_snapshot", |wtx| Ok::<R, TxError>(f(wtx.snap))) {
             Ok(val) => val,
             Err(err) => panic!("{err}"),
@@ -1849,6 +1859,11 @@ impl WorldRepository {
         F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
         E: FromWalError,
     {
+        crate::lock_rank::assert_locks_disallowed(
+            &[crate::lock_rank::RANK_BALLPARK, crate::lock_rank::RANK_ACTOR_STATE],
+            RANK_WORLD_INNER,
+            "WorldRepository::try_with_mut_snapshot forbidden while holding RANK_BALLPARK or RANK_ACTOR_STATE",
+        );
         enum AdapterErr<E> {
             User(E),
             Tx(TxError),
@@ -2087,6 +2102,76 @@ mod r4_persistence_tests {
 
         drop(repo);
         let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    #[test]
+    fn test_world_repository_mutating_entry_panics_immediately_under_ballpark_or_actor_state_locks() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::sync::{mpsc, Arc};
+        use std::time::{Duration, Instant};
+
+        let repo = Arc::new(WorldRepository::new_empty());
+        let repo_bg = Arc::clone(&repo);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (rel_tx, rel_rx) = mpsc::channel();
+        // Hold `writer` on a background thread so any caller attempting to acquire `writer`
+        // before checking disallowed actor lock ranks would block for >=250ms.
+        let holder = std::thread::spawn(move || {
+            let _w = repo_bg.writer.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = rel_rx.recv_timeout(Duration::from_secs(2));
+        });
+        held_rx.recv().unwrap();
+
+        let bp_lock: RankedRwLock<(), { crate::lock_rank::RANK_BALLPARK }> = RankedRwLock::new(());
+        let st_lock: RankedRwLock<(), { crate::lock_rank::RANK_ACTOR_STATE }> = RankedRwLock::new(());
+
+        for (rank_name, is_actor_state, is_write) in [
+            ("RANK_BALLPARK::read", false, false),
+            ("RANK_BALLPARK::write", false, true),
+            ("RANK_ACTOR_STATE::read", true, false),
+            ("RANK_ACTOR_STATE::write", true, true),
+        ] {
+            let _bp_r = (!is_actor_state && !is_write).then(|| bp_lock.read().unwrap());
+            let _bp_w = (!is_actor_state && is_write).then(|| bp_lock.write().unwrap());
+            let _st_r = (is_actor_state && !is_write).then(|| st_lock.read().unwrap());
+            let _st_w = (is_actor_state && is_write).then(|| st_lock.write().unwrap());
+
+            let t0 = Instant::now();
+            let mut ran = false;
+            let res_tx = catch_unwind(AssertUnwindSafe(|| {
+                repo.tx("test_w6_tx", |_wtx| {
+                    ran = true;
+                    Ok::<(), TxError>(())
+                })
+            }));
+            assert!(res_tx.is_err(), "{rank_name}: tx must panic immediately");
+            assert!(!ran && t0.elapsed() < Duration::from_millis(50), "{rank_name}: tx blocked or ran");
+
+            let t1 = Instant::now();
+            let mut ran = false;
+            let res_with = catch_unwind(AssertUnwindSafe(|| {
+                repo.with_mut_snapshot(|_snap| {
+                    ran = true;
+                });
+            }));
+            assert!(res_with.is_err(), "{rank_name}: with_mut_snapshot must panic immediately");
+            assert!(!ran && t1.elapsed() < Duration::from_millis(50), "{rank_name}: with_mut_snapshot blocked or ran");
+
+            let t2 = Instant::now();
+            let mut ran = false;
+            let res_try = catch_unwind(AssertUnwindSafe(|| {
+                repo.try_with_mut_snapshot(|_snap| -> Result<(), String> {
+                    ran = true;
+                    Ok(())
+                })
+            }));
+            assert!(res_try.is_err(), "{rank_name}: try_with_mut_snapshot must panic immediately");
+            assert!(!ran && t2.elapsed() < Duration::from_millis(50), "{rank_name}: try_with_mut_snapshot blocked or ran");
+        }
+
+        let _ = rel_tx.send(());
+        holder.join().unwrap();
     }
 }
 #[cfg(test)] #[path = "persistence_unit_tests.rs"] mod persistence_unit_tests;

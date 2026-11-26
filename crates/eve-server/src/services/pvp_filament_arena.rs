@@ -4,8 +4,12 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::NotificationTarget;
-use crate::router::ServerContext;
-use eve_db::lock_rank::AnyRwLock;
+use crate::router::{PendingMachoNotification, ServerContext};
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, PostCommitBallparkOp, PostUnlockIntent, PostUnlockOps,
+};
+use eve_db::lock_rank::{AnyRwLock, RankedRwLock, RANK_LEAF};
+use eve_db::{WorldRepository, WorldStateSnapshot};
 use crate::services::pve_abyssal_hazards::resolve_character_home_station_and_system;
 use crate::services::pve_abyssal_pylons::destroy_pod_and_respawn_faction_corvette_in_snap;
 use crate::services::pvp_filament_mgr::{
@@ -382,337 +386,330 @@ pub fn notify_pvp_stats_for_pilots_in_db(
 
 /// Real-time 1 Hz Proving Grounds arena boundary (`75 km` sphere around each match's `arena_offset`)
 /// and arena collapse timer (`900 s`) escalating environmental damage tick.
-pub fn step_proving_grounds_arena_hazards_in_ballpark(
-    ballpark: &mut eve_destiny::Ballpark,
-    sde_opt: Option<&eve_sde::SdeRegistry>,
-    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
-    solar_system_id: eve_sde::SolarSystemId,
-    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
-    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-) -> Vec<i64> {
-    step_proving_grounds_arena_hazards_in_ballpark_with_options(
-        ballpark,
-        sde_opt,
-        db_opt,
-        solar_system_id,
-        pending_notifications_opt,
-        notify_tx_opt,
-        false,
-    )
+#[derive(Debug, Clone)]
+pub(crate) struct ProvingArenaElimination {
+    pub match_id: i64,
+    pub char_id: i64,
+    pub ship_id: i64,
+    pub ship_type_id: u32,
+    pub pos: [f64; 3],
+    pub will_run_step_hook: bool,
 }
 
-pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick(
-    ballpark: &mut eve_destiny::Ballpark,
-    sde_opt: Option<&eve_sde::SdeRegistry>,
-    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
-    solar_system_id: eve_sde::SolarSystemId,
-    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
-    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-) -> Vec<i64> {
-    step_proving_grounds_arena_hazards_in_ballpark_with_options(
-        ballpark,
-        sde_opt,
-        db_opt,
-        solar_system_id,
-        pending_notifications_opt,
-        notify_tx_opt,
-        true,
-    )
+#[derive(Debug, Clone)]
+pub(crate) struct ProvingArenaPostCommit {
+    pub respawned_pilots: Vec<(i64, i64, i64, u32, i64)>,
+    pub ejected_pods: Vec<(i64, i64, i64)>,
+    pub concluded_matches: Vec<(i64, Vec<i64>)>,
+    pub pending_notifications_opt: Option<
+        std::sync::Arc<
+            RankedRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>, RANK_LEAF>,
+        >,
+    >,
+    pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
 }
 
-fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
-    ballpark: &mut eve_destiny::Ballpark,
+#[derive(Debug, Clone)]
+pub(crate) struct ProvingArenaTickDbOp {
+    pub hazard_tick_upserts: Vec<(i64, u32)>,
+    pub hazard_tick_removes: Vec<i64>,
+    pub eliminated: Vec<ProvingArenaElimination>,
+    pub now_unix: u64,
+    pub pending_notifications_opt: Option<
+        std::sync::Arc<
+            RankedRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>, RANK_LEAF>,
+        >,
+    >,
+    pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    pub standalone_post_commit:
+        Option<std::sync::Arc<std::sync::Mutex<Option<ProvingArenaPostCommit>>>>,
+}
+
+pub(crate) fn apply_proving_arena_tick_in_snap(
+    snap: &mut WorldStateSnapshot,
     sde_opt: Option<&eve_sde::SdeRegistry>,
-    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
-    solar_system_id: eve_sde::SolarSystemId,
-    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
-    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-    defer_ship_death_to_step_hook: bool,
-) -> Vec<i64> {
-    let mut destroyed_balls = Vec::new();
-    if solar_system_id != 32_000_001 {
-        return destroyed_balls;
+    op: &ProvingArenaTickDbOp,
+) -> (Vec<PostCommitBallparkOp>, Option<ProvingArenaPostCommit>) {
+    let mut store = load_pvp_store(snap);
+    if store.active_matches.is_empty() {
+        return (Vec::new(), None);
     }
-    let Some(db) = db_opt else {
-        return destroyed_balls;
-    };
-    if !db.with_snapshot(|snap| !load_pvp_store(snap).active_matches.is_empty()) {
-        return destroyed_balls;
+
+    let mut store_dirty = false;
+    for &sid in &op.hazard_tick_removes {
+        if store.hazard_ticks.remove(&sid).is_some() {
+            store_dirty = true;
+        }
     }
-    let now_unix = db.clock().now_unix_secs();
+    for &(sid, next_tick) in &op.hazard_tick_upserts {
+        if store.hazard_ticks.get(&sid).copied() != Some(next_tick) {
+            store.hazard_ticks.insert(sid, next_tick);
+            store_dirty = true;
+        }
+    }
+
     let mut respawned_pilots: Vec<(i64, i64, i64, u32, i64)> = Vec::new();
     let mut ejected_pods: Vec<(i64, i64, i64)> = Vec::new();
     let mut concluded_matches: Vec<(i64, Vec<i64>)> = Vec::new();
+    let mut pending_rewards: Vec<(u32, Vec<i64>)> = Vec::new();
+    let mut ballpark_effects: Vec<PostCommitBallparkOp> = Vec::new();
 
-    db.with_mut_snapshot(|snap| {
-        let mut store = load_pvp_store(snap);
-        if store.active_matches.is_empty() {
-            return;
+    let mut touched_matches: Vec<i64> = Vec::new();
+    for elim in &op.eliminated {
+        let mid = elim.match_id;
+        let cid = elim.char_id;
+        let ship_id = elim.ship_id;
+        let ship_type_id = elim.ship_type_id;
+        let pos = DVec3::from_array(elim.pos);
+
+        if store.hazard_ticks.remove(&ship_id).is_some() {
+            store_dirty = true;
         }
-        let match_ids: Vec<i64> = store
-            .active_matches
-            .values()
-            .filter(|m| m.arena_solar_system_id == 32_000_001)
-            .map(|m| m.match_id)
+
+        if !elim.will_run_step_hook {
+            let base_price = sde_opt
+                .and_then(|sde| sde.types.get(&ship_type_id))
+                .map(|t| t.base_price)
+                .unwrap_or(250_000.0);
+            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, ship_id);
+            snap.items.remove(&ship_id);
+            snap.item_positions.remove(&ship_id);
+            snap.module_online_states.remove(&ship_id);
+            snap.items.retain(|_, it| it.location_id != ship_id);
+            if ship_type_id != 670 {
+                snap.next_entity_id += 1;
+                let kid = snap.next_entity_id;
+                snap.record_killmail(
+                    eve_db::KillmailRecord {
+                        kill_id: kid,
+                        victim_character_id: cid,
+                        attacker_character_id: 0,
+                        attacker_corp_id: 1_000_298,
+                        solar_system_id: 32_000_001,
+                        ship_type_id,
+                        total_value_isk: base_price,
+                        ..Default::default()
+                    },
+                    op.now_unix,
+                );
+                snap.next_entity_id += 1;
+                let cap_id = snap.next_entity_id;
+                snap.items.insert(
+                    cap_id,
+                    eve_db::InventoryItemRecord {
+                        item_id: cap_id,
+                        type_id: 670,
+                        owner_id: cid,
+                        location_id: 32_000_001,
+                        flag: eve_db::InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+                snap.item_positions.insert(cap_id, [pos.x, pos.y, pos.z]);
+                let _ = sde_opt.map(|sde| {
+                    crate::router::apply_character_transition_in_snap(
+                        snap,
+                        sde,
+                        cid,
+                        crate::router::TransitionLocation::KeepCurrent,
+                        Some(cap_id),
+                        false,
+                        false,
+                    )
+                });
+                if sde_opt.is_none() {
+                    if let Some(ch) = snap.characters.get_mut(&cid) {
+                        ch.active_ship_id = cap_id;
+                    }
+                }
+                let (mass, radius, inertia, max_vel, shield, armor, hull, sig) = sde_opt
+                    .and_then(|sde| sde.types.get(&670))
+                    .map(|t| {
+                        let a = &t.default_attributes;
+                        (
+                            t.mass.max(12_000.0),
+                            t.radius.max(18.0),
+                            a.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5),
+                            a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0),
+                            a.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(250.0),
+                            a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(250.0),
+                            a.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(250.0),
+                            a.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied().unwrap_or(25.0),
+                        )
+                    })
+                    .unwrap_or((12_000.0, 18.0, 0.5, 250.0, 250.0, 250.0, 250.0, 25.0));
+                ballpark_effects.push(PostCommitBallparkOp::AddBallWithCombatAndMeta {
+                    ball: Ball {
+                        id: cap_id,
+                        type_id: 670,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: max_vel,
+                        inertia,
+                        mass,
+                        radius,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    combat_state: Some(eve_destiny::CombatState {
+                        shield_hp: shield,
+                        max_shield_hp: shield,
+                        armor_hp: armor,
+                        max_armor_hp: armor,
+                        structure_hp: hull,
+                        max_structure_hp: hull,
+                        signature_radius: sig,
+                        base_signature_radius: Some(sig),
+                        ..eve_destiny::CombatState::default()
+                    }),
+                    slim_meta: eve_destiny::SlimItemMeta {
+                        group_id: 29,
+                        category_id: 6,
+                        owner_id: cid,
+                        char_id: Some(cid),
+                        ..Default::default()
+                    },
+                });
+                ejected_pods.push((cid, ship_id, cap_id));
+            } else {
+                let (home_station_id, home_sys_id, corvette_id, _, _) =
+                    destroy_pod_and_respawn_faction_corvette_in_snap(
+                        snap,
+                        sde_opt,
+                        cid,
+                        32_000_001,
+                        [pos.x, pos.y, pos.z],
+                        op.now_unix,
+                    );
+                respawned_pilots.push((cid, ship_id, home_station_id, home_sys_id, corvette_id));
+            }
+        }
+        if store.match_eliminated.entry(mid).or_default().insert(cid) {
+            store_dirty = true;
+        }
+        if store.queue.remove(&cid).is_some() {
+            store_dirty = true;
+        }
+        if !touched_matches.contains(&mid) {
+            touched_matches.push(mid);
+        }
+    }
+
+    for mid in touched_matches {
+        let Some(m_snap) = store.active_matches.get(&mid).cloned() else {
+            continue;
+        };
+        if !m_snap.active {
+            continue;
+        }
+        let teams = effective_match_teams(&store, &m_snap);
+        let elim = store.match_eliminated.get(&mid).cloned().unwrap_or_default();
+        let surviving_team_indices: Vec<usize> = teams
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, t)| t.iter().any(|&c| !elim.contains(&c)).then_some(idx))
             .collect();
-        let mut store_dirty = false;
-        let mut pending_rewards: Vec<(u32, Vec<i64>)> = Vec::new();
-
-        for mid in match_ids {
-            let Some(m_snap) = store.active_matches.get(&mid).cloned() else {
-                continue;
-            };
-            let teams = effective_match_teams(&store, &m_snap);
-            let center = store
-                .match_arena_offsets
-                .get(&mid)
-                .copied()
-                .map(DVec3::from_array)
-                .or_else(|| ballpark.balls.get(&m_snap.end_gate_id).map(|b| b.position))
-                .unwrap_or(DVec3::ZERO);
-            let exceeded_timer =
-                now_unix > m_snap.started_unix.saturating_add(PROVING_ARENA_DURATION_SECS);
-
-            let mut newly_eliminated: Vec<(i64, i64, u32, DVec3)> = Vec::new();
-            for &cid in teams.iter().flatten() {
-                if m_snap.exited_pilots.contains(&cid) {
-                    continue;
-                }
-                let already_eliminated = store
-                    .match_eliminated
-                    .get(&mid)
-                    .is_some_and(|e| e.contains(&cid));
-                let Some(ship_id) = snap
-                    .characters
-                    .get(&cid)
-                    .filter(|c| c.solar_system_id == 32_000_001)
-                    .map(|c| c.active_ship_id)
-                    .filter(|&sid| sid > 0)
-                else {
-                    continue;
-                };
-                let Some((ship_pos, ship_type_id)) = ballpark
-                    .balls
-                    .get(&ship_id)
-                    .map(|b| (b.position, b.type_id))
-                else {
-                    continue;
-                };
-                if already_eliminated && ship_type_id != 670 {
-                    continue;
-                }
-                let outside_sphere = ship_pos.distance(center) > PROVING_ARENA_BOUNDARY_RADIUS_M;
-                if !outside_sphere && !exceeded_timer {
-                    if store.hazard_ticks.remove(&ship_id).is_some() {
-                        store_dirty = true;
-                    }
-                    continue;
-                }
-                let next_tick = store.hazard_ticks.get(&ship_id).copied().unwrap_or(0) + 1;
-                store.hazard_ticks.insert(ship_id, next_tick);
-                store_dirty = true;
-
-                let rem_dmg =
-                    PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * f64::from(next_tick - 1));
-                if let Some((_, true, _)) = ballpark.apply_true_damage_to_ball(ship_id, rem_dmg) {
-                    store.hazard_ticks.remove(&ship_id);
-                    destroyed_balls.push(ship_id);
-                    newly_eliminated.push((cid, ship_id, ship_type_id, ship_pos));
-                }
-            }
-
-            if newly_eliminated.is_empty() {
-                continue;
-            }
-            for (cid, ship_id, ship_type_id, pos) in newly_eliminated {
-                let will_run_step_hook = defer_ship_death_to_step_hook
-                    && snap.items.contains_key(&ship_id)
-                    && snap.characters.values().any(|c| c.active_ship_id == ship_id);
-                if !will_run_step_hook {
-                    let base_price = sde_opt
-                        .and_then(|sde| sde.types.get(&ship_type_id))
-                        .map(|t| t.base_price)
-                        .unwrap_or(250_000.0);
-                    crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, ship_id);
-                    snap.items.remove(&ship_id);
-                    snap.item_positions.remove(&ship_id);
-                    snap.module_online_states.remove(&ship_id);
-                    snap.items.retain(|_, it| it.location_id != ship_id);
-                    if ship_type_id != 670 {
-                        snap.next_entity_id += 1;
-                        let kid = snap.next_entity_id;
-                        snap.record_killmail(
-                            eve_db::KillmailRecord {
-                                kill_id: kid,
-                                victim_character_id: cid,
-                                attacker_character_id: 0,
-                                attacker_corp_id: 1_000_298,
-                                solar_system_id: 32_000_001,
-                                ship_type_id,
-                                total_value_isk: base_price,
-                                ..Default::default()
-                            },
-                            now_unix,
-                        );
-                        snap.next_entity_id += 1;
-                        let cap_id = snap.next_entity_id;
-                        snap.items.insert(
-                            cap_id,
-                            eve_db::InventoryItemRecord {
-                                item_id: cap_id,
-                                type_id: 670,
-                                owner_id: cid,
-                                location_id: 32_000_001,
-                                flag: eve_db::InventoryFlag::None,
-                                quantity: 1,
-                                singleton: true,
-                                ..Default::default()
-                            },
-                        );
-                        snap.item_positions.insert(cap_id, [pos.x, pos.y, pos.z]);
-                        let _ = sde_opt.map(|sde| {
-                            crate::router::apply_character_transition_in_snap(
-                                snap,
-                                sde,
-                                cid,
-                                crate::router::TransitionLocation::KeepCurrent,
-                                Some(cap_id),
-                                false,
-                                false,
-                            )
-                        });
-                        if sde_opt.is_none() {
-                            if let Some(ch) = snap.characters.get_mut(&cid) {
-                                ch.active_ship_id = cap_id;
-                            }
-                        }
-                        let (mass, radius, inertia, max_vel, shield, armor, hull, sig) = sde_opt
-                            .and_then(|sde| sde.types.get(&670))
-                            .map(|t| {
-                                let a = &t.default_attributes;
-                                (
-                                    t.mass.max(12_000.0),
-                                    t.radius.max(18.0),
-                                    a.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5),
-                                    a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0),
-                                    a.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(250.0),
-                                    a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(250.0),
-                                    a.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(250.0),
-                                    a.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied().unwrap_or(25.0),
-                                )
-                            })
-                            .unwrap_or((12_000.0, 18.0, 0.5, 250.0, 250.0, 250.0, 250.0, 25.0));
-                        ballpark.add_ball(Ball {
-                            id: cap_id,
-                            type_id: 670,
-                            position: pos,
-                            velocity: DVec3::ZERO,
-                            max_velocity: max_vel,
-                            inertia,
-                            mass,
-                            radius,
-                            speed_fraction: 0.0,
-                            mode: MovementMode::Stop,
-                        });
-                        ballpark.combat_states.insert(
-                            cap_id,
-                            eve_destiny::CombatState {
-                                shield_hp: shield,
-                                max_shield_hp: shield,
-                                armor_hp: armor,
-                                max_armor_hp: armor,
-                                structure_hp: hull,
-                                max_structure_hp: hull,
-                                signature_radius: sig,
-                                base_signature_radius: Some(sig),
-                                ..eve_destiny::CombatState::default()
-                            },
-                        );
-                        ejected_pods.push((cid, ship_id, cap_id));
-                    } else {
-                        let (home_station_id, home_sys_id, corvette_id, _, _) =
-                            destroy_pod_and_respawn_faction_corvette_in_snap(
-                                snap,
-                                sde_opt,
-                                cid,
-                                32_000_001,
-                                [pos.x, pos.y, pos.z],
-                                now_unix,
-                            );
-                        respawned_pilots.push((cid, ship_id, home_station_id, home_sys_id, corvette_id));
-                    }
-                }
-                store.match_eliminated.entry(mid).or_default().insert(cid);
-                store.queue.remove(&cid);
-            }
-
-            if m_snap.active {
-                let elim = store.match_eliminated.get(&mid).cloned().unwrap_or_default();
-                let surviving_team_indices: Vec<usize> = teams
+        if surviving_team_indices.len() <= 1 {
+            let win_team_idx = surviving_team_indices.first().copied();
+            let winner_cid = win_team_idx.and_then(|ti| {
+                teams[ti]
                     .iter()
-                    .enumerate()
-                    .filter_map(|(idx, t)| t.iter().any(|&c| !elim.contains(&c)).then_some(idx))
-                    .collect();
-                if surviving_team_indices.len() <= 1 {
-                    let win_team_idx = surviving_team_indices.first().copied();
-                    let winner_cid = win_team_idx.and_then(|ti| {
-                        teams[ti]
-                            .iter()
-                            .copied()
-                            .find(|c| !elim.contains(c))
-                            .or_else(|| teams[ti].first().copied())
-                    });
-                    if let Some(m) = store.active_matches.get_mut(&mid) {
-                        m.active = false;
-                        m.winner_char_id = winner_cid;
+                    .copied()
+                    .find(|c| !elim.contains(c))
+                    .or_else(|| teams[ti].first().copied())
+            });
+            if let Some(m) = store.active_matches.get_mut(&mid) {
+                m.active = false;
+                m.winner_char_id = winner_cid;
+            }
+            let ev_id = m_snap.event_id;
+            let mut all_participants = Vec::new();
+            for (t_idx, team) in teams.iter().enumerate() {
+                let is_win = win_team_idx == Some(t_idx);
+                for &cid in team {
+                    if !all_participants.contains(&cid) {
+                        all_participants.push(cid);
                     }
-                    let ev_id = m_snap.event_id;
-                    let mut all_participants = Vec::new();
-                    for (t_idx, team) in teams.iter().enumerate() {
-                        let is_win = win_team_idx == Some(t_idx);
-                        for &cid in team {
-                            if !all_participants.contains(&cid) {
-                                all_participants.push(cid);
-                            }
-                            store.queue.remove(&cid);
-                            let st = store.stats.entry(cid).or_insert((0, 0, 0, 0, 0.0));
-                            let est = store
-                                .event_stats
-                                .entry(ev_id)
-                                .or_default()
-                                .entry(cid)
-                                .or_insert((0, 0, 0, 0, 0.0));
-                            if is_win {
-                                st.0 += 1;
-                                st.2 += PROVING_WIN_POINTS;
-                                est.0 += 1;
-                                est.2 += PROVING_WIN_POINTS;
-                            } else {
-                                st.1 += 1;
-                                st.2 += PROVING_LOSS_POINTS;
-                                est.1 += 1;
-                                est.2 += PROVING_LOSS_POINTS;
-                            }
-                        }
-                    }
-                    concluded_matches.push((ev_id, all_participants));
-                    if let Some(ti) = win_team_idx {
-                        let fil_tid = store.match_filament_types.get(&mid).copied().unwrap_or(0);
-                        pending_rewards.push((fil_tid, teams[ti].clone()));
+                    store.queue.remove(&cid);
+                    let st = store.stats.entry(cid).or_insert((0, 0, 0, 0, 0.0));
+                    let est = store
+                        .event_stats
+                        .entry(ev_id)
+                        .or_default()
+                        .entry(cid)
+                        .or_insert((0, 0, 0, 0, 0.0));
+                    if is_win {
+                        st.0 += 1;
+                        st.2 += PROVING_WIN_POINTS;
+                        est.0 += 1;
+                        est.2 += PROVING_WIN_POINTS;
+                    } else {
+                        st.1 += 1;
+                        st.2 += PROVING_LOSS_POINTS;
+                        est.1 += 1;
+                        est.2 += PROVING_LOSS_POINTS;
                     }
                 }
             }
+            concluded_matches.push((ev_id, all_participants));
+            if let Some(ti) = win_team_idx {
+                let fil_tid = store.match_filament_types.get(&mid).copied().unwrap_or(0);
+                pending_rewards.push((fil_tid, teams[ti].clone()));
+            }
+            store_dirty = true;
         }
+    }
 
-        if store_dirty {
-            save_pvp_store(snap, &store);
+    if store_dirty {
+        save_pvp_store(snap, &store);
+    }
+    for (fil_tid, winners) in pending_rewards {
+        credit_proving_grounds_match_rewards_in_snap(snap, sde_opt, fil_tid, &winners);
+    }
+
+    let post_commit = if !respawned_pilots.is_empty()
+        || !ejected_pods.is_empty()
+        || !concluded_matches.is_empty()
+    {
+        Some(ProvingArenaPostCommit {
+            respawned_pilots,
+            ejected_pods,
+            concluded_matches,
+            pending_notifications_opt: op.pending_notifications_opt.clone(),
+            notify_tx_opt: op.notify_tx_opt.clone(),
+        })
+    } else {
+        None
+    };
+
+    if let (Some(slot), Some(pc)) = (&op.standalone_post_commit, &post_commit) {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(pc.clone());
         }
-        for (fil_tid, winners) in pending_rewards {
-            credit_proving_grounds_match_rewards_in_snap(snap, sde_opt, fil_tid, &winners);
-        }
+        return (ballpark_effects, None);
+    }
+
+    (ballpark_effects, post_commit)
+}
+
+pub(crate) fn emit_proving_arena_post_commit(
+    db: &std::sync::Arc<WorldRepository>,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    pending_notifications_dyn: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx_dyn: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    post_commit: ProvingArenaPostCommit,
+) {
+    let pending_ref = pending_notifications_dyn.or_else(|| {
+        post_commit
+            .pending_notifications_opt
+            .as_deref()
+            .map(|a| a as &dyn AnyRwLock<_>)
     });
+    let notify_tx_ref = notify_tx_dyn.or(post_commit.notify_tx_opt.as_ref());
 
-    for (cid, old_ship_id, home_station_id, home_sys_id, corvette_id) in respawned_pilots {
+    for (cid, old_ship_id, home_station_id, home_sys_id, corvette_id) in post_commit.respawned_pilots {
         let char_meta = db.with_snapshot(|s| {
             s.characters
                 .get(&cid)
@@ -750,8 +747,8 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
         ]);
         enqueue_pvp_char_notification(
             db,
-            pending_notifications_opt,
-            notify_tx_opt,
+            pending_ref,
+            notify_tx_ref,
             cid,
             crate::router::notify_registry::OnSessionChanged {
                 is_remote: false,
@@ -760,7 +757,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
             },
         );
     }
-    for (cid, old_ship_id, cap_id) in ejected_pods {
+    for (cid, old_ship_id, cap_id) in post_commit.ejected_pods {
         let char_meta = db.with_snapshot(|s| {
             s.characters
                 .get(&cid)
@@ -782,8 +779,8 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
         )]);
         enqueue_pvp_char_notification(
             db,
-            pending_notifications_opt,
-            notify_tx_opt,
+            pending_ref,
+            notify_tx_ref,
             cid,
             crate::router::notify_registry::OnSessionChanged {
                 is_remote: false,
@@ -792,15 +789,300 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
             },
         );
     }
-    for (ev_id, participants) in concluded_matches {
+    for (ev_id, participants) in post_commit.concluded_matches {
         notify_pvp_stats_for_pilots_in_db(
+            db,
+            sde_opt,
+            pending_ref,
+            notify_tx_ref,
+            ev_id,
+            &participants,
+        );
+    }
+}
+
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
+pub fn step_proving_grounds_arena_hazards_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+) -> Vec<i64> {
+    let post_commit_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut ops = PostUnlockOps::default();
+    let destroyed = step_proving_grounds_arena_hazards_in_ballpark_with_options(
+        ballpark,
+        sde_opt,
+        db_opt,
+        solar_system_id,
+        false,
+        None,
+        None,
+        None,
+        Some(post_commit_slot.clone()),
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.map(|d| &**d),
+        db_opt,
+        sde_opt,
+        ops,
+        Some(ballpark),
+        None,
+    );
+    if let (Some(db), Some(pc)) = (db_opt, post_commit_slot.lock().ok().and_then(|mut g| g.take())) {
+        emit_proving_arena_post_commit(
             db,
             sde_opt,
             pending_notifications_opt,
             notify_tx_opt,
-            ev_id,
-            &participants,
+            pc,
         );
+    }
+    destroyed
+}
+
+#[cfg(test)]
+pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    pending_notifications_opt: Option<&dyn AnyRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+) -> Vec<i64> {
+    let post_commit_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut ops = PostUnlockOps::default();
+    let destroyed = step_proving_grounds_arena_hazards_in_ballpark_with_options(
+        ballpark,
+        sde_opt,
+        db_opt,
+        solar_system_id,
+        true,
+        None,
+        None,
+        None,
+        Some(post_commit_slot.clone()),
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.map(|d| &**d),
+        db_opt,
+        sde_opt,
+        ops,
+        Some(ballpark),
+        None,
+    );
+    if let (Some(db), Some(pc)) = (db_opt, post_commit_slot.lock().ok().and_then(|mut g| g.take())) {
+        emit_proving_arena_post_commit(
+            db,
+            sde_opt,
+            pending_notifications_opt,
+            notify_tx_opt,
+            pc,
+        );
+    }
+    destroyed
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    pending_notifications_opt: Option<
+        &std::sync::Arc<
+            RankedRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>, RANK_LEAF>,
+        >,
+    >,
+    notify_tx_opt: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    arena_hazard_ticks_shadow: Option<(&mut std::collections::HashMap<i64, (Option<u32>, u64)>, u64)>,
+    post_unlock: &mut PostUnlockOps,
+) -> Vec<i64> {
+    step_proving_grounds_arena_hazards_in_ballpark_with_options(
+        ballpark,
+        sde_opt,
+        db_opt,
+        solar_system_id,
+        true,
+        pending_notifications_opt.cloned(),
+        notify_tx_opt.cloned(),
+        arena_hazard_ticks_shadow,
+        None,
+        post_unlock,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
+    ballpark: &mut eve_destiny::Ballpark,
+    _sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+    defer_ship_death_to_step_hook: bool,
+    pending_notifications_opt: Option<
+        std::sync::Arc<
+            RankedRwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>, RANK_LEAF>,
+        >,
+    >,
+    notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+    mut arena_hazard_ticks_shadow: Option<(&mut std::collections::HashMap<i64, (Option<u32>, u64)>, u64)>,
+    standalone_post_commit: Option<std::sync::Arc<std::sync::Mutex<Option<ProvingArenaPostCommit>>>>,
+    post_unlock: &mut PostUnlockOps,
+) -> Vec<i64> {
+    let mut destroyed_balls = Vec::new();
+    if solar_system_id != 32_000_001 {
+        return destroyed_balls;
+    }
+    let Some(db) = db_opt else {
+        return destroyed_balls;
+    };
+    let now_unix = db.clock().now_unix_secs();
+
+    struct ArenaScanCandidate {
+        match_id: i64,
+        char_id: i64,
+        ship_id: i64,
+        center: DVec3,
+        exceeded_timer: bool,
+        already_eliminated: bool,
+        db_hazard_ticks: Option<u32>,
+        will_run_step_hook: bool,
+    }
+
+    let candidates: Vec<ArenaScanCandidate> = db.with_snapshot(|snap| {
+        let store = load_pvp_store(snap);
+        if store.active_matches.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for m_snap in store
+            .active_matches
+            .values()
+            .filter(|m| m.arena_solar_system_id == 32_000_001)
+        {
+            let mid = m_snap.match_id;
+            let teams = effective_match_teams(&store, m_snap);
+            let center = store
+                .match_arena_offsets
+                .get(&mid)
+                .copied()
+                .map(DVec3::from_array)
+                .or_else(|| ballpark.balls.get(&m_snap.end_gate_id).map(|b| b.position))
+                .unwrap_or(DVec3::ZERO);
+            let exceeded_timer =
+                now_unix > m_snap.started_unix.saturating_add(PROVING_ARENA_DURATION_SECS);
+            for &cid in teams.iter().flatten() {
+                if m_snap.exited_pilots.contains(&cid) {
+                    continue;
+                }
+                let already_eliminated = store
+                    .match_eliminated
+                    .get(&mid)
+                    .is_some_and(|e| e.contains(&cid));
+                let Some(ship_id) = snap
+                    .characters
+                    .get(&cid)
+                    .filter(|c| c.solar_system_id == 32_000_001)
+                    .map(|c| c.active_ship_id)
+                    .filter(|&sid| sid > 0)
+                else {
+                    continue;
+                };
+                let db_hazard_ticks = store.hazard_ticks.get(&ship_id).copied();
+                let will_run_step_hook = defer_ship_death_to_step_hook
+                    && snap.items.contains_key(&ship_id)
+                    && snap.characters.values().any(|c| c.active_ship_id == ship_id);
+                out.push(ArenaScanCandidate {
+                    match_id: mid,
+                    char_id: cid,
+                    ship_id,
+                    center,
+                    exceeded_timer,
+                    already_eliminated,
+                    db_hazard_ticks,
+                    will_run_step_hook,
+                });
+            }
+        }
+        out
+    });
+
+    if candidates.is_empty() {
+        return destroyed_balls;
+    }
+
+    let mut hazard_tick_upserts: Vec<(i64, u32)> = Vec::new();
+    let mut hazard_tick_removes: Vec<i64> = Vec::new();
+    let mut eliminated: Vec<ProvingArenaElimination> = Vec::new();
+
+    for cand in candidates {
+        let Some((ship_pos, ship_type_id)) = ballpark
+            .balls
+            .get(&cand.ship_id)
+            .map(|b| (b.position, b.type_id))
+        else {
+            continue;
+        };
+        if cand.already_eliminated && ship_type_id != 670 {
+            continue;
+        }
+        let effective_prev_tick = match arena_hazard_ticks_shadow
+            .as_ref()
+            .and_then(|(sh, _)| sh.get(&cand.ship_id).copied())
+        {
+            Some((v_opt, _)) => v_opt,
+            None => cand.db_hazard_ticks,
+        };
+        let outside_sphere = ship_pos.distance(cand.center) > PROVING_ARENA_BOUNDARY_RADIUS_M;
+        if !outside_sphere && !cand.exceeded_timer {
+            if effective_prev_tick.is_some() {
+                if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_mut() {
+                    sh.insert(cand.ship_id, (None, *seq));
+                }
+                hazard_tick_removes.push(cand.ship_id);
+            }
+            continue;
+        }
+        let next_tick = effective_prev_tick.unwrap_or(0) + 1;
+
+        let rem_dmg =
+            PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * f64::from(next_tick - 1));
+        if let Some((_, true, _)) = ballpark.apply_true_damage_to_ball(cand.ship_id, rem_dmg) {
+            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_mut() {
+                sh.insert(cand.ship_id, (None, *seq));
+            }
+            hazard_tick_removes.push(cand.ship_id);
+            destroyed_balls.push(cand.ship_id);
+            eliminated.push(ProvingArenaElimination {
+                match_id: cand.match_id,
+                char_id: cand.char_id,
+                ship_id: cand.ship_id,
+                ship_type_id,
+                pos: [ship_pos.x, ship_pos.y, ship_pos.z],
+                will_run_step_hook: cand.will_run_step_hook,
+            });
+        } else {
+            if let Some((sh, seq)) = arena_hazard_ticks_shadow.as_mut() {
+                sh.insert(cand.ship_id, (Some(next_tick), *seq));
+            }
+            hazard_tick_upserts.push((cand.ship_id, next_tick));
+        }
+    }
+
+    if !hazard_tick_upserts.is_empty() || !hazard_tick_removes.is_empty() || !eliminated.is_empty() {
+        post_unlock.push(PostUnlockIntent::ProvingArenaTick(ProvingArenaTickDbOp {
+            hazard_tick_upserts,
+            hazard_tick_removes,
+            eliminated,
+            now_unix,
+            pending_notifications_opt,
+            notify_tx_opt,
+            standalone_post_commit,
+        }));
     }
 
     destroyed_balls

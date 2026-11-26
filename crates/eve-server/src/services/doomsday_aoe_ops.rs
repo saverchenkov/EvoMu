@@ -13,6 +13,7 @@ use eve_destiny::{DVec3, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
+pub(crate) use crate::services::doomsday_aoe_tick::step_bosonic_doomsday_in_ballpark_collecting;
 pub use crate::services::doomsday_aoe_tick::{
     step_bosonic_doomsday_in_ballpark, step_bosonic_doomsday_system,
 };

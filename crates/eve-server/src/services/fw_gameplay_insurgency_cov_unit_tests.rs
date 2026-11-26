@@ -498,35 +498,33 @@ async fn actor_fob_damage_phases_and_idle_roamer_patrol_branches() {
     });
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        let fob_ball = eve_destiny::Ball {
-            id: fob_id,
-            type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE,
-            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 1e9,
-            radius: 500.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        };
-        bp.add_ball(fob_ball);
+    let mut bp = eve_destiny::Ballpark::new(sys_id);
+    let fob_ball = eve_destiny::Ball {
+        id: fob_id,
+        type_id: PIRATE_STRONGHOLD_GURISTAS_TYPE,
+        position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e9,
+        radius: 500.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    bp.add_ball(fob_ball);
 
-        // 1. Invulnerable (suppression < stage 5) -> deals 0.0
-        let invuln = handle_fob_ball_damage_in_actor(
-            Some(&ctx.db),
-            sys_id,
-            fob_id,
-            eve_destiny::DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
-            &mut bp,
-            20_000,
-        )
-        .unwrap();
-        assert_eq!(invuln.0, 0.0);
-        assert!(!invuln.1);
-    }
+    // 1. Invulnerable (suppression < stage 5) -> deals 0.0
+    let invuln = handle_fob_ball_damage_in_actor(
+        Some(&ctx.db),
+        sys_id,
+        fob_id,
+        eve_destiny::DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
+        &mut bp,
+        20_000,
+    )
+    .unwrap();
+    assert_eq!(invuln.0, 0.0);
+    assert!(!invuln.1);
 
     // Push all systems to suppression stage 5 (supp >= 500 in >= 5 systems)
     for &s in &all_systems[..5] {
@@ -537,73 +535,61 @@ async fn actor_fob_damage_phases_and_idle_roamer_patrol_branches() {
         });
     }
 
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        // 2. Partial ShieldPhase damage stripping shield -> ArmorVulnerable
-        let p_arm = handle_fob_ball_damage_in_actor(
-            Some(&ctx.db),
-            sys_id,
-            fob_id,
-            eve_destiny::DamageVector { em: 1_500.0, thermal: 1_500.0, kinetic: 0.0, explosive: 0.0 },
-            &mut bp,
-            20_100,
-        )
-        .unwrap();
-        assert!(p_arm.0 > 0.0);
-        assert!(!p_arm.1);
-    }
+    // 2. Partial ShieldPhase damage stripping shield -> ArmorVulnerable
+    let p_arm = handle_fob_ball_damage_in_actor(
+        Some(&ctx.db),
+        sys_id,
+        fob_id,
+        eve_destiny::DamageVector { em: 1_500.0, thermal: 1_500.0, kinetic: 0.0, explosive: 0.0 },
+        &mut bp,
+        20_100,
+    )
+    .unwrap();
+    assert!(p_arm.0 > 0.0);
+    assert!(!p_arm.1);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.structures.get(&fob_id).unwrap().state, "ArmorVulnerable");
     });
 
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        // 3. Wipe remaining armor -> enters ArmorReinforced with timer
-        let reinf = handle_fob_ball_damage_in_actor(
-            Some(&ctx.db),
-            sys_id,
-            fob_id,
-            eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 5_000.0, explosive: 0.0 },
-            &mut bp,
-            20_200,
-        )
-        .unwrap();
-        assert!(!reinf.1);
-    }
+    // 3. Wipe remaining armor -> enters ArmorReinforced with timer
+    let reinf = handle_fob_ball_damage_in_actor(
+        Some(&ctx.db),
+        sys_id,
+        fob_id,
+        eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 5_000.0, explosive: 0.0 },
+        &mut bp,
+        20_200,
+    )
+    .unwrap();
+    assert!(!reinf.1);
     let until = ctx.db.with_snapshot(|snap| snap.insurgency_runtime.fob_armor_reinforced_until[&camp_id]);
     assert!(until > 20_200);
 
     // Advance past reinforcement -> ArmorPhase partial -> HullVulnerable, then fatal -> Destroyed
     set_clock_to(&clock, until + 10);
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        let p_hull = handle_fob_ball_damage_in_actor(
-            Some(&ctx.db),
-            sys_id,
-            fob_id,
-            eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 0.0, explosive: 1_000.0 },
-            &mut bp,
-            until + 10,
-        )
-        .unwrap();
-        assert!(!p_hull.1);
-    }
+    let p_hull = handle_fob_ball_damage_in_actor(
+        Some(&ctx.db),
+        sys_id,
+        fob_id,
+        eve_destiny::DamageVector { em: 0.0, thermal: 0.0, kinetic: 0.0, explosive: 1_000.0 },
+        &mut bp,
+        until + 10,
+    )
+    .unwrap();
+    assert!(!p_hull.1);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.structures.get(&fob_id).unwrap().state, "HullVulnerable");
     });
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        let killed = handle_fob_ball_damage_in_actor(
-            Some(&ctx.db),
-            sys_id,
-            fob_id,
-            eve_destiny::DamageVector { em: 5_000.0, thermal: 5_000.0, kinetic: 5_000.0, explosive: 5_000.0 },
-            &mut bp,
-            until + 20,
-        )
-        .unwrap();
-        assert!(killed.1);
-    }
+    let killed = handle_fob_ball_damage_in_actor(
+        Some(&ctx.db),
+        sys_id,
+        fob_id,
+        eve_destiny::DamageVector { em: 5_000.0, thermal: 5_000.0, kinetic: 5_000.0, explosive: 5_000.0 },
+        &mut bp,
+        until + 20,
+    )
+    .unwrap();
+    assert!(killed.1);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.structures.get(&fob_id).unwrap().state, "Destroyed");
     });

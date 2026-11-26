@@ -6,6 +6,10 @@
 //! anchoring lifecycles, Mobile Depot reinforcement & refitting, and MTU automated tractoring & looting.
 
 use crate::router::ServerContext;
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, PostCommitBallparkOp, PostUnlockIntent, PostUnlockOps,
+};
+use eve_db::WorldStateSnapshot;
 use eve_destiny::{BallId, DamageVector};
 use eve_machonet::SessionState;
 use eve_proto::BridgeRpcError;
@@ -467,6 +471,328 @@ fn is_non_disruptor_meta_in_system(
 
 /// Advances mobile deployable simulation in the solar system actor on each server tick (`feat:structures.mobile-tractor`, `feat:structures.mobile-tractor-rules`, `feat:structures.mobile-depot-lifetime-reinforce`).
 /// Executes automated expiry sweeps and MTU automated tractoring & hold-capacity looting.
+#[derive(Debug, Clone)]
+pub(crate) enum MobileDeployableDbOp {
+    SweepExpired {
+        expired_ids: Vec<i64>,
+    },
+    AdvanceTimers {
+        solar_system_id: u32,
+        now_unix: u64,
+    },
+    RemoveMissingMtu {
+        item_id: i64,
+    },
+    LootMtuCargo {
+        mtu_item_id: i64,
+        target_id: i64,
+        mtu_capacity: f64,
+    },
+    UpdateMtuTargetPosition {
+        target_id: i64,
+        new_pos: [f64; 3],
+    },
+    DepotReinforce {
+        ball_id: i64,
+        reinforced_until_unix: u64,
+    },
+    DepotDestroyed {
+        solar_system_id: u32,
+        ball_id: i64,
+        owner_id: i64,
+        pos_arr: [f64; 3],
+        now_unix: u64,
+    },
+    MtuDestroyed {
+        solar_system_id: u32,
+        ball_id: i64,
+        owner_id: i64,
+        pos_arr: [f64; 3],
+        now_unix: u64,
+    },
+    SimpleDeployableDestroyed {
+        ball_id: i64,
+    },
+}
+
+fn destroy_deployable_with_loot_drop_in_snap(
+    snap: &mut WorldStateSnapshot,
+    solar_system_id: u32,
+    ball_id: i64,
+    owner_id: i64,
+    pos_arr: [f64; 3],
+    now_unix: u64,
+) -> Option<i64> {
+    let mut spawned_can_id = None;
+    let hold_items: Vec<(i64, i32)> = snap
+        .items
+        .values()
+        .filter(|i| i.location_id == ball_id && i.quantity > 0)
+        .map(|i| (i.item_id, i.quantity))
+        .collect();
+    if !hold_items.is_empty() {
+        snap.next_entity_id += 1;
+        let can_id = snap.next_entity_id;
+        snap.items.insert(
+            can_id,
+            eve_db::InventoryItemRecord {
+                item_id: can_id,
+                type_id: 23,
+                owner_id,
+                location_id: solar_system_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(can_id, pos_arr);
+        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
+        spawned_can_id = Some(can_id);
+
+        for (iid, _) in hold_items {
+            let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64
+                / 4294967296.0;
+            if roll < 0.50 {
+                if let Some(it) = snap.items.get_mut(&iid) {
+                    it.location_id = can_id;
+                    it.flag = eve_db::InventoryFlag::Cargo;
+                    it.version += 1;
+                }
+            } else {
+                snap.items.remove(&iid);
+            }
+        }
+    }
+    snap.items.remove(&ball_id);
+    snap.item_positions.remove(&ball_id);
+    snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+    snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
+    write_deployable_state_snap(snap, |st| {
+        st.deployables.remove(&ball_id);
+    });
+    spawned_can_id
+}
+
+pub(crate) fn apply_mobile_deployable_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde_opt: Option<&SdeRegistry>,
+    op: &MobileDeployableDbOp,
+) -> Option<PostCommitBallparkOp> {
+    match op {
+        MobileDeployableDbOp::SweepExpired { expired_ids } => {
+            write_deployable_state_snap(snap, |st| {
+                for &eid in expired_ids {
+                    st.deployables.remove(&eid);
+                    st.observatory_pings_done.remove(&eid);
+                    st.siphon_last_cycle_unix.remove(&eid);
+                }
+            });
+            for &eid in expired_ids {
+                let child_ids: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == eid)
+                    .map(|i| i.item_id)
+                    .collect();
+                for cid in child_ids {
+                    snap.items.remove(&cid);
+                }
+                snap.items.remove(&eid);
+                snap.item_positions.remove(&eid);
+                snap.sp6_lifecycle.space_object_meta.remove(&eid);
+            }
+            None
+        }
+        MobileDeployableDbOp::AdvanceTimers {
+            solar_system_id,
+            now_unix,
+        } => {
+            if !snap.deployable_state.deployables.is_empty() {
+                write_deployable_state_snap(snap, |st| {
+                    for rec in st.deployables.values_mut() {
+                        if rec.solar_system_id == *solar_system_id {
+                            if rec.reinforced_until_unix.is_some_and(|u| *now_unix >= u) {
+                                rec.reinforced_until_unix = None;
+                            }
+                            if !rec.is_unanchored
+                                && !rec.anchor_completed
+                                && rec.anchor_start_unix > 0
+                                && *now_unix
+                                    >= rec
+                                        .anchor_start_unix
+                                        .saturating_add(rec.anchor_duration_secs)
+                            {
+                                rec.anchor_completed = true;
+                            }
+                        }
+                    }
+                });
+            }
+            if let Some(sde) = sde_opt {
+                let meta_ids: Vec<i64> = snap
+                    .sp6_lifecycle
+                    .space_object_meta
+                    .iter()
+                    .filter_map(|(&iid, meta)| {
+                        (!meta.anchor_completed
+                            && meta.anchor_start_unix.is_some_and(|start| {
+                                *now_unix
+                                    >= start.saturating_add(meta.anchoring_delay_secs.ceil() as u64)
+                            })
+                            && is_non_disruptor_meta_in_system(snap, sde, *solar_system_id, iid))
+                        .then_some(iid)
+                    })
+                    .collect();
+                for iid in meta_ids {
+                    if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&iid) {
+                        meta.anchor_completed = true;
+                    }
+                }
+            }
+            None
+        }
+        MobileDeployableDbOp::RemoveMissingMtu { item_id } => {
+            write_deployable_state_snap(snap, |st| {
+                st.deployables.remove(item_id);
+            });
+            None
+        }
+        MobileDeployableDbOp::LootMtuCargo {
+            mtu_item_id,
+            target_id,
+            mtu_capacity,
+        } => {
+            if let Some(sde) = sde_opt {
+                if !snap.items.contains_key(mtu_item_id) {
+                    return None;
+                }
+                let mut current_vol: f64 = snap
+                    .items
+                    .values()
+                    .filter(|c| c.location_id == *mtu_item_id && c.quantity > 0)
+                    .map(|c| {
+                        let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
+                        u_vol * (c.quantity.max(1) as f64)
+                    })
+                    .sum();
+
+                let child_ids: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|c| c.location_id == *target_id && c.quantity > 0)
+                    .map(|c| c.item_id)
+                    .collect();
+
+                for cid in child_ids {
+                    let Some(child) = snap.items.get(&cid).cloned() else { continue; };
+                    let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, &child);
+                    let total_vol = u_vol * (child.quantity.max(1) as f64);
+                    if current_vol + total_vol <= *mtu_capacity {
+                        if let Some(child_mut) = snap.items.get_mut(&cid) {
+                            child_mut.location_id = *mtu_item_id;
+                            child_mut.flag = eve_db::InventoryFlag::Cargo;
+                            child_mut.version += 1;
+                        }
+                        current_vol += total_vol;
+                    }
+                }
+            }
+            None
+        }
+        MobileDeployableDbOp::UpdateMtuTargetPosition { target_id, new_pos } => {
+            if snap.items.contains_key(target_id) {
+                snap.item_positions.insert(*target_id, *new_pos);
+            }
+            None
+        }
+        MobileDeployableDbOp::DepotReinforce {
+            ball_id,
+            reinforced_until_unix,
+        } => {
+            write_deployable_state_snap(snap, |st| {
+                if let Some(r) = st.deployables.get_mut(ball_id) {
+                    r.reinforced_until_unix = Some(*reinforced_until_unix);
+                }
+            });
+            None
+        }
+        MobileDeployableDbOp::DepotDestroyed {
+            solar_system_id,
+            ball_id,
+            owner_id,
+            pos_arr,
+            now_unix,
+        } => {
+            let actively_reinforced = read_deployable_state_snap(snap)
+                .deployables
+                .get(ball_id)
+                .is_some_and(|rec| rec.reinforced_until_unix.is_some_and(|u| *now_unix < u));
+            if actively_reinforced {
+                return None;
+            }
+            destroy_deployable_with_loot_drop_in_snap(
+                snap,
+                *solar_system_id,
+                *ball_id,
+                *owner_id,
+                *pos_arr,
+                *now_unix,
+            )
+            .map(|can_id| PostCommitBallparkOp::AddStaticBallWithMeta {
+                ball: eve_destiny::Ball {
+                    id: can_id,
+                    type_id: 23,
+                    position: DVec3::from_array(*pos_arr),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 20.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Rigid,
+                },
+                slim_meta: eve_destiny::SlimItemMeta {
+                    group_id: 12,
+                    category_id: 2,
+                    owner_id: *owner_id,
+                    ..Default::default()
+                },
+            })
+        }
+        MobileDeployableDbOp::MtuDestroyed {
+            solar_system_id,
+            ball_id,
+            owner_id,
+            pos_arr,
+            now_unix,
+        } => {
+            let _ = destroy_deployable_with_loot_drop_in_snap(
+                snap,
+                *solar_system_id,
+                *ball_id,
+                *owner_id,
+                *pos_arr,
+                *now_unix,
+            );
+            None
+        }
+        MobileDeployableDbOp::SimpleDeployableDestroyed { ball_id } => {
+            snap.items.remove(ball_id);
+            snap.item_positions.remove(ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(ball_id);
+            snap.sp6_lifecycle.ship_combat_hp.remove(ball_id);
+            write_deployable_state_snap(snap, |st| {
+                st.deployables.remove(ball_id);
+            });
+            None
+        }
+    }
+}
+
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
+#[allow(clippy::too_many_arguments)]
 pub fn step_mobile_deployables_in_actor(
     ballpark: &mut eve_destiny::Ballpark,
     active_module_cycles: &mut Vec<crate::system_actor::ActiveModuleCycle>,
@@ -478,6 +804,46 @@ pub fn step_mobile_deployables_in_actor(
     solar_system_id: u32,
     dt: f64,
     now_unix: u64,
+) {
+    let mut ops = PostUnlockOps::default();
+    step_mobile_deployables_in_actor_collecting(
+        ballpark,
+        active_module_cycles,
+        mechanic_rng,
+        sde_opt,
+        db_opt,
+        rng_opt,
+        solar_system_id,
+        dt,
+        now_unix,
+        None,
+        None,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.map(|d| &**d),
+        db_opt,
+        sde_opt,
+        ops,
+        Some(ballpark),
+        deactivation_hook,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_mobile_deployables_in_actor_collecting(
+    ballpark: &mut eve_destiny::Ballpark,
+    active_module_cycles: &mut Vec<crate::system_actor::ActiveModuleCycle>,
+    mechanic_rng: &crate::rng::MechanicRng,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    rng_opt: Option<&crate::rng::MechanicRng>,
+    solar_system_id: u32,
+    dt: f64,
+    now_unix: u64,
+    mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
+    mut obs_ping_shadow: Option<(&mut std::collections::HashMap<i64, (u32, u64)>, u64)>,
+    post_unlock: &mut PostUnlockOps,
 ) {
     let (Some(db), Some(sde)) = (db_opt, sde_opt) else { return; };
 
@@ -556,89 +922,41 @@ pub fn step_mobile_deployables_in_actor(
 
     // 0. Process pending MMJU 12s spools, Mobile Observatory 10m pings, and Mobile Siphon cycles before expiry removal
     if needs_ext {
-        crate::services::mobile_deployables_ext::step_ext_deployables_in_actor(
+        crate::services::mobile_deployables_ext::step_ext_deployables_in_actor_collecting(
             ballpark,
             Some(active_module_cycles),
-            deactivation_hook,
             sde,
             db,
             rng_opt.or(Some(mechanic_rng)),
             solar_system_id,
             now_unix,
+            mmju_shadow,
+            obs_ping_shadow.as_mut().map(|(m, seq)| (&mut **m, *seq)),
+            post_unlock,
         );
     }
 
-    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
+    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix.
+    // Keep `obs_ping_shadow` intact until `SweepExpired` / `ObservatoryStep` commits; post-commit
+    // `prune_committed(done_seq)` and `shadow.retain(|_, (_, seq)| *seq > committed_seq)` prune it.
     if !expired_ids.is_empty() {
         for &eid in &expired_ids {
             ballpark.balls.remove(&eid);
             ballpark.combat_states.remove(&eid);
         }
-        db.with_mut_snapshot(|snap| {
-            write_deployable_state_snap(snap, |st| {
-                for &eid in &expired_ids {
-                    st.deployables.remove(&eid);
-                    st.observatory_pings_done.remove(&eid);
-                    st.siphon_last_cycle_unix.remove(&eid);
-                }
-            });
-            for eid in expired_ids {
-                let child_ids: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|i| i.location_id == eid)
-                    .map(|i| i.item_id)
-                    .collect();
-                for cid in child_ids {
-                    snap.items.remove(&cid);
-                }
-                snap.items.remove(&eid);
-                snap.item_positions.remove(&eid);
-                snap.sp6_lifecycle.space_object_meta.remove(&eid);
-            }
-        });
+        post_unlock.push(PostUnlockIntent::MobileDeployable(
+            MobileDeployableDbOp::SweepExpired { expired_ids },
+        ));
     }
 
     // 2. Clear expired reinforcement timers and mark completed anchoring transitions
     if has_timer_transition {
-        db.with_mut_snapshot(|snap| {
-            if !snap.deployable_state.deployables.is_empty() {
-                write_deployable_state_snap(snap, |st| {
-                    for rec in st.deployables.values_mut() {
-                        if rec.solar_system_id == solar_system_id {
-                            if rec.reinforced_until_unix.is_some_and(|u| now_unix >= u) {
-                                rec.reinforced_until_unix = None;
-                            }
-                            if !rec.is_unanchored
-                                && !rec.anchor_completed
-                                && rec.anchor_start_unix > 0
-                                && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
-                            {
-                                rec.anchor_completed = true;
-                            }
-                        }
-                    }
-                });
-            }
-            let meta_ids: Vec<i64> = snap
-                .sp6_lifecycle
-                .space_object_meta
-                .iter()
-                .filter_map(|(&iid, meta)| {
-                    (!meta.anchor_completed
-                        && meta.anchor_start_unix.is_some_and(|start| {
-                            now_unix >= start.saturating_add(meta.anchoring_delay_secs.ceil() as u64)
-                        })
-                        && is_non_disruptor_meta_in_system(snap, sde, solar_system_id, iid))
-                    .then_some(iid)
-                })
-                .collect();
-            for iid in meta_ids {
-                if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&iid) {
-                    meta.anchor_completed = true;
-                }
-            }
-        });
+        post_unlock.push(PostUnlockIntent::MobileDeployable(
+            MobileDeployableDbOp::AdvanceTimers {
+                solar_system_id,
+                now_unix,
+            },
+        ));
     }
 
     // 3. MTU tractoring and looting
@@ -701,8 +1019,13 @@ pub fn step_mobile_deployables_in_actor(
                 if !is_wreck && !is_container {
                     continue;
                 }
-                if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
-                    raw_targets.push((it.item_id, DVec3::from_array(*pos_arr)));
+                if let Some(pos) = ballpark
+                    .balls
+                    .get(&it.item_id)
+                    .map(|b| b.position)
+                    .or_else(|| snap.item_positions.get(&it.item_id).copied().map(DVec3::from_array))
+                {
+                    raw_targets.push((it.item_id, pos));
                 }
             }
 
@@ -738,11 +1061,11 @@ pub fn step_mobile_deployables_in_actor(
 
         let candidates = match scan {
             MtuScan::MissingItem => {
-                db.with_mut_snapshot(|snap| {
-                    write_deployable_state_snap(snap, |st| {
-                        st.deployables.remove(&mtu.item_id);
-                    });
-                });
+                post_unlock.push(PostUnlockIntent::MobileDeployable(
+                    MobileDeployableDbOp::RemoveMissingMtu {
+                        item_id: mtu.item_id,
+                    },
+                ));
                 continue;
             }
             MtuScan::Skip => continue,
@@ -763,38 +1086,13 @@ pub fn step_mobile_deployables_in_actor(
 
         if target_dist <= loot_radius {
             // Loot cargo into MTU hold, enforcing capacity
-            db.with_mut_snapshot(|snap| {
-                let mut current_vol: f64 = snap
-                    .items
-                    .values()
-                    .filter(|c| c.location_id == mtu.item_id && c.quantity > 0)
-                    .map(|c| {
-                        let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
-                        u_vol * (c.quantity.max(1) as f64)
-                    })
-                    .sum();
-
-                let child_ids: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|c| c.location_id == target_id && c.quantity > 0)
-                    .map(|c| c.item_id)
-                    .collect();
-
-                for cid in child_ids {
-                    let Some(child) = snap.items.get(&cid).cloned() else { continue; };
-                    let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, &child);
-                    let total_vol = u_vol * (child.quantity.max(1) as f64);
-                    if current_vol + total_vol <= mtu_capacity {
-                        if let Some(child_mut) = snap.items.get_mut(&cid) {
-                            child_mut.location_id = mtu.item_id;
-                            child_mut.flag = eve_db::InventoryFlag::Cargo;
-                            child_mut.version += 1;
-                        }
-                        current_vol += total_vol;
-                    }
-                }
-            });
+            post_unlock.push(PostUnlockIntent::MobileDeployable(
+                MobileDeployableDbOp::LootMtuCargo {
+                    mtu_item_id: mtu.item_id,
+                    target_id,
+                    mtu_capacity,
+                },
+            ));
         } else {
             // Tractor target towards MTU at tractor_speed
             let dir = (mtu_pos - target_pos).normalize_or_zero();
@@ -804,17 +1102,21 @@ pub fn step_mobile_deployables_in_actor(
             } else {
                 target_pos + dir * step
             };
-            db.with_mut_snapshot(|snap| {
-                snap.item_positions.insert(target_id, [new_pos.x, new_pos.y, new_pos.z]);
-            });
             if let Some(b) = ballpark.balls.get_mut(&target_id) {
                 b.position = new_pos;
             }
+            post_unlock.push(PostUnlockIntent::MobileDeployable(
+                MobileDeployableDbOp::UpdateMtuTargetPosition {
+                    target_id,
+                    new_pos: [new_pos.x, new_pos.y, new_pos.z],
+                },
+            ));
         }
     }
 }
 
 /// Evaluates ball damage in solar system actor for Mobile Depots and MTUs (`feat:structures.mobile-depot-lifetime-reinforce`, `feat:structures.mobile-tractor-rules`).
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
 pub fn handle_ball_damage_in_actor(
     db_opt: &Option<std::sync::Arc<eve_db::WorldRepository>>,
     sde_opt: &Option<std::sync::Arc<eve_sde::SdeRegistry>>,
@@ -823,6 +1125,41 @@ pub fn handle_ball_damage_in_actor(
     damage: DamageVector,
     ballpark: &mut eve_destiny::Ballpark,
     now_unix: u64,
+) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
+    let mut ops = PostUnlockOps::default();
+    let res = handle_ball_damage_in_actor_collecting(
+        db_opt,
+        sde_opt,
+        solar_system_id,
+        ball_id,
+        damage,
+        ballpark,
+        now_unix,
+        None,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(
+        db_opt.as_deref(),
+        db_opt.as_ref(),
+        sde_opt.as_deref(),
+        ops,
+        Some(ballpark),
+        None,
+    );
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_ball_damage_in_actor_collecting(
+    db_opt: &Option<std::sync::Arc<eve_db::WorldRepository>>,
+    sde_opt: &Option<std::sync::Arc<eve_sde::SdeRegistry>>,
+    solar_system_id: u32,
+    ball_id: BallId,
+    damage: DamageVector,
+    ballpark: &mut eve_destiny::Ballpark,
+    now_unix: u64,
+    mut depot_reinf_shadow: Option<(&mut std::collections::HashMap<BallId, (u64, u64)>, u64)>,
+    post_unlock: &mut PostUnlockOps,
 ) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
     let db = db_opt.as_ref()?;
     let sde = sde_opt.as_ref()?;
@@ -834,20 +1171,27 @@ pub fn handle_ball_damage_in_actor(
     let it_grp = sde.types.get(&item_type_id).map(|t| t.group_id).unwrap_or(0);
 
     if it_grp == GROUP_MOBILE_DEPOT {
+        let Some(ball_snap) = ballpark.balls.get(&ball_id).cloned() else {
+            return Some((0.0, false, None));
+        };
         let state = db.with_snapshot(read_deployable_state_snap);
         let rec_opt = state.deployables.get(&ball_id).cloned();
 
-        let ball_snap = ballpark.balls.get(&ball_id).cloned();
+        let shadow_reinf = depot_reinf_shadow
+            .as_ref()
+            .and_then(|(sh, _)| sh.get(&ball_id).map(|&(u, _)| u));
+        let db_reinf = rec_opt.as_ref().and_then(|r| r.reinforced_until_unix);
+        let effective_reinf = match (db_reinf, shadow_reinf) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if effective_reinf.is_some_and(|u| now_unix < u) {
+            return Some((0.0, false, Some(ball_snap)));
+        }
+
         let cs = ballpark.combat_states.entry(ball_id).or_default();
 
         if let Some(rec) = rec_opt {
-            // Invulnerable during active reinforcement
-            if let Some(reinf_until) = rec.reinforced_until_unix {
-                if now_unix < reinf_until {
-                    return Some((0.0, false, ball_snap));
-                }
-            }
-
             // During 60-second anchoring countdown or when unanchored: takes direct damage and can be destroyed without reinforcement
             let anchoring_until_unix = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
             let is_anchoring = !rec.anchor_completed && rec.anchor_start_unix > 0 && anchoring_until_unix > now_unix;
@@ -861,163 +1205,63 @@ pub fn handle_ball_damage_in_actor(
                         + damage.kinetic.max(0.0) * cs.shield_resonance[2]
                         + damage.explosive.max(0.0) * cs.shield_resonance[3];
                     if resisted_shield_dmg <= 0.0 {
-                        return Some((0.0, false, ball_snap));
+                        return Some((0.0, false, Some(ball_snap)));
                     }
                     if resisted_shield_dmg + 1e-6 >= damage_to_threshold {
                         cs.shield_hp = shield_threshold;
                         let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
-                        db.with_mut_snapshot(|snap| {
-                            write_deployable_state_snap(snap, |st| {
-                                if let Some(r) = st.deployables.get_mut(&ball_id) {
-                                    r.reinforced_until_unix = Some(reinf_until);
-                                }
-                            });
-                        });
-                        return Some((damage_to_threshold, false, ball_snap));
+                        if let Some((sh, seq)) = depot_reinf_shadow.as_mut() {
+                            sh.insert(ball_id, (reinf_until, *seq));
+                        }
+                        post_unlock.push(PostUnlockIntent::MobileDeployable(
+                            MobileDeployableDbOp::DepotReinforce {
+                                ball_id,
+                                reinforced_until_unix: reinf_until,
+                            },
+                        ));
+                        return Some((damage_to_threshold, false, Some(ball_snap)));
                     } else {
                         cs.shield_hp -= resisted_shield_dmg;
-                        return Some((resisted_shield_dmg, false, ball_snap));
+                        return Some((resisted_shield_dmg, false, Some(ball_snap)));
                     }
                 }
             }
         }
 
-        // Unanchored, anchoring, post-reinforcement, or shields <= 25%: take damage directly and run full cleanup on destruction
+        // Unanchored, anchoring, post-reinforcement, or shields <= 25%: take damage directly and queue post-unlock cleanup
         let (applied, destroyed) = cs.apply_damage(damage);
         if destroyed {
             let _ = ballpark.remove_ball(ball_id);
             let pos_arr = db
                 .with_snapshot(|s| s.item_positions.get(&ball_id).copied())
-                .or_else(|| ball_snap.as_ref().map(|b| b.position.to_array()))
-                .unwrap_or([0.0; 3]);
-            let mut spawned_can_id = None;
-            db.with_mut_snapshot(|snap| {
-                let hold_items: Vec<(i64, i32)> = snap
-                    .items
-                    .values()
-                    .filter(|i| i.location_id == ball_id && i.quantity > 0)
-                    .map(|i| (i.item_id, i.quantity))
-                    .collect();
-                if !hold_items.is_empty() {
-                    snap.next_entity_id += 1;
-                    let can_id = snap.next_entity_id;
-                    snap.items.insert(
-                        can_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: can_id,
-                            type_id: 23,
-                            owner_id,
-                            location_id: solar_system_id as i64,
-                            flag: eve_db::InventoryFlag::None,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    snap.item_positions.insert(can_id, pos_arr);
-                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
-                    spawned_can_id = Some(can_id);
-
-                    for (iid, _) in hold_items {
-                        let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
-                        if roll < 0.50 {
-                            if let Some(it) = snap.items.get_mut(&iid) {
-                                it.location_id = can_id;
-                                it.flag = eve_db::InventoryFlag::Cargo;
-                                it.version += 1;
-                            }
-                        } else {
-                            snap.items.remove(&iid);
-                        }
-                    }
-                }
-                snap.items.remove(&ball_id);
-                snap.item_positions.remove(&ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
-                snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
-                write_deployable_state_snap(snap, |st| {
-                    st.deployables.remove(&ball_id);
-                });
-            });
-            if let Some(can_id) = spawned_can_id {
-                let _ = ballpark.add_static_ball_with_meta(
-                    eve_destiny::Ball {
-                        id: can_id,
-                        type_id: 23,
-                        position: DVec3::from_array(pos_arr),
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: 1_000.0,
-                        radius: 20.0,
-                        speed_fraction: 0.0,
-                        mode: eve_destiny::MovementMode::Stop,
-                    },
-                    eve_destiny::SlimItemMeta {
-                        group_id: 12,
-                        category_id: 2,
-                        owner_id,
-                        ..Default::default()
-                    },
-                );
-            }
+                .unwrap_or_else(|| ball_snap.position.to_array());
+            post_unlock.push(PostUnlockIntent::MobileDeployable(
+                MobileDeployableDbOp::DepotDestroyed {
+                    solar_system_id,
+                    ball_id,
+                    owner_id,
+                    pos_arr,
+                    now_unix,
+                },
+            ));
         }
-        return Some((applied, destroyed, ball_snap));
+        return Some((applied, destroyed, Some(ball_snap)));
     }
 
     if it_grp == GROUP_MOBILE_TRACTOR {
         let (applied, destroyed, ball_opt) = ballpark.apply_damage_to_ball(ball_id, damage)?;
         if destroyed {
             let _ = ballpark.remove_ball(ball_id);
-            // Drop 50% loot into cargo container
             let pos_arr = db.with_snapshot(|s| s.item_positions.get(&ball_id).copied()).unwrap_or([0.0; 3]);
-            db.with_mut_snapshot(|snap| {
-                let hold_items: Vec<(i64, i32)> = snap.items.values()
-                    .filter(|i| i.location_id == ball_id && i.quantity > 0)
-                    .map(|i| (i.item_id, i.quantity))
-                    .collect();
-                if !hold_items.is_empty() {
-                    snap.next_entity_id += 1;
-                    let can_id = snap.next_entity_id;
-                    snap.items.insert(
-                        can_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: can_id,
-                            type_id: 23,
-                            owner_id,
-                            location_id: solar_system_id as i64,
-                            flag: eve_db::InventoryFlag::None,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    snap.item_positions.insert(can_id, pos_arr);
-                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
-
-                    for (iid, _) in hold_items {
-                        let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
-                        if roll < 0.50 {
-                            if let Some(it) = snap.items.get_mut(&iid) {
-                                it.location_id = can_id;
-                                it.flag = eve_db::InventoryFlag::Cargo;
-                                it.version += 1;
-                            }
-                        } else {
-                            snap.items.remove(&iid);
-                        }
-                    }
-                }
-                snap.items.remove(&ball_id);
-                snap.item_positions.remove(&ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
-                snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
-                write_deployable_state_snap(snap, |st| {
-                    st.deployables.remove(&ball_id);
-                });
-            });
+            post_unlock.push(PostUnlockIntent::MobileDeployable(
+                MobileDeployableDbOp::MtuDestroyed {
+                    solar_system_id,
+                    ball_id,
+                    owner_id,
+                    pos_arr,
+                    now_unix,
+                },
+            ));
         }
         return Some((applied, destroyed, ball_opt));
     }
@@ -1029,15 +1273,9 @@ pub fn handle_ball_damage_in_actor(
         let (applied, destroyed, ball_opt) = ballpark.apply_damage_to_ball(ball_id, damage)?;
         if destroyed {
             let _ = ballpark.remove_ball(ball_id);
-            db.with_mut_snapshot(|snap| {
-                snap.items.remove(&ball_id);
-                snap.item_positions.remove(&ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
-                snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
-                write_deployable_state_snap(snap, |st| {
-                    st.deployables.remove(&ball_id);
-                });
-            });
+            post_unlock.push(PostUnlockIntent::MobileDeployable(
+                MobileDeployableDbOp::SimpleDeployableDestroyed { ball_id },
+            ));
         }
         return Some((applied, destroyed, ball_opt));
     }

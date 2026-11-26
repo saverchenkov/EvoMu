@@ -488,6 +488,8 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ReconnectLiveShipInSpace { .. } => "ReconnectLiveShipInSpace",
             SystemCommand::SpawnReconnectedShipInSpace { .. } => "SpawnReconnectedShipInSpace",
             SystemCommand::StartDisconnectedEmergencyWarp { .. } => "StartDisconnectedEmergencyWarp",
+            SystemCommand::PrepareDisconnectedWarp { .. } => "PrepareDisconnectedWarp",
+            SystemCommand::ReconcileDisconnectedWarp { .. } => "ReconcileDisconnectedWarp",
             SystemCommand::HandoffInSpacePilotObserver { .. } => "HandoffInSpacePilotObserver",
             SystemCommand::UpdateBallDbuffs { .. } => "UpdateBallDbuffs",
             SystemCommand::EmitLogiSoakStopFx { .. } => "EmitLogiSoakStopFx",

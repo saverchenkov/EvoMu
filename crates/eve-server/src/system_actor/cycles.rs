@@ -21,7 +21,6 @@ pub(crate) use super::post_unlock_test_shims::{
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{BallId, Ballpark, MovementMode};
-use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -344,6 +343,8 @@ pub(crate) fn apply_resolved_weapon_damage(
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    depot_reinf_shadow: Option<(&mut HashMap<BallId, (u64, u64)>, u64)>,
+    post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     if effective_damage.total() <= 0.0 {
         // Why: Turret/weapon shots that miss still emit combat-log miss messages (#1247).
@@ -365,7 +366,7 @@ pub(crate) fn apply_resolved_weapon_damage(
     }
     let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
     let sys_id = ballpark.solar_system_id;
-    let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(
+    let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor_collecting(
         db_opt,
         sde_opt,
         sys_id,
@@ -373,6 +374,8 @@ pub(crate) fn apply_resolved_weapon_damage(
         effective_damage,
         ballpark,
         now_unix,
+        depot_reinf_shadow,
+        post_unlock,
     )
     .or_else(|| ballpark.apply_damage_to_ball(target_id, effective_damage));
     let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
@@ -422,6 +425,7 @@ pub(crate) fn apply_weapon_cycle_damage_collecting(
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
+    depot_reinf_shadow: Option<(&mut HashMap<BallId, (u64, u64)>, u64)>,
     post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) {
     let Some(target_id) = cycle.target_id else {
@@ -531,6 +535,8 @@ pub(crate) fn apply_weapon_cycle_damage_collecting(
         pending_cycle_actions,
         destroyed_balls,
         pending_destroyed_outbox,
+        depot_reinf_shadow,
+        post_unlock,
     );
     if effective_damage.total() > 0.0 && db_opt.is_some() {
         if let Some(cs) = ballpark.combat_states.get(&target_id) {
@@ -580,7 +586,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi_collecting(
         weapon_cycle_start_modules, pending_missile_launches, mechanic_rng_opt, tactical_state,
         pending_cycle_actions, sim_elapsed_secs, dt, tidi_factor, reload_sim_remaining,
         deactivation_hook, pending_destroyed_outbox, db_opt.as_deref().map(|db| db.published_snapshot_arc()),
-        HashMap::new(), HashMap::new(), post_unlock,
+        HashMap::new(), HashMap::new(), None, post_unlock,
     )
 }
 
@@ -613,6 +619,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
     tick_snap_opt: Option<Arc<eve_db::WorldStateSnapshot>>,
     mut virtual_item_qty: HashMap<i64, i32>,
     mut virtual_crystal_dmg: HashMap<i64, f64>,
+    mut shadows_seq: Option<(&mut super::types::PostUnlockActorShadows, u64)>,
     post_unlock: &mut super::post_unlock::PostUnlockOps,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let tidi_factor = if tidi_factor.is_finite() {
@@ -638,12 +645,14 @@ pub(crate) fn step_cycles_with_reservations_collecting(
 
     // Per-tick rack heat generation (`sum(heatAbsorbtionRateModifier)` * evaluated `heatGenerationMultiplier`)
     // and passive exponential dissipation (`feat:modules.overheat-rack-heat-generation`)
-    crate::services::tactical_module_mechanics::step_rack_heat_per_tick(
+    crate::services::tactical_module_mechanics::step_rack_heat_per_tick_collecting(
         ship_rack_heat,
         active_module_cycles,
         sde_opt,
         db_opt,
         dt,
+        shadows_seq.as_mut().map(|(sh, seq)| (&mut sh.rack_heat_pending, *seq)),
+        post_unlock,
     );
 
     // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`);
@@ -757,6 +766,9 @@ pub(crate) fn step_cycles_with_reservations_collecting(
     }
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
+    let mut local_heat_dmg: HashMap<i64, (f64, bool)> = shadows_seq
+        .as_ref()
+        .map_or_else(HashMap::new, |(sh, _)| sh.build_pending_overheat_dmg());
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // If the source ship was destroyed / removed from space mid-cycle (or decloaked by proximity/physics), cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
         let cloak_decloaked = cycle.effect_name.starts_with("cloaking") && ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| !cs.is_cloaked && cs.cloak_velocity_multiplier.is_none());
@@ -1018,6 +1030,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                         pending_cycle_actions,
                         &mut destroyed_balls,
                         pending_destroyed_outbox,
+                        shadows_seq.as_mut().map(|(sh, seq)| (&mut sh.depot_reinforced_until, *seq)),
                         post_unlock,
                     );
                 }
@@ -1171,7 +1184,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                 }
             }
             if cycle.is_overloaded {
-                crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle(
+                crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle_collecting(
                     cycle,
                     ship_rack_heat,
                     sde_opt,
@@ -1179,6 +1192,9 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                     mechanic_rng_opt,
                     &mut burned_out,
                     &mut burned_ship_modules,
+                    Some(&mut local_heat_dmg),
+                    shadows_seq.as_ref().map(|(sh, _)| &sh.rack_heat_pending),
+                    post_unlock,
                 );
                 if burned_out {
                     pending_cycle_actions.push(PendingCycleAction::InvalidateShipFitting {
@@ -1385,6 +1401,7 @@ pub(crate) fn step_cycles_with_reservations_collecting(
                             pending_cycle_actions,
                             &mut destroyed_balls,
                             pending_destroyed_outbox,
+                            shadows_seq.as_mut().map(|(sh, seq)| (&mut sh.depot_reinforced_until, *seq)),
                             post_unlock,
                         );
                     }
@@ -1963,7 +1980,8 @@ impl SystemHandle {
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
-            warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix, ..
+            warp_state, external_active_modules, active_drone_miners, drone_next_ready_unix,
+            next_post_unlock_seq, post_unlock_shadows, ..
         } = &mut *st;
         let mut post_unlock_ops = super::post_unlock::PostUnlockOps::default();
         let tidi = self.tidi_factor();
@@ -2037,12 +2055,17 @@ impl SystemHandle {
                 }
             }
         }
-        let sup_dead = crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+        let next_pu_seq = next_post_unlock_seq.saturating_add(1);
+        let sup_dead = crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick_collecting(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
+            Some((&mut post_unlock_shadows.abyssal_boundary_ticks, next_pu_seq)),
+            Some((&mut post_unlock_shadows.abyssal_active_clouds, next_pu_seq)),
+            &mut post_unlock_ops,
         );
-        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick_collecting(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
-            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>), notify_tx_opt.as_ref(),
+            pending_notifications_opt.as_ref(), notify_tx_opt.as_ref(),
+            Some((&mut post_unlock_shadows.arena_hazard_ticks, next_pu_seq)), &mut post_unlock_ops,
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2066,9 +2089,11 @@ impl SystemHandle {
         }
         let fallback_rng = crate::rng::MechanicRng::default();
         let rng_ref = mechanic_rng_opt.as_deref().unwrap_or(&fallback_rng);
-        crate::services::mobile_deployables::step_mobile_deployables_in_actor(
-            &mut bp, active_module_cycles, rng_ref, deact_hook_guard.as_ref(),
-            sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
+        crate::services::mobile_deployables::step_mobile_deployables_in_actor_collecting(
+            &mut bp, active_module_cycles, rng_ref, sde_opt.as_deref(), db_opt.as_ref(),
+            mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
+            Some((&mut post_unlock_shadows.mmju_spool_fired_at, next_post_unlock_seq.saturating_add(1))),
+            Some((&mut post_unlock_shadows.observatory_pings_done, next_post_unlock_seq.saturating_add(1))), &mut post_unlock_ops,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         super::post_unlock::step_module_reloads_sim_clock_collecting(
@@ -2092,6 +2117,8 @@ impl SystemHandle {
             &mut destroyed,
             Some(&pending_destroyed),
             dt,
+            Some((&mut post_unlock_shadows.depot_reinforced_until, next_pu_seq)),
+            &mut post_unlock_ops,
         );
         destroyed.extend(step_cycles_with_reservations_collecting(
             self.solar_system_id,
@@ -2101,7 +2128,7 @@ impl SystemHandle {
             pending_missile_launches,
             mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
             Some(module_reload_sim_remaining), deact_hook_guard.as_ref(), Some(&pending_destroyed),
-            tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas, &mut post_unlock_ops,
+            tick_snap_opt, virtual_item_deltas, virtual_crystal_dmg_deltas, Some((post_unlock_shadows, next_pu_seq)), &mut post_unlock_ops,
         ));
         super::missiles::flush_pending_missile_launches(
             &mut bp,
@@ -2185,7 +2212,7 @@ impl SystemHandle {
                 target_ball_id,
             );
             if let Some(db) = db_opt.as_ref() {
-                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
+                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark_collecting(&mut bp, db, self.solar_system_id, target_ball_id, &mut post_unlock_ops);
             }
         }
         let (drained_destroyed, destroyed_lease) = pending_destroyed.checkout_for_step();
@@ -2273,79 +2300,6 @@ impl SystemHandle {
             drop(destroyed_lease);
         }
         tick
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_disconnected_warp_sync(
-        &self, ship_id: BallId, _type_id: u32, _radius: f64, _mass: f64,
-        _inertia: f64, _max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
-    ) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if !bp.balls.contains_key(&ship_id) {
-            // Do not synthesize a phantom ball from stale disconnected-ship state if the ship
-            // already transitioned out of this solar system.
-            return;
-        }
-        let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
-            !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
-        });
-        let warp_started = if needs_warp_init {
-            let start_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(current_pos);
-            let ok = bp
-                .set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)))
-                .is_ok();
-            if ok {
-                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-                    cs.is_emergency_warping = true;
-                }
-            }
-            ok
-        } else {
-            false
-        };
-        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        if warp_started {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            super::protection::sync_ball_protection_in_actor(&bp, &mut st, ship_id);
-            st.warp_state.clear_ball(ship_id, true);
-            st.warp_state.provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
-        }
-        drop(bp);
-        if warp_started {
-            self.publish_view();
-        }
-    }
-
-    pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let arrived = bp.balls.get(&ship_id).is_none_or(|b| {
-            !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
-        });
-        if arrived {
-            if bp.balls.get(&ship_id).is_some_and(|b| {
-                matches!(b.mode, MovementMode::Warp { .. })
-                    || (!bp.is_ball_scrambled(ship_id) && (b.position - dest).length() <= 50_000.0)
-            }) {
-                let _ = bp.set_ball_position(ship_id, dest);
-            }
-            let _ = bp.set_mode(ship_id, MovementMode::Stop);
-            if let Some(b) = bp.balls.get_mut(&ship_id) {
-                b.velocity = DVec3::ZERO;
-                b.speed_fraction = 0.0;
-            }
-        }
-        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
-        {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            super::protection::finish_disconnected_warp_protection_sync(&mut bp, &mut st, ship_id);
-            if arrived {
-                st.warp_state.clear_ball(ship_id, false);
-            }
-            self.publish_view_from(&bp, Some(&st));
-        }
-        drop(bp);
-        (final_pos, arrived)
     }
 }
 

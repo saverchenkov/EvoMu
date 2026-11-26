@@ -8,7 +8,10 @@ pub use crate::services::pve_abyssal_lifecycle::*;
 
 use crate::router::ServerContext;
 use crate::services::pve_incursion_sites::make_site_npc_ball;
-use eve_db::WorldRepository;
+use crate::system_actor::post_unlock::{
+    execute_post_unlock_ops_for_standalone, PostUnlockIntent, PostUnlockOps,
+};
+use eve_db::{WorldRepository, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
@@ -465,18 +468,47 @@ fn register_abyssal_room_npc(
     });
 }
 
-/// Proactively unlocks the Abyssal room conduit immediately when the final room NPC is destroyed on a ballpark tick.
-pub fn on_abyssal_room_npc_destroyed_in_ballpark(
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AbyssalRoomNpcDestroyedDbOp {
+    pub pocket_id: i64,
+    pub room_idx: usize,
+    pub now_sec: u64,
+}
+
+pub(crate) fn apply_abyssal_room_npc_destroyed_in_snap(
+    snap: &mut WorldStateSnapshot,
+    op: &AbyssalRoomNpcDestroyedDbOp,
+) {
+    for p in snap
+        .abyssal_state
+        .pockets
+        .values_mut()
+        .filter(|p| p.pocket_id == op.pocket_id)
+    {
+        if let Some(room) = p.rooms.get_mut(op.room_idx) {
+            if !room.cleared {
+                room.cleared = true;
+                room.gate_unlocked_at_sec.get_or_insert(op.now_sec);
+            }
+        }
+    }
+}
+
+/// Proactively unlocks the Abyssal room conduit immediately when the final room NPC is destroyed on a ballpark tick,
+/// queuing the `abyssal_state` mutation into `post_unlock` (`#1170`).
+pub(crate) fn on_abyssal_room_npc_destroyed_in_ballpark_collecting(
     ballpark: &mut eve_destiny::Ballpark,
     db: &std::sync::Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
     npc_ball_id: i64,
+    post_unlock: &mut PostUnlockOps,
 ) -> bool {
     if !(32_000_000..=32_999_999).contains(&solar_system_id) {
         return false;
     }
     let now_sec = db.clock().now_unix_secs();
-    let unlocked = with_abyssal_state_db(db, |st| {
+    let unlocked = db.with_snapshot(|snap| {
+        let st = &snap.abyssal_state;
         let mut target: Option<(i64, usize)> = None;
         for p in st.pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
             for (r_idx, r) in p.rooms.iter().enumerate() {
@@ -495,21 +527,42 @@ pub fn on_abyssal_room_npc_destroyed_in_ballpark(
                 break;
             }
         }
-        let Some((pid, r_idx)) = target else {
-            return None;
-        };
-        for p in st.pockets.values_mut().filter(|p| p.pocket_id == pid) {
-            p.rooms[r_idx].cleared = true;
-            p.rooms[r_idx].gate_unlocked_at_sec = Some(now_sec);
-        }
-        Some(1_895_000_000 + pid * 10 + (r_idx as i64 + 1))
+        target
     });
-    if let Some(gate_id) = unlocked {
+    if let Some((pid, r_idx)) = unlocked {
+        let gate_id = 1_895_000_000 + pid * 10 + (r_idx as i64 + 1);
+        post_unlock.push(PostUnlockIntent::AbyssalRoomNpcDestroyed(
+            AbyssalRoomNpcDestroyedDbOp {
+                pocket_id: pid,
+                room_idx: r_idx,
+                now_sec,
+            },
+        ));
         ballpark.set_ball_interactive(gate_id, true);
         ballpark.emit_client_controller_event(gate_id, None, "GateActivate", 1, None);
         return true;
     }
     false
+}
+
+/// Proactively unlocks the Abyssal room conduit immediately when the final room NPC is destroyed on a ballpark tick.
+/// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
+pub fn on_abyssal_room_npc_destroyed_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+) -> bool {
+    let mut ops = PostUnlockOps::default();
+    let res = on_abyssal_room_npc_destroyed_in_ballpark_collecting(
+        ballpark,
+        db,
+        solar_system_id,
+        npc_ball_id,
+        &mut ops,
+    );
+    execute_post_unlock_ops_for_standalone(Some(&**db), Some(db), None, ops, Some(ballpark), None);
+    res
 }
 
 /// Proactively unlocks the Abyssal room conduit immediately when the final room NPC is destroyed via async damage/death hooks.
@@ -523,7 +576,8 @@ pub async fn on_abyssal_room_npc_destroyed_core(
         return false;
     }
     let now_sec = db.clock().now_unix_secs();
-    let cand = with_abyssal_state_db(db, |st| {
+    let cand = db.with_snapshot(|snap| {
+        let st = &snap.abyssal_state;
         for p in st.pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
             for (r_idx, r) in p.rooms.iter().enumerate() {
                 if !r.cleared && r.npc_ball_ids.contains(&npc_ball_id) {
