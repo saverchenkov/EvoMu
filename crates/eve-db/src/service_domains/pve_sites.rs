@@ -546,6 +546,18 @@ pub enum DungeonTriggerKind {
         target_npc_group: Option<u8>,
         target_ball_id: Option<i64>,
     },
+    OnKillTagged {
+        target_tag: String,
+        #[serde(default)]
+        required_kills: Option<u32>,
+        #[serde(default)]
+        type_ids: Vec<u32>,
+    },
+    OnKillCount {
+        #[serde(default)]
+        target_npc_group: Option<u8>,
+        required_kills: u32,
+    },
     OnApproach {
         target_ball_id: Option<i64>,
         target_object_index: Option<usize>,
@@ -556,6 +568,34 @@ pub enum DungeonTriggerKind {
         container_ball_id: Option<i64>,
         target_object_index: Option<usize>,
         item_type_id: Option<u32>,
+    },
+    OnTimer {
+        delay_secs: u64,
+        #[serde(default)]
+        timer_id: Option<String>,
+        #[serde(default)]
+        after_group_cleared: Option<u8>,
+    },
+    OnRoomEntered {
+        #[serde(default)]
+        target_room_index: Option<usize>,
+    },
+    OnNpcDamaged {
+        #[serde(default)]
+        target_npc_group: Option<u8>,
+        #[serde(default)]
+        target_tag: Option<String>,
+        #[serde(default)]
+        target_ball_id: Option<i64>,
+        hull_or_shield_below_pct: u8,
+        #[serde(default)]
+        on_first_attack: bool,
+    },
+    CompoundAnd {
+        clauses: Vec<DungeonTriggerKind>,
+    },
+    CompoundOr {
+        clauses: Vec<DungeonTriggerKind>,
     },
 }
 
@@ -598,6 +638,10 @@ pub enum DungeonTriggerAction {
     FailDungeon {
         #[serde(default)]
         reason: String,
+    },
+    StartTimer {
+        timer_id: String,
+        delay_secs: u64,
     },
     SetObjective {
         objective_id: i64,
@@ -887,6 +931,8 @@ pub struct DungeonRuntimeRoom {
     pub last_actor_char_id: i64,
     #[serde(default)]
     pub gate_explicitly_locked: bool,
+    #[serde(default)]
+    pub armed_timers: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

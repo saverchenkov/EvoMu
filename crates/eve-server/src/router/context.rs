@@ -836,13 +836,7 @@ impl ServerContext {
                     crate::services::shipcaster_ops::on_landing_pad_ball_destroyed(&ctx, tid).await;
                     let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
-                    if let Ok(Some(death_res)) = crate::combat::death_pipeline::on_ball_destroyed_sync(
-                        &ctx,
-                        sys_id,
-                        tid,
-                        killer_opt,
-                        glam::DVec3::ZERO,
-                    ) {
+                    if let Ok(Some(death_res)) = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_id, tid, killer_opt, glam::DVec3::ZERO) {
                         if let Some(vcid) = ctx.db.with_snapshot(|s| {
                             death_res
                                 .ejected_capsule_id
@@ -897,6 +891,7 @@ impl ServerContext {
                 crate::services::ice_heist_ops::step_ice_heist_system(&ctx, sys_id).await;
                 crate::services::doomsday_aoe_ops::step_bosonic_doomsday_system(&ctx, sys_id).await;
                 crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
+                crate::services::pve_dungeon_runtime::tick_dungeon_runtime_system_step(&ctx, sys_id).await;
             })
         }));
         ctx.db.with_mut_snapshot(|snap| {
