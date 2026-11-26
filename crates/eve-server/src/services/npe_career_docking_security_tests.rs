@@ -276,10 +276,11 @@ async fn test_r7_td_457_blocks_combat_and_warp_scramble_pocket_entry_skip_and_co
         sp6.weapon_timers_until.remove(&cid);
     });
     let sys_h = ctx.systems.get_or_spawn(jita_sys);
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.combat_states.entry(sid).or_insert_with(CombatState::default).warp_scramble_strength = 3;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.entry(sid).or_insert_with(CombatState::default).warp_scramble_strength = 3;
+        })
+        .await;
     assert!(on_skip_air_npe(&ctx, Some(&mut sess), cid, now).is_err());
     assert!(complete_air_npe_checked(&ctx, Some(&mut sess), cid, now).is_err());
     assert!(!on_client_graph_message(
@@ -293,12 +294,13 @@ async fn test_r7_td_457_blocks_combat_and_warp_scramble_pocket_entry_skip_and_co
     ));
 
     // Remove warp scramble and verify completion docks cleanly
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(cs) = bp.combat_states.get_mut(&sid) {
-            cs.warp_scramble_strength = 0;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&sid) {
+                cs.warp_scramble_strength = 0;
+            }
+        })
+        .await;
     complete_air_npe_checked(&ctx, Some(&mut sess), cid, now).expect("complete after scramble clears");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&cid].station_id, Some(60_003_760));
@@ -340,11 +342,8 @@ async fn test_r7_td_457_docking_updates_system_constellation_region_and_blocks_c
     assert!(!ctx
         .systems
         .get_or_spawn(kisogo_sys)
-        .ballpark
-        .read()
-        .unwrap()
-        .balls
-        .contains_key(&sid));
+        .test_with_ballpark_async(move |bp| bp.balls.contains_key(&sid))
+        .await);
 
     // Malicious cross-universe home_station_id in non-starter system cannot pull pilot out of starter space
     let null_station = ctx

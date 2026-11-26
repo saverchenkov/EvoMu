@@ -516,10 +516,11 @@ async fn mmju_activation_error_branches_and_spool_completion() {
 
     // Move close, but set mass >= 1B kg -> ShipTooHeavy
     handle.try_set_ball_position(ship_id, DVec3::new(1_000.0, 0.0, 0.0));
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().mass = MMJU_MAX_SHIP_MASS_KG;
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().mass = MMJU_MAX_SHIP_MASS_KG;
+        })
+        .await;
     assert_eq!(
         handle_mmju_activate(&ctx, &sess, 90_000_001, ship_id, sys_id, unit_id)
             .await
@@ -529,11 +530,12 @@ async fn mmju_activation_error_branches_and_spool_completion() {
     );
 
     // Restore mass, cloak ship -> ShipCloaked
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().mass = 1_000_000.0;
-        bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = true;
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().mass = 1_000_000.0;
+            bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = true;
+        })
+        .await;
     assert_eq!(
         handle_mmju_activate(&ctx, &sess, 90_000_001, ship_id, sys_id, unit_id)
             .await
@@ -543,12 +545,13 @@ async fn mmju_activation_error_branches_and_spool_completion() {
     );
 
     // Uncloak, scramble -> WarpScrambled
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        let cs = bp.combat_states.get_mut(&ship_id).unwrap();
-        cs.is_cloaked = false;
-        cs.warp_scramble_strength = 2;
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let cs = bp.combat_states.get_mut(&ship_id).unwrap();
+            cs.is_cloaked = false;
+            cs.warp_scramble_strength = 2;
+        })
+        .await;
     assert_eq!(
         handle_mmju_activate(&ctx, &sess, 90_000_001, ship_id, sys_id, unit_id)
             .await
@@ -558,10 +561,11 @@ async fn mmju_activation_error_branches_and_spool_completion() {
     );
 
     // Clear scramble -> activation succeeds and spools for 12s
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
+        })
+        .await;
     let res = handle_mmju_activate(&ctx, &sess, 90_000_001, ship_id, sys_id, unit_id)
         .await
         .unwrap();

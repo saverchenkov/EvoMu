@@ -483,10 +483,10 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
     spawn_test_ball(&sys, target_id, 587, DVec3::new(1000.0, 0.0, 0.0), MovementMode::Stop, 1000.0).await;
 
     // Self jammed (`ShipJammed`), self cloaked (`TargetingFailed`), target cloaked (`TargetingFailed`), target tethered (`TargetInvulnerable`)
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&ship_id).unwrap().ecm_jammed_remaining_s = 5.0;
-    }
+    })
+    .await;
     assert_eq!(
         validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
             .await
@@ -494,12 +494,12 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "ShipJammed"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let scs = bp.combat_states.get_mut(&ship_id).unwrap();
         scs.ecm_jammed_remaining_s = 0.0;
         scs.is_cloaked = true;
-    }
+    })
+    .await;
     assert_eq!(
         validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
             .await
@@ -507,11 +507,11 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "TargetingFailed"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
         bp.combat_states.get_mut(&target_id).unwrap().is_cloaked = true;
-    }
+    })
+    .await;
     assert_eq!(
         validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
             .await
@@ -519,12 +519,12 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "TargetingFailed"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let tcs = bp.combat_states.get_mut(&target_id).unwrap();
         tcs.is_cloaked = false;
         tcs.is_tethered = true;
-    }
+    })
+    .await;
     assert_eq!(
         validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
             .await
@@ -533,11 +533,11 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
         "TargetInvulnerable"
     );
     // Out of range & TooManyLockedTargets
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&target_id).unwrap().is_tethered = false;
         bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(9_000_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     assert_eq!(
         validate_passive_targeter_activation(&ctx, &sys, char_id, ship_id, target_id, &fit)
             .await
@@ -545,10 +545,10 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "TargetOutOfRange"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     for dummy in 1..=10_i64 {
         let _ = sys
             .add_target_lock(
@@ -582,10 +582,10 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "TargetRequired"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(50_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     assert_eq!(
         run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &pa_fm, &pa_type, &pa_st, &fit, Some(target_id), false, false, false)
             .await
@@ -594,10 +594,10 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "OutOfRange"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     assert!(
         run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &pa_fm, &pa_type, &pa_st, &fit, Some(target_id), false, false, false)
             .await
@@ -623,10 +623,10 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "CannotActivateOnSelf"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     assert_eq!(
         run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &rr_fm, &rr_type, &rr_st, &fit, Some(target_id), false, false, false)
             .await
@@ -635,10 +635,10 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
             .code,
         "TargetOutOfRange"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&target_id).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     let rr_ok = run_prep(&ctx, &sys, sys_id, char_id, ship_id, 25, mod_id, &rr_fm, &rr_type, &rr_st, &fit, Some(target_id), false, false, false)
         .await
         .unwrap();

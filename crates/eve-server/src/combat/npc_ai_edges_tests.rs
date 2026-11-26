@@ -434,24 +434,24 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
     assert!(mgr.clone_soldier_respawn_timers.contains_key(&sys_id));
 
     // 2. Move ships > 60 km away -> transitions to Idle
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_ewar).unwrap().position = DVec3::new(80_000.0, 0.0, 0.0);
         bp.balls.get_mut(&ship_logi).unwrap().position = DVec3::new(80_000.0, 0.0, 0.0);
-    }
+    })
+    .await;
     mgr.step_ai_sync(&ctx, sys_id, 6, 1.0);
     assert_eq!(mgr.entities[&npc_id].state, NpcAiState::Idle);
     assert_eq!(mgr.entities[&npc_id].target_id, None);
 
     // 3. Move ship_ewar into weapon range with lethal NPC damage -> destroys ship_ewar and triggers death pipeline!
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_ewar).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
         let scs = bp.combat_states.get_mut(&ship_ewar).unwrap();
         scs.shield_hp = 1.0;
         scs.armor_hp = 1.0;
         scs.structure_hp = 1.0;
-    }
+    })
+    .await;
     mgr.entities.get_mut(&npc_id).unwrap().damage_vector =
         DamageVector::new(10_000.0, 10_000.0, 10_000.0, 10_000.0);
     mgr.step_ai_sync(&ctx, sys_id, 10, 1.0);
@@ -836,7 +836,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     let _ = ctx.drain_notifications_for_char(owner_char);
     mgr.step_ai_sync(&ctx, combat_sys, 5, 1.0);
     mgr.step_ai_sync(&ctx, combat_sys, 8, 1.0);
-    let abd_shield = sys_handle.ballpark.read().unwrap().combat_states[&abandoned_drone].shield_hp;
+    let abd_shield = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&abandoned_drone].shield_hp)
+        .await;
     assert!(abd_shield < 5_000.0, "NPC should have damaged abandoned drone, shield={abd_shield}");
     assert_no_combat_notifs("abandoned drone + docked owner in other system");
 
@@ -849,12 +851,18 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 11, 1.0);
-    let abd_shield_2 = sys_handle.ballpark.read().unwrap().combat_states[&abandoned_drone].shield_hp;
+    let abd_shield_2 = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&abandoned_drone].shield_hp)
+        .await;
     assert!(abd_shield_2 < abd_shield, "NPC should keep hitting abandoned drone");
     assert_no_combat_notifs("abandoned drone + undocked owner in same system");
 
     // 3. Replace target with untracked/orphaned drone item (not in active space drones) -> zero notifications
-    let _ = sys_handle.ballpark.write().unwrap().remove_ball(abandoned_drone);
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let _ = bp.remove_ball(abandoned_drone);
+        })
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(untracked_drone, drone_item(untracked_drone));
     });
@@ -862,7 +870,10 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     mgr.entities.get_mut(&npc_ball).unwrap().target_id = Some(untracked_drone);
     mgr.step_ai_sync(&ctx, combat_sys, 14, 1.0);
     assert!(
-        sys_handle.ballpark.read().unwrap().combat_states[&untracked_drone].shield_hp < 5_000.0,
+        sys_handle
+            .test_with_ballpark_async(move |bp| bp.combat_states[&untracked_drone].shield_hp)
+            .await
+            < 5_000.0,
         "NPC should damage untracked drone ball"
     );
     assert_no_combat_notifs("untracked orphaned drone in snap.items");
@@ -870,7 +881,11 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
     // 4. Replace target with actively controlled drone (`is_abandoned=false`):
     //    - outbound scene scoping (`#1190` / `#1565`) drops frames on the wire when owner is in `other_sys` or docked
     //    - while owner is undocked in `combat_sys` -> receives OnDamageMessage + OnDamageStateChange!
-    let _ = sys_handle.ballpark.write().unwrap().remove_ball(untracked_drone);
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            let _ = bp.remove_ball(untracked_drone);
+        })
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(active_drone, drone_item(active_drone));
     });
@@ -879,7 +894,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
 
     // 4a. Under BF-01, if the active drone owner is already out-of-system or docked at hit time,
     // no combat notification is enqueued at all (`events == []`, `drops == 0`).
-    let shield_before_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    let shield_before_oos = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&active_drone].shield_hp)
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {
             ch.solar_system_id = other_sys;
@@ -887,7 +904,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 17, 1.0);
-    let shield_after_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    let shield_after_oos = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&active_drone].shield_hp)
+        .await;
     assert!(shield_after_oos < shield_before_oos, "NPC should damage active drone (oos)");
     let (oos_events, oos_drops) = drain_owner_wire_combat_events();
     assert!(
@@ -902,7 +921,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 20, 1.0);
-    let shield_after_docked = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    let shield_after_docked = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&active_drone].shield_hp)
+        .await;
     assert!(shield_after_docked < shield_after_oos, "NPC should damage active drone (docked)");
     let (docked_events, docked_drops) = drain_owner_wire_combat_events();
     assert!(
@@ -919,7 +940,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 23, 1.0);
-    let shield_after_post_hit_oos = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    let shield_after_post_hit_oos = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&active_drone].shield_hp)
+        .await;
     assert!(shield_after_post_hit_oos < shield_after_docked, "NPC should damage active drone (post-hit oos)");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {
@@ -940,7 +963,9 @@ async fn npc_ai_abandoned_and_out_of_system_drone_hits_emit_no_owner_damage_noti
         }
     });
     mgr.step_ai_sync(&ctx, combat_sys, 26, 1.0);
-    let shield_after_post_hit_dock = sys_handle.ballpark.read().unwrap().combat_states[&active_drone].shield_hp;
+    let shield_after_post_hit_dock = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&active_drone].shield_hp)
+        .await;
     assert!(shield_after_post_hit_dock < shield_after_post_hit_oos, "NPC should damage active drone (post-hit dock)");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&owner_char) {

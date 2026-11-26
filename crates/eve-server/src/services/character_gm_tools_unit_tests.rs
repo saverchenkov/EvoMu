@@ -828,21 +828,19 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         assert!(s.asteroids.contains_key(&ast_id), "asteroid must be in snap.asteroids");
     });
     let slim_meta = handle
-        .ballpark
-        .read()
-        .unwrap()
-        .ball_slim_meta
-        .get(&ast_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&ast_id).cloned())
+        .await
         .expect("asteroid SlimItemMeta in ballpark");
     assert_eq!(slim_meta.owner_id, 1);
     assert_eq!(slim_meta.char_id, None);
     assert_eq!(slim_meta.corp_id, -1);
     assert_eq!(slim_meta.alliance_id, -1);
     {
-        let bp = handle.ballpark.read().unwrap();
-        assert_eq!(bp.balls[&ast_id].mode, eve_destiny::MovementMode::Rigid);
-        assert!(bp.is_static_ball(ast_id));
+        let (ast_mode, ast_static) = handle
+            .test_with_ballpark_async(move |bp| (bp.balls[&ast_id].mode.clone(), bp.is_static_ball(ast_id)))
+            .await;
+        assert_eq!(ast_mode, eve_destiny::MovementMode::Rigid);
+        assert!(ast_static);
     }
 
     let unspawned = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {ast_id}"))
@@ -863,12 +861,8 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         .expect("/spawn ship hull ok");
     let hull_id = sp_hull.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
     let hull_meta = handle
-        .ballpark
-        .read()
-        .unwrap()
-        .ball_slim_meta
-        .get(&hull_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&hull_id).cloned())
+        .await
         .expect("spawned ship SlimItemMeta in ballpark");
     assert_eq!(hull_meta.owner_id, char_id);
     assert_eq!(
@@ -876,20 +870,25 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
         "/spawn hull must be unpiloted (char_id == None) so menusvc shows Board Ship (#983)"
     );
     {
-        let bp = handle.ballpark.read().unwrap();
+        let (interactive_override, raw_hull) = handle
+            .test_with_ballpark_async(move |bp| {
+                let ov = bp.ball_interactive_overrides.get(&hull_id).copied();
+                let hull_ball = bp.balls.get(&hull_id).expect("spawned hull ball in ballpark");
+                let mut raw_hull = Vec::new();
+                eve_destiny::wire::encode_single_ball_with_park(
+                    &mut raw_hull,
+                    hull_ball,
+                    bp.current_tick as u32,
+                    Some(&hull_meta),
+                    Some(bp),
+                );
+                (ov, raw_hull)
+            })
+            .await;
         assert_eq!(
-            bp.ball_interactive_overrides.get(&hull_id),
-            Some(&false),
+            interactive_override,
+            Some(false),
             "/spawn unpiloted ship must record ball_interactive_overrides[hull_id] = false (#983)"
-        );
-        let hull_ball = bp.balls.get(&hull_id).expect("spawned hull ball in ballpark");
-        let mut raw_hull = Vec::new();
-        eve_destiny::wire::encode_single_ball_with_park(
-            &mut raw_hull,
-            hull_ball,
-            bp.current_tick as u32,
-            Some(&hull_meta),
-            Some(&bp),
         );
         assert_eq!(
             raw_hull[37] & eve_destiny::wire::BALL_FLAG_IS_INTERACTIVE,
@@ -917,12 +916,8 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
             .expect("/spawn NPC ok");
         let npc_id = sp_npc.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
         let npc_meta = handle
-            .ballpark
-            .read()
-            .unwrap()
-            .ball_slim_meta
-            .get(&npc_id)
-            .cloned()
+            .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&npc_id).cloned())
+            .await
             .expect("NPC SlimItemMeta in ballpark");
         assert_eq!(npc_meta.category_id, 11);
         assert!(
@@ -1395,20 +1390,27 @@ async fn spawn_1230_veldspar_queues_static_add_balls2_wire_and_slim_item() {
     );
 
     let ship_grid = {
-        let bp = handle.ballpark.read().unwrap();
-        let ship_grid = bp.ball_grid_ids.get(&ship_id).copied().expect("ship grid");
-        let far_grid = bp.ball_grid_ids.get(&far_ship_id).copied().expect("far grid");
+        let (ship_grid, far_grid, is_static_ast, has_grid_id, in_grid_members, ast_ball) = handle
+            .test_with_ballpark_async(move |bp| {
+                let ship_grid = bp.ball_grid_ids.get(&ship_id).copied().expect("ship grid");
+                let far_grid = bp.ball_grid_ids.get(&far_ship_id).copied().expect("far grid");
+                let is_static_ast = bp.is_static_ball(ast_id);
+                let has_grid_id = bp.ball_grid_ids.contains_key(&ast_id);
+                let in_grid_members = bp.grids.values().any(|g| g.members.contains(&ast_id));
+                let ast_ball = bp.balls[&ast_id].clone();
+                (ship_grid, far_grid, is_static_ast, has_grid_id, in_grid_members, ast_ball)
+            })
+            .await;
         assert_ne!(ship_grid, far_grid, "observers must occupy distinct system grids");
-        assert!(bp.is_static_ball(ast_id), "spawned asteroid must be static");
+        assert!(is_static_ast, "spawned asteroid must be static");
         assert!(
-            !bp.ball_grid_ids.contains_key(&ast_id),
+            !has_grid_id,
             "static spawned asteroid must not be inserted into ball_grid_ids"
         );
         assert!(
-            !bp.grids.values().any(|g| g.members.contains(&ast_id)),
+            !in_grid_members,
             "static spawned asteroid must not be inserted into GridBubble.members"
         );
-        let ast_ball = &bp.balls[&ast_id];
         assert_eq!(ast_ball.type_id, 1230);
         assert_eq!(ast_ball.mode, eve_destiny::MovementMode::Rigid);
         assert!(ast_ball.radius >= 200.0, "asteroid radius must be >= 200m");
@@ -1543,10 +1545,14 @@ async fn spawn_1230_veldspar_queues_static_add_balls2_wire_and_slim_item() {
         .expect("second /spawn 1230 ok");
     let ast2_id = spawn_rep2.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
     assert!(handle.remove_ball(ship_id).await.is_some());
-    let bp = handle.ballpark.read().unwrap();
-    assert!(bp.balls.contains_key(&ast2_id));
+    let (has_ast2, has_ship_grid) = handle
+        .test_with_ballpark_async(move |bp| {
+            (bp.balls.contains_key(&ast2_id), bp.grids.contains_key(&ship_grid))
+        })
+        .await;
+    assert!(has_ast2);
     assert!(
-        !bp.grids.contains_key(&ship_grid),
+        !has_ship_grid,
         "empty dynamic grid must delete via contract_or_delete_grid even near static asteroid"
     );
 }
@@ -1637,9 +1643,16 @@ async fn spawn_multi_npc_rollback_cleans_db_ballpark_and_npc_runtime_state() {
         assert!(!s.items.contains_key(&second_npc_id));
     });
     {
-        let bp = handle.ballpark.read().unwrap();
-        assert!(!bp.balls.contains_key(&first_npc_id));
-        assert!(!bp.balls.contains_key(&second_npc_id));
+        let (has_first, has_second) = handle
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.balls.contains_key(&first_npc_id),
+                    bp.balls.contains_key(&second_npc_id),
+                )
+            })
+            .await;
+        assert!(!has_first);
+        assert!(!has_second);
     }
     assert!(
         ctx.npc_spawns

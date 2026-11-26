@@ -324,12 +324,13 @@ async fn fighters_loading_unloading_launching_and_damage_reserve_edges() {
 
     // Cannot launch while cloaked or tethered
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_cloaked = true;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_cloaked = true;
+            }
+        })
+        .await;
     assert_eq!(
         handle_fighters(
             &ctx,
@@ -345,12 +346,13 @@ async fn fighters_loading_unloading_launching_and_damage_reserve_edges() {
         .code,
         "CannotOpenFighterTubesWhileCloaked"
     );
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_cloaked = false;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_cloaked = false;
+            }
+        })
+        .await;
     let tether_struct_id = 1_040_998_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         let corp_id = snap
@@ -404,12 +406,13 @@ async fn fighters_loading_unloading_launching_and_damage_reserve_edges() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.remove(&tether_struct_id);
     });
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_tethered = false;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_tethered = false;
+            }
+        })
+        .await;
 
     // Launch tube 0 via flag ID 159 (FighterTube0) -> returns empty errorsByTubeID PyRep::Dict and registers squadron
     let launched = handle_fighters(

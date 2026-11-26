@@ -805,8 +805,7 @@ async fn survey_scanner_ecm_burst_instant_effects_and_cycle_actions_cover_branch
         snap.module_active_states.insert(mod_salv);
         snap.module_active_charges.insert(mod_salv, 179);
     });
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         // Missing ship wreck + repeat != 0 -> keep_repeating=false -> deactivates + refunds 120 GJ cap
         st.pending_cycle_actions.push(crate::system_actor::PendingCycleAction::SalvageEnd {
             char_id,
@@ -880,7 +879,8 @@ async fn survey_scanner_ecm_burst_instant_effects_and_cycle_actions_cover_branch
             module_id: mod_scan,
             is_overloaded: true,
         });
-    }
+    })
+    .await;
     let _ = sys.set_capacitor(ship_id, 500.0).await;
     execute_pending_cycle_actions(&ctx, sys_id).await;
     // Cap refunded by 120.0 -> 620.0
@@ -1020,7 +1020,10 @@ async fn try_handle_mercden_remote_shield_repair_covers_all_guards_and_repair() 
     .unwrap();
 
     // 2. Cloaked & Tethered guards
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_cloaked = true;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = true;
+    })
+    .await;
     assert_eq!(
         try_handle_mercden_remote_shield_repair(&ctx, &sys, sys_id, char_id, ship_id, rep_mod_id, &fm, &mod_t, &fit, "Activate", den_id)
             .await
@@ -1028,8 +1031,12 @@ async fn try_handle_mercden_remote_shield_repair_covers_all_guards_and_repair() 
             .code,
         "Cloaked"
     );
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_tethered = true;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        let cs = bp.combat_states.get_mut(&ship_id).unwrap();
+        cs.is_cloaked = false;
+        cs.is_tethered = true;
+    })
+    .await;
     assert_eq!(
         try_handle_mercden_remote_shield_repair(&ctx, &sys, sys_id, char_id, ship_id, rep_mod_id, &fm, &mod_t, &fit, "Activate", den_id)
             .await
@@ -1037,7 +1044,10 @@ async fn try_handle_mercden_remote_shield_repair_covers_all_guards_and_repair() 
             .code,
         "Tethered"
     );
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
+    })
+    .await;
 
     // 3. TargetOutOfRange (den at 20km > max_range 12km)
     assert_eq!(
@@ -1344,8 +1354,7 @@ async fn helpers_reload_survey_dbuff_unload_dogma_and_weapon_damage_kill_mutants
 
     // 5. execute_pending_cycle_actions: empty early return + CycleWeaponDamage notification arms
     execute_pending_cycle_actions(&ctx, sys_id).await; // empty early return
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
             attacker_char_id: Some(char_id),
             attacker_ship_id: ship_id,
@@ -1386,7 +1395,8 @@ async fn helpers_reload_survey_dbuff_unload_dogma_and_weapon_damage_kill_mutants
             applied_dmg: 60.0,
             notified: false,
         });
-    }
+    })
+    .await;
     let victim_uid = ctx.db.with_snapshot(|s| s.characters[&victim_cid].user_id);
     let _ = ctx.db.acquire_online_lock(victim_uid, 2, Some(victim_cid), false, ctx.now_unix());
     execute_pending_cycle_actions(&ctx, sys_id).await;

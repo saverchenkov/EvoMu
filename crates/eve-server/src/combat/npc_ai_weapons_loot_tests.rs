@@ -13,7 +13,7 @@ use crate::router::ServerContext;
 use super::npc_ai::spawn_npc_wreck_and_loot_in_snap;
 use super::npc_ai_weapons_loot::{
     build_npc_ball_from_sde, clear_extended_npc_weapon_runtime,
-    execute_extended_npc_attack_in_bp, fallback_log_registry, inspect_npc_sde_profile,
+    execute_extended_npc_attack_with_sde_and_rng, fallback_log_registry, inspect_npc_sde_profile,
     is_edencom_arc_combatant_type, resolve_npc_combat_profile, resolve_npc_weapon_ammo_loot,
     resolve_npc_wreck_type_id, store_extended_npc_weapon_runtime,
     take_or_init_extended_npc_weapon_runtime, with_extended_npc_weapon_runtime,
@@ -379,109 +379,109 @@ async fn npc_edencom_vorton_secondary_arc_reaches_beyond_optimal_and_skips_prote
     };
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (pri_after, sec_after, cloak_after, warp_after, invuln_after, loc_invuln_after, broken_after, dead_after) = {
-        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.balls.insert(npc_id, npc_ball);
-        bp.combat_states.insert(npc_id, npc_cs);
+    let primary_ball = mk_target_ball(primary_id, 18_000.0, MovementMode::Stop);
+    let primary_cs = mk_target_cs();
+    let sec_ball = mk_target_ball(secondary_beyond_opt_id, 24_000.0, MovementMode::Stop);
+    let sec_cs = mk_target_cs();
+    let cloak_ball = mk_target_ball(cloaked_id, 18_100.0, MovementMode::Stop);
+    let mut cs_cloak = mk_target_cs();
+    cs_cloak.is_cloaked = true;
+    let warp_ball = mk_target_ball(
+        warping_id,
+        18_200.0,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(100_000.0, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 100_000.0,
+            phase: WarpPhase::Cruising,
+            elapsed_warp_time: 1.0,
+        },
+    );
+    let warp_cs = mk_target_cs();
+    let invuln_ball = mk_target_ball(invuln_id, 18_300.0, MovementMode::Stop);
+    let mut cs_invuln = mk_target_cs();
+    cs_invuln.undock_invulnerable_remaining_ticks = 10;
+    let dead_ball = mk_target_ball(dead_id, 18_400.0, MovementMode::Stop);
+    let mut cs_dead = mk_target_cs();
+    cs_dead.shield_hp = 0.0;
+    cs_dead.armor_hp = 0.0;
+    cs_dead.structure_hp = 0.0;
+    let loc_invuln_ball = mk_target_ball(loc_invuln_id, 18_350.0, MovementMode::Stop);
+    let mut cs_loc_invuln = mk_target_cs();
+    cs_loc_invuln.apply_jump_cloak_and_invuln_timers(60);
+    cs_loc_invuln.is_cloaked = false;
+    let broken_cloak_ball = mk_target_ball(broken_jump_cloak_id, 18_150.0, MovementMode::Stop);
+    let mut cs_broken_cloak = mk_target_cs();
+    cs_broken_cloak.apply_jump_cloak_and_invuln_timers(60);
+    cs_broken_cloak.undock_invulnerable_remaining_ticks = 0;
 
-        // Primary within shooter optimal (18 km < 19.2 km); secondary 6 km from primary (<= 10 km)
-        // yet 24 km from shooter (> 19.2 km optimal).
-        bp.balls
-            .insert(primary_id, mk_target_ball(primary_id, 18_000.0, MovementMode::Stop));
-        bp.combat_states.insert(primary_id, mk_target_cs());
+    let sde = Arc::clone(&ctx.sde);
+    let rng = Arc::clone(&ctx.mechanic_rng);
+    let (fired, pri_after, sec_after, cloak_after, warp_after, invuln_after, loc_invuln_after, broken_after, dead_after) = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(npc_id, npc_ball);
+            bp.combat_states.insert(npc_id, npc_cs);
 
-        bp.balls.insert(
-            secondary_beyond_opt_id,
-            mk_target_ball(secondary_beyond_opt_id, 24_000.0, MovementMode::Stop),
-        );
-        bp.combat_states
-            .insert(secondary_beyond_opt_id, mk_target_cs());
+            // Primary within shooter optimal (18 km < 19.2 km); secondary 6 km from primary (<= 10 km)
+            // yet 24 km from shooter (> 19.2 km optimal).
+            bp.balls.insert(primary_id, primary_ball);
+            bp.combat_states.insert(primary_id, primary_cs);
 
-        bp.balls
-            .insert(cloaked_id, mk_target_ball(cloaked_id, 18_100.0, MovementMode::Stop));
-        let mut cs_cloak = mk_target_cs();
-        cs_cloak.is_cloaked = true;
-        bp.combat_states.insert(cloaked_id, cs_cloak);
+            bp.balls.insert(secondary_beyond_opt_id, sec_ball);
+            bp.combat_states.insert(secondary_beyond_opt_id, sec_cs);
 
-        bp.balls.insert(
-            warping_id,
-            mk_target_ball(
-                warping_id,
-                18_200.0,
-                MovementMode::Warp {
-                    origin: DVec3::ZERO,
-                    destination: DVec3::new(100_000.0, 0.0, 0.0),
-                    warp_speed_au_s: 3.0,
-                    total_distance: 100_000.0,
-                    phase: WarpPhase::Cruising,
-                    elapsed_warp_time: 1.0,
-                },
-            ),
-        );
-        bp.combat_states.insert(warping_id, mk_target_cs());
+            bp.balls.insert(cloaked_id, cloak_ball);
+            bp.combat_states.insert(cloaked_id, cs_cloak);
 
-        bp.balls
-            .insert(invuln_id, mk_target_ball(invuln_id, 18_300.0, MovementMode::Stop));
-        let mut cs_invuln = mk_target_cs();
-        cs_invuln.undock_invulnerable_remaining_ticks = 10;
-        bp.combat_states.insert(invuln_id, cs_invuln);
+            bp.balls.insert(warping_id, warp_ball);
+            bp.combat_states.insert(warping_id, warp_cs);
 
-        bp.balls
-            .insert(dead_id, mk_target_ball(dead_id, 18_400.0, MovementMode::Stop));
-        let mut cs_dead = mk_target_cs();
-        cs_dead.shield_hp = 0.0;
-        cs_dead.armor_hp = 0.0;
-        cs_dead.structure_hp = 0.0;
-        bp.combat_states.insert(dead_id, cs_dead);
+            bp.balls.insert(invuln_id, invuln_ball);
+            bp.combat_states.insert(invuln_id, cs_invuln);
 
-        bp.balls.insert(
-            loc_invuln_id,
-            mk_target_ball(loc_invuln_id, 18_350.0, MovementMode::Stop),
-        );
-        let mut cs_loc_invuln = mk_target_cs();
-        cs_loc_invuln.apply_jump_cloak_and_invuln_timers(60);
-        cs_loc_invuln.is_cloaked = false;
-        bp.combat_states.insert(loc_invuln_id, cs_loc_invuln);
+            bp.balls.insert(dead_id, dead_ball);
+            bp.combat_states.insert(dead_id, cs_dead);
 
-        bp.balls.insert(
-            broken_jump_cloak_id,
-            mk_target_ball(broken_jump_cloak_id, 18_150.0, MovementMode::Stop),
-        );
-        let mut cs_broken_cloak = mk_target_cs();
-        cs_broken_cloak.apply_jump_cloak_and_invuln_timers(60);
-        cs_broken_cloak.undock_invulnerable_remaining_ticks = 0;
-        bp.combat_states.insert(broken_jump_cloak_id, cs_broken_cloak);
+            bp.balls.insert(loc_invuln_id, loc_invuln_ball);
+            bp.combat_states.insert(loc_invuln_id, cs_loc_invuln);
 
-        let sigs = HashMap::new();
-        let destroyed_in_call = HashSet::new();
-        let mut destroyed_in_tick = Vec::new();
-        let mut homefront_events = Vec::new();
-        let fired = execute_extended_npc_attack_in_bp(
-            &ctx,
-            &mut bp,
-            &mut npc,
-            &mut weapon_rt,
-            primary_id,
-            &sigs,
-            false,
-            false,
-            Some(&edencom_meta),
-            &destroyed_in_call,
-            &mut destroyed_in_tick,
-            &mut homefront_events,
-        );
-        assert!(fired);
-        (
-            bp.combat_states[&primary_id].shield_hp,
-            bp.combat_states[&secondary_beyond_opt_id].shield_hp,
-            bp.combat_states[&cloaked_id].shield_hp,
-            bp.combat_states[&warping_id].shield_hp,
-            bp.combat_states[&invuln_id].shield_hp,
-            bp.combat_states[&loc_invuln_id].shield_hp,
-            bp.combat_states[&broken_jump_cloak_id].shield_hp,
-            bp.combat_states[&dead_id].shield_hp,
-        )
-    };
+            bp.balls.insert(broken_jump_cloak_id, broken_cloak_ball);
+            bp.combat_states.insert(broken_jump_cloak_id, cs_broken_cloak);
+
+            let sigs = HashMap::new();
+            let destroyed_in_call = HashSet::new();
+            let mut destroyed_in_tick = Vec::new();
+            let mut homefront_events = Vec::new();
+            let fired = execute_extended_npc_attack_with_sde_and_rng(
+                &sde,
+                &rng,
+                bp,
+                &mut npc,
+                &mut weapon_rt,
+                primary_id,
+                &sigs,
+                false,
+                false,
+                Some(&edencom_meta),
+                &destroyed_in_call,
+                &mut destroyed_in_tick,
+                &mut homefront_events,
+            );
+            (
+                fired,
+                bp.combat_states[&primary_id].shield_hp,
+                bp.combat_states[&secondary_beyond_opt_id].shield_hp,
+                bp.combat_states[&cloaked_id].shield_hp,
+                bp.combat_states[&warping_id].shield_hp,
+                bp.combat_states[&invuln_id].shield_hp,
+                bp.combat_states[&loc_invuln_id].shield_hp,
+                bp.combat_states[&broken_jump_cloak_id].shield_hp,
+                bp.combat_states[&dead_id].shield_hp,
+            )
+        })
+        .await;
+    assert!(fired);
 
     assert!(pri_after < 5_000.0, "primary target must take vorton damage");
     assert!(
@@ -541,50 +541,60 @@ async fn npc_attack_skips_missile_fx_and_cooldown_after_turret_destroys_target()
     target_cs.structure_hp = 1.0;
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (fired, target_still_exists, fx_count, missile_fx_count) = {
-        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.balls.insert(npc_id, npc_ball);
-        bp.combat_states.insert(npc_id, npc_cs);
-        bp.balls.insert(target_id, target_ball);
-        bp.combat_states.insert(target_id, target_cs);
-        bp.pending_events.clear();
+    let sde = Arc::clone(&ctx.sde);
+    let rng = Arc::clone(&ctx.mechanic_rng);
+    let (fired, target_still_exists, fx_count, missile_fx_count, missile_cooldown_s) = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(npc_id, npc_ball);
+            bp.combat_states.insert(npc_id, npc_cs);
+            bp.balls.insert(target_id, target_ball);
+            bp.combat_states.insert(target_id, target_cs);
+            bp.pending_events.clear();
 
-        let sigs = HashMap::new();
-        let destroyed_in_call = HashSet::new();
-        let mut destroyed_in_tick = Vec::new();
-        let mut homefront_events = Vec::new();
-        let fired = execute_extended_npc_attack_in_bp(
-            &ctx,
-            &mut bp,
-            &mut npc,
-            &mut weapon_rt,
-            target_id,
-            &sigs,
-            false,
-            false,
-            None,
-            &destroyed_in_call,
-            &mut destroyed_in_tick,
-            &mut homefront_events,
-        );
-        let fx_events: Vec<&String> = bp
-            .pending_events
-            .iter()
-            .filter_map(|ev| match ev {
-                DestinyEvent::OnSpecialFX { guid, .. } => Some(guid),
-                _ => None,
-            })
-            .collect();
-        let m_fx = fx_events.iter().filter(|g| g.contains("Missile")).count();
-        (fired, bp.balls.contains_key(&target_id), fx_events.len(), m_fx)
-    };
+            let sigs = HashMap::new();
+            let destroyed_in_call = HashSet::new();
+            let mut destroyed_in_tick = Vec::new();
+            let mut homefront_events = Vec::new();
+            let fired = execute_extended_npc_attack_with_sde_and_rng(
+                &sde,
+                &rng,
+                bp,
+                &mut npc,
+                &mut weapon_rt,
+                target_id,
+                &sigs,
+                false,
+                false,
+                None,
+                &destroyed_in_call,
+                &mut destroyed_in_tick,
+                &mut homefront_events,
+            );
+            let fx_events: Vec<&String> = bp
+                .pending_events
+                .iter()
+                .filter_map(|ev| match ev {
+                    DestinyEvent::OnSpecialFX { guid, .. } => Some(guid),
+                    _ => None,
+                })
+                .collect();
+            let m_fx = fx_events.iter().filter(|g| g.contains("Missile")).count();
+            (
+                fired,
+                bp.balls.contains_key(&target_id),
+                fx_events.len(),
+                m_fx,
+                weapon_rt.missile_cooldown_s,
+            )
+        })
+        .await;
 
     assert!(fired);
     assert!(!target_still_exists, "turret shot must destroy fragile target");
     assert_eq!(fx_count, 1, "only turret SpecialFX may emit before target dies");
     assert_eq!(missile_fx_count, 0, "missile FX must not emit on dead target");
     assert_eq!(
-        weapon_rt.missile_cooldown_s, 0.0,
+        missile_cooldown_s, 0.0,
         "missile cooldown must not be burned after turret destroys target"
     );
 }
@@ -679,47 +689,56 @@ async fn npc_edencom_vorton_arc_never_hits_player_wreck_jetcan_or_deployable() {
     };
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (pri_s, wreck_s, jetcan_s, depot_s, drone_s) = {
-        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.balls.insert(npc_id, npc_ball);
-        bp.combat_states.insert(npc_id, npc_cs);
-        for &(id, tid, x) in &[
-            (primary_id, 587_u32, 10_000.0),
-            (wreck_id, 26_557, 11_000.0),
-            (jetcan_id, 23, 11_500.0),
-            (depot_id, 33_474, 12_000.0),
-            (drone_id, drone_tid, 12_500.0),
-        ] {
-            bp.balls.insert(id, mk_ball(id, tid, x));
-            bp.combat_states.insert(id, mk_cs());
-        }
-        let sigs = HashMap::new();
-        let destroyed_in_call = HashSet::new();
-        let mut destroyed_in_tick = Vec::new();
-        let mut homefront_events = Vec::new();
-        let fired = execute_extended_npc_attack_in_bp(
-            &ctx,
-            &mut bp,
-            &mut npc,
-            &mut weapon_rt,
-            primary_id,
-            &sigs,
-            false,
-            false,
-            Some(&meta),
-            &destroyed_in_call,
-            &mut destroyed_in_tick,
-            &mut homefront_events,
-        );
-        assert!(fired);
-        (
-            bp.combat_states[&primary_id].shield_hp,
-            bp.combat_states[&wreck_id].shield_hp,
-            bp.combat_states[&jetcan_id].shield_hp,
-            bp.combat_states[&depot_id].shield_hp,
-            bp.combat_states[&drone_id].shield_hp,
-        )
-    };
+    let target_entries: Vec<(i64, Ball, eve_destiny::CombatState)> = [
+        (primary_id, 587_u32, 10_000.0),
+        (wreck_id, 26_557, 11_000.0),
+        (jetcan_id, 23, 11_500.0),
+        (depot_id, 33_474, 12_000.0),
+        (drone_id, drone_tid, 12_500.0),
+    ]
+    .into_iter()
+    .map(|(id, tid, x)| (id, mk_ball(id, tid, x), mk_cs()))
+    .collect();
+    let sde = Arc::clone(&ctx.sde);
+    let rng = Arc::clone(&ctx.mechanic_rng);
+    let (fired, pri_s, wreck_s, jetcan_s, depot_s, drone_s) = sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(npc_id, npc_ball);
+            bp.combat_states.insert(npc_id, npc_cs);
+            for (id, ball, cs) in target_entries {
+                bp.balls.insert(id, ball);
+                bp.combat_states.insert(id, cs);
+            }
+            let sigs = HashMap::new();
+            let destroyed_in_call = HashSet::new();
+            let mut destroyed_in_tick = Vec::new();
+            let mut homefront_events = Vec::new();
+            let fired = execute_extended_npc_attack_with_sde_and_rng(
+                &sde,
+                &rng,
+                bp,
+                &mut npc,
+                &mut weapon_rt,
+                primary_id,
+                &sigs,
+                false,
+                false,
+                Some(&meta),
+                &destroyed_in_call,
+                &mut destroyed_in_tick,
+                &mut homefront_events,
+            );
+            (
+                fired,
+                bp.combat_states[&primary_id].shield_hp,
+                bp.combat_states[&wreck_id].shield_hp,
+                bp.combat_states[&jetcan_id].shield_hp,
+                bp.combat_states[&depot_id].shield_hp,
+                bp.combat_states[&drone_id].shield_hp,
+            )
+        })
+        .await;
+    assert!(fired);
     assert!(pri_s < 5_000.0, "primary target must take Vorton damage");
     assert!(drone_s < 5_000.0, "hostile combatant drone within 10km must take Vorton arc damage");
     assert_eq!(wreck_s, 5_000.0, "player wreck must never be damaged by Vorton arc");

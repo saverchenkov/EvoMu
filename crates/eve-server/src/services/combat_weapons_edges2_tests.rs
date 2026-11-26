@@ -189,11 +189,8 @@ async fn ewar_target_painter_npc_overload_tether_and_non_weapon_dispatch() {
     let npc_sig = ctx
         .systems
         .get_or_spawn(sys_id)
-        .ballpark
-        .read()
-        .unwrap()
-        .combat_states[&npc_id]
-        .signature_radius;
+        .test_with_ballpark_async(move |bp| bp.combat_states[&npc_id].signature_radius)
+        .await;
     assert!(npc_sig > 100.0);
 
     // Salvager & Defender dispatch delegation (return Some(Err(...)) rather than None)

@@ -477,18 +477,37 @@ async fn gh829_navy_classification_and_npc_corp_id_resolution_across_spawners() 
     .await;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let bp = sys_handle.ballpark.read().unwrap();
+    let group0_id = group_ids[0];
+    let (navy_meta, metas) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            let navy_meta = bp
+                .ball_slim_meta
+                .get(&navy_id)
+                .expect("State Navy Cerberus SlimItemMeta")
+                .clone();
+            let metas = [
+                ("spawn_group", group0_id, 1_000_127_i64),
+                ("ore_guard", ore_guard_id, 1_000_431),
+                ("sleeper_sentry_tower", tower_id, 1_000_149),
+            ]
+            .into_iter()
+            .map(|(label, id, expected_corp)| {
+                let meta = bp
+                    .ball_slim_meta
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("{label} SlimItemMeta missing"))
+                    .clone();
+                (label, meta, expected_corp)
+            })
+            .collect::<Vec<_>>();
+            (navy_meta, metas)
+        })
+        .await;
 
-    let navy_meta = bp.ball_slim_meta.get(&navy_id).expect("State Navy Cerberus SlimItemMeta");
     assert_eq!(navy_meta.owner_id, 500_001, "Caldari Navy Cerberus must belong to Caldari (500001), not EDENCOM (500027)");
     assert_eq!(navy_meta.corp_id, 1_000_002, "corp_id must resolve to Caldari NPC corp, never faction ID 500027");
 
-    for (label, id, expected_corp) in [
-        ("spawn_group", group_ids[0], 1_000_127),
-        ("ore_guard", ore_guard_id, 1_000_431),
-        ("sleeper_sentry_tower", tower_id, 1_000_149),
-    ] {
-        let meta = bp.ball_slim_meta.get(&id).unwrap_or_else(|| panic!("{label} SlimItemMeta missing"));
+    for (label, meta, expected_corp) in metas {
         assert!(
             !(500_001..=500_030).contains(&meta.corp_id),
             "{label} SlimItemMeta.corp_id must never be a faction ID (got {})",
@@ -559,8 +578,14 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        let fb_meta = bp.ball_slim_meta.get(&fallback_id).expect("fallback meta");
+        let (fb_meta, pir_meta) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.ball_slim_meta.get(&fallback_id).expect("fallback meta").clone(),
+                    bp.ball_slim_meta.get(&pirate_id).expect("pirate meta").clone(),
+                )
+            })
+            .await;
         assert_eq!(fb_meta.group_id, 550);
         assert_eq!(fb_meta.category_id, 11);
         assert_eq!(fb_meta.owner_id, 500_001);
@@ -571,7 +596,6 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
         assert!(!fb_meta.is_cloaked);
         assert_eq!(fb_meta.name.as_deref(), Some("Factionless Raider"));
 
-        let pir_meta = bp.ball_slim_meta.get(&pirate_id).expect("pirate meta");
         assert_eq!(pir_meta.owner_id, 500_010);
         assert_eq!(pir_meta.corp_id, 1_000_127);
         assert_eq!(pir_meta.name.as_deref(), Some("Guristas Raider"));
@@ -695,8 +719,10 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
     assert!((bounty - 500_000.0).abs() < 1e-3);
     assert!(!drops.is_empty());
 
-    let bp = sys_handle.ballpark.read().unwrap();
-    let w_meta = bp.ball_slim_meta.get(&wreck_id).expect("wreck SlimItemMeta");
+    let w_meta = sys_handle
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&wreck_id).cloned())
+        .await
+        .expect("wreck SlimItemMeta");
     assert_eq!(w_meta.group_id, 186);
     assert_eq!(w_meta.category_id, 2);
     assert_eq!(w_meta.owner_id, char_id);
@@ -826,9 +852,13 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        assert_eq!(bp.balls[&sentry_id].max_velocity, 0.0);
-        assert_eq!(bp.balls[&amarr_sentry_id].max_velocity, 0.0);
+        let (v1, v2) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                (bp.balls[&sentry_id].max_velocity, bp.balls[&amarr_sentry_id].max_velocity)
+            })
+            .await;
+        assert_eq!(v1, 0.0);
+        assert_eq!(v2, 0.0);
     }
     sys_handle
         .spawn_ball_with_combat(
@@ -1045,9 +1075,16 @@ async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corrupti
         assert_eq!(generic_ent.target_id, None);
     });
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        assert_eq!(bp.balls[&amarr_sentry_id].max_velocity, 0.0);
-        assert_eq!(bp.balls[&generic_sentry_id].max_velocity, 0.0);
+        let (v1, v2) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.balls[&amarr_sentry_id].max_velocity,
+                    bp.balls[&generic_sentry_id].max_velocity,
+                )
+            })
+            .await;
+        assert_eq!(v1, 0.0);
+        assert_eq!(v2, 0.0);
     }
 
     // 2. Low-sec on-grid illegal aggression engages sentry, and Stage-5 corruption disables it.
@@ -1498,7 +1535,10 @@ async fn khanid_500008_sentry_classification_and_non_empire_group_99_exclusions(
         assert!(is_empire_sentry_npc(&ctx, ent));
     });
     assert_eq!(
-        ctx.systems.get_or_spawn(low_sys_id).ballpark.read().unwrap().balls[&khanid_id].max_velocity,
+        ctx.systems
+            .get_or_spawn(low_sys_id)
+            .test_with_ballpark_async(move |bp| bp.balls[&khanid_id].max_velocity)
+            .await,
         0.0
     );
 
@@ -1739,9 +1779,12 @@ async fn extended_npc_ai_sde_dps_within_one_percent_five_types_and_zero_neut() {
         for tick in 0..n_ticks {
             step_extended_npc_ai_sync(&ctx, sys_id);
             if (tick + 1) % 250 == 0 {
-                let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-                bp.pending_events.clear();
-                bp.observer_events.clear();
+                sys_handle
+                    .test_with_ballpark_mut_async(move |bp| {
+                        bp.pending_events.clear();
+                        bp.observer_events.clear();
+                    })
+                    .await;
             }
         }
 
@@ -1894,27 +1937,32 @@ async fn extended_npc_ai_emits_weapon_matched_special_fx_and_wire_meta() {
         step_extended_npc_ai_sync(&ctx, sys_id);
 
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let has_fx = bp.pending_events.iter().any(|ev| {
-            matches!(
-                ev,
-                eve_destiny::DestinyEvent::OnSpecialFX { ball_id, module_id: None, guid, is_active: true }
-                if *ball_id == npc_id && guid == expected_guid
-            )
-        });
+        let (has_fx, pending_events, meta_fields) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                let has_fx = bp.pending_events.iter().any(|ev| {
+                    matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::OnSpecialFX { ball_id, module_id: None, guid, is_active: true }
+                        if *ball_id == npc_id && guid == expected_guid
+                    )
+                });
+                let meta = bp
+                    .special_fx_meta
+                    .get(&(npc_id, None, expected_guid.to_string()))
+                    .map(|m| (m.target_id, m.is_offensive, m.module_type_id, m.other_type_id));
+                (has_fx, bp.pending_events.clone(), meta)
+            })
+            .await;
         assert!(
             has_fx,
-            "NPC {npc_tid} must emit OnSpecialFX {expected_guid}, events={:?}",
-            bp.pending_events
+            "NPC {npc_tid} must emit OnSpecialFX {expected_guid}, events={pending_events:?}"
         );
-        let meta = bp
-            .special_fx_meta
-            .get(&(npc_id, None, expected_guid.to_string()))
-            .expect("SpecialFxWireMeta recorded for NPC attack");
-        assert_eq!(meta.target_id, Some(ship_id));
-        assert!(meta.is_offensive);
-        assert_eq!(meta.module_type_id, expected_mod_tid);
-        assert_eq!(meta.other_type_id, expected_other_tid);
+        let (target_id, is_offensive, module_type_id, other_type_id) =
+            meta_fields.expect("SpecialFxWireMeta recorded for NPC attack");
+        assert_eq!(target_id, Some(ship_id));
+        assert!(is_offensive);
+        assert_eq!(module_type_id, expected_mod_tid);
+        assert_eq!(other_type_id, expected_other_tid);
     }
 }
 
@@ -2416,8 +2464,18 @@ async fn extended_npc_weapon_runtime_survives_concurrent_epoch_bumps_and_two_sys
     let max_dmg = 3.0 * (t_shots_max as f64 * prof.turret.as_ref().unwrap().shot_damage.total()
         + m_shots_max as f64 * prof.missile.as_ref().unwrap().volley_damage.total());
 
-    ctx.systems.get_or_spawn(sys_a).ballpark.write().unwrap().pending_events.clear();
-    ctx.systems.get_or_spawn(sys_b).ballpark.write().unwrap().pending_events.clear();
+    ctx.systems
+        .get_or_spawn(sys_a)
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.pending_events.clear();
+        })
+        .await;
+    ctx.systems
+        .get_or_spawn(sys_b)
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.pending_events.clear();
+        })
+        .await;
     step_extended_npc_ai_sync(&ctx, sys_a);
     step_extended_npc_ai_sync(&ctx, sys_b);
 
@@ -2449,10 +2507,14 @@ async fn extended_npc_weapon_runtime_survives_concurrent_epoch_bumps_and_two_sys
 
     for (sid, ship, npc) in [(sys_a, ship_a, npc_a), (sys_b, ship_b, npc_b)] {
         let sh = ctx_arc.systems.get_or_spawn(sid);
-        let fx_cnt = {
-            let bp = sh.ballpark.read().unwrap();
-            bp.pending_events.iter().filter(|e| matches!(e, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc)).count()
-        };
+        let fx_cnt = sh
+            .test_with_ballpark_async(move |bp| {
+                bp.pending_events
+                    .iter()
+                    .filter(|e| matches!(e, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc))
+                    .count()
+            })
+            .await;
         let dmg = initial_shield - sh.get_combat_state(ship).await.unwrap().unwrap().shield_hp;
         assert!(fx_cnt >= 2 && fx_cnt <= fx_max, "sys {sid} FX {fx_cnt} exceeded cooldown budget {fx_max}");
         assert!(dmg > 0.0 && dmg <= max_dmg, "sys {sid} damage {dmg} exceeded cooldown budget {max_dmg}");

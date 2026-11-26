@@ -1828,12 +1828,12 @@ async fn r5_f2_02_claim_ops_do_not_dirty_and_preserve_precommit_state_on_flush()
     ctx.db.with_mut_snapshot(|s| { s.items.insert(f_item, make_fighter_item(f_item, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9)); });
     f2_test_commit_load(&ctx, sys_id, ship_id, 0, f_item, 23_057).await;
     sys_h.flush_fighter_checkpoint().await.unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
 
     // 1. Launch ClaimAndReserve must not mark dirty and concurrent flush keeps tube 0 without res_id.
     let mk_claim = || FighterLaunchActorOp::ClaimAndReserve { ship_id, char_id, carrier_type_id: 23_915, tube_count: 3, requested_tubes: Some(vec![0]), now_unix: ctx.now_unix(), next_res_ids: vec![770_001], sde: Arc::clone(&ctx.sde) };
     let claim = sys_h.fighter_launch_op(mk_claim()).await.unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, 999_001, 5.0);
     ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
     let cold = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
@@ -1851,34 +1851,34 @@ async fn r5_f2_02_claim_ops_do_not_dirty_and_preserve_precommit_state_on_flush()
     }).await.unwrap();
     fighter_test_helpers::set_fighter_ability_cooldown_in_system(&ctx, sys_id, sq_ball, 0, 5_000);
     sys_h.flush_fighter_checkpoint().await.unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
 
     // 2. Recall ClaimActive must not mark dirty and concurrent flush retains launched sq + cooldown.
     let rc = sys_h.fighter_recall_op(FighterRecallActorOp::ClaimActive { ball_id: sq_ball, ship_id, char_id, sde: Arc::clone(&ctx.sde) }).await.unwrap().expect("claim active");
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, 999_002, 5.0);
     ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
     let cold2 = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
     assert!(cold2.active_fighters.contains_key(&sq_ball) && cold2.cooldown_state.get(&(sq_ball, 0)) == Some(&5_000));
     sys_h.fighter_recall_op(FighterRecallActorOp::RestoreClaimed { squadron: rc.squadron, saved_charges: rc.saved_charges, saved_cooldowns: rc.saved_cooldowns, accum_dmg: rc.accum_dmg, abandoned_fallback: false }).await.unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
 
     // 3. Scoop Claim must not mark dirty and concurrent flush retains abandoned sq + damage until Commit.
     fighter_test_helpers::insert_active_fighter_in_system(&ctx, sys_id, ab_ball, make_test_fighter_sq(ab_ball, 530_503, 23_057, char_id, 0, 0, true));
     fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, ab_ball, 12.5);
     sys_h.flush_fighter_checkpoint().await.unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     let (k, sq) = sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Claim { target_fighter_id: ab_ball }).await.unwrap().unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     fighter_test_helpers::set_fighter_unit_damage_accum_in_system(&ctx, sys_id, 999_003, 5.0);
     ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
     let cold3 = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
     assert!(cold3.active_fighters.contains_key(&ab_ball) && cold3.unit_damage_accum.get(&ab_ball) == Some(&12.5));
     sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Restore { key: k, squadron: sq }).await.unwrap();
-    assert!(!sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(!sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     let (k2, _) = sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Claim { target_fighter_id: ab_ball }).await.unwrap().unwrap();
     sys_h.scoop_abandoned_fighter_op(FighterScoopActorOp::Commit { key: k2 }).await.unwrap();
-    assert!(sys_h.actor_state.read().unwrap().is_fighters_dirty());
+    assert!(sys_h.test_with_actor_state_async(|st| st.is_fighters_dirty()).await);
     sys_h.flush_fighter_checkpoint().await.unwrap();
     let cold4 = load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap();
     assert!(!cold4.active_fighters.contains_key(&ab_ball) && cold4.unit_damage_accum.get(&ab_ball).is_none());
@@ -1942,9 +1942,20 @@ async fn r6_f2_02_destroyed_recall_db_fail_discards_claim_and_cleanup_clears_cla
     assert!(sys_h.fighter_recall_op(FighterRecallActorOp::ClaimActive { ball_id: c_ball, ship_id, char_id, sde: Arc::clone(&ctx.sde) }).await.unwrap().is_some());
     assert!(sys_h.cleanup_destroyed_fighter_sync(res_id).is_some() && sys_h.cleanup_destroyed_fighter_sync(c_ball).is_some());
     {
-        let st = sys_h.actor_state.read().unwrap();
-        assert!(st.pending_launch_reservations.is_empty() && st.pending_recall_or_scoop_claims.is_empty());
-        assert!(st.take_fighter_checkpoint_snapshot().is_some_and(|s| !s.state.tube_loads.contains_key(&(ship_id, 1)) && !s.state.active_fighters.contains_key(&c_ball)));
+        let (no_res, no_claims, snap_ok) = sys_h
+            .test_with_actor_state_async(move |st| {
+                (
+                    st.pending_launch_reservations.is_empty(),
+                    st.pending_recall_or_scoop_claims.is_empty(),
+                    st.take_fighter_checkpoint_snapshot().is_some_and(|s| {
+                        !s.state.tube_loads.contains_key(&(ship_id, 1))
+                            && !s.state.active_fighters.contains_key(&c_ball)
+                    }),
+                )
+            })
+            .await;
+        assert!(no_res && no_claims);
+        assert!(snap_ok);
     }
 
     // F2-R6-02: Destroyed squadron whose recall fails DB check after ClaimActive must discard claim instead of resurrecting.
@@ -1952,14 +1963,28 @@ async fn r6_f2_02_destroyed_recall_db_fail_discards_claim_and_cleanup_clears_cla
     let held = f2_hold_db(&ctx.db, move |s| { s.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760); });
     let rpc = tokio::spawn({ let (c, mut s) = (Arc::clone(&ctx), session); async move { handle_fighters(&c, &mut s, "fighterMgr", "RecallFightersToTubes", &[PyRep::List(vec![PyRep::Integer(f_ball)])], &HashMap::new()).await } });
     for _ in 0..200 {
-        if sys_h.actor_state.read().unwrap().pending_recall_or_scoop_claims.contains_key(&f_ball) { break; }
+        if sys_h
+            .test_with_actor_state_async(move |st| st.pending_recall_or_scoop_claims.contains_key(&f_ball))
+            .await
+        {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    assert!(sys_h.actor_state.read().unwrap().pending_recall_or_scoop_claims.contains_key(&f_ball));
+    assert!(
+        sys_h
+            .test_with_actor_state_async(move |st| st.pending_recall_or_scoop_claims.contains_key(&f_ball))
+            .await
+    );
     let _ = held.0.send(());
     held.1.join().unwrap();
     assert!(rpc.await.unwrap().unwrap().is_err());
-    assert!(sys_h.actor_state.read().unwrap().pending_recall_or_scoop_claims.is_empty() && fighter_test_helpers::active_fighter(&ctx, f_ball).is_none());
+    assert!(
+        sys_h
+            .test_with_actor_state_async(|st| st.pending_recall_or_scoop_claims.is_empty())
+            .await
+            && fighter_test_helpers::active_fighter(&ctx, f_ball).is_none()
+    );
     let _ = sys_h.flush_fighter_checkpoint().await;
     assert!(!load_cold_fighters_for_system(&ctx.db, Some(&ctx.sde), sys_id).unwrap().active_fighters.contains_key(&f_ball));
 }
@@ -2002,15 +2027,15 @@ async fn r6_f2_04_load_tube_split_invalid_restores_prev_and_preserves_concurrent
     assert_eq!(handle_deactivate_fighter_ability_slots(&ctx2, &mut sess2, &[PyRep::Integer(sq_ball), PyRep::Integer(1)]).await.unwrap().unwrap_err().code, "StorageError");
     assert_eq!(apply_damage_to_fighter_squadron(&ctx2, sys2, sq_ball, DamageVector::new(100.0, 0.0, 0.0, 0.0)).await, (0, 0, false));
     f2_test_break_cp(&ctx2, false);
-    assert!(apply_damage_to_fighter_squadron(&ctx2, sys2, sq_ball, DamageVector::new(1_200.0, 0.0, 0.0, 0.0)).await.0 >= 1 && !h2.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(apply_damage_to_fighter_squadron(&ctx2, sys2, sq_ball, DamageVector::new(1_200.0, 0.0, 0.0, 0.0)).await.0 >= 1 && !h2.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
 
     // BF-02: Unhydrated cross-system fighter lookup hydrates and returns FighterNotInSystem.
     let (sys_other, other_sq) = (30_002_187u32, 630_799i64);
     f2_test_seed_sqlite_fighters(&ctx2, sys_other, &[(other_sq, make_test_fighter_sq(other_sq, 530_798, 23_057, char2, ship2, 0, false))]);
     let h_other = f2_test_spawn_unhydrated(&ctx2, sys_other).await;
-    assert!(h_other.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(h_other.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     assert_eq!(handle_activate_fighter_ability_slots(&ctx2, &mut sess2, &[PyRep::Integer(other_sq), PyRep::Integer(1)]).await.unwrap().unwrap_err().code, "FighterNotInSystem");
-    assert!(!h_other.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(!h_other.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2061,7 +2086,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
     let h_t = f2_test_spawn_unhydrated(&ctx, sys_t).await;
     spawn_fighter_test_ball(&h_t, ship_id, 23_915, DVec3::new(2_000.0, 0.0, 0.0), Some(CombatState::default())).await;
     sync_tether(&ctx, char_id, sys_t, ship_id).await;
-    assert!(!h_t.actor_state.read().unwrap().fighters_needs_sqlite_hydration && !h_t.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    assert!(!h_t.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && !h_t.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
 
     // 2. crimewatch_scene_notify hydrates on both targeted combat_sys_id (Some) and scan fallback (None).
     for (sys_n, sq_n, explicit) in [(sys_n1, 630_802_i64, Some(sys_n1)), (sys_n2, 630_803_i64, None)] {
@@ -2070,7 +2095,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
         f2_test_seed_sqlite_fighters(&ctx, sys_n, &[(sq_n, make_test_fighter_sq(sq_n, sq_n - 100_000, 23_057, char_id, ship_id, 0, false))]);
         let h_n = f2_test_spawn_unhydrated(&ctx, sys_n).await;
         emit_combat_log_and_damage_state(&ctx, gunner_id, None, gunner_ship, sq_n, 23_057, 25.0, false, 0.8, 1.0, 1.0, explicit);
-        assert!(!h_n.actor_state.read().unwrap().fighters_needs_sqlite_hydration && ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event.starts_with("OnDamageMessage")));
+        assert!(!h_n.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event.starts_with("OnDamageMessage")));
     }
 
     // 3. apply_damage_structure_or_ball hydrates and applies squadron casualty damage.
@@ -2079,7 +2104,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
     let h_d = f2_test_spawn_unhydrated(&ctx, sys_d).await;
     spawn_fighter_test_ball(&h_d, sq_d, 23_057, DVec3::ZERO, Some(sponge_cs())).await;
     let dmg_hit = apply_damage_structure_or_ball(&ctx, &h_d, sys_d, gunner_id, sq_d, DamageVector::new(1_200.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix()).await.unwrap();
-    assert!(dmg_hit.is_some_and(|(a, _, _)| a > 0.0) && !h_d.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h_d.view().fighters.active_fighters.get(&sq_d).is_none_or(|sq| sq.squadron_size < 9));
+    assert!(dmg_hit.is_some_and(|(a, _, _)| a > 0.0) && !h_d.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && h_d.view().fighters.active_fighters.get(&sq_d).is_none_or(|sq| sq.squadron_size < 9));
 
     // 4. combat_weapons_spool::handle_ship_or_npc_destruction hydrates and removes destroyed fighter while keeping siblings.
     let (sq_sp, sq_sp_keep) = (630_805_i64, 630_806_i64);
@@ -2088,7 +2113,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
     spawn_fighter_test_ball(&h_sp, sq_sp, 23_057, DVec3::ZERO, Some(sponge_cs())).await;
     let ball_sp = h_sp.get_ball_snapshot(sq_sp).await.unwrap().unwrap().1;
     let _ = handle_ship_or_npc_destruction(&ctx, &h_sp, gunner_id, gunner_ship, 23_915, 0, sq_sp, &ball_sp, None, sys_sp, 100.0, ctx.now_unix()).await;
-    assert!(!h_sp.actor_state.read().unwrap().fighters_needs_sqlite_hydration && !h_sp.view().fighters.active_fighters.contains_key(&sq_sp) && h_sp.view().fighters.active_fighters.contains_key(&sq_sp_keep));
+    assert!(!h_sp.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && !h_sp.view().fighters.active_fighters.contains_key(&sq_sp) && h_sp.view().fighters.active_fighters.contains_key(&sq_sp_keep));
 
     // 5. step_guided_bombs_in_system hydrates before hostility check: spares corp-friendly fighter, damages hostile fighter.
     let (sq_fr, sq_en) = (630_807_i64, 630_808_i64);
@@ -2099,7 +2124,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
         spawn_fighter_test_ball(&h_b, bid, tid, pos, cs).await;
     }
     step_guided_bombs_in_system(&ctx, sys_b, 0.1).await;
-    assert!(!h_b.actor_state.read().unwrap().fighters_needs_sqlite_hydration && h_b.get_combat_state(sq_fr).await.unwrap().unwrap().shield_hp == 500.0 && h_b.get_combat_state(sq_en).await.unwrap().unwrap().shield_hp < 500.0);
+    assert!(!h_b.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && h_b.get_combat_state(sq_fr).await.unwrap().unwrap().shield_hp == 500.0 && h_b.get_combat_state(sq_en).await.unwrap().unwrap().shield_hp < 500.0);
 
     // 6. npc_ai::step_system_npc_spawns_ai_sync hydrates and resolves fighter owner_char_id -> delivers OnDamageMessage.
     let sq_npc = 630_809_i64;
@@ -2116,7 +2141,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
         sponge_cs(),
         eve_destiny::SlimItemMeta { group_id: 100, category_id: 18, owner_id: char_id, ..Default::default() },
     ).await.unwrap();
-    assert!(h_npc.actor_state.read().unwrap().fighters_needs_sqlite_hydration);
+    assert!(h_npc.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await);
     for tick in 1..=5 { step_system_npc_spawns_ai_sync(&ctx, sys_npc, tick, 1.0); }
-    assert!(!h_npc.actor_state.read().unwrap().fighters_needs_sqlite_hydration && ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event.starts_with("OnDamageMessage")));
+    assert!(!h_npc.test_with_actor_state_async(|st| st.fighters_needs_sqlite_hydration).await && ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event.starts_with("OnDamageMessage")));
 }

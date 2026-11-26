@@ -400,8 +400,10 @@ async fn interdiction_bubbles_and_execute_agency_content_warp_paths() {
         "WarpScrambled"
     );
     {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        assert!(bp.set_interdiction_nullified(ship_id, true));
+        let nullified = sys_handle
+            .test_with_ballpark_mut_async(move |bp| bp.set_interdiction_nullified(ship_id, true))
+            .await;
+        assert!(nullified);
     }
     assert_eq!(
         check_warp_interdiction_and_adjust_dest(&sys_handle, ship_id, origin, far_dest).unwrap(),
@@ -812,7 +814,9 @@ async fn use_warp_vector_gate_cloak_vs_covert_cloak_rollback_none_and_agency_war
         .await
         .unwrap();
     assert_eq!(res1.dict_get("remainingQuantity"), Some(&PyRep::Integer(1)));
-    let cs_after_gate = sys_handle.ballpark.read().unwrap().combat_states[&ship_id].clone();
+    let cs_after_gate = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&ship_id].clone())
+        .await;
     assert!(!cs_after_gate.is_cloaked);
     assert_eq!(cs_after_gate.gate_cloak_remaining_ticks, 0);
 
@@ -839,6 +843,8 @@ async fn use_warp_vector_gate_cloak_vs_covert_cloak_rollback_none_and_agency_war
         .await
         .unwrap();
     assert_eq!(res2.dict_get("remainingQuantity"), Some(&PyRep::Integer(0)));
-    let cs_after_cov = sys_handle.ballpark.read().unwrap().combat_states[&ship_id].clone();
+    let cs_after_cov = sys_handle
+        .test_with_ballpark_async(move |bp| bp.combat_states[&ship_id].clone())
+        .await;
     assert!(cs_after_cov.is_cloaked);
 }

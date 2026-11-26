@@ -400,10 +400,10 @@ async fn mid_tunnel_warp_preservation_gatecamp_bubble_interception_and_active_cy
             .warp_exit_invulnerable_remaining_ticks,
         0
     );
-    sys.ballpark
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove_warp_bubble(99_888);
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.remove_warp_bubble(99_888);
+    })
+    .await;
 
     // 3. Active Cyno holds disconnected ship for full 600s duration and despawn cleans up module + beacon
     let lowsec_sys = ctx

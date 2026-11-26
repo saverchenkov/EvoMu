@@ -530,21 +530,25 @@ async fn deathzone_room_offset_and_system_bounds_kill_mutations() {
 
     // Room 2 center is at (10_000, 0, 50_000). Place ship right at that center -> inside boundary, no notification!
     let handle = ctx.systems.get_or_spawn(abyss_sys);
-    handle.ballpark.write().unwrap().balls.insert(
-        ship_id,
-        Ball {
-            id: ship_id,
-            type_id: 587,
-            position: DVec3::new(10_000.0, 0.0, 50_000.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 300.0,
-            inertia: 1.0,
-            mass: 1_000_000.0,
-            radius: 50.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-    );
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(
+                ship_id,
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::new(10_000.0, 0.0, 50_000.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+            );
+        })
+        .await;
     sync_deathzone_state_notifications(&ctx, abyss_sys);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
@@ -607,26 +611,30 @@ async fn mutant_kill_deathzone_transitions_boundary_and_incursion_tale_remove() 
 
     let handle = ctx.systems.get_or_spawn(abyss_sys);
     let center = DVec3::new(10_000.0, 0.0, 50_000.0);
-    let set_pos = |pos: DVec3| {
-        handle.ballpark.write().unwrap().balls.insert(
-            ship_id,
-            Ball {
-                id: ship_id,
-                type_id: 587,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 1_000_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-        );
-    };
+    async fn set_pos(handle: &crate::system_actor::SystemHandle, ship_id: i64, pos: DVec3) {
+        handle
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.balls.insert(
+                    ship_id,
+                    Ball {
+                        id: ship_id,
+                        type_id: 587,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 300.0,
+                        inertia: 1.0,
+                        mass: 1_000_000.0,
+                        radius: 50.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                );
+            })
+            .await;
+    }
 
     // 1. Exact boundary radius (distance == r): not outside (> r is false)
-    set_pos(center + DVec3::new(r, 0.0, 0.0));
+    set_pos(&handle, ship_id, center + DVec3::new(r, 0.0, 0.0)).await;
     sync_deathzone_state_notifications(&ctx, abyss_sys);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     ctx.db.with_snapshot(|snap| {
@@ -634,7 +642,7 @@ async fn mutant_kill_deathzone_transitions_boundary_and_incursion_tale_remove() 
     });
 
     // 2. Step outside boundary (distance == r + 1.0): enters danger, emits keyval, inserts active ship
-    set_pos(center + DVec3::new(r + 1.0, 0.0, 0.0));
+    set_pos(&handle, ship_id, center + DVec3::new(r + 1.0, 0.0, 0.0)).await;
     sync_deathzone_state_notifications(&ctx, abyss_sys);
     let enter_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(enter_notifs.len(), 1);
@@ -653,7 +661,7 @@ async fn mutant_kill_deathzone_transitions_boundary_and_incursion_tale_remove() 
     });
 
     // 4. Return inside boundary: emits None payload and removes ship from active deathzone set
-    set_pos(center);
+    set_pos(&handle, ship_id, center).await;
     sync_deathzone_state_notifications(&ctx, abyss_sys);
     let exit_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(exit_notifs.len(), 1);

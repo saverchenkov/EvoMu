@@ -645,8 +645,7 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
             ..Default::default()
         })
         .await;
-    {
-        let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.register_observer(ship_a);
         bp.register_observer(ship_manned);
         bp.target_locks.entry(ship_a).or_default().push(eve_destiny::TargetLock {
@@ -656,7 +655,8 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
             locked: true,
             max_range_m: None,
         });
-    }
+    })
+    .await;
 
     let mut sess = SessionState::new(9_730);
     sess.user_id = Some(1);
@@ -739,14 +739,22 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
     let cap_cs = sys.get_combat_state(cap_id).await.unwrap().unwrap();
     assert!(cap_cs.max_shield_hp > 0.0 && cap_cs.max_armor_hp > 0.0 && cap_cs.max_structure_hp > 0.0);
     {
-        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&false));
-        assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), None);
-        assert!(bp.target_locks.get(&ship_a).is_none_or(|v| v.is_empty()));
+        let (ovr_a, meta_a_char, locks_empty, obs_a) = sys
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.ball_interactive_overrides.get(&ship_a).copied(),
+                    bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id),
+                    bp.target_locks.get(&ship_a).is_none_or(|v| v.is_empty()),
+                    bp.observer_events.get(&ship_a).cloned(),
+                )
+            })
+            .await;
+        assert_eq!(ovr_a, Some(false));
+        assert_eq!(meta_a_char, None);
+        assert!(locks_empty);
         assert!(
-            bp.observer_events.get(&ship_a).is_none_or(|v| v.is_empty()),
-            "HF1005-02: Eject must not strand observer_events under vacated ship_a: {:?}",
-            bp.observer_events.get(&ship_a)
+            obs_a.as_ref().is_none_or(|v| v.is_empty()),
+            "HF1005-02: Eject must not strand observer_events under vacated ship_a: {obs_a:?}"
         );
     }
     let (_t_ej, cap_events, _) = sys.drain_observer_updates(cap_id).await.unwrap();
@@ -778,7 +786,12 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
         add_cap_count, 1,
         "HF1005-02: AddBalls2 for cap_id must be emitted exactly once; got {cap_events:?}"
     );
-    assert!(sys.actor_state.read().unwrap().active_module_cycles.iter().all(|c| c.ship_id != ship_a));
+    assert!(
+        sys.test_with_actor_state_async(move |st| {
+            st.active_module_cycles.iter().all(|c| c.ship_id != ship_a)
+        })
+        .await
+    );
     ctx.db.with_snapshot(|s| {
         assert!(s.item_positions.contains_key(&ship_a));
         assert!(s.item_positions.contains_key(&cap_id));
@@ -801,9 +814,16 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
     assert_eq!(sess.ship_id, Some(ship_a));
     assert!(sys.get_ball_snapshot(cap_id).await.unwrap().is_none());
     {
-        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&true));
-        assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), Some(char_id));
+        let (ovr_a, meta_a_char) = sys
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.ball_interactive_overrides.get(&ship_a).copied(),
+                    bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id),
+                )
+            })
+            .await;
+        assert_eq!(ovr_a, Some(true));
+        assert_eq!(meta_a_char, Some(char_id));
     }
 
     // 5. Negative guard: cannot Board another pilot's manned ship.
@@ -852,15 +872,24 @@ async fn in_space_eject_and_ship_to_ship_board_lifecycle_and_guards() {
     let (_, ship_a_after_board) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     assert!(matches!(ship_a_after_board.mode, eve_destiny::MovementMode::Stop));
     {
-        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(bp.ball_interactive_overrides.get(&ship_a), Some(&false));
-        assert_eq!(bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id), None);
-        assert_eq!(bp.ball_interactive_overrides.get(&ship_b), Some(&true));
-        assert_eq!(bp.ball_slim_meta.get(&ship_b).and_then(|m| m.char_id), Some(char_id));
+        let (ovr_a, meta_a_char, ovr_b, meta_b_char, obs_a) = sys
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.ball_interactive_overrides.get(&ship_a).copied(),
+                    bp.ball_slim_meta.get(&ship_a).and_then(|m| m.char_id),
+                    bp.ball_interactive_overrides.get(&ship_b).copied(),
+                    bp.ball_slim_meta.get(&ship_b).and_then(|m| m.char_id),
+                    bp.observer_events.get(&ship_a).cloned(),
+                )
+            })
+            .await;
+        assert_eq!(ovr_a, Some(false));
+        assert_eq!(meta_a_char, None);
+        assert_eq!(ovr_b, Some(true));
+        assert_eq!(meta_b_char, Some(char_id));
         assert!(
-            bp.observer_events.get(&ship_a).is_none_or(|v| v.is_empty()),
-            "HF1005-02: ship-to-ship Board must not strand observer_events under vacated ship_a: {:?}",
-            bp.observer_events.get(&ship_a)
+            obs_a.as_ref().is_none_or(|v| v.is_empty()),
+            "HF1005-02: ship-to-ship Board must not strand observer_events under vacated ship_a: {obs_a:?}"
         );
     }
     let (_tb, pilot_board_events, _) = sys.drain_observer_updates(ship_b).await.unwrap();
@@ -1090,12 +1119,8 @@ async fn eject_in_space_missing_hull_ball_rejects_without_mutating_db_or_spawnin
     });
     assert_eq!(sess.ship_id, Some(ship_id));
     assert!(
-        !sys.ballpark
-            .write()
-            .unwrap()
-            .balls
-            .values()
-            .any(|b| b.type_id == 670),
+        !sys.test_with_ballpark_async(|bp| bp.balls.values().any(|b| b.type_id == 670))
+            .await,
         "no capsule ball may be spawned near star origin (150, 0, 0)"
     );
 }

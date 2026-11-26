@@ -614,12 +614,8 @@ async fn ensure_fob_damaged_hp_sync_spread_khanid_wh_and_fallback_corps_coverage
     let fob_cs = ctx
         .systems
         .get_or_spawn(fob_sys)
-        .ballpark
-        .read()
-        .unwrap()
-        .combat_states
-        .get(&fob_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.combat_states.get(&fob_id).cloned())
+        .await
         .expect("fob ball combat state");
     assert!((fob_cs.shield_hp - 12_345.0).abs() < 1e-6);
     assert!((fob_cs.armor_hp - 6_789.0).abs() < 1e-6);

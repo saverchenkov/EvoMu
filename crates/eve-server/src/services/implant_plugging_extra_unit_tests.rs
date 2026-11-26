@@ -1439,7 +1439,10 @@ async fn mutants_cov_booster_purge_ballpark_sync_implant_version_destroy_and_car
     let expected_c1 = ctx.build_ship_combat_state(c1, ship1, 587);
     let expected_c2 = ctx.build_ship_combat_state(c2, ship2, 587);
     assert!((expected_c2.max_shield_hp - expected_c1.max_shield_hp).abs() > 1.0);
-    let bp_cs = sys_h.ballpark.read().unwrap().combat_states.get(&ship2).cloned().unwrap();
+    let bp_cs = sys_h
+        .test_with_ballpark_async(move |bp| bp.combat_states.get(&ship2).cloned())
+        .await
+        .unwrap();
     assert!((bp_cs.max_shield_hp - expected_c2.max_shield_hp).abs() < 1e-3);
 
     // 3. purge_expired_boosters_in_snapshot returns invalidated ships directly when unscoped

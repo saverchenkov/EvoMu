@@ -298,12 +298,13 @@ async fn npc_ai_orbit_attack_cooldown_and_destruction_factions_and_abyssal() {
     assert_eq!(mgr.entities[&npc_ball_id].last_attack_tick, 10);
 
     // Move NPC to 4_000.0 m (<= optimal * 1.25): at tick 11 (< 10 + 2), state is Attack but cooldown prevents firing
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(b) = bp.balls.get_mut(&npc_ball_id) {
-            b.position = DVec3::new(4_000.0, 0.0, 0.0);
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&npc_ball_id) {
+                b.position = DVec3::new(4_000.0, 0.0, 0.0);
+            }
+        })
+        .await;
     mgr.step_ai_sync(&ctx, sys_id, 11, 1.0);
     assert_eq!(mgr.entities[&npc_ball_id].state, NpcAiState::Attack);
     assert_eq!(mgr.entities[&npc_ball_id].last_attack_tick, 10);
@@ -324,24 +325,24 @@ async fn npc_ai_orbit_attack_cooldown_and_destruction_factions_and_abyssal() {
         hit_notifs.iter().any(|n| n.event == "OnDamageStateChange"),
         "step_ai_sync attack must emit OnDamageStateChange to victim"
     );
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        let obs_evs = bp.drain_observer_events(player_ship);
-        assert!(
-            obs_evs
-                .iter()
-                .any(|e| matches!(e, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_ball_id)),
-            "step_ai_sync attack must queue OnSpecialFX on ballpark"
-        );
-    }
+    let obs_evs = sys_handle
+        .test_with_ballpark_mut_async(move |bp| bp.drain_observer_events(player_ship))
+        .await;
+    assert!(
+        obs_evs
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_ball_id)),
+        "step_ai_sync attack must queue OnSpecialFX on ballpark"
+    );
 
     // Verify step_ai_sync never targets category 11 NPCs or category 25 asteroids (#792)
     let other_npc_ball = 100_400_020;
     let ast_ball = 100_400_021;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.remove_ball(player_ship);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.remove_ball(player_ship);
+        })
+        .await;
     let _ = sys_handle
         .spawn_ball_with_meta(
             Ball {
@@ -964,14 +965,15 @@ async fn npc_ai_chase_idle_ewar_logi_threat_and_ball_destruction_branches() {
     assert!(mgr.respawn_timers.contains_key(&(sys_id, 13)));
 
     // Move all ships beyond 50 km -> NPC transitions back to Idle with MovementMode::Stop
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        for bid in [player_ship, logi_ship, ewar_ship] {
-            if let Some(b) = bp.balls.get_mut(&bid) {
-                b.position = DVec3::new(80_000.0, 0.0, 0.0);
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            for bid in [player_ship, logi_ship, ewar_ship] {
+                if let Some(b) = bp.balls.get_mut(&bid) {
+                    b.position = DVec3::new(80_000.0, 0.0, 0.0);
+                }
             }
-        }
-    }
+        })
+        .await;
     mgr.step_ai_sync(&ctx, sys_id, 6, 1.0);
     assert_eq!(mgr.entities[&npc_ball].state, NpcAiState::Idle);
     assert_eq!(mgr.entities[&npc_ball].target_id, None);
@@ -1055,20 +1057,21 @@ async fn npc_ai_chase_idle_ewar_logi_threat_and_ball_destruction_branches() {
             },
         );
     });
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(b) = bp.balls.get_mut(&player_ship) {
-            b.position = DVec3::new(1_000.0, 0.0, 0.0);
-        }
-        if let Some(cs) = bp.combat_states.get_mut(&player_ship) {
-            cs.shield_hp = 0.0;
-            cs.armor_hp = 0.0;
-            cs.structure_hp = 1.0;
-            cs.shield_resonance = [1.0; 4];
-            cs.armor_resonance = [1.0; 4];
-            cs.structure_resonance = [1.0; 4];
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&player_ship) {
+                b.position = DVec3::new(1_000.0, 0.0, 0.0);
+            }
+            if let Some(cs) = bp.combat_states.get_mut(&player_ship) {
+                cs.shield_hp = 0.0;
+                cs.armor_hp = 0.0;
+                cs.structure_hp = 1.0;
+                cs.shield_resonance = [1.0; 4];
+                cs.armor_resonance = [1.0; 4];
+                cs.structure_resonance = [1.0; 4];
+            }
+        })
+        .await;
     mgr.entities.get_mut(&npc_ball).unwrap().damage_vector =
         DamageVector::new(1_000.0, 1_000.0, 1_000.0, 1_000.0);
     mgr.step_ai_sync(&ctx, sys_id, 10, 1.0);
@@ -1224,16 +1227,17 @@ async fn npc_ai_sde_dps_within_one_percent_across_five_ship_classes_and_factions
         for tick in 1..=n_ticks {
             mgr.step_ai_sync(&ctx, sys_id, tick, 1.0);
             if tick % 500 == 0 {
-                sys_handle.ballpark.write().unwrap().pending_events.clear();
+                sys_handle
+                    .test_with_ballpark_mut_async(move |bp| {
+                        bp.pending_events.clear();
+                    })
+                    .await;
             }
         }
 
         let remaining_shield = sys_handle
-            .ballpark
-            .read()
-            .unwrap()
-            .combat_states[&target_bid]
-            .shield_hp;
+            .test_with_ballpark_async(move |bp| bp.combat_states[&target_bid].shield_hp)
+            .await;
         let empirical_dps = (initial_shield - remaining_shield) / (n_ticks as f64);
 
         // Analytical turret expectation at P_hit = 1.0:
@@ -1310,11 +1314,8 @@ async fn npc_ai_turret_normal_hit_rules_angular_velocity_sig_and_range_cutoff() 
             mgr.step_ai_sync(&ctx, sys_id, tick, 1.0);
         }
         let remaining = sys_handle
-            .ballpark
-            .read()
-            .unwrap()
-            .combat_states[&target_bid]
-            .shield_hp;
+            .test_with_ballpark_async(move |bp| bp.combat_states[&target_bid].shield_hp)
+            .await;
         initial_shield - remaining
     };
 
@@ -1397,11 +1398,8 @@ async fn npc_ai_missile_application_sig_speed_and_flight_range_cutoff() {
         );
         mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
         let remaining = sys_handle
-            .ballpark
-            .read()
-            .unwrap()
-            .combat_states[&target_bid]
-            .shield_hp;
+            .test_with_ballpark_async(move |bp| bp.combat_states[&target_bid].shield_hp)
+            .await;
         initial_shield - remaining
     };
 
@@ -1479,21 +1477,23 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
             ),
             make_sponge_combat_state(1e6, 400.0),
         );
-        {
-            let mut bp = sys_handle.ballpark.write().unwrap();
-            bp.pending_events.clear();
-        }
+        sys_handle
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.pending_events.clear();
+            })
+            .await;
         mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
-        let (fx_evs, encoded_fx_wires) = {
-            let mut bp = sys_handle.ballpark.write().unwrap();
-            let evs = std::mem::take(&mut bp.pending_events);
-            let encoded: Vec<eve_proto::PyRep> = evs
-                .iter()
-                .filter(|ev| matches!(ev, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_bid))
-                .map(|ev| eve_destiny::wire::encode_destiny_event(1, ev, Some(&bp)))
-                .collect();
-            (evs, encoded)
-        };
+        let (fx_evs, encoded_fx_wires) = sys_handle
+            .test_with_ballpark_mut_async(move |bp| {
+                let evs = std::mem::take(&mut bp.pending_events);
+                let encoded: Vec<eve_proto::PyRep> = evs
+                    .iter()
+                    .filter(|ev| matches!(ev, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_bid))
+                    .map(|ev| eve_destiny::wire::encode_destiny_event(1, ev, Some(&*bp)))
+                    .collect();
+                (evs, encoded)
+            })
+            .await;
         assert!(
             fx_evs.iter().any(|ev| matches!(
                 ev,
@@ -1593,29 +1593,35 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
         ),
         make_sponge_combat_state(1e6, 400.0),
     );
-    {
-        sys_handle.ballpark.write().unwrap().pending_events.clear();
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.pending_events.clear();
+        })
+        .await;
     mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
     assert_eq!(mgr.entities[&follower_bid].state, NpcAiState::Chase);
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        let b = &bp.balls[&follower_bid];
-        assert_eq!(b.max_velocity, 440.0);
-        assert_eq!(b.speed_fraction, 1.0);
+        let (max_velocity, speed_fraction, mode, chase_sf_count) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                let b = &bp.balls[&follower_bid];
+                let chase_sf_count = bp
+                    .pending_events
+                    .iter()
+                    .filter(|ev| matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, fraction }
+                            if *ball_id == follower_bid && (*fraction - 1.0).abs() < 1e-6
+                    ))
+                    .count();
+                (b.max_velocity, b.speed_fraction, b.mode.clone(), chase_sf_count)
+            })
+            .await;
+        assert_eq!(max_velocity, 440.0);
+        assert_eq!(speed_fraction, 1.0);
         assert!(matches!(
-            b.mode,
+            mode,
             MovementMode::Follow { range, .. } if (range - 3_625.0).abs() < 1e-6
         ));
-        let chase_sf_count = bp
-            .pending_events
-            .iter()
-            .filter(|ev| matches!(
-                ev,
-                eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, fraction }
-                    if *ball_id == follower_bid && (*fraction - 1.0).abs() < 1e-6
-            ))
-            .count();
         assert_eq!(
             chase_sf_count, 1,
             "mobile Chase Follow transition must emit exactly one SetSpeedFraction(1.0)"
@@ -1632,59 +1638,69 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
         NpcAiState::Orbit | NpcAiState::Attack
     ));
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        let b = &bp.balls[&follower_bid];
-        assert!((b.speed_fraction - 0.5).abs() < 1e-6);
+        let (b_speed_fraction, b_mode, tb_max_velocity, tb_speed_fraction) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                let b = &bp.balls[&follower_bid];
+                let tb = &bp.balls[&tessella_bid];
+                (b.speed_fraction, b.mode.clone(), tb.max_velocity, tb.speed_fraction)
+            })
+            .await;
+        assert!((b_speed_fraction - 0.5).abs() < 1e-6);
         assert!(matches!(
-            b.mode,
+            b_mode,
             MovementMode::Orbit { range, .. } if (range - 3_625.0).abs() < 1e-6
         ));
-        let tb = &bp.balls[&tessella_bid];
-        assert_eq!(tb.max_velocity, 1_500.0);
+        assert_eq!(tb_max_velocity, 1_500.0);
         if matches!(mgr.entities[&tessella_bid].state, NpcAiState::Orbit | NpcAiState::Attack) {
-            assert!((tb.speed_fraction - (1_000.0 / 1_500.0)).abs() < 1e-6);
+            assert!((tb_speed_fraction - (1_000.0 / 1_500.0)).abs() < 1e-6);
         }
     }
 
     // Move back to 20 km -> Orbit -> Chase must emit exactly one Follow and one SetSpeedFraction(1.0) (BF-R2-03)
-    {
-        sys_handle.ballpark.write().unwrap().pending_events.clear();
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.pending_events.clear();
+        })
+        .await;
     sys_handle
         .set_ball_position(target_bid, follower_pos + DVec3::new(20_000.0, 0.0, 0.0))
         .await;
     mgr.step_ai_sync(&ctx, sys_id, 3, 1.0);
     assert_eq!(mgr.entities[&follower_bid].state, NpcAiState::Chase);
     {
-        let bp = sys_handle.ballpark.read().unwrap();
-        let b = &bp.balls[&follower_bid];
-        assert!((b.speed_fraction - 1.0).abs() < 1e-6);
+        let (speed_fraction, mode, follow_count, sf_fractions) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                let b = &bp.balls[&follower_bid];
+                let follow_count = bp
+                    .pending_events
+                    .iter()
+                    .filter(|ev| matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::Follow { ball_id, target_id, .. }
+                            if *ball_id == follower_bid && *target_id == target_bid
+                    ))
+                    .count();
+                let sf_fractions: Vec<f64> = bp
+                    .pending_events
+                    .iter()
+                    .filter_map(|ev| match ev {
+                        eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, fraction }
+                            if *ball_id == follower_bid =>
+                        {
+                            Some(*fraction)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (b.speed_fraction, b.mode.clone(), follow_count, sf_fractions)
+            })
+            .await;
+        assert!((speed_fraction - 1.0).abs() < 1e-6);
         assert!(matches!(
-            b.mode,
+            mode,
             MovementMode::Follow { target_id, range }
                 if target_id == target_bid && (range - 3_625.0).abs() < 1e-6
         ));
-        let follow_count = bp
-            .pending_events
-            .iter()
-            .filter(|ev| matches!(
-                ev,
-                eve_destiny::DestinyEvent::Follow { ball_id, target_id, .. }
-                    if *ball_id == follower_bid && *target_id == target_bid
-            ))
-            .count();
-        let sf_fractions: Vec<f64> = bp
-            .pending_events
-            .iter()
-            .filter_map(|ev| match ev {
-                eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, fraction }
-                    if *ball_id == follower_bid =>
-                {
-                    Some(*fraction)
-                }
-                _ => None,
-            })
-            .collect();
         assert_eq!(follow_count, 1, "Orbit -> Chase must emit exactly one Follow event");
         assert_eq!(
             sf_fractions.len(),
@@ -1869,11 +1885,8 @@ async fn npc_ai_vorton_uses_missile_drf_within_optimal_without_wrecking_or_track
             mgr.step_ai_sync(&ctx, sys_id, tick, 1.0);
         }
         let remaining = sys_handle
-            .ballpark
-            .read()
-            .unwrap()
-            .combat_states[&target_bid]
-            .shield_hp;
+            .test_with_ballpark_async(move |bp| bp.combat_states[&target_bid].shield_hp)
+            .await;
         initial_shield - remaining
     };
 
@@ -1962,18 +1975,21 @@ async fn npc_ai_stationary_armed_npc_has_zero_orbit_range_and_no_speed_churn() {
     assert_eq!(mgr.entities[&sentry_bid].orbit_range, 0.0);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let sentry_pos = {
-        let bp = sys_handle.ballpark.read().unwrap();
-        let b = &bp.balls[&sentry_bid];
-        assert_eq!(b.max_velocity, 0.0);
-        assert_eq!(b.speed_fraction, 0.0);
-        b.position
-    };
+    let (sentry_max_vel, sentry_speed_frac, sentry_pos) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            let b = &bp.balls[&sentry_bid];
+            (b.max_velocity, b.speed_fraction, b.position)
+        })
+        .await;
+    assert_eq!(sentry_max_vel, 0.0);
+    assert_eq!(sentry_speed_frac, 0.0);
 
     // Step idle with no target -> Attack at 25km -> Attack at 4km -> Idle at 80km
-    {
-        sys_handle.ballpark.write().unwrap().pending_events.clear();
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.pending_events.clear();
+        })
+        .await;
     mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
     assert_eq!(mgr.entities[&sentry_bid].state, NpcAiState::Idle);
 
@@ -2003,18 +2019,23 @@ async fn npc_ai_stationary_armed_npc_has_zero_orbit_range_and_no_speed_churn() {
     mgr.step_ai_sync(&ctx, sys_id, 4, 1.0);
     assert_eq!(mgr.entities[&sentry_bid].state, NpcAiState::Idle);
 
-    let bp = sys_handle.ballpark.read().unwrap();
-    let movement_churn: Vec<_> = bp
-        .pending_events
-        .iter()
-        .filter(|ev| match ev {
-            eve_destiny::DestinyEvent::Follow { ball_id, .. }
-            | eve_destiny::DestinyEvent::Orbit { ball_id, .. }
-            | eve_destiny::DestinyEvent::Stop { ball_id }
-            | eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, .. } => *ball_id == sentry_bid,
-            _ => false,
+    let movement_churn: Vec<eve_destiny::DestinyEvent> = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            bp.pending_events
+                .iter()
+                .filter(|ev| match ev {
+                    eve_destiny::DestinyEvent::Follow { ball_id, .. }
+                    | eve_destiny::DestinyEvent::Orbit { ball_id, .. }
+                    | eve_destiny::DestinyEvent::Stop { ball_id }
+                    | eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, .. } => {
+                        *ball_id == sentry_bid
+                    }
+                    _ => false,
+                })
+                .cloned()
+                .collect()
         })
-        .collect();
+        .await;
     assert!(
         movement_churn.is_empty(),
         "stationary armed NPC must emit zero Follow/Orbit/Stop/SetSpeedFraction churn, got {movement_churn:?}"
@@ -2085,55 +2106,75 @@ async fn npc_ai_killing_blow_on_special_fx_retains_wire_meta_across_next_tick_en
             ),
             fragile_cs,
         );
-        let emit_tick = {
-            let mut bp = sys_handle.ballpark.write().unwrap();
-            bp.register_observer(observer_bid);
-            let _ = bp.drain_all_observer_events();
-            bp.pending_events.clear();
-            bp.current_tick
-        };
+        let emit_tick = sys_handle
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.register_observer(observer_bid);
+                let _ = bp.drain_all_observer_events();
+                bp.pending_events.clear();
+                bp.current_tick
+            })
+            .await;
 
         mgr.step_ai_sync(&ctx, sys_id, emit_tick, 1.0);
 
         {
-            let bp = sys_handle.ballpark.read().unwrap();
+            let (target_still_present, fx_meta_retained) = sys_handle
+                .test_with_ballpark_async(move |bp| {
+                    (
+                        bp.balls.contains_key(&target_bid),
+                        bp.special_fx_meta
+                            .values()
+                            .any(|m| m.target_id == Some(target_bid)),
+                    )
+                })
+                .await;
             assert!(
-                !bp.balls.contains_key(&target_bid),
+                !target_still_present,
                 "target {target_bid} must be destroyed by lethal NPC shot ({npc_type_id})"
             );
             assert!(
-                !bp.special_fx_meta
-                    .values()
-                    .any(|m| m.target_id == Some(target_bid)),
+                !fx_meta_retained,
                 "special_fx_meta must still be pruned when target is destroyed"
             );
         }
 
         // Next simulation tick (emit_tick + 1): matches cluster_tick.rs encoding tick N's queued FX on tick N + 1.
-        let (pending_after_step, obs_after_step) = {
-            let mut bp = sys_handle.ballpark.write().unwrap();
-            let pending = bp.step(1.0);
-            assert_eq!(bp.current_tick, emit_tick + 1);
-            let obs = bp.drain_observer_events(observer_bid);
-            (pending, obs)
-        };
+        let (step1_tick, pending_after_step, obs_after_step) = sys_handle
+            .test_with_ballpark_mut_async(move |bp| {
+                let pending = bp.step(1.0);
+                let obs = bp.drain_observer_events(observer_bid);
+                (bp.current_tick, pending, obs)
+            })
+            .await;
+        assert_eq!(step1_tick, emit_tick + 1);
 
-        let bp_guard = sys_handle.ballpark.read().unwrap();
-        let stamp = bp_guard.current_tick as u32;
-        for (source_label, ev_list) in [
-            ("pending_events", &pending_after_step),
-            ("observer_events", &obs_after_step),
-        ] {
-            let fx_ev = ev_list
+        let find_fx = |source_label: &str, ev_list: &[eve_destiny::DestinyEvent]| {
+            ev_list
                 .iter()
                 .find(|ev| matches!(
                     ev,
                     eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: true, .. }
                         if *ball_id == npc_bid && guid == expected_guid
                 ))
-                .unwrap_or_else(|| panic!("{source_label} missing killing-blow OnSpecialFX for {npc_type_id}: {ev_list:?}"));
-            let wire = eve_destiny::wire::encode_destiny_event(stamp, fx_ev, Some(&bp_guard));
-            let eve_proto::PyRep::Tuple(top) = &wire else {
+                .unwrap_or_else(|| panic!("{source_label} missing killing-blow OnSpecialFX for {npc_type_id}: {ev_list:?}"))
+                .clone()
+        };
+        let pending_fx = find_fx("pending_events", &pending_after_step);
+        let obs_fx = find_fx("observer_events", &obs_after_step);
+        let (pending_wire, obs_wire) = sys_handle
+            .test_with_ballpark_async(move |bp| {
+                let stamp = bp.current_tick as u32;
+                (
+                    eve_destiny::wire::encode_destiny_event(stamp, &pending_fx, Some(bp)),
+                    eve_destiny::wire::encode_destiny_event(stamp, &obs_fx, Some(bp)),
+                )
+            })
+            .await;
+        for (source_label, wire) in [
+            ("pending_events", &pending_wire),
+            ("observer_events", &obs_wire),
+        ] {
+            let eve_proto::PyRep::Tuple(top) = wire else {
                 panic!("expected DestinyUpdate tuple");
             };
             let eve_proto::PyRep::Tuple(act) = &top[1] else {
@@ -2168,18 +2209,21 @@ async fn npc_ai_killing_blow_on_special_fx_retains_wire_meta_across_next_tick_en
             .find(|ev| matches!(ev, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_bid))
             .unwrap()
             .clone();
-        drop(bp_guard);
 
         // Advancing to emit_tick + 2 must expire the deferred pruned FX metadata.
         {
-            let mut bp = sys_handle.ballpark.write().unwrap();
-            let _ = bp.step(1.0);
-            assert_eq!(bp.current_tick, emit_tick + 2);
-            let expired_wire = eve_destiny::wire::encode_destiny_event(
-                bp.current_tick as u32,
-                &sample_fx,
-                Some(&bp),
-            );
+            let (step2_tick, expired_wire) = sys_handle
+                .test_with_ballpark_mut_async(move |bp| {
+                    let _ = bp.step(1.0);
+                    let wire = eve_destiny::wire::encode_destiny_event(
+                        bp.current_tick as u32,
+                        &sample_fx,
+                        Some(&*bp),
+                    );
+                    (bp.current_tick, wire)
+                })
+                .await;
+            assert_eq!(step2_tick, emit_tick + 2);
             let eve_proto::PyRep::Tuple(top) = &expired_wire else {
                 panic!("expected DestinyUpdate tuple");
             };
@@ -2399,10 +2443,11 @@ async fn cmb51_npc_spawn_ai_step_via_actor_mailbox_applies_damage_and_skips_non_
         )
         .await
         .unwrap();
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.mark_ball_non_free(pinned_id, false);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.mark_ball_non_free(pinned_id, false);
+        })
+        .await;
     assert!(sys_handle.view().is_non_free_ball(pinned_id));
 
     let target_id = 900_901_002_i64;

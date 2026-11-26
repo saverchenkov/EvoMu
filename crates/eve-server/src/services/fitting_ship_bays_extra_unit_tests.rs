@@ -1225,12 +1225,12 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
     assert_eq!(sess.ship_id, Some(active_id));
     assert!(sys_h.get_ball_snapshot(target_cruiser).await.unwrap().is_none());
     assert!(sys_h
-        .ballpark
-        .read()
-        .unwrap()
-        .target_locks
-        .get(&target_cruiser)
-        .is_none_or(|v| v.is_empty()));
+        .test_with_ballpark_async(move |bp| {
+            bp.target_locks
+                .get(&target_cruiser)
+                .is_none_or(|v| v.is_empty())
+        })
+        .await);
 
     // 5. Active ship store WITHOUT existing_cap mints new capsule; WITH existing_cap reuses it
     // First remove `space_pod_id` so no existing_cap exists -> mints a brand new capsule ID

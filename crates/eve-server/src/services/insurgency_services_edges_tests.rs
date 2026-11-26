@@ -354,12 +354,13 @@ async fn insurgency_fw_complex_tick_and_rpc_error_edges() {
 
     // Move empire ship > 30 km away and advance tick so only pirate ship is on grid -> advances corruption!
     let _ = sys_handle.remove_ball(ship_id).await;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        for _ in 0..5 {
-            bp.step(1.0);
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            for _ in 0..5 {
+                bp.step(1.0);
+            }
+        })
+        .await;
     assert!(step_system_insurgency_capture_tick(&ctx, lowsec_sys, enemy_ship, FACTION_GURISTAS).await);
     let corr_pts = read_insurgency_runtime(&ctx, |rt| {
         rt.campaigns[&camp_id].corruption_points.get(&lowsec_sys).copied().unwrap_or(0)

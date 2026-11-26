@@ -300,10 +300,10 @@ async fn validate_and_execute_salvage_cycle_scheduled_auto_repeat_and_rigs() {
     assert!(sys.has_active_module_cycle_sync(ship_id, wreck_zero));
 
     // NotEnoughCapacitor error when cap < 100
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&ship_id).unwrap().capacitor = 10.0;
-    }
+    })
+    .await;
     assert_eq!(
         execute_wreck_salvage_cycle_scheduled(
             &ctx,
@@ -593,8 +593,10 @@ async fn salvager_range_chance_math_slim_meta_and_scheduled_cap_boundaries() {
     assert!(matches!(roll_ok, SalvageOutcome::Success { .. }));
     let can1_id = ctx.db.with_snapshot(|snap| snap.items[&loot_in_far].location_id);
     {
-        let bp = sys.ballpark.read().unwrap();
-        let meta = bp.ball_slim_meta(can1_id).expect("jetcan slim meta");
+        let meta = sys
+            .test_with_ballpark_async(move |bp| bp.ball_slim_meta(can1_id).cloned())
+            .await
+            .expect("jetcan slim meta");
         assert_eq!(meta.group_id, 12);
         assert_eq!(meta.category_id, 2);
         assert_eq!(meta.owner_id, wreck_owner);
@@ -630,10 +632,10 @@ async fn salvager_range_chance_math_slim_meta_and_scheduled_cap_boundaries() {
     assert_eq!(sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor, 0.0);
 
     // Check drone scheduled cycle uses EvaluatedDrone cap_need=25.0 & duration_s clamp max(1.0)
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&ship_id).unwrap().capacitor = 25.0;
-    }
+    })
+    .await;
     let drone_rep = execute_wreck_salvage_cycle_scheduled(
         &ctx,
         sys_id,
@@ -744,8 +746,10 @@ async fn salvager_range_chance_math_slim_meta_and_scheduled_cap_boundaries() {
     assert_eq!(win_rep.dict_get("salvaged").and_then(|v| v.as_bool()), Some(true));
     let can2_id = ctx.db.with_snapshot(|snap| snap.items[&loot_in_exact].location_id);
     {
-        let bp = sys.ballpark.read().unwrap();
-        let meta = bp.ball_slim_meta(can2_id).expect("cycle jetcan slim meta");
+        let meta = sys
+            .test_with_ballpark_async(move |bp| bp.ball_slim_meta(can2_id).cloned())
+            .await
+            .expect("cycle jetcan slim meta");
         assert_eq!(meta.group_id, 12);
         assert_eq!(meta.category_id, 2);
         assert_eq!(meta.owner_id, wreck_owner);
@@ -914,14 +918,15 @@ async fn validate_drone_bandwidth_and_launch_drones_pin_dps_vel_fit_and_slim_met
     assert!((ctrl.active_drones[&b1].dps - 75.0).abs() < 1e-6);
     assert!((ctrl.active_drones[&b2].dps - 12.0).abs() < 1e-6);
 
-    let (ball1, ball2, meta1) = {
-        let bp = sys.ballpark.read().unwrap();
-        (
-            bp.balls[&b1].clone(),
-            bp.balls[&b2].clone(),
-            bp.ball_slim_meta(b1).unwrap().clone(),
-        )
-    };
+    let (ball1, ball2, meta1) = sys
+        .test_with_ballpark_async(move |bp| {
+            (
+                bp.balls[&b1].clone(),
+                bp.balls[&b2].clone(),
+                bp.ball_slim_meta(b1).unwrap().clone(),
+            )
+        })
+        .await;
     assert!((ball1.max_velocity - 1_500.0).abs() < 1e-6);
     assert!((ball2.max_velocity - 800.0).abs() < 1e-6);
     // idx=1 -> offset x = cos(100)*50 != 0, z = sin(100)*50 != 0

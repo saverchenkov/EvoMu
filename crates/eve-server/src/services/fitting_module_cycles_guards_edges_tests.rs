@@ -172,8 +172,7 @@ async fn is_ship_actively_cloaked_and_guards_cover_warp_gate_cloak_and_active_cl
     assert!(act_err.message.contains("launch drones"));
 
     // 2. WarpPhase::Aligning allows weapon & space action
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_id).unwrap().mode = MovementMode::Warp {
             origin: DVec3::ZERO,
             destination: DVec3::new(1e9, 0.0, 0.0),
@@ -182,7 +181,8 @@ async fn is_ship_actively_cloaked_and_guards_cover_warp_gate_cloak_and_active_cl
             phase: WarpPhase::Aligning,
             elapsed_warp_time: 0.0,
         };
-    }
+    })
+    .await;
     assert!(
         enforce_space_module_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, &weapon)
             .await
@@ -195,14 +195,14 @@ async fn is_ship_actively_cloaked_and_guards_cover_warp_gate_cloak_and_active_cl
     );
 
     // 3. Gate cloak (gate_cloak_remaining_ticks > 0) is NOT actively cloaked and breaks on guard
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_id).unwrap().mode = MovementMode::Stop;
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_cloaked = true;
         cs.gate_cloak_remaining_ticks = 30;
         cs.cloak_velocity_multiplier = None;
-    }
+    })
+    .await;
     assert!(!is_ship_actively_cloaked(&ctx, &sys, ship_id).await);
     assert!(
         enforce_space_module_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, &weapon)
@@ -219,12 +219,12 @@ async fn is_ship_actively_cloaked_and_guards_cover_warp_gate_cloak_and_active_cl
     );
 
     // Re-apply gate cloak and verify action guard also breaks it
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_cloaked = true;
         cs.gate_cloak_remaining_ticks = 15;
-    }
+    })
+    .await;
     assert!(
         enforce_space_action_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, "fire")
             .await
@@ -240,12 +240,12 @@ async fn is_ship_actively_cloaked_and_guards_cover_warp_gate_cloak_and_active_cl
     );
 
     // 4. Non-gate active cloak (is_cloaked && gate_cloak_remaining_ticks == 0)
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_cloaked = true;
         cs.gate_cloak_remaining_ticks = 0;
-    }
+    })
+    .await;
     assert!(is_ship_actively_cloaked(&ctx, &sys, ship_id).await);
     assert_eq!(
         enforce_space_module_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, &weapon)
@@ -279,21 +279,21 @@ async fn is_ship_actively_cloaked_and_guards_cover_warp_gate_cloak_and_active_cl
     );
 
     // 5. cloak_velocity_multiplier alone also triggers is_ship_actively_cloaked
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_cloaked = false;
         cs.cloak_velocity_multiplier = Some(0.25);
-    }
+    })
+    .await;
     assert!(is_ship_actively_cloaked(&ctx, &sys, ship_id).await);
 
     // 6. DB module_active_states fallback when combat state has no cloak
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_cloaked = false;
         cs.cloak_velocity_multiplier = None;
-    }
+    })
+    .await;
     assert!(!is_ship_actively_cloaked(&ctx, &sys, ship_id).await);
     let cloak_tid = ctx
         .sde
@@ -1129,13 +1129,14 @@ async fn handle_module_cycles_survey_probe_launcher_while_following() {
     let mut h = FmcModuleCyclesHarness::setup().await;
 
     // 3. Survey Probe Launcher in `MovementMode::Follow` (`L571, L577`)
-    {
-        let mut bp = h.sys.ballpark.write().unwrap();
-        bp.balls.get_mut(&FMC_SHIP_ID).unwrap().mode = MovementMode::Follow {
-            target_id: FMC_MOON_TARGET,
-            range: 1_000.0,
-        };
-    }
+    h.sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&FMC_SHIP_ID).unwrap().mode = MovementMode::Follow {
+                target_id: FMC_MOON_TARGET,
+                range: 1_000.0,
+            };
+        })
+        .await;
     let probe_rep = h
         .call_cycles("dogmaIM", "Activate", &[PyRep::Integer(FMC_MOD_PROBE_LNCH)])
         .await
@@ -1145,7 +1146,11 @@ async fn handle_module_cycles_survey_probe_launcher_while_following() {
         probe_rep.dict_get("launcherID").and_then(|v| v.as_i64()),
         Some(FMC_MOD_PROBE_LNCH)
     );
-    h.sys.ballpark.write().unwrap().balls.get_mut(&FMC_SHIP_ID).unwrap().mode = MovementMode::Stop;
+    h.sys
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&FMC_SHIP_ID).unwrap().mode = MovementMode::Stop;
+        })
+        .await;
 }
 
 #[tokio::test]

@@ -421,12 +421,8 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     // Verify hauler in Perimeter has valid CombatState HP (> 0 HP, e.g. 5,000 HP)
     let perim_handle = ctx.systems.get_or_spawn(SYS_PERIMETER);
     let hauler_combat = perim_handle
-        .ballpark
-        .read()
-        .unwrap()
-        .combat_states
-        .get(&convoy_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.combat_states.get(&convoy_id).cloned())
+        .await
         .expect("Hauler must have combat state in new system");
     assert!(
         hauler_combat.max_shield_hp > 0.0 && hauler_combat.structure_hp > 0.0,

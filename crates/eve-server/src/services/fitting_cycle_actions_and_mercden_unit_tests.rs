@@ -166,8 +166,7 @@ async fn burst_jammer_safety_block_and_pending_cycle_actions_salvage_repeat_and_
             },
         );
     });
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
             char_id,
             ship_id,
@@ -195,7 +194,8 @@ async fn burst_jammer_safety_block_and_pending_cycle_actions_salvage_repeat_and_
             module_id: ecm_id,
             is_overloaded: true,
         });
-    }
+    })
+    .await;
     execute_pending_cycle_actions(&ctx, sys_id).await;
     let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((cs_after.capacitor - 620.0).abs() < 1e-3, "deducted cap should be refunded");

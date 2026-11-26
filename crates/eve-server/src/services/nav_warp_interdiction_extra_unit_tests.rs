@@ -565,10 +565,11 @@ async fn agency_warp_interdiction_bubbles_capacitor_tier_rollback_and_session_ti
             },
         )
         .await;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.ball_group_ids.insert(shuttle_id, 31);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.ball_group_ids.insert(shuttle_id, 31);
+        })
+        .await;
 
     // 1. check_warp_interdiction_and_adjust_dest: clear, destination bubble intercept, origin bubble scram, bubble-immune bypass
     assert_eq!(

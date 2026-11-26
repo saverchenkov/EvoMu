@@ -24,11 +24,8 @@ async fn test_air_npe_pocket_spawn_move_ship_and_cleanup() {
     spawn_or_move_ship_in_pocket(&ctx, char_id, sys_id, ship_id, 596);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let has_ship_ball = sys_handle
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .balls
-        .contains_key(&ship_id);
+        .test_with_ballpark_async(move |bp| bp.balls.contains_key(&ship_id))
+        .await;
     assert!(has_ship_ball);
 
     // 3. Start tutorial so runner state exists, mark moved_into_pocket, then cleanup and restore UI
@@ -162,8 +159,11 @@ async fn test_air_npe_pocket_security_combat_timers_structure_dock_and_errors() 
     spawn_or_move_ship_in_pocket(&ctx, char_id, sys_id, ship_id, 596);
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.set_warp_scramble_strength(ship_id, 2);
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.set_warp_scramble_strength(ship_id, 2);
+            })
+            .await;
     }
     // Scrambled in space -> WarpScrambled; docked (in_space=false) -> Ok
     assert_eq!(
@@ -175,8 +175,11 @@ async fn test_air_npe_pocket_security_combat_timers_structure_dock_and_errors() 
     assert!(check_npe_live_combat_or_scramble(&ctx, char_id, sys_id, ship_id, false, now).is_ok());
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.set_warp_scramble_strength(ship_id, 0);
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.set_warp_scramble_strength(ship_id, 0);
+            })
+            .await;
     }
 
     // 4. validate_npe_start_or_entry error paths
