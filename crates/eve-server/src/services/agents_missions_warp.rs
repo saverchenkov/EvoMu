@@ -90,7 +90,7 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
         by_proximity
     });
     if let Some((mid, pocket_pos)) = matched_mission {
-        super::agents_missions::reconcile_stale_mission_npcs(ctx, handle, char_id, mid);
+        super::reconcile_stale_mission_npcs(ctx, handle, char_id, mid);
         let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
             ctx,
             char_id,
