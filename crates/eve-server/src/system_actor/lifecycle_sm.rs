@@ -18,7 +18,6 @@ use super::lifecycle::{
 };
 use super::module_cooldowns::{
     flush_cold_transitions_under_gate, CooldownGatePhase, CooldownPersistGate,
-    PendingCooldownTransition,
 };
 use super::{
     machonet_wallclock_ms, BallId, BallparkHandle, DVec3, PendingDestroyedOutbox,

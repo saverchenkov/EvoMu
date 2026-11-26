@@ -471,7 +471,7 @@ async fn dirty_removal_survives_rehydrate_and_locked_unknown_char_deact_preserve
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aborted_loading_mid_drain_stop_preemption_and_cold_flush_race() {
-    use super::module_cooldowns::CooldownGatePhase;
+    use crate::system_actor::module_cooldowns::CooldownGatePhase;
     use std::sync::atomic::{AtomicBool, Ordering};
     let (reg, db, _sde) = test_registry_with_db();
     let (jita, cloak_tid, now) = (30_000_142_u32, 11_370_u32, db.clock().now_unix_secs() as f64);

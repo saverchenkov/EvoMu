@@ -198,18 +198,6 @@ pub(in crate::system_actor) fn read_tick_deactivation_hooks(
     (raw_hook, post_hook, sink_hook)
 }
 
-pub(crate) fn run_staged_deactivation_hooks(
-    ops: super::post_unlock::PostUnlockOps,
-    hook_opt: Option<&ModuleDeactivationHook>,
-) {
-    let Some(hook) = hook_opt else { return };
-    for intent in ops.intents {
-        if let super::post_unlock::PostUnlockIntent::DeactivationHook(h) = intent {
-            if let Some(cid) = h.char_id.or(h.fallback_owner_id) { hook(h.solar_system_id, cid, &h.cycle); }
-        }
-    }
-}
-
 /// Updates TiDi history, advances per-system `sim_elapsed_secs`, and prunes expired
 /// actor cooldowns at tick start, returning the effective simulated `dt` (`cycles.rs` helper).
 pub(in crate::system_actor) fn prepare_tick_cooldowns_in_actor(

@@ -891,11 +891,13 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
         actor_st,
         ball_positions,
         scrambled_balls,
-        module_deactivation_hook,
+        deactivation_sink_hook: module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone(),
         explicit_update_state_guards: None,
         ball_spawn_tokens: None,
         removed_checkpoint_ball: None,
         post_unlock_ops,
+        cooldown_persist_gate: None,
+        tidi_factor: 1.0,
     };
     remove_ball_in_actor(&mut ctx, ball_id, false)
 }

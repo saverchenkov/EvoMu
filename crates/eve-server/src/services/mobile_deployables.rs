@@ -1115,27 +1115,6 @@ pub(crate) fn step_mobile_deployables_in_actor_collecting(
     }
 }
 
-/// Compatibility wrapper around [`step_mobile_deployables_in_actor_collecting`] that runs any
-/// staged Observatory deactivation hooks synchronously via `deactivation_hook` outside actor ticks.
-#[allow(clippy::too_many_arguments)]
-pub fn step_mobile_deployables_in_actor(
-    ballpark: &mut eve_destiny::Ballpark,
-    active_module_cycles: &mut Vec<crate::system_actor::ActiveModuleCycle>,
-    mechanic_rng: &crate::rng::MechanicRng,
-    deactivation_hook: Option<&crate::system_actor::ModuleDeactivationHook>,
-    sde_opt: Option<&eve_sde::SdeRegistry>,
-    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
-    rng_opt: Option<&crate::rng::MechanicRng>,
-    solar_system_id: u32, dt: f64, now_unix: u64,
-) {
-    let mut ops = crate::system_actor::post_unlock::PostUnlockOps::default();
-    step_mobile_deployables_in_actor_collecting(
-        ballpark, active_module_cycles, mechanic_rng, deactivation_hook.is_some(),
-        sde_opt, db_opt, rng_opt, solar_system_id, dt, now_unix, &mut ops,
-    );
-    crate::system_actor::run_staged_deactivation_hooks(ops, deactivation_hook);
-}
-
 /// Evaluates ball damage in solar system actor for Mobile Depots and MTUs (`feat:structures.mobile-depot-lifetime-reinforce`, `feat:structures.mobile-tractor-rules`).
 /// Standalone/test wrapper that executes collected post-unlock ops immediately (`assert_no_actor_locks_before_db_tx`).
 pub fn handle_ball_damage_in_actor(
