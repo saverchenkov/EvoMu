@@ -542,23 +542,39 @@ pub(in crate::system_actor) fn read_sqlite_for_shared(
     read_sqlite_drones_for_hydration(db, solar_system_id, shared.migrated_opt.as_ref(), blocking)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::system_actor) enum FlushWriteOutcome {
+    Written,
+    AlreadyAtOrPastSeq,
+    Deferred,
+}
+
+impl FlushWriteOutcome {
+    pub(in crate::system_actor) fn is_persisted(self) -> bool {
+        matches!(self, Self::Written | Self::AlreadyAtOrPastSeq)
+    }
+}
+
 pub(in crate::system_actor) fn write_sqlite_for_shared(
     shared: &ActiveDronesSharedCtx,
     solar_system_id: SolarSystemId,
     seq: u64,
     entries: &[(BallId, DroneSpaceState)],
     blocking: bool,
-) -> bool {
-    let Some(ref db) = shared.db_opt else { return false; };
+) -> FlushWriteOutcome {
+    if seq == 0 {
+        return FlushWriteOutcome::Deferred;
+    }
+    let Some(ref db) = shared.db_opt else { return FlushWriteOutcome::Deferred; };
     let mut last_seq = if blocking {
         shared.flush_mutex.lock().unwrap_or_else(|e| e.into_inner())
     } else if let Ok(g) = shared.flush_mutex.try_lock() {
         g
     } else {
-        return false;
+        return FlushWriteOutcome::Deferred;
     };
-    if seq == 0 || seq <= *last_seq {
-        return false;
+    if seq <= *last_seq {
+        return FlushWriteOutcome::AlreadyAtOrPastSeq;
     }
     let now_unix = db.clock().now_unix_secs();
     let keyed: Vec<(String, &DroneSpaceState)> = entries.iter().map(|(bid, d)| (bid.to_string(), d)).collect();
@@ -571,9 +587,9 @@ pub(in crate::system_actor) fn write_sqlite_for_shared(
     let res = if blocking { Some(db.with_sqlite_conn(write_op)) } else { db.try_with_sqlite_conn_mut(write_op) };
     if matches!(res, Some(Ok(()))) {
         *last_seq = seq;
-        true
+        FlushWriteOutcome::Written
     } else {
-        false
+        FlushWriteOutcome::Deferred
     }
 }
 
@@ -682,7 +698,7 @@ fn flush_sync_with_target(sys_id: SolarSystemId, shared: &ActiveDronesSharedCtx,
         |_, reply| SystemCommand::SnapshotDirtyActiveDrones { reply },
         |ctx, _| Ok(capture_dirty_active_drones_snapshot(ctx.actor_st).map(|(s, _, e)| (s, e))),
     ) {
-        if write_sqlite_for_shared(shared, sys_id, seq, &entries, blocking) {
+        if write_sqlite_for_shared(shared, sys_id, seq, &entries, blocking).is_persisted() {
             let _ = target.send_sync(
                 seq,
                 |seq, reply| SystemCommand::CommitActiveDronesFlushed { seq, reply },
@@ -709,7 +725,7 @@ pub(in crate::system_actor) async fn flush_from_handle_async(handle: &SystemHand
         handle, "SnapshotDirtyActiveDrones", ACTOR_CMD_TIMEOUT, |reply| SystemCommand::SnapshotDirtyActiveDrones { reply },
     ).await else { return; };
     let (shared, sys_id) = (shared_ref.clone(), handle.solar_system_id);
-    if tokio::task::spawn_blocking(move || write_sqlite_for_shared(&shared, sys_id, seq, &entries, true)).await.unwrap_or(false) {
+    if tokio::task::spawn_blocking(move || write_sqlite_for_shared(&shared, sys_id, seq, &entries, true)).await.is_ok_and(FlushWriteOutcome::is_persisted) {
         let _ = call_actor_result_with_deadline(
             handle, "CommitActiveDronesFlushed", ACTOR_CMD_TIMEOUT, |reply| SystemCommand::CommitActiveDronesFlushed { seq, reply },
         ).await;
@@ -1156,6 +1172,14 @@ fn execute_drone_scoop_claim_op_in_actor(
             && (st.parent_ship_id == target_ship_id
                 || (st.parent_ship_id == 0 && expected_owner > 0))
     };
+    let is_actively_controlled_by_ship =
+        |st: &DroneSpaceState, expected_owner_opt: Option<i64>, target_ship_id: i64| {
+            !st.is_abandoned
+                && st.solar_system_id == ctx.solar_system_id
+                && target_ship_id > 0
+                && st.parent_ship_id == target_ship_id
+                && expected_owner_opt.is_none_or(|cid| st.owner_char_id == cid)
+        };
     match action {
         DroneScoopClaimAction::ClaimPlayerScoop { char_id } => {
             if ctx.actor_st.scoop_claimed_drones.contains_key(&ball_id) {
@@ -1226,14 +1250,7 @@ fn execute_drone_scoop_claim_op_in_actor(
                 .actor_st
                 .active_drones_in_space
                 .get(&ball_id)
-                .is_some_and(|st| {
-                    !st.is_abandoned
-                        && st.solar_system_id == ctx.solar_system_id
-                        && match char_id_opt {
-                            Some(cid) => st.owner_char_id == cid || st.parent_ship_id == ship_id,
-                            None => st.parent_ship_id == ship_id || st.owner_char_id > 0,
-                        }
-                });
+                .is_some_and(|st| is_actively_controlled_by_ship(st, char_id_opt, ship_id));
             if can_abandon {
                 Ok(DroneScoopClaimOutcome::TakeForAbandon(
                     abandon_drone_in_place_in_actor(ctx, ball_id),
@@ -1251,11 +1268,12 @@ fn execute_drone_scoop_claim_op_in_actor(
             target_ship_id,
             require_returning,
         } => {
+            let expected_owner_opt = (expected_owner > 0).then_some(expected_owner);
             if let Some(pending_slot) = ctx.actor_st.scoop_claimed_drones.get_mut(&ball_id) {
                 if let Some(st) = ctx.actor_st.active_drones_in_space.get(&ball_id) {
                     if st.ball_id > 0
                         && (!require_returning || st.activity_state == 4)
-                        && is_returning_for_ship(st, expected_owner, target_ship_id)
+                        && is_actively_controlled_by_ship(st, expected_owner_opt, target_ship_id)
                     {
                         let notify_char_id = if st.owner_char_id > 0 {
                             st.owner_char_id
@@ -1282,7 +1300,7 @@ fn execute_drone_scoop_claim_op_in_actor(
                 .get(&ball_id)
                 .is_some_and(|st| {
                     (!require_returning || st.activity_state == 4)
-                        && is_returning_for_ship(st, expected_owner, target_ship_id)
+                        && is_actively_controlled_by_ship(st, expected_owner_opt, target_ship_id)
                 });
             if can_take {
                 Ok(DroneScoopClaimOutcome::TakeForAbandon(

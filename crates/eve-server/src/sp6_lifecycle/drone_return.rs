@@ -523,26 +523,27 @@ async fn try_atomic_scoop_drone(
             .as_ref()
             .is_none_or(|sb| sb.surface_distance(db) > 2_500.0)
     {
-        let ship_valid = !ship_warping_pre
-            && ship_ball_opt.is_some()
-            && ctx.db.with_snapshot(|snap| {
-                is_ship_available_for_scoop_in_snap(snap, target_ship_id, d.solar_system_id)
-            });
-        if !ship_valid {
-            if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
-                claimed_drone,
-            ))) = sys_handle
-                .drone_scoop_claim_op(
-                    d.ball_id,
-                    crate::system_actor::DroneScoopClaimAction::TakeUnclaimedForAbandon {
-                        expected_owner: d.owner_char_id,
-                        target_ship_id,
-                        require_returning: false,
-                    },
-                )
-                .await
-            {
-                abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
+        if !ship_warping_pre {
+            let ship_valid = ship_ball_opt.is_some()
+                && ctx.db.with_snapshot(|snap| {
+                    is_ship_available_for_scoop_in_snap(snap, target_ship_id, d.solar_system_id)
+                });
+            if !ship_valid {
+                if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
+                    claimed_drone,
+                ))) = sys_handle
+                    .drone_scoop_claim_op(
+                        d.ball_id,
+                        crate::system_actor::DroneScoopClaimAction::TakeUnclaimedForAbandon {
+                            expected_owner: d.owner_char_id,
+                            target_ship_id,
+                            require_returning: false,
+                        },
+                    )
+                    .await
+                {
+                    abandon_returning_drone_in_space(ctx, sys_handle, claimed_drone).await;
+                }
             }
         }
         return false;
@@ -566,6 +567,7 @@ async fn try_atomic_scoop_drone(
         Moved(Box<DroneSpaceState>),
         BayFull,
         ShipUnavailable,
+        ShipWarping,
         NotInSpace,
         ItemMissing,
         Destroyed,
@@ -607,15 +609,13 @@ async fn try_atomic_scoop_drone(
         }) {
             return ScoopOutcome::NotInSpace;
         }
-        let ship_opt = (!is_ship_ball_warping(sys_handle, None, target_ship_id)
-            && is_ship_available_for_scoop_in_snap(
-                snap,
-                target_ship_id,
-                existing.solar_system_id,
-            ))
-        .then(|| snap.items.get(&target_ship_id))
-        .flatten();
-        let Some(sh) = ship_opt else {
+        if !is_ship_available_for_scoop_in_snap(snap, target_ship_id, existing.solar_system_id) {
+            return ScoopOutcome::ShipUnavailable;
+        }
+        if is_ship_ball_warping(sys_handle, None, target_ship_id) {
+            return ScoopOutcome::ShipWarping;
+        }
+        let Some(sh) = snap.items.get(&target_ship_id) else {
             return ScoopOutcome::ShipUnavailable;
         };
         if !snap.items.contains_key(&existing.drone_item_id) {
@@ -674,7 +674,7 @@ async fn try_atomic_scoop_drone(
             scoop_guard.disarm();
             *claimed
         }
-        ScoopOutcome::BayFull => {
+        ScoopOutcome::BayFull | ScoopOutcome::ShipWarping => {
             release_scoop_claim_and_apply_pending(ctx, sys_handle, d.ball_id, Some(&mut scoop_guard))
                 .await;
             return false;
@@ -791,11 +791,12 @@ pub async fn step_returning_drones(ctx: &ServerContext) {
             .ok()
             .flatten()
             .map(|(_, b)| b);
-        let ship_warping = is_ship_ball_warping(&sys_handle, ship_ball.as_ref(), d.parent_ship_id);
-        let ship_explicitly_invalid = ship_warping
-            || !ctx.db.with_snapshot(|snap| {
-                is_ship_available_for_scoop_in_snap(snap, d.parent_ship_id, d.solar_system_id)
-            });
+        if is_ship_ball_warping(&sys_handle, ship_ball.as_ref(), d.parent_ship_id) {
+            continue;
+        }
+        let ship_explicitly_invalid = !ctx.db.with_snapshot(|snap| {
+            is_ship_available_for_scoop_in_snap(snap, d.parent_ship_id, d.solar_system_id)
+        });
         if ship_ball.is_none() || ship_explicitly_invalid {
             if let Ok(crate::system_actor::DroneScoopClaimOutcome::TakeForAbandon(Some(
                 claimed_drone,
@@ -1538,24 +1539,12 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
                 continue;
             }
             if t.category_id == 87 {
-                let max_squadron_size = t
-                    .default_attributes
-                    .get(&2215)
-                    .copied()
-                    .map(|v| v as u32)
-                    .unwrap_or(9);
-                fighters.push(crate::router::context::ActiveFighterSquadron {
-                    ball_id,
-                    item_id: item.item_id,
-                    type_id: item.type_id,
-                    owner_char_id: item.owner_id,
-                    parent_ship_id: 0,
-                    tube_index: 0,
-                    squadron_size: (item.quantity.max(1) as u32).min(max_squadron_size),
-                    target_id: None,
-                    is_abandoned: true,
-                    mwd_active: false,
-                });
+                let max_sq = t.default_attributes.get(&2215).copied().map(|v| v as u32).unwrap_or(9);
+                fighters.push((item.location_id as u32, crate::system_actor::ActiveFighterSquadron {
+                    ball_id, item_id: item.item_id, type_id: item.type_id, owner_char_id: item.owner_id,
+                    parent_ship_id: 0, tube_index: 0, squadron_size: (item.quantity.max(1) as u32).min(max_sq),
+                    target_id: None, is_abandoned: true, mwd_active: false,
+                }));
                 continue;
             }
             if t.category_id != 18 {
@@ -1682,11 +1671,7 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
         }
     }
     if !fighters.is_empty() {
-        if let Ok(mut guard) = ctx.active_fighters.write() {
-            for f in fighters {
-                guard.insert(f.ball_id, f);
-            }
-        }
+        ctx.systems.seed_abandoned_fighters_by_system(fighters);
     }
 }
 

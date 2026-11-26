@@ -370,6 +370,11 @@ pub fn try_remove_ball_for_db(
                         st.protection_registry.remove(&ball_id);
                         removed_drone = st.active_drones_in_space.contains_key(&ball_id);
                         crate::system_actor::drones::clear_removed_ball_drones_in_state(st, ball_id);
+                        if st.active_drones_checkpoint_dirty {
+                            st.hibernated.store(false, std::sync::atomic::Ordering::Relaxed);
+                            st.hibernated_since_unix.store(0, std::sync::atomic::Ordering::Relaxed);
+                            st.idle_ticks.store(0, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let before = st.external_active_modules.len();
                         st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
                         removed_ext = st.external_active_modules.len() != before;

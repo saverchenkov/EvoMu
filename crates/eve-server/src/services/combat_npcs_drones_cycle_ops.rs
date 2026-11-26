@@ -1182,31 +1182,35 @@ pub(crate) async fn handle_scoop_to_drone_bay(
                 };
             }
 
-            let caller_unavailable =
-                crate::sp6_lifecycle::drone_return::is_ship_ball_warping(
-                    &sys_handle,
-                    Some(&ship_ball),
-                    ship_id,
-                ) || snap.characters.get(&char_id).is_some_and(|ch| {
+            let ship_warping = crate::sp6_lifecycle::drone_return::is_ship_ball_warping(
+                &sys_handle,
+                Some(&ship_ball),
+                ship_id,
+            );
+            let caller_unavailable = ship_warping
+                || snap.characters.get(&char_id).is_some_and(|ch| {
                     ch.station_id.is_some()
                         || ch.structure_id.is_some()
                         || ch.solar_system_id != sys_id
                         || ch.active_ship_id != ship_id
-                }) || snap.sp6_lifecycle.disconnected_ships.contains_key(&char_id)
-                    || snap
-                        .sp6_lifecycle
-                        .disconnected_ships
-                        .values()
-                        .any(|d| d.ship_id == ship_id)
-                    || !snap.items.get(&ship_id).is_some_and(|sh| {
-                        sh.location_id == sys_id as i64 && sh.flag == InventoryFlag::None
-                    });
-            if caller_unavailable {
-                let should_abandon = active_drone.as_ref().is_some_and(|st| {
-                    !st.is_abandoned
-                        && st.solar_system_id == sys_id
-                        && (st.owner_char_id == char_id || st.parent_ship_id == ship_id)
+                })
+                || snap.sp6_lifecycle.disconnected_ships.contains_key(&char_id)
+                || snap
+                    .sp6_lifecycle
+                    .disconnected_ships
+                    .values()
+                    .any(|d| d.ship_id == ship_id)
+                || !snap.items.get(&ship_id).is_some_and(|sh| {
+                    sh.location_id == sys_id as i64 && sh.flag == InventoryFlag::None
                 });
+            if caller_unavailable {
+                let should_abandon = !ship_warping
+                    && active_drone.as_ref().is_some_and(|st| {
+                        !st.is_abandoned
+                            && st.solar_system_id == sys_id
+                            && ship_id > 0
+                            && st.parent_ship_id == ship_id
+                    });
                 return ScoopTxResult::CallerUnavailableAbandon(
                     should_abandon,
                     format!("Caller ship {ship_id} is not undocked in solar system {sys_id}"),

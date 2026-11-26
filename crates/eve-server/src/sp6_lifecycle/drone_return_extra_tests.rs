@@ -1784,10 +1784,11 @@ async fn scoop_to_drone_bay_and_atomic_return_handle_concurrent_races_and_dockin
         }).await;
         assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &warp_rej_state, ship_id).await);
         assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess.clone(), "ship", "ScoopToDroneBay", &[PyRep::Integer(d_warp_rej)], &kw).await.unwrap().unwrap_err().code, "DroneNotInSpace");
-        assert_eq!(ctx.db.with_snapshot(|s| (s.items[&d_warp_rej].location_id, s.items[&d_warp_rej].flag)), (sys_id as i64, InventoryFlag::None));
+        let warp_live = drone_test_helpers::active_drone(&ctx, d_warp_rej).unwrap();
+        assert!(!warp_live.is_abandoned && warp_live.owner_char_id == char_id && warp_live.parent_ship_id == ship_id);
+        assert_eq!(ctx.db.with_snapshot(|s| (s.items[&d_warp_rej].location_id, s.items[&d_warp_rej].flag, s.items[&d_warp_rej].owner_id)), (sys_id as i64, InventoryFlag::None, char_id));
 
         let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
-        drone_test_helpers::seed_active_drone(&ctx, warp_rej_state.clone());
         ctx.db.with_mut_snapshot(|snap| {
             snap.sp6_lifecycle.disconnected_ships.insert(char_id, eve_db::DisconnectedShipEntry {
                 char_id, ship_id, ship_type_id: 645, solar_system_id: sys_id,
@@ -1829,29 +1830,26 @@ async fn scoop_claim_blocks_reconnect_and_abandon_and_destruction_respects_drone
         (778_100_001i64, 778_100_002i64, 778_100_003i64, 778_100_103i64, 778_100_004i64, 778_100_104i64, 778_100_005i64, 778_100_006i64);
 
     let (owner_uid, thief_uid) = ctx.db.with_mut_snapshot(|snap| {
-        let mut init_pilot = |cid: i64, sid: i64| {
-            let ch = snap.characters.get_mut(&cid).unwrap();
-            (ch.active_ship_id, ch.solar_system_id, ch.station_id, ch.structure_id) = (sid, sys_id, None, None);
-            let uid = ch.user_id;
+        let mut init = |cid: i64, sid: i64| {
+            let uid = {
+                let ch = snap.characters.get_mut(&cid).unwrap();
+                (ch.active_ship_id, ch.solar_system_id, ch.station_id, ch.structure_id) = (sid, sys_id, None, None);
+                ch.user_id
+            };
             snap.skills.entry(cid).or_default().insert(3436, eve_db::TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
             insert_drone_item(snap, sid, 645, cid, sys_id as i64, InventoryFlag::None, 1, None);
             uid
         };
-        let (u1, u2) = (init_pilot(owner_char, owner_ship), init_pilot(thief_char, thief_ship));
-        for (item_id, ball_id) in [(d_recon, d_recon), (d_ab, d_ab), (item_kill_1, ball_kill_1), (item_kill_2, ball_kill_2), (id_eq, id_eq), (d_dead_first, d_dead_first)] {
-            insert_drone_item(snap, item_id, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, (item_id != ball_id).then_some(ball_id));
+        let (u1, u2) = (init(owner_char, owner_ship), init(thief_char, thief_ship));
+        for (iid, bid) in [(d_recon, d_recon), (d_ab, d_ab), (item_kill_1, ball_kill_1), (item_kill_2, ball_kill_2), (id_eq, id_eq), (d_dead_first, d_dead_first)] {
+            insert_drone_item(snap, iid, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, (iid != bid).then_some(bid));
         }
         (u1, u2)
     });
-    for (uid, cid) in [(owner_uid, owner_char), (thief_uid, thief_char)] {
-        ctx.db.acquire_online_lock_with_computer_hash(uid, 1, Some(cid), None, true, ctx.now_unix()).expect("register online");
-    }
-
+    for (uid, cid) in [(owner_uid, owner_char), (thief_uid, thief_char)] { ctx.db.acquire_online_lock_with_computer_hash(uid, 1, Some(cid), None, true, ctx.now_unix()).expect("register online"); }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    spawn_ball(&ctx, sys_id, owner_ship, 645, DVec3::ZERO);
-    spawn_ball(&ctx, sys_id, thief_ship, 645, DVec3::new(100.0, 0.0, 0.0));
-    for bid in [d_recon, d_ab, ball_kill_1, id_eq, d_dead_first] {
-        spawn_ball(&ctx, sys_id, bid, 2454, DVec3::new(200.0, 0.0, 0.0));
+    for (id, tid, x) in [(owner_ship, 645u32, 0.0), (thief_ship, 645, 100.0), (d_recon, 2454, 200.0), (d_ab, 2454, 200.0), (ball_kill_1, 2454, 200.0), (id_eq, 2454, 200.0), (d_dead_first, 2454, 200.0)] {
+        spawn_ball(&ctx, sys_id, id, tid, DVec3::new(x, 0.0, 0.0));
     }
     sys_handle.spawn_ball_with_combat(Ball {
         id: ball_kill_2, type_id: 2454, position: DVec3::new(200.0, 0.0, 0.0), velocity: DVec3::ZERO,
@@ -1950,32 +1948,20 @@ async fn launch_drones_reservation_isolated_from_scans_and_rollback_clean() {
             insert_drone_item(snap, sid, 593, cid, sys_id as i64, InventoryFlag::None, 1, None);
             snap.skills.entry(cid).or_default().insert(3436, eve_db::TrainedSkillRecord { type_id: 3436, level: 1, skill_points: 250.0 });
         }
-        for did in [drone_item_id, extra_drone_id] {
-            insert_drone_item(snap, did, 10_246, owner_char, owner_ship, InventoryFlag::DroneBay, 1, None);
-        }
+        for did in [drone_item_id, extra_drone_id] { insert_drone_item(snap, did, 10_246, owner_char, owner_ship, InventoryFlag::DroneBay, 1, None); }
         snap.fleets.insert(fleet_id, eve_db::FleetRecord { fleet_id, boss_id: owner_char, members: vec![owner_char, ally_char], ..Default::default() });
         base_char.user_id
     });
-
-    ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
-        asteroid_id, solar_system_id: sys_id, belt_id: 40_000_001, type_id: 1230,
-        quantity: 10_000, initial_quantity: 10_000, position: (1_000.0, 0.0, 0.0), radius: 50.0,
-    });
+    ctx.db.spawn_asteroid(eve_db::AsteroidRecord { asteroid_id, solar_system_id: sys_id, belt_id: 40_000_001, type_id: 1230, quantity: 10_000, initial_quantity: 10_000, position: (1_000.0, 0.0, 0.0), radius: 50.0 });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     spawn_ball(&ctx, sys_id, owner_ship, 593, DVec3::ZERO);
     spawn_ball(&ctx, sys_id, ally_ship, 593, DVec3::new(500.0, 0.0, 0.0));
-    sys_handle.spawn_asteroid(crate::system_actor::AsteroidState {
-        asteroid_id, belt_id: 40_000_001, type_id: 1230, initial_units: 10_000,
-        remaining_units: 10_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None,
-    }, Ball {
-        id: asteroid_id, type_id: 1230, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await.expect("spawn_asteroid");
+    sys_handle.spawn_asteroid(
+        crate::system_actor::AsteroidState { asteroid_id, belt_id: 40_000_001, type_id: 1230, initial_units: 10_000, remaining_units: 10_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None },
+        Ball { id: asteroid_id, type_id: 1230, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+    ).await.expect("spawn_asteroid");
 
-    let owner_sess = SessionState {
-        user_id: Some(owner_uid), character_id: Some(owner_char), ship_id: Some(owner_ship),
-        solar_system_id: Some(sys_id), fleet_id: Some(fleet_id), ..Default::default()
-    };
+    let owner_sess = SessionState { user_id: Some(owner_uid), character_id: Some(owner_char), ship_id: Some(owner_ship), solar_system_id: Some(sys_id), fleet_id: Some(fleet_id), ..Default::default() };
     ctx.db.acquire_online_lock(owner_uid, 958_777, Some(owner_char), true, ctx.now_unix()).expect("register online");
     let kw = HashMap::new();
     let _ = ctx.drain_notifications_for_char(owner_char);
@@ -1983,25 +1969,18 @@ async fn launch_drones_reservation_isolated_from_scans_and_rollback_clean() {
 
     // Part 1: Hold live `LaunchDrones` in flight between `reserve_drone_launches` and `try_with_mut_snapshot`.
     let db_hold = Arc::clone(&ctx.db);
-    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-    let holder = tokio::task::spawn_blocking(move || {
-        db_hold.with_mut_snapshot(|snap| {
-            assert!(locked_tx.send(()).is_ok()); assert!(release_rx.blocking_recv().is_ok());
-            if let Some(ch) = snap.characters.get_mut(&owner_char) { ch.station_id = Some(60_003_760); }
-        });
-    });
+    let ((locked_tx, locked_rx), (release_tx, release_rx)) = (tokio::sync::oneshot::channel::<()>(), tokio::sync::oneshot::channel::<()>());
+    let holder = tokio::task::spawn_blocking(move || db_hold.with_mut_snapshot(|snap| {
+        assert!(locked_tx.send(()).is_ok() && release_rx.blocking_recv().is_ok());
+        if let Some(ch) = snap.characters.get_mut(&owner_char) { ch.station_id = Some(60_003_760); }
+    }));
     locked_rx.await.unwrap();
     let (c_launch, mut s_launch, k_launch) = (Arc::clone(&ctx), owner_sess.clone(), kw.clone());
-    let launch_task = tokio::spawn(async move {
-        handle_npcs_drones(&c_launch, &mut s_launch, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(drone_item_id)])], &k_launch).await
-    });
+    let launch_task = tokio::spawn(async move { handle_npcs_drones(&c_launch, &mut s_launch, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(drone_item_id)])], &k_launch).await });
 
     let mut reserved = false;
     for _ in 0..500 {
-        if sys_handle.reserve_drone_launches(ReserveDroneLaunchesReq {
-            ship_id: owner_ship, max_drones_allowed: 0, max_bandwidth: 1.0, partial_ok: false, drones: Vec::new(),
-        }).await.unwrap().rejected_error == Some("NoDroneManagementAbilitiesLeft") { reserved = true; break; }
+        if sys_handle.reserve_drone_launches(ReserveDroneLaunchesReq { ship_id: owner_ship, max_drones_allowed: 0, max_bandwidth: 1.0, partial_ok: false, drones: Vec::new() }).await.unwrap().rejected_error == Some("NoDroneManagementAbilitiesLeft") { reserved = true; break; }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert!(reserved);
@@ -2022,34 +2001,23 @@ async fn launch_drones_reservation_isolated_from_scans_and_rollback_clean() {
         ("CmdReturnBay", Vec::new(), "NoDronesInSpace"),
         ("CmdAbandonDrone", vec![PyRep::Integer(drone_item_id)], "DroneNotFound"),
         ("CmdReconnectToDrones", vec![PyRep::Integer(drone_item_id)], "DroneNotFound"),
-    ] {
-        assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess.clone(), "entity", method, &cmd_args, &kw).await.unwrap().unwrap_err().code, want_code);
-    }
+    ] { assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess.clone(), "entity", method, &cmd_args, &kw).await.unwrap().unwrap_err().code, want_code); }
 
     ctx.invalidate_ship_fitting(owner_ship);
     assert!(ctx.get_or_rebuild_ship_fitting(owner_char, owner_ship).unwrap().drones.iter().all(|&(id, _)| id > 0));
     assert_eq!(space_entity_ops::handle(&ctx, &mut owner_sess.clone(), None, "entity", "GetExtraFleetMembers", &[], &kw).await.unwrap().unwrap(), PyRep::List(Vec::new()));
     assert!(ctx.drain_notifications_for_char(owner_char).iter().all(|n| !matches!(n.event.as_str(), "OnDroneStateChange" | "OnDroneActivityChange" | "OnDroneControlLost")));
     while let Ok(tb) = destiny_rx.try_recv() {
-        for ev in tb.events.iter().chain(tb.observer_events.values().flat_map(|v| v.iter())) {
-            assert!(!matches!(ev, eve_destiny::DestinyEvent::OnDroneStateChange { drone_id, .. } if *drone_id <= 0));
-        }
+        for ev in tb.events.iter().chain(tb.observer_events.values().flat_map(|v| v.iter())) { assert!(!matches!(ev, eve_destiny::DestinyEvent::OnDroneStateChange { drone_id, .. } if *drone_id <= 0)); }
     }
 
     assert!(release_tx.send(()).is_ok()); holder.await.unwrap();
     assert_eq!(launch_task.await.unwrap().unwrap().unwrap_err().code, "ShipNotInSpace");
-    assert_eq!(sys_handle.reserve_drone_launches(ReserveDroneLaunchesReq {
-        ship_id: owner_ship, max_drones_allowed: 0, max_bandwidth: 1.0, partial_ok: false, drones: Vec::new(),
-    }).await.unwrap().rejected_error, None);
+    assert_eq!(sys_handle.reserve_drone_launches(ReserveDroneLaunchesReq { ship_id: owner_ship, max_drones_allowed: 0, max_bandwidth: 1.0, partial_ok: false, drones: Vec::new() }).await.unwrap().rejected_error, None);
 
     // Part 2: Hold reservation with `db.writer` free, run `ChangeDroneSettings` & `evacuate_abyssal_pockets_for_downtime` + rollback.
     ctx.db.with_mut_snapshot(|snap| if let Some(ch) = snap.characters.get_mut(&owner_char) { (ch.station_id, ch.solar_system_id) = (None, abyss_sys); });
-    with_abyssal_state(&ctx, |st| {
-        st.pockets.insert(owner_char, eve_db::AbyssalPocketSession {
-            pocket_id: 958_001, character_id: owner_char, ship_id: owner_ship,
-            origin_solar_system_id: sys_id, abyssal_solar_system_id: abyss_sys, tier: 1, current_room: 1, max_ships: 1, ..Default::default()
-        });
-    });
+    with_abyssal_state(&ctx, |st| { st.pockets.insert(owner_char, eve_db::AbyssalPocketSession { pocket_id: 958_001, character_id: owner_char, ship_id: owner_ship, origin_solar_system_id: sys_id, abyssal_solar_system_id: abyss_sys, tier: 1, current_room: 1, max_ships: 1, ..Default::default() }); });
     let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
     spawn_ball(&ctx, abyss_sys, owner_ship, 593, DVec3::ZERO);
     let mut abyss_sess = SessionState { solar_system_id: Some(abyss_sys), ..owner_sess.clone() };
@@ -2077,8 +2045,7 @@ async fn reconnect_drones_enforces_reserved_launches_and_concurrent_capacity() {
     use crate::system_actor::ReserveDroneLaunchesReq;
 
     let ctx = Arc::new(test_ctx());
-    let (sys_id, owner_char, owner_ship) = (30_000_142u32, 90_998_101i64, 958_100_010i64);
-    let (bay_drone, aban_1, aban_2) = (958_100_101i64, 958_100_102i64, 958_100_103i64);
+    let ((sys_id, owner_char, owner_ship), (bay_drone, aban_1, aban_2)) = ((30_000_142u32, 90_998_101i64, 958_100_010i64), (958_100_101i64, 958_100_102i64, 958_100_103i64));
     let owner_sess = setup_race_pilot(&ctx, owner_char, owner_ship, sys_id, 1);
     ctx.db.with_mut_snapshot(|snap| {
         insert_drone_item(snap, bay_drone, 2454, owner_char, owner_ship, InventoryFlag::DroneBay, 1, None);
@@ -2086,31 +2053,21 @@ async fn reconnect_drones_enforces_reserved_launches_and_concurrent_capacity() {
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for (did, x) in [(aban_1, 500.0), (aban_2, 600.0)] { spawn_ball(&ctx, sys_id, did, 2454, DVec3::new(x, 0.0, 0.0)); }
-    drone_test_helpers::seed_active_drones(&ctx, [aban_1, aban_2].map(|id| {
-        let mut st = make_drone_state(id, id, 2454, 0, 0, sys_id, false, 0);
-        (st.is_abandoned, st.original_owner_char_id) = (true, owner_char);
-        st
-    }));
+    drone_test_helpers::seed_active_drones(&ctx, [aban_1, aban_2].map(|id| { let mut st = make_drone_state(id, id, 2454, 0, 0, sys_id, false, 0); (st.is_abandoned, st.original_owner_char_id) = (true, owner_char); st }));
     let kw = HashMap::new();
 
     // (a) In-flight `LaunchDrones` reservation blocks concurrent `CmdReconnectToDrones`.
     let (rtx, holder) = hold_db_lock(&ctx.db).await;
     let (c_l, mut s_l, k_l) = (Arc::clone(&ctx), owner_sess.clone(), kw.clone());
-    let launch_task = tokio::spawn(async move {
-        handle_npcs_drones(&c_l, &mut s_l, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(bay_drone)])], &k_l).await
-    });
+    let launch_task = tokio::spawn(async move { handle_npcs_drones(&c_l, &mut s_l, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(bay_drone)])], &k_l).await });
     let mut reserved = false;
     for _ in 0..500 {
-        if sys_handle.reserve_drone_launches(ReserveDroneLaunchesReq { ship_id: owner_ship, max_drones_allowed: 0, max_bandwidth: 1.0, partial_ok: false, drones: Vec::new() }).await.unwrap().rejected_error == Some("NoDroneManagementAbilitiesLeft") {
-            reserved = true;
-            break;
-        }
+        if sys_handle.reserve_drone_launches(ReserveDroneLaunchesReq { ship_id: owner_ship, max_drones_allowed: 0, max_bandwidth: 1.0, partial_ok: false, drones: Vec::new() }).await.unwrap().rejected_error == Some("NoDroneManagementAbilitiesLeft") { reserved = true; break; }
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     assert!(reserved);
     let rep = super::handle_cmd_reconnect_to_drones(&ctx, &mut owner_sess.clone(), &[PyRep::List(vec![PyRep::Integer(aban_1)])], &kw).await.unwrap();
-    assert!(matches!(rep.dict_get("MaxDronesExceeded"), Some(PyRep::List(v)) if v == &[PyRep::Integer(aban_1)]));
-    assert!(drone_test_helpers::active_drone(&ctx, aban_1).unwrap().is_abandoned);
+    assert!(matches!(rep.dict_get("MaxDronesExceeded"), Some(PyRep::List(v)) if v == &[PyRep::Integer(aban_1)]) && drone_test_helpers::active_drone(&ctx, aban_1).unwrap().is_abandoned);
     let _ = rtx.send(()); holder.await.unwrap();
     launch_task.await.unwrap().expect("handled").expect("LaunchDrones ok");
     assert_eq!(drone_test_helpers::active_drones_for_ship(&ctx, owner_ship).len(), 1);
@@ -2120,15 +2077,10 @@ async fn reconnect_drones_enforces_reserved_launches_and_concurrent_capacity() {
     let (mut s1, mut s2) = (owner_sess.clone(), owner_sess.clone());
     let (a1, a2) = ([PyRep::List(vec![PyRep::Integer(aban_1)])], [PyRep::List(vec![PyRep::Integer(aban_2)])]);
     let (r1, r2) = tokio::join!(super::handle_cmd_reconnect_to_drones(&ctx, &mut s1, &a1, &kw), super::handle_cmd_reconnect_to_drones(&ctx, &mut s2, &a2, &kw));
-    assert_eq!(drone_test_helpers::active_drones_for_ship(&ctx, owner_ship).len(), 1);
-    assert_eq!([r1.unwrap(), r2.unwrap()].iter().filter(|r| r.dict_get("MaxDronesExceeded").is_some()).count(), 1);
+    assert_eq!((drone_test_helpers::active_drones_for_ship(&ctx, owner_ship).len(), [r1.unwrap(), r2.unwrap()].iter().filter(|r| r.dict_get("MaxDronesExceeded").is_some()).count()), (1, 1));
 
     ctx.db.with_mut_snapshot(|snap| { snap.skills.get_mut(&owner_char).unwrap().get_mut(&3436).unwrap().level = 5; });
-    drone_test_helpers::seed_active_drones(&ctx, [aban_1, aban_2].map(|id| {
-        let mut st = make_drone_state(id, id, 2454, 0, 0, sys_id, false, 0);
-        (st.is_abandoned, st.original_owner_char_id, st.bandwidth_used) = (true, owner_char, 15.0);
-        st
-    }));
+    drone_test_helpers::seed_active_drones(&ctx, [aban_1, aban_2].map(|id| { let mut st = make_drone_state(id, id, 2454, 0, 0, sys_id, false, 0); (st.is_abandoned, st.original_owner_char_id, st.bandwidth_used) = (true, owner_char, 15.0); st }));
     let (b1, b2) = tokio::join!(super::handle_cmd_reconnect_to_drones(&ctx, &mut s1, &a1, &kw), super::handle_cmd_reconnect_to_drones(&ctx, &mut s2, &a2, &kw));
     let bw_controlled = drone_test_helpers::active_drones_for_ship(&ctx, owner_ship);
     assert_eq!(bw_controlled.len(), 1);
@@ -2179,8 +2131,7 @@ async fn scoop_claim_blocks_engage_return_home_assist_guard_and_mining() {
     let assert_no_notifs = |c: &ServerContext| assert!(c.drain_notifications_for_char(owner_char).iter().all(|n| !matches!(n.event.as_str(), "OnDroneStateChange" | "OnDroneActivityChange")));
 
     // 1. `ClaimPlayerScoop` blocks `CmdEngage`, `CmdReturnHome`, `CmdAssist`, `CmdGuard`.
-    let (rtx, h1) = hold_db_lock(&ctx.db).await;
-    let (c1, mut s1, k1) = (Arc::clone(&ctx), owner_sess.clone(), kw.clone());
+    let ((rtx, h1), (c1, mut s1, k1)) = (hold_db_lock(&ctx.db).await, (Arc::clone(&ctx), owner_sess.clone(), kw.clone()));
     let sc1 = tokio::spawn(async move { handle_npcs_drones(&c1, &mut s1, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_combat)], &k1).await });
     wait_for_scoop_claim(&sys_handle, d_combat).await;
     let _ = ctx.drain_notifications_for_char(owner_char);
@@ -2192,8 +2143,7 @@ async fn scoop_claim_blocks_engage_return_home_assist_guard_and_mining() {
     let _ = rtx.send(()); h1.await.unwrap(); sc1.await.unwrap().unwrap().unwrap();
 
     // 2. `ClaimPlayerScoop` blocks `CmdMineRepeatedly` without orphan miners.
-    let (rtx, h2) = hold_db_lock(&ctx.db).await;
-    let (c2, mut s2, k2) = (Arc::clone(&ctx), owner_sess.clone(), kw.clone());
+    let ((rtx, h2), (c2, mut s2, k2)) = (hold_db_lock(&ctx.db).await, (Arc::clone(&ctx), owner_sess.clone(), kw.clone()));
     let sc2 = tokio::spawn(async move { handle_npcs_drones(&c2, &mut s2, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_miner)], &k2).await });
     wait_for_scoop_claim(&sys_handle, d_miner).await;
     let _ = ctx.drain_notifications_for_char(owner_char);
@@ -2203,8 +2153,7 @@ async fn scoop_claim_blocks_engage_return_home_assist_guard_and_mining() {
     let _ = rtx.send(()); h2.await.unwrap(); sc2.await.unwrap().unwrap().unwrap();
 
     // 3. `ClaimReturnScoop` blocks both `CmdEngage` and `CmdMineRepeatedly`.
-    let (rtx, h3) = hold_db_lock(&ctx.db).await;
-    let (c3, sh3, r_clone) = (Arc::clone(&ctx), sys_handle.clone(), r_st.clone());
+    let ((rtx, h3), (c3, sh3, r_clone)) = (hold_db_lock(&ctx.db).await, (Arc::clone(&ctx), sys_handle.clone(), r_st.clone()));
     let sc3 = tokio::spawn(async move { super::try_atomic_scoop_drone(&c3, &sh3, &r_clone, owner_ship).await });
     wait_for_scoop_claim(&sys_handle, d_ret).await;
     let _ = ctx.drain_notifications_for_char(owner_char);
@@ -2221,24 +2170,17 @@ async fn release_or_take_preserves_disconnect_and_abandon_blocks_distinct_item_r
     use crate::system_actor::{DroneScoopClaimAction, DroneScoopClaimOutcome, PendingScoopAbandonKind};
 
     let ctx = Arc::new(test_ctx());
-    let (sys_id, owner_char, thief_char, owner_ship, thief_ship) = (30_000_142u32, 90_998_301i64, 90_998_302i64, 958_300_001i64, 958_300_002i64);
-    let (d_disc, d_kill_ball, d_kill_item) = (958_300_011i64, 958_300_012i64, 958_300_112i64);
+    let ((sys_id, owner_char, thief_char, owner_ship, thief_ship), (d_disc, d_kill_ball, d_kill_item)) =
+        ((30_000_142u32, 90_998_301i64, 90_998_302i64, 958_300_001i64, 958_300_002i64), (958_300_011i64, 958_300_012i64, 958_300_112i64));
     let mut owner_sess = setup_race_pilot(&ctx, owner_char, owner_ship, sys_id, 5);
-    let mut thief_sess = SessionState { user_id: owner_sess.user_id, character_id: Some(thief_char), ship_id: Some(thief_ship), solar_system_id: Some(sys_id), ..Default::default() };
+    let mut thief_sess = setup_race_pilot(&ctx, thief_char, thief_ship, sys_id, 5);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut t = snap.characters[&owner_char].clone();
-        (t.character_id, t.user_id, t.active_ship_id) = (thief_char, thief_char as u64, thief_ship);
-        snap.characters.insert(thief_char, t);
-        insert_drone_item(snap, thief_ship, 593, thief_char, sys_id as i64, InventoryFlag::None, 1, None);
         insert_drone_item(snap, d_disc, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, None);
         insert_drone_item(snap, d_kill_item, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, Some(d_kill_ball));
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for id in [thief_ship, d_disc, d_kill_ball] { spawn_ball(&ctx, sys_id, id, 2454, DVec3::new(100.0, 0.0, 0.0)); }
-    drone_test_helpers::seed_active_drones(&ctx, [
-        make_drone_state(d_disc, d_disc, 2454, owner_char, owner_ship, sys_id, false, 4),
-        make_drone_state(d_kill_ball, d_kill_item, 2454, owner_char, owner_ship, sys_id, false, 4),
-    ]);
+    for id in [d_disc, d_kill_ball] { spawn_ball(&ctx, sys_id, id, 2454, DVec3::new(100.0, 0.0, 0.0)); }
+    drone_test_helpers::seed_active_drones(&ctx, [make_drone_state(d_disc, d_disc, 2454, owner_char, owner_ship, sys_id, false, 4)]);
 
     // (a) `ReleaseOrTakeForAbandon` preserves stamped `Disconnect` (non-stealable, reconnectable).
     assert!(matches!(sys_handle.drone_scoop_claim_op(d_disc, DroneScoopClaimAction::ClaimPlayerScoop { char_id: owner_char }).await.unwrap(), DroneScoopClaimOutcome::Claimed(_)));
@@ -2253,6 +2195,7 @@ async fn release_or_take_preserves_disconnect_and_abandon_blocks_distinct_item_r
     assert_eq!(drone_test_helpers::active_drone(&ctx, d_disc).unwrap().parent_ship_id, owner_ship);
 
     // (b) `TakeUnclaimedForAbandon` stays in-place and `abandon_returning_drone_in_space` blocks distinct `item_id` resurrection.
+    drone_test_helpers::seed_active_drone(&ctx, make_drone_state(d_kill_ball, d_kill_item, 2454, owner_char, owner_ship, sys_id, false, 4));
     let DroneScoopClaimOutcome::TakeForAbandon(Some(taken)) = sys_handle.drone_scoop_claim_op(d_kill_ball, DroneScoopClaimAction::TakeUnclaimedForAbandon {
         expected_owner: owner_char, target_ship_id: owner_ship, require_returning: false,
     }).await.unwrap() else { panic!("expected TakeForAbandon"); };
@@ -2270,39 +2213,26 @@ async fn scoop_claim_skips_engaged_tick_auto_aggression_and_mining_and_guard_dro
     use crate::system_actor::{DroneScoopClaimAction, ScoopClaimGuard};
 
     let ctx = Arc::new(test_ctx());
-    let (sys_id, owner_char, ally_char, owner_ship, npc_id, ast_id) = (30_000_142u32, 90_998_401i64, 90_998_402i64, 958_400_001i64, 958_400_002i64, 958_400_003i64);
-    let (d_eng, d_auto, d_mine, d_mine2, d_guard) = (958_400_011i64, 958_400_012i64, 958_400_013i64, 958_400_014i64, 958_400_015i64);
+    let ((sys_id, owner_char, ally_char, owner_ship, npc_id, ast_id), (d_eng, d_auto, d_mine, d_mine2, d_guard)) =
+        ((30_000_142u32, 90_998_401i64, 90_998_402i64, 958_400_001i64, 958_400_002i64, 958_400_003i64), (958_400_011i64, 958_400_012i64, 958_400_013i64, 958_400_014i64, 958_400_015i64));
     let mut owner_sess = setup_race_pilot(&ctx, owner_char, owner_ship, sys_id, 5);
-    ctx.db.with_mut_snapshot(|snap| {
-        for (did, tid) in [(d_eng, 2454u32), (d_auto, 2454), (d_mine, 10_246), (d_mine2, 10_246), (d_guard, 2454)] {
-            insert_drone_item(snap, did, tid, owner_char, sys_id as i64, InventoryFlag::None, 1, None);
-        }
+    ctx.db.with_mut_snapshot(|snap| for (did, tid) in [(d_eng, 2454u32), (d_auto, 2454), (d_mine, 10_246), (d_mine2, 10_246), (d_guard, 2454)] {
+        insert_drone_item(snap, did, tid, owner_char, sys_id as i64, InventoryFlag::None, 1, None);
     });
-    ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
-        asteroid_id: ast_id, solar_system_id: sys_id, belt_id: 40_000_001, type_id: 1230,
-        quantity: 10_000, initial_quantity: 10_000, position: (1_000.0, 0.0, 0.0), radius: 50.0,
-    });
+    ctx.db.spawn_asteroid(eve_db::AsteroidRecord { asteroid_id: ast_id, solar_system_id: sys_id, belt_id: 40_000_001, type_id: 1230, quantity: 10_000, initial_quantity: 10_000, position: (1_000.0, 0.0, 0.0), radius: 50.0 });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for (did, tid) in [(d_eng, 2454u32), (d_auto, 2454), (d_mine, 10_246), (d_mine2, 10_246), (d_guard, 2454)] {
-        spawn_ball(&ctx, sys_id, did, tid, DVec3::new(100.0, 0.0, 0.0));
-    }
-    sys_handle.spawn_asteroid(crate::system_actor::AsteroidState {
-        asteroid_id: ast_id, belt_id: 40_000_001, type_id: 1230, initial_units: 10_000,
-        remaining_units: 10_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None,
-    }, Ball {
-        id: ast_id, type_id: 1230, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await.unwrap();
-    sys_handle.spawn_ball_with_combat(Ball {
-        id: npc_id, type_id: 593, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 0.0, mass: 1.0e6, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }, CombatState { shield_hp: 500.0, max_shield_hp: 500.0, armor_hp: 500.0, max_armor_hp: 500.0, structure_hp: 500.0, max_structure_hp: 500.0, ..Default::default() }).await.unwrap();
-
+    for (did, tid) in [(d_eng, 2454u32), (d_auto, 2454), (d_mine, 10_246), (d_mine2, 10_246), (d_guard, 2454)] { spawn_ball(&ctx, sys_id, did, tid, DVec3::new(100.0, 0.0, 0.0)); }
+    sys_handle.spawn_asteroid(
+        crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 40_000_001, type_id: 1230, initial_units: 10_000, remaining_units: 10_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None },
+        Ball { id: ast_id, type_id: 1230, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+    ).await.unwrap();
+    sys_handle.spawn_ball_with_combat(
+        Ball { id: npc_id, type_id: 593, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e6, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        CombatState { shield_hp: 500.0, max_shield_hp: 500.0, armor_hp: 500.0, max_armor_hp: 500.0, structure_hp: 500.0, max_structure_hp: 500.0, ..Default::default() },
+    ).await.unwrap();
     let (mut s_eng, mut s_auto, mut s_mine, mut s_mine2, s_guard) = (
-        make_drone_state(d_eng, d_eng, 2454, owner_char, owner_ship, sys_id, false, 1),
-        make_drone_state(d_auto, d_auto, 2454, owner_char, owner_ship, sys_id, false, 0),
-        make_drone_state(d_mine, d_mine, 10_246, owner_char, owner_ship, sys_id, false, 2),
-        make_drone_state(d_mine2, d_mine2, 10_246, owner_char, owner_ship, sys_id, false, 0),
+        make_drone_state(d_eng, d_eng, 2454, owner_char, owner_ship, sys_id, false, 1), make_drone_state(d_auto, d_auto, 2454, owner_char, owner_ship, sys_id, false, 0),
+        make_drone_state(d_mine, d_mine, 10_246, owner_char, owner_ship, sys_id, false, 2), make_drone_state(d_mine2, d_mine2, 10_246, owner_char, owner_ship, sys_id, false, 0),
         make_drone_state(d_guard, d_guard, 2454, owner_char, owner_ship, sys_id, false, 4),
     );
     (s_eng.target_id, s_eng.damage_vector) = (Some(npc_id), DamageVector { kinetic: 50.0, ..Default::default() });
@@ -2311,8 +2241,7 @@ async fn scoop_claim_skips_engaged_tick_auto_aggression_and_mining_and_guard_dro
     drone_test_helpers::seed_active_drones(&ctx, [s_eng, s_auto, s_mine, s_guard]);
     sys_handle.upsert_drone_miner(DroneMiningState {
         drone_id: d_mine, asteroid_id: ast_id, ship_id: owner_ship, owner_char_id: owner_char,
-        solar_system_id: sys_id, yield_units: 25, duration_secs: 60, next_cycle_unix: 0,
-        waste_prob: 0.0, ore_type_id: 1230, destination_flag: InventoryFlag::Cargo,
+        solar_system_id: sys_id, yield_units: 25, duration_secs: 60, next_cycle_unix: 0, waste_prob: 0.0, ore_type_id: 1230, destination_flag: InventoryFlag::Cargo,
     }).await.unwrap();
 
     // BF-03: claimed drones skipped in engaged tick, auto-aggression/guard, and repeating mining; `CmdMineRepeatedly` inserts atomically.
@@ -2352,21 +2281,15 @@ async fn scoop_claim_skips_engaged_tick_auto_aggression_and_mining_and_guard_dro
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unhydrated_unsafe_read_wake_hydrates_for_warp_disconnect_remove_logoff_and_validators() {
     use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
-
     struct TmpDbGuard(std::path::PathBuf);
-    impl Drop for TmpDbGuard {
-        fn drop(&mut self) {
-            for ext in ["sqlite", "sqlite-wal", "sqlite-shm"] { let _ = std::fs::remove_file(self.0.with_extension(ext)); }
-        }
-    }
+    impl Drop for TmpDbGuard { fn drop(&mut self) { for ext in ["sqlite", "sqlite-wal", "sqlite-shm"] { let _ = std::fs::remove_file(self.0.with_extension(ext)); } } }
     let tmp = std::env::temp_dir().join(format!("evomu_bf02_unsafe_read_{}.sqlite", std::process::id()));
     drop(TmpDbGuard(tmp.clone()));
     let _guard = TmpDbGuard(tmp.clone());
 
-    let demo = test_ctx();
-    let base_ch = demo.db.with_snapshot(|s| s.characters[&90_000_001].clone());
-    let (sys_id, owner_char, owner_ship) = (30_000_142u32, 90_998_501i64, 958_500_001i64);
+    let (demo, sys_id, owner_char, owner_ship) = (test_ctx(), 30_000_142u32, 90_998_501i64, 958_500_001i64);
     let (d_ctrl, d_aban, d_salv) = (958_500_011i64, 958_500_012i64, 958_500_013i64);
+    let base_ch = demo.db.with_snapshot(|s| s.characters[&90_000_001].clone());
     let seed_drones = || {
         let mut st_aban = make_drone_state(d_aban, d_aban, 2454, 0, 0, sys_id, false, 0);
         (st_aban.is_abandoned, st_aban.original_owner_char_id) = (true, owner_char);
@@ -2375,64 +2298,44 @@ async fn unhydrated_unsafe_read_wake_hydrates_for_warp_disconnect_remove_logoff_
         [make_drone_state(d_ctrl, d_ctrl, 2454, owner_char, owner_ship, sys_id, false, 0), st_aban, st_salv]
     };
     {
-        let db1 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).unwrap());
-        let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&demo.sde), db1);
-        ctx1.db.with_mut_snapshot(|snap| {
-            let mut ch = base_ch.clone();
-            (ch.character_id, ch.solar_system_id, ch.active_ship_id, ch.station_id, ch.structure_id) = (owner_char, sys_id, owner_ship, None, None);
-            snap.characters.insert(owner_char, ch);
-            let mut ship = InventoryItemRecord {
-                item_id: owner_ship, type_id: 593, owner_id: owner_char, location_id: sys_id as i64,
-                flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
-            };
-            ship.dynamic_attributes.extend([(283, 100.0), (1271, 25.0)]);
-            snap.items.insert(owner_ship, ship);
-            snap.skills.entry(owner_char).or_default().insert(3436, eve_db::TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
-            for (did, tid, oid) in [(d_ctrl, 2454u32, owner_char), (d_aban, 2454, 0), (d_salv, 32_787, owner_char)] {
-                insert_drone_item(snap, did, tid, oid, sys_id as i64, InventoryFlag::None, 1, None);
-            }
+        let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&demo.sde), Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).unwrap()));
+        ctx1.db.with_mut_snapshot(|s| {
+            let mut ch = base_ch.clone(); (ch.character_id, ch.solar_system_id, ch.active_ship_id, ch.station_id, ch.structure_id) = (owner_char, sys_id, owner_ship, None, None); s.characters.insert(owner_char, ch);
+            insert_drone_item(s, owner_ship, 593, owner_char, sys_id as i64, InventoryFlag::None, 1, None);
+            s.items.get_mut(&owner_ship).unwrap().dynamic_attributes.extend([(283, 100.0), (1271, 25.0)]);
+            s.skills.entry(owner_char).or_default().insert(3436, eve_db::TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 256_000.0 });
+            for (did, tid, oid) in [(d_ctrl, 2454u32, owner_char), (d_aban, 2454, 0), (d_salv, 32_787, owner_char)] { insert_drone_item(s, did, tid, oid, sys_id as i64, InventoryFlag::None, 1, None); }
         });
         drone_test_helpers::seed_active_drones(&ctx1, seed_drones());
         assert!(ctx1.systems.stop_system(sys_id).await);
     }
 
-    let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).unwrap());
-    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&demo.sde), db2);
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&demo.sde), Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).unwrap()));
     drone_test_helpers::seed_active_drones(&ctx2, seed_drones());
     assert!(ctx2.systems.stop_system(sys_id).await);
-    let owner_sess = SessionState { user_id: Some(base_ch.user_id), character_id: Some(owner_char), ship_id: Some(owner_ship), solar_system_id: Some(sys_id), ..Default::default() };
-    let kw = HashMap::new();
+    let (owner_sess, kw) = (SessionState { user_id: Some(base_ch.user_id), character_id: Some(owner_char), ship_id: Some(owner_ship), solar_system_id: Some(sys_id), ..Default::default() }, HashMap::new());
     async fn wake_unsafe(c: &ServerContext, sys_id: u32) -> crate::system_actor::SystemHandle {
         let (rtx, holder) = hold_db_lock(&c.db).await;
         let h = c.db.with_snapshot(|_| c.systems.get_or_spawn(sys_id));
         let _ = h.get_ball_snapshot(0).await;
         assert!(h.view().active_drones_needs_sqlite_hydration && h.view().active_drones_in_space.is_empty());
-        let _ = rtx.send(());
-        holder.await.unwrap();
-        h
+        let _ = rtx.send(()); holder.await.unwrap(); h
     }
 
     wake_unsafe(&ctx2, sys_id).await;
-    assert!(super::super::safe_logoff_blocking_space_conditions(&ctx2, owner_char, owner_ship, sys_id).contains(&"SAFE_LOGOFF_DRONES_IN_SPACE"));
-    assert!(ctx2.systems.stop_system(sys_id).await);
+    assert!(super::super::safe_logoff_blocking_space_conditions(&ctx2, owner_char, owner_ship, sys_id).contains(&"SAFE_LOGOFF_DRONES_IN_SPACE") && ctx2.systems.stop_system(sys_id).await);
 
     let h = wake_unsafe(&ctx2, sys_id).await;
     spawn_ball(&ctx2, sys_id, owner_ship, 593, DVec3::ZERO);
-    assert!(h.view().active_drones_needs_sqlite_hydration);
-    assert_eq!(handle_npcs_drones(&ctx2, &mut owner_sess.clone(), "entity", "CmdSalvage", &[], &kw).await.unwrap().unwrap_err().code, "TargetRequired");
-    assert!(ctx2.systems.stop_system(sys_id).await);
+    assert!(h.view().active_drones_needs_sqlite_hydration && handle_npcs_drones(&ctx2, &mut owner_sess.clone(), "entity", "CmdSalvage", &[], &kw).await.unwrap().unwrap_err().code == "TargetRequired" && ctx2.systems.stop_system(sys_id).await);
 
     let h = wake_unsafe(&ctx2, sys_id).await;
-    spawn_ball(&ctx2, sys_id, owner_ship, 593, DVec3::ZERO);
-    spawn_ball(&ctx2, sys_id, d_aban, 2454, DVec3::new(100.0, 0.0, 0.0));
-    assert!(h.view().active_drones_needs_sqlite_hydration);
-    assert!(handle_npcs_drones(&ctx2, &mut owner_sess.clone(), "entity", "CmdReconnectToDrones", &[PyRep::List(vec![PyRep::Integer(d_aban)])], &kw).await.unwrap().is_ok());
-    assert!(ctx2.systems.stop_system(sys_id).await);
+    spawn_ball(&ctx2, sys_id, owner_ship, 593, DVec3::ZERO); spawn_ball(&ctx2, sys_id, d_aban, 2454, DVec3::new(100.0, 0.0, 0.0));
+    assert!(h.view().active_drones_needs_sqlite_hydration && handle_npcs_drones(&ctx2, &mut owner_sess.clone(), "entity", "CmdReconnectToDrones", &[PyRep::List(vec![PyRep::Integer(d_aban)])], &kw).await.unwrap().is_ok() && ctx2.systems.stop_system(sys_id).await);
 
     wake_unsafe(&ctx2, sys_id).await;
     super::disconnect_drones_for_ship_on_warp_sync(&ctx2, owner_char, owner_ship, sys_id);
-    assert_eq!(drone_test_helpers::active_drone(&ctx2, d_ctrl).unwrap().parent_ship_id, 0);
-    assert!(ctx2.systems.stop_system(sys_id).await);
+    assert!(drone_test_helpers::active_drone(&ctx2, d_ctrl).unwrap().parent_ship_id == 0 && ctx2.systems.stop_system(sys_id).await);
 
     wake_unsafe(&ctx2, sys_id).await;
     assert_eq!(ctx2.systems.remove_active_drone_across_systems_sync(d_salv).unwrap().ball_id, d_salv);
@@ -2473,4 +2376,72 @@ async fn scoop_claim_blocks_cmd_engage_and_web_cycle_without_cooldown_bypass() {
     assert!(apply_drone_web_cycle(&ctx, &sys_handle, &s_web, &drone_ball, npc_id, &target_ball).await && sys_handle.has_active_module_cycle_on_target(d_web, -d_web, npc_id));
     handle_npcs_drones(&ctx, &mut owner_sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(d_web)]), PyRep::Integer(npc_id)], &HashMap::new()).await.unwrap().unwrap();
     assert!(sys_handle.get_combat_state(npc_id).await.unwrap().unwrap().shield_hp < 500.0 && sys_handle.drone_next_ready_unix(d_web).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnected_owned_drone_preserves_ownership_on_warping_or_unavailable_scoop_and_blocks_theft() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
+    let ctx = Arc::new(test_ctx());
+    let ((sys_id, owner_char, thief_char, owner_ship, thief_ship, d_id), kw) = ((30_000_142u32, 90_998_601i64, 90_998_602i64, 958_600_001i64, 958_600_002i64, 958_600_011i64), HashMap::new());
+    let mut owner_sess = setup_race_pilot(&ctx, owner_char, owner_ship, sys_id, 5);
+    let mut thief_sess = setup_race_pilot(&ctx, thief_char, thief_ship, sys_id, 5);
+    ctx.db.with_mut_snapshot(|s| insert_drone_item(s, d_id, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, None));
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_ball(&ctx, sys_id, d_id, 2454, DVec3::new(100.0, 0.0, 0.0));
+    let d_st = make_drone_state(d_id, d_id, 2454, owner_char, 0, sys_id, false, 4);
+    drone_test_helpers::seed_active_drone(&ctx, d_st.clone());
+    let assert_owned = || {
+        let st = drone_test_helpers::active_drone(&ctx, d_id).expect("disconnected drone stays in space");
+        assert!(!st.is_abandoned && st.owner_char_id == owner_char && st.parent_ship_id == 0);
+        assert_eq!(ctx.db.with_snapshot(|s| (s.items[&d_id].location_id, s.items[&d_id].flag, s.items[&d_id].owner_id)), (sys_id as i64, InventoryFlag::None, owner_char));
+    };
+
+    let _ = sys_handle.set_movement_mode(owner_ship, MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1e6, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1e6, phase: eve_destiny::WarpPhase::Cruising, elapsed_warp_time: 1.0 }).await;
+    assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &d_st, owner_ship).await);
+    assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_id)], &kw).await.unwrap().unwrap_err().code, "DroneNotInSpace");
+    assert_owned();
+
+    assert!(sys_handle.remove_ball(owner_ship).await.is_some());
+    spawn_ball(&ctx, sys_id, owner_ship, 593, DVec3::ZERO);
+    ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.disconnected_ships.insert(owner_char, eve_db::DisconnectedShipEntry { char_id: owner_char, ship_id: owner_ship, ship_type_id: 593, solar_system_id: sys_id, disconnected_at_unix: 100, remove_at_unix: 200, ..Default::default() }); });
+    assert!(!super::try_atomic_scoop_drone(&ctx, &sys_handle, &d_st, owner_ship).await);
+    assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_id)], &kw).await.unwrap().unwrap_err().code, "DroneNotInSpace");
+    assert_owned();
+    assert_eq!(handle_npcs_drones(&ctx, &mut thief_sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_id)], &kw).await.unwrap().unwrap_err().code, "DroneOwnedByOther");
+
+    ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.disconnected_ships.remove(&owner_char); });
+    assert!(super::try_atomic_scoop_drone(&ctx, &sys_handle, &d_st, owner_ship).await);
+    assert_eq!(ctx.db.with_snapshot(|s| (s.items[&d_id].location_id, s.items[&d_id].flag, s.items[&d_id].owner_id)), (owner_ship, InventoryFlag::DroneBay, owner_char));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step_returning_drones_preserves_ownership_while_warping_unclaimed_and_claimed() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
+    use crate::system_actor::{DroneScoopClaimAction, DroneScoopClaimOutcome};
+    let ctx = Arc::new(test_ctx());
+    let ((sys_id, owner_char, thief_char, owner_ship, thief_ship), (d_unclaimed, d_claimed), kw) =
+        ((30_000_142u32, 90_998_701i64, 90_998_702i64, 958_700_001i64, 958_700_002i64), (958_700_011i64, 958_700_012i64), HashMap::new());
+    let _owner_sess = setup_race_pilot(&ctx, owner_char, owner_ship, sys_id, 5);
+    let mut thief_sess = setup_race_pilot(&ctx, thief_char, thief_ship, sys_id, 5);
+    ctx.db.with_mut_snapshot(|s| for id in [d_unclaimed, d_claimed] {
+        insert_drone_item(s, id, 2454, owner_char, sys_id as i64, InventoryFlag::None, 1, None);
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for id in [d_unclaimed, d_claimed] { spawn_ball(&ctx, sys_id, id, 2454, DVec3::new(100.0, 0.0, 0.0)); }
+    drone_test_helpers::seed_active_drone(&ctx, make_drone_state(d_claimed, d_claimed, 2454, owner_char, owner_ship, sys_id, false, 4));
+    assert!(matches!(sys_handle.drone_scoop_claim_op(d_claimed, DroneScoopClaimAction::ClaimReturnScoop { expected_owner: owner_char, target_ship_id: owner_ship }).await.unwrap(), DroneScoopClaimOutcome::Claimed(_)));
+    super::disconnect_drones_for_ship_on_warp_sync(&ctx, owner_char, owner_ship, sys_id);
+    drone_test_helpers::seed_active_drone(&ctx, make_drone_state(d_unclaimed, d_unclaimed, 2454, owner_char, owner_ship, sys_id, false, 4));
+    let _ = sys_handle.set_movement_mode(owner_ship, MovementMode::Warp { origin: DVec3::ZERO, destination: DVec3::new(1e6, 0.0, 0.0), warp_speed_au_s: 3.0, total_distance: 1e6, phase: eve_destiny::WarpPhase::Cruising, elapsed_warp_time: 1.0 }).await;
+    super::step_returning_drones(&ctx).await;
+
+    let st_u = drone_test_helpers::active_drone(&ctx, d_unclaimed).expect("unclaimed returning drone stays in space");
+    assert!(!st_u.is_abandoned && st_u.owner_char_id == owner_char && st_u.parent_ship_id == owner_ship);
+    assert_eq!(ctx.db.with_snapshot(|s| (s.items[&d_unclaimed].location_id, s.items[&d_unclaimed].flag, s.items[&d_unclaimed].owner_id)), (sys_id as i64, InventoryFlag::None, owner_char));
+    assert_eq!(handle_npcs_drones(&ctx, &mut thief_sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_unclaimed)], &kw).await.unwrap().unwrap_err().code, "DroneOwnedByOther");
+
+    super::release_scoop_claim_and_apply_pending(&ctx, &sys_handle, d_claimed, None).await;
+    let st_c = drone_test_helpers::active_drone(&ctx, d_claimed).expect("claimed returning drone preserves disconnect");
+    assert!(!st_c.is_abandoned && st_c.owner_char_id == owner_char && st_c.parent_ship_id == 0);
+    assert_eq!(handle_npcs_drones(&ctx, &mut thief_sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(d_claimed)], &kw).await.unwrap().unwrap_err().code, "DroneOwnedByOther");
 }

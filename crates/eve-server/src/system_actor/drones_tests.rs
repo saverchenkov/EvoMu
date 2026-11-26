@@ -449,9 +449,9 @@ fn stale_seq_active_drone_flush_does_not_overwrite_newer_sqlite_checkpoint() {
     let sys_id = 30_000_142u32;
     let shared = drones::ActiveDronesSharedCtx { db_opt: Some(Arc::clone(&db)), ..Default::default() };
     let (d1, d2) = (make_space_drone(951_601, 100_001, 900_001, sys_id, true), make_space_drone(951_602, 100_001, 900_001, sys_id, true));
-    assert!(!drones::write_sqlite_for_shared(&shared, sys_id, 0, &[(d1.ball_id, d1.clone())], true));
-    assert!(drones::write_sqlite_for_shared(&shared, sys_id, 2, &[(d2.ball_id, d2)], true));
-    assert!(!drones::write_sqlite_for_shared(&shared, sys_id, 1, &[(d1.ball_id, d1)], true));
+    assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 0, &[(d1.ball_id, d1.clone())], true), drones::FlushWriteOutcome::Deferred);
+    assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 2, &[(d2.ball_id, d2)], true), drones::FlushWriteOutcome::Written);
+    assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 1, &[(d1.ball_id, d1)], true), drones::FlushWriteOutcome::AlreadyAtOrPastSeq);
     let rows = db.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(
         c, sys_id, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
     )).unwrap();
@@ -478,4 +478,25 @@ async fn concurrent_deferred_hydration_preserves_legacy_json_drones_until_commit
     assert!(sys.active_drone(951_701).is_some() && reg.drone_rt_state.migrated_legacy_drone_systems.lock().unwrap().contains(&sys_id));
     assert!(sys.remove_active_drone(951_701).await.unwrap().is_some() && reg.stop_system(sys_id).await);
     assert!(reg.get_or_spawn(sys_id).active_drone(951_701).is_none() && reg.stop_system(sys_id).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn already_persisted_seq_without_commit_clears_dirty_and_restores_hibernation() {
+    let (tmp, _guard) = temp_sqlite_db("already_persisted_9");
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite persisted seq"));
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(Arc::new(eve_sde::SdeRegistry::with_canonical_seed()), Arc::clone(&db)));
+    let (sys_id, d) = (30_000_142u32, make_space_drone(951_801, 100_001, 900_001, 30_000_142, true));
+    let sys = reg.get_or_spawn(sys_id);
+    let (lrx, rtx, h) = hold_writer(&db); lrx.await.unwrap();
+    sys.upsert_active_drone(d.clone()).await.unwrap();
+    assert!(!sys.is_hibernated());
+    let _ = rtx.send(()); h.await.unwrap();
+    let shared = sys.ballpark.drone_hydration_shared().unwrap();
+    assert_eq!(drones::write_sqlite_for_shared(shared, sys_id, 1, &[(d.ball_id, d.clone())], true), drones::FlushWriteOutcome::Written);
+    assert!(!sys.is_hibernated());
+    assert_eq!(drones::write_sqlite_for_shared(shared, sys_id, 1, &[(d.ball_id, d)], true), drones::FlushWriteOutcome::AlreadyAtOrPastSeq);
+    let _ = sys.step_manual(1.0).await.unwrap();
+    let _ = sys.step_manual(1.0).await.unwrap();
+    assert!(sys.is_hibernated() && !shared.dirty.load(std::sync::atomic::Ordering::Acquire));
+    assert!(reg.stop_system(sys_id).await);
 }
