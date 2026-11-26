@@ -85,7 +85,7 @@ pub struct SkinrStaticCatalog {
 impl SkinrStaticCatalog {
     pub fn load(sde: &SdeRegistry) -> Self {
         let mut cat = Self {
-            ship_isis_groups: sde.type_isis_groups.clone(),
+            ship_isis_groups: (*sde.type_isis_groups).clone(),
             ..Self::default()
         };
 

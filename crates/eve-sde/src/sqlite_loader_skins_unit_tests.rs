@@ -156,7 +156,7 @@ fn skin_tables_and_on_demand_sqlite_celestial_queries() {
         sde.stars = Arc::new(aux.stars);
         sde.solar_system_factions = Arc::new(aux.solar_system_factions);
         sde.solar_system_security_classes = Arc::new(aux.solar_system_security_classes);
-        sde.career_goals = aux.career_goals;
+        sde.career_goals = aux.career_goals.into();
     }
     // Explicitly clear db_path so any attempted runtime SQLite connection would fail (`#743`).
     sde.db_path = None;

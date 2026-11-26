@@ -790,7 +790,7 @@ fn salvage_pools_wreck_resolution_celestials_and_industry_helpers() {
     assert_eq!(pools_bp.t2_intact, vec![25598]);
     assert_eq!(pools_bp.ancient, vec![30001]);
 
-    sde.types = types;
+    sde.types = types.into();
     sde.salvage_pools = Arc::new(pools_fallback);
 
     // 2. resolve_wreck_type_id across race_override, direct wrecks, faction->race fallback, and group default

@@ -82,7 +82,7 @@ impl SdeRegistry {
 
         let mut registry = Self {
             db_path: Some(canon),
-            races,
+            races: races.into(),
             ..Self::default()
         };
 
@@ -198,13 +198,13 @@ impl SdeRegistry {
 
         Ok(Self {
             db_path: Some(canon),
-            resources,
+            resources: resources.into(),
             achievements_static,
-            achievement_events_static,
+            achievement_events_static: achievement_events_static.into(),
             achievement_category_labels,
             career_paths_static,
             career_goal_definitions,
-            contribution_methods,
+            contribution_methods: contribution_methods.into(),
             daily_goal_catalog,
             ..Self::default()
         })
@@ -328,11 +328,11 @@ impl SdeRegistry {
 
         Ok(Self {
             db_path: Some(canon),
-            resources,
-            types: loaded_types.types,
-            constellations,
-            regions,
-            solar_systems,
+            resources: resources.into(),
+            types: loaded_types.types.into(),
+            constellations: constellations.into(),
+            regions: regions.into(),
+            solar_systems: solar_systems.into(),
             celestial_count: celestial_system_by_id.len(),
             celestials_by_system: Arc::new(celestials_by_system),
             celestial_system_by_id: Arc::new(celestial_system_by_id),

@@ -491,7 +491,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         .expect("open raw client fighterabilities.static");
     assert_eq!(fa_raw_bytes, 32_768);
     assert_eq!(raw_fas.len(), 36);
-    assert_eq!(raw_fas, sde.fighter_abilities);
+    assert_eq!(raw_fas, *sde.fighter_abilities);
     for fa in sde.fighter_abilities.values() {
         assert!(!fa.target_mode.is_empty());
         assert_eq!(fa.ability_name_id, fa.display_name_id);

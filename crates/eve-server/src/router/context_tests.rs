@@ -2274,3 +2274,37 @@ async fn current_thread_wait_worker_deact_and_post_commit_remove_ball_finalize_c
     let cold = crate::system_actor::load_cold_system_module_cooldowns_from_db(&ctx.db, sys);
     assert!(cold.contains_key(&(ship_id, cloak1, tid)) && cold.contains_key(&(ship_id, cloak2, tid)));
 }
+
+#[test]
+fn server_context_new_and_from_config_share_sde_tables_with_isolated_derived_caches() {
+    struct CtxDerivedTag(u64);
+
+    let _env_guard = crate::lock_test_env_read();
+    let ctx_a = ServerContext::new();
+    let ctx_b = ServerContext::new();
+
+    assert!(!Arc::ptr_eq(&ctx_a.sde, &ctx_b.sde));
+    assert!(eve_sde::SharedMap::ptr_eq(&ctx_a.sde.types, &ctx_b.sde.types));
+    assert!(eve_sde::SharedMap::ptr_eq(&ctx_a.sde.blueprints, &ctx_b.sde.blueprints));
+    assert!(eve_sde::SharedMap::ptr_eq(&ctx_a.sde.solar_systems, &ctx_b.sde.solar_systems));
+
+    let tag_a = ctx_a.sde.get_or_init_derived(|| CtxDerivedTag(101));
+    let tag_b = ctx_b.sde.get_or_init_derived(|| CtxDerivedTag(202));
+    assert!(!Arc::ptr_eq(&tag_a, &tag_b));
+    assert_eq!(tag_a.0, 101);
+    assert_eq!(tag_b.0, 202);
+
+    let mut cfg_default = crate::config::ServerConfig::default();
+    cfg_default.storage.backend = "memory".into();
+    let ctx_cfg_default = ServerContext::from_config(&cfg_default).expect("from_config default path");
+    assert!(!Arc::ptr_eq(&ctx_a.sde, &ctx_cfg_default.sde));
+    assert!(eve_sde::SharedMap::ptr_eq(&ctx_a.sde.types, &ctx_cfg_default.sde.types));
+
+    let mut cfg_explicit = crate::config::ServerConfig::default();
+    cfg_explicit.storage.backend = "memory".into();
+    cfg_explicit.sde_path = SdeRegistry::default_db_path().to_string_lossy().into_owned();
+    let ctx_cfg_explicit =
+        ServerContext::from_config(&cfg_explicit).expect("from_config explicit path");
+    assert!(!Arc::ptr_eq(&ctx_a.sde, &ctx_cfg_explicit.sde));
+    assert!(eve_sde::SharedMap::ptr_eq(&ctx_a.sde.types, &ctx_cfg_explicit.sde.types));
+}

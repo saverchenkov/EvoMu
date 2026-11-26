@@ -1091,7 +1091,7 @@ fn test_t2_sde_ui_and_content_static_domain_verification() {
         .expect("fighterabilities.static");
     assert_eq!(fa_bytes, 32_768);
     assert_eq!(raw_fas.len(), 36);
-    assert_eq!(raw_fas, sde.fighter_abilities);
+    assert_eq!(raw_fas, *sde.fighter_abilities);
     assert_eq!(raw_fas[&2].ability_name_id, Some(513_537));
     assert_eq!(raw_fas[&2].tooltip_text_id, Some(516_650));
     assert_eq!(raw_fas[&7].target_mode, "pointTargeted");
