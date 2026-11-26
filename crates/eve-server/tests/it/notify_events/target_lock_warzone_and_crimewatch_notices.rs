@@ -301,24 +301,27 @@ async fn notify_b30_crimewatch_timers_and_ship_death() {
     assert_eq!(sys_crim.args.len(), 3);
     assert_eq!(sys_crim.args[2], PyRep::List(vec![PyRep::Integer(PILOT_A)]));
 
-    // AdvanceClock past 1s trigger -> countdown states 102, 202, 303 with Windows FILETIME expiry
+    // AdvanceClock past 1s trigger -> countdown states 102, 202, 303 with SimFileTime expiry.
+    // Track 1 (`#1196` / `#1652`): `AdvanceClock(5)` adds 5s of un-rebased server clock lead, so
+    // `virtual_unix_expiry_to_sim_filetime_for_char` subtracts 5s to align with client sim time.
     rpc(&ctx, &mut sess_a, "timeControl", "AdvanceClock", &[PyRep::Integer(5)]).await.expect("AdvanceClock 5");
     let tick_notifs = ctx.drain_notifications_for_char(PILOT_A);
     let w_cd = tick_notifs.iter().find(|n| n.event == "OnWeaponsTimerUpdate").expect("OnWeaponsTimerUpdate 102");
-    assert_eq!(w_cd.args, vec![PyRep::Integer(102), PyRep::Integer(expected_ft(t0 + 60))]);
+    assert_eq!(w_cd.args, vec![PyRep::Integer(102), PyRep::Integer(expected_ft(t0 + 55))]);
     let p_cd = tick_notifs.iter().find(|n| n.event == "OnPvpTimerUpdate").expect("OnPvpTimerUpdate 202");
-    assert_eq!(p_cd.args, vec![PyRep::Integer(202), PyRep::Integer(expected_ft(t0 + 900))]);
+    assert_eq!(p_cd.args, vec![PyRep::Integer(202), PyRep::Integer(expected_ft(t0 + 895))]);
     let c_cd = tick_notifs.iter().find(|n| n.event == "OnCriminalTimerUpdate").expect("OnCriminalTimerUpdate 303");
-    assert_eq!(c_cd.args, vec![PyRep::Integer(303), PyRep::Integer(expected_ft(t0 + 900))]);
+    assert_eq!(c_cd.args, vec![PyRep::Integer(303), PyRep::Integer(expected_ft(t0 + 895))]);
 
-    // Advance past t0 + 600 -> 900s PvP timer must stay 202 (no 202 -> 201 regression) in both notifications and GetClientStates
+    // Advance past t0 + 600 -> 900s PvP timer must stay 202 (no 202 -> 201 regression) in both notifications and GetClientStates;
+    // cumulative un-rebased lead is now 5 + 596 = 601s, yielding `(t0 + 900) - 601 = t0 + 299` in client sim time.
     rpc(&ctx, &mut sess_a, "timeControl", "AdvanceClock", &[PyRep::Integer(596)]).await.expect("AdvanceClock to t0+601");
     let mid_notifs = ctx.drain_notifications_for_char(PILOT_A);
     assert!(mid_notifs.iter().all(|n| n.event != "OnPvpTimerUpdate" || n.args[0] == PyRep::Integer(202)));
     let cw_states = rpc(&ctx, &mut sess_a, "crimewatch", "GetClientStates", &[]).await.expect("GetClientStates at t0+601");
     if let PyRep::Tuple(outer) = &cw_states {
         if let PyRep::Tuple(timers) = &outer[0] {
-            assert_eq!(timers[1], PyRep::Tuple(vec![PyRep::Integer(202), PyRep::Integer(expected_ft(t0 + 900))]));
+            assert_eq!(timers[1], PyRep::Tuple(vec![PyRep::Integer(202), PyRep::Integer(expected_ft(t0 + 299))]));
         }
     }
 

@@ -31,9 +31,27 @@ fn attribute_cluster_agent_alliance_and_cosmetic_emitters() {
     let (ctx, char_id) = make_online_ctx();
 
     // loc_id == owner_id emits only OnModuleAttributeChange
-    emit_setattr_notifications(&ctx, char_id, char_id, 5001, 6, 12345, 250.0, 100.0);
+    emit_setattr_notifications(
+        &ctx,
+        char_id,
+        char_id,
+        5001,
+        6,
+        eve_db::clock::SimFileTime::from_ticks(12345),
+        250.0,
+        100.0,
+    );
     // loc_id > 0 && loc_id != owner_id emits both OnModuleAttributeChange and OnLocationAttributeChange
-    emit_setattr_notifications(&ctx, char_id, 100_000_001, 5002, 6, 12346, 300.0, 250.0);
+    emit_setattr_notifications(
+        &ctx,
+        char_id,
+        100_000_001,
+        5002,
+        6,
+        eve_db::clock::SimFileTime::from_ticks(12346),
+        300.0,
+        250.0,
+    );
 
     emit_cluster_shutdown_cancelled(&ctx, "   ");
     emit_cluster_shutdown_cancelled(&ctx, "CustomShutdownLabel");

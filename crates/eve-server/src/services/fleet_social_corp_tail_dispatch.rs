@@ -130,7 +130,7 @@ pub fn handle_corp_gov_tail(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationWelcomeMailChanged {
                     character_id: char_id,
-                    change_date: now_unix as i64,
+                    change_date: ctx.wall_unix_to_filetime(now_unix),
                 },
             );
             Some(Ok(PyRep::keyval([

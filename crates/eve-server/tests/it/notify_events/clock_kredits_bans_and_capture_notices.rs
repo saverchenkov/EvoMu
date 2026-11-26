@@ -650,4 +650,414 @@ async fn test_parity_notify_fw_capture_changed() {
     assert!(cap_notifs[0][4].as_f64().unwrap_or(0.0) > 0.0);
     assert_eq!(cap_notifs[0][5], PyRep::Integer(attacker_fac));
 }
+
+#[tokio::test]
+async fn test_notify_clock_domain_separation_under_offset_and_tidi() {
+    use crate::notify_structures_clones_pi::{drain_all, find_notif, login_in_space, make_item};
+    use eve_db::{IskCents, InventoryFlag};
+    use eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    use eve_server::services::abyssal_void_mgr::{
+        ABYSSAL_SPACE_SYSTEM_ID, VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS, VOID_SPACE_SYSTEM_ID,
+    };
+
+    const FILETIME_TICKS_PER_SEC: i64 = 10_000_000;
+    let assert_sim_ft_near = |actual: i64, expected: i64, label: &str| {
+        let delta = actual - expected;
+        assert!(
+            (0..=20).contains(&delta),
+            "{label}: expected SimFileTime within [0, 20] monotonic 100ns ticks of {expected}, got {actual} (delta={delta})"
+        );
+    };
+    let ctx = new_ctx();
+
+    let ship_a = 921_000_001_i64;
+    let ship_b = 921_000_002_i64;
+    let launcher_id = 921_000_010_i64;
+    let probe_stack_id = 921_000_011_i64;
+    let abyss_fil_id = 921_000_020_i64;
+    let void_fil_id = 921_000_021_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.balance = IskCents::from_isk(500_000_000);
+        }
+    });
+    let mut sess_corp = SessionState::new(92_150);
+    common::login_pilot(&ctx, &mut sess_corp, "demo", "demo-secret").await;
+    rpc(
+        &ctx,
+        &mut sess_corp,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(PILOT_A)],
+    )
+    .await
+    .expect("select docked PILOT_A");
+    ctx.advance_secs(12);
+    rpc(
+        &ctx,
+        &mut sess_corp,
+        "corpRegistry",
+        "AddCorporation",
+        &[PyRep::String("Clock Domain Corp".into()), PyRep::String("CLKD".into())],
+    )
+    .await
+    .expect("AddCorporation");
+
+    let mut sess_a = login_in_space(
+        &ctx,
+        92_150,
+        "demo",
+        "demo-secret",
+        PILOT_A,
+        ship_a,
+        621,
+        JITA_SYSTEM,
+        DVec3::new(0.0, 2.0e9, 0.0),
+    )
+    .await;
+    sess_a.role |= ROLE_GM_DEFAULT;
+
+    let mut sess_b = login_in_space(
+        &ctx,
+        92_152,
+        "other",
+        "other-secret",
+        PILOT_B,
+        ship_b,
+        587,
+        JITA_SYSTEM,
+        DVec3::new(1_000.0, 2.0e9, 0.0),
+    )
+    .await;
+
+    let uid_v = ctx.db.provision_player_account("clk_void_u", "clk_void_pass");
+    let pilot_v = ctx
+        .db
+        .create_character(uid_v, "Clock Void Pilot", 1, 1, 11, 17, &ctx.sde)
+        .expect("create pilot_v")
+        .character_id;
+    let ship_v = 921_000_003_i64;
+    let mut sess_v = login_in_space(
+        &ctx,
+        92_153,
+        "clk_void_u",
+        "clk_void_pass",
+        pilot_v,
+        ship_v,
+        621,
+        AMARR_SYSTEM,
+        DVec3::new(0.0, 2.0e9, 0.0),
+    )
+    .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.balance = IskCents::from_isk(500_000_000);
+        }
+        snap.items.insert(
+            launcher_id,
+            make_item(launcher_id, 17_901, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.items.insert(
+            probe_stack_id,
+            make_item(probe_stack_id, 30_013, PILOT_A, ship_a, InventoryFlag::HiSlot0, 8, false),
+        );
+        snap.items.insert(
+            abyss_fil_id,
+            make_item(abyss_fil_id, 56_134, PILOT_A, ship_a, InventoryFlag::Cargo, 1, false),
+        );
+        snap.items.insert(
+            void_fil_id,
+            make_item(void_fil_id, 62_448, pilot_v, ship_v, InventoryFlag::Cargo, 1, false),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_a);
+
+    // Anchor JITA_SYSTEM, ABYSSAL_SPACE_SYSTEM_ID, and VOID_SPACE_SYSTEM_ID at -300s offset & 0.25 TiDi.
+    ctx.anchor_system_sim_clock_with_offset_ms(JITA_SYSTEM, -300_000, 0.25);
+    ctx.anchor_system_sim_clock_with_offset_ms(ABYSSAL_SPACE_SYSTEM_ID, -300_000, 0.25);
+    ctx.anchor_system_sim_clock_with_offset_ms(VOID_SPACE_SYSTEM_ID, -300_000, 0.25);
+
+    let sim_jita = ctx
+        .peek_system_sim_filetime(JITA_SYSTEM)
+        .expect("anchored Jita sim clock");
+    let sim_abyss = ctx
+        .peek_system_sim_filetime(ABYSSAL_SPACE_SYSTEM_ID)
+        .expect("anchored Abyss sim clock");
+    let sim_void = ctx
+        .peek_system_sim_filetime(VOID_SPACE_SYSTEM_ID)
+        .expect("anchored Void sim clock");
+    let wall_ft = ctx.now_machonet_wall_filetime();
+    assert!(
+        wall_ft.as_ticks().saturating_sub(sim_jita.as_ticks()) >= 295 * FILETIME_TICKS_PER_SEC,
+        "anchored sim clock ({}) must lag wallclock ({}) by ~300s",
+        sim_jita.as_ticks(),
+        wall_ft.as_ticks(),
+    );
+
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let _ = drain_all(&ctx, &mut sess_v, pilot_v);
+
+    // 1. OnSafeLogoffTimerStarted (`RT-99`): -300s sim offset + 30s * 0.25 TiDi = sim_jita + 7.5s.
+    rpc(&ctx, &mut sess_b, "ship", "SafeLogoff", &[])
+        .await
+        .expect("SafeLogoff");
+    let logoff_notifs = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let logoff_ft = find_notif(&logoff_notifs, "OnSafeLogoffTimerStarted")[0]
+        .as_i64()
+        .expect("OnSafeLogoffTimerStarted arg");
+    assert_eq!(
+        logoff_ft,
+        sim_jita.saturating_add_ms(7_500).as_ticks(),
+        "OnSafeLogoffTimerStarted must emit dilated SimFileTime under -300s offset and TiDi=0.25"
+    );
+    assert!(logoff_ft < wall_ft.as_ticks());
+
+    // 2. OnCaptureChanged: uses SimFileTime (`sim_jita`), NOT wall clock.
+    eve_server::services::notify_emitters_space_dungeons::emit_fw_capture_changed(
+        &ctx,
+        JITA_SYSTEM,
+        921_000_901,
+        500_001,
+        25.0,
+        600_000.0,
+    );
+    let cap_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let cap_ft = find_notif(&cap_notifs, "OnCaptureChanged")[2]
+        .as_i64()
+        .expect("OnCaptureChanged lastIncident");
+    assert_sim_ft_near(cap_ft, sim_jita.as_ticks(), "OnCaptureChanged lastIncident");
+
+    // 3. OnAddExpiryDurationForAbyssalPvpContent: virtual expiry mapped to SimFileTime (`+150s` at 0.25 TiDi).
+    let pvp_exp_unix = ctx.now_unix() + 600;
+    eve_server::services::notify_emitters_space_dungeons::emit_pvp_match_found_and_expiry(
+        &ctx,
+        PILOT_A,
+        pvp_exp_unix,
+    );
+    let pvp_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let pvp_ft = find_notif(&pvp_notifs, "OnAddExpiryDurationForAbyssalPvpContent")[0]
+        .as_i64()
+        .expect("OnAddExpiryDurationForAbyssalPvpContent endTime");
+    assert_eq!(pvp_ft, sim_jita.saturating_add_secs(150).as_ticks());
+    assert!(pvp_ft < wall_ft.as_ticks());
+
+    // 4. OnModuleAttributeChange & OnLocationAttributeChange: use SimFileTime (`sim_jita`).
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/setattr {launcher_id} 18 75.0"))],
+    )
+    .await
+    .expect("/setattr");
+    let attr_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let mod_attr = find_notif(&attr_notifs, "OnModuleAttributeChange");
+    let mod_ts = mod_attr[3].as_i64().expect("OnModuleAttributeChange time");
+    assert_sim_ft_near(mod_ts, sim_jita.as_ticks(), "OnModuleAttributeChange time");
+    assert_eq!(mod_attr[6].as_i64(), Some(mod_ts));
+    let loc_attr = find_notif(&attr_notifs, "OnLocationAttributeChange");
+    assert_eq!(loc_attr[4].as_i64(), Some(mod_ts));
+
+    // 5. OnProbeWarpStart & OnSystemScanStarted: use SimFileTime (`sim_jita`).
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
+    )
+    .await
+    .expect("launchProbe");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let scan_coords = PyRep::List(
+        (0..8)
+            .map(|i| {
+                PyRep::List(vec![
+                    PyRep::Real(250_000.0 + (i as f64) * 500.0),
+                    PyRep::Real(2.0e9),
+                    PyRep::Real(0.0),
+                    PyRep::Integer(2),
+                ])
+            })
+            .collect(),
+    );
+    rpc(&ctx, &mut sess_a, "scanMgr", "RequestScans", &[scan_coords])
+        .await
+        .expect("RequestScans");
+    let scan_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let mut warp_start_ft_opt: Option<i64> = None;
+    let max_warp_ms = scan_notifs
+        .iter()
+        .filter(|(e, _)| e == "OnProbeWarpStart")
+        .map(|(_, a)| {
+            let st = a[3].as_i64().expect("OnProbeWarpStart startTime");
+            assert_sim_ft_near(st, sim_jita.as_ticks(), "OnProbeWarpStart startTime");
+            if let Some(prev_st) = warp_start_ft_opt {
+                assert_eq!(st, prev_st);
+            } else {
+                warp_start_ft_opt = Some(st);
+            }
+            a[4].as_i64().expect("OnProbeWarpStart duration") as u64
+        })
+        .max()
+        .expect("expected OnProbeWarpStart events");
+    let warp_start_ft = warp_start_ft_opt.expect("OnProbeWarpStart startTime");
+    let scan_start_ft = find_notif(&scan_notifs, "OnSystemScanStarted")[0]
+        .as_i64()
+        .expect("OnSystemScanStarted startTime");
+    assert_eq!(
+        scan_start_ft,
+        eve_db::clock::SimFileTime::from_ticks(warp_start_ft)
+            .saturating_add_ms(max_warp_ms)
+            .as_ticks()
+    );
+    assert!(scan_start_ft < wall_ft.as_ticks());
+    rpc(&ctx, &mut sess_a, "scanMgr", "DestroyProbe", &[])
+        .await
+        .expect("DestroyProbe");
+
+    // 6. OnTournamentPerformBan & OnCorporationWelcomeMailChanged: valid WallFileTime unaffected by -300s/0.25x sim skew.
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "tourneyMgr",
+        "CreateMatch",
+        &[
+            PyRep::Integer(196),
+            PyRep::Integer(19_601),
+            PyRep::Integer(100),
+            PyRep::Integer(600),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+            PyRep::List(vec![PyRep::Integer(PILOT_A), PyRep::Integer(PILOT_B)]),
+        ],
+    )
+    .await
+    .expect("CreateMatch");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let ban_unix = ctx.now_unix();
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "tourneyMgr",
+        "BanShip",
+        &[PyRep::Integer(19_601), PyRep::List(vec![PyRep::Integer(621)])],
+    )
+    .await
+    .expect("BanShip");
+    let ban_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let ban_deadline_ft = find_notif(&ban_notifs, "OnTournamentPerformBan")[3]
+        .as_i64()
+        .expect("OnTournamentPerformBan deadline");
+    assert_eq!(
+        ban_deadline_ft,
+        ctx.virtual_unix_to_machonet_wall_filetime(ban_unix + 60).as_ticks()
+    );
+    assert!(ban_deadline_ft >= wall_ft.saturating_add_secs(55).as_ticks());
+
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let welcome_unix = ctx.now_unix();
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "SetCorpWelcomeMail",
+        &[
+            PyRep::String("Welcome".into()),
+            PyRep::String("Body".into()),
+            PyRep::Bool(true),
+        ],
+    )
+    .await
+    .expect("SetCorpWelcomeMail");
+    let welcome_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let welcome_ft = find_notif(&welcome_notifs, "OnCorporationWelcomeMailChanged")[1]
+        .as_i64()
+        .expect("OnCorporationWelcomeMailChanged changeDate");
+    assert_eq!(welcome_ft, ctx.wall_unix_to_filetime(welcome_unix).as_ticks());
+    assert!(welcome_ft >= wall_ft.as_ticks());
+
+    // 7. OnAddExpiryDurationForAbyssalContent: SimFileTime in ABYSSAL_SPACE_SYSTEM_ID (-300s offset, 0.25 TiDi -> +300 sim-s).
+    let deploy_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "abyssalMgr",
+        "AbyssalEntranceDeployment",
+        &[PyRep::Integer(abyss_fil_id)],
+    )
+    .await
+    .expect("AbyssalEntranceDeployment");
+    let trace_id = deploy_rep
+        .dict_get("traceBallID")
+        .and_then(|v| v.as_i64())
+        .expect("traceBallID");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "abyssalMgr",
+        "AbyssalEntranceGateActivation",
+        &[PyRep::Integer(trace_id)],
+    )
+    .await
+    .expect("AbyssalEntranceGateActivation");
+    let abyss_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let abyss_end_ft = find_notif(&abyss_notifs, "OnAddExpiryDurationForAbyssalContent")[0]
+        .as_i64()
+        .expect("OnAddExpiryDurationForAbyssalContent endTime");
+    assert_sim_ft_near(
+        abyss_end_ft,
+        sim_abyss.saturating_add_secs(300).as_ticks(),
+        "OnAddExpiryDurationForAbyssalContent TiDi-scaled endTime",
+    );
+    assert!(
+        wall_ft.saturating_add_secs(1_200).as_ticks().saturating_sub(abyss_end_ft)
+            >= 1_195 * FILETIME_TICKS_PER_SEC
+    );
+
+    // 8. OnAddExpiryDurationForVoidSpaceContent & OnVoidSpaceRelog: SimFileTime in VOID_SPACE_SYSTEM_ID (-300s offset, 0.25 TiDi -> +450 sim-s).
+    rpc(
+        &ctx,
+        &mut sess_v,
+        "voidSpaceMgr",
+        "VoidSpacePlayerJump",
+        &[PyRep::Integer(void_fil_id), PyRep::Integer(777_196)],
+    )
+    .await
+    .expect("VoidSpacePlayerJump");
+    let void_notifs = drain_all(&ctx, &mut sess_v, pilot_v);
+    let void_end_ft = find_notif(&void_notifs, "OnAddExpiryDurationForVoidSpaceContent")[0]
+        .as_i64()
+        .expect("OnAddExpiryDurationForVoidSpaceContent endTime");
+    assert_sim_ft_near(
+        void_end_ft,
+        sim_void
+            .saturating_add_secs((VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS as i64) / 4)
+            .as_ticks(),
+        "OnAddExpiryDurationForVoidSpaceContent TiDi-scaled endTime",
+    );
+    assert!(
+        wall_ft
+            .saturating_add_secs(VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS as i64)
+            .as_ticks()
+            .saturating_sub(void_end_ft)
+            >= 1_645 * FILETIME_TICKS_PER_SEC
+    );
+
+    rpc(&ctx, &mut sess_v, "voidSpaceMgr", "ClientIsReady", &[])
+        .await
+        .expect("voidSpaceMgr.ClientIsReady");
+    let relog_notifs = drain_all(&ctx, &mut sess_v, pilot_v);
+    let relog_end_ft = find_notif(&relog_notifs, "OnVoidSpaceRelog")[0]
+        .dict_get("end_time")
+        .and_then(|v| v.as_i64())
+        .expect("OnVoidSpaceRelog end_time");
+    assert_eq!(relog_end_ft, void_end_ft);
+}
 }

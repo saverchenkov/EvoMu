@@ -1736,8 +1736,8 @@ async fn handle_request_scans(
         .filter(|&sid| sid > 0)
         .and_then(|sid| ctx.get_or_rebuild_ship_fitting(char_id, sid).ok());
 
-    let warp_ft = ctx.now_blueos_filetime_ticks();
-    let mut max_warp_end_ft = warp_ft;
+    let (warp_ft, wall_warp_ft) = (ctx.now_system_sim_filetime(Some(sys_id)), ctx.now_blueos_filetime_ticks());
+    let mut max_warp_ms: i64 = 0;
     for (pid, new_pos) in moved_balls {
         if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(pid).await {
             let old_pos = b.position;
@@ -1750,10 +1750,7 @@ async fn handle_request_scans(
                     .as_ref()
                     .and_then(|ps| {
                         let w600 = ps.get_attribute(600, &ctx.sde);
-                        let w1281 = {
-                            let m = ps.get_attribute(1281, &ctx.sde);
-                            if m > 0.0 { m } else { 1.0 }
-                        };
+                        let w1281 = Some(ps.get_attribute(1281, &ctx.sde)).filter(|&m| m > 0.0).unwrap_or(1.0);
                         (w600 > 0.0).then_some(w600 * w1281)
                     })
                     .or_else(|| {
@@ -1773,8 +1770,8 @@ async fn handle_request_scans(
                     .max(500.0);
                 if dist <= 150_000.0 {
                     let move_ms = ((dist / max_vel) * 1000.0).round().clamp(200.0, 5_000.0) as i64;
-                    let p_end_ft = warp_ft + move_ms * 10_000;
-                    max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
+                    let p_end_ft = wall_warp_ft + move_ms * 10_000;
+                    max_warp_ms = max_warp_ms.max(move_ms);
                     let _ = sys_handle.set_movement_mode(pid, eve_destiny::MovementMode::GotoDirection { direction: (new_pos - old_pos).normalize_or_zero() }).await;
                     let _ = sys_handle.set_speed_fraction(pid, 1.0).await;
                     let _ = ctx.emit_typed(
@@ -1792,8 +1789,8 @@ async fn handle_request_scans(
                     let accel_ms = 50.0 * (dist / 1_000.0).max(1.0).ln();
                     let cruise_ms = (dist / (warp_au * AU_IN_METERS)) * 1000.0;
                     let warp_ms = (accel_ms + cruise_ms).round().clamp(500.0, 30_000.0) as i64;
-                    let p_end_ft = warp_ft + warp_ms * 10_000;
-                    max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
+                    let p_end_ft = wall_warp_ft + warp_ms * 10_000;
+                    max_warp_ms = max_warp_ms.max(warp_ms);
                     let _ = sys_handle.set_movement_mode(pid, eve_destiny::MovementMode::new_warp(old_pos, new_pos, warp_au)).await;
                     let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
                     let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
@@ -2301,8 +2298,8 @@ async fn handle_request_scans(
         }).filter_map(|i| ctx.sde.types.get(&i.type_id)?.default_attributes.get(&1906).copied()).fold(1.0, |acc, pct| acc * (1.0 + pct / 100.0).clamp(0.5, 1.5));
         (base_ms * (1.0 - 0.05 * a_lvl) * (1.0 - 0.10 * acq_lvl) * mod_mult).round().clamp(1_500.0, 20_000.0) as i64
     });
-    let scan_end_ft = max_warp_end_ft + scan_ms * 10_000;
-    if max_warp_end_ft == warp_ft {
+    let scan_end_ft = wall_warp_ft + (max_warp_ms + scan_ms) * 10_000;
+    if max_warp_ms == 0 {
         {
             let mut pm = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
             for p in &active_probes { if let Some(mp) = pm.get_mut(&p.probe_id) { mp.state = PROBE_STATE_SCANNING; } }
@@ -2321,7 +2318,7 @@ async fn handle_request_scans(
     let _ = ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnSystemScanStarted {
-            start_time: max_warp_end_ft,
+            start_time: warp_ft.saturating_add_ms(max_warp_ms.max(0) as u64),
             duration_ms: scan_ms,
             probes: probe_scan_started_probes_dict(&scan_probe_positions),
         },

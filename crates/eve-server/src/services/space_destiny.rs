@@ -10,10 +10,8 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 const UPDATE_STATE_COOLDOWN_TICKS: u64 = 5;
-const UPDATE_STATE_COOLDOWN_WALL: Duration = Duration::from_secs(5);
 
 pub(crate) fn take_pending_structure_set_state(
     ctx: &ServerContext,
@@ -624,44 +622,61 @@ async fn push_set_state_with_guard_and_bootstrap(
     queue_set_state: bool,
 ) -> Result<(), BridgeRpcError> {
     let was_bootstrapped = ctx.is_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
-    let current_tick = handle.query_current_tick().await.unwrap_or(0);
+    let current_tick = handle.view().current_tick;
     let guard_key = (session.session_id, char_id);
     let mut should_push_set_state = true;
     if !is_explicit_rpc {
         ctx.systems
             .clear_explicit_update_state_guard(session.session_id, char_id);
     } else {
-        let mut map = ctx
-            .systems
-            .explicit_update_state_guards
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let force_bypass = !was_bootstrapped || force_bypass_cooldown;
-        let in_cooldown = !force_bypass
-            && map.get(&guard_key).copied().is_some_and(|prev| {
-                prev.sys_id == sys_id
-                    && prev.ship_id == observer_ball_id
-                    && current_tick >= prev.last_push_tick
-                    && current_tick.saturating_sub(prev.last_push_tick)
-                        < UPDATE_STATE_COOLDOWN_TICKS
-                    && prev.last_push_at.elapsed() < UPDATE_STATE_COOLDOWN_WALL
-            });
-        if in_cooldown {
-            should_push_set_state = false;
-        } else {
-            if map.len() > 4_096 {
-                let now = Instant::now();
-                map.retain(|_, v| now.duration_since(v.last_push_at) < Duration::from_secs(600));
+        let needs_prune = {
+            let mut map = ctx
+                .systems
+                .explicit_update_state_guards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let force_bypass = !was_bootstrapped || force_bypass_cooldown;
+            let in_cooldown = !force_bypass
+                && map.get(&guard_key).copied().is_some_and(|prev| {
+                    prev.sys_id == sys_id
+                        && prev.ship_id == observer_ball_id
+                        && current_tick >= prev.last_push_tick
+                        && current_tick.saturating_sub(prev.last_push_tick)
+                            < UPDATE_STATE_COOLDOWN_TICKS
+                });
+            if in_cooldown {
+                should_push_set_state = false;
+                false
+            } else {
+                let over = map.len() > 4_096;
+                map.insert(
+                    guard_key,
+                    crate::system_actor::ExplicitUpdateStateGuard {
+                        sys_id,
+                        ship_id: observer_ball_id,
+                        last_push_tick: current_tick,
+                    },
+                );
+                over
             }
-            map.insert(
-                guard_key,
-                crate::system_actor::ExplicitUpdateStateGuard {
-                    sys_id,
-                    ship_id: observer_ball_id,
-                    last_push_tick: current_tick,
-                    last_push_at: Instant::now(),
-                },
-            );
+        };
+        if needs_prune {
+            // Query live per-system simulation ticks outside the leaf lock so each guard expires
+            // strictly in its own solar system's tick domain (never global/wall time, #1196).
+            let active_ticks = ctx.systems.active_system_ticks();
+            let mut map = ctx
+                .systems
+                .explicit_update_state_guards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if map.len() > 4_096 {
+                map.retain(|_, v| {
+                    active_ticks.get(&v.sys_id).is_some_and(|&sys_tick| {
+                        sys_tick >= v.last_push_tick
+                            && sys_tick.saturating_sub(v.last_push_tick) < 600
+                    })
+                });
+            }
         }
     }
     if should_push_set_state {

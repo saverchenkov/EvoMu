@@ -266,8 +266,11 @@ pub async fn handle(
                             .copied()
                             .unwrap_or(vs.target_id)
                     });
-                    let rem_sec = vs.expires_at_sec.saturating_sub(ctx.now_unix()) as i64;
-                    let end_ft = ctx.now_blueos_filetime_ticks() + rem_sec.max(1) * 10_000_000;
+                    let expiry_unix = vs.expires_at_sec.max(ctx.now_unix().saturating_add(1));
+                    let end_ft = ctx.virtual_unix_expiry_to_sim_filetime_for_system(
+                        Some(VOID_SPACE_SYSTEM_ID),
+                        expiry_unix,
+                    );
                     // V24 Void Space nebula graphic ID from `res:/staticdata/voidspaceencounters.fsdbinary` (`nebulaGraphicIDs[0]`).
                     let nebula_graphic_id = vs.nebula_graphic_id.unwrap_or_else(|| {
                         resolve_void_space_nebula_graphic_id(
@@ -278,7 +281,7 @@ pub async fn handle(
                     let client_data = PyRep::Dict(vec![
                         (PyRep::String("content_id".into()), PyRep::Integer(persisted_cid)),
                         (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(nebula_graphic_id)),
-                        (PyRep::String("end_time".into()), PyRep::Integer(end_ft)),
+                        (PyRep::String("end_time".into()), PyRep::Integer(end_ft.as_ticks())),
                     ]);
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
@@ -920,7 +923,17 @@ fn emit_abyssal_entry_notifications(
         crate::router::NotificationTarget::Character(char_id),
         OnAbyssalLocationEntered { client_data },
     );
-    let end_ft = ctx.now_blueos_filetime_ticks() + remaining_sec.max(1) * 10_000_000;
+    let collapse_at_unix = read_abyssal_state(ctx, |st| {
+        st.pockets
+            .get(&char_id)
+            .filter(|p| p.collapse_at_sec > 0)
+            .map(|p| p.collapse_at_sec)
+    })
+    .unwrap_or_else(|| ctx.now_unix().saturating_add(remaining_sec.max(1) as u64));
+    let end_ft = ctx.virtual_unix_expiry_to_sim_filetime_for_system(
+        Some(ABYSSAL_SPACE_SYSTEM_ID),
+        collapse_at_unix,
+    );
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         OnAddExpiryDurationForAbyssalContent { end_time: end_ft },

@@ -290,3 +290,63 @@ mod tests {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn arch_debt_ratchet_1196_raw_filetime_conversions() {
+    let tmp = make_temp_dir("1196_raw_filetime_conversions");
+    let src = tmp.join("src");
+    std::fs::create_dir_all(src.join("services")).expect("create services dir");
+    std::fs::write(
+        src.join("services/new_bad.rs"),
+        r#"
+// unix_to_filetime(now) + 116_444_736_000_000_000
+const S1: &str = "unix_to_filetime(1)";
+const S2: &str = "116_444_736_000_000_000";
+pub fn bad(now: u64) -> i64 {
+    let a = unix_to_filetime(now);
+    let b = (now as i64) * 10_000_000 + 116_444_736_000_000_000;
+    let c = (now as i64) * 10_000_000 + 116444736000000000i64;
+    a + b + c
+}
+#[cfg(test)]
+mod tests {
+    fn t() -> i64 { 116_444_736_000_000_000 }
+}
+"#,
+    )
+    .expect("write new_bad.rs");
+
+    let ratchet = ArchDebtRatchet::load_default().expect("load default arch_debt_ratchet.json");
+    let rule = &ratchet.patterns["raw_filetime_conversions"];
+    assert!(!rule.zero_required);
+    assert_eq!(rule.owning_issue, Some(1196));
+    assert!(!rule.files.is_empty());
+
+    let report = scan_arch_debt_in_dir(&src).expect("scan raw_filetime_conversions");
+    assert_eq!(
+        report.patterns["raw_filetime_conversions"].occurrences, 3,
+        "expected exactly 3 non-comment/non-test raw FILETIME hits"
+    );
+    assert_eq!(
+        report.patterns["raw_filetime_conversions"]
+            .per_file
+            .get("services/new_bad.rs"),
+        Some(&3)
+    );
+    let err = ratchet
+        .assert_ratchet(&report)
+        .expect_err("unlisted raw_filetime_conversions file must fail ratchet");
+    assert!(err.contains("raw_filetime_conversions"), "unexpected error: {err}");
+
+    let clean_src = tmp.join("clean_src");
+    std::fs::create_dir_all(clean_src.join("services")).expect("create clean services dir");
+    std::fs::write(
+        clean_src.join("services/clean.rs"),
+        "pub fn ok(now: u64) -> i64 { eve_db::clock::WallFileTime::from_unix_secs_saturating(now).as_ticks() }\n",
+    )
+    .expect("write clean.rs");
+    ratchet
+        .verify_dir(&clean_src)
+        .expect("typed WallFileTime helper must pass raw_filetime_conversions ratchet");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

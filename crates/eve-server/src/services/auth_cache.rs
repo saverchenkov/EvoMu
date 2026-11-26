@@ -150,7 +150,7 @@ pub async fn handle(
                         notification_id: 0,
                         type_id: 0,
                         sender_id: session.character_id,
-                        created: ctx.now_blueos_filetime_ticks(),
+                        created: ctx.now_blueos_wall_filetime(),
                         data,
                     },
                 );

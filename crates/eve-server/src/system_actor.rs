@@ -478,6 +478,13 @@ impl SystemRegistry {
             .retain(|(sid, _), _| *sid != session_id);
     }
 
+    pub(crate) fn active_system_ticks(&self) -> HashMap<SolarSystemId, u64> {
+        self.active_system_handles()
+            .into_iter()
+            .filter_map(|(sid, h)| (!h.cmd_tx.is_closed()).then(|| (sid, h.view().current_tick)))
+            .collect()
+    }
+
     /// Acquires the exclusive per-system physics-step slot if no prior step for `solar_system_id` is still in flight.
     pub(crate) fn try_begin_physics_step(&self, solar_system_id: SolarSystemId) -> Option<PhysicsStepGuard> {
         let flag = {

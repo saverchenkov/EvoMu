@@ -925,10 +925,10 @@ pub fn emit_sim_clock_rebase_if_advanced(ctx: &ServerContext, prev_unix: u64, se
     if secs == 0 {
         return;
     }
-    let old_ft = (prev_unix as i64)
-        .saturating_mul(10_000_000)
-        .saturating_add(116_444_736_000_000_000);
-    let new_ft = ctx.now_blueos_filetime_ticks();
+    let old_ft = eve_db::clock::SimFileTime::from_ticks(
+        ctx.wall_unix_to_filetime(prev_unix).as_ticks(),
+    );
+    let new_ft = eve_db::clock::SimFileTime::from_ticks(ctx.now_blueos_filetime_ticks());
     if new_ft <= old_ft {
         return;
     }
@@ -943,13 +943,11 @@ pub fn emit_sim_clock_rebase_if_advanced(ctx: &ServerContext, prev_unix: u64, se
             .map(|c| c.solar_system_id)
             .collect()
     });
-    let times = PyRep::Tuple(vec![PyRep::Integer(old_ft), PyRep::Integer(new_ft)]);
+    let times = (old_ft, new_ft);
     for sys_id in systems {
         ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            DoSimClockRebase {
-                times: times.clone(),
-            },
+            DoSimClockRebase { times },
         );
     }
 }

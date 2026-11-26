@@ -690,13 +690,12 @@ pub struct WeaponVolleyOutput {
     pub(crate) has_post_unlock_work: bool,
 }
 
-/// Per-session `beyonce.UpdateStateRequest` cooldown state stored per `ServerContext` on `SystemRegistry` (`#1169`).
+/// Per-session `beyonce.UpdateStateRequest` cooldown state stored per `ServerContext` on `SystemRegistry` (`#1169`, `RT-91`, `#1196`).
 #[derive(Debug, Clone, Copy)]
 pub struct ExplicitUpdateStateGuard {
     pub sys_id: u32,
     pub ship_id: i64,
     pub last_push_tick: u64,
-    pub last_push_at: std::time::Instant,
 }
 
 /// Sim-clock state for an active module reload (`#1081`).

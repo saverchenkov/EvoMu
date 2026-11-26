@@ -99,10 +99,10 @@ fn broadcast_sim_clock_rebase_to_space_chars(
             NotificationTarget::Character(char_id),
             "solarsystemid2",
             crate::router::notify_registry::DoSimClockRebase {
-                times: PyRep::Tuple(vec![
-                    PyRep::Integer(old_sim_ft),
-                    PyRep::Integer(new_sim_ft),
-                ]),
+                times: (
+                    eve_db::clock::SimFileTime::from_ticks(old_sim_ft),
+                    eve_db::clock::SimFileTime::from_ticks(new_sim_ft),
+                ),
             },
         );
     }
@@ -248,10 +248,10 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::DoSimClockRebase {
-            times: PyRep::Tuple(vec![
-                PyRep::Integer(old_sim_ft),
-                PyRep::Integer(new_sim_ft),
-            ]),
+            times: (
+                eve_db::clock::SimFileTime::from_ticks(old_sim_ft),
+                eve_db::clock::SimFileTime::from_ticks(new_sim_ft),
+            ),
         },
     );
     crate::services::combat_crimewatch::crimewatch_timers::reemit_active_crimewatch_timers_on_tidi_change(
@@ -354,10 +354,10 @@ pub fn sync_jump_clock_and_emit_rebase_if_needed(
         ctx.emit_typed(
             NotificationTarget::Character(char_id),
             crate::router::notify_registry::DoSimClockRebase {
-                times: PyRep::Tuple(vec![
-                    PyRep::Integer(old_sim_ft),
-                    PyRep::Integer(dest_sim_ft),
-                ]),
+                times: (
+                    eve_db::clock::SimFileTime::from_ticks(old_sim_ft),
+                    eve_db::clock::SimFileTime::from_ticks(dest_sim_ft),
+                ),
             },
         );
         crate::services::combat_crimewatch::crimewatch_timers::reemit_active_crimewatch_timers_on_tidi_change(

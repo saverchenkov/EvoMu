@@ -406,6 +406,7 @@ enum PatternKind {
     EffectiveCorpMemberRolesCallSites,
     CorpRoleTableReads,
     RequestCorpRoleMaskReads,
+    RawFiletimeConversions,
 }
 
 impl PatternKind {
@@ -445,6 +446,7 @@ impl PatternKind {
         Self::EffectiveCorpMemberRolesCallSites,
         Self::CorpRoleTableReads,
         Self::RequestCorpRoleMaskReads,
+        Self::RawFiletimeConversions,
     ];
 
     fn as_str(self) -> &'static str {
@@ -490,6 +492,7 @@ impl PatternKind {
             }
             Self::CorpRoleTableReads => "corp_role_table_reads",
             Self::RequestCorpRoleMaskReads => "request_corp_role_mask_reads",
+            Self::RawFiletimeConversions => "raw_filetime_conversions",
         }
     }
 
@@ -578,6 +581,9 @@ impl PatternKind {
             ),
             Self::RequestCorpRoleMaskReads => {
                 Some(r"\bcorp_role_mask\b|\.\s*bitmask\b")
+            }
+            Self::RawFiletimeConversions => {
+                Some(r"\b(?:unix_to_filetime\s*\(|116_?444_?736_?000_?000_?000)")
             }
         }
     }
@@ -707,7 +713,38 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::RequestCorpRoleMaskReads => {
             crate::arch_debt_ratchet_corp_roles::count_request_corp_role_mask_reads(text)
         }
+        PatternKind::RawFiletimeConversions => count_raw_filetime_conversions(text),
     }
+}
+
+fn count_raw_filetime_conversions(text: &str) -> usize {
+    let mut count = count_word_lparen(text, "unix_to_filetime");
+    if !text.contains("116") {
+        return count;
+    }
+    const GROUPS: [&[u8]; 5] = [b"444", b"736", b"000", b"000", b"000"];
+    let b = text.as_bytes();
+    for (i, _) in text.match_indices("116") {
+        if !has_word_boundary_before(b, i) {
+            continue;
+        }
+        let mut pos = i + 3;
+        let mut matched = true;
+        for &g in &GROUPS {
+            if pos < b.len() && b[pos] == b'_' {
+                pos += 1;
+            }
+            if b.get(pos..pos + g.len()) != Some(g) {
+                matched = false;
+                break;
+            }
+            pos += g.len();
+        }
+        if matched {
+            count += 1;
+        }
+    }
+    count
 }
 
 pub(crate) fn count_fn_decl(text: &str, hint: &str, matches_after_ws: impl Fn(&[u8]) -> bool) -> usize {
@@ -1619,6 +1656,7 @@ mod tests {
             "external_set_combat_state_calls",
             "manual_module_activation_rollback",
             "module_active_states",
+            "raw_filetime_conversions",
         ] {
             assert!(
                 ratchet.patterns.contains_key(required_key),

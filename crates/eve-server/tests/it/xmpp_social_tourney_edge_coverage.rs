@@ -1150,8 +1150,26 @@ async fn test_notify_emitters_character_and_batch3_gm_slash_cmds() {
     let uid1 = s1.user_id.expect("uid1");
 
     // Exercise direct notification emitters cleanly
-    ne::emit_setattr_notifications(&ctx, PILOT_1, 30_000_142, 900_001, 12, 13_350_000_000_000_0000, 0.0, 1.0);
-    ne::emit_setattr_notifications(&ctx, PILOT_1, 60_003_760, 900_002, 12, 13_350_000_000_000_0000, 42.0, 10.0);
+    ne::emit_setattr_notifications(
+        &ctx,
+        PILOT_1,
+        30_000_142,
+        900_001,
+        12,
+        eve_db::clock::SimFileTime::from_ticks(13_350_000_000_000_0000),
+        0.0,
+        1.0,
+    );
+    ne::emit_setattr_notifications(
+        &ctx,
+        PILOT_1,
+        60_003_760,
+        900_002,
+        12,
+        eve_db::clock::SimFileTime::from_ticks(13_350_000_000_000_0000),
+        42.0,
+        10.0,
+    );
     ne::emit_cluster_shutdown_cancelled(&ctx, "");
     ne::emit_cluster_shutdown_cancelled(&ctx, "UI/CancelledByGM");
     ne::emit_global_config_updated(&ctx, "testKey", &PyRep::Integer(7));

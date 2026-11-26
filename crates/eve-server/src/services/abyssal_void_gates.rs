@@ -1006,9 +1006,10 @@ pub(crate) async fn handle_void_space_player_jump(
             client_data,
         },
     );
-    let void_end_ft = ctx.now_blueos_filetime_ticks()
-        + (crate::services::abyssal_void_mgr::VOID_SPACE_ENCOUNTER_LIFE_TIME_SECS as i64)
-            * 10_000_000;
+    let void_end_ft = ctx.virtual_unix_expiry_to_sim_filetime_for_system(
+        Some(VOID_SPACE_SYSTEM_ID),
+        void_expires_at,
+    );
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnAddExpiryDurationForVoidSpaceContent {

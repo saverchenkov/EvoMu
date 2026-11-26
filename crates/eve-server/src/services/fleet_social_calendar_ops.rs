@@ -38,7 +38,7 @@ fn emit_new_calendar_event(
         OnNewCalendarEventOptAuto {
             event_id,
             owner_id,
-            event_date_time,
+            event_date_time: eve_db::clock::WallFileTime::from_ticks(event_date_time),
             event_duration: duration,
             event_title: title.to_string(),
             importance,
@@ -66,8 +66,8 @@ fn emit_edit_calendar_event(
         OnEditCalendarEvent {
             event_id,
             owner_id,
-            old_event_date_time,
-            event_date_time,
+            old_event_date_time: eve_db::clock::WallFileTime::from_ticks(old_event_date_time),
+            event_date_time: eve_db::clock::WallFileTime::from_ticks(event_date_time),
             event_duration: duration,
             event_title: title.to_string(),
             importance,
@@ -89,7 +89,7 @@ fn emit_remove_calendar_event(
         "charid",
         OnRemoveCalendarEvent {
             event_id,
-            event_date_time,
+            event_date_time: eve_db::clock::WallFileTime::from_ticks(event_date_time),
             is_deleted,
         },
     );

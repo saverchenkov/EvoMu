@@ -1508,7 +1508,6 @@ pub async fn handle_safe_logoff(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
-    let unrebased_offset_secs = ctx.unrebased_clock_offset_secs();
     let mut failed_conditions: Vec<String> = Vec::new();
 
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -1611,10 +1610,10 @@ pub async fn handle_safe_logoff(
         );
     });
 
-    // Subtract un-rebased `/advancetime` lead so V24 `SafeLogoffTimer2.UpdateLogoffTime`
-    // compares against client `blue.os.GetSimTime()` while server-side expiry in
-    // `SafeLogoffEntry.complete_at_unix` still tracks `now_unix + 30` (#1360, #1386).
-    let safe_logoff_ft = unix_to_filetime(complete_at_unix.saturating_sub(unrebased_offset_secs));
+    // Map `complete_at_unix` into `char_id`'s `SimFileTime` domain (`RT-99`: subtracts
+    // un-rebased `/advancetime` lead, shifts by system sim/wall offset, and scales remaining ticks
+    // by active TiDi while `SafeLogoffEntry.complete_at_unix` tracks virtual expiry).
+    let safe_logoff_ft = ctx.virtual_unix_expiry_to_sim_filetime_for_char(char_id, complete_at_unix);
     let started_notif = OnSafeLogoffTimerStarted {
         safe_logoff_time: safe_logoff_ft,
     };

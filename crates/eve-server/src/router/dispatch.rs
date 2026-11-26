@@ -1739,7 +1739,7 @@ pub(crate) fn maybe_emit_login_sim_clock_rebase(
             .now_unix()
             .saturating_sub(ctx.unrebased_clock_offset_secs());
         (bp_unix > 0 && bp_unix < client_now_unix)
-            .then(|| ((bp_unix as i64) + 11_644_473_600).saturating_mul(10_000_000))
+            .then(|| ctx.wall_unix_to_filetime(bp_unix).as_ticks())
     });
     if let Some(cur_sim_ft) = cur_sim_ft_opt {
         if cur_sim_ft < now_wall_ft {
@@ -1765,10 +1765,10 @@ pub(crate) fn maybe_emit_login_sim_clock_rebase(
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::DoSimClockRebase {
-                    times: PyRep::Tuple(vec![
-                        PyRep::Integer(now_wall_ft),
-                        PyRep::Integer(cur_sim_ft),
-                    ]),
+                    times: (
+                        eve_db::clock::SimFileTime::from_ticks(now_wall_ft),
+                        eve_db::clock::SimFileTime::from_ticks(cur_sim_ft),
+                    ),
                 },
             );
         }
