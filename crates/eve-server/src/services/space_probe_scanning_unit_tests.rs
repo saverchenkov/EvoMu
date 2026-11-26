@@ -2931,3 +2931,173 @@ async fn bf01_space_probe_scanning_rejects_active_upwell_structure_control() {
         assert_eq!(err.code, err_not_in_space, "{method}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rt_109_poisoned_probe_locks_recover_cleanly_on_read_and_write() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let probe_id = 890_999_001_i64;
+    let overdue_lost_id = 890_999_002_i64;
+    let overdue_ret_id = 890_999_003_i64;
+    let now_unix = ctx.now_unix();
+    let kw = HashMap::new();
+
+    let lost_ship_id = 999_999_002_i64;
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&lost_ship_id)));
+
+    {
+        let mut probes = ctx.active_scanner_probes.write().unwrap();
+        probes.insert(
+            probe_id,
+            ActiveScannerProbe {
+                probe_id,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+        probes.insert(
+            overdue_lost_id,
+            ActiveScannerProbe {
+                probe_id: overdue_lost_id,
+                probe_type_id: 30_013,
+                owner_char_id: 90_000_002,
+                ship_id: lost_ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 60.0,
+                launched_at_unix: now_unix.saturating_sub(120),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    }
+
+    let probes_lock = Arc::clone(&ctx.active_scanner_probes);
+    let _ = std::thread::spawn(move || {
+        let _guard = probes_lock.write().unwrap();
+        panic!("intentional RT-109 probe lock poison");
+    })
+    .join();
+    let scan_ctx_lock = Arc::clone(&ctx.active_probe_scan_contexts);
+    let _ = std::thread::spawn(move || {
+        let _guard = scan_ctx_lock.write().unwrap();
+        panic!("intentional RT-109 scan context lock poison");
+    })
+    .join();
+    assert!(ctx.active_scanner_probes.read().is_err());
+    assert!(ctx.active_probe_scan_contexts.write().is_err());
+
+    let bound = BoundObjectEntry {
+        bound_id: 991,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 991,
+    };
+
+    // RequestScans and DestroyProbe must still recover poisoned locks rather than dropping/failing.
+    let scan_res = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "RequestScans",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("poisoned probe locks must recover cleanly in RequestScans");
+    assert!(matches!(scan_res, PyRep::List(_)));
+
+    let destroyed = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(probe_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("poisoned probe locks must recover cleanly in DestroyProbe");
+    assert_eq!(destroyed.dict_get("destroyedCount"), Some(&PyRep::Integer(1)));
+    assert!(
+        !ctx.active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&probe_id)
+    );
+
+    // Lock remains poisoned: overdue-probe background & per-char sweeps must also recover
+    // cleanly across read() (`expire_all_overdue_probes`) and both write() sites (`state = -1`
+    // claim and `state = -2` lost-probe mark in `expire_overdue_probes_for_char`).
+    assert!(ctx.active_scanner_probes.read().is_err());
+    expire_all_overdue_probes(&ctx, now_unix).await;
+    assert_eq!(
+        ctx.active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&overdue_lost_id)
+            .map(|p| p.state),
+        Some(-2)
+    );
+
+    ctx.active_scanner_probes
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            overdue_ret_id,
+            ActiveScannerProbe {
+                probe_id: overdue_ret_id,
+                probe_type_id: 30_013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 60.0,
+                launched_at_unix: now_unix.saturating_sub(120),
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
+    let (returned, lost) = expire_overdue_probes_for_char(&ctx, char_id, now_unix).await;
+    assert_eq!(returned, vec![overdue_ret_id]);
+    assert!(lost.is_empty());
+    assert_eq!(
+        ctx.active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&overdue_ret_id)
+            .map(|p| p.state),
+        Some(-1)
+    );
+}

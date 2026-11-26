@@ -127,13 +127,7 @@ pub(super) async fn validate_in_space_ship_store_allowed(
             ));
         }
 
-        let has_active_cycles = sys
-            .actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == sid);
+        let has_active_cycles = sys.has_any_active_module_cycle(sid);
         let has_active_mod_state = ctx.db.with_snapshot(|snap| {
             snap.items
                 .values()
@@ -178,15 +172,7 @@ pub(super) async fn cleanup_ship_leaving_space(
     );
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
     crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, ship_id);
-    let cycle_mods: Vec<i64> = sys
-        .actor_state
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .active_module_cycles
-        .iter()
-        .filter(|c| c.ship_id == ship_id)
-        .map(|c| c.module_id)
-        .collect();
+    let cycle_mods = sys.active_cycle_module_ids_for_ship(ship_id);
     for mid in cycle_mods {
         sys.try_remove_module_cycle(ship_id, mid);
     }

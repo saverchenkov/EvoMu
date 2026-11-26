@@ -1616,6 +1616,30 @@ pub enum SystemCommand {
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
+    /// Test-only exclusive access to actor `Ballpark` and `SystemActorState` through the mailbox (`#1342`).
+    #[cfg(any(test, feature = "testkit"))]
+    TestAccess {
+        op: TestAccessOp,
+        mutated: bool,
+        reply: oneshot::Sender<()>,
+    },
+}
+
+/// Opaque test-only closure passed inside [`SystemCommand::TestAccess`] (`#1342`).
+#[cfg(any(test, feature = "testkit"))]
+pub struct TestAccessOp(pub(crate) Box<dyn FnOnce(&mut Ballpark, &mut SystemActorState) + Send>);
+
+#[cfg(any(test, feature = "testkit"))]
+impl TestAccessOp {
+    pub(crate) fn new(
+        op: impl FnOnce(&mut Ballpark, &mut SystemActorState) + Send + 'static,
+    ) -> Self {
+        Self(Box::new(op))
+    }
+
+    pub(crate) fn run(self, ballpark: &mut Ballpark, actor_st: &mut SystemActorState) {
+        (self.0)(ballpark, actor_st);
+    }
 }
 
 impl SystemCommand {
@@ -1624,6 +1648,10 @@ impl SystemCommand {
     /// Observer-drain commands return `false` here because they only mutate [`SystemView`] when
     /// `sync_player_slim_items` updates player metadata, which the actor checks dynamically (`RT-43`).
     pub(crate) fn may_mutate_system_view(&self) -> bool {
+        #[cfg(any(test, feature = "testkit"))]
+        if let Self::TestAccess { mutated, .. } = self {
+            return *mutated;
+        }
         !matches!(
             self,
             Self::GetBallSlimItem { .. }
@@ -1788,6 +1816,14 @@ pub struct SystemView {
     pub pending_warp_finished: HashSet<BallId>,
     pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     pub drone_next_ready_unix: HashMap<BallId, u64>,
+    pub stargate_activation_states: BTreeMap<BallId, eve_destiny::StargateActivationState>,
+    pub active_module_cycles: Vec<ActiveModuleCycle>,
+    pub external_active_modules: HashSet<(BallId, ItemId)>,
+    pub active_nanite_repairs: Vec<ActiveNaniteRepair>,
+    pub pending_anchoring_disruptor_count: usize,
+    pub protection_registry: HashMap<BallId, ActorShipProtection>,
+    pub fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
+    pub asteroids: HashMap<BallId, AsteroidState>,
 }
 
 impl Default for SystemView {
@@ -1827,8 +1863,41 @@ impl Default for SystemView {
             pending_warp_finished: HashSet::new(),
             active_drone_miners: HashMap::new(),
             drone_next_ready_unix: HashMap::new(),
+            stargate_activation_states: BTreeMap::new(),
+            active_module_cycles: Vec::new(),
+            external_active_modules: HashSet::new(),
+            active_nanite_repairs: Vec::new(),
+            pending_anchoring_disruptor_count: 0,
+            protection_registry: HashMap::new(),
+            fit_projections: HashMap::new(),
+            asteroids: HashMap::new(),
         }
     }
+}
+
+#[derive(Default)]
+struct ViewActorSnapshot {
+    sim_elapsed_secs: f64,
+    active_module_ships: HashSet<BallId>,
+    active_bastion_ships: HashSet<BallId>,
+    active_triage_ships: HashSet<BallId>,
+    active_siege_ships: HashSet<BallId>,
+    active_industrial_core_ships: HashSet<BallId>,
+    active_microjump_ships: HashSet<BallId>,
+    active_immobilize_or_no_assist_ships: HashSet<BallId>,
+    warp_provenance: HashMap<BallId, WarpProvenance>,
+    active_warps: HashMap<BallId, CharacterId>,
+    return_warps: HashSet<BallId>,
+    pending_warp_finished: HashSet<BallId>,
+    active_drone_miners: HashMap<BallId, super::DroneMiningState>,
+    drone_next_ready_unix: HashMap<BallId, u64>,
+    active_module_cycles: Vec<ActiveModuleCycle>,
+    external_active_modules: HashSet<(BallId, ItemId)>,
+    active_nanite_repairs: Vec<ActiveNaniteRepair>,
+    pending_anchoring_disruptor_count: usize,
+    protection_registry: HashMap<BallId, ActorShipProtection>,
+    fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
+    asteroids: HashMap<BallId, AsteroidState>,
 }
 
 impl SystemView {
@@ -1877,22 +1946,7 @@ impl SystemView {
             }
         }
 
-        let (
-            sim_elapsed_secs,
-            active_module_ships,
-            active_bastion_ships,
-            active_triage_ships,
-            active_siege_ships,
-            active_industrial_core_ships,
-            active_microjump_ships,
-            active_immobilize_or_no_assist_ships,
-            warp_provenance,
-            active_warps,
-            return_warps,
-            pending_warp_finished,
-            active_drone_miners,
-            drone_next_ready_unix,
-        ) = if let Some(st) = actor_state {
+        let actor = if let Some(st) = actor_state {
             let mut mods = HashSet::new();
             let mut bastion = HashSet::new();
             let mut triage = HashSet::new();
@@ -1927,56 +1981,57 @@ impl SystemView {
             for &(ship_id, _) in &st.external_active_modules {
                 mods.insert(ship_id);
             }
-            (
-                st.sim_elapsed_secs,
-                mods,
-                bastion,
-                triage,
-                siege,
-                ind_core,
-                microjump,
-                immobilize_or_no_assist,
-                st.warp_state.provenance.clone(),
-                st.warp_state.active_warps.clone(),
-                st.warp_state.return_warps.clone(),
-                st.warp_state.pending_warp_finished.clone(),
-                st.active_drone_miners.clone(),
-                st.drone_next_ready_unix.clone(),
-            )
+            ViewActorSnapshot {
+                sim_elapsed_secs: st.sim_elapsed_secs,
+                active_module_ships: mods,
+                active_bastion_ships: bastion,
+                active_triage_ships: triage,
+                active_siege_ships: siege,
+                active_industrial_core_ships: ind_core,
+                active_microjump_ships: microjump,
+                active_immobilize_or_no_assist_ships: immobilize_or_no_assist,
+                warp_provenance: st.warp_state.provenance.clone(),
+                active_warps: st.warp_state.active_warps.clone(),
+                return_warps: st.warp_state.return_warps.clone(),
+                pending_warp_finished: st.warp_state.pending_warp_finished.clone(),
+                active_drone_miners: st.active_drone_miners.clone(),
+                drone_next_ready_unix: st.drone_next_ready_unix.clone(),
+                active_module_cycles: st.active_module_cycles.clone(),
+                external_active_modules: st.external_active_modules.clone(),
+                active_nanite_repairs: st.active_nanite_repairs.clone(),
+                pending_anchoring_disruptor_count: st.pending_anchoring_disruptors.len(),
+                protection_registry: st.protection_registry.clone(),
+                fit_projections: st.fit_projections.clone(),
+                asteroids: st.asteroids.clone(),
+            }
         } else if let Some(prev) = previous {
-            (
-                prev.sim_elapsed_secs,
-                prev.active_module_ships.clone(),
-                prev.active_bastion_ships.clone(),
-                prev.active_triage_ships.clone(),
-                prev.active_siege_ships.clone(),
-                prev.active_industrial_core_ships.clone(),
-                prev.active_microjump_ships.clone(),
-                prev.active_immobilize_or_no_assist_ships.clone(),
-                prev.warp_provenance.clone(),
-                prev.active_warps.clone(),
-                prev.return_warps.clone(),
-                prev.pending_warp_finished.clone(),
-                prev.active_drone_miners.clone(),
-                prev.drone_next_ready_unix.clone(),
-            )
+            ViewActorSnapshot {
+                sim_elapsed_secs: prev.sim_elapsed_secs,
+                active_module_ships: prev.active_module_ships.clone(),
+                active_bastion_ships: prev.active_bastion_ships.clone(),
+                active_triage_ships: prev.active_triage_ships.clone(),
+                active_siege_ships: prev.active_siege_ships.clone(),
+                active_industrial_core_ships: prev.active_industrial_core_ships.clone(),
+                active_microjump_ships: prev.active_microjump_ships.clone(),
+                active_immobilize_or_no_assist_ships: prev
+                    .active_immobilize_or_no_assist_ships
+                    .clone(),
+                warp_provenance: prev.warp_provenance.clone(),
+                active_warps: prev.active_warps.clone(),
+                return_warps: prev.return_warps.clone(),
+                pending_warp_finished: prev.pending_warp_finished.clone(),
+                active_drone_miners: prev.active_drone_miners.clone(),
+                drone_next_ready_unix: prev.drone_next_ready_unix.clone(),
+                active_module_cycles: prev.active_module_cycles.clone(),
+                external_active_modules: prev.external_active_modules.clone(),
+                active_nanite_repairs: prev.active_nanite_repairs.clone(),
+                pending_anchoring_disruptor_count: prev.pending_anchoring_disruptor_count,
+                protection_registry: prev.protection_registry.clone(),
+                fit_projections: prev.fit_projections.clone(),
+                asteroids: prev.asteroids.clone(),
+            }
         } else {
-            (
-                0.0,
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashSet::new(),
-                HashSet::new(),
-                HashMap::new(),
-                HashMap::new(),
-            )
+            ViewActorSnapshot::default()
         };
 
         Self {
@@ -1984,7 +2039,7 @@ impl SystemView {
             current_tick: ballpark.current_tick,
             sim_unix_secs: ballpark.sim_unix_secs,
             tidi_factor,
-            sim_elapsed_secs,
+            sim_elapsed_secs: actor.sim_elapsed_secs,
             balls: ballpark.balls.clone(),
             static_ball_ids: ballpark.static_ball_ids.iter().copied().collect(),
             non_free_ball_ids: ballpark.non_free_ball_ids.iter().copied().collect(),
@@ -2009,20 +2064,36 @@ impl SystemView {
             grids: ballpark.grids.clone(),
             registered_observers: ballpark.registered_observers.clone(),
             target_locks: ballpark.target_locks.clone(),
-            active_module_ships,
-            active_bastion_ships,
-            active_triage_ships,
-            active_siege_ships,
-            active_industrial_core_ships,
-            active_microjump_ships,
-            active_immobilize_or_no_assist_ships,
-            warp_provenance,
-            active_warps,
-            return_warps,
-            pending_warp_finished,
-            active_drone_miners,
-            drone_next_ready_unix,
+            active_module_ships: actor.active_module_ships,
+            active_bastion_ships: actor.active_bastion_ships,
+            active_triage_ships: actor.active_triage_ships,
+            active_siege_ships: actor.active_siege_ships,
+            active_industrial_core_ships: actor.active_industrial_core_ships,
+            active_microjump_ships: actor.active_microjump_ships,
+            active_immobilize_or_no_assist_ships: actor.active_immobilize_or_no_assist_ships,
+            warp_provenance: actor.warp_provenance,
+            active_warps: actor.active_warps,
+            return_warps: actor.return_warps,
+            pending_warp_finished: actor.pending_warp_finished,
+            active_drone_miners: actor.active_drone_miners,
+            drone_next_ready_unix: actor.drone_next_ready_unix,
+            stargate_activation_states: ballpark.stargate_activation_states.clone(),
+            active_module_cycles: actor.active_module_cycles,
+            external_active_modules: actor.external_active_modules,
+            active_nanite_repairs: actor.active_nanite_repairs,
+            pending_anchoring_disruptor_count: actor.pending_anchoring_disruptor_count,
+            protection_registry: actor.protection_registry,
+            fit_projections: actor.fit_projections,
+            asteroids: actor.asteroids,
         }
+    }
+
+    /// Mirrors `Ballpark::stargate_activation_state`.
+    pub fn stargate_activation_state(
+        &self,
+        gate_id: BallId,
+    ) -> Option<eve_destiny::StargateActivationState> {
+        self.stargate_activation_states.get(&gate_id).copied()
     }
 
     pub fn ball(&self, ball_id: BallId) -> Option<&Ball> {

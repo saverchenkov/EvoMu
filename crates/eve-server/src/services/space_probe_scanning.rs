@@ -862,7 +862,8 @@ fn handle_qa_override_probe_expiry(
         },
     };
     let mut updated_any = false;
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         for p in map.values_mut() {
             if p.owner_char_id == char_id {
                 p.max_flight_time_s = secs;
@@ -1183,10 +1184,9 @@ fn handle_set_activity_state(
         return Some(Err(e));
     }
 
-    let mutation_res = if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    let mutation_res = {
+        let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         apply_set_activity_state_updates(&mut map, char_id, sys_id, &per_probe_states, bulk_state)
-    } else {
-        Ok(Vec::new())
     };
     let changed = match mutation_res {
         Ok(c) => c,
@@ -1606,9 +1606,12 @@ async fn handle_request_scans(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let has_any_tracked_probes = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
-        map.values().any(|p| p.owner_char_id == char_id && p.state >= 0)
-    });
+    let has_any_tracked_probes = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .any(|p| p.owner_char_id == char_id && p.state >= 0);
     if !has_any_tracked_probes && session.ship_id.is_none() {
         let msg = "Session has no active ship";
         return Some(Err(BridgeRpcError::with_client_error(
@@ -1664,7 +1667,8 @@ async fn handle_request_scans(
         .or(raw_range_step_kw)
         .map(|v| v.clamp(1, 8) as i32);
     let sys_id = caller_sys;
-    if let Ok(probe_map) = ctx.active_scanner_probes.read() {
+    {
+        let probe_map = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner());
         let has_active_before = probe_map
             .values()
             .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0);
@@ -1680,16 +1684,19 @@ async fn handle_request_scans(
     if has_any_tracked_probes {
         let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     }
-    let has_active_in_sys = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
-        map.values()
-            .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
-    });
+    let has_active_in_sys = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0);
     if !has_active_in_sys {
         return Some(Err(no_active_probes_err()));
     }
 
     let mut moved_balls: Vec<(i64, DVec3)> = Vec::new();
-    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+    {
+        let mut probe_map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         let Some((staged_updates, apply_bulk_step)) =
             stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map)
         else {
@@ -1720,11 +1727,12 @@ async fn handle_request_scans(
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
     let scan_ship_id_for_move = session.ship_id.or_else(|| {
-        ctx.active_scanner_probes.read().ok().and_then(|m| {
-            m.values()
-                .find(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
-                .map(|p| p.ship_id)
-        })
+        ctx.active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .map(|p| p.ship_id)
     });
     let move_fit_opt = scan_ship_id_for_move
         .filter(|&sid| sid > 0)
@@ -1737,7 +1745,7 @@ async fn handle_request_scans(
             let old_pos = b.position;
             let dist = (old_pos - new_pos).length();
             if dist > 1.0 {
-                let p_tid = ctx.active_scanner_probes.read().ok().and_then(|m| m.get(&pid).map(|p| p.probe_type_id)).unwrap_or(30_013);
+                let p_tid = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner()).get(&pid).map(|p| p.probe_type_id).unwrap_or(30_013);
                 let p_sde = ctx.sde.types.get(&p_tid);
                 let p_dogma = evaluate_probe_dogma_state(move_fit_opt.as_ref(), pid, p_tid, &ctx.sde);
                 let warp_au: f64 = p_dogma
@@ -1778,7 +1786,8 @@ async fn handle_request_scans(
                             probe_state: PROBE_STATE_MOVING as i64,
                         },
                     );
-                    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+                    {
+                        let mut probe_map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
                         if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = PROBE_STATE_MOVING; }
                     }
                 } else {
@@ -1807,7 +1816,8 @@ async fn handle_request_scans(
                             duration: warp_ms,
                         },
                     );
-                    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+                    {
+                        let mut probe_map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
                         if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = PROBE_STATE_WARPING; }
                     }
                 }
@@ -1815,9 +1825,14 @@ async fn handle_request_scans(
         }
     }
 
-    let active_probes: Vec<crate::router::ActiveScannerProbe> = ctx.active_scanner_probes.read().ok()
-        .map(|map| map.values().filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0).cloned().collect())
-        .unwrap_or_default();
+    let active_probes: Vec<crate::router::ActiveScannerProbe> = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .cloned()
+        .collect();
     if active_probes.is_empty() {
         return Some(Err(BridgeRpcError { code: "NoActiveProbes".into(), message: "No active scanner probes in space".into(), client_error: None }));
     }
@@ -2290,7 +2305,8 @@ async fn handle_request_scans(
     });
     let scan_end_ft = max_warp_end_ft + scan_ms * 10_000;
     if max_warp_end_ft == warp_ft {
-        if let Ok(mut pm) = ctx.active_scanner_probes.write() {
+        {
+            let mut pm = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
             for p in &active_probes { if let Some(mp) = pm.get_mut(&p.probe_id) { mp.state = PROBE_STATE_SCANNING; } }
         }
         for p in &active_probes {
@@ -2389,7 +2405,8 @@ async fn handle_recover_probes(
             }
             if list.is_empty() {
                 explicit_empty_list = true;
-            } else if let Ok(map) = ctx.active_scanner_probes.read() {
+            } else {
+                let map = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner());
                 for &pid in &target_probe_ids {
                     if let Some(p) = map.get(&pid) {
                         if p.owner_char_id != char_id || p.solar_system_id != sys_id || p.state <= 0
@@ -2414,10 +2431,11 @@ async fn handle_recover_probes(
                     eve_proto::ClientError::CustomInfo(msg.into()),
                 )));
             };
-            let found_owned = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
+            let found_owned = {
+                let map = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner());
                 map.get(&pid)
                     .is_some_and(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
-            });
+            };
             if !found_owned {
                 let msg = format!("Scanner probe {pid} not found");
                 return Some(Err(BridgeRpcError::with_client_error(
@@ -2437,14 +2455,13 @@ async fn handle_recover_probes(
 
     let candidate_probes: Vec<crate::router::ActiveScannerProbe> = if explicit_empty_list {
         Vec::new()
-    } else if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    } else {
+        let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         let ids: Vec<i64> = map.values()
             .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 && (target_probe_ids.is_empty() || target_probe_ids.contains(&p.probe_id)))
             .map(|p| p.probe_id)
             .collect();
         ids.into_iter().filter_map(|id| map.remove(&id)).collect()
-    } else {
-        Vec::new()
     };
 
     let ship_id_opt = session.ship_id.or_else(|| candidate_probes.first().map(|p| p.ship_id));
@@ -2579,10 +2596,9 @@ async fn handle_recover_probes(
     }
 
     if !unrecovered_probes.is_empty() {
-        if let Ok(mut map) = ctx.active_scanner_probes.write() {
-            for p in unrecovered_probes {
-                map.insert(p.probe_id, p);
-            }
+        let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
+        for p in unrecovered_probes {
+            map.insert(p.probe_id, p);
         }
     }
     if !recovered_probes.is_empty() {
@@ -2708,7 +2724,8 @@ async fn handle_reconnect_probes(
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     let ship_id = session.ship_id.unwrap_or(0);
     let mut reconnected_probes = Vec::new();
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         let existing_active = map
             .values()
             .filter(|p| {
@@ -2829,11 +2846,9 @@ async fn handle_destroy_probe(
             RejectNotFound,
             NotInTracker,
         }
-        let check = ctx
-            .active_scanner_probes
-            .read()
-            .ok()
-            .map_or(ProbeTargetCheck::NotInTracker, |map| match map.get(&pid) {
+        let check = {
+            let map = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner());
+            match map.get(&pid) {
                 Some(p) if p.owner_char_id == char_id && p.solar_system_id == sys_id => {
                     if p.state >= 0 {
                         ProbeTargetCheck::OwnedDestroyable
@@ -2843,7 +2858,8 @@ async fn handle_destroy_probe(
                 }
                 Some(_) => ProbeTargetCheck::RejectNotFound,
                 None => ProbeTargetCheck::NotInTracker,
-            });
+            }
+        };
         match check {
             ProbeTargetCheck::OwnedDestroyable | ProbeTargetCheck::OwnedCargoSentinel => {}
             ProbeTargetCheck::RejectNotFound => {
@@ -2878,7 +2894,8 @@ async fn handle_destroy_probe(
             }
         }
     }
-    let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = {
+        let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         let ids: Vec<i64> = map
             .values()
             .filter(|p| {
@@ -2890,7 +2907,7 @@ async fn handle_destroy_probe(
             .map(|p| p.probe_id)
             .collect();
         ids.into_iter().filter_map(|id| map.remove(&id)).collect()
-    } else { Vec::new() };
+    };
     if !destroyed_probes.is_empty() {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         for p in &destroyed_probes {
@@ -2903,7 +2920,12 @@ async fn handle_destroy_probe(
         let destroyed_ids: Vec<i64> = destroyed_probes.iter().map(|p| p.probe_id).collect();
         prune_probe_ids_from_pending_scans(ctx, char_id, &destroyed_ids);
         sync_scanner_probes_to_db(ctx);
-        let any_left = ctx.active_scanner_probes.read().ok().is_some_and(|m| m.values().any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0));
+        let any_left = ctx
+            .active_scanner_probes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0);
         if !any_left {
             let _ = ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -2992,9 +3014,12 @@ fn record_active_probe_scan_context(
     char_id: i64,
     scan_ctx: ActiveProbeScanContext,
 ) {
-    if let Ok(mut guard) = ctx.active_probe_scan_contexts.write() {
-        guard.entry(char_id).or_default().push(scan_ctx);
-    }
+    ctx.active_probe_scan_contexts
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(char_id)
+        .or_default()
+        .push(scan_ctx);
 }
 
 fn take_matching_scan_context(
@@ -3002,7 +3027,7 @@ fn take_matching_scan_context(
     char_id: i64,
     p_ids: &[i64],
 ) -> Option<ActiveProbeScanContext> {
-    let mut guard = ctx.active_probe_scan_contexts.write().ok()?;
+    let mut guard = ctx.active_probe_scan_contexts.write().unwrap_or_else(|e| e.into_inner());
     let list = guard.get_mut(&char_id)?;
     let idx = list.iter().position(|sc| sc.probe_ids == p_ids).or_else(|| {
         if p_ids.is_empty() {
@@ -3024,7 +3049,8 @@ fn prune_probe_ids_from_pending_scans(ctx: &ServerContext, char_id: i64, removed
         return;
     }
     let removed_set: HashSet<i64> = removed_ids.iter().copied().collect();
-    if let Ok(mut guard) = ctx.active_probe_scan_contexts.write() {
+    {
+        let mut guard = ctx.active_probe_scan_contexts.write().unwrap_or_else(|e| e.into_inner());
         if let Some(list) = guard.get_mut(&char_id) {
             for sc in list.iter_mut() {
                 sc.probe_ids.retain(|id| !removed_set.contains(id));
@@ -3068,29 +3094,17 @@ fn prune_stale_pending_scans_for_char(
             .iter()
             .any(|(cid, ..)| *cid == char_id)
     });
-    let has_ctx_scans = ctx
-        .active_probe_scan_contexts
-        .read()
-        .ok()
-        .is_some_and(|m| m.contains_key(&char_id));
+    let has_ctx_scans = ctx.active_probe_scan_contexts.read().unwrap_or_else(|e| e.into_inner()).contains_key(&char_id);
     if !has_db_scans && !has_ctx_scans {
         return;
     }
 
-    let live_probe_ids: HashSet<i64> = ctx
-        .active_scanner_probes
-        .read()
-        .ok()
-        .map(|map| {
-            map.values()
-                .filter(|p| p.owner_char_id == char_id && is_probe_live_for_space_state(p, cur_state.as_ref()))
-                .map(|p| p.probe_id)
-                .collect()
-        })
-        .unwrap_or_default();
+    let live_probe_ids: HashSet<i64> = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner())
+        .values().filter(|p| p.owner_char_id == char_id && is_probe_live_for_space_state(p, cur_state.as_ref())).map(|p| p.probe_id).collect();
 
     let mut valid_scan_probe_sets: Vec<Vec<i64>> = Vec::new();
-    if let Ok(mut guard) = ctx.active_probe_scan_contexts.write() {
+    {
+        let mut guard = ctx.active_probe_scan_contexts.write().unwrap_or_else(|e| e.into_inner());
         if let Some(list) = guard.get_mut(&char_id) {
             list.retain(|sc| {
                 let overlaps_cleared = clear_overlapping_ids
@@ -3134,7 +3148,8 @@ fn prune_stale_pending_scans_for_char(
 
     if !pruned_probe_ids.is_empty() {
         let mut changed = false;
-        if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+        {
+            let mut probe_map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
             for pid in pruned_probe_ids {
                 if let Some(p) = probe_map.get_mut(&pid) {
                     if p.owner_char_id == char_id {
@@ -3177,18 +3192,8 @@ fn is_probe_live_for_space_state(
 /// Transitions due warping/moving probes whose owner is still in space in the same session,
 /// while silently clearing stale `warp_end_ft` timers for detached/inactive probes.
 fn process_due_probe_arrivals(ctx: &ServerContext, now_ft: i64) -> bool {
-    let arrival_char_ids: HashSet<i64> = ctx
-        .active_scanner_probes
-        .read()
-        .ok()
-        .map(|probe_map| {
-            probe_map
-                .values()
-                .filter(|p| p.warp_end_ft.is_some_and(|end_ft| now_ft >= end_ft))
-                .map(|p| p.owner_char_id)
-                .collect()
-        })
-        .unwrap_or_default();
+    let arrival_char_ids: HashSet<i64> = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner())
+        .values().filter(|p| p.warp_end_ft.is_some_and(|end_ft| now_ft >= end_ft)).map(|p| p.owner_char_id).collect();
     if arrival_char_ids.is_empty() {
         return false;
     }
@@ -3199,21 +3204,15 @@ fn process_due_probe_arrivals(ctx: &ServerContext, now_ft: i64) -> bool {
             .filter_map(|&cid| char_space_session_state(snap, cid).map(|st| (cid, st)))
             .collect()
     });
-    let scan_ctxs_by_char: HashMap<i64, Vec<ActiveProbeScanContext>> = ctx
-        .active_probe_scan_contexts
-        .read()
-        .ok()
-        .map(|guard| {
-            arrival_char_ids
-                .iter()
-                .filter_map(|&cid| guard.get(&cid).map(|list| (cid, list.clone())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let scan_ctxs_by_char: HashMap<i64, Vec<ActiveProbeScanContext>> = {
+        let guard = ctx.active_probe_scan_contexts.read().unwrap_or_else(|e| e.into_inner());
+        arrival_char_ids.iter().filter_map(|&cid| guard.get(&cid).map(|list| (cid, list.clone()))).collect()
+    };
 
     let mut due_arrivals = Vec::new();
     let mut cleared_any_warp_end = false;
-    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+    {
+        let mut probe_map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         for p in probe_map.values_mut() {
             if !p.warp_end_ft.is_some_and(|end_ft| now_ft >= end_ft) {
                 continue;
@@ -3338,7 +3337,8 @@ fn process_due_probe_scans(ctx: &ServerContext, now_ft: i64) -> bool {
             .is_some_and(|sc| is_scan_context_valid_for_state(sc, st_opt));
 
         let mut live_p_ids = Vec::new();
-        if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+        {
+            let mut probe_map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
             for &pid in &p_ids {
                 if let Some(p) = probe_map.get_mut(&pid) {
                     let probe_still_live = session_valid
@@ -3423,27 +3423,23 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
 /// Locks `db` before `active_scanner_probes.read()` to prevent stale out-of-order overwrites.
 pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
     let probes_differ = ctx.db.with_snapshot(|snap| {
-        if let Ok(map) = ctx.active_scanner_probes.read() {
-            let persisted = &snap.sp6_lifecycle.active_scanner_probes;
-            let live_count = map.values().filter(|p| p.state >= 0).count();
-            persisted.len() != live_count
-                || map
-                    .iter()
-                    .filter(|(_, p)| p.state >= 0)
-                    .any(|(id, p)| persisted.get(id) != Some(p))
-        } else {
-            false
-        }
+        let map = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner());
+        let persisted = &snap.sp6_lifecycle.active_scanner_probes;
+        let live_count = map.values().filter(|p| p.state >= 0).count();
+        persisted.len() != live_count
+            || map
+                .iter()
+                .filter(|(_, p)| p.state >= 0)
+                .any(|(id, p)| persisted.get(id) != Some(p))
     });
     if probes_differ {
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
-            if let Ok(map) = ctx.active_scanner_probes.read() {
-                st.active_scanner_probes = map
-                    .iter()
-                    .filter(|(_, p)| p.state >= 0)
-                    .map(|(&id, p)| (id, p.clone()))
-                    .collect();
-            }
+            let map = ctx.active_scanner_probes.read().unwrap_or_else(|e| e.into_inner());
+            st.active_scanner_probes = map
+                .iter()
+                .filter(|(_, p)| p.state >= 0)
+                .map(|(&id, p)| (id, p.clone()))
+                .collect();
         });
         ctx.persist_server_runtime_to_db();
     }

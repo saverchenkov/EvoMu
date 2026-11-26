@@ -966,27 +966,7 @@ pub(crate) fn tick_sov_prospecting_deposit_respawn_with_handle(
     let Some(sov_asteroid_ids) = collect_sov_asteroid_ids(db, sys_id) else {
         return;
     };
-    let live_ast_states: Vec<(i64, i64)> = {
-        let st_guard = handle
-            .actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        sov_asteroid_ids
-            .into_iter()
-            .filter_map(|aid| {
-                st_guard.asteroids.get(&aid).map(|st| {
-                    (
-                        aid,
-                        if st.depleted {
-                            0_i64
-                        } else {
-                            st.remaining_units as i64
-                        },
-                    )
-                })
-            })
-            .collect()
-    };
+    let live_ast_states = handle.live_asteroid_remaining_units(&sov_asteroid_ids);
     let newly_spawned =
         tick_sov_prospecting_deposit_respawn_core(sde, db, sys_id, now, live_ast_states);
     for (aid, tid, units, uvol, rad, pos) in newly_spawned {

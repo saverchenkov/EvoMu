@@ -213,3 +213,80 @@ fn rust_and_python_ratchet_scanners_agree_on_live_repo() {
         "Rust vs Python untyped_user_error per-file counts mismatch"
     );
 }
+
+#[test]
+fn arch_debt_ratchet_1342_actor_state_locks_and_system_handle_sync_lock_helpers() {
+    let tmp = make_temp_dir("1342_actor_state_and_sync_locks");
+    let src = tmp.join("src");
+    std::fs::create_dir_all(src.join("services")).expect("create services dir");
+    std::fs::create_dir_all(src.join("system_actor")).expect("create system_actor dir");
+
+    std::fs::write(
+        src.join("services/ext.rs"),
+        r#"
+pub fn f(sys: &Sys) {
+    // sys.actor_state.read();
+    let _lit = "sys.actor_state.write()";
+    let _a = sys.actor_state.read().unwrap();
+    let _b = sys.actor_state.try_write();
+}
+#[cfg(test)]
+mod tests {
+    fn allowed(sys: &Sys) {
+        let _c = sys.actor_state.read().unwrap();
+    }
+}
+"#,
+    )
+    .expect("write services/ext.rs");
+
+    std::fs::write(
+        src.join("system_actor/sample.rs"),
+        r#"
+pub fn g(sys: &Sys) {
+    let _bp = sys.ballpark.read().unwrap();
+    let _st = sys.actor_state.write().unwrap();
+}
+#[cfg(test)]
+mod tests {
+    fn ignored(sys: &Sys) {
+        let _bp = sys.ballpark.write().unwrap();
+    }
+}
+"#,
+    )
+    .expect("write system_actor/sample.rs");
+
+    let report = scan_arch_debt_in_dir(&src).expect("scan 1342 ratchets");
+    let ext_rule = &report.patterns["actor_state_locks_outside_system_actor"];
+    assert_eq!(ext_rule.occurrences, 2);
+    assert_eq!(ext_rule.per_file.get("services/ext.rs"), Some(&2));
+    assert!(!ext_rule.per_file.contains_key("system_actor/sample.rs"));
+
+    let sync_rule = &report.patterns["system_handle_sync_lock_helpers"];
+    assert_eq!(sync_rule.occurrences, 4);
+    assert_eq!(sync_rule.per_file.get("services/ext.rs"), Some(&2));
+    assert_eq!(sync_rule.per_file.get("system_actor/sample.rs"), Some(&2));
+
+    let live = ArchDebtRatchet::load_default().expect("load live arch_debt_ratchet.json");
+    let ext_live = &live.patterns["actor_state_locks_outside_system_actor"];
+    assert!(ext_live.zero_required);
+    assert_eq!(ext_live.owning_issue, Some(1342));
+    assert!(ext_live.files.is_empty());
+
+    let sync_live = &live.patterns["system_handle_sync_lock_helpers"];
+    assert!(!sync_live.zero_required);
+    assert_eq!(sync_live.owning_issue, Some(1342));
+    assert!(sync_live.files.keys().all(|p| p.starts_with("system_actor")));
+
+    let err = live
+        .assert_ratchet(&report)
+        .expect_err("ratchet must reject external actor_state locks and unlisted sync lock helpers");
+    assert!(
+        err.contains("actor_state_locks_outside_system_actor")
+            || err.contains("system_handle_sync_lock_helpers"),
+        "unexpected error: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

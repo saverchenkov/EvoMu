@@ -24,6 +24,8 @@ mod ball_ops;
 pub use ball_ops::*;
 mod drones;
 pub use drones::*;
+#[cfg(any(test, feature = "testkit"))]
+mod test_seam;
 #[cfg(test)]
 pub(crate) use activation_ops::{
     apply_fit_projection_in_actor, apply_fit_projection_with_cycles_in_actor,
@@ -41,16 +43,12 @@ mod lifecycle_sm;
 mod types;
 pub use types::*;
 
-pub(in crate::system_actor) use belts::{
-    build_tick_broadcast, ensure_default_slim_meta,
-};
+pub(in crate::system_actor) use belts::{build_tick_broadcast, ensure_default_slim_meta};
 pub(in crate::system_actor) use eve_db::lock_rank::{
     held_lock_ranks, AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_LEAF,
     RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY,
 };
-use eve_destiny::wire::{
-    encode_set_state_payload, encode_set_state_update,
-};
+use eve_destiny::wire::{encode_set_state_payload, encode_set_state_update};
 pub(in crate::system_actor) use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, SlimItemMeta};
 pub(in crate::system_actor) use eve_proto::PyRep;
 pub(in crate::system_actor) use eve_sde::{SdeRegistry, SolarSystemId};
@@ -1523,6 +1521,11 @@ impl SystemRegistry {
                         if let Some(cmd) = cycles_tackle::handle_tackle_or_damage_command(&mut exec_ctx, cmd) {
                             if let Some(cmd) = ball_ops::handle_ball_ops_command(&mut exec_ctx, cmd) {
                             if let Some(cmd) = drones::handle_drone_runtime_command(&mut exec_ctx, cmd) {
+                            let cmd_opt = {
+                                #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, cmd) }
+                                #[cfg(not(any(test, feature = "testkit")))] { Some(cmd) }
+                            };
+                            if let Some(cmd) = cmd_opt {
                             let mut sync_protection_ball: Option<BallId> = None;
                             {
                                 let ballpark = &mut *exec_ctx.ballpark;
@@ -2138,6 +2141,7 @@ impl SystemRegistry {
                                     exec_ctx.actor_st,
                                     bid,
                                 );
+                            }
                             }
                             }
                             }

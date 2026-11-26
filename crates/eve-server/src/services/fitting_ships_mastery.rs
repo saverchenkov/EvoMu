@@ -746,15 +746,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 if let Some(sys_id) = sys_opt {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.stop_non_warp_module_cycles(old_ship_id).await;
-                    let cycle_mods: Vec<i64> = sys
-                        .actor_state
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .active_module_cycles
-                        .iter()
-                        .filter(|c| c.ship_id == old_ship_id)
-                        .map(|c| c.module_id)
-                        .collect();
+                    let cycle_mods = sys.active_cycle_module_ids_for_ship(old_ship_id);
                     for mid in cycle_mods {
                         let _ = sys.remove_module_cycle(old_ship_id, mid).await;
                     }
@@ -1160,15 +1152,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
                             if let Some(sys_id) = session.solar_system_id {
                                 let sys = ctx.systems.get_or_spawn(sys_id);
-                                let cycle_mods: Vec<i64> = sys
-                                    .actor_state
-                                    .read()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .active_module_cycles
-                                    .iter()
-                                    .filter(|c| c.ship_id == prev)
-                                    .map(|c| c.module_id)
-                                    .collect();
+                                let cycle_mods = sys.active_cycle_module_ids_for_ship(prev);
                                 for mid in cycle_mods {
                                     let _ = sys.remove_module_cycle(prev, mid).await;
                                 }

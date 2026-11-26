@@ -315,54 +315,6 @@ impl BallparkHandle {
     }
 }
 
-#[derive(Clone)]
-pub struct SystemHandle {
-    pub solar_system_id: SolarSystemId,
-    pub(crate) cmd_tx: mpsc::Sender<SystemCommand>,
-    pub(in crate::system_actor) post_unlock_tx: tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockMsg>,
-    pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
-    pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
-    pub(in crate::system_actor) completed_post_unlock_seq: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
-    pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-    pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    pub(crate) tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    pub(crate) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-    pub(crate) warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
-    pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    pub ballpark: Arc<BallparkHandle>,
-    pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
-    pub(crate) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
-    pub(crate) view_rx: tokio::sync::watch::Receiver<Arc<super::SystemView>>,
-    pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) sim_elapsed_secs_bits: Arc<std::sync::atomic::AtomicU64>,
-    /// Highest visible / prime (`SetState`) Destiny stamp delivered in this system (`#1081`).
-    pub(crate) last_visible_stamp: Arc<std::sync::atomic::AtomicU64>,
-    /// Highest `OnSpecialFX` Destiny stamp emitted in this system so FX stamps never backstep (`#1081`).
-    pub(crate) last_fx_stamp: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) hibernated: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) idle_ticks: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) dynamic_ball_count: Arc<std::sync::atomic::AtomicUsize>,
-    pub command_panics: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) pending_destroyed_balls: super::PendingDestroyedOutbox,
-    #[cfg(test)]
-    pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(crate) panic_on_command_countdown_for_test: Arc<std::sync::atomic::AtomicUsize>,
-    #[cfg(test)]
-    pub(crate) panic_after_destruction_for_test: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(crate) before_step_reply_hook_for_test:
-        Arc<RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>>,
-    pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
-    pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
-    pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
-    pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
-    pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
-}
-
 impl SystemHandle {
     /// Returns the latest lock-free published [`super::SystemView`] snapshot.
     pub fn view(&self) -> Arc<super::SystemView> {
@@ -457,10 +409,9 @@ impl SystemHandle {
         if !self.hibernated.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
-        if let Ok(bp) = self.ballpark.try_read() {
-            if bp.balls.keys().any(|&bid| !bp.is_static_ball(bid)) {
-                return false;
-            }
+        let view = self.view();
+        if view.balls.keys().any(|&bid| !view.is_static_ball(bid)) {
+            return false;
         }
         true
     }
@@ -627,6 +578,7 @@ impl SystemHandle {
                 celestials_helpers::collect_ball_positions_for_post_unlock(
                     &bp, &[ball_id], &st.db_opt, &st.ball_space_entry_epochs, &mut ops,
                 );
+                self.publish_view_from(&bp, Some(&st));
             }
             super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                 self, st.db_opt.as_ref(), None, ops, caller_can_wait,
@@ -649,10 +601,7 @@ impl SystemHandle {
 
     /// Reads the tracked activation state for stargate `gate_id`, if present (`#1080`).
     pub fn stargate_activation_state(&self, gate_id: BallId) -> Option<eve_destiny::StargateActivationState> {
-        self.ballpark
-            .read()
-            .ok()
-            .and_then(|bp| bp.stargate_activation_state(gate_id))
+        self.view().stargate_activation_state(gate_id)
     }
 
     /// Transitions a `CLOSED` stargate into `ACTIVATING` (`#1080`).
@@ -662,9 +611,10 @@ impl SystemHandle {
         transition_ms: u64,
         now_ms_opt: Option<u64>,
     ) -> bool {
-        self.ballpark
-            .write()
-            .is_ok_and(|mut bp| bp.activate_stargate_transition(gate_id, transition_ms, now_ms_opt))
+        let Ok(mut bp) = self.ballpark.write() else { return false; };
+        let changed = bp.activate_stargate_transition(gate_id, transition_ms, now_ms_opt);
+        if changed { self.publish_view_from(&bp, None); }
+        changed
     }
 
     /// Explicitly sets stargate activation state (`#1080`).
@@ -675,22 +625,23 @@ impl SystemHandle {
         transition_remaining_ms: u64,
         activation_transition_at_ms: u64,
     ) -> bool {
-        self.ballpark.write().is_ok_and(|mut bp| {
-            bp.set_stargate_activation_state(
-                gate_id,
-                activation_state,
-                transition_remaining_ms,
-                activation_transition_at_ms,
-            )
-        })
+        let Ok(mut bp) = self.ballpark.write() else { return false; };
+        let changed = bp.set_stargate_activation_state(
+            gate_id,
+            activation_state,
+            transition_remaining_ms,
+            activation_transition_at_ms,
+        );
+        if changed { self.publish_view_from(&bp, None); }
+        changed
     }
 
     /// Settles any elapsed `ACTIVATING` stargates against `now_ms`, returning opened gate IDs (`#1080`).
     pub fn settle_stargate_activation_states(&self, now_ms: u64) -> Vec<BallId> {
-        self.ballpark
-            .write()
-            .map(|mut bp| bp.settle_stargate_activation_transitions(0.0, Some(now_ms)))
-            .unwrap_or_default()
+        let Ok(mut bp) = self.ballpark.write() else { return Vec::new(); };
+        let opened = bp.settle_stargate_activation_transitions(0.0, Some(now_ms));
+        if !opened.is_empty() { self.publish_view_from(&bp, None); }
+        opened
     }
 
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
@@ -1261,36 +1212,28 @@ impl SystemHandle {
     }
 
     pub fn has_active_nanite_repair_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_nanite_repairs
             .iter()
             .any(|r| r.ship_id == ship_id && r.module_id == module_id)
     }
 
     pub fn has_active_module_cycle_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.module_id == module_id)
     }
 
     pub fn has_active_mjd_or_mjfg_spool_sync(&self, ship_id: BallId) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.mjd_jump_distance_m.is_some())
     }
 
     pub fn is_module_mjd_or_mjfg_spooling_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.view()
             .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.module_id == module_id && c.mjd_jump_distance_m.is_some())
@@ -1337,6 +1280,11 @@ impl SystemHandle {
                 refund_paste,
                 &mut ops,
             );
+            self.view_tx.send_modify(|cur| {
+                let mut next = (**cur).clone();
+                next.active_nanite_repairs = st.active_nanite_repairs.clone();
+                *cur = Arc::new(next);
+            });
             super::post_unlock::enqueue_post_unlock_or_barrier_under_locks(
                 self,
                 st.db_opt.as_ref(),
@@ -1371,6 +1319,7 @@ impl SystemHandle {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
             drain_fn(&mut st)
         };
+        self.publish_view();
         super::post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
     }
 
@@ -1454,6 +1403,11 @@ impl SystemHandle {
                 }
             }
         }
+        self.view_tx.send_modify(|cur| {
+            let mut next = (**cur).clone();
+            next.asteroids = st.asteroids.clone();
+            *cur = Arc::new(next);
+        });
     }
 
     pub fn try_spawn_ball_with_meta(
@@ -1519,7 +1473,6 @@ impl SystemHandle {
             let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
             apply_spawn(&mut bp);
             super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
-            self.publish_view_from(&bp, None);
         }
     }
 
@@ -1610,7 +1563,6 @@ impl SystemHandle {
         bp.add_ball(ball);
         bp.combat_states.insert(ball_id, combat_state);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        self.publish_view_from(&bp, None);
         super::protection::sync_ball_protection_under_bp(self, &bp, ball_id);
         let dyn_count = bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count();
         self.dynamic_ball_count
@@ -1641,6 +1593,7 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.add_mobile_warp_disruptor(id, position, radius);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, None);
     }
 
     /// Atomically mutates declarative modifiers on `ball_id`'s [`CombatState`] and recomputes
@@ -1694,6 +1647,7 @@ impl SystemHandle {
                 );
             }
         }
+        self.publish_view_from(&bp, None);
         true
     }
 
@@ -1701,6 +1655,7 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let _ = bp.remove_warp_bubble(id);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, None);
     }
 
     pub fn tidi_factor(&self) -> f64 {
@@ -1776,16 +1731,11 @@ impl SystemHandle {
 
     /// Computes live simulation load in this solar system (dynamic balls + weighted active module/repair/anchoring cycles).
     pub fn active_entity_and_cycle_load(&self) -> usize {
-        let dyn_balls = {
-            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            bp.balls.keys().filter(|&&bid| !bp.is_static_ball(bid)).count()
-        };
-        let cycle_load = {
-            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-            st.active_module_cycles.len().saturating_mul(2)
-                + st.pending_anchoring_disruptors.len()
-                + st.active_nanite_repairs.len()
-        };
+        let view = self.view();
+        let dyn_balls = view.balls.keys().filter(|&&bid| !view.is_static_ball(bid)).count();
+        let cycle_load = view.active_module_cycles.len().saturating_mul(2)
+            + view.pending_anchoring_disruptor_count
+            + view.active_nanite_repairs.len();
         dyn_balls.saturating_add(cycle_load)
     }
 
@@ -1962,19 +1912,11 @@ impl SystemHandle {
 
     fn read_warp_state_field<T>(
         &self,
-        from_actor: impl FnOnce(&super::types::ActorWarpState) -> T,
+        _from_actor: impl FnOnce(&super::types::ActorWarpState) -> T,
         from_view: impl FnOnce(&super::SystemView) -> T,
     ) -> T {
-        if eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= RANK_ACTOR_STATE)
-        {
-            let view = self.view();
-            from_view(&view)
-        } else {
-            let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-            from_actor(&st.warp_state)
-        }
+        let view = self.view();
+        from_view(&view)
     }
 
     pub fn set_warp_provenance(&self, ball_id: BallId, provenance: super::WarpProvenance) {
@@ -3085,20 +3027,19 @@ impl SystemHandle {
     }
 
     pub fn has_any_active_nanite_repair_sync(&self, ship_id: BallId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
+        self.view().active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
     }
 
     pub fn is_module_being_nanite_repaired_sync(&self, ship_id: BallId, module_id: i64) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_nanite_repairs
+        self.view()
+            .active_nanite_repairs
             .iter()
             .any(|r| r.ship_id == ship_id && r.module_id == module_id)
     }
 
     pub fn has_active_overloaded_cycle_sync(&self, ship_id: BallId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles
+        self.view()
+            .active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.is_overloaded)
     }
@@ -3108,8 +3049,8 @@ impl SystemHandle {
         target_ship_id: BallId,
         sde: Option<&eve_sde::SdeRegistry>,
     ) -> Vec<BallId> {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles
+        self.view()
+            .active_module_cycles
             .iter()
             .filter(|c| {
                 c.target_id == Some(target_ship_id)
@@ -3121,8 +3062,7 @@ impl SystemHandle {
     }
 
     pub fn has_active_industrial_core_sync(&self, ship_id: BallId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles.iter().any(|c| {
+        self.view().active_module_cycles.iter().any(|c| {
             c.ship_id == ship_id
                 && matches!(c.module_type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591)
         })
@@ -3138,6 +3078,13 @@ impl SystemHandle {
             } else {
                 st.active_nanite_repairs.push(job);
             }
+        }
+        if !cancelled.is_empty() {
+            self.view_tx.send_modify(|cur| {
+                let mut next = (**cur).clone();
+                next.active_nanite_repairs = st.active_nanite_repairs.clone();
+                *cur = Arc::new(next);
+            });
         }
         cancelled
     }
@@ -3180,4 +3127,54 @@ pub(crate) use celestials_helpers::{
 pub(crate) use celestials_helpers::db_ballpark_entry_for_test;
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
+
+// Kept at EOF so non-depth-aware `strip_cfg_test_items` does not mask `impl SystemHandle` after
+// comma-terminated `#[cfg(test)]` struct fields (`#1342`).
+#[derive(Clone)]
+pub struct SystemHandle {
+    pub solar_system_id: SolarSystemId,
+    pub(crate) cmd_tx: mpsc::Sender<SystemCommand>,
+    pub(in crate::system_actor) post_unlock_tx: tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockMsg>,
+    pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
+    pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    pub(in crate::system_actor) completed_post_unlock_seq: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
+    pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub(crate) tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub(crate) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(crate) warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
+    pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub ballpark: Arc<BallparkHandle>,
+    pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
+    pub(crate) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
+    pub(crate) view_rx: tokio::sync::watch::Receiver<Arc<super::SystemView>>,
+    pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) sim_elapsed_secs_bits: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest visible / prime (`SetState`) Destiny stamp delivered in this system (`#1081`).
+    pub(crate) last_visible_stamp: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest `OnSpecialFX` Destiny stamp emitted in this system so FX stamps never backstep (`#1081`).
+    pub(crate) last_fx_stamp: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) hibernated: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) idle_ticks: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) dynamic_ball_count: Arc<std::sync::atomic::AtomicUsize>,
+    pub command_panics: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) pending_destroyed_balls: super::PendingDestroyedOutbox,
+    #[cfg(test)]
+    pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) panic_on_command_countdown_for_test: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) panic_after_destruction_for_test: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) before_step_reply_hook_for_test:
+        Arc<RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>>,
+    pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
+    pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
+    pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
+    pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
+}
 

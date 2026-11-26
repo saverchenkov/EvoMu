@@ -1283,13 +1283,8 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
     crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[victim_ship_id]);
     crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
     let cycled_mod_ids: std::collections::HashSet<i64> = sys_handle
-        .actor_state
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .active_module_cycles
-        .iter()
-        .filter(|c| c.ship_id == victim_ship_id)
-        .map(|c| c.module_id)
+        .active_cycle_module_ids_for_ship(victim_ship_id)
+        .into_iter()
         .collect();
     sys_handle.try_remove_destroyed_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {

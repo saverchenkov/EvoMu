@@ -1132,12 +1132,76 @@ impl SystemHandle {
 
     /// Reads the latest [`eve_dogma::FitProjection`] stored in actor state for `ship_id`, if any.
     pub fn latest_fit_projection(&self, ship_id: BallId) -> Option<eve_dogma::FitProjection> {
-        self.actor_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .fit_projections
-            .get(&ship_id)
+        self.view().fit_projections.get(&ship_id).cloned()
+    }
+
+    /// Returns active cycle module IDs currently running on `ship_id` (`#1342`).
+    pub fn active_cycle_module_ids_for_ship(&self, ship_id: BallId) -> Vec<ItemId> {
+        self.view()
+            .active_module_cycles
+            .iter()
+            .filter(|c| c.ship_id == ship_id)
+            .map(|c| c.module_id)
+            .collect()
+    }
+
+    /// Returns active module cycles whose `ship_id` or `target_id` matches `ball_id`, excluding an
+    /// optional `(ship_id, module_id)` cycle already handled by the caller (`#1342`).
+    pub fn active_cycles_referencing_ball(
+        &self,
+        ball_id: BallId,
+        exclude_module: Option<(BallId, ItemId)>,
+    ) -> Vec<super::ActiveModuleCycle> {
+        self.view()
+            .active_module_cycles
+            .iter()
+            .filter(|c| {
+                (c.target_id == Some(ball_id) || c.ship_id == ball_id)
+                    && !exclude_module.is_some_and(|(sid, mid)| c.ship_id == sid && c.module_id == mid)
+            })
             .cloned()
+            .collect()
+    }
+
+    /// Returns `true` if `ship_id` has an active module cycle granting self-EWAR immunity (`#1342`).
+    pub fn has_self_ewar_immune_cycle(&self, ship_id: BallId) -> bool {
+        self.view()
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.self_ewar_immune)
+    }
+
+    /// Returns `true` if `(ship_id, module_id)` currently has an active cycle targeting `target_id` (`#1342`).
+    pub fn has_active_module_cycle_on_target(
+        &self,
+        ship_id: BallId,
+        module_id: ItemId,
+        target_id: BallId,
+    ) -> bool {
+        self.view().active_module_cycles.iter().any(|c| {
+            c.ship_id == ship_id && c.module_id == module_id && c.target_id == Some(target_id)
+        })
+    }
+
+    /// Returns `(is_overloaded, pending_overloaded)` per cycling `module_id` on `ship_id` (`#1342`).
+    pub fn active_cycle_overload_states_for_ship(
+        &self,
+        ship_id: BallId,
+    ) -> std::collections::HashMap<ItemId, (bool, Option<bool>)> {
+        self.view()
+            .active_module_cycles
+            .iter()
+            .filter(|c| c.ship_id == ship_id)
+            .map(|c| (c.module_id, (c.is_overloaded, c.pending_overloaded)))
+            .collect()
+    }
+
+    /// Returns `true` if `ship_id` currently has any active module cycle in actor state (`#1342`).
+    pub fn has_any_active_module_cycle(&self, ship_id: BallId) -> bool {
+        self.view()
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id)
     }
 
     /// Atomically validates preconditions, commits a module cycle, and breaks protection (`#1486`).
@@ -1268,11 +1332,11 @@ impl SystemHandle {
     /// Canonical read-only check of whether `(ship_id, module_id)` has an active cycle
     /// or actor-tracked external active module (`#1486`, `PVE-133`).
     pub fn is_module_active_sync(&self, ship_id: BallId, module_id: ItemId) -> bool {
-        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
-        st.active_module_cycles
+        let view = self.view();
+        view.active_module_cycles
             .iter()
             .any(|c| c.ship_id == ship_id && c.module_id == module_id)
-            || st.external_active_modules.contains(&(ship_id, module_id))
+            || view.external_active_modules.contains(&(ship_id, module_id))
     }
 
     fn mutate_external_active_modules_sync<R>(

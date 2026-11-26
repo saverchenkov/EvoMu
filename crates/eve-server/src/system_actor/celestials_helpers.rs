@@ -1367,22 +1367,33 @@ impl SystemHandle {
         self.finish_warp_for_dock(ball_id, None)
     }
 
-    /// Returns the last synced velocity `[vx, vy, vz]` for `ball_id`, reading `ballpark` when lock
-    /// rank permits or falling back to [`ball_velocity_cache_map`].
-    pub fn get_ball_velocity_sync(&self, ball_id: BallId) -> Option<[f64; 3]> {
-        if !eve_db::lock_rank::held_lock_ranks()
+    /// Returns `(asteroid_id, remaining_units)` (`0` if depleted) for each tracked asteroid ID (`#1342`).
+    pub fn live_asteroid_remaining_units(&self, asteroid_ids: &[BallId]) -> Vec<(BallId, i64)> {
+        let view = self.view();
+        asteroid_ids
             .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            if let Ok(bp) = self.ballpark.try_read() {
-                return bp
-                    .balls
-                    .get(&ball_id)
-                    .map(|b| [b.velocity.x, b.velocity.y, b.velocity.z]);
-            }
+            .filter_map(|&aid| {
+                view.asteroids.get(&aid).map(|st| {
+                    (
+                        aid,
+                        if st.depleted {
+                            0_i64
+                        } else {
+                            st.remaining_units as i64
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Returns the last synced velocity `[vx, vy, vz]` for `ball_id`, reading [`SystemView`]
+    /// first or falling back to [`ball_velocity_cache_map`].
+    pub fn get_ball_velocity_sync(&self, ball_id: BallId) -> Option<[f64; 3]> {
+        if let Some(vel) = self.view().ball_velocity(ball_id) {
+            return Some([vel.x, vel.y, vel.z]);
         }
-        let cache_key =
-            Arc::as_ptr(&self.ball_positions) as usize;
+        let cache_key = Arc::as_ptr(&self.ball_positions) as usize;
         ball_velocity_cache_map()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1391,14 +1402,10 @@ impl SystemHandle {
     }
 
     /// Returns live `(position, velocity)` for `ball_id` only if the ball is currently present in
-    /// this system's ballpark (`GH #1085`).
+    /// this system (`GH #1085`).
     pub fn get_live_ball_kinematics_sync(&self, ball_id: BallId) -> Option<(DVec3, DVec3)> {
-        if !eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            return bp.balls.get(&ball_id).map(|b| (b.position, b.velocity));
+        if let Some(ball) = self.view().ball(ball_id) {
+            return Some((ball.position, ball.velocity));
         }
         let pos = self.get_ball_position_sync(ball_id)?;
         let vel = self

@@ -215,8 +215,7 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
         make_combat_state(500.0, 500.0, 500.0, 250.0),
     );
 
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         let c_adc = ActiveModuleCycle {
             ship_id,
             module_id: mod_adc,
@@ -272,7 +271,8 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
             paste_total_needed: 4,
             paste_consumed_so_far: 4,
         });
-    }
+    })
+    .await;
 
     assert!(sys.has_active_module_cycle_sync(ship_id, mod_adc));
     assert!(sys.has_active_mjd_or_mjfg_spool_sync(ship_id));
@@ -682,8 +682,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     assert!((snap.max_velocity - 450.0).abs() < 1e-6);
 
     // active_offensive_aggressors_on_sync + cancel_nanite_repairs_for_ship_sync
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.active_module_cycles.push(ActiveModuleCycle {
             ship_id: ship2,
             module_id: mod_scram,
@@ -712,7 +711,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
             paste_total_needed: 2,
             paste_consumed_so_far: 1,
         });
-    }
+    })
+    .await;
     let agg = sys.active_offensive_aggressors_on_sync(ship1, Some(&ctx.sde));
     assert_eq!(agg, vec![ship2]);
     let cancelled = sys.cancel_nanite_repairs_for_ship_sync(ship2);
@@ -1196,8 +1196,7 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
     assert!(sys.stop_nanite_repair(b2, 714_001).await.unwrap().is_none());
 
     // cancel_nanite_repairs_for_ship_sync preserves other ships
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.active_nanite_repairs.push(ActiveNaniteRepair {
             char_id: 90_000_001,
             ship_id: b2,
@@ -1218,7 +1217,8 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
             duration_s: 10.0,
             elapsed_s: 0.0,
         });
-    }
+    })
+    .await;
     let cancelled_b2 = sys.cancel_nanite_repairs_for_ship_sync(b2);
     assert_eq!(cancelled_b2.len(), 1);
     assert_eq!(cancelled_b2[0].module_id, 714_002);
@@ -1230,10 +1230,10 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
         it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 10.0);
         snap.items.insert(714_003, it);
     });
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(|st| {
         st.active_nanite_repairs[0].elapsed_s = 10.0;
-    }
+    })
+    .await;
     sys.cancel_ship_nanite_repairs_sync(b1, false);
     assert!(!ctx.db.with_snapshot(|s| s.items[&714_003]
         .dynamic_attributes
@@ -1243,8 +1243,7 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
     let jumped = sys.micro_jump_field(b2, 100_000.0, 5_000.0, 25).await.unwrap();
     assert!(jumped.contains(&b2));
 
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.active_module_cycles.push(ActiveModuleCycle {
             ship_id: b1,
             module_id: 715_001,
@@ -1266,7 +1265,8 @@ async fn system_handle_async_commands_asteroids_ecm_nanite_bubbles_and_hooks() {
             remote_shield_amount: 100.0, // Assistance, NOT offensive
             ..ActiveModuleCycle::default()
         });
-    }
+    })
+    .await;
     assert!(sys.has_active_industrial_core_sync(b1));
     assert_eq!(sys.active_offensive_aggressors_on_sync(b2, Some(&ctx.sde)), vec![b1]);
 
@@ -1898,10 +1898,13 @@ async fn bf3_cancel_ship_nanite_repairs_under_leaf_lock_enqueues_instead_of_drop
         m.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 120.0);
         snap.items.insert(mod_id, m);
     });
-    sys.actor_state.write().unwrap().active_nanite_repairs.push(ActiveNaniteRepair {
-        ship_id, char_id, module_id: mod_id, initial_damage_hp: 40.0, duration_s: 10.0,
-        elapsed_s: 0.0, paste_total_needed: 5, paste_consumed_so_far: 5,
-    });
+    sys.test_with_actor_state_mut_async(move |st| {
+        st.active_nanite_repairs.push(ActiveNaniteRepair {
+            ship_id, char_id, module_id: mod_id, initial_damage_hp: 40.0, duration_s: 10.0,
+            elapsed_s: 0.0, paste_total_needed: 5, paste_consumed_so_far: 5,
+        });
+    })
+    .await;
     let leaf_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_LEAF }> = eve_db::lock_rank::RankedRwLock::new(());
     let leaf_guard = leaf_lock.write().unwrap();
     sys.cancel_ship_nanite_repairs_sync(ship_id, true);

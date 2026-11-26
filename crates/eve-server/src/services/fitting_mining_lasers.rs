@@ -573,13 +573,9 @@ pub(crate) async fn handle_mining_and_deactivate(
             }
             let cycle_overload_states: std::collections::HashMap<i64, (bool, Option<bool>)> =
                 if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    let st = sys.actor_state.read().unwrap_or_else(|e| e.into_inner());
-                    st.active_module_cycles
-                        .iter()
-                        .filter(|c| c.ship_id == ship_id)
-                        .map(|c| (c.module_id, (c.is_overloaded, c.pending_overloaded)))
-                        .collect()
+                    ctx.systems
+                        .get_or_spawn(sys_id)
+                        .active_cycle_overload_states_for_ship(ship_id)
                 } else {
                     std::collections::HashMap::new()
                 };

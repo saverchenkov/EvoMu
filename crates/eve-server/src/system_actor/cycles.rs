@@ -1933,12 +1933,8 @@ pub(crate) fn emit_propulsion_stop_fx_before_detach(
 
 impl SystemHandle {
     pub fn has_active_modules_or_cloak_sync(&self, ball_id: BallId) -> bool {
-        if self.active_module_ships.read().unwrap_or_else(|e| e.into_inner()).contains(&ball_id) {
-            return true;
-        }
-        let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        bp.combat_states.get(&ball_id).is_some_and(eve_destiny::CombatState::has_any_cloak)
-            || bp.ball_slim_meta.get(&ball_id).is_some_and(|m| m.is_cloaked)
+        let view = self.view();
+        view.has_active_module(ball_id) || view.is_ball_cloaked(ball_id)
     }
 
     pub fn set_last_auto_stepped_unix(&self, now_unix: u64) {
@@ -2228,6 +2224,7 @@ impl SystemHandle {
         let ops_was_empty = post_unlock_ops.is_empty();
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         super::protection::sync_all_protection_registry_in_actor(&bp, &mut st);
+        self.publish_view_from(&bp, Some(&st));
         let wait_ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
             self,
             &mut st,

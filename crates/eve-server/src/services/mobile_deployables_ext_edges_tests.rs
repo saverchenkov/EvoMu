@@ -680,19 +680,20 @@ async fn observatory_pings_stabilization_and_decloak_with_side_effects() {
             .unwrap();
     }
     record_ship_cloak_activated(&ctx, ship_stab_id);
-    {
-        let mut st = handle.actor_state.write().unwrap();
-        st.active_module_cycles.push(crate::system_actor::ActiveModuleCycle {
-            ship_id: ship_cycle_id,
-            module_id: cloak_mod_cycle,
-            module_type_id: 11578,
-            owner_char_id: Some(90_000_001),
-            effect_name: "effects.Cloak".to_string(),
-            repeat: 1,
-            duration_s: 5.0,
-            ..Default::default()
-        });
-    }
+    handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.active_module_cycles.push(crate::system_actor::ActiveModuleCycle {
+                ship_id: ship_cycle_id,
+                module_id: cloak_mod_cycle,
+                module_type_id: 11578,
+                owner_char_id: Some(90_000_001),
+                effect_name: "effects.Cloak".to_string(),
+                repeat: 1,
+                duration_s: 5.0,
+                ..Default::default()
+            });
+        })
+        .await;
 
     // Advance 600s (anchor complete + 1st ping) -> stabilized ship stays cloaked across pings;
     // advance further so multiple pings run (12 pings total) to guarantee 40% decloak triggers on non-stabilized ships.
