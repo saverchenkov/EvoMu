@@ -1,8 +1,67 @@
 //! Weapon charge loading and compatibility routines (`impl ServerContext`).
 
 use super::context::ServerContext;
-use eve_proto::BridgeRpcError;
+use eve_proto::{BridgeRpcError, ItemQty};
 use std::collections::HashMap;
+
+fn is_crystal_charge_group(group_id: u32) -> bool {
+    matches!(group_id, 86 | 374 | 375 | 482 | 663)
+}
+
+fn is_script_charge_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        907..=911 | 1153 | 1400 | 1549..=1551 | 1559 | 1569 | 1701 | 1702
+    )
+}
+
+fn is_wear_only_crystal_attrs(item: &eve_db::InventoryItemRecord) -> bool {
+    item.source_mutaplasmid_id.is_none()
+        && item.insured_payout_isk.is_finite()
+        && item.insured_payout_isk == 0.0
+        && item
+            .dynamic_attributes
+            .keys()
+            .all(|k| *k == eve_sde::attr_ids::DAMAGE || *k == eve_sde::attr_ids::HP_STRUCT)
+}
+
+fn is_pristine_stackable_charge(item: &eve_db::InventoryItemRecord) -> bool {
+    !item.singleton
+        && item.dynamic_attributes.is_empty()
+        && item.source_mutaplasmid_id.is_none()
+        && !item.is_blueprint_copy
+        && item.insured_payout_isk.is_finite()
+        && item.insured_payout_isk == 0.0
+}
+
+fn map_charge_consume_err(
+    err: eve_db::DbError,
+    ship_id: i64,
+    item_id: i64,
+    type_id: u32,
+    type_name: &str,
+    char_id: i64,
+) -> BridgeRpcError {
+    match err {
+        eve_db::DbError::ItemOwnershipViolation { .. } => {
+            BridgeRpcError::ownership_or_location_violation(
+                item_id,
+                None,
+                None,
+                Some(char_id),
+                None,
+                err.to_string(),
+            )
+        }
+        other => BridgeRpcError::fitting_validation_failed(
+            Some(ship_id),
+            Some(item_id),
+            Some(i64::from(type_id)),
+            type_name,
+            other.to_string(),
+        ),
+    }
+}
 
 impl ServerContext {
     pub fn is_charge_compatible_with_weapon(
@@ -199,10 +258,57 @@ impl ServerContext {
             }
             self.check_type_skill_prerequisites_in_snapshot(snap, char_id, src_charge.type_id)?;
 
+            let is_crystal_type = is_crystal_charge_group(charge_type.group_id);
+            let is_script_type = is_script_charge_group(charge_type.group_id);
+            let is_wear_only_crystal = crate::services::inventory_fitting::fitting_ewar_capital::is_wear_only_non_singleton_crystal(&src_charge);
+            let is_single_crystal_move = is_crystal_type
+                && src_charge.quantity == 1
+                && (src_charge.singleton || is_wear_only_crystal);
+            let is_single_script_move =
+                is_script_type && src_charge.quantity == 1 && src_charge.singleton;
+
+            if is_single_crystal_move && !is_wear_only_crystal_attrs(&src_charge) {
+                return Err(BridgeRpcError::fitting_validation_failed(
+                    Some(ship_id),
+                    Some(charge_item_id),
+                    Some(i64::from(src_charge.type_id)),
+                    &charge_type.name,
+                    format!("Cannot load mutated or insured crystal item {charge_item_id}"),
+                ));
+            }
+
+            let policy = if is_single_crystal_move {
+                eve_db::ItemClassPolicy::ExactAssembledItem
+            } else if is_single_script_move {
+                eve_db::ItemClassPolicy::ExactBlueprintOrSingleton
+            } else {
+                eve_db::ItemClassPolicy::StackableCommodity
+            };
+            let consume_opts = if matches!(policy, eve_db::ItemClassPolicy::StackableCommodity) {
+                eve_db::ConsumeExactOptions::for_character_stack(char_id)
+            } else {
+                eve_db::ConsumeExactOptions {
+                    reject_blueprint_copy: true,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id, policy)
+                }
+            };
+            snap.validate_item_for_consumption(&src_charge, &consume_opts)
+                .map_err(|e| {
+                    map_charge_consume_err(
+                        e,
+                        ship_id,
+                        charge_item_id,
+                        src_charge.type_id,
+                        &charge_type.name,
+                        char_id,
+                    )
+                })?;
+
             let max_cap = Self::weapon_slot_max_charge_capacity(weapon_type, charge_type);
+            let slot_cap = if is_crystal_type { 1 } else { max_cap };
 
             // Check if a charge is already in `(ship_id, flag)`
-            let existing_loaded: Option<(i64, u32, i32)> = snap
+            let existing_loaded: Option<eve_db::InventoryItemRecord> = snap
                 .items
                 .values()
                 .find(|i| {
@@ -215,93 +321,188 @@ impl ServerContext {
                             .map(|t| t.category_id == 8)
                             .unwrap_or(false)
                 })
-                .map(|i| (i.item_id, i.type_id, i.quantity));
+                .cloned();
 
             let mut current_same_id_qty: Option<(i64, i32)> = None;
-            if let Some((ex_id, ex_type_id, ex_qty)) = existing_loaded {
-                if ex_type_id == src_charge.type_id {
+            if let Some(ex_item) = existing_loaded {
+                let ex_id = ex_item.item_id;
+                let ex_type_id = ex_item.type_id;
+                let ex_qty = ex_item.quantity;
+                let ex_is_crystal = self
+                    .sde
+                    .types
+                    .get(&ex_type_id)
+                    .is_some_and(|t| is_crystal_charge_group(t.group_id));
+                let can_top_up_same = ex_type_id == src_charge.type_id
+                    && !is_crystal_type
+                    && !ex_is_crystal
+                    && is_pristine_stackable_charge(&ex_item)
+                    && is_pristine_stackable_charge(&src_charge);
+                if can_top_up_same {
                     current_same_id_qty = Some((ex_id, ex_qty));
                 } else {
-                    // ChangeAmmo: unload previous charge stack back to `(ship_id, Cargo)`
-                    let merge_cargo_id = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.item_id != ex_id
-                                && i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && i.flag == eve_db::InventoryFlag::Cargo
-                                && i.type_id == ex_type_id
-                                && !i.singleton
-                        })
-                        .map(|i| i.item_id);
+                    // ChangeAmmo or crystal/singleton/worn swap: unload previous charge back to `(ship_id, Cargo)`
+                    let ex_mergeable = is_pristine_stackable_charge(&ex_item)
+                        && !snap.is_courier_cargo_item(ex_id)
+                        && !snap.is_item_locked_in_contract_or_job(ex_id);
+                    let merge_cargo_id = if ex_mergeable {
+                        snap.items
+                            .values()
+                            .find(|i| {
+                                i.item_id != ex_id
+                                    && i.owner_id == char_id
+                                    && i.location_id == ship_id
+                                    && i.flag == eve_db::InventoryFlag::Cargo
+                                    && i.type_id == ex_type_id
+                                    && is_pristine_stackable_charge(i)
+                                    && !snap.is_courier_cargo_item(i.item_id)
+                                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                                    && i.quantity.checked_add(ex_qty).is_some()
+                            })
+                            .map(|i| i.item_id)
+                    } else {
+                        None
+                    };
                     if let Some(mc_id) = merge_cargo_id {
+                        let mc_qty = snap.items.get(&mc_id).map(|m| m.quantity).unwrap_or(0);
+                        let new_mc_qty = ItemQty::try_from_i32(mc_qty)
+                            .and_then(|q| q.checked_add(ItemQty::try_from_i32(ex_qty)?))
+                            .and_then(|q| q.try_into_stack_i32())
+                            .map_err(|e| {
+                                BridgeRpcError::fitting_validation_failed(
+                                    Some(ship_id),
+                                    Some(mc_id),
+                                    Some(i64::from(ex_type_id)),
+                                    &charge_type.name,
+                                    e.to_string(),
+                                )
+                            })?;
                         snap.items.remove(&ex_id);
                         if let Some(mc) = snap.items.get_mut(&mc_id) {
-                            mc.quantity = mc.quantity.saturating_add(ex_qty);
+                            mc.quantity = new_mc_qty;
                             mc.version += 1;
                         }
-                    } else if let Some(ex_item) = snap.items.get_mut(&ex_id) {
-                        ex_item.location_id = ship_id;
-                        ex_item.flag = eve_db::InventoryFlag::Cargo;
-                        ex_item.singleton = false;
-                        ex_item.version += 1;
+                    } else if let Some(ex_mut) = snap.items.get_mut(&ex_id) {
+                        ex_mut.location_id = ship_id;
+                        ex_mut.flag = eve_db::InventoryFlag::Cargo;
+                        if ex_mut.quantity == 1 && !ex_mut.dynamic_attributes.is_empty() && ex_is_crystal {
+                            ex_mut.singleton = true;
+                        }
+                        ex_mut.version += 1;
                     }
                 }
             }
 
             let cur_qty = current_same_id_qty.map(|(_, q)| q).unwrap_or(0);
-            let room = (max_cap - cur_qty).max(0);
-            if room == 0 {
-                let (ex_id, ex_q) = current_same_id_qty.unwrap();
-                let ver = snap.items.get(&ex_id).map(|i| i.version).unwrap_or(1);
-                return Ok((ex_id, src_charge.type_id, ex_q, ver));
-            }
-            let to_load = src_charge.quantity.min(room);
-
-            if let Some((ex_id, _)) = current_same_id_qty {
-                if src_charge.quantity > to_load {
-                    if let Some(src_mut) = snap.items.get_mut(&charge_item_id) {
-                        src_mut.quantity -= to_load;
-                        src_mut.version += 1;
-                    }
-                } else {
-                    snap.items.remove(&charge_item_id);
+            let room = slot_cap.checked_sub(cur_qty).unwrap_or(0).max(0);
+            if !is_crystal_type && room == 0 {
+                if let Some((ex_id, ex_q)) = current_same_id_qty {
+                    let ver = snap.items.get(&ex_id).map(|i| i.version).unwrap_or(1);
+                    return Ok((ex_id, src_charge.type_id, ex_q, ver));
                 }
-                let ex_mut = snap.items.get_mut(&ex_id).unwrap();
-                ex_mut.quantity += to_load;
+            }
+            let to_load = if is_crystal_type {
+                1
+            } else {
+                src_charge.quantity.min(room)
+            };
+            let qty_to_load = ItemQty::try_from_i32(to_load).map_err(|e| {
+                BridgeRpcError::fitting_validation_failed(
+                    Some(ship_id),
+                    Some(charge_item_id),
+                    Some(i64::from(src_charge.type_id)),
+                    &charge_type.name,
+                    e.to_string(),
+                )
+            })?;
+
+            if let Some((ex_id, ex_qty)) = current_same_id_qty {
+                let new_ex_qty = ItemQty::try_from_i32(ex_qty)
+                    .and_then(|q| q.checked_add(qty_to_load))
+                    .and_then(|q| q.try_into_stack_i32())
+                    .map_err(|e| {
+                        BridgeRpcError::fitting_validation_failed(
+                            Some(ship_id),
+                            Some(ex_id),
+                            Some(i64::from(src_charge.type_id)),
+                            &charge_type.name,
+                            e.to_string(),
+                        )
+                    })?;
+                snap.consume_exact_item_quantity(charge_item_id, to_load, consume_opts)
+                    .map_err(|e| {
+                        map_charge_consume_err(
+                            e,
+                            ship_id,
+                            charge_item_id,
+                            src_charge.type_id,
+                            &charge_type.name,
+                            char_id,
+                        )
+                    })?;
+                let ex_mut = snap.items.get_mut(&ex_id).ok_or_else(|| {
+                    BridgeRpcError::fitting_validation_failed(
+                        Some(ship_id),
+                        Some(ex_id),
+                        Some(i64::from(src_charge.type_id)),
+                        &charge_type.name,
+                        format!("Loaded charge {ex_id} missing during top-up"),
+                    )
+                })?;
+                ex_mut.quantity = new_ex_qty;
                 ex_mut.version += 1;
                 Ok((ex_id, ex_mut.type_id, ex_mut.quantity, ex_mut.version))
-            } else if src_charge.quantity > to_load {
-                if let Some(src_mut) = snap.items.get_mut(&charge_item_id) {
-                    src_mut.quantity -= to_load;
-                    src_mut.version += 1;
-                }
-                snap.next_entity_id += 1;
-                let loaded_id = snap.next_entity_id;
-                snap.items.insert(
-                    loaded_id,
-                    eve_db::InventoryItemRecord {
+            } else {
+                let saved_custom_name = if src_charge.quantity == to_load {
+                    snap.item_custom_names.get(&charge_item_id).cloned()
+                } else {
+                    None
+                };
+                let consumed = snap
+                    .consume_exact_item_quantity(charge_item_id, to_load, consume_opts)
+                    .map_err(|e| {
+                        map_charge_consume_err(
+                            e,
+                            ship_id,
+                            charge_item_id,
+                            src_charge.type_id,
+                            &charge_type.name,
+                            char_id,
+                        )
+                    })?;
+                let (loaded_id, new_rec) = if consumed.is_none() {
+                    let mut moved = src_charge.clone();
+                    moved.location_id = ship_id;
+                    moved.flag = flag;
+                    moved.quantity = to_load;
+                    moved.singleton = moved.singleton || is_crystal_type;
+                    moved.version += 1;
+                    if let Some(name) = saved_custom_name {
+                        snap.item_custom_names.insert(charge_item_id, name);
+                    }
+                    (charge_item_id, moved)
+                } else {
+                    let loaded_id = snap.alloc_entity_id();
+                    let split_rec = eve_db::InventoryItemRecord {
                         item_id: loaded_id,
                         type_id: src_charge.type_id,
                         owner_id: char_id,
                         location_id: ship_id,
                         flag,
                         quantity: to_load,
-                        singleton: false,
+                        singleton: is_crystal_type,
                         version: 1,
-                        dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
-                    },
-                );
-                Ok((loaded_id, src_charge.type_id, to_load, 1))
-            } else {
-                let src_mut = snap.items.get_mut(&charge_item_id).unwrap();
-                src_mut.location_id = ship_id;
-                src_mut.flag = flag;
-                src_mut.singleton = false;
-                src_mut.version += 1;
-                Ok((src_mut.item_id, src_mut.type_id, src_mut.quantity, src_mut.version))
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    };
+                    (loaded_id, split_rec)
+                };
+                let ver = new_rec.version;
+                snap.items.insert(loaded_id, new_rec);
+                Ok((loaded_id, src_charge.type_id, to_load, ver))
             }
         }
     }

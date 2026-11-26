@@ -946,6 +946,9 @@ fn handle_item_consume(
     if item_id == 0 || quantity == 0 {
         return Err((STATUS_BAD_REQUEST, "ConsumeRequest requires valid item ID and quantity > 0".into()));
     }
+    let qty_i32 = eve_proto::ItemQty::try_from_u64(quantity)
+        .and_then(|q| q.try_into_stack_i32())
+        .map_err(|_| (STATUS_BAD_REQUEST, "ConsumeRequest quantity out of range".into()))?;
 
     let (comp_id, uses_granted, is_pattern) = state
         .db
@@ -978,7 +981,7 @@ fn handle_item_consume(
                     client_error: None,
                 });
             }
-            if item.quantity <= 0 || (item.quantity as u64) < quantity {
+            if item.quantity < qty_i32 {
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_BAD_REQUEST.to_string(),
                     message: "Insufficient component license item stack quantity".into(),
@@ -1000,7 +1003,7 @@ fn handle_item_consume(
                 .is_some_and(SdeSkinComponent::is_pattern);
             s.consume_exact_item_quantity(
                 item_id as i64,
-                quantity as i32,
+                qty_i32,
                 eve_db::ConsumeExactOptions {
                     reject_blueprint_copy: true,
                     active_ship_id: current_ship,

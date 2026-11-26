@@ -3,14 +3,10 @@
   "description": "Per-file falling ratchet eliminating narrowing quantity/runs `as i32` / `as u32` casts across production crates/eve-server/src/services/ (#1186).",
   "rules": {
     "direct_quantity_casts": {
-      "zero_required": false,
+      "zero_required": true,
       "owning_issue": 1186,
-      "description": "Direct narrowing `as i32` / `as u32` casts on quantity/runs variables, field accesses, or compute_*_qty() calls. Zero everywhere except the 3 files actively held by parallel Wave F2 Track 13 (#1583).",
-      "files": {
-        "quasar_cosmetics_market.rs": 2,
-        "quasar_cosmetics_skinr.rs": 1,
-        "quasar_freelance_defs.rs": 1
-      }
+      "description": "Direct narrowing `as i32` / `as u32` casts on quantity/runs variables, field accesses, or compute_*_qty() calls. 0 remaining across crates/eve-server/src/services/.",
+      "files": {}
     },
     "clamped_quantity_casts": {
       "zero_required": false,

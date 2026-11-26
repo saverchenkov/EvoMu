@@ -318,7 +318,7 @@ pub fn register_item_delivery_and_definitions(
                         .values()
                         .filter(|item| {
                             item.type_id == target_type_id
-                                && item.quantity >= (batch_size as i32)
+                                && i64::from(item.quantity) >= batch_size
                                 && snap.validate_item_for_consumption(item, &deliver_opts).is_ok()
                         })
                         .map(|item| item.item_id)
@@ -328,9 +328,11 @@ pub fn register_item_delivery_and_definitions(
                     return None;
                 };
                 if let Some(avail_qty) = snap.items.get(&iid).map(|it| it.quantity) {
-                    let take = ((avail_qty.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
-                    if take > 0 {
-                        if snap.consume_exact_item_quantity(iid, take as i32, deliver_opts).is_ok() {
+                    let take = (i64::from(avail_qty).min(allowed_qty) / batch_size) * batch_size;
+                    if let Ok(take_i32) =
+                        eve_proto::ItemQty::try_from_i64(take).and_then(|q| q.try_into_stack_i32())
+                    {
+                        if snap.consume_exact_item_quantity(iid, take_i32, deliver_opts).is_ok() {
                             delivered_units = take;
                             consumed_loc = char_loc;
                             found = true;

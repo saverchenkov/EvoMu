@@ -336,6 +336,49 @@ fn component_licenses_grant_get_revoke_consume_and_title_definitions() {
     );
     assert_eq!(db.with_snapshot(|s| s.items[&item_id].quantity), 1);
 
+    // 3b. ConsumeRequest with quantity > i32::MAX must fail cleanly with STATUS_BAD_REQUEST without truncation
+    let overflow_consume_req = eve_proto::quasar::WireMessage {
+        fields: vec![
+            eve_proto::quasar::WireField {
+                field_number: 1,
+                value: eve_proto::quasar::WireValue::LengthDelimited(
+                    eve_proto::quasar::WireMessage {
+                        fields: vec![eve_proto::quasar::WireField {
+                            field_number: 1,
+                            value: eve_proto::quasar::WireValue::LengthDelimited(
+                                eve_proto::quasar::WireMessage {
+                                    fields: vec![eve_proto::quasar::WireField {
+                                        field_number: 1,
+                                        value: eve_proto::quasar::WireValue::Varint(item_id as u64),
+                                    }],
+                                }
+                                .encode(),
+                            ),
+                        }],
+                    }
+                    .encode(),
+                ),
+            },
+            eve_proto::quasar::WireField {
+                field_number: 2,
+                value: eve_proto::quasar::WireValue::Varint(u64::from(i32::MAX as u32) + 1),
+            },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            overflow_consume_req,
+            now
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(db.with_snapshot(|s| s.items[&item_id].quantity), 1);
+
     // 4. Title definition & version endpoints
     assert_eq!(
         call(&router, &player, "eve_public.cosmetic.character.title.definition.api.GetLatestRequest", Vec::new(), now).status_code,

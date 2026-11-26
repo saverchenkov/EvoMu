@@ -178,6 +178,23 @@ fn charge_compatibility_capacity_and_loading_into_weapon_slot() {
         .into_iter()
         .find_map(|w| {
             let cg = *w.default_attributes.get(&604)? as u32;
+            if matches!(
+                cg,
+                86 | 374
+                    | 375
+                    | 482
+                    | 663
+                    | 907..=911
+                    | 1153
+                    | 1400
+                    | 1549..=1551
+                    | 1559
+                    | 1569
+                    | 1701
+                    | 1702
+            ) {
+                return None;
+            }
             let csize = w.default_attributes.get(&128).copied();
             let mut compat: Vec<_> = ctx
                 .sde
