@@ -159,10 +159,12 @@ async fn in_space_agent_colocation_and_deterministic_origin_edges() {
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(1_001_000.0, 0.0, 0.0)).await;
     assert!(is_agent_colocated(&ctx, &ship_sess, sys_id, &in_space_agent).await);
 
-    // deterministic_mission_site_origin determinism & epic_arc_required_missions fallback
-    let p1 = deterministic_mission_site_origin(&ctx, sys_id, 1234);
-    let p2 = deterministic_mission_site_origin(&ctx, sys_id, 1234);
+    // mission_site_origin_for_instance determinism & distinctness + epic_arc_required_missions fallback
+    let p1 = mission_site_origin_for_instance(&ctx, sys_id, 1234);
+    let p2 = mission_site_origin_for_instance(&ctx, sys_id, 1234);
+    let p3 = mission_site_origin_for_instance(&ctx, sys_id, 1235);
     assert_eq!(p1, p2);
+    assert!(p1.distance(p3) >= 250_000.0);
     assert!(epic_arc_required_missions(&ctx, 9_999_999) >= 2);
 }
 
@@ -1185,7 +1187,14 @@ async fn warp_to_location_dungeon_initiates_warp_arrives_and_spawns_wave_gh1367(
         .get(&inoue_sys_id)
         .and_then(|s| s.stations.first().map(|st| st.position))
         .unwrap_or(DVec3::ZERO);
-    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
+    let site_origin = ctx.db.with_snapshot(|snap| {
+        let iid = snap
+            .missions
+            .get_by_character_template(char_id, mission_id)
+            .unwrap()
+            .instance_id;
+        mission_site_origin_for_instance(&ctx, inoue_sys_id, iid)
+    });
     assert!(
         site_origin.distance(first_station_pos) > 150_000.0,
         "mission site must sit well outside station undock grids"
@@ -1295,13 +1304,12 @@ async fn warp_to_location_range_homebase_objective_and_agent_in_space() {
     let char_id = 91_001_368_i64;
     let ship_id = 100_910_368_i64;
     let mission_id = 875_u32;
-    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
     // Start far (> 1 AU / >= 1,000 km) from both stations and dungeon so every leg > 150 km.
     let start_pos = home_pos + DVec3::new(10_000_000.0, -5_000_000.0, 0.0);
     let (mut sess, sys_h) =
         setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, start_pos).await;
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let mission_iid = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
             MissionFixture::accepted(char_id, mission_id, agent_id, inoue_sys_id)
@@ -1314,7 +1322,12 @@ async fn warp_to_location_range_homebase_objective_and_agent_in_space() {
                 .origin_station_id(Some(home_st_id))
                 .destination_station_id(Some(dest_st_id)),
         );
+        snap.missions
+            .get_by_character_template(char_id, mission_id)
+            .unwrap()
+            .instance_id
     });
+    let site_origin = mission_site_origin_for_instance(&ctx, inoue_sys_id, mission_iid);
 
     // 1. Non-zero warpRange (25 km) lands 25 km short of dungeon anchor while NPCs spawn at anchor.
     let r_dungeon = handle(
@@ -1509,7 +1522,7 @@ async fn warp_to_location_negative_guards_do_not_mutate_state() {
 
     // Spawn stopped ship in Inoue.
     let mission_id = 875_u32;
-    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
+    let site_origin = mission_site_origin_for_instance(&ctx, inoue_sys_id, 1);
     let close_pos = site_origin + DVec3::new(50_000.0, 0.0, 0.0); // < 150 km from site_origin
     let (mut sess, sys_h) =
         setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, close_pos).await;
@@ -1585,12 +1598,21 @@ async fn warp_to_location_negative_guards_do_not_mutate_state() {
     );
 
     // 7. Same-system mission < 150 km away -> WarpDistanceTooShort
-    ctx.db.with_mut_snapshot(|snap| {
+    let close_origin = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::edit(snap, char_id, mission_id, |m| {
             m.solar_system_id = inoue_sys_id;
             m.agent_id = 3_012_050;
         });
+        let iid = snap
+            .missions
+            .get_by_character_template(char_id, mission_id)
+            .unwrap()
+            .instance_id;
+        mission_site_origin_for_instance(&ctx, inoue_sys_id, iid)
     });
+    let _ = sys_h
+        .set_ball_position(ship_id, close_origin + DVec3::new(50_000.0, 0.0, 0.0))
+        .await;
     assert_eq!(
         handle(
             &ctx,
@@ -1631,7 +1653,7 @@ async fn warp_to_location_bookmark_acl_expiry_and_zarzakh_enforcement() {
     let corp_a = 1_000_009_i64;
     let corp_b = 9_800_777_i64;
 
-    let origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, 875);
+    let origin = mission_site_origin_for_instance(&ctx, inoue_sys_id, 875);
     let start_pos = origin + DVec3::new(300_000.0, 0.0, 0.0);
     let (mut sess_a, sys_h) =
         setup_undocked_pilot(&ctx, char_a, ship_a, inoue_sys_id, start_pos).await;
@@ -1764,8 +1786,14 @@ async fn warp_to_location_bookmark_acl_expiry_and_zarzakh_enforcement() {
     let (_, idle_ball) = sys_h.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     assert!(matches!(idle_ball.mode, MovementMode::Stop));
 
-    // Mission dungeon warp must ignore unauthorized shared bm_shared_no_folder_b coordinates and warp to deterministic mission origin.
-    let expected_mission_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, 877);
+    // Mission dungeon warp must ignore unauthorized shared bm_shared_no_folder_b coordinates and warp to per-instance mission origin.
+    let iid_877 = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_character_template(char_a, 877)
+            .unwrap()
+            .instance_id
+    });
+    let expected_mission_origin = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_877);
     let m_res = handle(
         &ctx,
         &mut sess_a,
@@ -1820,19 +1848,23 @@ async fn goto_location_v24_referring_agent_and_on_grid_vs_off_grid() {
     let agent_id = 3_012_050_i64;
     let other_agent_id = 3_008_416_i64;
 
-    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
-    let off_grid_start = site_origin + DVec3::new(350_000.0, 0.0, 0.0);
     let (mut sess, sys_h) =
-        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, off_grid_start).await;
-
-    ctx.db.with_mut_snapshot(|snap| {
+        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, DVec3::ZERO).await;
+    let iid_876 = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
             MissionFixture::accepted(char_id, mission_id, agent_id, inoue_sys_id)
                 .current_room_id(1)
                 .npcs_remaining(2),
         );
+        snap.missions
+            .get_by_character_template(char_id, mission_id)
+            .unwrap()
+            .instance_id
     });
+    let site_origin = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_876);
+    let off_grid_start = site_origin + DVec3::new(350_000.0, 0.0, 0.0);
+    assert!(sys_h.set_ball_position(ship_id, off_grid_start).await);
 
     // P2 #1: explicit non-matching mission_id or bound agent must NOT fall back to an unrelated mission.
     let bad_mid = handle(
@@ -1979,16 +2011,9 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     let char_a = 91_001_375_i64;
     let ship_a = 100_910_375_i64;
     let mid_a = 878_u32;
-    let origin_a = deterministic_mission_site_origin(&ctx, inoue_sys_id, mid_a);
-    let (mut sess_a, sys_h) = setup_undocked_pilot(
-        &ctx,
-        char_a,
-        ship_a,
-        inoue_sys_id,
-        origin_a + DVec3::new(350_000.0, 0.0, 0.0),
-    )
-    .await;
-    ctx.db.with_mut_snapshot(|snap| {
+    let (mut sess_a, sys_h) =
+        setup_undocked_pilot(&ctx, char_a, ship_a, inoue_sys_id, DVec3::ZERO).await;
+    let iid_a = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
             snap,
             MissionFixture::accepted(char_a, mid_a, 3_012_050, inoue_sys_id)
@@ -1996,7 +2021,17 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
                 .npcs_remaining(2)
                 .spawned_npc_ball_ids(vec![9_999_001]), // stale missing ball ID
         );
+        snap.missions
+            .get_by_character_template(char_a, mid_a)
+            .unwrap()
+            .instance_id
     });
+    let origin_a = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_a);
+    assert!(
+        sys_h
+            .set_ball_position(ship_a, origin_a + DVec3::new(350_000.0, 0.0, 0.0))
+            .await
+    );
     let _ = sys_h
         .modify_combat_state(ship_a, |cs| {
             cs.undock_invulnerable_remaining_ticks = 25;
@@ -2057,15 +2092,26 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
     let ship_b = 100_910_376_i64;
     let cloak_mod_id = 100_910_399_i64;
     let mid_b = 879_u32;
-    let origin_b = deterministic_mission_site_origin(&ctx, inoue_sys_id, mid_b);
-    let (mut sess_b, _) = setup_undocked_pilot(
-        &ctx,
-        char_b,
-        ship_b,
-        inoue_sys_id,
-        origin_b + DVec3::new(350_000.0, 0.0, 0.0),
-    )
-    .await;
+    let (mut sess_b, _) =
+        setup_undocked_pilot(&ctx, char_b, ship_b, inoue_sys_id, DVec3::ZERO).await;
+    let iid_b = ctx.db.with_mut_snapshot(|snap| {
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(char_b, mid_b, 3_012_050, inoue_sys_id)
+                .current_room_id(1)
+                .npcs_remaining(1),
+        );
+        snap.missions
+            .get_by_character_template(char_b, mid_b)
+            .unwrap()
+            .instance_id
+    });
+    let origin_b = mission_site_origin_for_instance(&ctx, inoue_sys_id, iid_b);
+    assert!(
+        sys_h
+            .set_ball_position(ship_b, origin_b + DVec3::new(350_000.0, 0.0, 0.0))
+            .await
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             cloak_mod_id,
@@ -2081,12 +2127,6 @@ async fn warp_to_location_breaks_invuln_covert_cloak_safe_logoff_and_p2_reconcil
             },
         );
         snap.module_active_states.insert(cloak_mod_id);
-        mission_fixture::insert(
-            snap,
-            MissionFixture::accepted(char_b, mid_b, 3_012_050, inoue_sys_id)
-                .current_room_id(1)
-                .npcs_remaining(1),
-        );
     });
     let _ = sys_h
         .modify_combat_state(ship_b, |cs| {

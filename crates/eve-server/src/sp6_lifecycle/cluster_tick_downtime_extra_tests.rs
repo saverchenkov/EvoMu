@@ -231,7 +231,14 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
         .sde
         .types
         .values()
-        .find(|t| t.category_id == 11 && t.faction_id.is_some())
+        .filter(|t| {
+            t.category_id == 11
+                && t.faction_id.is_some()
+                && t.default_attributes
+                    .get(&416)
+                    .is_some_and(|&v| (2_500.0..=15_000.0).contains(&v))
+        })
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(10_019);
     let fallback_npc_tid = 999_888_777u32;

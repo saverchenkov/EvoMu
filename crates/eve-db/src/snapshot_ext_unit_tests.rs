@@ -977,6 +977,9 @@ fn id_allocation_and_reconciliation_across_all_tables_and_leap_dates() {
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
                 npcs_remaining: 1,
                 spawned_npc_ball_ids: vec![-5, 250_000_123, 950_000_000],
@@ -1003,4 +1006,50 @@ fn id_allocation_and_reconciliation_across_all_tables_and_leap_dates() {
     assert_eq!(unix_secs_to_date_string(1_709_164_800), "2024-02-29");
     assert_eq!(unix_secs_to_date_string(1_740_700_800), "2025-02-28");
     assert_eq!(unix_secs_to_date_string(1_740_787_200), "2025-03-01");
+}
+
+#[test]
+fn entity_id_allocation_and_reference_check_protect_mission_asteroid_entity_id() {
+    let mut snap = WorldStateSnapshot::default();
+    let protected_ast_id = 350_000_042_i64;
+    snap.missions
+        .try_insert(crate::MissionInstance {
+            instance_id: 42,
+            character_id: 90_001,
+            agent_id: 3_000_001,
+            template_id: 4801,
+            state: crate::MissionState::Accepted,
+            kind: crate::MissionKind::Mining,
+            solar_system_id: 30_000_142,
+            current_room_id: 1,
+            bookmark_id: None,
+            origin_station_id: None,
+            offered_level: None,
+            is_anomic_burner: false,
+            offered_at_unix: 0,
+            offer_expiry_unix: 0,
+            accepted_at_unix: None,
+            accept_expiry_unix: None,
+            bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: Some(protected_ast_id),
+            dungeon_instance_id: None,
+            objective: crate::MissionObjective::Delivery(crate::DeliveryObjective {
+                item_type_id: Some(1228),
+                quantity: 500,
+            }),
+        })
+        .expect("insert mining mission");
+    assert!(!snap.asteroids.contains_key(&protected_ast_id));
+    assert!(
+        snap.is_entity_id_referenced(protected_ast_id),
+        "is_entity_id_referenced must detect mission.asteroid_entity_id even when snap.asteroids is empty"
+    );
+    snap.next_entity_id = protected_ast_id - 1;
+    let first_alloc = snap.alloc_entity_id();
+    assert_eq!(
+        first_alloc,
+        protected_ast_id + 1,
+        "alloc_entity_id must skip mission.asteroid_entity_id even before asteroid record exists"
+    );
 }

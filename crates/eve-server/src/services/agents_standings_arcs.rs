@@ -2423,8 +2423,7 @@ pub(crate) fn handle_get_plausible_mission_ids(
                     .map(|b| b.object_id)
             })
         });
-    let mut agent_ids: Vec<i64> = Vec::new();
-    if let Some(aid) = target_aid {
+    let agent_ids: Vec<i64> = if let Some(aid) = target_aid {
         if !ctx.sde.agents.contains_key(&aid) {
             return Some(Err(BridgeRpcError {
                 code: "AgentNotFound".into(),
@@ -2432,18 +2431,14 @@ pub(crate) fn handle_get_plausible_mission_ids(
                 client_error: None,
             }));
         }
-        agent_ids.push(aid);
+        vec![aid]
     } else {
         ctx.db.with_snapshot(|snap| {
-            for m in snap.missions.iter_by_character(char_id) {
-                if m.agent_id > 0 {
-                    agent_ids.push(m.agent_id);
-                }
-            }
-        });
-        agent_ids.sort_unstable();
-        agent_ids.dedup();
-    }
+            crate::services::agents_missions::agents_missions_helpers::collect_character_mission_agent_ids(
+                snap, char_id,
+            )
+        })
+    };
     let mut plausible: Vec<u32> = Vec::new();
     for aid in agent_ids {
         if let Some(agent) = ctx.sde.agents.get(&aid) {

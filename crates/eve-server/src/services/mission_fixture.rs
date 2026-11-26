@@ -25,6 +25,9 @@ pub struct MissionFixture {
     pub npcs_remaining: u32,
     pub spawned_npc_ball_ids: Vec<i64>,
     pub bookmark_id: Option<i64>,
+    pub site_origin_m: Option<[i64; 3]>,
+    pub asteroid_entity_id: Option<i64>,
+    pub dungeon_instance_id: Option<i64>,
 
     // Metadata fields backed by `MissionTimingAndCargoMeta` when `has_metadata` is true.
     pub has_metadata: bool,
@@ -253,6 +256,35 @@ impl MissionFixture {
         self
     }
 
+    /// Sets persisted per-instance site origin in integer meters (`site_origin_m`).
+    pub fn site_origin_m(mut self, site_origin_m: Option<[i64; 3]>) -> Self {
+        self.site_origin_m = site_origin_m;
+        self
+    }
+
+    /// Returns `site_origin_m` converted to floating-point meters, if set.
+    pub fn site_origin_f64(&self) -> Option<[f64; 3]> {
+        self.site_origin_m
+            .map(|[x, y, z]| [x as f64, y as f64, z as f64])
+    }
+
+    /// Sets the allocated mining asteroid entity ID (`asteroid_entity_id`).
+    pub fn asteroid_entity_id(mut self, asteroid_entity_id: Option<i64>) -> Self {
+        self.asteroid_entity_id = asteroid_entity_id;
+        self
+    }
+
+    /// Returns the allocated mining asteroid entity ID, if set.
+    pub fn get_asteroid_entity_id(&self) -> Option<i64> {
+        self.asteroid_entity_id
+    }
+
+    /// Sets the reserved `DungeonRuntimeInstance` ID (`dungeon_instance_id`).
+    pub fn dungeon_instance_id(mut self, dungeon_instance_id: Option<i64>) -> Self {
+        self.dungeon_instance_id = dungeon_instance_id;
+        self
+    }
+
     /// Sets the `sp6_lifecycle` initial wave NPC count (`None` clears it).
     pub fn initial_wave_count(mut self, initial_wave_count: Option<u32>) -> Self {
         self.initial_wave_count = initial_wave_count;
@@ -360,6 +392,9 @@ fn from_instance(inst: &MissionInstance) -> MissionFixture {
         state: inst.state.as_str().to_string(),
         current_room_id: inst.current_room_id,
         bookmark_id: inst.bookmark_id,
+        site_origin_m: inst.site_origin_m,
+        asteroid_entity_id: inst.asteroid_entity_id,
+        dungeon_instance_id: inst.dungeon_instance_id,
         offered_at_unix: inst.offered_at_unix,
         offer_expiry_unix: inst.offer_expiry_unix,
         accepted_at_unix: inst.accepted_at_unix,
@@ -494,6 +529,9 @@ fn insert_with_kind(
             accepted_at_unix: mission.accepted_at_unix,
             accept_expiry_unix: mission.accept_expiry_unix,
             bonus_expiry_unix: mission.bonus_expiry_unix,
+            site_origin_m: mission.site_origin_m,
+            asteroid_entity_id: mission.asteroid_entity_id,
+            dungeon_instance_id: mission.dungeon_instance_id,
             objective,
         })
         .expect("upsert mission fixture");

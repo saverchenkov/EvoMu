@@ -694,13 +694,27 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         slash_cmd(&ctx, &mut pilot, &format!("/createitem {tid} {qty}")).await;
     }
 
+    let (m_sys, npcs_rem) = ctx.db.with_snapshot(|s| {
+        mission_fixture::get(s, char_id, mission_id)
+            .map(|m| (m.solar_system_id, m.npcs_remaining))
+            .unwrap_or((agent_sys, 0))
+    });
+    if npcs_rem > 0 {
+        let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+            &ctx,
+            char_id,
+            m_sys,
+            glam::DVec3::ZERO,
+            Some(mission_id),
+        );
+    }
     let ball_ids = ctx.db.with_snapshot(|s| {
         mission_fixture::get(s, char_id, mission_id)
             .map(|m| m.spawned_npc_ball_ids)
             .unwrap_or_default()
     });
     for bid in ball_ids {
-        on_mission_npc_destroyed_core(&ctx.db, agent_sys, bid, Some(char_id));
+        on_mission_npc_destroyed_core(&ctx.db, m_sys, bid, Some(char_id));
     }
 
     // Complete mission (DoAction 6): verifies crediting of ISK and LP rewards

@@ -1,5 +1,5 @@
 use super::super::{
-    deterministic_mission_site_origin, find_accepted_mission_for_warp, handle,
+    find_accepted_mission_for_warp, handle, mission_site_origin_for_instance,
     parse_agent_warp_args, resolve_agent_warp_target, MissionLocationRef, WarpTarget,
 };
 use super::test_ctx;
@@ -436,8 +436,11 @@ async fn warp_target_enum_replaces_loc_lt_64_heuristics_and_resolves_typed_varia
             .unwrap();
     assert!(matches!(target_bare, WarpTarget::Dungeon { mission_id: 42, .. }));
 
-    // Deterministic dungeon fallback still places anchor in Jita when bookmark is absent.
-    let fallback_origin = deterministic_mission_site_origin(&ctx, sys_id, mission_id);
+    // Per-instance dungeon fallback still places anchor in Jita outside station grids when bookmark is absent.
+    let mission_iid = ctx
+        .db
+        .with_snapshot(|snap| snap.missions.get_by_character_template(char_id, mission_id).unwrap().instance_id);
+    let fallback_origin = mission_site_origin_for_instance(&ctx, sys_id, mission_iid);
     assert!(fallback_origin.length() > 150_000.0);
 
     // 3. Explicit bookmark (`WarpTarget::Bookmark`), station (`WarpTarget::StationOrCelestial`), and agent-in-space (`WarpTarget::AgentInSpace`).

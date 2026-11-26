@@ -206,7 +206,7 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         let PyRep::KeyVal(acc_mkv) = acc_m else {
             panic!("Expected DoAction(AcceptMission) KeyVal");
         };
-        let npc_ball_id = acc_mkv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
+        assert_eq!(acc_mkv.get("spawnedNpcBallID"), Some(&PyRep::None));
         let bm_id = acc_mkv.get("bookmarkID").unwrap().as_i64().unwrap();
         if let Some(ship_id) = session.ship_id {
             ctx.db.with_mut_snapshot(|snap| {
@@ -252,6 +252,29 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         .await
         .unwrap();
         for _ in 0..200 {
+            let _ = perim_handle.step_manual(1.0).await.unwrap();
+        }
+        ctx.dispatch_rpc(session, "beyonce", Some(cur_b_id), "CmdStop", &[], &empty, None)
+            .await
+            .unwrap();
+        let npc_ball_id = ctx.db.with_snapshot(|snap| {
+            snap.missions
+                .get_by_character_template(90_000_001, mid as u32)
+                .expect("accepted mission after pocket warp")
+                .spawned_npc_ball_ids()[0]
+        });
+        ctx.dispatch_rpc(
+            session,
+            "beyonce",
+            Some(cur_b_id),
+            "CmdFollowBall",
+            &[PyRep::Integer(npc_ball_id), PyRep::Real(500.0)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..50 {
             let _ = perim_handle.step_manual(1.0).await.unwrap();
         }
         ctx.dispatch_rpc(session, "beyonce", Some(cur_b_id), "CmdStop", &[], &empty, None)

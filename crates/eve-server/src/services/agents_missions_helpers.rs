@@ -1169,13 +1169,135 @@ pub fn reclaim_courier_cargo(
     }
 }
 
+pub(super) fn resolve_agent_corp_and_faction(
+    ctx: &ServerContext,
+    char_id: i64,
+    agent_id: i64,
+    sys_id: u32,
+    station_id: Option<i64>,
+    is_storyline: bool,
+) -> (i64, Option<i64>) {
+    let corp_id = ctx
+        .sde
+        .agents
+        .get(&agent_id)
+        .map(|a| a.corporation_id)
+        .unwrap_or_else(|| {
+            resolve_agent_and_corp_for_system(ctx, char_id, sys_id, station_id, is_storyline).1
+        });
+    let faction_id = ctx
+        .sde
+        .npc_corporations
+        .get(&corp_id)
+        .and_then(|c| c.faction_id)
+        .map(i64::from);
+    (corp_id, faction_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_mission_penalty_standings(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    agent_id: i64,
+    corp_id: i64,
+    faction_id: Option<i64>,
+    agent_delta: f64,
+    corp_delta: f64,
+    faction_pct: f64,
+    event_type_id: i64,
+) -> Vec<(i64, f64, f64)> {
+    let mut changes: Vec<(i64, f64, f64)> = Vec::new();
+    let mut actual_corp_delta: Option<f64> = None;
+    let mut actual_agent_delta: Option<f64> = None;
+    if let Some(ch) = snap.characters.get_mut(&char_id) {
+        if corp_delta.abs() > 1e-9 {
+            let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
+            let next = (cur + corp_delta).clamp(-10.0, 10.0);
+            let delta = next - cur;
+            if delta.abs() > 1e-9 {
+                ch.standings.insert(corp_id, next);
+                changes.push((corp_id, next, delta));
+                actual_corp_delta = Some(delta);
+            }
+        }
+        if agent_delta.abs() > 1e-9 && agent_id > 0 {
+            let cur_ag = ch.standings.get(&agent_id).copied().unwrap_or(0.0);
+            let next_ag = (cur_ag + agent_delta).clamp(-10.0, 10.0);
+            let delta_ag = next_ag - cur_ag;
+            if delta_ag.abs() > 1e-9 {
+                ch.standings.insert(agent_id, next_ag);
+                changes.push((agent_id, next_ag, delta_ag));
+                actual_agent_delta = Some(delta_ag);
+            }
+        }
+    }
+    if let Some(delta_ag) = actual_agent_delta.filter(|d| d.abs() > 1e-9) {
+        let ev_id = snap.alloc_entity_id();
+        snap.standing_transactions
+            .entry(char_id)
+            .or_default()
+            .push(StandingTransactionRecord {
+                event_id: ev_id,
+                from_id: agent_id,
+                to_id: char_id,
+                modification: delta_ag,
+                event_type_id,
+            });
+    }
+    if let Some(delta_corp) = actual_corp_delta.filter(|d| d.abs() > 1e-9) {
+        let ev_id = snap.alloc_entity_id();
+        snap.standing_transactions
+            .entry(char_id)
+            .or_default()
+            .push(StandingTransactionRecord {
+                event_id: ev_id,
+                from_id: corp_id,
+                to_id: char_id,
+                modification: delta_corp,
+                event_type_id,
+            });
+    }
+    if let Some(fac_id) = faction_id {
+        if faction_pct.abs() > 1e-9 {
+            let mut fac_changes: Vec<(i64, f64, f64)> = Vec::new();
+            super::agents_standings_arcs::apply_faction_standing_with_derived(
+                ctx,
+                snap,
+                char_id,
+                fac_id,
+                faction_pct,
+                true,
+                &mut fac_changes,
+            );
+            for (entity_id, new_val, delta) in fac_changes {
+                if delta.abs() > 1e-9 {
+                    let ev_id = snap.alloc_entity_id();
+                    snap.standing_transactions
+                        .entry(char_id)
+                        .or_default()
+                        .push(StandingTransactionRecord {
+                            event_id: ev_id,
+                            from_id: entity_id,
+                            to_id: char_id,
+                            modification: delta,
+                            event_type_id,
+                        });
+                    changes.push((entity_id, new_val, delta));
+                }
+            }
+        }
+    }
+    changes
+}
+
 pub async fn abandon_or_decline_mission(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     mission_id: u32,
 ) -> Result<(String, bool, bool), BridgeRpcError> {
-    let (m_sys_id, ball_ids, new_state, penalty_applied, was_accepted) =
+    let (m_sys_id, ball_ids, ast_id, st_changes, new_state, penalty_applied, was_accepted) =
         ctx.db.try_with_mut_snapshot(|snap| {
             let Some(existing) = snap.missions.get_by_character_template(char_id, mission_id)
             else {
@@ -1201,6 +1323,7 @@ pub async fn abandon_or_decline_mission(
             let m_sys_id = existing.solar_system_id;
             let m_agent_id = existing.agent_id;
             let m_bmid = existing.bookmark_id;
+            let m_ast_id = existing.asteroid_entity_id;
             let ball_ids = existing.spawned_npc_ball_ids().to_vec();
             let next_state = if was_accepted {
                 MissionState::Quit
@@ -1210,9 +1333,16 @@ pub async fn abandon_or_decline_mission(
             let new_state = next_state.as_str().to_string();
             let now = ctx.now_unix();
             let mut standing_penalty_applied = false;
+            let mut st_changes: Vec<(i64, f64, f64)> = Vec::new();
 
-            // Reclaim granted courier cargo while active record is still present
+            // Reclaim granted courier cargo and remove persisted mission asteroid while active.
             reclaim_courier_cargo(snap, char_id, mission_id);
+            if let Some(aid) = m_ast_id {
+                snap.asteroids.remove(&aid);
+                let _ = snap.missions.update_by_character_template(char_id, mission_id, |m| {
+                    m.asteroid_entity_id = None;
+                });
+            }
             let corp_id = ctx
                 .sde
                 .agents
@@ -1230,6 +1360,12 @@ pub async fn abandon_or_decline_mission(
                     )
                     .1
                 });
+            let faction_id = ctx
+                .sde
+                .npc_corporations
+                .get(&corp_id)
+                .and_then(|c| c.faction_id)
+                .map(i64::from);
 
             let is_rnd = ctx
                 .sde
@@ -1239,30 +1375,18 @@ pub async fn abandon_or_decline_mission(
 
             if was_accepted {
                 if ctx.sde.missions.contains_key(&mission_id) {
-                    let mut actual_delta = None;
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
-                        let next = (cur - 0.1).max(-10.0);
-                        ch.standings.insert(corp_id, next);
-                        let ag_cur = ch.standings.get(&m_agent_id).copied().unwrap_or(0.0);
-                        ch.standings.insert(m_agent_id, (ag_cur - 0.1).max(-10.0));
-                        actual_delta =
-                            Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
-                    }
-                    if let Some(delta) = actual_delta {
-                        snap.next_entity_id += 1;
-                        let ev_id = snap.next_entity_id;
-                        snap.standing_transactions
-                            .entry(char_id)
-                            .or_default()
-                            .push(StandingTransactionRecord {
-                                event_id: ev_id,
-                                from_id: corp_id,
-                                to_id: char_id,
-                                modification: delta,
-                                event_type_id: 83,
-                            });
-                    }
+                    st_changes = apply_mission_penalty_standings(
+                        ctx,
+                        snap,
+                        char_id,
+                        m_agent_id,
+                        corp_id,
+                        faction_id,
+                        -0.10,
+                        -0.10,
+                        -0.5,
+                        83,
+                    );
                     standing_penalty_applied = true;
                 }
                 if let Some(bmid) = m_bmid {
@@ -1282,30 +1406,18 @@ pub async fn abandon_or_decline_mission(
                     .copied()
                     .unwrap_or(0);
                 if now.saturating_sub(last_decline) < 14_400 {
-                    let mut actual_delta = None;
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
-                        let next = (cur - 0.05).max(-10.0);
-                        ch.standings.insert(corp_id, next);
-                        let ag_cur = ch.standings.get(&m_agent_id).copied().unwrap_or(0.0);
-                        ch.standings.insert(m_agent_id, (ag_cur - 0.05).max(-10.0));
-                        actual_delta =
-                            Some(if cur - 0.05 >= -10.0 { -0.05 } else { -10.0 - cur });
-                    }
-                    if let Some(delta) = actual_delta {
-                        snap.next_entity_id += 1;
-                        let ev_id = snap.next_entity_id;
-                        snap.standing_transactions
-                            .entry(char_id)
-                            .or_default()
-                            .push(StandingTransactionRecord {
-                                event_id: ev_id,
-                                from_id: corp_id,
-                                to_id: char_id,
-                                modification: delta,
-                                event_type_id: 83,
-                            });
-                    }
+                    st_changes = apply_mission_penalty_standings(
+                        ctx,
+                        snap,
+                        char_id,
+                        m_agent_id,
+                        corp_id,
+                        faction_id,
+                        -0.05,
+                        -0.05,
+                        -0.25,
+                        83,
+                    );
                     standing_penalty_applied = true;
                 }
                 snap.last_mission_decline_times.insert(char_id, now);
@@ -1316,20 +1428,138 @@ pub async fn abandon_or_decline_mission(
             Ok((
                 m_sys_id,
                 ball_ids,
+                m_ast_id,
+                st_changes,
                 new_state,
                 standing_penalty_applied,
                 was_accepted,
             ))
         })?;
 
-    if m_sys_id > 0 && !ball_ids.is_empty() {
-        let handle = ctx.systems.get_or_spawn(m_sys_id);
-        for bid in ball_ids {
-            let _ = handle.remove_ball(bid).await;
+    super::notify_standing_changes(ctx, char_id, &st_changes);
+
+    if m_sys_id > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
+        if let Some(handle) = ctx.systems.get_handle(m_sys_id) {
+            for bid in ball_ids {
+                let _ = handle.remove_ball(bid).await;
+            }
+            if let Some(aid) = ast_id {
+                let _ = handle.remove_ball(aid).await;
+            }
         }
     }
 
     Ok((new_state, penalty_applied, was_accepted))
+}
+
+/// Materializes an accepted mining mission's persisted asteroid into `handle` when a pilot enters
+/// the mission pocket (`PVE-020` / `PVE-022`).
+pub(super) async fn ensure_mission_asteroid_spawned_with_handle(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    solar_system_id: u32,
+    target_mission_id: Option<u32>,
+) {
+    let candidates: Vec<(u32, i64, eve_db::AsteroidRecord, f64)> = ctx.db.with_snapshot(|snap| {
+        let mut out = Vec::new();
+        for m in snap.missions.iter_by_character(char_id) {
+            if m.state != MissionState::Accepted
+                || m.kind != eve_db::MissionKind::Mining
+                || m.solar_system_id != solar_system_id
+            {
+                continue;
+            }
+            if let Some(target_id) = target_mission_id {
+                if m.template_id != target_id {
+                    continue;
+                }
+            }
+            let Some(ast_id) = m.asteroid_entity_id else {
+                continue;
+            };
+            let Some(rec) = snap.asteroids.get(&ast_id) else {
+                continue;
+            };
+            if rec.solar_system_id != solar_system_id || rec.quantity <= 0 {
+                continue;
+            }
+            let ore_vol = ctx
+                .sde
+                .types
+                .get(&rec.type_id)
+                .map(|t| t.volume.max(0.01))
+                .unwrap_or(0.1);
+            out.push((m.template_id, ast_id, rec.clone(), ore_vol));
+        }
+        out
+    });
+    for (mission_id, ast_id, rec, ore_vol) in candidates {
+        if handle.get_ball_position_sync(ast_id).is_some() {
+            continue;
+        }
+        let qty_u64 = u64::try_from(rec.quantity.max(0)).unwrap_or(0);
+        if qty_u64 == 0 {
+            continue;
+        }
+        let initial_u64 = u64::try_from(rec.initial_quantity.max(rec.quantity)).unwrap_or(qty_u64);
+        let ast_ball = eve_destiny::Ball {
+            id: ast_id,
+            type_id: rec.type_id,
+            position: glam::DVec3::new(rec.position.0, rec.position.1, rec.position.2),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 50_000.0,
+            radius: rec.radius,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        let ast_state = crate::system_actor::AsteroidState {
+            asteroid_id: ast_id,
+            belt_id: rec.belt_id,
+            type_id: rec.type_id,
+            initial_units: initial_u64,
+            remaining_units: qty_u64,
+            unit_volume: ore_vol,
+            depleted: false,
+            respawn_at_tick: None,
+        };
+        if let Err(err) = handle.spawn_asteroid(ast_state, ast_ball).await {
+            tracing::warn!(
+                char_id,
+                solar_system_id,
+                mission_id,
+                asteroid_id = ast_id,
+                error = %err,
+                "failed to materialize mission asteroid on pocket entry"
+            );
+        }
+    }
+}
+
+/// Pocket-entry materialization bridge for Mining mission asteroids (`PVE-020` / `PVE-022`).
+pub async fn ensure_mission_asteroid_spawned_on_pocket_entry(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: u32,
+    target_mission_id: Option<u32>,
+) {
+    let has_candidate = ctx.db.with_snapshot(|snap| {
+        snap.missions.iter_by_character(char_id).any(|m| {
+            m.state == MissionState::Accepted
+                && m.kind == eve_db::MissionKind::Mining
+                && m.solar_system_id == solar_system_id
+                && target_mission_id.is_none_or(|mid| m.template_id == mid)
+                && m.asteroid_entity_id
+                    .is_some_and(|aid| snap.asteroids.get(&aid).is_some_and(|r| r.quantity > 0))
+        })
+    });
+    if !has_candidate {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    ensure_mission_asteroid_spawned_with_handle(ctx, &handle, char_id, solar_system_id, target_mission_id).await;
 }
 
 #[derive(Debug, Clone)]
@@ -1991,6 +2221,86 @@ pub fn on_mission_npc_destroyed_core(
     db.with_mut_snapshot(|snap| {
         snap.missions.on_npc_destroyed(sys_id, npc_id);
     });
+}
+
+/// Collects sorted, deduplicated positive `agent_id`s across a character's active and archived missions.
+pub fn collect_character_mission_agent_ids(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<i64> {
+    let mut agent_ids: Vec<i64> = snap
+        .missions
+        .iter_by_character(char_id)
+        .filter(|m| m.agent_id > 0)
+        .map(|m| m.agent_id)
+        .chain(
+            snap.missions
+                .iter_history_by_character(char_id)
+                .filter(|e| e.agent_id > 0)
+                .map(|e| e.agent_id),
+        )
+        .collect();
+    agent_ids.sort_unstable();
+    agent_ids.dedup();
+    agent_ids
+}
+
+/// Reconstructs a `MissionInstance` from an archived [`eve_db::MissionHistoryEntry`],
+/// hydrating courier destination and cargo metadata from SDE when absent.
+pub fn hydrate_mission_from_history_entry(
+    ctx: &ServerContext,
+    entry: &eve_db::MissionHistoryEntry,
+    fallback_sys_id: u32,
+    fallback_station_id: Option<i64>,
+) -> eve_db::MissionInstance {
+    let agent_info = ctx.sde.agents.get(&entry.agent_id);
+    let origin_sid = agent_info.and_then(|a| a.station_id).or(fallback_station_id);
+    let mission_sys_id = agent_info
+        .and_then(|a| a.solar_system_id)
+        .unwrap_or(fallback_sys_id);
+    let mut inst = eve_db::MissionInstance::from_history_entry(entry, mission_sys_id, origin_sid);
+    if inst.kind == eve_db::MissionKind::Courier && inst.destination_station_id().is_none() {
+        if let (Some(tmpl), Some(agent)) =
+            (ctx.sde.missions.get(&inst.template_id), agent_info)
+        {
+            if let Ok(details) = resolve_courier_mission_details(ctx, tmpl, agent) {
+                if let Some(courier) = inst.courier_mut() {
+                    courier.cargo_type_id = Some(details.cargo_type_id);
+                    courier.quantity = details.cargo_quantity;
+                    courier.destination_station_id = Some(details.destination_station_id);
+                }
+                if inst.origin_station_id.is_none() {
+                    inst.origin_station_id = Some(details.origin_station_id);
+                }
+            }
+        }
+        if inst.destination_station_id().is_none() {
+            let fallback_dest = inst.origin_station_id.or(fallback_station_id).or_else(|| {
+                (mission_sys_id > 0)
+                    .then(|| {
+                        ctx.sde
+                            .stations
+                            .values()
+                            .filter(|st| st.solar_system_id == mission_sys_id)
+                            .map(|st| st.station_id)
+                            .min()
+                    })
+                    .flatten()
+            });
+            if let Some(dest_sid) = fallback_dest {
+                if let Some(courier) = inst.courier_mut() {
+                    courier.destination_station_id = Some(dest_sid);
+                    if courier.cargo_type_id.is_none() {
+                        courier.cargo_type_id = Some(3814);
+                    }
+                    if courier.quantity <= 0 {
+                        courier.quantity = 1;
+                    }
+                }
+            }
+        }
+    }
+    inst
 }
 
 #[cfg(test)]

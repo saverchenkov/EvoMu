@@ -1399,6 +1399,9 @@ fn issue_1181_is_entity_id_referenced_exact_lookup_and_collision_skip() {
                 accepted_at_unix: None,
                 accept_expiry_unix: None,
                 bonus_expiry_unix: None,
+                site_origin_m: None,
+                asteroid_entity_id: None,
+                dungeon_instance_id: None,
                 objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
                     npcs_remaining: 1,
                     spawned_npc_ball_ids: vec![npc_id_old],
@@ -1708,6 +1711,9 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
                 npcs_remaining: 1,
                 spawned_npc_ball_ids: vec![800_000_001],
@@ -2192,6 +2198,9 @@ fn issue_1181_snapshot_alloc_entity_id_reconciles_dirty_lp_logs_and_active_missi
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
                 npcs_remaining: 1,
                 spawned_npc_ball_ids: vec![],

@@ -155,13 +155,28 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         let offer = ok(&ctx, &mut pilot, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(caldari_agent_id)]).await;
         let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap();
         ok(&ctx, &mut pilot, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)]).await;
+        let (m_sys, npcs_rem) = ctx.db.with_snapshot(|snap| {
+            eve_server::services::mission_fixture::get(snap, pilot.char_id, mid as u32)
+                .map(|m| (m.solar_system_id, m.npcs_remaining))
+                .unwrap_or((0, 0))
+        });
+        if npcs_rem > 0 && m_sys > 0 {
+            let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+                &ctx,
+                pilot.char_id,
+                m_sys,
+                glam::DVec3::ZERO,
+                Some(mid as u32),
+            );
+        }
         let m_npcs: Vec<i64> = ctx.db.with_snapshot(|snap| {
             eve_server::services::mission_fixture::get(snap, pilot.char_id, mid as u32)
                 .map(|m| m.spawned_npc_ball_ids)
                 .unwrap_or_default()
         });
+        let m_sys_handle = if m_sys > 0 { ctx.systems.get_or_spawn(m_sys) } else { sys.clone() };
         for nid in m_npcs {
-            let _ = sys
+            let _ = m_sys_handle
                 .apply_damage_with_attacker(
                     nid,
                     eve_destiny::DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 },

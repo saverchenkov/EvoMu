@@ -1311,6 +1311,7 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
     )
     .await
     .expect("first accept 13_777");
+    assert_eq!(acc1.dict_get("spawnedNpcBallID"), Some(&PyRep::None));
     assert_eq!(acc1.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(3_600)));
     let expected_accept_expiry = base_now + 604_800;
     let expected_bonus_expiry = base_now + 3_600;
@@ -1323,20 +1324,8 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
         Some(&PyRep::Integer(expected_bonus_expiry as i64))
     );
 
-    // Despawn NPC balls so `can_respawn_missing` triggers on a later `DoAction(3)` call after bonus expiry.
-    let initial_balls = ctx.db.with_snapshot(|snap| {
-        mission_fixture::get(snap, char_id, 13_777)
-            .map(|m| m.spawned_npc_ball_ids)
-            .unwrap_or_default()
-    });
-    assert!(!initial_balls.is_empty());
-    let sys_handle = ctx.systems.get_or_spawn(sys1);
-    for bid in initial_balls {
-        let _ = sys_handle.remove_ball(bid).await;
-    }
-
-    eve_db::ServerClock::advance_secs(&*clock, 3_650);
-    let acc2 = call_agent_mgr(
+    // Re-accepting an already-Accepted mission must reject cleanly with InvalidMissionState (PVE-020).
+    let reaccept_err = call_agent_mgr(
         &ctx,
         &mut sess,
         "DoAction",
@@ -1344,31 +1333,116 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
         &kw,
     )
     .await
-    .expect("re-accept 13_777 to respawn missing NPCs");
-    assert_eq!(
-        acc2.dict_get("expiryUnix"),
-        Some(&PyRep::Integer(expected_accept_expiry as i64)),
-        "re-accept must preserve original accept_expiry_unix"
-    );
-    assert_eq!(
-        acc2.dict_get("bonusExpiryUnix"),
-        Some(&PyRep::Integer(expected_bonus_expiry as i64)),
-        "re-accept must preserve original bonus_expiry_unix"
-    );
+    .unwrap_err();
+    assert_eq!(reaccept_err.code, "InvalidMissionState");
+
+    // Put pilot ship in space and warp to the dungeon pocket -> spawns wave on pocket entry.
+    let ship_id = 100_000_001_i64;
+    let start_pos = ctx
+        .sde
+        .stations
+        .get(&st1)
+        .map(|s| s.position)
+        .unwrap_or(glam::DVec3::ZERO);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = sys1;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys1 as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..InventoryItemRecord::default()
+            },
+        );
+    });
+    sess.station_id = None;
+    sess.ship_id = Some(ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys1);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: start_pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .expect("spawn ship in space");
+    call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "WarpToLocation",
+        &[PyRep::String("dungeon".into()), PyRep::Integer(13_777)],
+        &kw,
+    )
+    .await
+    .expect("initial dungeon warp spawns wave");
+
+    // Despawn NPC balls so pocket re-entry after bonus expiry triggers respawn while preserving deadlines.
+    let initial_balls = ctx.db.with_snapshot(|snap| {
+        mission_fixture::get(snap, char_id, 13_777)
+            .map(|m| m.spawned_npc_ball_ids)
+            .unwrap_or_default()
+    });
+    assert!(!initial_balls.is_empty());
+    for bid in initial_balls {
+        let _ = sys_handle.remove_ball(bid).await;
+    }
+
+    eve_db::ServerClock::advance_secs(&*clock, 3_650);
+    let _ = sys_handle.set_ball_position(ship_id, start_pos).await;
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "WarpToLocation",
+        &[PyRep::String("dungeon".into()), PyRep::Integer(13_777)],
+        &kw,
+    )
+    .await
+    .expect("second dungeon warp respawns missing NPCs");
 
     ctx.db.with_snapshot(|snap| {
         let meta = mission_fixture::get(snap, char_id, 13_777).expect("fixture preserved");
+        assert!(!meta.spawned_npc_ball_ids.is_empty());
         assert_eq!(meta.accepted_at_unix, Some(base_now));
         assert_eq!(meta.accept_expiry_unix, Some(expected_accept_expiry));
         assert_eq!(meta.bonus_expiry_unix, Some(expected_bonus_expiry));
     });
 
-    // Clear the respawned NPCs and complete -> expired bonus deadline must still yield bonusReward == 0.
+    // Clear the respawned NPCs, dock back at agent station, and complete -> expired bonus deadline must yield bonusReward == 0.
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(st1);
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = st1;
+            ship.flag = InventoryFlag::Hangar;
+        }
         mission_fixture::edit(snap, char_id, 13_777, |m| {
             m.npcs_remaining = 0;
         });
     });
+    sess.station_id = Some(st1);
     let done = call_agent_mgr(
         &ctx,
         &mut sess,

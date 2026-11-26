@@ -371,6 +371,105 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
 // ============================================================================
 // 4. Mission Complete: ISK, Time Bonus, LP, Standings & Item Rewards (feat:pve.mission-complete)
 // ============================================================================
+async fn clear_mission_npcs_and_return_to_station(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    agent_oid: u64,
+    mission_id: u32,
+    home_sys: u32,
+    home_station: i64,
+) {
+    let kw = HashMap::new();
+    let ship = slash_cmd(ctx, sess, &format!("/createitem {TYPE_VELATOR} 1")).await;
+    let ship_id = ship.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None)
+        .await
+        .expect("Board");
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let pre_mission_sys = ctx.db.with_snapshot(|s| {
+        eve_server::services::mission_fixture::get(s, char_id, mission_id)
+            .map(|a| a.solar_system_id)
+            .unwrap_or(home_sys)
+    });
+    if pre_mission_sys != home_sys {
+        slash_cmd(ctx, sess, &format!("/tr {pre_mission_sys}")).await;
+    }
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        Some(agent_oid),
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(i64::from(mission_id)),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Warp to mission pocket");
+    let (mission_sys, spawned_npcs) = ctx.db.with_snapshot(|s| {
+        eve_server::services::mission_fixture::get(s, char_id, mission_id)
+            .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids))
+            .unwrap_or((home_sys, Vec::new()))
+    });
+    assert!(
+        !spawned_npcs.is_empty(),
+        "mission {mission_id} must materialize spawned NPCs on pocket warp"
+    );
+    let sys_h = ctx.systems.get_or_spawn(mission_sys);
+    for npc_bid in spawned_npcs {
+        sys_h
+            .apply_damage_with_attacker(
+                npc_bid,
+                DamageVector {
+                    em: 100_000.0,
+                    thermal: 100_000.0,
+                    kinetic: 100_000.0,
+                    explosive: 100_000.0,
+                },
+                Some(char_id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    slash_cmd(ctx, sess, &format!("/tr {home_sys}")).await;
+    if let Some(st) = ctx.sde.stations.get(&home_station) {
+        let dock_sys = ctx.systems.get_or_spawn(home_sys);
+        dock_sys
+            .set_ball_position(ship_id, st.position + DVec3::new(500.0, 0.0, 0.0))
+            .await;
+        dock_sys.step_manual(0.1).await.unwrap();
+    }
+    let beyonce_oid = crate::pve_e2e_common::bind_service(
+        ctx,
+        sess,
+        "beyonce",
+        PyRep::Integer(i64::from(home_sys)),
+    )
+    .await as u64;
+    ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &kw, None)
+        .await
+        .expect("CmdStop before dock");
+    ctx.dispatch_rpc(
+        sess,
+        "stationSvc",
+        None,
+        "Dock",
+        &[PyRep::Integer(home_station)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Dock");
+}
+
 #[tokio::test]
 async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
     let ctx = fresh_ctx();
@@ -437,57 +536,16 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         }
     }
     if npcs_rem > 0 {
-        let ship_c = slash_cmd(&ctx, &mut sess_c, &format!("/createitem {TYPE_VELATOR} 1")).await;
-        let ship_c_id = ship_c.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
-        ctx.advance_secs(31);
-        ctx.dispatch_rpc(&mut sess_c, "ship", None, "Board", &[PyRep::Integer(ship_c_id)], &kw, None)
-            .await
-            .expect("Board");
-        ctx.advance_secs(31);
-        ctx.dispatch_rpc(&mut sess_c, "stationSvc", None, "Undock", &[], &kw, None)
-            .await
-            .expect("Undock");
-        let (mission_c_sys, spawned_npcs) = ctx.db.with_snapshot(|s| {
-            eve_server::services::mission_fixture::get(s, 97_004_001, mission_c_id)
-                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids))
-                .unwrap_or((career_sys, Vec::new()))
-        });
-        let sys_c = ctx.systems.get_or_spawn(mission_c_sys);
-        for npc_bid in spawned_npcs {
-            sys_c
-                .apply_damage_with_attacker(
-                    npc_bid,
-                    DamageVector {
-                        em: 100_000.0,
-                        thermal: 100_000.0,
-                        kinetic: 100_000.0,
-                        explosive: 100_000.0,
-                    },
-                    Some(97_004_001),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        slash_cmd(&ctx, &mut sess_c, &format!("/tr {career_sys}")).await;
-        if let Some(st) = ctx.sde.stations.get(&career_station) {
-            let dock_sys_c = ctx.systems.get_or_spawn(career_sys);
-            dock_sys_c
-                .set_ball_position(ship_c_id, st.position + DVec3::new(500.0, 0.0, 0.0))
-                .await;
-            dock_sys_c.step_manual(0.1).await.unwrap();
-        }
-        ctx.dispatch_rpc(
+        clear_mission_npcs_and_return_to_station(
+            &ctx,
             &mut sess_c,
-            "stationSvc",
-            None,
-            "Dock",
-            &[PyRep::Integer(career_station)],
-            &kw,
-            None,
+            97_004_001,
+            career_oid,
+            mission_c_id,
+            career_sys,
+            career_station,
         )
-        .await
-        .expect("Dock career");
+        .await;
     }
 
     let comp_c = ctx
@@ -586,57 +644,16 @@ async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
         }
     }
     if npcs_rem_s > 0 {
-        let ship_s = slash_cmd(&ctx, &mut sess_s, &format!("/createitem {TYPE_VELATOR} 1")).await;
-        let ship_s_id = ship_s.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
-        ctx.advance_secs(31);
-        ctx.dispatch_rpc(&mut sess_s, "ship", None, "Board", &[PyRep::Integer(ship_s_id)], &kw, None)
-            .await
-            .expect("Board");
-        ctx.advance_secs(31);
-        ctx.dispatch_rpc(&mut sess_s, "stationSvc", None, "Undock", &[], &kw, None)
-            .await
-            .expect("Undock");
-        let (mission_s_sys, npcs_s) = ctx.db.with_snapshot(|s| {
-            eve_server::services::mission_fixture::get(s, 97_004_002, mission_s_id)
-                .map(|a| (a.solar_system_id, a.spawned_npc_ball_ids))
-                .unwrap_or((sec_sys, Vec::new()))
-        });
-        let sys_s = ctx.systems.get_or_spawn(mission_s_sys);
-        for npc_bid in npcs_s {
-            sys_s
-                .apply_damage_with_attacker(
-                    npc_bid,
-                    DamageVector {
-                        em: 100_000.0,
-                        thermal: 100_000.0,
-                        kinetic: 100_000.0,
-                        explosive: 100_000.0,
-                    },
-                    Some(97_004_002),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        slash_cmd(&ctx, &mut sess_s, &format!("/tr {sec_sys}")).await;
-        if let Some(st) = ctx.sde.stations.get(&sec_station) {
-            let dock_sys_s = ctx.systems.get_or_spawn(sec_sys);
-            dock_sys_s
-                .set_ball_position(ship_s_id, st.position + DVec3::new(500.0, 0.0, 0.0))
-                .await;
-            dock_sys_s.step_manual(0.1).await.unwrap();
-        }
-        ctx.dispatch_rpc(
+        clear_mission_npcs_and_return_to_station(
+            &ctx,
             &mut sess_s,
-            "stationSvc",
-            None,
-            "Dock",
-            &[PyRep::Integer(sec_station)],
-            &kw,
-            None,
+            97_004_002,
+            sec_oid,
+            mission_s_id,
+            sec_sys,
+            sec_station,
         )
-        .await
-        .expect("Dock sec");
+        .await;
     }
 
     ctx.advance_secs(7_200);

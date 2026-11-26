@@ -222,6 +222,9 @@ pub(crate) fn populate_world_core_entities(snap: &mut WorldStateSnapshot) {
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: MissionObjective::Encounter(EncounterObjective {
                 npcs_remaining: 4,
                 spawned_npc_ball_ids: vec![70001],

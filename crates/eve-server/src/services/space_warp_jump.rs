@@ -786,16 +786,9 @@ async fn handle_cmd_warp_to_stuff(
                 });
             }
             if resolved_pos.is_none() && !matches!(stuff_type, "epinstance" | "ep_instance") {
-                resolved_pos = ctx.db.with_snapshot(|snap| {
-                    if snap.missions.iter_by_character(char_id).any(|m| {
-                        m.solar_system_id == sys_id
-                            && m.state == eve_db::MissionState::Accepted
-                            && (target_id == m.template_id as i64 || target_id == m.agent_id as i64)
-                    }) {
-                        return Some(DVec3::new(250_000_000.0, 0.0, 250_000_000.0));
-                    }
-                    None
-                });
+                resolved_pos = crate::services::agents_missions::agents_missions_warp::resolve_accepted_mission_warp_origin(
+                    ctx, session, char_id, sys_id, target_id,
+                )?;
             }
         }
         "char" | "fleet" => {
@@ -976,21 +969,27 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos,
     );
     let landing_dist = current_ball.position.distance(landing_pos);
-
-    let warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
-    let mut dest_pos = landing_pos - warp_dir * min_range;
-    let requested_dist_m = current_ball.position.distance(dest_pos);
-    let effective_warp_dist_m = (landing_dist - min_range).min(requested_dist_m);
-    if effective_warp_dist_m < 150_000.0 {
+    let intended_warp_dist_m = (landing_dist - min_range).max(0.0);
+    if intended_warp_dist_m < 150_000.0 {
         return Err(BridgeRpcError {
             code: "WarpDistanceTooShort".into(),
             message: format!(
                 "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                effective_warp_dist_m.max(0.0)
+                intended_warp_dist_m
             ),
             client_error: None,
         });
     }
+
+    let raw_warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
+    let mut dest_pos = crate::services::nav_warp_interdiction::check_warp_interdiction_and_adjust_dest(
+        &handle,
+        ship_id,
+        current_ball.position,
+        landing_pos - raw_warp_dir * min_range,
+    )?;
+    let warp_dir = (dest_pos - current_ball.position).normalize_or_zero();
+    let requested_dist_m = current_ball.position.distance(dest_pos);
 
     let (base_warp_cap_need, sde_max_cap) = ctx
         .sde
@@ -1137,9 +1136,9 @@ async fn handle_cmd_warp_to_stuff(
                 ctx, &handle, char_id, ship_id, sys_id,
             )
             .await;
-            let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
-                ctx, char_id, sys_id, dest_pos,
-            );
+            crate::services::agents_missions::agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+                ctx, &handle, char_id, sys_id, &stuff_type, target_id, dest_pos,
+            ).await;
             crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
                 ctx, char_id, sys_id, current_ball.position.to_array(), dest_pos.to_array(),
             );

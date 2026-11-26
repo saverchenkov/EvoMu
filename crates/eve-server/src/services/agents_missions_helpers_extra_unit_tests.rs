@@ -1222,8 +1222,12 @@ async fn wave4_courier_multi_stack_reclaim_decline_boundary_clamp_and_npc_filter
     assert!(pen_in);
     ctx.db.with_snapshot(|snap| {
         assert!((snap.characters[&char_id].standings[&1_000_009] - (-10.0)).abs() < 1e-9);
-        let last_tx = snap.standing_transactions[&char_id].last().unwrap();
-        assert!((last_tx.modification - (-0.02)).abs() < 1e-9);
+        let corp_tx = snap.standing_transactions[&char_id]
+            .iter()
+            .rev()
+            .find(|tx| tx.from_id == 1_000_009 && tx.event_type_id == 83)
+            .expect("corp penalty standing transaction");
+        assert!((corp_tx.modification - (-0.02)).abs() < 1e-9);
     });
 
     // on_mission_npc_destroyed_core: ignores Offered/Completed & wrong sys_id, decrements even with mismatched killer when ball_id matches!

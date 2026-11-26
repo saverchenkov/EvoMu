@@ -459,10 +459,22 @@ pub struct MissionInstance {
     pub accept_expiry_unix: Option<u64>,
     #[serde(default)]
     pub bonus_expiry_unix: Option<u64>,
+    #[serde(default)]
+    pub site_origin_m: Option<[i64; 3]>,
+    #[serde(default)]
+    pub asteroid_entity_id: Option<i64>,
+    #[serde(default)]
+    pub dungeon_instance_id: Option<i64>,
     pub objective: MissionObjective,
 }
 
 impl MissionInstance {
+    /// Returns the persisted per-instance site origin in floating-point meters, if set.
+    pub fn site_origin_f64(&self) -> Option<[f64; 3]> {
+        self.site_origin_m
+            .map(|[x, y, z]| [x as f64, y as f64, z as f64])
+    }
+
     /// Verifies that `self.kind` agrees with the `self.objective` variant.
     pub fn is_objective_consistent(&self) -> bool {
         matches!(
@@ -524,6 +536,9 @@ impl MissionInstance {
                 .then_some(entry.offered_at_unix),
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: MissionObjective::default_for_kind(entry.kind),
         }
     }
@@ -864,6 +879,18 @@ impl MissionInstanceStore {
     /// All live indexed NPC ball IDs across stored encounter objectives.
     pub fn spawned_npc_ball_ids(&self) -> impl Iterator<Item = i64> + '_ {
         self.by_npc_ball.keys().copied()
+    }
+
+    /// All allocated mining asteroid entity IDs referenced by active mission instances.
+    pub fn asteroid_entity_ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.by_id
+            .values()
+            .filter_map(|inst| inst.asteroid_entity_id)
+    }
+
+    /// Returns `true` if `asteroid_id` is referenced by any active mission's `asteroid_entity_id`.
+    pub fn contains_asteroid_entity_id(&self, asteroid_id: i64) -> bool {
+        self.asteroid_entity_ids().any(|id| id == asteroid_id)
     }
 
     /// Deterministic ascending iteration over all archived mission history entries.
@@ -1515,6 +1542,9 @@ mod tests {
             accepted_at_unix: (state != MissionState::Offered).then_some(1_700_000_100),
             accept_expiry_unix: (state != MissionState::Offered).then_some(1_700_604_800),
             bonus_expiry_unix: (state != MissionState::Offered).then_some(1_700_007_200),
+            site_origin_m: Some([10_000_000, 0, -5_000_000]),
+            asteroid_entity_id: (kind == MissionKind::Mining).then_some(instance_id + 2_000),
+            dungeon_instance_id: None,
             objective,
         }
     }

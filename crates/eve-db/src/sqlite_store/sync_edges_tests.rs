@@ -497,6 +497,9 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: crate::MissionObjective::Encounter(crate::EncounterObjective::default()),
         })
         .expect("insert mission");

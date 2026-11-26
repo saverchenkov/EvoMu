@@ -93,9 +93,7 @@ async fn test_agent_missions_complete_reward_formula_and_storyline_e2e() {
         accepted.dict_get("state"),
         Some(&PyRep::String("Accepted".into()))
     );
-    let spawned_npc_id = accepted
-        .dict_get("spawnedNpcBallID")
-        .and_then(|v| v.as_i64());
+    assert_eq!(accepted.dict_get("spawnedNpcBallID"), Some(&PyRep::None));
 
     // 4. Undock, warp to mission bookmark, and destroy all spawned mission NPCs with turrets
     undock_from_station(&ctx, &mut sess, agent_sys).await;
@@ -138,9 +136,6 @@ async fn test_agent_missions_complete_reward_formula_and_storyline_e2e() {
                 .unwrap_or_default()
         });
         if npcs_to_clear.is_empty() {
-            if let Some(sid) = spawned_npc_id.filter(|_| _pass == 0) {
-                warp_and_engage_ball(&ctx, &mut sess, site_sys, ship_id, &guns, sid, "item", PyRep::Integer(sid)).await;
-            }
             break;
         }
         for npc_id in npcs_to_clear {

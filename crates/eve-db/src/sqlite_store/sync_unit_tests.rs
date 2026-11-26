@@ -271,6 +271,9 @@ fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective: crate::MissionObjective::Encounter(crate::EncounterObjective {
                 npcs_remaining: 1,
                 spawned_npc_ball_ids: vec![],

@@ -566,6 +566,43 @@ async fn query_journal_missions(
         .collect()
 }
 
+async fn complete_accepted_courier_mission(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    mid: i64,
+    dest_sta: i64,
+) {
+    let kw = HashMap::new();
+    let tag = format!("courier_cargo:{char_id}:{mid}");
+    ctx.db.with_mut_snapshot(|snap| {
+        let cid = snap
+            .item_custom_names
+            .iter()
+            .find(|(_, v)| *v == &tag)
+            .map(|(&k, _)| k)
+            .expect("granted courier cargo item");
+        if let Some(it) = snap.items.get_mut(&cid) {
+            it.location_id = ship_id;
+            it.flag = InventoryFlag::Cargo;
+        }
+    });
+    let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
+    dock_at_station(ctx, sess, char_id, dest_sys, Some(dest_sta));
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        None,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(mid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Complete courier mission");
+}
+
 async fn complete_live_courier(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -608,32 +645,7 @@ async fn complete_live_courier(
     .await
     .expect("Accept courier mission");
 
-    let tag = format!("courier_cargo:{char_id}:{mid}");
-    ctx.db.with_mut_snapshot(|snap| {
-        let cid = snap
-            .item_custom_names
-            .iter()
-            .find(|(_, v)| *v == &tag)
-            .map(|(&k, _)| k)
-            .expect("granted courier cargo item");
-        if let Some(it) = snap.items.get_mut(&cid) {
-            it.location_id = ship_id;
-            it.flag = InventoryFlag::Cargo;
-        }
-    });
-    let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
-    dock_at_station(ctx, sess, char_id, dest_sys, Some(dest_sta));
-    ctx.dispatch_rpc(
-        sess,
-        "agentMgr",
-        None,
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(mid)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Complete courier mission");
+    complete_accepted_courier_mission(ctx, sess, char_id, ship_id, mid, dest_sta).await;
 }
 
 async fn complete_live_fw_mission(
@@ -671,10 +683,24 @@ async fn complete_live_fw_mission(
     )
     .await
     .expect("Accept FW mission");
-    let (m_sys_id, npc_ids) = ctx.db.with_snapshot(|s| {
-        let m = eve_server::services::mission_fixture::get(s, char_id, mid as u32).unwrap();
-        (m.solar_system_id, m.spawned_npc_ball_ids)
+    let (m_sys_id, is_courier, dest_sta_opt) = ctx.db.with_snapshot(|s| {
+        let m = s
+            .missions
+            .get_by_character_template(char_id, mid as u32)
+            .expect("accepted FW mission");
+        (
+            m.solar_system_id,
+            m.kind == eve_db::MissionKind::Courier,
+            m.courier().and_then(|c| c.destination_station_id),
+        )
     });
+    if is_courier {
+        let dest_sta = dest_sta_opt
+            .or_else(|| offer.get("destinationStationID").and_then(|v| v.as_i64()))
+            .unwrap_or_else(|| fw_agent.station_id.unwrap());
+        complete_accepted_courier_mission(ctx, sess, char_id, ship_id, mid, dest_sta).await;
+        return;
+    }
 
     dock_at_station(ctx, sess, char_id, m_sys_id, None);
     let sys_h = ctx.systems.get_or_spawn(m_sys_id);
@@ -695,6 +721,25 @@ async fn complete_live_fw_mission(
             ctx.build_type_combat_state(639),
         )
         .await;
+    let pocket_anchor = ctx
+        .db
+        .with_snapshot(|s| {
+            eve_server::services::mission_fixture::get(s, char_id, mid as u32)
+                .and_then(|m| m.site_origin_f64().map(DVec3::from))
+        })
+        .unwrap_or(DVec3::ZERO);
+    let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        ctx,
+        char_id,
+        m_sys_id,
+        pocket_anchor,
+        Some(mid as u32),
+    );
+    let npc_ids = ctx.db.with_snapshot(|s| {
+        eve_server::services::mission_fixture::get(s, char_id, mid as u32)
+            .unwrap()
+            .spawned_npc_ball_ids
+    });
     for nid in npc_ids {
         let _ = sys_h.set_ball_position(nid, DVec3::new(1_000.0, 0.0, 0.0)).await;
         ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(nid)], &kw, None)
@@ -971,15 +1016,28 @@ async fn test_b36_storyline_offer_counter() {
     .into_iter()
     .enumerate()
     {
-        if non_qual_agent.agent_type_id == 3 {
-            complete_live_courier(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
+        let clear_agent_missions = || {
             ctx.db.with_mut_snapshot(|snap| {
-                for m in eve_server::services::mission_fixture::list(snap) {
-                    if m.agent_id == non_qual_agent.agent_id {
-                        eve_server::services::mission_fixture::remove(snap, m.character_id, m.mission_id);
-                    }
+                let mids: Vec<u32> = snap
+                    .missions
+                    .iter_by_character(char_id)
+                    .filter(|m| m.agent_id == non_qual_agent.agent_id)
+                    .map(|m| m.template_id)
+                    .chain(
+                        snap.missions
+                            .iter_history_by_character(char_id)
+                            .filter(|h| h.agent_id == non_qual_agent.agent_id)
+                            .map(|h| h.template_id),
+                    )
+                    .collect();
+                for mid in mids {
+                    eve_server::services::mission_fixture::remove(snap, char_id, mid);
                 }
             });
+        };
+        if non_qual_agent.agent_type_id == 3 {
+            complete_live_courier(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
+            clear_agent_missions();
         } else if non_qual_agent.agent_type_id == 5 {
             let dc_sys = non_qual_agent.solar_system_id.unwrap();
             let dc_sta = non_qual_agent.station_id.or_else(|| ctx.sde.solar_systems[&dc_sys].stations.first().map(|s| s.station_id)).unwrap_or(60_003_760);
@@ -1008,18 +1066,10 @@ async fn test_b36_storyline_offer_counter() {
             let mid = off["missionID"].as_i64().unwrap();
             ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &kw, None).await.unwrap();
             ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid)], &kw, None).await.unwrap();
-            ctx.db.with_mut_snapshot(|snap| {
-                eve_server::services::mission_fixture::remove(snap, char_id, mid as u32);
-            });
+            clear_agent_missions();
         } else {
             complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
-            ctx.db.with_mut_snapshot(|snap| {
-                for m in eve_server::services::mission_fixture::list(snap) {
-                    if m.agent_id == non_qual_agent.agent_id {
-                        eve_server::services::mission_fixture::remove(snap, m.character_id, m.mission_id);
-                    }
-                }
-            });
+            clear_agent_missions();
         }
     }
     let j = query_journal_missions(&ctx, &mut sess).await;
@@ -1123,7 +1173,7 @@ async fn test_b36_storyline_offer_counter() {
             .await
             .expect("Accept Storyline mission"),
     );
-    let sl_npcs = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().spawned_npc_ball_ids);
+    let sl_npcs_rem = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().npcs_remaining);
     if let Some(dest_sta) = briefing_1.get("destinationStationID").and_then(|v| v.as_i64()) {
         let courier_tag = format!("courier_cargo:{char_id}:{first_sl_mid}");
         let cargo_iid = ctx.db.with_snapshot(|s| {
@@ -1136,10 +1186,12 @@ async fn test_b36_storyline_offer_counter() {
         });
         let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
         dock_at_station(&ctx, &mut sess, char_id, dest_sys, Some(dest_sta));
-    } else if !sl_npcs.is_empty() {
+    } else if sl_npcs_rem > 0 {
         dock_at_station(&ctx, &mut sess, char_id, sl_sys, None);
         let sys_h = ctx.systems.get_or_spawn(sl_sys);
         let _ = sys_h.spawn_ball_with_combat(Ball { id: ship_id, type_id: 639, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 100_000_000.0, radius: 250.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(639)).await;
+        let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(&ctx, char_id, sl_sys, DVec3::ZERO, Some(first_sl_mid as u32));
+        let sl_npcs = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().spawned_npc_ball_ids);
         for nid in sl_npcs {
             let _ = sys_h.set_ball_position(nid, DVec3::new(1_000.0, 0.0, 0.0)).await;
             ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(nid)], &kw, None).await.unwrap();

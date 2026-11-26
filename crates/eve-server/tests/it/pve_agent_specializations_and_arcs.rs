@@ -466,12 +466,16 @@ async fn test_pve_mining_missions_career_and_data_centers() {
     let PyRep::KeyVal(off_kv) = offer else { panic!() };
     let mid = off_kv["missionID"].as_i64().unwrap() as u32;
 
-    // Accept mining mission -> spawns private pocket asteroid
-    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(m_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept mining");
+    // Accept mining mission -> persists bookmark + allocated asteroid in DB without spawning space balls yet
+    let acc_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(m_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept mining");
 
-    let expected_ast_id = 910_000_000 + (mid as i64) * 1000 + 1;
+    let expected_ast_id = acc_res
+        .dict_get("asteroidEntityID")
+        .and_then(PyRep::as_i64)
+        .expect("allocated asteroidEntityID on mining accept");
+    assert_ne!(expected_ast_id, 910_000_000 + (mid as i64) * 1000 + 1);
     let ast_exists = ctx.db.with_snapshot(|snap| snap.asteroids.contains_key(&expected_ast_id));
-    assert!(ast_exists, "Private mission asteroid must be spawned in space for mining mission");
+    assert!(ast_exists, "Private mission asteroid must be persisted in DB on mining accept");
 
     // Completing without ore must fail
     let premature = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(m_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.expect_err("Premature complete must fail");
@@ -1007,14 +1011,18 @@ async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_gua
         .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(5), PyRep::Integer(combat_mid as i64)], &kw, None)
         .await
         .expect("Remote-eligible burner mission accepts via DoAction(5)");
-    let npc_id = remote_combat_acc.dict_get("spawnedNpcBallID").and_then(|v| v.as_i64()).expect("spawnedNpcBallID");
+    assert_eq!(
+        remote_combat_acc.dict_get("state").and_then(PyRep::as_str),
+        Some("Accepted")
+    );
+    assert_eq!(remote_combat_acc.dict_get("spawnedNpcBallID"), Some(&PyRep::None));
     let bm_id = remote_combat_acc.dict_get("bookmarkID").and_then(|v| v.as_i64()).expect("bookmarkID");
     let remote_handle = ctx.systems.get_or_spawn(remote_sys);
     let ag_handle = ctx.systems.get_or_spawn(ag_sys);
-    assert!(remote_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_none(), "NPC must NOT spawn in caller's remote_sys");
-    assert!(ag_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_some(), "NPC MUST spawn in m.solar_system_id (ag_sys)");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.bookmarks[&bm_id].solar_system_id, ag_sys, "Mission bookmark must be in m.solar_system_id");
+        let m_combat = snap.missions.get_by_character_template(char_id, combat_mid).expect("combat mission");
+        assert!(m_combat.spawned_npc_ball_ids().is_empty(), "Accept must not materialize NPCs prior to pocket warp");
     });
 
     let remote_mining_acc = ctx
@@ -1026,12 +1034,57 @@ async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_gua
         Some("Accepted"),
         "expected Accepted mission state on remote burner accept: {remote_mining_acc:?}"
     );
-    let ast_id = 910_000_000 + (mining_mid as i64) * 1000 + 1;
+    let ast_id = remote_mining_acc
+        .dict_get("asteroidEntityID")
+        .and_then(PyRep::as_i64)
+        .expect("allocated asteroidEntityID on remote mining accept");
+    assert_ne!(ast_id, 910_000_000 + (mining_mid as i64) * 1000 + 1);
     assert!(remote_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_none(), "Asteroid must NOT spawn in remote_sys");
-    assert!(ag_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_some(), "Asteroid MUST spawn in ag_sys");
+    assert!(ag_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_none(), "Asteroid must NOT spawn in ag_sys at accept time prior to pocket warp");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.asteroids[&ast_id].solar_system_id, ag_sys);
     });
+
+    // Warping into pockets inside ag_sys materializes both the combat NPCs and allocated mining asteroid in ag_sys (never remote_sys).
+    relocate_docked_pilot(&ctx, &mut sess, char_id, ag_sys, None).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "agentMgr",
+        None,
+        "WarpToLocation",
+        &[PyRep::String("dungeon".into()), PyRep::Integer(combat_mid as i64)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Warp to combat burner pocket in ag_sys");
+    let npc_ids = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_character_template(char_id, combat_mid)
+            .expect("combat mission")
+            .spawned_npc_ball_ids()
+            .to_vec()
+    });
+    assert!(!npc_ids.is_empty(), "Combat NPCs must spawn in ag_sys on pocket warp");
+    let npc_id = npc_ids[0];
+    assert!(remote_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_none(), "NPC must NOT spawn in caller's remote_sys");
+    assert!(ag_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_some(), "NPC MUST spawn in m.solar_system_id (ag_sys) on pocket warp");
+
+    let _ = ag_handle.set_movement_mode(100_000_001, eve_destiny::MovementMode::Stop).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "agentMgr",
+        None,
+        "WarpToLocation",
+        &[PyRep::String("dungeon".into()), PyRep::Integer(mining_mid as i64)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Warp to mining burner pocket in ag_sys");
+    assert!(remote_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_none(), "Asteroid must NOT spawn in remote_sys");
+    assert!(ag_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_some(), "Asteroid MUST spawn in ag_sys on pocket warp");
+    relocate_docked_pilot(&ctx, &mut sess, char_id, remote_sys, None).await;
 
     // 3. DoAction(6) requires co-location; DoAction(7) rejects physical item delivery; DoAction(7) succeeds on non-item combat
     ctx.db.with_mut_snapshot(|snap| {

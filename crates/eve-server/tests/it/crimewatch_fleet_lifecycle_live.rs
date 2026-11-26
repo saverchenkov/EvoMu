@@ -513,14 +513,36 @@ async fn test_live_crimewatch_sec_gain_caps_and_tag_tier_bands() {
         ctx.advance_secs(12);
         rpc(&ctx, &mut pilot, "stationSvc", "Undock", &[]).await.unwrap();
         pilot.ship_id = pilot.sess.ship_id.unwrap_or(pilot.ship_id);
-        let spawned = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, pilot.char_id, mid).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids)));
-        if let Some((mission_sys, rats)) = spawned {
-            if let Some(&m_rat_id) = rats.first() {
+        let m_info = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, pilot.char_id, mid).map(|m| (m.solar_system_id, m.npcs_remaining)));
+        if let Some((mission_sys, npcs_rem)) = m_info {
+            if npcs_rem > 0 {
                 slash_cmd(&ctx, &mut pilot.sess, &format!("/tr {mission_sys}")).await;
-                slash_cmd(&ctx, &mut pilot.sess, "/heal").await;
-                shoot_and_destroy(&ctx, &mut pilot, mission_sys, &guns, m_rat_id).await;
-                mission_ok = true;
-                break;
+                let warp_res = ctx.dispatch_rpc(
+                    &mut pilot.sess,
+                    "agentMgr",
+                    None,
+                    "WarpToLocation",
+                    &[PyRep::String("dungeon".into()), PyRep::Integer(i64::from(mid))],
+                    &HashMap::new(),
+                    None,
+                ).await;
+                warp_res.expect("Warp to mission pocket");
+                let m_handle = ctx.systems.get_or_spawn(mission_sys);
+                let _ = m_handle.set_movement_mode(pilot.ship_id, eve_destiny::MovementMode::Stop).await;
+                let rats = ctx.db.with_snapshot(|s| {
+                    eve_server::services::mission_fixture::get(s, pilot.char_id, mid)
+                        .map(|m| m.spawned_npc_ball_ids)
+                        .unwrap_or_default()
+                });
+                if let Some(&m_rat_id) = rats.first() {
+                    if let Ok(Some((_, rat_b))) = m_handle.get_ball_snapshot(m_rat_id).await {
+                        m_handle.set_ball_position(pilot.ship_id, rat_b.position + glam::DVec3::new(2_000.0, 0.0, 0.0)).await;
+                    }
+                    slash_cmd(&ctx, &mut pilot.sess, "/heal").await;
+                    shoot_and_destroy(&ctx, &mut pilot, mission_sys, &guns, m_rat_id).await;
+                    mission_ok = true;
+                    break;
+                }
             }
         }
     }

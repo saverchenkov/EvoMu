@@ -1657,20 +1657,15 @@ async fn mission_dungeon_warp_target_rejects_zarzakh_mission_and_bookmark() {
 
     // Case 2: Mission in Jita whose attached bookmark points into Zarzakh must also reject with DunBlacklistCannotWarp.
     let jita_handle = ctx.systems.get_or_spawn(jita_sys);
-    let jita_origin = deterministic_mission_site_origin(&ctx, jita_sys, 1_902)
-        + glam::DVec3::new(300_000.0, 0.0, 0.0);
-    ctx.db.with_mut_snapshot(|snap| {
+    let jita_iid = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = jita_sys;
         }
-        mission_fixture::insert(
-            snap,
-            MissionFixture::accepted(char_id, 1_902, 3_012_050, jita_sys)
-                .current_room_id(1)
-                .npcs_remaining(2)
-                .bookmark_id(Some(zz_bm_id)),
-        );
+        mission_fixture::insert(snap, MissionFixture::accepted(char_id, 1_902, 3_012_050, jita_sys).current_room_id(1).npcs_remaining(2).bookmark_id(Some(zz_bm_id)));
+        snap.missions.get_by_character_template(char_id, 1_902).unwrap().instance_id
     });
+    let jita_origin = mission_site_origin_for_instance(&ctx, jita_sys, jita_iid)
+        + glam::DVec3::new(300_000.0, 0.0, 0.0);
     jita_handle
         .spawn_ball_with_combat(
             eve_destiny::Ball {
@@ -2367,10 +2362,7 @@ async fn mission_pocket_wave_respawn_is_scoped_to_warped_mission_and_preserves_n
     let mid_b = 1_882_u32;
     let kw = HashMap::new();
 
-    let origin_a = deterministic_mission_site_origin(&ctx, sys_id, mid_a);
-    let start_pos = origin_a + glam::DVec3::new(350_000.0, 0.0, 0.0);
-
-    ctx.db.with_mut_snapshot(|snap| {
+    let iid_a = ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::clear_character(snap, char_id);
         snap.items.insert(
             ship_id,
@@ -2392,20 +2384,12 @@ async fn mission_pocket_wave_respawn_is_scoped_to_warped_mission_and_preserves_n
             ch.station_id = None;
             ch.structure_id = None;
         }
-        mission_fixture::insert(
-            snap,
-            MissionFixture::accepted(char_id, mid_a, 3_012_050, sys_id)
-                .current_room_id(1)
-                .npcs_remaining(2),
-        );
-        mission_fixture::insert(
-            snap,
-            MissionFixture::accepted(char_id, mid_b, 3_012_051, sys_id)
-                .current_room_id(1)
-                .npcs_remaining(3)
-                .awaiting_downtime_respawn(true),
-        );
+        mission_fixture::insert(snap, MissionFixture::accepted(char_id, mid_a, 3_012_050, sys_id).current_room_id(1).npcs_remaining(2));
+        mission_fixture::insert(snap, MissionFixture::accepted(char_id, mid_b, 3_012_051, sys_id).current_room_id(1).npcs_remaining(3).awaiting_downtime_respawn(true));
+        snap.missions.get_by_character_template(char_id, mid_a).unwrap().instance_id
     });
+    let origin_a = mission_site_origin_for_instance(&ctx, sys_id, iid_a);
+    let start_pos = origin_a + glam::DVec3::new(350_000.0, 0.0, 0.0);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle

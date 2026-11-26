@@ -203,8 +203,15 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let npcs_expected = ctx.db.with_snapshot(|snap| mission_fixture::get(snap, char_id, burner_mid).expect("active mission").npcs_remaining);
     assert_eq!(npcs_expected, enc.wave_npc_count);
 
-    rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(burner_mid as i64)])
+    let burner_acc = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(burner_mid as i64)])
         .await.expect("Accept Anomic Burner mission");
+    assert_eq!(do_action_info(&burner_acc).dict_get("spawnedNpcBallID"), Some(&PyRep::None));
+    assert!(ctx.db.with_snapshot(|snap| mission_fixture::get(snap, char_id, burner_mid).unwrap().spawned_npc_ball_ids.is_empty()));
+
+    let warp_ship_id = sess.ship_id.expect("pilot active ship");
+    rpc_call(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.expect("Undock to warp to burner pocket");
+    rpc_call(&ctx, &mut sess, "agentMgr", "WarpToLocation", &[PyRep::String("dungeon".into()), PyRep::Integer(burner_mid as i64)])
+        .await.expect("Warp to burner pocket");
 
     let ball_ids = ctx.db.with_snapshot(|snap| {
         mission_fixture::get(snap, char_id, burner_mid)
@@ -408,6 +415,9 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
         );
     }
 
+    // Re-dock at agent station before testing colocated incomplete DoAction(6)
+    let _ = sys_handle.remove_ball(warp_ship_id).await;
+    colocate_with_agent(&ctx, &mut sess, char_id, agent_id);
     // Completing before killing NPCs must fail
     let incomplete_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(burner_mid as i64)])
         .await.expect_err("Security mission cannot complete while NPCs remain");
@@ -2610,10 +2620,16 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
     );
     assert!(!enc.npc_type_ids.is_empty(), "Security encounter must have non-empty NPC type IDs");
 
-    // 2. Accept security mission -> spawns multi-hostile-NPC wave on grid
-    rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
+    // 2. Accept security mission -> pocket entry on warp spawns multi-hostile-NPC wave on grid
+    let sec_acc = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
         .await
         .expect("Accept security mission");
+    assert_eq!(do_action_info(&sec_acc).dict_get("spawnedNpcBallID"), Some(&PyRep::None));
+    let sec_ship_id = sess.ship_id.expect("pilot ship");
+    rpc_call(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.expect("Undock for security pocket warp");
+    rpc_call(&ctx, &mut sess, "agentMgr", "WarpToLocation", &[PyRep::String("dungeon".into()), PyRep::Integer(mid as i64)])
+        .await
+        .expect("Warp to security mission pocket");
 
     let (ball_ids, npcs_remaining) = ctx.db.with_snapshot(|snap| {
         let m = mission_fixture::get(snap, char_id, mid).expect("active mission");
@@ -2628,6 +2644,8 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
         let snap_opt = sys_handle.get_ball_snapshot(bid).await.ok().flatten();
         assert!(snap_opt.is_some(), "Spawned NPC ball {bid} must exist in solar system ballpark");
     }
+    let _ = sys_handle.remove_ball(sec_ship_id).await;
+    colocate_with_agent(&ctx, &mut sess, char_id, sec_agent_id);
 
     // 3. Completing while hostile NPCs remain must fail with MissionIncomplete
     let premature_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid as i64)])
@@ -2721,23 +2739,36 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
         "Required ore units {req_units} must be in 500-2000 units range"
     );
 
-    // 2. Accept mining mission -> creates mission mining asteroid in system
-    rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
+    // 2. Accept mining mission -> persists allocated asteroid record in DB and materializes on pocket warp
+    let mining_acc = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
         .await
         .expect("Accept mining mission");
-
-    let expected_ast_id = 910_000_000 + (mid as i64) * 1000 + 1;
+    let expected_ast_id = do_action_info(&mining_acc)
+        .dict_get("asteroidEntityID")
+        .and_then(|v| v.as_i64())
+        .expect("allocated asteroidEntityID on mining accept");
+    assert_ne!(expected_ast_id, 910_000_000 + (mid as i64) * 1000 + 1);
     let asteroid_record = ctx.db.with_snapshot(|snap| snap.asteroids.get(&expected_ast_id).cloned());
-    assert!(asteroid_record.is_some(), "Mission mining asteroid must be spawned in DB snapshot");
+    assert!(asteroid_record.is_some(), "Mission mining asteroid must be persisted in DB snapshot");
     let ast = asteroid_record.expect("Mission mining asteroid record");
     assert_eq!(ast.type_id, req_ore_tid, "Spawned asteroid type must match required ore type");
-    assert_eq!(ast.solar_system_id, sys_id, "Asteroid must spawn in mission solar system");
+    assert_eq!(ast.solar_system_id, sys_id, "Asteroid must belong to mission solar system");
     assert!(ast.quantity >= req_units as i64, "Asteroid quantity must be sufficient for mission");
 
-    // Verify asteroid ball exists in solar system ballpark
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(
+        sys_handle.get_ball_snapshot(expected_ast_id).await.ok().flatten().is_none(),
+        "Mission asteroid ball must not spawn before pocket warp"
+    );
+    let mine_ship_id = sess.ship_id.expect("pilot ship");
+    rpc_call(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.expect("Undock to warp to mining pocket");
+    rpc_call(&ctx, &mut sess, "agentMgr", "WarpToLocation", &[PyRep::String("dungeon".into()), PyRep::Integer(mid as i64)])
+        .await
+        .expect("Warp to mining pocket");
     let ast_ball_opt = sys_handle.get_ball_snapshot(expected_ast_id).await.ok().flatten();
-    assert!(ast_ball_opt.is_some(), "Mission asteroid ball must exist in solar system ballpark");
+    assert!(ast_ball_opt.is_some(), "Mission asteroid ball must materialize in solar system ballpark on pocket warp");
+    let _ = sys_handle.remove_ball(mine_ship_id).await;
+    colocate_with_agent(&ctx, &mut sess, char_id, mining_agent_id);
 
     // 3. Completing without ore in station hangar must fail with MissionIncomplete
     let incomplete_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid as i64)])

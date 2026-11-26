@@ -2,9 +2,8 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_mut_combat_runtime;
-use eve_destiny::{Ball, MovementMode, SlimItemMeta};
+use eve_destiny::SlimItemMeta;
 use glam::DVec3;
-use std::collections::HashMap;
 
 /// Daily downtime maintenance: purges stale NPC wrecks (`feat:lifecycle.wreck-downtime`)
 /// and resets uncompleted (`MissionState::Accepted`) missions by despawning remaining NPCs and restoring
@@ -390,6 +389,10 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
     pocket_origin: DVec3,
     target_mission_id: Option<u32>,
 ) -> usize {
+    if !pocket_origin.is_finite() {
+        return 0;
+    }
+    let now_unix = ctx.now_unix();
     let default_npc_tid =
         crate::services::agents_missions::agents_missions_helpers::resolve_mission_npc_type(ctx)
             .max(10_019);
@@ -404,8 +407,38 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
         for iid in candidate_ids {
             let Some((wave_count, wave_types)) = snap.missions.get(iid).and_then(|mission| {
                 let enc = mission.encounter()?;
-                let matches_target =
-                    target_mission_id.is_none_or(|mid| mission.template_id == mid);
+                let matches_target = match target_mission_id {
+                    Some(mid) => {
+                        mission.template_id == mid
+                            && crate::services::agents_missions::agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+                                ctx,
+                                snap,
+                                None,
+                                mission,
+                                solar_system_id,
+                                now_unix,
+                                false,
+                            )
+                            .is_ok()
+                    }
+                    None => {
+                        let Ok(known_origin) =
+                            crate::services::agents_missions::agents_missions_warp::resolve_mission_pocket_origin_in_snap(
+                                ctx,
+                                snap,
+                                None,
+                                mission,
+                                solar_system_id,
+                                now_unix,
+                                mission.site_origin_m.is_some() || mission.bookmark_id.is_some(),
+                            )
+                        else {
+                            return None;
+                        };
+                        known_origin
+                            .is_none_or(|pos| pos.is_finite() && pocket_origin.distance(pos) <= 200_000.0)
+                    }
+                };
                 let needs_respawn = enc.awaiting_downtime_respawn
                     || (enc.spawned_npc_ball_ids.is_empty() && enc.npcs_remaining > 0);
                 if mission.state != eve_db::MissionState::Accepted
@@ -460,111 +493,66 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
     for (sys_id, npc_bid, npc_type_id, pos) in spawned_npcs {
         let handle = ctx.systems.get_or_spawn(sys_id);
         let sde_type = ctx.sde.types.get(&npc_type_id);
-        let (group_id, category_id, faction_id, max_vel, mass, radius, inertia, opt_range, bounty, dmg_vec) =
-            sde_type
-                .map(|t| {
-                    let mv = t.default_attributes.get(&37).copied().unwrap_or(320.0);
-                    let agi = t.default_attributes.get(&70).copied().unwrap_or(2.0);
-                    let opt = t.default_attributes.get(&54).copied().unwrap_or(10_000.0);
-                    let bty = t.default_attributes.get(&481).copied().unwrap_or(25_000.0);
-                    let mult = t.default_attributes.get(&64).copied().unwrap_or(1.0).max(0.5);
-                    let em = t.default_attributes.get(&114).copied().unwrap_or(12.0) * mult;
-                    let ex = t.default_attributes.get(&116).copied().unwrap_or(12.0) * mult;
-                    let ki = t.default_attributes.get(&117).copied().unwrap_or(15.0) * mult;
-                    let th = t.default_attributes.get(&118).copied().unwrap_or(15.0) * mult;
-                    (
-                        t.group_id,
-                        t.category_id,
-                        t.faction_id.unwrap_or(500_010),
-                        mv.max(150.0),
-                        t.mass.max(100_000.0),
-                        t.radius.max(30.0),
-                        agi.max(0.5),
-                        opt.max(5_000.0),
-                        bty.max(10_000.0),
-                        eve_destiny::DamageVector::new(em, th, ki, ex),
-                    )
-                })
-                .unwrap_or((
-                    546,
-                    11,
-                    500_010,
-                    320.0,
-                    1_200_000.0,
-                    45.0,
-                    2.0,
-                    10_000.0,
-                    25_000.0,
-                    eve_destiny::DamageVector::new(12.0, 15.0, 15.0, 12.0),
-                ));
-        let npc_corp_id = ctx
-            .sde
-            .npc_corporations
-            .values()
-            .find(|c| c.faction_id == Some(faction_id))
-            .map(|c| c.corporation_id as i64)
-            .unwrap_or(1_000_127);
-        let cs = ctx.build_type_combat_state(npc_type_id);
+        let (mut ball, cs, mut entity) =
+            crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+                ctx,
+                sys_id,
+                npc_bid,
+                npc_type_id,
+                "Pirate",
+                1,
+                pos,
+            );
+        if sde_type.is_none() {
+            ball.max_velocity = 320.0;
+            ball.mass = 1_200_000.0;
+            ball.radius = 45.0;
+            ball.inertia = 2.0;
+            entity.faction_id = 500_010;
+            entity.bounty_isk = 25_000.0;
+            entity.optimal_range = 10_000.0;
+            entity.orbit_range = 6_000.0;
+            entity.damage_vector = eve_destiny::DamageVector::new(12.0, 15.0, 15.0, 12.0);
+        } else {
+            entity.bounty_isk = entity.bounty_isk.max(10_000.0);
+        }
+        let owner_faction_id = if entity.faction_id > 0 {
+            entity.faction_id
+        } else {
+            500_010
+        };
+        let owner_id = i64::from(owner_faction_id);
+        let npc_corp_id =
+            crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
+                ctx, owner_id,
+            );
+        let (group_id, category_id, name) = sde_type
+            .map(|t| {
+                (
+                    t.group_id,
+                    t.category_id,
+                    (!t.name.is_empty()).then(|| t.name.clone()),
+                )
+            })
+            .unwrap_or((546, 11, None));
         handle.try_spawn_ball_with_meta(
-            Ball {
-                id: npc_bid,
-                type_id: npc_type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: max_vel,
-                inertia,
-                mass,
-                radius,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
+            ball,
             cs,
             SlimItemMeta {
                 group_id,
                 category_id,
-                owner_id: faction_id as i64,
+                owner_id,
                 char_id: None,
                 corp_id: npc_corp_id,
                 alliance_id: -1,
                 security_status: -5.0,
-                is_cloaked: false, ..Default::default()
+                is_cloaked: false,
+                name,
+                ..Default::default()
             },
         );
         with_mut_combat_runtime(ctx, |rt| {
-            rt.npc_entities.insert(
-                npc_bid,
-                crate::services::combat_crimewatch::ExtendedNpcEntity {
-                    ball_id: npc_bid,
-                    type_id: npc_type_id,
-                    faction_id,
-                    archetype: "Pirate".into(),
-                    solar_system_id: sys_id,
-                    spawn_group_id: 1,
-                    target_id: None,
-                    aggression_threat: HashMap::new(),
-                    threat_table: HashMap::new(),
-                    bounty_isk: bounty,
-                    optimal_range: opt_range,
-                    orbit_range: (opt_range * 0.6).clamp(2_500.0, 15_000.0),
-                    damage_vector: dmg_vec,
-                    entropic_cycles: 0,
-                    drifter_overshield_hp: 0.0,
-                    drifter_doomsday_fired: false,
-                    web_speed_factor: 0.0,
-                    web_range: 0.0,
-                    scram_strength: 0.0,
-                    scram_range: 0.0,
-                    neut_amount: 0.0,
-                    ecm_jammed: false,
-                    remote_shield_rep: 0.0,
-                    remote_armor_rep: 0.0,
-                    remote_rep_range: 0.0,
-                    tag_drop_type_id: None,
-                    custom_cargo_loot: None,
-                    spawn_position: pos,
-                    sleeper_wh_class: 0,
-                },
-            );
+            rt.npc_entities.insert(npc_bid, entity);
         });
     }
     count

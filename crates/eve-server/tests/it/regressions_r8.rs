@@ -285,7 +285,6 @@ async fn test_review_r8_regressions() {
     s2.station_id = Some(jita_agent_station);
 
     let mut s1_mids = Vec::new();
-    let mut s1_npcs = Vec::new();
     let mut s1_bms = Vec::new();
     for _ in 0..2 {
         let rm = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
@@ -298,10 +297,11 @@ async fn test_review_r8_regressions() {
         let PyRep::KeyVal(am_kv) = am else {
             panic!("Expected am_kv");
         };
-        s1_npcs.push(am_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap());
+        assert_eq!(am_kv.get("spawnedNpcBallID"), Some(&PyRep::None));
         s1_bms.push(am_kv.get("bookmarkID").unwrap().as_i64().unwrap());
     }
     assert_ne!(s1_mids[0], s1_mids[1]);
+    assert_ne!(s1_bms[0], s1_bms[1]);
     let rm_s2 = ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
     let PyRep::KeyVal(rms2_kv) = rm_s2 else {
         panic!("Expected rms2_kv");
@@ -311,11 +311,21 @@ async fn test_review_r8_regressions() {
     let PyRep::KeyVal(ams2_kv) = am_s2 else {
         panic!("Expected ams2_kv");
     };
-    let s2_npc_1001 = ams2_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
+    assert_eq!(ams2_kv.get("spawnedNpcBallID"), Some(&PyRep::None));
     let s2_bm_1 = ams2_kv.get("bookmarkID").unwrap().as_i64().unwrap();
-    assert_ne!(s1_npcs[0], s1_npcs[1]);
-    assert_ne!(s1_npcs[0], s2_npc_1001);
-    assert_ne!(s1_npcs[1], s2_npc_1001);
+    assert_ne!(s1_bms[0], s2_bm_1);
+    assert_ne!(s1_bms[1], s2_bm_1);
+    ctx.db.with_snapshot(|snap| {
+        let m1_a = snap.missions.get_by_character_template(90_000_001, s1_mids[0] as u32).unwrap();
+        let m1_b = snap.missions.get_by_character_template(90_000_001, s1_mids[1] as u32).unwrap();
+        let m2_a = snap.missions.get_by_character_template(90_000_002, s2_mid_1 as u32).unwrap();
+        assert!(m1_a.spawned_npc_ball_ids().is_empty() && m1_b.spawned_npc_ball_ids().is_empty() && m2_a.spawned_npc_ball_ids().is_empty());
+        let p1_a = glam::DVec3::from(m1_a.site_origin_f64().unwrap());
+        let p1_b = glam::DVec3::from(m1_b.site_origin_f64().unwrap());
+        let p2_a = glam::DVec3::from(m2_a.site_origin_f64().unwrap());
+        assert!(p1_a.distance(p1_b) >= 250_000.0);
+        assert!(p1_a.distance(p2_a) >= 250_000.0);
+    });
 
     let PyRep::KeyVal(u1_kv) = ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
         panic!("Expected u1_kv");
@@ -334,6 +344,15 @@ async fn test_review_r8_regressions() {
     }
     ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None).await.unwrap();
+
+    let (s1_npc_0, s2_npc_1001) = ctx.db.with_snapshot(|snap| {
+        let m1_0 = snap.missions.get_by_character_template(90_000_001, s1_mids[0] as u32).unwrap();
+        let m1_1 = snap.missions.get_by_character_template(90_000_001, s1_mids[1] as u32).unwrap();
+        let m2_0 = snap.missions.get_by_character_template(90_000_002, s2_mid_1 as u32).unwrap();
+        assert!(m1_1.spawned_npc_ball_ids().is_empty(), "second s1 mission must not spawn when warping to first mission");
+        (m1_0.spawned_npc_ball_ids()[0], m2_0.spawned_npc_ball_ids()[0])
+    });
+    assert_ne!(s1_npc_0, s2_npc_1001);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -386,11 +405,16 @@ async fn test_review_r8_regressions() {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
 
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdFollowBall", &[PyRep::Integer(s1_npc_0), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    for _ in 0..50 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     let _ = jita_handle
         .add_target_lock(
             100_000_001,
             eve_destiny::TargetLock {
-                target_id: s1_npcs[0],
+                target_id: s1_npc_0,
                 lock_time_ms: 0.0,
                 remaining_lock_ms: 0.0,
                 locked: true,
@@ -399,7 +423,7 @@ async fn test_review_r8_regressions() {
         )
         .await;
     let mut fw1_destroyed = false;
-    for shot in 0..10 {
+    for shot in 0..80 {
         if shot > 0 {
             for _ in 0..5 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
@@ -414,7 +438,7 @@ async fn test_review_r8_regressions() {
                 &[
                     PyRep::Integer(100_000_005),
                     PyRep::String("projectileFired".into()),
-                    PyRep::Integer(s1_npcs[0]),
+                    PyRep::Integer(s1_npc_0),
                     PyRep::Integer(0),
                 ],
                 &kw,
@@ -445,7 +469,15 @@ async fn test_review_r8_regressions() {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
     }
-    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdFollowBall", &[PyRep::Integer(s1_npcs[1]), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    let s1_npc_1 = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_character_template(90_000_001, s1_mids[1] as u32)
+            .unwrap()
+            .spawned_npc_ball_ids()[0]
+    });
+    assert_ne!(s1_npc_0, s1_npc_1);
+    assert_ne!(s1_npc_1, s2_npc_1001);
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdFollowBall", &[PyRep::Integer(s1_npc_1), PyRep::Real(500.0)], &kw, None).await.unwrap();
     for _ in 0..50 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
@@ -454,7 +486,7 @@ async fn test_review_r8_regressions() {
         .add_target_lock(
             100_000_001,
             eve_destiny::TargetLock {
-                target_id: s1_npcs[1],
+                target_id: s1_npc_1,
                 lock_time_ms: 0.0,
                 remaining_lock_ms: 0.0,
                 locked: true,
@@ -462,7 +494,7 @@ async fn test_review_r8_regressions() {
             },
         )
         .await;
-    for _ in 0..10 {
+    for _ in 0..80 {
         for _ in 0..5 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
@@ -475,7 +507,7 @@ async fn test_review_r8_regressions() {
                 &[
                     PyRep::Integer(100_000_005),
                     PyRep::String("projectileFired".into()),
-                    PyRep::Integer(s1_npcs[1]),
+                    PyRep::Integer(s1_npc_1),
                     PyRep::Integer(0),
                 ],
                 &kw,
@@ -496,6 +528,53 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills
+            .entry(90_000_002)
+            .or_default()
+            .insert(3318, eve_db::TrainedSkillRecord { type_id: 3318, level: 5, skill_points: 512_000.0 });
+        for (item_id, type_id, flag, qty, singleton) in [
+            (100_000_944_i64, 2889_u32, InventoryFlag::HiSlot1, 1_i32, true),
+            (100_000_945, 2889, InventoryFlag::HiSlot2, 1, true),
+            (100_000_946, 519, InventoryFlag::LoSlot0, 1, true),
+            (100_000_947, 519, InventoryFlag::LoSlot1, 1, true),
+            (100_000_948, 519, InventoryFlag::LoSlot2, 1, true),
+            (100_000_949, 21924, InventoryFlag::HiSlot1, 120, false),
+            (100_000_950, 21924, InventoryFlag::HiSlot2, 120, false),
+        ] {
+            snap.items.insert(
+                item_id,
+                eve_db::InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: 90_000_002,
+                    location_id: 100_000_002,
+                    flag,
+                    quantity: qty,
+                    singleton,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(100_000_002);
+    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdFollowBall", &[PyRep::Integer(s2_npc_1001), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    for _ in 0..150 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+        if let (Some((_, sb)), Some((_, nb))) = (
+            jita_handle.get_ball_snapshot(100_000_002).await.unwrap(),
+            jita_handle.get_ball_snapshot(s2_npc_1001).await.unwrap(),
+        ) {
+            if sb.position.distance(nb.position) <= 1_000.0 {
+                break;
+            }
+        }
+    }
     let _ = jita_handle
         .add_target_lock(
             100_000_002,
@@ -509,38 +588,52 @@ async fn test_review_r8_regressions() {
         )
         .await;
     let mut fws2_destroyed = false;
-    for shot in 0..10 {
+    for shot in 0..105 {
         if shot > 0 {
-            for _ in 0..5 {
+            for _ in 0..3 {
                 let _ = jita_handle.step_manual(1.0).await.unwrap();
             }
+            if jita_handle.get_ball_snapshot(s2_npc_1001).await.unwrap().is_none() {
+                fws2_destroyed = true;
+                break;
+            }
         }
-        let fw_s2 = ctx
-            .dispatch_rpc(
-                &mut s2,
-                "dogmaIM",
-                None,
-                "Activate",
-                &[
-                    PyRep::Integer(100_000_006),
-                    PyRep::String("projectileFired".into()),
-                    PyRep::Integer(s2_npc_1001),
-                    PyRep::Integer(0),
-                ],
-                &kw,
-                None,
-            )
-            .await
-            .unwrap();
-        let PyRep::KeyVal(fws2_kv) = fw_s2 else {
-            panic!("Expected fws2_kv");
-        };
-        if fws2_kv.get("destroyed") == Some(&PyRep::Bool(true)) {
-            fws2_destroyed = true;
+        for gun_id in [100_000_006_i64, 100_000_944, 100_000_945] {
+            let fw_s2 = ctx
+                .dispatch_rpc(
+                    &mut s2,
+                    "dogmaIM",
+                    None,
+                    "Activate",
+                    &[
+                        PyRep::Integer(gun_id),
+                        PyRep::String("projectileFired".into()),
+                        PyRep::Integer(s2_npc_1001),
+                        PyRep::Integer(0),
+                    ],
+                    &kw,
+                    None,
+                )
+                .await
+                .unwrap();
+            if let PyRep::KeyVal(fws2_kv) = fw_s2 {
+                if fws2_kv.get("destroyed") == Some(&PyRep::Bool(true)) {
+                    fws2_destroyed = true;
+                    break;
+                }
+            }
+        }
+        if fws2_destroyed {
             break;
         }
     }
-    assert!(fws2_destroyed);
+    assert!(fws2_destroyed, "s2 mission NPC {s2_npc_1001} (mid={s2_mid_1}) must be destroyed");
+    ctx.db.with_mut_snapshot(|snap| {
+        for item_id in 100_000_944_i64..=100_000_950 {
+            snap.items.remove(&item_id);
+        }
+    });
+    ctx.invalidate_ship_fitting(100_000_002);
     ctx.dispatch_rpc(&mut s2, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
 
@@ -562,8 +655,30 @@ async fn test_review_r8_regressions() {
     let PyRep::KeyVal(am1003_kv) = am_1003 else {
         panic!("Expected am1003_kv");
     };
-    let npc_1003 = am1003_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
+    assert_eq!(am1003_kv.get("spawnedNpcBallID"), Some(&PyRep::None));
+    let bm_1003 = am1003_kv.get("bookmarkID").unwrap().as_i64().unwrap();
+    ctx.advance_secs(15);
+    let PyRep::KeyVal(u1003_kv) = ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
+        panic!("Expected u1003_kv");
+    };
+    let s1_b_1003 = u1003_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_1003), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(bm_1003)], &kw, None).await.unwrap();
+    for _ in 0..200 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    let npc_1003 = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_character_template(90_000_001, s1_mid_3 as u32)
+            .unwrap()
+            .spawned_npc_ball_ids()[0]
+    });
     assert!(jita_handle.get_ball_snapshot(npc_1003).await.unwrap().is_some());
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_1003), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(jita_agent_station)], &kw, None).await.unwrap();
+    for _ in 0..200 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Dock", &[PyRep::Integer(jita_agent_station)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut s1, "agentMgr", None, "RemoveOfferFromJournal", &[PyRep::Integer(s1_mid_3)], &kw, None).await.unwrap();
     assert!(jita_handle.get_ball_snapshot(npc_1003).await.unwrap().is_none());
 
@@ -2286,7 +2401,11 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
         .expect("GetStandingTransactions after quit");
     let quit_rows = extract_rowset_rows(&st_tx_after_quit);
     assert_eq!(quit_rows.len(), 1);
-    assert_eq!(quit_rows[0][3], PyRep::Real(-0.1));
+    let quit_mod = quit_rows[0][3].as_f64().expect("standing modification Real");
+    assert!(
+        (quit_mod - (-0.1)).abs() < 1e-9,
+        "expected ~-0.1 standing modification, got {quit_mod}"
+    );
     assert_eq!(quit_rows[0][4], PyRep::Integer(83));
 
     // R23-P1-2: jumpCloneSvc.GetPriceForClone matches flat 900,000 ISK charged by InstallCloneInStation

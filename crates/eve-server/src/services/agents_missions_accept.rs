@@ -3,15 +3,15 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    build_mission_briefing_text, deterministic_mission_site_origin, finalize_mission_state_cleanup,
-    is_agent_colocated, is_storyline_agent_type, is_storyline_template, mission_bonus_window_secs,
-    resolve_mission_npc_type, resolve_security_mission_encounter, resolve_target_mission_id,
+    build_mission_briefing_text, finalize_mission_state_cleanup, is_agent_colocated,
+    is_storyline_agent_type, is_storyline_template, mission_bonus_window_secs,
+    mission_site_origin_for_instance, resolve_mission_npc_type,
+    resolve_security_mission_encounter, resolve_target_mission_id,
 };
 use crate::router::notify_registry::OnAgentMissionChange;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_character_services::emit_agent_mission_dialogue;
 use eve_db::{InventoryFlag, InventoryItemRecord, MissionKind, MissionState};
-use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -98,52 +98,42 @@ pub(super) async fn handle_mission_accept_action(
             .as_ref()
             .map(|a| resolve_security_mission_encounter(ctx, t, a, mission_sys_id))
     });
-    let handle = ctx.systems.get_or_spawn(mission_sys_id);
-    let existing_accepted = ctx.db.with_snapshot(|snap| {
-        snap.missions
-            .get_by_character_template(char_id, mission_id)
-            .filter(|m| m.state == MissionState::Accepted && m.npcs_remaining() > 0)
-            .map(|m| (m.solar_system_id, m.spawned_npc_ball_ids().to_vec()))
-    });
-    let can_respawn_missing = if let Some((m_sys_id, prev_balls)) = existing_accepted {
-        if m_sys_id == mission_sys_id && !prev_balls.is_empty() {
-            let m_handle = ctx.systems.get_or_spawn(m_sys_id);
-            let mut all_missing = true;
-            for bid in prev_balls {
-                if m_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
-                    all_missing = false;
-                    break;
-                }
-            }
-            all_missing
-        } else {
-            false
-        }
-    } else {
-        false
-    };
 
     let now = ctx.now_unix();
     let accept_dur = 604_800_u64;
     let bonus_dur =
         mission_bonus_window_secs(ctx, char_id, actual_agent_id, mission_id);
+    let mission_title = tmpl_opt
+        .as_ref()
+        .map(|m| m.title.clone())
+        .unwrap_or_else(|| format!("Mission {mission_id}"));
 
-    let m_info = ctx.db.with_snapshot(|snap| {
+    let expired_sys_cleanup = ctx.db.with_snapshot(|snap| {
         let m = snap.missions.get_by_character_template(char_id, mission_id)?;
-        let is_expired = m.offer_expiry_unix > 0 && now > m.offer_expiry_unix;
-        Some((m.state, m.solar_system_id, is_expired))
+        (m.state == MissionState::Offered
+            && m.offer_expiry_unix > 0
+            && now > m.offer_expiry_unix)
+        .then_some(m.solar_system_id)
     });
-    if let Some((state, sys, is_expired)) = m_info {
-        if state == MissionState::Offered {
-            if is_expired {
-                ctx.db.with_mut_snapshot(|snap| {
-                    finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Expired, false, now);
-                });
-                return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired"), client_error: None }));
+    if expired_sys_cleanup.is_some() {
+        let (clean_sys, ast_id, ball_ids) = ctx.db.with_mut_snapshot(|snap| {
+            finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Expired, false, now)
+        });
+        if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
+            if let Some(handle) = ctx.systems.get_handle(clean_sys) {
+                for bid in ball_ids {
+                    let _ = handle.remove_ball(bid).await;
+                }
+                if let Some(aid) = ast_id {
+                    let _ = handle.remove_ball(aid).await;
+                }
             }
-        } else if !(state == MissionState::Accepted && sys == mission_sys_id && can_respawn_missing) {
-            return Some(Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {sys}), not Offered", state.as_str()), client_error: None }));
         }
+        return Some(Err(BridgeRpcError {
+            code: "MissionOfferExpired".into(),
+            message: format!("Mission {mission_id} offer has expired"),
+            client_error: None,
+        }));
     }
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -162,32 +152,66 @@ pub(super) async fn handle_mission_accept_action(
                     eve_proto::ClientError::CustomInfo(msg),
                 ));
             }
-            return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}"), client_error: None });
+            return Err(BridgeRpcError {
+                code: "MissionNotOffered".into(),
+                message: format!("Mission {mission_id} has not been offered to character {char_id}"),
+                client_error: None,
+            });
         };
-        if m_check.state != MissionState::Offered && !(m_check.state == MissionState::Accepted && m_check.solar_system_id == mission_sys_id && can_respawn_missing) {
-            return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {}), not Offered", m_check.state.as_str(), m_check.solar_system_id), client_error: None });
+        if m_check.state != MissionState::Offered {
+            return Err(BridgeRpcError {
+                code: "InvalidMissionState".into(),
+                message: format!(
+                    "Mission {mission_id} is in state '{}' (system {}), not Offered",
+                    m_check.state.as_str(),
+                    m_check.solar_system_id
+                ),
+                client_error: None,
+            });
         }
+        if m_check.offer_expiry_unix > 0 && now > m_check.offer_expiry_unix {
+            return Err(BridgeRpcError {
+                code: "MissionOfferExpired".into(),
+                message: format!("Mission {mission_id} offer has expired"),
+                client_error: None,
+            });
+        }
+
+        let m_sys = if m_check.solar_system_id > 0 {
+            m_check.solar_system_id
+        } else {
+            mission_sys_id
+        };
+        let raw_origin = mission_site_origin_for_instance(ctx, m_sys, m_check.instance_id);
+        let origin_m = [
+            raw_origin.x.round() as i64,
+            raw_origin.y.round() as i64,
+            raw_origin.z.round() as i64,
+        ];
+        let site_origin = DVec3::new(origin_m[0] as f64, origin_m[1] as f64, origin_m[2] as f64);
+
         let need_npc = m_check.npcs_remaining() > 0;
         let is_courier = m_check.kind == MissionKind::Courier;
+        let is_mining = m_check.kind == MissionKind::Mining;
+        let mining_ore_tid = is_mining
+            .then(|| m_check.required_delivery().map_or(1230, |(tid, _)| tid));
         let courier_obj = m_check.courier().cloned();
         let m_agent_id = m_check.agent_id;
         let m_origin_station_id = m_check.origin_station_id;
 
-        let mut spawned_npcs: Vec<(i64, eve_db::TypeId)> = Vec::new();
-        let mut wave_ball_ids = Vec::new();
         let mut wave_tids = Vec::new();
         let mut wave_count = 0_u32;
         if need_npc {
             let count = enc_opt.as_ref().map(|e| e.wave_npc_count).unwrap_or(1) as usize;
             let pool = enc_opt.as_ref().map(|e| e.npc_type_ids.as_slice()).unwrap_or(&[]);
-            wave_ball_ids.reserve(count);
             wave_tids.reserve(count);
             for i in 0..count {
-                let npc_id = snap.alloc_entity_id();
-                let tid = if !pool.is_empty() { pool[i % pool.len()] } else { resolve_mission_npc_type(ctx) };
-                wave_ball_ids.push(npc_id);
+                let tid = if !pool.is_empty() {
+                    pool[i % pool.len()]
+                } else {
+                    resolve_mission_npc_type(ctx)
+                };
                 wave_tids.push(tid);
-                spawned_npcs.push((npc_id, tid));
             }
             wave_count = count as u32;
         }
@@ -196,20 +220,93 @@ pub(super) async fn handle_mission_accept_action(
         if is_courier {
             if let Some(ref co) = courier_obj {
                 if co.granted_item_id.is_none() {
-                    let cargo_tid = co.cargo_type_id.ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: format!("Courier mission {mission_id} has no delivery item type specified"), client_error: None })?;
+                    let cargo_tid = co.cargo_type_id.ok_or_else(|| BridgeRpcError {
+                        code: "InvalidMissionLocation".into(),
+                        message: format!(
+                            "Courier mission {mission_id} has no delivery item type specified"
+                        ),
+                        client_error: None,
+                    })?;
                     let cargo_qty = co.quantity.max(1);
                     let agent_station = m_origin_station_id
                         .or_else(|| ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id))
-                        .or_else(|| ctx.sde.agents.get(&m_agent_id).and_then(|a| a.solar_system_id).and_then(|sys| ctx.sde.stations.values().filter(|st| st.solar_system_id == sys).map(|st| st.station_id).min()))
-                        .ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: "Agent has no valid station location".into(), client_error: None })?;
+                        .or_else(|| {
+                            ctx.sde
+                                .agents
+                                .get(&m_agent_id)
+                                .and_then(|a| a.solar_system_id)
+                                .and_then(|sys| {
+                                    ctx.sde
+                                        .stations
+                                        .values()
+                                        .filter(|st| st.solar_system_id == sys)
+                                        .map(|st| st.station_id)
+                                        .min()
+                                })
+                        })
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "InvalidMissionLocation".into(),
+                            message: "Agent has no valid station location".into(),
+                            client_error: None,
+                        })?;
                     let cid = snap.alloc_entity_id();
-                    let item = InventoryItemRecord { item_id: cid, type_id: cargo_tid, owner_id: char_id, location_id: agent_station, flag: InventoryFlag::Hangar, quantity: cargo_qty, singleton: false, version: 1, ..Default::default() };
+                    let item = InventoryItemRecord {
+                        item_id: cid,
+                        type_id: cargo_tid,
+                        owner_id: char_id,
+                        location_id: agent_station,
+                        flag: InventoryFlag::Hangar,
+                        quantity: cargo_qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    };
                     snap.items.insert(cid, item);
-                    snap.item_custom_names.insert(cid, format!("courier_cargo:{char_id}:{mission_id}"));
+                    snap.item_custom_names
+                        .insert(cid, format!("courier_cargo:{char_id}:{mission_id}"));
                     new_courier_grant = Some((cid, cargo_qty));
                 }
             }
         }
+
+        let allocated_ast_id = if let Some(ore_tid) = mining_ore_tid {
+            let ast_id = snap.alloc_entity_id();
+            let ast_pos = site_origin + DVec3::new(8_000.0, 1_000.0, -5_000.0);
+            snap.asteroids.insert(
+                ast_id,
+                eve_db::AsteroidRecord {
+                    asteroid_id: ast_id,
+                    solar_system_id: m_sys,
+                    belt_id: 0,
+                    type_id: ore_tid,
+                    quantity: 5_000,
+                    initial_quantity: 5_000,
+                    position: (ast_pos.x, ast_pos.y, ast_pos.z),
+                    radius: 50.0,
+                },
+            );
+            Some(ast_id)
+        } else {
+            None
+        };
+
+        let bookmark_id = snap.alloc_entity_id();
+        snap.bookmarks.insert(
+            bookmark_id,
+            eve_db::BookmarkRecord {
+                bookmark_id,
+                owner_id: char_id,
+                solar_system_id: m_sys,
+                label: format!("Mission: {mission_title}"),
+                x: site_origin.x,
+                y: site_origin.y,
+                z: site_origin.z,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
 
         let mut final_accept_expiry = now + accept_dur;
         let mut final_bonus_expiry = now + bonus_dur;
@@ -217,7 +314,12 @@ pub(super) async fn handle_mission_accept_action(
             .update_by_character_template(char_id, mission_id, |m| {
                 m.state = MissionState::Accepted;
                 if m.solar_system_id == 0 {
-                    m.solar_system_id = mission_sys_id;
+                    m.solar_system_id = m_sys;
+                }
+                m.site_origin_m = Some(origin_m);
+                m.bookmark_id = Some(bookmark_id);
+                if let Some(ast_id) = allocated_ast_id {
+                    m.asteroid_entity_id = Some(ast_id);
                 }
                 m.accepted_at_unix.get_or_insert(now);
                 final_accept_expiry = *m.accept_expiry_unix.get_or_insert(now + accept_dur);
@@ -225,7 +327,7 @@ pub(super) async fn handle_mission_accept_action(
                 if need_npc {
                     if let Some(enc) = m.encounter_mut() {
                         enc.npcs_remaining = wave_count;
-                        enc.spawned_npc_ball_ids = wave_ball_ids;
+                        enc.spawned_npc_ball_ids.clear();
                         enc.initial_wave_count = Some(wave_count);
                         enc.initial_wave_types = wave_tids;
                     }
@@ -238,71 +340,14 @@ pub(super) async fn handle_mission_accept_action(
                 }
             })
             .map_err(super::mission_store_rpc_err)?;
-        Ok((spawned_npcs, final_accept_expiry, final_bonus_expiry))
-    });
-    let (spawned_npcs, expiry_unix, bonus_expiry_unix) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let first_npc_id = spawned_npcs.first().map(|(id, _)| *id);
 
-    let site_origin = deterministic_mission_site_origin(ctx, mission_sys_id, mission_id);
-    if !spawned_npcs.is_empty() {
-        for (idx, (npc_id, tid)) in spawned_npcs.into_iter().enumerate() {
-            let pocket_offset = ((npc_id % 40) as f64) * 35.0 + (idx as f64) * 350.0;
-            let pos = site_origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0);
-            let (ball, cs, mut entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(ctx, mission_sys_id, npc_id, tid, "Pirate", 1, pos);
-            entity.bounty_isk = entity.bounty_isk.max(10_000.0);
-            let _ = handle.spawn_ball_with_combat(ball, cs).await;
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.npc_entities.insert(npc_id, entity);
-            });
-        }
-    }
-
-    let mining_ore_tid = ctx.db.with_snapshot(|snap| {
-        snap.missions
-            .get_by_character_template(char_id, mission_id)
-            .filter(|m| m.kind == MissionKind::Mining)
-            .map(|m| m.required_delivery().map_or(1230, |(tid, _)| tid))
-    });
-    if let Some(ore_tid) = mining_ore_tid {
-        let ore_vol = ctx.sde.types.get(&ore_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.1);
-        let ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
-        let ast_pos = site_origin + DVec3::new(8_000.0, 1_000.0, -5_000.0);
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.asteroids.insert(ast_id, eve_db::AsteroidRecord { asteroid_id: ast_id, solar_system_id: mission_sys_id, belt_id: 0, type_id: ore_tid, quantity: 5_000, initial_quantity: 5_000, position: (ast_pos.x, ast_pos.y, ast_pos.z), radius: 50.0 });
-        });
-        let ast_ball = Ball { id: ast_id, type_id: ore_tid, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
-        let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: ore_tid, initial_units: 5_000, remaining_units: 5_000, unit_volume: ore_vol, depleted: false, respawn_at_tick: None };
-        let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
-    }
-
-    let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone()).unwrap_or_else(|| format!("Mission {mission_id}"));
-    let bookmark_id = ctx.db.with_mut_snapshot(|snap| {
-        let bmid = snap.alloc_entity_id();
-        let b_sys = snap
-            .missions
-            .get_by_character_template(char_id, mission_id)
-            .map(|m| m.solar_system_id)
-            .filter(|&s| s > 0)
-            .unwrap_or(mission_sys_id);
-        snap.bookmarks.insert(bmid, eve_db::BookmarkRecord { bookmark_id: bmid, owner_id: char_id, solar_system_id: b_sys, label: format!("Mission: {mission_title}"), x: site_origin.x, y: site_origin.y, z: site_origin.z, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false });
-        let _ = snap.missions
-            .update_by_character_template(char_id, mission_id, |m| {
-                m.bookmark_id = Some(bmid);
-            });
-        bmid
-    });
-    let dialogue = PyRep::List(vec![
-        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::String("Complete Mission".into())]),
-        PyRep::Tuple(vec![PyRep::Integer(11), PyRep::String("Quit Mission".into())]),
-    ]);
-    let (active_agent_id, mission_body) = ctx.db.with_snapshot(|snap| {
         let am = snap.missions.get_by_character_template(char_id, mission_id);
         let active_agent_id = am.map_or(agent_id, |m| m.agent_id);
         let active_sys_id = am
             .map(|m| m.solar_system_id)
             .filter(|&s| s > 0)
-            .unwrap_or(mission_sys_id);
-        let body = build_mission_briefing_text(
+            .unwrap_or(m_sys);
+        let mission_body = build_mission_briefing_text(
             ctx,
             active_agent_id,
             mission_id,
@@ -310,8 +355,31 @@ pub(super) async fn handle_mission_accept_action(
             active_sys_id,
             am,
         );
-        (active_agent_id, body)
+        Ok((
+            final_accept_expiry,
+            final_bonus_expiry,
+            bookmark_id,
+            allocated_ast_id,
+            active_agent_id,
+            mission_body,
+        ))
     });
+    let (
+        expiry_unix,
+        bonus_expiry_unix,
+        bookmark_id,
+        allocated_ast_id,
+        active_agent_id,
+        mission_body,
+    ) = match res {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+
+    let dialogue = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::String("Complete Mission".into())]),
+        PyRep::Tuple(vec![PyRep::Integer(11), PyRep::String("Quit Mission".into())]),
+    ]);
     let agent_type_id = ctx.sde.agents.get(&active_agent_id).map(|a| a.agent_type_id).unwrap_or(2);
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
@@ -348,6 +416,10 @@ pub(super) async fn handle_mission_accept_action(
         ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
         ("bonusExpiryUnix", PyRep::Integer(bonus_expiry_unix as i64)),
         ("bonusWindowSecs", PyRep::Integer(bonus_dur as i64)),
-        ("spawnedNpcBallID", first_npc_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+        ("spawnedNpcBallID", PyRep::None),
+        (
+            "asteroidEntityID",
+            allocated_ast_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
     ])))
 }

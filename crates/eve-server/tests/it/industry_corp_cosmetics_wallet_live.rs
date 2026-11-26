@@ -555,10 +555,24 @@ async fn test_live_corp_projects_audit_reinforce_and_npc_standings() {
             dock_station(&ctx, &mut s1, dest).await;
         }
     }
-    let (ball_ids, m_sys) = ctx.db.with_snapshot(|s| {
+    let (npcs_rem, m_sys) = ctx.db.with_snapshot(|s| {
         mission_fixture::get(s, PILOT_1, mid as u32)
-            .map(|m| (m.spawned_npc_ball_ids, m.solar_system_id))
-            .unwrap_or((Vec::new(), 30_000_142))
+            .map(|m| (m.npcs_remaining, m.solar_system_id))
+            .unwrap_or((0, 30_000_142))
+    });
+    if npcs_rem > 0 {
+        let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+            &ctx,
+            PILOT_1,
+            m_sys,
+            glam::DVec3::ZERO,
+            Some(mid as u32),
+        );
+    }
+    let ball_ids = ctx.db.with_snapshot(|s| {
+        mission_fixture::get(s, PILOT_1, mid as u32)
+            .map(|m| m.spawned_npc_ball_ids)
+            .unwrap_or_default()
     });
     for bid in ball_ids {
         eve_server::services::agents_missions::on_mission_npc_destroyed_core(&ctx.db, m_sys, bid, Some(PILOT_1));

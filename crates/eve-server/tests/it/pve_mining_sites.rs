@@ -306,15 +306,35 @@ async fn test_mn18_mining_missions_market_and_goals() {
     };
     assert_eq!(accept_kv["state"].as_str(), Some("Accepted"));
 
-    let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
+    let pocket_ast_id = accept_kv
+        .get("asteroidEntityID")
+        .and_then(|v| v.as_i64())
+        .expect("allocated asteroidEntityID");
+    assert_ne!(pocket_ast_id, 910_000_000 + (mission_id as i64) * 1000 + 1);
     let handle = ctx.systems.get_or_spawn(system_id);
+    assert!(
+        handle.get_asteroid_state(pocket_ast_id).await.unwrap().is_none(),
+        "mining asteroid must not spawn in space on accept before pocket entry"
+    );
+    eve_server::services::agents_missions::ensure_mission_asteroid_spawned_on_pocket_entry(
+        &ctx,
+        char_id,
+        system_id,
+        Some(mission_id),
+    )
+    .await;
+    let (expected_ore_tid, expected_req_qty) = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .get_by_character_template(char_id, mission_id)
+            .and_then(|m| m.required_delivery())
+            .expect("mining mission delivery target")
+    });
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap().expect("pocket asteroid");
-    // L1 mission 4801 ("Starting Simple") resolves to Scordite (1228, volume 0.15 m3)
-    assert_eq!(pocket_ast.type_id, 1228);
+    assert_eq!(pocket_ast.type_id, expected_ore_tid);
     let (_, pocket_ball) = handle.get_ball_snapshot(pocket_ast_id).await.unwrap().unwrap();
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1228));
+        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == expected_ore_tid));
     });
 
     let incomplete = ctx
@@ -379,26 +399,24 @@ async fn test_mn18_mining_missions_market_and_goals() {
         })
         .await
         .unwrap();
-    // Scordite (1228) has volume 0.15 m3 -> 296.484375 m3/cycle delivers 1_976 units per cycle across 3 cycles to deplete 5_000 units
-    let mine_pocket_c1 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
-        .await
-        .expect("first mining cycle");
-    assert_eq!(mine_pocket_c1.units_delivered, 1_976);
-    assert_eq!(mine_pocket_c1.stop, None);
-    let mine_pocket_c2 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
-        .await
-        .expect("second mining cycle");
-    assert_eq!(mine_pocket_c2.units_delivered, 1_976);
-    assert_eq!(mine_pocket_c2.stop, None);
-    let mine_pocket_c3 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
-        .await
-        .expect("third mining cycle");
-    assert_eq!(mine_pocket_c3.units_delivered, 1_048);
-    assert_eq!(
-        mine_pocket_c3.stop,
-        Some(eve_server::services::mining_cycle::MiningStopReason::AsteroidDepleted)
-    );
-    let mined_mission_units = mine_pocket_c1.units_delivered + mine_pocket_c2.units_delivered + mine_pocket_c3.units_delivered;
+    let mut mined_mission_units = 0_i64;
+    let mut pocket_depleted = false;
+    for cycle in 0..32 {
+        let cycle_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
+            .await
+            .unwrap_or_else(|e| panic!("mining cycle {cycle} failed: {e:?}"));
+        assert!(cycle_res.units_delivered > 0, "cycle {cycle} must deliver ore");
+        mined_mission_units += cycle_res.units_delivered;
+        if let Some(stop) = cycle_res.stop {
+            assert_eq!(
+                stop,
+                eve_server::services::mining_cycle::MiningStopReason::AsteroidDepleted
+            );
+            pocket_depleted = true;
+            break;
+        }
+    }
+    assert!(pocket_depleted, "mining mission asteroid must deplete");
     assert_eq!(mined_mission_units, 5_000);
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -418,11 +436,11 @@ async fn test_mn18_mining_missions_market_and_goals() {
     let remaining_ore: i32 = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|it| it.owner_id == char_id && it.location_id == m_ship_id && it.type_id == 1228)
+            .filter(|it| it.owner_id == char_id && it.location_id == m_ship_id && it.type_id == expected_ore_tid)
             .map(|it| it.quantity)
             .sum()
     });
-    assert_eq!(remaining_ore, 4_500);
+    assert_eq!(remaining_ore, 5_000 - expected_req_qty);
 
     let goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32);
     let mut earned_ind_cp: u32 = goals
