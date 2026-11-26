@@ -1277,7 +1277,7 @@ async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jettison_full_clean_fuel_bay_clears_fuel_blocks_drops_power_and_blocks_duplication() {
     for (idx, use_three_arg) in [false, true].into_iter().enumerate() {
-        let mut ctx = test_ctx();
+        let ctx = test_ctx();
         let (char_id, uid, corp_id) = ctx.db.with_snapshot(|s| {
             let (&cid, ch) = s.characters.iter().next().unwrap();
             (cid, ch.user_id, ch.corporation_id)
@@ -1285,16 +1285,6 @@ async fn jettison_full_clean_fuel_bay_clears_fuel_blocks_drops_power_and_blocks_
         let _ = ctx
             .db
             .acquire_online_lock(uid, 20 + idx as u64, Some(char_id), false, ctx.now_unix());
-
-        let reg = Arc::make_mut(&mut ctx.sde);
-        reg.types.insert(
-            SERVICE_MOD_TYPE,
-            make_sde_type(SERVICE_MOD_TYPE, 1415, 66, 100.0, vec![(2110, 1.0)]),
-        );
-        reg.types.insert(
-            FUEL_BLOCK_TYPE,
-            make_sde_type(FUEL_BLOCK_TYPE, FUEL_GROUP_ID, 4, 5.0, vec![]),
-        );
 
         let st_id = 1_030_000_000_200_i64 + idx as i64;
         let svc_id = 901_200_i64 + idx as i64 * 10;
