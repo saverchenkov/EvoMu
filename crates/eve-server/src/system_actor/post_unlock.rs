@@ -1814,7 +1814,7 @@ pub(in crate::system_actor) struct PostCommitActorTargets {
     /// Weak reference so actor-owned post-commit delivery never bumps `Arc::strong_count(&h.ballpark)` above 3 during idle eviction (`lifecycle_sm`).
     pub ballpark: Weak<super::celestials::BallparkHandle>,
     pub actor_state: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
-    pub ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub ball_positions: Arc<super::celestials::BallPositionSyncCache>,
     pub scrambled_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub view_tx: Arc<tokio::sync::watch::Sender<Arc<SystemView>>>,
     pub tidi_factor_bits: Arc<AtomicU64>,

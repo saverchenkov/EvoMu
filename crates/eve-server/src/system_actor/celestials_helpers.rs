@@ -47,7 +47,7 @@ pub(crate) fn send_tick_broadcast_sequenced(
 struct DbBallparkEntry {
     ballpark: std::sync::Weak<BallparkHandle>,
     actor_state: std::sync::Weak<RankedRwLock<crate::system_actor::SystemActorState, RANK_ACTOR_STATE>>,
-    ball_positions: std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions: std::sync::Weak<BallPositionSyncCache>,
     scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     active_module_ships: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     view_tx: std::sync::Weak<tokio::sync::watch::Sender<Arc<crate::system_actor::SystemView>>>,
@@ -56,11 +56,14 @@ struct DbBallparkEntry {
     drone_hydration: crate::system_actor::drones::ActiveDronesSharedCtx,
 }
 
-fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>>,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+const DB_BALLPARK_REGISTRY_SLOT: &str = "eve_server.system_actor.db_ballpark_registry";
+
+struct DbBallparkRegistry(std::sync::Mutex<HashMap<SolarSystemId, DbBallparkEntry>>);
+
+fn db_ballpark_registry(db: &eve_db::WorldRepository) -> Arc<DbBallparkRegistry> {
+    db.get_or_init_transient_runtime_slot(DB_BALLPARK_REGISTRY_SLOT, || {
+        DbBallparkRegistry(std::sync::Mutex::new(HashMap::new()))
+    })
 }
 
 pub(crate) fn register_db_system_ballpark(
@@ -68,12 +71,13 @@ pub(crate) fn register_db_system_ballpark(
     solar_system_id: SolarSystemId,
     handle: &SystemHandle,
 ) {
-    let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
+    let reg = db_ballpark_registry(db);
+    let mut g = reg.0.lock().unwrap_or_else(|e| e.into_inner());
     if g.len() > 256 {
         g.retain(|_, entry| entry.ballpark.strong_count() > 0);
     }
     g.insert(
-        (db.instance_id(), solar_system_id),
+        solar_system_id,
         DbBallparkEntry {
             ballpark: Arc::downgrade(&handle.ballpark),
             actor_state: Arc::downgrade(&handle.actor_state),
@@ -94,13 +98,17 @@ pub(crate) fn clear_db_system_ballpark_if_matching(
     solar_system_id: SolarSystemId,
     handle: &SystemHandle,
 ) {
-    let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
-    let key = (db.instance_id(), solar_system_id);
+    let Some(Some(reg)) =
+        db.get_transient_runtime_slot::<DbBallparkRegistry>(DB_BALLPARK_REGISTRY_SLOT)
+    else {
+        return;
+    };
+    let mut g = reg.0.lock().unwrap_or_else(|e| e.into_inner());
     let target = Arc::downgrade(&handle.ballpark);
-    if g.get(&key)
+    if g.get(&solar_system_id)
         .is_some_and(|entry| std::sync::Weak::ptr_eq(&entry.ballpark, &target))
     {
-        g.remove(&key);
+        g.remove(&solar_system_id);
     }
 }
 
@@ -109,11 +117,11 @@ pub(crate) fn db_ballpark_entry_for_test(
     db: &Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
 ) -> Option<std::sync::Weak<BallparkHandle>> {
-    db_ballpark_map()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(db.instance_id(), solar_system_id))
-        .map(|entry| entry.ballpark.clone())
+    let reg = db
+        .get_transient_runtime_slot::<DbBallparkRegistry>(DB_BALLPARK_REGISTRY_SLOT)
+        .flatten()?;
+    let g = reg.0.lock().unwrap_or_else(|e| e.into_inner());
+    g.get(&solar_system_id).map(|entry| entry.ballpark.clone())
 }
 
 fn leaf_write_value<T>(lock: &RankedRwLock<T, RANK_LEAF>, leaf_held: bool, value: T) {
@@ -126,104 +134,69 @@ fn leaf_write_value<T>(lock: &RankedRwLock<T, RANK_LEAF>, leaf_held: bool, value
     }
 }
 
-fn register_weak_leaf_cache<T>(
-    map: &std::sync::Mutex<HashMap<usize, std::sync::Weak<RankedRwLock<T, RANK_LEAF>>>>,
-    cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-    target: &Arc<RankedRwLock<T, RANK_LEAF>>,
-) {
-    let key = Arc::as_ptr(cache) as usize;
-    let mut g = map.lock().unwrap_or_else(|e| e.into_inner());
-    if g.len() > 256 {
-        g.retain(|_, w| w.strong_count() > 0);
+/// Per-system synchronized ball position, velocity, committed-warp, and tether cache (`#1583`).
+///
+/// Owned directly by [`SystemHandle`] so stopping and restarting a system actor discards all
+/// prior-run kinematics, tether, and warp cache state with zero pointer-address maps or
+/// process-wide eviction wipes.
+pub(crate) struct BallPositionSyncCache {
+    positions: RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>,
+    committed_warps: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    static_sync_meta: std::sync::Mutex<Option<(u64, usize)>>,
+    velocities: std::sync::Mutex<HashMap<BallId, [f64; 3]>>,
+}
+
+impl BallPositionSyncCache {
+    pub(crate) fn new(
+        committed_warps: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+        tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    ) -> Self {
+        Self {
+            positions: RankedRwLock::new(HashMap::new()),
+            committed_warps,
+            tethered_balls,
+            static_sync_meta: std::sync::Mutex::new(None),
+            velocities: std::sync::Mutex::new(HashMap::new()),
+        }
     }
-    g.insert(key, Arc::downgrade(target));
-}
 
-fn update_weak_leaf_cache<T>(
-    map: &std::sync::Mutex<HashMap<usize, std::sync::Weak<RankedRwLock<T, RANK_LEAF>>>>,
-    cache_key: usize,
-    leaf_held: bool,
-    value: T,
-) {
-    let arc_opt = map
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&cache_key)
-        .and_then(|w| w.upgrade());
-    if let Some(arc) = arc_opt {
-        leaf_write_value(&arc, leaf_held, value);
+    #[cfg(test)]
+    pub(crate) fn new_standalone() -> Self {
+        Self::new(
+            Arc::new(RankedRwLock::new(HashMap::new())),
+            Arc::new(RankedRwLock::new(std::collections::HashSet::new())),
+        )
+    }
+
+    pub(crate) fn get_velocity(&self, ball_id: BallId) -> Option<[f64; 3]> {
+        self.velocities
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ball_id)
+            .copied()
     }
 }
 
-fn committed_warp_cache_map(
-) -> &'static std::sync::Mutex<
-    HashMap<usize, std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>>,
-> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<
-            HashMap<usize, std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>>,
-        >,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
+impl std::ops::Deref for BallPositionSyncCache {
+    type Target = RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>;
 
-pub(crate) fn register_committed_warp_cache(
-    cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-    committed_warps: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-) {
-    register_weak_leaf_cache(committed_warp_cache_map(), cache, committed_warps);
-}
-
-fn tethered_balls_cache_map(
-) -> &'static std::sync::Mutex<
-    HashMap<usize, std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>>,
-> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<
-            HashMap<
-                usize,
-                std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-            >,
-        >,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-pub(crate) fn register_tethered_balls_cache(
-    cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-    tethered_balls: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-) {
-    register_weak_leaf_cache(tethered_balls_cache_map(), cache, tethered_balls);
-}
-
-fn static_position_sync_state(
-) -> &'static std::sync::Mutex<HashMap<usize, (u64, usize)>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, (u64, usize)>>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-#[allow(clippy::type_complexity)]
-fn ball_velocity_cache_map(
-) -> &'static std::sync::Mutex<HashMap<usize, HashMap<BallId, [f64; 3]>>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, HashMap<BallId, [f64; 3]>>>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    fn deref(&self) -> &Self::Target {
+        &self.positions
+    }
 }
 
 pub(crate) fn sync_ball_positions(
     ballpark: &Ballpark,
-    cache: &RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>,
+    cache: &BallPositionSyncCache,
     scrambled: &RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>,
 ) {
-    let cache_key = cache as *const RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF> as usize;
     let cur_static_epoch = ballpark.static_epoch();
     let cur_static_count = ballpark.static_ball_ids.len();
-    let prev_static = static_position_sync_state()
+    let prev_static = *cache
+        .static_sync_meta
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&cache_key)
-        .copied();
+        .unwrap_or_else(|e| e.into_inner());
     let statics_unchanged = prev_static == Some((cur_static_epoch, cur_static_count));
 
     let leaf_held = eve_db::lock_rank::held_lock_ranks()
@@ -259,23 +232,20 @@ pub(crate) fn sync_ball_positions(
 
     let mut cache_updated = false;
     if leaf_held {
-        if let Ok(mut g) = cache.try_write_unranked() {
+        if let Ok(mut g) = cache.positions.try_write_unranked() {
             update_cache(&mut g);
             cache_updated = true;
         }
     } else {
-        let mut g = cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut g = cache.positions.write().unwrap_or_else(|e| e.into_inner());
         update_cache(&mut g);
         cache_updated = true;
     }
     if cache_updated {
-        let mut meta = static_position_sync_state()
+        *cache
+            .static_sync_meta
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if meta.len() > 512 {
-            meta.clear();
-        }
-        meta.insert(cache_key, (cur_static_epoch, cur_static_count));
+            .unwrap_or_else(|e| e.into_inner()) = Some((cur_static_epoch, cur_static_count));
 
         let mut dyn_vel = HashMap::new();
         if ballpark.balls.len() > cur_static_count {
@@ -285,13 +255,10 @@ pub(crate) fn sync_ball_positions(
                 }
             }
         }
-        let mut vel_map = ball_velocity_cache_map()
+        *cache
+            .velocities
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if vel_map.len() > 512 {
-            vel_map.clear();
-        }
-        vel_map.insert(cache_key, dyn_vel);
+            .unwrap_or_else(|e| e.into_inner()) = dyn_vel;
     }
 
     let mut scram = std::collections::HashSet::new();
@@ -337,8 +304,8 @@ pub(crate) fn sync_ball_positions(
     }
 
     leaf_write_value(scrambled, leaf_held, scram);
-    update_weak_leaf_cache(committed_warp_cache_map(), cache_key, leaf_held, warps);
-    update_weak_leaf_cache(tethered_balls_cache_map(), cache_key, leaf_held, teth);
+    leaf_write_value(&cache.committed_warps, leaf_held, warps);
+    leaf_write_value(&cache.tethered_balls, leaf_held, teth);
 }
 
 /// Synchronously removes `ball_id` from `solar_system_id`'s `Ballpark` if spawned for `db`.
@@ -347,11 +314,16 @@ pub fn try_remove_ball_for_db(
     solar_system_id: SolarSystemId,
     ball_id: BallId,
 ) {
-    let entry = db_ballpark_map()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(db.instance_id(), solar_system_id))
-        .cloned();
+    let entry = db
+        .get_transient_runtime_slot::<DbBallparkRegistry>(DB_BALLPARK_REGISTRY_SLOT)
+        .flatten()
+        .and_then(|reg| {
+            reg.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&solar_system_id)
+                .cloned()
+        });
     if let Some(entry) = entry {
         if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) = (
             entry.ballpark.upgrade(),
@@ -1065,7 +1037,7 @@ pub(crate) fn fast_forward_clock_in_actor(
     secs: u64,
     sim_elapsed_secs: &mut f64,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions_actor: &Arc<BallPositionSyncCache>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
 ) {
@@ -1096,7 +1068,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     sim_elapsed_secs: &mut f64,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
-    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions_actor: &Arc<BallPositionSyncCache>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
     warp_state: &mut crate::system_actor::types::ActorWarpState,
@@ -1128,7 +1100,7 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
     sim_elapsed_secs: &mut f64,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
-    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions_actor: &Arc<BallPositionSyncCache>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
     broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
@@ -1165,7 +1137,7 @@ pub(crate) fn fast_forward_clock_in_actor_collecting(
     sim_elapsed_secs: &mut f64,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
-    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions_actor: &Arc<BallPositionSyncCache>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
     broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
@@ -1447,17 +1419,12 @@ impl SystemHandle {
     }
 
     /// Returns the last synced velocity `[vx, vy, vz]` for `ball_id`, reading [`SystemView`]
-    /// first or falling back to [`ball_velocity_cache_map`].
+    /// first or falling back to [`BallPositionSyncCache`].
     pub fn get_ball_velocity_sync(&self, ball_id: BallId) -> Option<[f64; 3]> {
         if let Some(vel) = self.view().ball_velocity(ball_id) {
             return Some([vel.x, vel.y, vel.z]);
         }
-        let cache_key = Arc::as_ptr(&self.ball_positions) as usize;
-        ball_velocity_cache_map()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&cache_key)
-            .and_then(|m| m.get(&ball_id).copied())
+        self.ball_positions.get_velocity(ball_id)
     }
 
     /// Returns live `(position, velocity)` for `ball_id` only if the ball is currently present in

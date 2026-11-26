@@ -62,8 +62,7 @@ async fn celestials_helpers_pruning_unregistered_and_scrambled_sync() {
     cs.warp_scramble_strength = 2;
     bp.combat_states.insert(ship_id, cs);
 
-    let pos_cache: eve_db::lock_rank::RankedRwLock<_, { eve_db::lock_rank::RANK_LEAF }> =
-        eve_db::lock_rank::RankedRwLock::new(HashMap::new());
+    let pos_cache = BallPositionSyncCache::new_standalone();
     let scram_cache: eve_db::lock_rank::RankedRwLock<_, { eve_db::lock_rank::RANK_LEAF }> =
         eve_db::lock_rank::RankedRwLock::new(HashSet::new());
     sync_ball_positions(&bp, &pos_cache, &scram_cache);
@@ -128,7 +127,7 @@ async fn fast_forward_clock_and_force_stop_warp_edge_branches() {
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sys_id = 30_000_142u32;
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-    let pos_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let pos_cache = Arc::new(BallPositionSyncCache::new_standalone());
     let scram_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let mut bp = Ballpark::new(sys_id);
     let mut sim_elapsed = 0.0;
@@ -539,7 +538,7 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
     });
 
     // 3. fast_forward_clock_in_actor advances tick, sim_elapsed_secs, ball position, and shared caches
-    let ball_pos_map = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let ball_pos_map = Arc::new(BallPositionSyncCache::new_standalone());
     let scrambled_map = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let tick_before = bp.current_tick;
     let mut sim_elapsed = 10.0;
@@ -594,10 +593,10 @@ fn incremental_sync_ball_positions_tracks_dynamic_moves_and_static_changes() {
         },
     });
 
-    let cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
     let scram = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let warps = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
-    register_committed_warp_cache(&cache, &warps);
+    let tethered = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
+    let cache = Arc::new(BallPositionSyncCache::new(Arc::clone(&warps), tethered));
 
     // 1. Initial populate
     sync_ball_positions(&bp, &cache, &scram);
@@ -677,7 +676,7 @@ fn fast_forward_clock_preserves_tick_stamp_across_repeated_calls() {
         speed_fraction: 1.0,
         mode: MovementMode::GotoDirection { direction: DVec3::X },
     });
-    let cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let cache = Arc::new(BallPositionSyncCache::new_standalone());
     let scram = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
     let mut sim_elapsed = 0.0;
@@ -739,9 +738,7 @@ fn fast_forward_clock_passively_recharges_stationary_ship_past_300s_cap_without_
         );
         crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
     });
-    let pos_map = Arc::new(eve_db::lock_rank::RankedRwLock::new(
-        std::collections::HashMap::new(),
-    ));
+    let pos_map = Arc::new(BallPositionSyncCache::new_standalone());
     let scram_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
     let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::system_actor::TickBroadcast>(16);
     let mut bp = Ballpark::new(sys_id);
@@ -899,6 +896,109 @@ fn clear_landed_warp_tracking_from_events_emits_warp_finished_for_return_warps_b
     assert!(
         !pending.contains(&ship_still_warping),
         "in-flight warp without Stop event must NOT queue OnWarpFinished"
+    );
+}
+
+#[tokio::test]
+async fn actor_stop_restart_isolates_ball_position_velocity_tether_and_warp_caches() {
+    let registry = Arc::new(SystemRegistry::new());
+    let sys_id = 30_000_142_u32;
+    let ship_id = 99_901_001_i64;
+    let dest = DVec3::new(1_000_000_000.0, 250_000.0, -500_000.0);
+
+    let h1 = registry.get_or_spawn(sys_id);
+    let mut ship_ball = make_ship_ball(
+        ship_id,
+        DVec3::new(1_000.0, 2_000.0, 3_000.0),
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: dest,
+            warp_speed_au_s: 3.0,
+            total_distance: dest.length(),
+            phase: eve_destiny::WarpPhase::Cruising,
+            elapsed_warp_time: 4.0,
+        },
+    );
+    ship_ball.velocity = DVec3::new(150.0, -25.0, 40.0);
+    let mut cs = CombatState::new();
+    cs.is_tethered = true;
+    h1.spawn_ball_with_combat(ship_ball, cs).await.unwrap();
+
+    assert_eq!(h1.get_ball_velocity_sync(ship_id), Some([150.0, -25.0, 40.0]));
+    assert_eq!(
+        h1.ball_positions.get_velocity(ship_id),
+        Some([150.0, -25.0, 40.0])
+    );
+    assert!(h1.is_ball_tethered_sync(ship_id));
+    assert!(h1.tethered_balls.read().unwrap().contains(&ship_id));
+    assert_eq!(h1.committed_warp_destination_sync(ship_id), Some(dest));
+    assert_eq!(
+        h1.committed_warp_balls.read().unwrap().get(&ship_id).copied(),
+        Some(dest)
+    );
+    drop(h1);
+
+    assert!(registry.stop_system(sys_id).await);
+    let h2 = registry.get_or_spawn(sys_id);
+    assert_eq!(h2.get_ball_velocity_sync(ship_id), None);
+    assert_eq!(h2.ball_positions.get_velocity(ship_id), None);
+    assert!(!h2.is_ball_tethered_sync(ship_id));
+    assert!(!h2.tethered_balls.read().unwrap().contains(&ship_id));
+    assert_eq!(h2.committed_warp_destination_sync(ship_id), None);
+    assert!(!h2.committed_warp_balls.read().unwrap().contains_key(&ship_id));
+}
+
+#[tokio::test]
+async fn two_world_repositories_isolate_try_remove_ball_for_db() {
+    let pair = eve_testkit::process_global_ratchet::TwoRepositoryPair::with_demo_seed_isolated();
+    let db_a = pair.left_repo();
+    let db_b = pair.right_repo();
+    let sys_id = 30_000_142_u32;
+    let ball_id = 99_901_002_i64;
+
+    let reg_a = SystemRegistry::new();
+    let reg_b = SystemRegistry::new();
+    let h_a = reg_a.get_or_spawn(sys_id);
+    let h_b = reg_b.get_or_spawn(sys_id);
+    register_db_system_ballpark(db_a, sys_id, &h_a);
+    register_db_system_ballpark(db_b, sys_id, &h_b);
+
+    h_a.spawn_ball(make_ship_ball(
+        ball_id,
+        DVec3::new(100.0, 0.0, 0.0),
+        MovementMode::Stop,
+    ))
+    .await
+    .unwrap();
+    h_b.spawn_ball(make_ship_ball(
+        ball_id,
+        DVec3::new(200.0, 0.0, 0.0),
+        MovementMode::Stop,
+    ))
+    .await
+    .unwrap();
+    assert!(h_a.get_ball_snapshot(ball_id).await.unwrap().is_some());
+    assert!(h_b.get_ball_snapshot(ball_id).await.unwrap().is_some());
+
+    try_remove_ball_for_db(db_a, sys_id, ball_id);
+
+    assert!(h_a.get_ball_snapshot(ball_id).await.unwrap().is_none());
+    assert!(h_b.get_ball_snapshot(ball_id).await.unwrap().is_some());
+
+    let weak_slot = db_a
+        .get_transient_runtime_slot::<DbBallparkRegistry>(DB_BALLPARK_REGISTRY_SLOT)
+        .flatten()
+        .map(|slot| Arc::downgrade(&slot))
+        .expect("db_a DbBallparkRegistry slot initialized");
+    assert!(weak_slot.upgrade().is_some());
+    drop(h_a);
+    drop(reg_a);
+    drop(h_b);
+    drop(reg_b);
+    drop(pair);
+    assert!(
+        weak_slot.upgrade().is_none(),
+        "dropping WorldRepository must free DbBallparkRegistry transient runtime slot"
     );
 }
 

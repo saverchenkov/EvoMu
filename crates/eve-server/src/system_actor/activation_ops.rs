@@ -366,7 +366,7 @@ pub(crate) fn apply_set_movement_mode_command(
     notify_tx_opt: &Option<
         tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
     >,
-    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions_actor: &Arc<BallPositionSyncCache>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     ball_space_entry_epochs: &HashMap<BallId, u64>,
     warp_state: &mut ActorWarpState,

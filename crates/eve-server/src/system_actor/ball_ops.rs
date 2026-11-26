@@ -33,7 +33,7 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     pub(in crate::system_actor) solar_system_id: SolarSystemId,
     pub(in crate::system_actor) ballpark: &'a mut Ballpark,
     pub(in crate::system_actor) actor_st: &'a mut SystemActorState,
-    pub(in crate::system_actor) ball_positions: &'a Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    pub(in crate::system_actor) ball_positions: &'a Arc<celestials::BallPositionSyncCache>,
     pub(in crate::system_actor) scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     deactivation_sink_hook: Option<ModuleDeactivationHook>,
@@ -930,7 +930,7 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
     actor_st: &mut SystemActorState,
-    ball_positions: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    ball_positions: &Arc<celestials::BallPositionSyncCache>,
     scrambled_balls: &Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     module_deactivation_hook: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     cooldown_persist_gate: Option<&Arc<CooldownPersistGate>>,
@@ -2133,6 +2133,8 @@ mod tests {
         let (view_tx, view_rx) = watch::channel(Arc::new(SystemView::default()));
         let view_tx = Arc::new(view_tx);
         let tidi_bits = Arc::new(AtomicU64::new(1.0_f64.to_bits()));
+        let tethered_balls = Arc::new(RankedRwLock::new(HashSet::new()));
+        let committed_warp_balls = Arc::new(RankedRwLock::new(HashMap::new()));
         let handle = SystemHandle {
             solar_system_id: 30_000_142,
             cmd_tx,
@@ -2143,10 +2145,13 @@ mod tests {
             fighters_needs_hydration: Arc::new(AtomicBool::new(false)),
             fighter_ctx: Arc::new(Default::default()),
             event_tx,
-            ball_positions: Arc::new(RankedRwLock::new(HashMap::new())),
+            ball_positions: Arc::new(celestials::BallPositionSyncCache::new(
+                Arc::clone(&committed_warp_balls),
+                Arc::clone(&tethered_balls),
+            )),
             scrambled_balls: Arc::new(RankedRwLock::new(HashSet::new())),
-            tethered_balls: Arc::new(RankedRwLock::new(HashSet::new())),
-            committed_warp_balls: Arc::new(RankedRwLock::new(HashMap::new())),
+            tethered_balls,
+            committed_warp_balls,
             warp_stopped_at: Arc::new(RankedRwLock::new(HashMap::new())),
             active_module_ships: Arc::new(RankedRwLock::new(HashSet::new())),
             ballpark: Arc::new(BallparkHandle::new(

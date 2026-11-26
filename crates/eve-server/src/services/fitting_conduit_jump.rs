@@ -41,12 +41,10 @@ pub(super) fn ship_accepts_beacon(ctx: &ServerContext, ship_type: &eve_sde::InvT
     list.contains(beacon)
 }
 
-pub(super) fn csprng_unit_f64(ctx: &ServerContext) -> f64 {
-    if let Some(u) = ctx.mechanic_rng.try_unit_f64() {
-        return u;
-    }
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+pub(super) fn csprng_unit_f64_from_seq(ctx: &ServerContext) -> f64 {
+    let seq = ctx
+        .combat_rng_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut z = seq
         .wrapping_mul(0x9e37_79b9_7f4a_7c15)
         .wrapping_add(ctx.now_blueos_filetime_ticks() as u64);
@@ -54,6 +52,13 @@ pub(super) fn csprng_unit_f64(ctx: &ServerContext) -> f64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 31;
     ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+}
+
+pub(super) fn csprng_unit_f64(ctx: &ServerContext) -> f64 {
+    if let Some(u) = ctx.mechanic_rng.try_unit_f64() {
+        return u;
+    }
+    csprng_unit_f64_from_seq(ctx)
 }
 
 pub(super) fn random_arrival_position(ctx: &ServerContext, beacon_pos: DVec3) -> DVec3 {

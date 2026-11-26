@@ -482,3 +482,48 @@ async fn jump_portal_bridge_jump_through_conduit_and_jammer_state_rpcs() {
         assert_eq!(snap.items.get(&bomber2_ship).unwrap().location_id, i64::from(dest_sys));
     });
 }
+
+#[test]
+fn two_contexts_isolate_csprng_unit_f64_and_combat_rng_seq() {
+    let pair = eve_testkit::process_global_ratchet::TwoContextPair::from_factory(|| {
+        test_ctx_with_custom(|_| {})
+    });
+    let ctx_a = pair.left();
+    let ctx_b = pair.right();
+    let ctx_ref = test_ctx_with_custom(|_| {});
+
+    assert!(!ctx_a.mechanic_rng.is_seeded());
+    assert!(!ctx_b.mechanic_rng.is_seeded());
+    assert_eq!(
+        ctx_a.combat_rng_seq.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        ctx_b.combat_rng_seq.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    for _ in 0..8 {
+        let u = csprng_unit_f64(ctx_a);
+        assert!((0.0..1.0).contains(&u));
+    }
+    let _ = csprng_unit_f64_from_seq(ctx_a);
+    let _ = csprng_unit_f64_from_seq(ctx_a);
+    let _ = csprng_unit_f64_from_seq(ctx_a);
+    assert_eq!(
+        ctx_a.combat_rng_seq.load(std::sync::atomic::Ordering::Relaxed),
+        4
+    );
+    assert_eq!(
+        ctx_b.combat_rng_seq.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    let seq_b0 = csprng_unit_f64_from_seq(ctx_b);
+    let seq_ref0 = csprng_unit_f64_from_seq(&ctx_ref);
+    assert_eq!(seq_b0, seq_ref0);
+    assert_eq!(
+        ctx_b.combat_rng_seq.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+}
