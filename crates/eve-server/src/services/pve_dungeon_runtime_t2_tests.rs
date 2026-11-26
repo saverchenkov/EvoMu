@@ -799,22 +799,18 @@ async fn t2a3_delayed_repeatable_named_timer_cleanup_and_rearm_bf_r2_02() {
         assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
         assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
         assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
-
         ctx.advance_secs(2);
         sys_h.step_manual(1.0).await.unwrap();
         read_dungeon_runtime_store(&ctx, |s| {
             let rm = &s.instances[&inst_id].rooms[0];
-            assert!(rm.triggers[0].armed_at_unix.is_some(), "cycle {cycle}: delayed trigger must arm on TimerTick");
-            assert!(!rm.armed_timers.contains_key("rep_del"), "BF-R2-02: TimerTick arming must clean up rep_del");
+            assert!(rm.triggers[0].armed_at_unix.is_some() && !rm.armed_timers.contains_key("rep_del"), "cycle {cycle}: rep_del cleaned up on arming");
         });
-
         let _ = ctx.drain_notifications_for_char(char_id);
         ctx.advance_secs(4);
         assert_eq!(tick_due_delayed_dungeon_triggers(&ctx).await, 1, "cycle {cycle}: delayed repeatable OnTimer fires");
         assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 1);
         read_dungeon_runtime_store(&ctx, |s| {
-            let rm = &s.instances[&inst_id].rooms[0];
-            assert!(!rm.armed_timers.contains_key("__latch:0:0:root:timer:rep_del"), "BF-R2-02: latch must clear so future StartTimer re-arms");
+            assert!(!s.instances[&inst_id].rooms[0].armed_timers.contains_key("__latch:0:0:root:timer:rep_del"));
         });
     }
 }
@@ -828,10 +824,7 @@ async fn t2a3_npc_damaged_shield_only_depletion_bf_r2_03() {
     let t0 = ctx.db.clock().now_unix_secs();
 
     let mut r0 = t2_room(1, 9921, r_pos, vec![
-        t2_trig(1, DungeonTriggerKind::OnNpcDamaged {
-            target_npc_group: Some(1), target_tag: None, target_ball_id: None,
-            hull_or_shield_below_pct: 50, on_first_attack: false,
-        }, DungeonTriggerAction::UnlockGate, false),
+        t2_trig(1, DungeonTriggerKind::OnNpcDamaged { target_npc_group: Some(1), target_tag: None, target_ball_id: None, hull_or_shield_below_pct: 50, on_first_attack: false }, DungeonTriggerAction::UnlockGate, false),
     ]);
     r0.entered = true;
     r0.entered_unix = Some(t0);
@@ -843,18 +836,14 @@ async fn t2a3_npc_damaged_shield_only_depletion_bf_r2_03() {
         });
     });
     let npc_id = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.unwrap().npc_ids[0];
-
     for _ in 0..32 {
         let (shield_pct, step) = {
             let view = sys_h.view();
             let cs = view.combat_states.get(&npc_id).expect("npc combat state");
             assert!(cs.max_shield_hp > 0.0);
-            let sp = ((cs.shield_hp / cs.max_shield_hp) * 100.0).round() as u8;
-            (sp, (cs.max_shield_hp * 0.08).max(1.0))
+            (((cs.shield_hp / cs.max_shield_hp) * 100.0).round() as u8, (cs.max_shield_hp * 0.08).max(1.0))
         };
-        if shield_pct <= 35 {
-            break;
-        }
+        if shield_pct <= 35 { break; }
         let _ = sys_h.apply_damage_with_attacker(npc_id, DamageVector { em: step, thermal: step, kinetic: step, explosive: step }, Some(char_id)).await.unwrap();
     }
     {
@@ -869,4 +858,77 @@ async fn t2a3_npc_damaged_shield_only_depletion_bf_r2_03() {
         let rm = &s.instances[&inst_id].rooms[0];
         assert!(rm.triggers[0].fired && !rm.gate_locked, "BF-R2-03: shield-only depletion <= 50% must fire OnNpcDamaged");
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t2a3_compound_and_repeatable_named_timer_and_shared_peer_bf_r3_01() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_050_110i64, 991_014i64);
+    let (r_pos, p2_pos, arm_pos) = ([53_000_000.0, 0.0, 0.0], [53_010_000.0, 0.0, 0.0], [53_020_000.0, 0.0, 0.0]);
+    let (ctx, _, ship_id) = make_t2a3_ctx(shared_sde(), Arc::new(WorldRepository::new_empty()), sys_id, char_id, "r3_01", DVec3::ZERO).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let t0 = ctx.db.clock().now_unix_secs();
+
+    let mut r0 = t2_room(1, 9931, r_pos, vec![
+        t2_trig(1, DungeonTriggerKind::CompoundAnd { clauses: vec![
+            DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("t1".into()), after_group_cleared: None },
+            DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: r_pos, radius_m: 3_000.0 },
+        ]}, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9301 }, true),
+        t2_trig(2, DungeonTriggerKind::CompoundAnd { clauses: vec![
+            DungeonTriggerKind::OnTimer { delay_secs: 0, timer_id: Some("t1".into()), after_group_cleared: None },
+            DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: p2_pos, radius_m: 3_000.0 },
+        ]}, DungeonTriggerAction::TriggerMessage { message_type: 1, message_id: 9302 }, true),
+        t2_trig(3, DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: None, anchor_pos: arm_pos, radius_m: 3_000.0 }, DungeonTriggerAction::StartTimer { timer_id: "t1".into(), delay_secs: 3 }, true),
+    ]);
+    r0.spawned = true;
+    r0.entered = true;
+    r0.entered_unix = Some(t0);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance {
+            instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id,
+            base_position: r_pos, rooms: vec![r0], created_unix: t0, ..Default::default()
+        });
+    });
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(arm_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    ctx.advance_secs(3);
+    sys_h.step_manual(1.0).await.unwrap();
+    read_dungeon_runtime_store(&ctx, |s| {
+        let at = &s.instances[&inst_id].rooms[0].armed_timers;
+        assert!(!at.contains_key("t1") && at.contains_key("__and:0:0:root.0") && at.contains_key("__and:0:1:root.0"));
+    });
+    ctx.advance_secs(1);
+    let tx_wait = ctx.db.tx_commit_count();
+    tick_dungeon_runtime_system_step(&ctx, sys_id).await;
+    assert_eq!(ctx.db.tx_commit_count(), tx_wait, "BF-R3-01: idle TimerTick with latched OnTimer must stay read-pure");
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(r_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p2_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert_eq!(ctx.drain_notifications_for_char(char_id).iter().filter(|n| n.event == "OnDungeonTriggerMessage").count(), 2);
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    for _ in 0..2 {
+        ctx.advance_secs(1);
+        let tx_idle = ctx.db.tx_commit_count();
+        tick_dungeon_runtime_system_step(&ctx, sys_id).await;
+        assert_eq!(ctx.db.tx_commit_count(), tx_idle, "BF-R3-01: completed CompoundAnd stays read-pure");
+    }
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(r_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(arm_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
+    assert!(sys_h.set_ball_position(ship_id, DVec3::ZERO).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    ctx.advance_secs(3);
+    sys_h.step_manual(1.0).await.unwrap();
+    assert!(sys_h.set_ball_position(ship_id, DVec3::from_array(p2_pos)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
 }

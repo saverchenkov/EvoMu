@@ -112,6 +112,42 @@ fn collect_due_named_timers(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn collect_newly_latched_due_named_timers(
+    kind: &DungeonTriggerKind,
+    prev_armed: &BTreeMap<String, u64>,
+    curr_armed: &BTreeMap<String, u64>,
+    r_idx: usize,
+    t_idx: usize,
+    path: &str,
+    now_unix: u64,
+    out_expired: &mut Vec<String>,
+) {
+    match kind {
+        DungeonTriggerKind::OnTimer { timer_id: Some(ref tid), .. } => {
+            if !tid.is_empty() && !tid.starts_with("__") {
+                let latch_key = format!("__latch:{r_idx}:{t_idx}:{path}:timer:{tid}");
+                if !prev_armed.contains_key(&latch_key)
+                    && curr_armed.contains_key(&latch_key)
+                    && curr_armed.get(tid).is_some_and(|&due| now_unix >= due)
+                    && !out_expired.contains(tid)
+                {
+                    out_expired.push(tid.clone());
+                }
+            }
+        }
+        DungeonTriggerKind::CompoundAnd { clauses } | DungeonTriggerKind::CompoundOr { clauses } => {
+            for (ci, c) in clauses.iter().enumerate() {
+                let sub = format!("{path}.{ci}");
+                collect_newly_latched_due_named_timers(
+                    c, prev_armed, curr_armed, r_idx, t_idx, &sub, now_unix, out_expired,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Resets repeatable trigger latches ONLY for clauses whose occurrence/timer has genuinely elapsed (`OWN-R5-04`).
 /// Named timers (`timer_id`) and unnamed repeatable `__rep_timer` deadlines are consumed ONLY when
 /// `consume_timers` (`DungeonEvent::TimerTick`) is true so peer `OnTimer` triggers are never starved (`BF-03`).
@@ -553,7 +589,9 @@ fn evaluate_trigger_with_occurrence_latch(
                 let ok_now = if already
                     && matches!(
                         clause,
-                        DungeonTriggerKind::OnKillTagged { .. } | DungeonTriggerKind::OnKillCount { .. }
+                        DungeonTriggerKind::OnKillTagged { .. }
+                            | DungeonTriggerKind::OnKillCount { .. }
+                            | DungeonTriggerKind::OnTimer { .. }
                     )
                 {
                     true
@@ -661,19 +699,29 @@ fn evaluate_room_triggers_in_inst(
             }
             continue;
         }
-        let mut scratch = inst.rooms[r_idx].armed_timers.clone();
+        let prev_armed = is_timer_tick.then(|| inst.rooms[r_idx].armed_timers.clone());
+        let mut scratch = prev_armed.as_ref().cloned().unwrap_or_else(|| inst.rooms[r_idx].armed_timers.clone());
         let matched = evaluate_trigger_with_occurrence_latch(
             &kind, inst, &inst.rooms[r_idx], &mut scratch, r_idx, t_idx, "root", event, now_unix,
         );
+        if let Some(ref prev) = prev_armed {
+            collect_newly_latched_due_named_timers(
+                &kind,
+                prev,
+                &scratch,
+                r_idx,
+                t_idx,
+                "root",
+                now_unix,
+                &mut expired_named_timers,
+            );
+        }
         inst.rooms[r_idx].armed_timers = scratch;
         if !matched {
             continue;
         }
         any_hit = true;
         if delay > 0 {
-            if is_timer_tick {
-                collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
-            }
             let t = &mut inst.rooms[r_idx].triggers[t_idx];
             t.armed_at_unix = Some(now_unix);
             t.armed_by_char_id = (actor_char_id > 0).then_some(actor_char_id);
@@ -695,9 +743,6 @@ fn evaluate_room_triggers_in_inst(
                 &mut expired_named_timers,
             );
         } else {
-            if is_timer_tick {
-                collect_due_named_timers(&kind, &inst.rooms[r_idx].armed_timers, now_unix, &mut expired_named_timers);
-            }
             inst.rooms[r_idx].triggers[t_idx].fired = true;
         }
         batch.push((trig_id, target_room_index, repeatable, actor_char_id, acts));

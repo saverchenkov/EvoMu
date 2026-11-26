@@ -551,9 +551,7 @@ fn parse_rooms_from_pyrep(
                             .take(16)
                             .map(|a_rep| {
                                 let parsed = parse_dungeon_trigger_action(a_rep, t_rep);
-                                if matches!(parsed, DungeonTriggerAction::StartTimer { .. })
-                                    && a_rep.dict_get("delaySecs").is_none()
-                                {
+                                if matches!(parsed, DungeonTriggerAction::StartTimer { .. }) && a_rep.as_str().is_some() {
                                     extra_uses_wrapper_start_timer_delay = true;
                                 }
                                 parsed
