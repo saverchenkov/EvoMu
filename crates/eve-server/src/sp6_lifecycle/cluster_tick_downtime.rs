@@ -2,9 +2,8 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_mut_combat_runtime;
-use eve_destiny::{Ball, MovementMode, SlimItemMeta};
+use eve_destiny::SlimItemMeta;
 use glam::DVec3;
-use std::collections::HashMap;
 
 /// Daily downtime maintenance: purges stale NPC wrecks (`feat:lifecycle.wreck-downtime`)
 /// and resets uncompleted (`MissionState::Accepted`) missions by despawning remaining NPCs and restoring

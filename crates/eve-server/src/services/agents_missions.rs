@@ -1050,7 +1050,7 @@ pub async fn handle_with_bound(
                                 m.template_id,
                                 m.agent_id,
                                 m.solar_system_id,
-                                m.station_id,
+                                m.origin_station_id,
                                 MissionState::Expired,
                                 false,
                             ))
@@ -1061,7 +1061,7 @@ pub async fn handle_with_bound(
                                 m.template_id,
                                 m.agent_id,
                                 m.solar_system_id,
-                                m.station_id,
+                                m.origin_station_id,
                                 MissionState::Failed,
                                 true,
                             ))
