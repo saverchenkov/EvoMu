@@ -2944,6 +2944,9 @@ async fn rt_109_poisoned_probe_locks_recover_cleanly_on_read_and_write() {
     let now_unix = ctx.now_unix();
     let kw = HashMap::new();
 
+    let lost_ship_id = 999_999_002_i64;
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&lost_ship_id)));
+
     {
         let mut probes = ctx.active_scanner_probes.write().unwrap();
         probes.insert(
@@ -2972,7 +2975,7 @@ async fn rt_109_poisoned_probe_locks_recover_cleanly_on_read_and_write() {
                 probe_id: overdue_lost_id,
                 probe_type_id: 30_013,
                 owner_char_id: 90_000_002,
-                ship_id: 100_000_002,
+                ship_id: lost_ship_id,
                 launcher_module_id: 0,
                 solar_system_id: sys_id,
                 position: [0.0; 3],
