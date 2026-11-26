@@ -5188,24 +5188,14 @@ async fn wave3_targeted_system_actor_ewar_missile_and_social_edges() {
             applied_damage: 0.0,
         }
     };
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.insert(
-            missile_dead_id,
-            mk_missile(missile_dead_id, far_ship_id, 10.0, false),
-        );
-        rt.in_flight_missiles.insert(
-            missile_no_tgt_id,
-            mk_missile(missile_no_tgt_id, 99_999_999, 10.0, false),
-        );
-        rt.in_flight_missiles.insert(
-            missile_hit_id,
-            mk_missile(missile_hit_id, far_ship_id, 200.0, true),
-        );
-        rt.in_flight_missiles.insert(
-            missile_kill_id,
-            mk_missile(missile_kill_id, lethal_tgt_id, 500.0, false),
-        );
-    });
+    for m in [
+        mk_missile(missile_dead_id, far_ship_id, 10.0, false),
+        mk_missile(missile_no_tgt_id, 99_999_999, 10.0, false),
+        mk_missile(missile_hit_id, far_ship_id, 200.0, true),
+        mk_missile(missile_kill_id, lethal_tgt_id, 500.0, false),
+    ] {
+        sys.upsert_in_flight_missile_sync(m).unwrap();
+    }
     let completed = combat_missiles_aoe::step_combat_system(&ctx, sys_id, 1.0).await;
     assert_eq!(completed.len(), 4);
     assert!(

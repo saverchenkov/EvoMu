@@ -556,6 +556,21 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ApplyPersistedCooldownCommit { .. } => {
                 "ApplyPersistedCooldownCommit"
             }
+            SystemCommand::HydrateWeaponEffects { .. } => "HydrateWeaponEffects",
+            SystemCommand::UpsertEntropicSpoolActivation { .. } => "UpsertEntropicSpoolActivation",
+            SystemCommand::AdvanceEntropicSpoolCycle { .. } => "AdvanceEntropicSpoolCycle",
+            SystemCommand::UpdateEntropicSpool { .. } => "UpdateEntropicSpool",
+            SystemCommand::RemoveEntropicSpool { .. } => "RemoveEntropicSpool",
+            SystemCommand::CollectAndClearEntropicSpoolsForShip { .. } => {
+                "CollectAndClearEntropicSpoolsForShip"
+            }
+            SystemCommand::UpsertInFlightMissile { .. } => "UpsertInFlightMissile",
+            SystemCommand::RemoveInFlightMissile { .. } => "RemoveInFlightMissile",
+            SystemCommand::DamageInFlightMissile { .. } => "DamageInFlightMissile",
+            SystemCommand::InterceptInFlightMissile { .. } => "InterceptInFlightMissile",
+            SystemCommand::UpsertActiveBreacherDot { .. } => "UpsertActiveBreacherDot",
+            SystemCommand::RemoveActiveBreacherDot { .. } => "RemoveActiveBreacherDot",
+            SystemCommand::FlushWeaponEffectsCheckpoint { .. } => "FlushWeaponEffectsCheckpoint",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -1122,6 +1137,135 @@ fn system_command_all_variants_construct_and_match() {
             },
             reply: None,
         },
+        SystemCommand::HydrateWeaponEffects {
+            spools: Vec::new(),
+            missiles: Vec::new(),
+            breachers: Vec::new(),
+            legacy_prune: None,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::UpsertEntropicSpoolActivation {
+            spool: crate::system_actor::EntropicSpoolState {
+                target_id: 2,
+                solar_system_id: 30_000_142,
+                attacker_char_id: 1,
+                attacker_ship_id: 10,
+                module_id: 11,
+                module_type_id: 47_240,
+                charge_item_id: None,
+                base_damage: DamageVector::default(),
+                cap_need: 10.0,
+                duration_s: 3.0,
+                cycles: 0,
+                elapsed_in_cycle: 0.0,
+                per_cycle_bonus: 0.1,
+                max_bonus: 1.5,
+                current_multiplier: 1.0,
+            },
+            is_active_in_db: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::AdvanceEntropicSpoolCycle {
+            ship_id: 1,
+            module_id: 2,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::UpdateEntropicSpool {
+            spool: crate::system_actor::EntropicSpoolState {
+                target_id: 2,
+                solar_system_id: 30_000_142,
+                attacker_char_id: 1,
+                attacker_ship_id: 10,
+                module_id: 11,
+                module_type_id: 47_240,
+                charge_item_id: None,
+                base_damage: DamageVector::default(),
+                cap_need: 10.0,
+                duration_s: 3.0,
+                cycles: 1,
+                elapsed_in_cycle: 0.5,
+                per_cycle_bonus: 0.1,
+                max_bonus: 1.5,
+                current_multiplier: 1.1,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveEntropicSpool {
+            ship_id: 1,
+            module_id: 2,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::CollectAndClearEntropicSpoolsForShip {
+            ship_id: 1,
+            target_id_opt: None,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::UpsertInFlightMissile {
+            missile: crate::system_actor::InFlightMissileState {
+                missile_ball_id: 1,
+                solar_system_id: 30_000_142,
+                attacker_char_id: 1,
+                attacker_ship_id: 2,
+                launcher_module_id: 3,
+                launcher_type_id: 2410,
+                missile_type_id: 209,
+                target_ball_id: 4,
+                max_velocity: 1000.0,
+                flight_time_s: 5.0,
+                remaining_flight_s: 4.0,
+                hp: 50.0,
+                max_hp: 50.0,
+                base_damage: DamageVector::default(),
+                explosion_radius: 40.0,
+                explosion_velocity: 150.0,
+                drf: 0.6,
+                is_fof: false,
+                is_breacher_pod: false,
+                breacher_dot_duration_s: 0.0,
+                breacher_flat_cap: 0.0,
+                breacher_pct_cap: 0.0,
+                destroyed: false,
+                expired: false,
+                impacted: false,
+                applied_damage: 0.0,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveInFlightMissile {
+            missile_ball_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::DamageInFlightMissile {
+            missile_ball_id: 1,
+            damage: 25.0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::InterceptInFlightMissile {
+            target_missile_id_opt: None,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::UpsertActiveBreacherDot {
+            dot: crate::system_actor::ActiveBreacherDot {
+                target_ball_id: 1,
+                solar_system_id: 30_000_142,
+                source_char_id: 2,
+                source_ship_id: 3,
+                weapon_type_id: 4,
+                charge_type_id: 5,
+                flat_cap_dps: 100.0,
+                pct_cap_fraction: 0.01,
+                remaining_s: 10.0,
+                tick_damage: 10.0,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveActiveBreacherDot {
+            target_ball_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::FlushWeaponEffectsCheckpoint {
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -1134,9 +1278,9 @@ fn system_command_all_variants_construct_and_match() {
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
     if cfg!(any(test, feature = "testkit")) {
-        assert_eq!(tags.len(), 147);
+        assert_eq!(tags.len(), 160);
     } else {
-        assert_eq!(tags.len(), 146);
+        assert_eq!(tags.len(), 159);
     }
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
@@ -1180,9 +1324,11 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[142], "ClearModuleReloadSimDeadline");
     assert_eq!(tags[143], "ApplyLoadingCooldownTransitions");
     assert_eq!(tags[144], "ApplyPersistedCooldownCommit");
-    assert_eq!(tags[145], "ShutdownActor");
+    assert_eq!(tags[145], "HydrateWeaponEffects");
+    assert_eq!(tags[157], "FlushWeaponEffectsCheckpoint");
+    assert_eq!(tags[158], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[146], "TestAccess");
+    assert_eq!(tags[159], "TestAccess");
 }
 
 #[test]

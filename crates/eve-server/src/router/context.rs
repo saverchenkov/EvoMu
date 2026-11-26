@@ -768,7 +768,7 @@ impl ServerContext {
                         }
                     }
                 }
-                crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
+                crate::services::combat_crimewatch::step_system_weapon_effects_from_actor(&ctx, sys_id, dt).await;
                 crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
                 if !destroyed_balls.is_empty() {
                     let now_unix = ctx.now_unix();

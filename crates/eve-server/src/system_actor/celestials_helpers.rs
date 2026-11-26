@@ -54,6 +54,7 @@ struct DbBallparkEntry {
     tidi_factor_bits: std::sync::Weak<std::sync::atomic::AtomicU64>,
     cmd_tx: tokio::sync::mpsc::WeakSender<crate::system_actor::SystemCommand>,
     drone_hydration: crate::system_actor::drones::ActiveDronesSharedCtx,
+    weapon_effects_coord: Option<std::sync::Weak<crate::system_actor::WeaponEffectsFlushCoord>>,
 }
 
 const DB_BALLPARK_REGISTRY_SLOT: &str = "eve_server.system_actor.db_ballpark_registry";
@@ -88,6 +89,11 @@ pub(crate) fn register_db_system_ballpark(
             tidi_factor_bits: Arc::downgrade(&handle.tidi_factor_bits),
             cmd_tx: handle.cmd_tx.downgrade(),
             drone_hydration: handle.ballpark.drone_hydration_shared().cloned().unwrap_or_default(),
+            weapon_effects_coord: handle
+                .view()
+                .weapon_effects_coord
+                .as_ref()
+                .map(Arc::downgrade),
         },
     );
 }
@@ -342,7 +348,8 @@ pub fn try_remove_ball_for_db(
                         st.protection_registry.remove(&ball_id);
                         removed_drone = st.active_drones_in_space.contains_key(&ball_id);
                         crate::system_actor::drones::clear_removed_ball_drones_in_state(st, ball_id);
-                        if st.active_drones_checkpoint_dirty {
+                        let removed_we = crate::system_actor::weapon_effects::clear_removed_ball_weapon_effects_in_state(st, ball_id);
+                        if st.active_drones_checkpoint_dirty || st.weapon_effects_dirty {
                             st.hibernated.store(false, std::sync::atomic::Ordering::Relaxed);
                             st.hibernated_since_unix.store(0, std::sync::atomic::Ordering::Relaxed);
                             st.idle_ticks.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -358,6 +365,7 @@ pub fn try_remove_ball_for_db(
                                 leaf_write_value(&mod_arc, leaf_held, mods);
                             }
                         }
+                        removed_drone |= removed_we;
                     }
                     if removed_ball || removed_ext || removed_drone {
                         if let Some(vtx) = entry.view_tx.upgrade() {
@@ -393,6 +401,19 @@ pub fn try_remove_ball_for_db(
                     }
                     sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
+                if let Some(cmd_tx) = entry.cmd_tx.upgrade() {
+                    if let Some(we_coord) = entry
+                        .weapon_effects_coord
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                    {
+                        crate::system_actor::weapon_effects::try_flush_from_sender(
+                            solar_system_id,
+                            &cmd_tx,
+                            &we_coord,
+                        );
+                    }
+                }
             } else {
                 {
                     let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
@@ -410,6 +431,17 @@ pub fn try_remove_ball_for_db(
                         &cmd_tx,
                         &entry.drone_hydration,
                     );
+                    if let Some(we_coord) = entry
+                        .weapon_effects_coord
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                    {
+                        crate::system_actor::weapon_effects::try_flush_from_sender(
+                            solar_system_id,
+                            &cmd_tx,
+                            &we_coord,
+                        );
+                    }
                 }
             }
         }
@@ -662,6 +694,7 @@ pub(crate) fn remove_ball_checkpoint_tracking(
     state.ball_space_entry_epochs.remove(&ball_id);
     state.last_checkpointed_balls.remove(&ball_id);
     state.warp_state.clear_ball(ball_id, true);
+    let _ = crate::system_actor::weapon_effects::clear_removed_ball_weapon_effects_in_state(state, ball_id);
 }
 
 /// Prunes landed or deactivated warps from actor `warp_state`, deferring `OnWarpFinished`
@@ -962,6 +995,8 @@ pub(crate) fn update_system_hibernation_flag(
         || (state.db_opt.is_some()
             && (state.active_drones_checkpoint_dirty
                 || state.active_drones_needs_sqlite_hydration))
+        || state.weapon_effects.has_active_work()
+        || crate::system_actor::weapon_effects::has_unflushed_weapon_effects_in_state(state)
         || state.pending_destroyed_balls.is_non_empty()
         || state
             .asteroids

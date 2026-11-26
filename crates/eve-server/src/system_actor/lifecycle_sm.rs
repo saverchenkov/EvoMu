@@ -1245,6 +1245,7 @@ impl SystemRegistry {
             }
             let _ = handle.flush_condition_checkpoint().await;
             let _ = handle.flush_module_cooldown_checkpoint().await;
+            let _ = handle.flush_weapon_effects_checkpoint().await;
             if !self.is_handle_hibernated_safe(&handle) {
                 continue;
             }

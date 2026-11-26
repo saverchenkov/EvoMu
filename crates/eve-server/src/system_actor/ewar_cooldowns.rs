@@ -429,6 +429,7 @@ pub(in crate::system_actor) fn finalize_post_unlock_ops_deactivations_in_actor(
         }
     }
     ops.intents = next_intents;
+    super::weapon_effects::collect_dirty_weapon_effects_post_unlock_op(solar_system_id, actor_st, ops);
     mutated_actor
 }
 
@@ -443,6 +444,7 @@ pub(in crate::system_actor) fn build_and_finalize_removed_ball_ops(
     post_hook: Option<PairedModuleDeactivationPostUnlockHook>,
     tidi_factor: f64,
 ) -> super::post_unlock::PostUnlockOps {
+    super::weapon_effects::clear_removed_ball_weapon_effects_in_state(st, ball_id);
     let include_deact = raw_hook.is_some() || post_hook.is_some();
     if st.db_opt.is_none() && !include_deact {
         return super::post_unlock::PostUnlockOps::default();

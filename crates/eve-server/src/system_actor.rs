@@ -22,8 +22,8 @@ mod protection;
 mod activation_ops;
 mod ball_ops;
 pub use ball_ops::*;
-mod drones;
-pub use drones::*;
+mod drones; pub use drones::*;
+mod weapon_effects; pub use weapon_effects::*;
 #[cfg(any(test, feature = "testkit"))]
 mod test_seam;
 mod fighters; pub use fighters::*;
@@ -367,6 +367,7 @@ pub struct SystemRegistry {
     /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
     pub system_wide_effects: RankedRwLock<view::SystemWideEffectsState, RANK_LEAF>,
     pub(crate) drone_rt_state: drones::RegistryDroneRuntimeState,
+    pub(crate) weapon_effects_rt_state: weapon_effects::RegistryWeaponEffectsState,
     runtime_handle: RankedRwLock<Option<tokio::runtime::Handle>, RANK_LEAF>,
 }
 
@@ -421,6 +422,7 @@ impl SystemRegistry {
             lifecycle_test_hooks: Default::default(),
             system_wide_effects: RankedRwLock::new(view::SystemWideEffectsState::default()),
             drone_rt_state: drones::RegistryDroneRuntimeState::default(),
+            weapon_effects_rt_state: Default::default(),
             runtime_handle: RankedRwLock::new(None),
         }
     }
@@ -777,22 +779,12 @@ impl SystemRegistry {
             .is_some_and(|h| h.is_ball_scrambled_sync(ball_id))
     }
 
-    pub fn is_ball_tethered_sync(
-        &self,
-        solar_system_id: SolarSystemId,
-        ball_id: BallId,
-    ) -> bool {
-        self.get_handle(solar_system_id)
-            .is_some_and(|h| h.is_ball_tethered_sync(ball_id))
+    pub fn is_ball_tethered_sync(&self, solar_system_id: SolarSystemId, ball_id: BallId) -> bool {
+        self.get_handle(solar_system_id).is_some_and(|h| h.is_ball_tethered_sync(ball_id))
     }
 
-    pub fn has_active_modules_or_cloak_sync(
-        &self,
-        solar_system_id: SolarSystemId,
-        ball_id: BallId,
-    ) -> bool {
-        self.get_handle(solar_system_id)
-            .is_some_and(|h| h.has_active_modules_or_cloak_sync(ball_id))
+    pub fn has_active_modules_or_cloak_sync(&self, solar_system_id: SolarSystemId, ball_id: BallId) -> bool {
+        self.get_handle(solar_system_id).is_some_and(|h| h.has_active_modules_or_cloak_sync(ball_id))
     }
 
     pub fn find_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
@@ -1014,6 +1006,7 @@ impl SystemRegistry {
         for (_, handle) in self.active_system_handles() {
             total += handle.flush_dirty_condition_checkpoint_sync();
             drones::flush_from_handle(&handle);
+            weapon_effects::flush_from_handle(&handle);
         }
         total
     }
@@ -1199,20 +1192,12 @@ impl SystemRegistry {
             ..Default::default()
         };
         drones::init_actor_active_drones(&mut initial_actor_state, self, solar_system_id, db_read_safe);
+        weapon_effects::init_actor_weapon_effects(&mut initial_actor_state, self, solar_system_id, &initial_ballpark, db_read_safe, &mut initial_post_unlock_ops);
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
         if db_read_safe {
-            let dyn_ids: Vec<BallId> = initial_ballpark
-                .balls
-                .keys()
-                .copied()
-                .filter(|&bid| !initial_ballpark.is_static_ball(bid))
-                .collect();
+            let dyn_ids: Vec<BallId> = initial_ballpark.balls.keys().copied().filter(|&bid| !initial_ballpark.is_static_ball(bid)).collect();
             for bid in dyn_ids {
-                celestials::record_spawned_ball_checkpoint_baseline(
-                    &mut initial_actor_state,
-                    &initial_ballpark,
-                    bid,
-                );
+                celestials::record_spawned_ball_checkpoint_baseline(&mut initial_actor_state, &initial_ballpark, bid);
             }
         }
         let staged_claims = {
@@ -1440,6 +1425,11 @@ impl SystemRegistry {
                 }
             };
             flush_actor_active_drones(false);
+            weapon_effects::flush_actor_weapon_effects(
+                solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
+                &tidi_factor_bits_actor, event_tx_actor.receiver_count(), db_opt_actor.as_deref(),
+                post_unlock_tx_opt.0.as_ref().map(|tx| (tx, &post_unlock_in_flight_actor)), false,
+            );
             while let Some((cmd_batch, shutdown_requested)) =
                 post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0).await
             {
@@ -1541,6 +1531,7 @@ impl SystemRegistry {
                     .and_then(|c| drones::handle_drone_runtime_command(&mut exec_ctx, c))
                     .and_then(|c| fighters::handle_fighter_runtime_command(&mut exec_ctx, c))
                     .and_then(|c| ewar_cooldowns::handle_ewar_and_cooldown_command(&mut exec_ctx, c))
+                    .and_then(|c| weapon_effects::handle_weapon_effects_command(&mut exec_ctx, c))
                     .and_then(|c| {
                         #[cfg(any(test, feature = "testkit"))] { test_seam::handle_test_access_command(&mut exec_ctx, c) }
                         #[cfg(not(any(test, feature = "testkit")))] { Some(c) }
@@ -1583,6 +1574,9 @@ impl SystemRegistry {
                                     protection_registry,
                                     active_drone_miners,
                                     drone_next_ready_unix,
+                                    weapon_effects, weapon_effects_needs_sqlite_hydration,
+                                    weapon_effects_removed_pre_hydration, weapon_effects_seq,
+                                    weapon_effects_dirty, weapon_effects_coord,
                                     next_post_unlock_seq,
                                     post_unlock_shadows,
                                     ..
@@ -1991,6 +1985,11 @@ impl SystemRegistry {
                                             protection_registry.remove(&dead_id);
                                             active_drone_miners.remove(&dead_id);
                                             drone_next_ready_unix.remove(&dead_id);
+                                            weapon_effects::clear_removed_ball_weapon_effects_fields(
+                                                weapon_effects, *weapon_effects_needs_sqlite_hydration,
+                                                weapon_effects_removed_pre_hydration, weapon_effects_seq,
+                                                weapon_effects_dirty, weapon_effects_coord, dead_id,
+                                            );
                                         }
                                         ballpark.pending_events.retain(|ev| match ev {
                                             DestinyEvent::TargetLockFailed { target_id, .. } => {
@@ -2299,6 +2298,11 @@ impl SystemRegistry {
                     };
                     let _ = view_tx_actor.send(Arc::new(next_view));
                 }
+                weapon_effects::flush_actor_weapon_effects(
+                    solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
+                    &tidi_factor_bits_actor, event_tx_actor.receiver_count(), db_opt_actor.as_deref(),
+                    post_unlock_tx_opt.0.as_ref().map(|tx| (tx, &post_unlock_in_flight_actor)), false,
+                );
                 for send_reply in batch_deferred_replies {
                     send_reply();
                 }
@@ -2422,16 +2426,15 @@ impl SystemRegistry {
                         }
                     }
                 }
+                weapon_effects::flush_actor_weapon_effects(
+                    solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
+                    &tidi_factor_bits_actor, event_tx_actor.receiver_count(), Some(db), None, true,
+                );
             }
             flush_actor_active_drones(true);
-            drop((
-                ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
-                scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,
-                pending_destroyed_actor, event_tx_actor,
-            ));
+            drop((ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor));
             cmd_rx.close();
-            drop(cmd_rx);
-            drop(shutdown_reply);
+            drop((cmd_rx, shutdown_reply));
         });
 
         let (fighters_needs_hydration, dirty_stamp) = {

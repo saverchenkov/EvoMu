@@ -609,14 +609,14 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
         .expect("Breacher Pod 1");
     let tick1 = dict_get(&bp1, "breacherTickDPS").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!(tick1 > 0.0, "Breacher pod must apply initial DoT tick");
-    let active_dots = with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.len());
+    let active_dots = ctx.systems.active_breacher_dot_count();
     assert_eq!(active_dots, 1, "Single active breacher DoT entry per target");
     // Step 5 seconds of combat system and verify DoT ticks without stacking when re-applied
     ctx.advance_secs(10);
     let _ = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(breacher_id), PyRep::Integer(victim_ship_id)], &HashMap::new())
         .await
         .expect("Breacher Pod 2");
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.len()), 1, "Multiple breacher pods on the same target must refresh rather than stack");
+    assert_eq!(ctx.systems.active_breacher_dot_count(), 1, "Multiple breacher pods on the same target must refresh rather than stack");
     step_combat_system(&ctx, lowsec_sys_id, 5.0).await;
 
     // 5. Damage application layers (`feat:combat.damage-application-layers`) & Passive Shield Recharge (`feat:dogma.shield-recharge`)

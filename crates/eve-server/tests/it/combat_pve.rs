@@ -931,7 +931,7 @@ use eve_server::services::combat_crimewatch::combat_npc_ai::{
 };
 use eve_server::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction;
 use eve_server::services::combat_crimewatch::{
-    step_combat_system, with_combat_runtime, with_mut_combat_runtime, InFlightMissileState,
+    step_combat_system, with_mut_combat_runtime, InFlightMissileState,
 };
 use glam::DVec3;
 
@@ -1401,18 +1401,16 @@ async fn test_c3_courier_package_destroyed_and_missile_death_pipeline() {
     for (mid, pos) in [(missile_id, 400.0), (drone_missile_id, 850.0), (can_missile_id, 650.0), (npc_missile_id, 550.0)] {
         let _ = sys_handle.spawn_ball_with_combat(new_ball(mid, 204, DVec3::new(pos, 0.0, 0.0)), CombatState::default()).await;
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        for (mid, tid) in [(missile_id, hauler_ship_id), (drone_missile_id, drone_id), (can_missile_id, jet_can_id), (npc_missile_id, npc_target_id)] {
-            rt.in_flight_missiles.insert(mid, InFlightMissileState {
-                missile_ball_id: mid, solar_system_id: sys_id, attacker_char_id: attacker_id, attacker_ship_id: 610_030_003,
-                launcher_module_id: 610_030_004, launcher_type_id: 2410, missile_type_id: 204, target_ball_id: tid,
-                max_velocity: 1_000.0, flight_time_s: 5.0, remaining_flight_s: 5.0, hp: 70.0, max_hp: 70.0,
-                base_damage: DamageVector::new(100.0, 100.0, 100.0, 100.0), explosion_radius: 40.0, explosion_velocity: 150.0,
-                drf: 0.6, is_fof: false, is_breacher_pod: false, breacher_dot_duration_s: 0.0, breacher_flat_cap: 0.0,
-                breacher_pct_cap: 0.0, destroyed: false, expired: false, impacted: false, applied_damage: 0.0,
-            });
-        }
-    });
+    for (mid, tid) in [(missile_id, hauler_ship_id), (drone_missile_id, drone_id), (can_missile_id, jet_can_id), (npc_missile_id, npc_target_id)] {
+        sys_handle.upsert_in_flight_missile(InFlightMissileState {
+            missile_ball_id: mid, solar_system_id: sys_id, attacker_char_id: attacker_id, attacker_ship_id: 610_030_003,
+            launcher_module_id: 610_030_004, launcher_type_id: 2410, missile_type_id: 204, target_ball_id: tid,
+            max_velocity: 1_000.0, flight_time_s: 5.0, remaining_flight_s: 5.0, hp: 70.0, max_hp: 70.0,
+            base_damage: DamageVector::new(100.0, 100.0, 100.0, 100.0), explosion_radius: 40.0, explosion_velocity: 150.0,
+            drf: 0.6, is_fof: false, is_breacher_pod: false, breacher_dot_duration_s: 0.0, breacher_flat_cap: 0.0,
+            breacher_pct_cap: 0.0, destroyed: false, expired: false, impacted: false, applied_damage: 0.0,
+        }).await.unwrap();
+    }
 
     let issuer_ship_before = ctx.db.with_snapshot(|s| s.characters.get(&issuer_id).unwrap().active_ship_id);
     step_combat_system(&ctx, sys_id, 1.0).await;

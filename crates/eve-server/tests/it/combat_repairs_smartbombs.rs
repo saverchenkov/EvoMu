@@ -18,7 +18,7 @@ use eve_dogma::{
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState, InFlightMissileState};
+use eve_server::services::combat_crimewatch::{DroneSpaceState, InFlightMissileState};
 use std::collections::HashMap;
 
 pub(super) fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag, quantity: i32) {
@@ -539,16 +539,14 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
         id: missile_ball_id, type_id: 204, position: ship_ball.position + DVec3::new(1_500.0, 0.0, 0.0),
         velocity: DVec3::new(100.0, 0.0, 0.0), max_velocity: 1000.0, inertia: 1.0, mass: 100.0, radius: 1.0, speed_fraction: 1.0, mode: MovementMode::Follow { target_id: ship_id, range: 0.0 },
     }).await.unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.insert(missile_ball_id, InFlightMissileState {
-            missile_ball_id, solar_system_id: sys_id, attacker_char_id: neutral_char_id, attacker_ship_id: neutral_ship_id,
-            launcher_module_id: 0, launcher_type_id: 0, missile_type_id: 204, target_ball_id: ship_id,
-            max_velocity: 1000.0, flight_time_s: 10.0, remaining_flight_s: 10.0, hp: 30.0, max_hp: 30.0,
-            base_damage: eve_destiny::DamageVector::default(), explosion_radius: 50.0, explosion_velocity: 100.0,
-            drf: 1.0, is_fof: false, is_breacher_pod: false, breacher_dot_duration_s: 0.0,
-            breacher_flat_cap: 0.0, breacher_pct_cap: 0.0, destroyed: false, expired: false, impacted: false, applied_damage: 0.0,
-        });
-    });
+    sys.upsert_in_flight_missile(InFlightMissileState {
+        missile_ball_id, solar_system_id: sys_id, attacker_char_id: neutral_char_id, attacker_ship_id: neutral_ship_id,
+        launcher_module_id: 0, launcher_type_id: 0, missile_type_id: 204, target_ball_id: ship_id,
+        max_velocity: 1000.0, flight_time_s: 10.0, remaining_flight_s: 10.0, hp: 30.0, max_hp: 30.0,
+        base_damage: eve_destiny::DamageVector::default(), explosion_radius: 50.0, explosion_velocity: 100.0,
+        drf: 1.0, is_fof: false, is_breacher_pod: false, breacher_dot_duration_s: 0.0,
+        breacher_flat_cap: 0.0, breacher_pct_cap: 0.0, destroyed: false, expired: false, impacted: false, applied_damage: 0.0,
+    }).await.unwrap();
     let mut low_hp_cs = CombatState::default();
     low_hp_cs.shield_hp = 5.0;
     low_hp_cs.armor_hp = 5.0;
@@ -605,7 +603,7 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
         !eve_server::services::drone_test_helpers::has_active_drone(&ctx, drone_ball_id),
         "Drone destroyed by Smartbomb AoE must be removed from active space drones"
     );
-    assert!(with_combat_runtime(&ctx, |rt| rt.in_flight_missiles.get(&missile_ball_id).is_some_and(|m| m.destroyed)), "In-flight missile within smartbomb range must be destroyed");
+    assert!(sys.in_flight_missile(missile_ball_id).is_some_and(|m| m.destroyed), "In-flight missile within smartbomb range must be destroyed");
     assert!(sys.get_ball_snapshot(missile_ball_id).await.unwrap().is_none(), "Destroyed missile ball must be removed from space");
     let cw_sb = ctx.crimewatch.with_crimewatch(|cw| cw.states.get(&char_id).cloned().unwrap_or_default());
     assert!(cw_sb.criminal_flag_until_unix > 0 && cw_sb.pending_concord_arrival.is_some(), "Smartbomb hitting neutral entities inside blast radius must trigger Criminal flag and CONCORD");

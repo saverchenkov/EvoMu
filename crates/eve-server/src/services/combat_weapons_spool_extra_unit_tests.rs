@@ -8,9 +8,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_weapons_spool::*;
-use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, AssistLogEntry,
-};
+use crate::services::combat_crimewatch::{with_mut_combat_runtime, AssistLogEntry};
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, TargetLock};
 use eve_dogma::{FittedModule, ModuleState, ShipFittingEngine};
@@ -229,8 +227,8 @@ fn entropic_spool_defaults_inactive_reactivation_and_unlock_all_targets() {
 
     // Passing target_id_opt = None stops ALL spools on ship_id and deactivates fitted modules
     clear_entropic_spools_on_target_unlock(&ctx, ship_id, char_id, None);
-    assert!(!with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, mod_a))));
-    assert!(!with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, mod_b))));
+    assert!(ctx.systems.active_entropic_spool(ship_id, mod_a).is_none());
+    assert!(ctx.systems.active_entropic_spool(ship_id, mod_b).is_none());
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.module_active_states.contains(&mod_a));
         assert!(!snap.module_active_charges.contains_key(&mod_a));
@@ -333,7 +331,7 @@ async fn step_system_entropic_spools_handles_cap_depletion_last_round_unlock_and
         assert!(!snap.items.contains_key(&ammo_one), "single round of ammo should be removed on consumption");
         assert!(!snap.killmails.is_empty(), "target destruction should record killmail");
     });
-    assert!(!with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, mod_inactive))));
+    assert!(ctx.systems.active_entropic_spool(ship_id, mod_inactive).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

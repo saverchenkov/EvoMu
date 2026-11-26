@@ -69,39 +69,37 @@ async fn smartbomb_hits_missiles_probes_drones_ships_and_triggers_concord() {
             vc.active_ship_id = victim_ship;
         }
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.insert(
-            missile_id,
-            InFlightMissileState {
-                missile_ball_id: missile_id,
-                solar_system_id: sys_id,
-                attacker_char_id: victim_char,
-                attacker_ship_id: victim_ship,
-                launcher_module_id: 900_001,
-                launcher_type_id: 2_410,
-                missile_type_id: 209,
-                target_ball_id: ship_id,
-                max_velocity: 3_750.0,
-                flight_time_s: 6.0,
-                remaining_flight_s: 5.0,
-                hp: 50.0,
-                max_hp: 50.0,
-                base_damage: DamageVector::new(0.0, 0.0, 100.0, 0.0),
-                explosion_radius: 40.0,
-                explosion_velocity: 170.0,
-                drf: 0.604,
-                is_fof: false,
-                is_breacher_pod: false,
-                breacher_dot_duration_s: 0.0,
-                breacher_flat_cap: 0.0,
-                breacher_pct_cap: 0.0,
-                destroyed: false,
-                expired: false,
-                impacted: false,
-                applied_damage: 0.0,
-            },
-        );
-    });
+    sys_handle
+        .upsert_in_flight_missile(InFlightMissileState {
+            missile_ball_id: missile_id,
+            solar_system_id: sys_id,
+            attacker_char_id: victim_char,
+            attacker_ship_id: victim_ship,
+            launcher_module_id: 900_001,
+            launcher_type_id: 2_410,
+            missile_type_id: 209,
+            target_ball_id: ship_id,
+            max_velocity: 3_750.0,
+            flight_time_s: 6.0,
+            remaining_flight_s: 5.0,
+            hp: 50.0,
+            max_hp: 50.0,
+            base_damage: DamageVector::new(0.0, 0.0, 100.0, 0.0),
+            explosion_radius: 40.0,
+            explosion_velocity: 170.0,
+            drf: 0.604,
+            is_fof: false,
+            is_breacher_pod: false,
+            breacher_dot_duration_s: 0.0,
+            breacher_flat_cap: 0.0,
+            breacher_pct_cap: 0.0,
+            destroyed: false,
+            expired: false,
+            impacted: false,
+            applied_damage: 0.0,
+        })
+        .await
+        .unwrap();
 
     let res = activate_aoe_or_defender_module(
         &ctx, char_id, ship_id, sys_id, 0.9, now_unix, 720_001, &sb_mod, sb_type, &attacker_ball, None, &kwargs,
@@ -251,39 +249,37 @@ async fn bomb_launcher_damage_void_lockbreaker_and_defender_interception() {
     // 6. Defender Launcher intercepts active missile
     let mid = 880_000_009i64;
     spawn_missile_target_ball(&ctx, low_sys, mid, 209, DVec3::new(2_000.0, 0.0, 0.0), 0.0, 0.0, 50.0, 0.0).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.insert(
-            mid,
-            InFlightMissileState {
-                missile_ball_id: mid,
-                solar_system_id: low_sys,
-                attacker_char_id: 90_000_002,
-                attacker_ship_id: target_ship,
-                launcher_module_id: 900_001,
-                launcher_type_id: 2_410,
-                missile_type_id: 209,
-                target_ball_id: ship_id,
-                max_velocity: 3_750.0,
-                flight_time_s: 6.0,
-                remaining_flight_s: 5.0,
-                hp: 50.0,
-                max_hp: 50.0,
-                base_damage: DamageVector::new(0.0, 0.0, 100.0, 0.0),
-                explosion_radius: 40.0,
-                explosion_velocity: 170.0,
-                drf: 0.604,
-                is_fof: false,
-                is_breacher_pod: false,
-                breacher_dot_duration_s: 0.0,
-                breacher_flat_cap: 0.0,
-                breacher_pct_cap: 0.0,
-                destroyed: false,
-                expired: false,
-                impacted: false,
-                applied_damage: 0.0,
-            },
-        );
-    });
+    sys_handle
+        .upsert_in_flight_missile(InFlightMissileState {
+            missile_ball_id: mid,
+            solar_system_id: low_sys,
+            attacker_char_id: 90_000_002,
+            attacker_ship_id: target_ship,
+            launcher_module_id: 900_001,
+            launcher_type_id: 2_410,
+            missile_type_id: 209,
+            target_ball_id: ship_id,
+            max_velocity: 3_750.0,
+            flight_time_s: 6.0,
+            remaining_flight_s: 5.0,
+            hp: 50.0,
+            max_hp: 50.0,
+            base_damage: DamageVector::new(0.0, 0.0, 100.0, 0.0),
+            explosion_radius: 40.0,
+            explosion_velocity: 170.0,
+            drf: 0.604,
+            is_fof: false,
+            is_breacher_pod: false,
+            breacher_dot_duration_s: 0.0,
+            breacher_flat_cap: 0.0,
+            breacher_pct_cap: 0.0,
+            destroyed: false,
+            expired: false,
+            impacted: false,
+            applied_damage: 0.0,
+        })
+        .await
+        .unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(730_011, make_fighter_item(730_011, 267, char_id, ship_id, InventoryFlag::HiSlot1, 2));
     });

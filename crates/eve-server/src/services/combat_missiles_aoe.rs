@@ -175,6 +175,44 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
     }
 }
 
+/// Actor-tick step entry point replacing per-tick `step_system_entropic_spools` in `system_step_hook`:
+/// skips actor mailbox asks and SQLite writes when `SystemView` shows no active weapon effects/hydration
+/// and no self-destruct countdowns are pending for `solar_system_id`, and never wakes cold systems.
+pub async fn step_system_weapon_effects_from_actor(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    dt_sim: f64,
+) {
+    crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(
+        ctx,
+        solar_system_id,
+    )
+    .await;
+    if !(dt_sim > 0.0 && dt_sim.is_finite()) {
+        return;
+    }
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
+    let view = sys_handle.view();
+    let has_sd = with_combat_runtime(ctx, |rt| {
+        rt.self_destruct_countdowns
+            .values()
+            .any(|sd| sd.solar_system_id == solar_system_id)
+    });
+    if !view.has_active_weapon_effects && !view.weapon_effects_needs_sqlite_hydration && !has_sd {
+        return;
+    }
+    crate::services::combat_weapons_spool::step_system_entropic_spools_with_handle(
+        ctx,
+        &sys_handle,
+        solar_system_id,
+        dt_sim,
+    )
+    .await;
+    let _ = step_missiles_and_breachers(ctx, solar_system_id, dt_sim).await;
+}
+
 /// (`feat:combat.missile-flight-physics-destruction`, `feat:modules.breacher-pods`).
 pub async fn step_combat_system(
     ctx: &ServerContext,
@@ -192,21 +230,26 @@ pub async fn step_missiles_and_breachers(
     solar_system_id: u32,
     dt: f64,
 ) -> Vec<InFlightMissileState> {
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let missile_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
-        rt.in_flight_missiles
+    let handle_opt = ctx.systems.get_handle(solar_system_id);
+    let has_sd = with_combat_runtime(ctx, |rt| {
+        rt.self_destruct_countdowns
             .values()
-            .filter(|m| m.solar_system_id == solar_system_id && !m.destroyed && !m.expired && !m.impacted)
-            .map(|m| m.missile_ball_id)
-            .collect()
+            .any(|sd| sd.solar_system_id == solar_system_id)
     });
+    if let Some(ref h) = handle_opt {
+        let view = h.view();
+        if !view.has_active_weapon_effects && !view.weapon_effects_needs_sqlite_hydration && !has_sd {
+            return Vec::new();
+        }
+    } else if !has_sd {
+        return Vec::new();
+    }
+    let sys_handle = handle_opt.unwrap_or_else(|| ctx.systems.get_or_spawn(solar_system_id));
+    let missiles = sys_handle.step_active_missiles_snapshot().await;
 
     let mut completed = Vec::new();
-    for mid in missile_ids {
-        let state_opt = with_combat_runtime(ctx, |rt| rt.in_flight_missiles.get(&mid).cloned());
-        let Some(mstate) = state_opt else {
-            continue;
-        };
+    for mstate in missiles {
+        let mid = mstate.missile_ball_id;
         let mut mstate = Box::new(mstate);
 
         // Check if missile ball was destroyed in Ballpark
@@ -226,9 +269,7 @@ pub async fn step_missiles_and_breachers(
             mstate.destroyed = true;
             mstate.applied_damage = 0.0;
             let _ = sys_handle.remove_ball(mid).await;
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.in_flight_missiles.insert(mid, (*mstate).clone());
-            });
+            let _ = sys_handle.upsert_in_flight_missile((*mstate).clone()).await;
             completed.push(*mstate);
             continue;
         }
@@ -242,9 +283,7 @@ pub async fn step_missiles_and_breachers(
         else {
             mstate.expired = true;
             let _ = sys_handle.remove_ball(mid).await;
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.in_flight_missiles.insert(mid, (*mstate).clone());
-            });
+            let _ = sys_handle.upsert_in_flight_missile((*mstate).clone()).await;
             completed.push(*mstate);
             continue;
         };
@@ -351,27 +390,23 @@ pub async fn step_missiles_and_breachers(
                         mstate.breacher_pct_cap,
                         total_target_hp,
                     );
-                    with_mut_combat_runtime(ctx, |rt| {
-                        rt.active_breacher_dots.insert(
-                            mstate.target_ball_id,
-                            ActiveBreacherDot {
-                                target_ball_id: mstate.target_ball_id,
-                                source_char_id: mstate.attacker_char_id,
-                                source_ship_id: mstate.attacker_ship_id,
-                                weapon_type_id: mstate.launcher_type_id,
-                                charge_type_id: mstate.missile_type_id,
-                                flat_cap_dps: mstate.breacher_flat_cap,
-                                pct_cap_fraction: mstate.breacher_pct_cap,
-                                remaining_s: mstate.breacher_dot_duration_s,
-                                tick_damage: tick_dps,
-                            },
-                        );
-                    });
+                    let _ = sys_handle
+                        .upsert_active_breacher_dot(ActiveBreacherDot {
+                            target_ball_id: mstate.target_ball_id,
+                            solar_system_id: mstate.solar_system_id,
+                            source_char_id: mstate.attacker_char_id,
+                            source_ship_id: mstate.attacker_ship_id,
+                            weapon_type_id: mstate.launcher_type_id,
+                            charge_type_id: mstate.missile_type_id,
+                            flat_cap_dps: mstate.breacher_flat_cap,
+                            pct_cap_fraction: mstate.breacher_pct_cap,
+                            remaining_s: mstate.breacher_dot_duration_s,
+                            tick_damage: tick_dps,
+                        })
+                        .await;
                 }
             }
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.in_flight_missiles.insert(mid, (*mstate).clone());
-            });
+            let _ = sys_handle.upsert_in_flight_missile((*mstate).clone()).await;
             completed.push(*mstate);
         } else {
             m_pos += dir * (mstate.max_velocity * step_time);
@@ -382,14 +417,10 @@ pub async fn step_missiles_and_breachers(
                 mstate.expired = true;
                 mstate.applied_damage = 0.0;
                 let _ = sys_handle.remove_ball(mid).await;
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles.insert(mid, (*mstate).clone());
-                });
+                let _ = sys_handle.upsert_in_flight_missile((*mstate).clone()).await;
                 completed.push(*mstate);
             } else {
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles.insert(mid, (*mstate).clone());
-                });
+                let _ = sys_handle.upsert_in_flight_missile((*mstate).clone()).await;
             }
         }
     }
@@ -803,28 +834,21 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                 let mut destroyed_missile_ids = Vec::new();
                 let mut destroyed_probe_ids = Vec::new();
                 let mut destroyed_drone_ids = Vec::new();
-                let in_flight_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles
-                        .values()
-                        .filter(|m| m.solar_system_id == sys_id && !m.destroyed && !m.expired && !m.impacted)
-                        .map(|m| m.missile_ball_id)
-                        .collect()
-                });
+                let in_flight_ids: Vec<i64> = sys_handle
+                    .step_active_missiles_snapshot()
+                    .await
+                    .into_iter()
+                    .map(|m| m.missile_ball_id)
+                    .collect();
                 for mid in in_flight_ids {
                     if let Ok(Some((_, m_ball))) = sys_handle.get_ball_snapshot(mid).await {
                         if attacker_ball.position.distance(m_ball.position) <= emp_range {
-                            let mut destroyed_now = false;
-                            with_mut_combat_runtime(ctx, |rt| {
-                                if let Some(ms) = rt.in_flight_missiles.get_mut(&mid) {
-                                    ms.hp -= sb_dmg.total();
-                                    if ms.hp <= 0.0 {
-                                        ms.hp = 0.0;
-                                        ms.destroyed = true;
-                                        ms.applied_damage = 0.0;
-                                        destroyed_now = true;
-                                    }
-                                }
-                            });
+                            let destroyed_now = sys_handle
+                                .damage_in_flight_missile(mid, sb_dmg.total())
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or(false);
                             if destroyed_now {
                                 let _ = sys_handle.remove_ball(mid).await;
                                 destroyed_missile_ids.push(mid);
@@ -1223,29 +1247,11 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
-                let intercepted_missile_id = with_mut_combat_runtime(ctx, |rt| {
-                    let cand_id = target_id_opt
-                        .filter(|tid| rt.in_flight_missiles.contains_key(tid))
-                        .or_else(|| {
-                            rt.in_flight_missiles
-                                .values()
-                                .find(|ms| {
-                                    ms.solar_system_id == sys_id
-                                        && !ms.destroyed
-                                        && !ms.expired
-                                        && !ms.impacted
-                                })
-                                .map(|ms| ms.missile_ball_id)
-                        });
-                    if let Some(mid) = cand_id {
-                        if let Some(ms) = rt.in_flight_missiles.get_mut(&mid) {
-                            ms.hp = 0.0;
-                            ms.destroyed = true;
-                            ms.applied_damage = 0.0;
-                        }
-                    }
-                    cand_id
-                });
+                let intercepted_missile_id = sys_handle
+                    .intercept_in_flight_missile(target_id_opt)
+                    .await
+                    .ok()
+                    .flatten();
                 if let Some(mid) = intercepted_missile_id {
                     let _ = sys_handle.remove_ball(mid).await;
                 }
@@ -1337,7 +1343,42 @@ pub async fn activate_missile_or_breacher_launcher(
     is_breacher_pod: bool,
     has_explicit_target: bool,
 ) -> Result<PyRep, BridgeRpcError> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle = ctx
+        .systems
+        .try_wake_for_weapon_effects_seed(sys_id)
+        .map_err(|err| {
+            eve_proto::BridgeRpcError::from_client_error(eve_proto::ClientError::Internal(
+                err.to_string(),
+            ))
+        })?;
+    activate_missile_or_breacher_launcher_on_handle(
+        ctx, &sys_handle, char_id, ship_id, sys_id, now_unix, module_id, m, fit, charge_type_id,
+        charge_type, attacker_ball, target_ball_id, base_dmg, is_fof_missile, is_breacher_pod,
+        has_explicit_target,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn activate_missile_or_breacher_launcher_on_handle(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    now_unix: u64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    fit: &eve_dogma::ShipFittingEngine,
+    charge_type_id: u32,
+    charge_type: &eve_sde::InvType,
+    attacker_ball: &eve_destiny::Ball,
+    target_ball_id: i64,
+    base_dmg: DamageVector,
+    is_fof_missile: bool,
+    is_breacher_pod: bool,
+    has_explicit_target: bool,
+) -> Result<PyRep, BridgeRpcError> {
                 let (missile_vel, flight_time_s, _) =
                     compute_missile_flight_kinematics(fit, module_id, Some(charge_type), &ctx.sde);
                 let missile_hp = charge_type.default_attributes.get(&9).copied().unwrap_or(60.0);
@@ -1371,7 +1412,7 @@ pub async fn activate_missile_or_breacher_launcher(
                     snap.next_entity_id += 1;
                     snap.next_entity_id
                 });
-                let _ = sys_handle
+                sys_handle
                     .spawn_ball_with_combat(
                         eve_destiny::Ball {
                             id: missile_ball_id,
@@ -1399,7 +1440,12 @@ pub async fn activate_missile_or_breacher_launcher(
                             ..eve_destiny::CombatState::default()
                         },
                     )
-                    .await;
+                    .await
+                    .map_err(|err| {
+                        eve_proto::BridgeRpcError::from_client_error(
+                            eve_proto::ClientError::Internal(err),
+                        )
+                    })?;
 
                 let in_flight = InFlightMissileState {
                     missile_ball_id,
@@ -1429,9 +1475,12 @@ pub async fn activate_missile_or_breacher_launcher(
                     impacted: false,
                     applied_damage: 0.0,
                 };
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles.insert(missile_ball_id, in_flight);
-                });
+                if let Err(err) = sys_handle.upsert_in_flight_missile(in_flight).await {
+                    let _ = sys_handle.remove_ball(missile_ball_id).await;
+                    return Err(eve_proto::BridgeRpcError::from_client_error(
+                        eve_proto::ClientError::Internal(err),
+                    ));
+                }
 
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&target_ball_id).map(|c| c.character_id)
@@ -1459,21 +1508,33 @@ pub async fn activate_missile_or_breacher_launcher(
                 }
 
                 // Simulate full missile flight immediately when deferImpact is false
-                let _ = step_missiles_and_breachers(ctx, sys_id, flight_time_s + 0.01).await;
-                let resolved_ms = with_combat_runtime(ctx, |rt| {
-                    rt.in_flight_missiles.get(&missile_ball_id).cloned()
-                })
-                .unwrap();
+                let completed = step_missiles_and_breachers(ctx, sys_id, flight_time_s + 0.01).await;
+                let resolved_ms = completed
+                    .into_iter()
+                    .find(|m| m.missile_ball_id == missile_ball_id)
+                    .or_else(|| sys_handle.in_flight_missile(missile_ball_id));
+                let resolved_ms = match resolved_ms {
+                    Some(ms) => ms,
+                    None => sys_handle
+                        .get_in_flight_missile(missile_ball_id)
+                        .await
+                        .ok_or_else(|| {
+                            eve_proto::BridgeRpcError::from_client_error(
+                                eve_proto::ClientError::Internal(format!(
+                                    "In-flight missile {missile_ball_id} unavailable after flight resolution"
+                                )),
+                            )
+                        })?,
+                };
 
                 let mut dot_tick_applied = 0.0;
                 if is_breacher_pod && resolved_ms.impacted {
                     let _ = step_missiles_and_breachers(ctx, sys_id, 1.0).await;
-                    dot_tick_applied = with_combat_runtime(ctx, |rt| {
-                        rt.active_breacher_dots
-                            .get(&target_ball_id)
-                            .map(|d| d.tick_damage)
-                            .unwrap_or(0.0)
-                    });
+                    dot_tick_applied = sys_handle
+                        .get_active_breacher_dot(target_ball_id)
+                        .await
+                        .map(|d| d.tick_damage)
+                        .unwrap_or(0.0);
                 }
 
                 let total_applied = resolved_ms.applied_damage + dot_tick_applied;

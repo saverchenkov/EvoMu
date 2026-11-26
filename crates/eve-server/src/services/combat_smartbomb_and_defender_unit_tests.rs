@@ -57,16 +57,14 @@ async fn missile_multi_step_flight_destroyed_ball_missing_target_and_assisted_se
         applied_damage: 0.0,
     };
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.insert(m_multi, make_mstate(m_multi, t_multi));
-        rt.in_flight_missiles.insert(m_dead_ball, make_mstate(m_dead_ball, t_multi));
-        rt.in_flight_missiles.insert(m_no_target, make_mstate(m_no_target, 999_999_999));
-    });
+    sys_handle.upsert_in_flight_missile(make_mstate(m_multi, t_multi)).await.unwrap();
+    sys_handle.upsert_in_flight_missile(make_mstate(m_dead_ball, t_multi)).await.unwrap();
+    sys_handle.upsert_in_flight_missile(make_mstate(m_no_target, 999_999_999)).await.unwrap();
 
-    // Step 1 (dt = 1.0s): m_multi advances 2000m (remains in flight in rt.in_flight_missiles), m_dead_ball destroyed, m_no_target expired
+    // Step 1 (dt = 1.0s): m_multi advances 2000m (remains in flight in sys_handle), m_dead_ball destroyed, m_no_target expired
     let step1 = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
     assert!(!step1.iter().any(|m| m.missile_ball_id == m_multi));
-    let s_multi_1 = with_combat_runtime(&ctx, |rt| rt.in_flight_missiles[&m_multi].clone());
+    let s_multi_1 = sys_handle.in_flight_missile(m_multi).unwrap();
     assert!(!s_multi_1.impacted && !s_multi_1.expired && !s_multi_1.destroyed);
     assert!((s_multi_1.remaining_flight_s - 5.0).abs() < 1e-6);
     assert!(step1.iter().find(|m| m.missile_ball_id == m_dead_ball).unwrap().destroyed);
@@ -219,39 +217,37 @@ async fn smartbomb_partial_missile_drone_pod_and_defender_auto_target_branches()
     });
 
     crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.insert(
-            tough_mid,
-            InFlightMissileState {
-                missile_ball_id: tough_mid,
-                solar_system_id: low_sys,
-                attacker_char_id: victim_char,
-                attacker_ship_id: victim_pod,
-                launcher_module_id: 900_001,
-                launcher_type_id: 2_410,
-                missile_type_id: 209,
-                target_ball_id: ship_id,
-                max_velocity: 2_000.0,
-                flight_time_s: 6.0,
-                remaining_flight_s: 5.0,
-                hp: 500.0,
-                max_hp: 500.0,
-                base_damage: DamageVector::new(0.0, 0.0, 100.0, 0.0),
-                explosion_radius: 40.0,
-                explosion_velocity: 170.0,
-                drf: 0.604,
-                is_fof: false,
-                is_breacher_pod: false,
-                breacher_dot_duration_s: 0.0,
-                breacher_flat_cap: 0.0,
-                breacher_pct_cap: 0.0,
-                destroyed: false,
-                expired: false,
-                impacted: false,
-                applied_damage: 0.0,
-            },
-        );
-    });
+    sys_handle
+        .upsert_in_flight_missile(InFlightMissileState {
+            missile_ball_id: tough_mid,
+            solar_system_id: low_sys,
+            attacker_char_id: victim_char,
+            attacker_ship_id: victim_pod,
+            launcher_module_id: 900_001,
+            launcher_type_id: 2_410,
+            missile_type_id: 209,
+            target_ball_id: ship_id,
+            max_velocity: 2_000.0,
+            flight_time_s: 6.0,
+            remaining_flight_s: 5.0,
+            hp: 500.0,
+            max_hp: 500.0,
+            base_damage: DamageVector::new(0.0, 0.0, 100.0, 0.0),
+            explosion_radius: 40.0,
+            explosion_velocity: 170.0,
+            drf: 0.604,
+            is_fof: false,
+            is_breacher_pod: false,
+            breacher_dot_duration_s: 0.0,
+            breacher_flat_cap: 0.0,
+            breacher_pct_cap: 0.0,
+            destroyed: false,
+            expired: false,
+            impacted: false,
+            applied_damage: 0.0,
+        })
+        .await
+        .unwrap();
     crate::services::drone_test_helpers::seed_active_drone(
         &ctx,
         DroneSpaceState {
@@ -318,10 +314,7 @@ async fn smartbomb_partial_missile_drone_pod_and_defender_auto_target_branches()
 
     assert_eq!(py_val(&sb_res, "concordTriggered").and_then(|v| v.as_bool()), Some(false));
     assert!(matches!(py_val(&sb_res, "destroyedMissileIDs"), Some(PyRep::List(l)) if l.is_empty()));
-    assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.in_flight_missiles[&tough_mid].hp),
-        250.0
-    );
+    assert_eq!(sys_handle.in_flight_missile(tough_mid).unwrap().hp, 250.0);
     assert!(matches!(py_val(&sb_res, "destroyedDroneIDs"), Some(PyRep::List(l)) if l.len() == 1));
     // Module-cloaked ship took smartbomb damage (500 -> 250) without decloaking; gate-cloaked ship took 0 damage
     let cloaked_cs = sys_handle.get_combat_state(cloaked_ship).await.unwrap().unwrap();

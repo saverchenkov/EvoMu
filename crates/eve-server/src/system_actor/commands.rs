@@ -853,6 +853,65 @@ pub enum SystemCommand {
         commit: super::module_cooldowns::PersistedCooldownCommit,
         reply: Option<oneshot::Sender<Result<(), String>>>,
     },
+    HydrateWeaponEffects {
+        spools: Vec<((i64, i64), super::EntropicSpoolState)>,
+        missiles: Vec<(i64, super::InFlightMissileState)>,
+        breachers: Vec<(i64, super::ActiveBreacherDot)>,
+        legacy_prune: Option<super::LegacyWeaponEffectsPruneKeys>,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    UpsertEntropicSpoolActivation {
+        spool: super::EntropicSpoolState,
+        is_active_in_db: bool,
+        reply: oneshot::Sender<Result<Option<(u32, f64)>, String>>,
+    },
+    AdvanceEntropicSpoolCycle {
+        ship_id: i64,
+        module_id: i64,
+        reply: oneshot::Sender<Result<(u32, f64), String>>,
+    },
+    UpdateEntropicSpool {
+        spool: super::EntropicSpoolState,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveEntropicSpool {
+        ship_id: i64,
+        module_id: i64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    CollectAndClearEntropicSpoolsForShip {
+        ship_id: i64,
+        target_id_opt: Option<i64>,
+        reply: oneshot::Sender<Result<Vec<i64>, String>>,
+    },
+    UpsertInFlightMissile {
+        missile: super::InFlightMissileState,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveInFlightMissile {
+        missile_ball_id: i64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    DamageInFlightMissile {
+        missile_ball_id: i64,
+        damage: f64,
+        reply: oneshot::Sender<Result<Option<bool>, String>>,
+    },
+    InterceptInFlightMissile {
+        target_missile_id_opt: Option<i64>,
+        reply: oneshot::Sender<Result<Option<i64>, String>>,
+    },
+    UpsertActiveBreacherDot {
+        dot: super::ActiveBreacherDot,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveActiveBreacherDot {
+        target_ball_id: i64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    FlushWeaponEffectsCheckpoint {
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -917,6 +976,7 @@ impl SystemCommand {
                 | Self::SnapshotDirtyActiveDrones { .. }
                 | Self::CommitActiveDronesFlushed { .. }
                 | Self::SnapshotModuleCooldownCheckpoint { .. }
+                | Self::FlushWeaponEffectsCheckpoint { .. }
                 | Self::ShutdownActor { .. }
         )
     }

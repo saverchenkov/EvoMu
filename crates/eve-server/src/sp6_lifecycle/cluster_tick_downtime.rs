@@ -706,14 +706,13 @@ pub(super) fn warn_sync_deadline_overrun(
     }
 }
 
-/// Runs synchronous per-system NPC AI/spawns off the Tokio worker pool under a bounded timeout and logs deadline budget overruns on `step_combat_system` (`#1170`, `#1208`).
+/// Runs synchronous per-system NPC AI/spawns off the Tokio worker pool under a bounded timeout (`#1170`, `#1208`).
 pub(super) async fn step_system_ai_and_combat_bounded(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
     sys_id: eve_sde::SolarSystemId,
     deadline: std::time::Duration,
 ) {
-    let step_start = std::time::Instant::now();
     let ctx_ai = ctx.clone();
     let handle_ai = handle.clone();
     let npc_ai_start = std::time::Instant::now();
@@ -761,18 +760,6 @@ pub(super) async fn step_system_ai_and_combat_bounded(
             );
         }
     }
-    // Run `step_combat_system` outside cancellation so multi-step missile/structure damage and
-    // `on_ball_destroyed` commits cannot be aborted mid-`.await` (`P2-1`), logging budget overruns.
-    let remaining_budget = deadline.saturating_sub(step_start.elapsed());
-    let combat_step_start = std::time::Instant::now();
-    crate::services::combat_crimewatch::step_combat_system(ctx, sys_id, 1.0).await;
-    warn_sync_deadline_overrun(
-        "step_combat_system",
-        Some(sys_id),
-        None,
-        combat_step_start.elapsed(),
-        remaining_budget,
-    );
 }
 
 #[cfg(test)]

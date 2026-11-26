@@ -931,6 +931,13 @@ pub(crate) struct SystemActorState {
     pub(crate) active_drones_needs_sqlite_hydration: bool,
     pub(crate) active_drones_removed_pre_hydration: HashSet<BallId>,
     pub(crate) drone_hydration: super::ActiveDronesSharedCtx,
+    pub weapon_effects: super::ActorWeaponEffectsState,
+    pub(crate) weapon_effects_dirty: bool,
+    pub(crate) weapon_effects_seq: u64,
+    pub(crate) weapon_effects_dispatched_seq: u64,
+    pub(crate) weapon_effects_needs_sqlite_hydration: bool,
+    pub(crate) weapon_effects_removed_pre_hydration: super::WeaponEffectsRemovedPreHydration,
+    pub(crate) weapon_effects_coord: Arc<super::WeaponEffectsFlushCoord>,
 }
 
 #[derive(Debug, Clone, Copy)]

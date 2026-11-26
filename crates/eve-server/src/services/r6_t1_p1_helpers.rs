@@ -4,9 +4,7 @@ use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
-use super::combat_crimewatch::{
-    combat_missiles_aoe, combat_wrecks_killmails, with_combat_runtime, with_mut_combat_runtime,
-};
+use super::combat_crimewatch::{combat_missiles_aoe, combat_wrecks_killmails};
 use crate::router::ServerContext;
 use crate::system_actor::SystemHandle;
 
@@ -145,24 +143,25 @@ pub(crate) async fn step_active_breacher_dots(
     solar_system_id: u32,
     dt: f64,
 ) {
-    let dot_targets: Vec<i64> = with_combat_runtime(ctx, |rt| rt.active_breacher_dots.keys().copied().collect());
-    for tid in dot_targets {
-        let Some(mut dot) = with_combat_runtime(ctx, |rt| rt.active_breacher_dots.get(&tid).cloned()) else {
-            continue;
-        };
-        let Ok(Some(cs)) = sys_handle.get_combat_state(tid).await else {
-            continue;
+    let dots = sys_handle.active_breacher_dots_snapshot().await;
+    for mut dot in dots {
+        let tid = dot.target_ball_id;
+        let cs = match sys_handle.get_combat_state(tid).await {
+            Ok(Some(cs)) => cs,
+            Ok(None) => {
+                let _ = sys_handle.remove_active_breacher_dot(tid).await;
+                continue;
+            }
+            Err(_) => continue,
         };
         let now_unix = ctx.now_unix();
         if is_target_invulnerable_or_tethered_in_system(ctx, solar_system_id, tid, &cs, now_unix) {
             dot.remaining_s -= dt;
-            with_mut_combat_runtime(ctx, |rt| {
-                if dot.remaining_s <= 1e-6 {
-                    rt.active_breacher_dots.remove(&tid);
-                } else {
-                    rt.active_breacher_dots.insert(tid, dot);
-                }
-            });
+            if dot.remaining_s <= 1e-6 {
+                let _ = sys_handle.remove_active_breacher_dot(tid).await;
+            } else {
+                let _ = sys_handle.upsert_active_breacher_dot(dot).await;
+            }
             continue;
         }
 
@@ -255,13 +254,11 @@ pub(crate) async fn step_active_breacher_dots(
         }
 
         dot.remaining_s -= dt;
-        with_mut_combat_runtime(ctx, |rt| {
-            if destroyed_by_dot || dot.remaining_s <= 1e-6 {
-                rt.active_breacher_dots.remove(&tid);
-            } else {
-                rt.active_breacher_dots.insert(tid, dot.clone());
-            }
-        });
+        if destroyed_by_dot || dot.remaining_s <= 1e-6 {
+            let _ = sys_handle.remove_active_breacher_dot(tid).await;
+        } else {
+            let _ = sys_handle.upsert_active_breacher_dot(dot.clone()).await;
+        }
         if destroyed_by_dot {
             let (ball_type_id, ball_pos) = ball_snap_opt
                 .map(|b| (b.type_id, b.position))

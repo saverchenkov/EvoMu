@@ -20,7 +20,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     register_container_lifetime, step_combat_system, step_wreck_and_jetcan_decay,
-    with_combat_runtime, with_mut_combat_runtime, InFlightMissileState,
+    InFlightMissileState,
 };
 use eve_server::services::doomsday_aoe_tick::{
     mutate_superweapon_runtime, read_superweapon_runtime, step_bosonic_doomsday_in_ballpark,
@@ -342,55 +342,51 @@ async fn tidi_sim_clock_governs_missiles_locks_and_reloads() {
         )
         .await
         .unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        for (mid, sys_id, att_ship, tgt_id) in [
-            (jita_missile_id, JITA_SYSTEM_ID, pilot.ship_id, 900_810_101),
-            (amarr_missile_id, AMARR_SYSTEM_ID, 900_810_201, 900_810_202),
-        ] {
-            rt.in_flight_missiles.insert(
-                mid,
-                InFlightMissileState {
-                    missile_ball_id: mid,
-                    solar_system_id: sys_id,
-                    attacker_char_id: pilot.char_id,
-                    attacker_ship_id: att_ship,
-                    launcher_module_id: 900_810_400,
-                    launcher_type_id: 2410,
-                    missile_type_id: 204,
-                    target_ball_id: tgt_id,
-                    max_velocity: 1_000.0,
-                    flight_time_s: 5.0,
-                    remaining_flight_s: 5.0,
-                    hp: 70.0,
-                    max_hp: 70.0,
-                    base_damage: DamageVector::new(100.0, 0.0, 0.0, 0.0),
-                    explosion_radius: 40.0,
-                    explosion_velocity: 150.0,
-                    drf: 0.6,
-                    is_fof: false,
-                    is_breacher_pod: false,
-                    breacher_dot_duration_s: 0.0,
-                    breacher_flat_cap: 0.0,
-                    breacher_pct_cap: 0.0,
-                    destroyed: false,
-                    expired: false,
-                    impacted: false,
-                    applied_damage: 0.0,
-                },
-            );
-        }
-    });
+    for (sys_h, mid, sys_id, att_ship, tgt_id) in [
+        (&sys_jita, jita_missile_id, JITA_SYSTEM_ID, pilot.ship_id, 900_810_101),
+        (&sys_amarr, amarr_missile_id, AMARR_SYSTEM_ID, 900_810_201, 900_810_202),
+    ] {
+        sys_h
+            .upsert_in_flight_missile(InFlightMissileState {
+                missile_ball_id: mid,
+                solar_system_id: sys_id,
+                attacker_char_id: pilot.char_id,
+                attacker_ship_id: att_ship,
+                launcher_module_id: 900_810_400,
+                launcher_type_id: 2410,
+                missile_type_id: 204,
+                target_ball_id: tgt_id,
+                max_velocity: 1_000.0,
+                flight_time_s: 5.0,
+                remaining_flight_s: 5.0,
+                hp: 70.0,
+                max_hp: 70.0,
+                base_damage: DamageVector::new(100.0, 0.0, 0.0, 0.0),
+                explosion_radius: 40.0,
+                explosion_velocity: 150.0,
+                drf: 0.6,
+                is_fof: false,
+                is_breacher_pod: false,
+                breacher_dot_duration_s: 0.0,
+                breacher_flat_cap: 0.0,
+                breacher_pct_cap: 0.0,
+                destroyed: false,
+                expired: false,
+                impacted: false,
+                applied_damage: 0.0,
+            })
+            .await
+            .unwrap();
+    }
 
     for _ in 0..2 {
         step_combat_system(&ctx, JITA_SYSTEM_ID, 1.0).await;
         step_combat_system(&ctx, AMARR_SYSTEM_ID, 1.0).await;
     }
-    let (jita_ms_2, amarr_ms_2) = with_combat_runtime(&ctx, |rt| {
-        (
-            rt.in_flight_missiles.get(&jita_missile_id).cloned().unwrap(),
-            rt.in_flight_missiles.get(&amarr_missile_id).cloned().unwrap(),
-        )
-    });
+    let (jita_ms_2, amarr_ms_2) = (
+        sys_jita.in_flight_missile(jita_missile_id).unwrap(),
+        sys_amarr.in_flight_missile(amarr_missile_id).unwrap(),
+    );
     assert!(amarr_ms_2.impacted, "1500m missile at 1000m/s in 1.0x impacts by 2s");
     assert!(
         !jita_ms_2.impacted && (jita_ms_2.remaining_flight_s - 4.5).abs() < 1e-6,
@@ -400,9 +396,7 @@ async fn tidi_sim_clock_governs_missiles_locks_and_reloads() {
     for _ in 0..4 {
         step_combat_system(&ctx, JITA_SYSTEM_ID, 1.0).await;
     }
-    let jita_ms_6 = with_combat_runtime(&ctx, |rt| {
-        rt.in_flight_missiles.get(&jita_missile_id).cloned().unwrap()
-    });
+    let jita_ms_6 = sys_jita.in_flight_missile(jita_missile_id).unwrap();
     assert!(
         jita_ms_6.impacted,
         "0.25x TiDi missile impacts after 6 wall seconds (1.5s sim = 1500m)"
