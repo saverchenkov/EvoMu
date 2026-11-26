@@ -369,16 +369,22 @@ async fn check_ship_in_space_uncloaked_and_range(
     cloak_msg: &str,
 ) -> Result<(i32, i32, usize, f64), BridgeRpcError> {
     let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
-        return Err(hacking_client_err(
-            "ShipNotInSpace",
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "hacking_site",
             format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
         ));
     };
     let sb = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, ball))) => ball,
         _ => {
-            return Err(hacking_client_err(
-                "ShipNotInSpace",
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "hacking_site",
                 format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
             ));
         }

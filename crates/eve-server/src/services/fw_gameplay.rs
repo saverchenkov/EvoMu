@@ -460,10 +460,14 @@ pub async fn activate_fw_complex_gate_in_space(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active ship {ship_id} is not spawned in space in system {sys_id}"),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "fw_complex_gate",
+                format!("Active ship {ship_id} is not spawned in space in system {sys_id}"),
+            )
         })?;
 
     let (complex_sys, tier, completed, persisted_gate_pos) = ctx

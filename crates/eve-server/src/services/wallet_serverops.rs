@@ -1325,10 +1325,20 @@ pub fn handle(
                     if item.location_id == tower_id && item.type_id == 14343 {
                         tower_id
                     } else {
-                        return Err(rpc_err("InvalidTarget", format!("Target {item_id} is not an anchored silo for tower {tower_id}")));
+                        return Err(BridgeRpcError::invalid_target_group(
+                            Some(item_id),
+                            "Silo",
+                            "not_anchored_silo",
+                            format!("Target {item_id} is not an anchored silo for tower {tower_id}"),
+                        ));
                     }
                 } else {
-                    return Err(rpc_err("InvalidTarget", format!("Target {item_id} not found")));
+                    return Err(BridgeRpcError::invalid_target_group(
+                        Some(item_id),
+                        "Silo",
+                        "target_not_found",
+                        format!("Target {item_id} not found"),
+                    ));
                 };
                 check_starbase_auth(snap, session, char_id, target, now_unix)?;
                 snap.orbital_provision_types.insert(item_id, i64::from(provision_type));

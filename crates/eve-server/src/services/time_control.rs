@@ -20,12 +20,13 @@ async fn handle_advance_clock(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError::with_client_error(
-            "InsufficientRole",
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            format!("{service}.{method}"),
             format!(
                 "UserError: GM_InsufficientRole: {service}.{method} requires a V24.01 GM/Admin service role bitmask"
             ),
-            eve_proto::ClientError::user(eve_proto::UserErrorKey::InsufficientRoles),
         ));
     }
     let rpc = RpcArgs::new(args, kwargs);
@@ -83,12 +84,13 @@ fn handle_clear_session_timer(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError::with_client_error(
-            "InsufficientRole",
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            format!("{service}.{method}"),
             format!(
                 "UserError: GM_InsufficientRole: {service}.{method} requires a V24.01 GM/Admin service role bitmask"
             ),
-            eve_proto::ClientError::user(eve_proto::UserErrorKey::InsufficientRoles),
         ));
     }
     let target_cid = match RpcArgs::new(args, kwargs).opt_positive_i64(0, "targetCharID")? {

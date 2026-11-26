@@ -277,10 +277,14 @@ pub async fn precheck_entosis_activation(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Ship {ship_id} is not in space in system {target_sys}"),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(target_sys),
+                "entosis_link",
+                format!("Ship {ship_id} is not in space in system {target_sys}"),
+            )
         })?;
     let target_pos = sys_handle
         .get_ball_snapshot(target_id)

@@ -380,10 +380,12 @@ fn dispatch_rpc<'a>(
             )
             .await
             .or_else(|| {
-                Some(Err(BridgeRpcError::with_client_error(
-                    "ModuleNotFound",
+                Some(Err(BridgeRpcError::module_not_found(
+                    raw_module_id,
+                    session.ship_id,
+                    None,
+                    false,
                     format!("Module {raw_module_id} not found on ship"),
-                    eve_proto::ClientError::user(eve_proto::UserErrorKey::ItemNotFound),
                 )))
             })
         } else if matches!(

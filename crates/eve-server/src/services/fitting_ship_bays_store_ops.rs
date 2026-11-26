@@ -374,8 +374,11 @@ pub(super) async fn handle_store_vessel(
         .flatten()
         .map(|(_, b)| b.position);
     let (Some(cp), Some(hp)) = (caller_pos, host_pos) else {
-        return Err(err(
-            "ShipNotInSpace",
+        return Err(BridgeRpcError::ship_not_in_space(
+            if caller_pos.is_none() { active_ship_id } else { host_ship_id },
+            Some(char_id),
+            Some(sys_id),
+            "ship_bay_access",
             format!("Host {host_ship_id} or active ship {active_ship_id} is not on grid"),
         ));
     };
@@ -406,8 +409,11 @@ pub(super) async fn handle_store_vessel(
             .flatten()
             .map(|(_, b)| b.position);
         let Some(tp) = target_pos else {
-            return Err(err(
-                "ShipNotInSpace",
+            return Err(BridgeRpcError::ship_not_in_space(
+                target_ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "ship_bay_access",
                 format!("Target ship {target_ship_id} is not on grid"),
             ));
         };

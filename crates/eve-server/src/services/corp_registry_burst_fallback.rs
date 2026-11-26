@@ -80,7 +80,13 @@ pub(in crate::services) async fn handle_fleet_burst_fallback(
             }
         }
         let Some(mod_item) = snap.items.get(&module_id) else {
-            return Err(err("ModuleNotFound", "Command burst module not found"));
+            return Err(BridgeRpcError::module_not_found(
+                module_id,
+                Some(active_ship_id),
+                None,
+                false,
+                "Command burst module not found",
+            ));
         };
         if mod_item.owner_id != char_id || mod_item.location_id != active_ship_id {
             return Err(err(
@@ -109,7 +115,13 @@ pub(in crate::services) async fn handle_fleet_burst_fallback(
             ));
         }
         let Some(mod_type) = ctx.sde.types.get(&mod_item.type_id) else {
-            return Err(err("ModuleNotFound", "Command burst module SDE type unknown"));
+            return Err(BridgeRpcError::module_not_found(
+                module_id,
+                Some(active_ship_id),
+                Some(i64::from(mod_item.type_id)),
+                false,
+                "Command burst module SDE type unknown",
+            ));
         };
         let charge_tid = snap
             .items
@@ -138,8 +150,11 @@ pub(in crate::services) async fn handle_fleet_burst_fallback(
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let Some((_, booster_ball)) = sys.get_ball_snapshot(active_ship_id).await.ok().flatten() else {
-        return Some(Err(err(
-            "ShipNotInSpace",
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            active_ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "command_burst",
             "Active ship ball is not spawned in space",
         )));
     };

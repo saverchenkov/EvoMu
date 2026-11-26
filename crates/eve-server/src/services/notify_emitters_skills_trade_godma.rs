@@ -742,7 +742,19 @@ pub(crate) async fn prepare_dogma_take_module_offline(
         })
         .map(|m| m.type_id);
     if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
-        return Err(err("FittingValidationFailed", e));
+        let module_name = ctx
+            .sde
+            .types
+            .get(&mod_type_id)
+            .map(|t| t.name.as_str())
+            .unwrap_or("Module");
+        return Err(BridgeRpcError::fitting_validation_failed(
+            Some(ship_id),
+            Some(module_id),
+            (mod_type_id > 0).then_some(i64::from(mod_type_id)),
+            module_name,
+            e,
+        ));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let offline_mod_ids = fit
@@ -954,12 +966,23 @@ pub async fn handle_dogma_set_module_online(
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
     let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
-        let code = if e.starts_with("ModuleBurnedOut") {
-            "ModuleBurnedOut"
-        } else {
-            "FittingValidationFailed"
-        };
-        return Err(err(code, e));
+        if e.starts_with("ModuleBurnedOut") {
+            return Err(err("ModuleBurnedOut", e));
+        }
+        let eff_mod_type_id = fit.modules.get(&module_id).map(|m| m.type_id).unwrap_or(mod_type_id);
+        let module_name = ctx
+            .sde
+            .types
+            .get(&eff_mod_type_id)
+            .map(|t| t.name.as_str())
+            .unwrap_or("Module");
+        return Err(BridgeRpcError::fitting_validation_failed(
+            Some(ship_id),
+            Some(module_id),
+            fit.modules.get(&module_id).map(|m| i64::from(m.type_id)),
+            module_name,
+            e,
+        ));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let committed_mod_type_id = ctx.db.try_with_mut_snapshot(|snap| {
@@ -972,15 +995,21 @@ pub async fn handle_dogma_set_module_online(
         let mut resolved_type_id = 0_u32;
         if was_fitted_in_db {
             let mod_it = snap.items.get(&module_id).ok_or_else(|| {
-                err(
-                    "ModuleNotFound",
+                BridgeRpcError::module_not_found(
+                    module_id,
+                    Some(ship_id),
+                    None,
+                    false,
                     format!("Module {module_id} no longer fitted on ship {ship_id}"),
                 )
             })?;
             let flag_u16 = mod_it.flag as u16;
             if mod_it.location_id != ship_id || !matches!(flag_u16, 11..=34 | 92..=99 | 125..=132 | 164..=171) {
-                return Err(err(
-                    "ModuleNotFound",
+                return Err(BridgeRpcError::module_not_found(
+                    module_id,
+                    Some(ship_id),
+                    Some(i64::from(mod_it.type_id)),
+                    false,
                     format!("Module {module_id} is not fitted on ship {ship_id}"),
                 ));
             }
