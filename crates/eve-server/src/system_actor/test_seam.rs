@@ -761,7 +761,7 @@ mod tests {
             mk_ship(ship_combat, DVec3::new(200.0, 0.0, 0.0), DVec3::ZERO, MovementMode::Stop),
             CombatState {
                 is_cloaked: true,
-                base_max_velocity: 300.0,
+                base_max_velocity: Some(300.0),
                 ..Default::default()
             },
         );
@@ -778,7 +778,7 @@ mod tests {
 
         // 5. try_sync_ship_ballpark_stats & mobile warp disruptor sync mutators refresh SystemView.
         let fresh_stats = CombatState {
-            base_max_velocity: 450.0,
+            base_max_velocity: Some(450.0),
             ..Default::default()
         };
         assert!(sys.try_sync_ship_ballpark_stats(ship_combat, &fresh_stats));
