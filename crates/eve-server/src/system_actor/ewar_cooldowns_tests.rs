@@ -501,3 +501,20 @@ async fn live_system_migration_prunes_stale_sqlite_rows_when_cluster_migrated_is
     assert!(!after.contains_key(&(s_exp, m_exp, cloak_tid)));
     assert_eq!(after.get(&(s_live, m_live, cloak_tid)).and_then(|e| e.solar_system_id), Some(jita));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rehydrate_clean_seq_zero_actor_after_stop_restart_preserves_seeded_sqlite_cooldown() {
+    let (reg, db, clock) = test_tidi_reg(1_750_340_000, None);
+    let (jita, cloak_tid, now) = (30_000_142_u32, 11_370_u32, clock.now_unix_secs() as f64);
+    let k = (547_001_i64, 647_001_i64, cloak_tid);
+    seed_ships_in_db(&db, jita, &[k.0]);
+    drop(reg.get_or_spawn(jita));
+    assert!(reg.stop_system(jita).await);
+    let h = reg.get_or_spawn(jita);
+    assert_eq!(h.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
+    reg.seed_cold_system_module_cooldown_in_db(&db, jita, k, cd_entry(now, 25.0, jita, 0.0));
+    let r = Arc::clone(&reg);
+    tokio::task::spawn_blocking(move || r.rehydrate_active_system_cooldowns_from_db()).await.unwrap();
+    assert!(h.module_reactivation_cooldown(&k).is_some_and(|e| e.delay_s >= 24.0));
+    assert!(load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k));
+}

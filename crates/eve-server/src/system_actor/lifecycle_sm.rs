@@ -1868,26 +1868,30 @@ impl SystemRegistry {
                     return StopBeginAction::AlreadyCold;
                 };
                 if handle.cmd_tx.is_closed() {
-                    let pending = self.take_pending_and_mark_cold(&handle.cooldown_persist_gate);
+                    let captured_tidi = handle.tidi_factor();
+                    let persist_gate = Arc::clone(&handle.cooldown_persist_gate);
+                    let actor_state = Arc::clone(&handle.actor_state);
+                    let pending = {
+                        let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        cg.phase = CooldownGatePhase::Cold;
+                        persist_gate.clear_pending_transitions_flag();
+                        std::mem::take(&mut cg.pending_transitions)
+                    };
                     self.clear_db_ballpark_for_handle(solar_system_id, &handle);
                     self.clear_system_seed_markers(solar_system_id);
                     self.fighter_persist
                         .slot_for(solar_system_id)
                         .retire_to_cold(generation);
                     if let Ok(mut telem) = self.lifecycle_telemetry.write() {
-                        telem.record_settled_cold(
-                            solar_system_id,
-                            generation,
-                            SystemLifecycleState::Live,
-                            "stop_dead_live_to_cold",
-                        );
+                        telem.record_settled_cold(solar_system_id, generation, SystemLifecycleState::Live, "stop_dead_live_to_cold");
                     }
+                    drop(handle);
                     drop(guard);
-                    self.flush_aborted_loading_transitions(
-                        solar_system_id,
-                        &handle.cooldown_persist_gate,
-                        pending,
-                    );
+                    self.flush_stopped_actor_module_cooldowns(solar_system_id, &actor_state, captured_tidi);
+                    self.flush_aborted_loading_transitions(solar_system_id, &persist_gate, pending);
+                    let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    let next_epoch = persist_gate.bump_epoch();
+                    cg.last_persisted = Some((next_epoch, 0));
                     return StopBeginAction::AlreadyCold;
                 }
                 let from_state = if self.is_handle_hibernated_safe(&handle) {

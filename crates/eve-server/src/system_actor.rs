@@ -1398,6 +1398,7 @@ impl SystemRegistry {
                 target_lock_completed_hook_actor.clone(),
                 post_unlock_actions_actor.clone(),
                 post_commit_targets,
+                Some(rt_handle.clone()),
             );
         if !initial_post_unlock_ops.is_empty() {
             let _ = post_unlock::send_post_unlock_item(

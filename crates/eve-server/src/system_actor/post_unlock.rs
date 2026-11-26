@@ -1963,6 +1963,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     post_unlock_actions_worker: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
     post_commit_targets: PostCommitActorTargets,
+    rt_handle: Option<tokio::runtime::Handle>,
 ) -> (
     tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>,
     tokio::sync::oneshot::Receiver<()>,
@@ -1975,6 +1976,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
         let _done_guard = WorkerDoneGuard(Some(done_tx));
         let _ = worker_thread_id.set(std::thread::current().id());
         let process_item = |item: PostUnlockWorkItem| {
+            let _rt_guard = rt_handle.as_ref().map(|h| h.enter());
             let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let lock_hook = lock_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();
             let PostUnlockWorkItem { db_opt, sde_opt, ops, replies, in_flight_guard, work_seq } = item;

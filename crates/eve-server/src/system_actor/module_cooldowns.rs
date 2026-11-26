@@ -1154,64 +1154,41 @@ pub(crate) fn migrate_and_prune_module_cooldowns_in_db(
     let mut dirty_systems: BTreeSet<u32> = BTreeSet::new();
     let mut unresolved_legacy: Vec<ModuleCooldownCheckpointRow> = Vec::new();
     let mut had_cluster_rows = false;
+    let mut insert_migrated = |target_sys: u32, key: (i64, i64, u32), norm: ModuleCooldownEntry, tf: f64, hist: bool| {
+        let map = per_system_migrated.entry(target_sys).or_default();
+        let inc_rem = remaining_cooldown_secs_with_tidi(&norm, now_unix_f64, Some(target_sys), 0.0, tf, hist);
+        if map.get(&key).is_none_or(|cur| inc_rem > remaining_cooldown_secs_with_tidi(cur, now_unix_f64, Some(target_sys), 0.0, tf, hist) + 1e-6) {
+            map.insert(key, norm);
+        }
+    };
 
     for (row_sys_id, key @ (ship_id, mod_id, mod_tid), entry, resolved_opt) in staged {
-        let check_sys = if row_sys_id == CLUSTER_SYSTEM_ID {
-            had_cluster_rows = true;
-            resolved_opt
-        } else {
-            Some(row_sys_id)
-        };
+        let check_sys = if row_sys_id == CLUSTER_SYSTEM_ID { had_cluster_rows = true; resolved_opt } else { Some(row_sys_id) };
         let (tidi_factor, has_tidi_history) = check_sys
-            .map(|sid| {
-                *tidi_cache
-                    .entry(sid)
-                    .or_insert_with(|| systems.resolve_effective_tidi_mode(sid, true))
-            })
+            .map(|sid| *tidi_cache.entry(sid).or_insert_with(|| systems.resolve_effective_tidi_mode(sid, true)))
             .unwrap_or((1.0, false));
         let normalized = if row_sys_id > 0 && entry.solar_system_id.is_none() {
             dirty_systems.insert(row_sys_id);
-            ModuleCooldownEntry {
-                solar_system_id: Some(row_sys_id),
-                ..entry
-            }
+            ModuleCooldownEntry { solar_system_id: Some(row_sys_id), ..entry }
         } else {
             entry
         };
-        let rem = remaining_cooldown_secs_with_tidi(
-            &normalized,
-            now_unix_f64,
-            check_sys,
-            0.0,
-            tidi_factor,
-            has_tidi_history,
-        );
+        let rem = remaining_cooldown_secs_with_tidi(&normalized, now_unix_f64, check_sys, 0.0, tidi_factor, has_tidi_history);
         if rem <= 1e-6 {
-            if row_sys_id > 0 {
-                dirty_systems.insert(row_sys_id);
-            }
+            if row_sys_id > 0 { dirty_systems.insert(row_sys_id); }
             continue;
         }
         if row_sys_id == CLUSTER_SYSTEM_ID {
             if let Some(target_sys) = resolved_opt {
-                let norm = ModuleCooldownEntry {
-                    solar_system_id: Some(target_sys),
-                    ..entry
-                };
-                per_system_migrated
-                    .entry(target_sys)
-                    .or_default()
-                    .insert(key, norm);
+                let norm = ModuleCooldownEntry { solar_system_id: Some(target_sys), ..entry };
+                insert_migrated(target_sys, key, norm, tidi_factor, has_tidi_history);
                 dirty_systems.insert(target_sys);
-                tidi_cache
-                    .entry(target_sys)
-                    .or_insert_with(|| systems.resolve_effective_tidi_mode(target_sys, true));
+                tidi_cache.entry(target_sys).or_insert_with(|| systems.resolve_effective_tidi_mode(target_sys, true));
             } else {
-                unresolved_legacy.push((
-                    module_cooldown_checkpoint_key(ship_id, mod_id, mod_tid),
-                    (key, entry),
-                ));
+                unresolved_legacy.push((module_cooldown_checkpoint_key(ship_id, mod_id, mod_tid), (key, entry)));
             }
+        } else if row_sys_id > 0 {
+            insert_migrated(row_sys_id, key, normalized, tidi_factor, has_tidi_history);
         }
     }
 
@@ -1460,11 +1437,14 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
     if let Some((exp_epoch, exp_last)) = expected_gate_token {
         let gate = ctx.cooldown_persist_gate.ok_or_else(|| "missing cooldown persist gate".to_string())?;
         let mut cg = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let uncommitted_seq = match cg.last_persisted {
-            Some((ep, seq)) => ep != exp_epoch || ctx.actor_st.module_cooldown_checkpoint_seq > seq,
-            None => ctx.actor_st.module_cooldown_checkpoint_seq > 0,
-        };
+        let actor_epoch = ctx.actor_st.module_cooldown_persist_epoch;
+        let uncommitted_seq = ctx.actor_st.module_cooldown_checkpoint_seq > 0
+            && match cg.last_persisted {
+                Some((ep, seq)) => ep != actor_epoch || ctx.actor_st.module_cooldown_checkpoint_seq > seq,
+                None => true,
+            };
         if gate.current_epoch() != exp_epoch
+            || actor_epoch != exp_epoch
             || cg.last_persisted != exp_last
             || ctx.actor_st.module_cooldown_checkpoint_dirty
             || ctx.actor_st.module_cooldowns.boot_db_pending_merge
@@ -1514,16 +1494,18 @@ pub(in crate::system_actor) fn prune_expired_module_cooldowns_in_actor(
     if eff_hist {
         ctx.actor_st.has_tidi_history = true;
     }
-    if force_persist {
-        for entry in ctx.actor_st.module_cooldowns.reactivation_cooldowns.values_mut() {
+    let mut normalized = false;
+    for entry in ctx.actor_st.module_cooldowns.reactivation_cooldowns.values_mut() {
+        if entry.solar_system_id.is_none() {
             entry.solar_system_id.get_or_insert(ctx.solar_system_id);
+            normalized = true;
         }
     }
     let pruned = prune_expired_module_cooldowns_in_state(
         &mut ctx.actor_st.module_cooldowns, ctx.solar_system_id, now_unix_f64,
         ctx.actor_st.sim_elapsed_secs, eff_tidi, eff_hist,
     );
-    if !pruned && !force_persist {
+    if !pruned && !force_persist && !normalized {
         return Ok(None);
     }
     ctx.actor_st.module_cooldown_checkpoint_dirty = true;
@@ -1535,14 +1517,15 @@ pub(in crate::system_actor) fn snapshot_module_cooldown_checkpoint_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     only_if_dirty: bool,
 ) -> Result<Option<ModuleCooldownPersistPayload>, String> {
-    let has_uncommitted_seq = ctx.cooldown_persist_gate.is_some_and(|gate| {
-        let cg = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let epoch = gate.current_epoch();
-        match cg.last_persisted {
-            Some((ep, seq)) => ep != epoch || ctx.actor_st.module_cooldown_checkpoint_seq > seq,
-            None => ctx.actor_st.module_cooldown_checkpoint_seq > 0,
-        }
-    });
+    let has_uncommitted_seq = ctx.actor_st.module_cooldown_checkpoint_seq > 0
+        && ctx.cooldown_persist_gate.is_some_and(|gate| {
+            let cg = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let epoch = ctx.actor_st.module_cooldown_persist_epoch;
+            match cg.last_persisted {
+                Some((ep, seq)) => ep != epoch || ctx.actor_st.module_cooldown_checkpoint_seq > seq,
+                None => true,
+            }
+        });
     if only_if_dirty
         && !ctx.actor_st.module_cooldown_checkpoint_dirty
         && !ctx.actor_st.module_cooldowns.boot_db_pending_merge
