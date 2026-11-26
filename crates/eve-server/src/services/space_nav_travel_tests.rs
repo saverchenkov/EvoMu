@@ -722,23 +722,24 @@ async fn sync_ship_cloak_from_fitting_preserves_combat_state_and_locks_without_s
         .await;
 
     // Seed active incoming/outgoing target locks before sync_ship_cloak_and_mjfg_from_fitting runs.
-    {
-        let mut bp = sys_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
-            target_id: enemy_id,
-            lock_time_ms: 2_000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: None,
-        });
-        bp.target_locks.entry(observer_id).or_default().push(eve_destiny::TargetLock {
-            target_id: ship_id,
-            lock_time_ms: 2_000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: None,
-        });
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
+                target_id: enemy_id,
+                lock_time_ms: 2_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            });
+            bp.target_locks.entry(observer_id).or_default().push(eve_destiny::TargetLock {
+                target_id: ship_id,
+                lock_time_ms: 2_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            });
+        })
+        .await;
     let _ = sys_h.drain_observer_updates(observer_id).await;
 
     sync_ship_cloak_and_mjfg_from_fitting(&ctx, char_id, sys_id, ship_id).await;
@@ -753,13 +754,24 @@ async fn sync_ship_cloak_from_fitting_preserves_combat_state_and_locks_without_s
     assert!(cs_after.is_cloaked);
 
     {
-        let bp = sys_h.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let (outgoing_locked, incoming_locked) = sys_h
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.target_locks
+                        .get(&ship_id)
+                        .is_some_and(|l| l.iter().any(|t| t.target_id == enemy_id && t.locked)),
+                    bp.target_locks
+                        .get(&observer_id)
+                        .is_some_and(|l| l.iter().any(|t| t.target_id == ship_id && t.locked)),
+                )
+            })
+            .await;
         assert!(
-            bp.target_locks.get(&ship_id).is_some_and(|l| l.iter().any(|t| t.target_id == enemy_id && t.locked)),
+            outgoing_locked,
             "outgoing target lock must survive cloak speed sync"
         );
         assert!(
-            bp.target_locks.get(&observer_id).is_some_and(|l| l.iter().any(|t| t.target_id == ship_id && t.locked)),
+            incoming_locked,
             "incoming target lock must survive cloak speed sync"
         );
     }

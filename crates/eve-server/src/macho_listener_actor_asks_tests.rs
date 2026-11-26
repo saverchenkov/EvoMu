@@ -26,13 +26,16 @@ impl PausedActorGuard {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let sys_pause = sys_handle.clone();
         let join_handle = std::thread::spawn(move || {
-            let _bp = sys_pause.ballpark.write().unwrap();
-            held_tx.send(()).unwrap();
-            let _ = release_rx.recv();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sys_pause.test_with_ballpark(|_| {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                });
+            }));
         });
         held_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("PausedActorGuard acquire ballpark write lock");
+            .expect("PausedActorGuard pause SystemActor");
         Self {
             release_tx: Some(release_tx),
             join_handle: Some(join_handle),

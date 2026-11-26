@@ -1098,7 +1098,7 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
         .set_ball_position(cruiser_id, gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0))
         .await;
     let _ = ctx.drain_notifications_for_char(char_id);
-    sys.ballpark.write().unwrap().pending_events.clear();
+    sys.test_with_ballpark_mut_async(|bp| bp.pending_events.clear()).await;
 
     try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
         .await
@@ -1130,32 +1130,38 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
 
     // (d) ball_slim_meta.is_cloaked cleared + CloakBall(0) + OnSpecialFX + OnGodmaShipEffect(active=0) emitted
     assert!(
-        !sys.ballpark
-            .read()
-            .unwrap()
-            .ball_slim_meta
-            .get(&cruiser_id)
-            .is_some_and(|m| m.is_cloaked),
+        !sys.test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta
+                .get(&cruiser_id)
+                .is_some_and(|m| m.is_cloaked)
+        })
+        .await,
         "ball_slim_meta.is_cloaked must be false after ESS gate decloak"
     );
     {
-        let bp = sys.ballpark.read().unwrap();
+        let (has_cloak_0, has_special_fx, pending_dbg) = sys
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.pending_events.iter().any(|ev| matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
+                    )),
+                    bp.pending_events.iter().any(|ev| matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+                            if *ball_id == cruiser_id && guid == "effects.Cloak"
+                    )),
+                    format!("{:?}", bp.pending_events),
+                )
+            })
+            .await;
         assert!(
-            bp.pending_events.iter().any(|ev| matches!(
-                ev,
-                eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
-            )),
-            "expected DestinyEvent::CloakBall(cloaked=0), got {:?}",
-            bp.pending_events
+            has_cloak_0,
+            "expected DestinyEvent::CloakBall(cloaked=0), got {pending_dbg}"
         );
         assert!(
-            bp.pending_events.iter().any(|ev| matches!(
-                ev,
-                eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
-                    if *ball_id == cruiser_id && guid == "effects.Cloak"
-            )),
-            "expected DestinyEvent::OnSpecialFX(effects.Cloak, false), got {:?}",
-            bp.pending_events
+            has_special_fx,
+            "expected DestinyEvent::OnSpecialFX(effects.Cloak, false), got {pending_dbg}"
         );
     }
     let notifs = ctx.drain_notifications_for_char(char_id);
@@ -1198,13 +1204,13 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
     );
 
     // (e) ESS main bank link succeeds (NOT rejected with CantLinkWhileCloaked) once positioned at beacon
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let b = bp.balls.get_mut(&cruiser_id).unwrap();
         b.position = ess_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
         b.mode = MovementMode::Stop;
         b.velocity = glam::DVec3::ZERO;
-    }
+    })
+    .await;
     let link_res = crate::services::encounter_surveillance_system::handle_ess_link(
         &ctx,
         &cruiser_sess,
@@ -1273,15 +1279,15 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
 
     // (h) Stale `ball_slim_meta.is_cloaked = true` (which blocks AttemptLinkToMainBank with
     // CantLinkWhileCloaked) is cleared by `break_gate_cloak` + ESS link succeeds afterwards.
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.ball_slim_meta.get_mut(&cruiser_id).unwrap().is_cloaked = true;
         let b = bp.balls.get_mut(&cruiser_id).unwrap();
         b.position = ess_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
         b.mode = MovementMode::Stop;
         b.velocity = glam::DVec3::ZERO;
         bp.pending_events.clear();
-    }
+    })
+    .await;
     assert_eq!(
         crate::services::encounter_surveillance_system::handle_ess_link(
             &ctx,
@@ -1302,32 +1308,30 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
         .unwrap()
         .expect("ESS gate must clear stale ball_slim_meta.is_cloaked");
     assert!(
-        !sys.ballpark
-            .read()
-            .unwrap()
-            .ball_slim_meta
-            .get(&cruiser_id)
-            .is_some_and(|m| m.is_cloaked)
+        !sys.test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta
+                .get(&cruiser_id)
+                .is_some_and(|m| m.is_cloaked)
+        })
+        .await
     );
     assert!(
-        sys.ballpark
-            .read()
-            .unwrap()
-            .pending_events
-            .iter()
-            .any(|ev| matches!(
+        sys.test_with_ballpark_async(move |bp| {
+            bp.pending_events.iter().any(|ev| matches!(
                 ev,
                 eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
-            )),
+            ))
+        })
+        .await,
         "expected DestinyEvent::CloakBall(cloaked=0) when clearing stale slim_meta.is_cloaked"
     );
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let b = bp.balls.get_mut(&cruiser_id).unwrap();
         b.position = ess_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
         b.mode = MovementMode::Stop;
         b.velocity = glam::DVec3::ZERO;
-    }
+    })
+    .await;
     crate::services::encounter_surveillance_system::handle_ess_link(
         &ctx,
         &cruiser_sess,
@@ -1931,7 +1935,7 @@ async fn ess_gate_jump_gate_cloak_and_stale_slim_meta_do_not_emit_cloak_module_f
         .await;
 
     let _ = ctx.drain_notifications_for_char(char_id);
-    sys.ballpark.write().unwrap().pending_events.clear();
+    sys.test_with_ballpark_mut_async(|bp| bp.pending_events.clear()).await;
 
     let gate_ok = try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
         .await
@@ -1943,24 +1947,22 @@ async fn ess_gate_jump_gate_cloak_and_stale_slim_meta_do_not_emit_cloak_module_f
     assert!(!post_cs.is_cloaked);
     assert_eq!(post_cs.gate_cloak_remaining_ticks, 0);
     assert!(
-        !sys.ballpark
-            .read()
-            .unwrap()
-            .ball_slim_meta
-            .get(&cruiser_id)
-            .is_some_and(|m| m.is_cloaked),
+        !sys.test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta
+                .get(&cruiser_id)
+                .is_some_and(|m| m.is_cloaked)
+        })
+        .await,
         "ball_slim_meta.is_cloaked must be cleared when breaking jump-gate cloak"
     );
     assert!(
-        sys.ballpark
-            .read()
-            .unwrap()
-            .pending_events
-            .iter()
-            .any(|ev| matches!(
+        sys.test_with_ballpark_async(move |bp| {
+            bp.pending_events.iter().any(|ev| matches!(
                 ev,
                 eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
-            )),
+            ))
+        })
+        .await,
         "expected DestinyEvent::CloakBall(cloaked=0) on jump-gate cloak cancel"
     );
 
@@ -1981,15 +1983,15 @@ async fn ess_gate_jump_gate_cloak_and_stale_slim_meta_do_not_emit_cloak_module_f
 
     // 2. Stale `ball_slim_meta.is_cloaked = true` clearance (no active cloak module, no CS cloak)
     // clears slim meta + emits CloakBall(0) without emitting OnCloakModuleForceDeactivated.
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.ball_slim_meta.get_mut(&cruiser_id).unwrap().is_cloaked = true;
         let b = bp.balls.get_mut(&cruiser_id).unwrap();
         b.position = gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
         b.mode = MovementMode::Stop;
         b.velocity = glam::DVec3::ZERO;
         bp.pending_events.clear();
-    }
+    })
+    .await;
     let _ = ctx.drain_notifications_for_char(char_id);
 
     try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
@@ -1997,23 +1999,21 @@ async fn ess_gate_jump_gate_cloak_and_stale_slim_meta_do_not_emit_cloak_module_f
         .expect("handled")
         .expect("stale slim_meta.is_cloaked clears cleanly on ESS gate activation");
     assert!(
-        !sys.ballpark
-            .read()
-            .unwrap()
-            .ball_slim_meta
-            .get(&cruiser_id)
-            .is_some_and(|m| m.is_cloaked)
+        !sys.test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta
+                .get(&cruiser_id)
+                .is_some_and(|m| m.is_cloaked)
+        })
+        .await
     );
     assert!(
-        sys.ballpark
-            .read()
-            .unwrap()
-            .pending_events
-            .iter()
-            .any(|ev| matches!(
+        sys.test_with_ballpark_async(move |bp| {
+            bp.pending_events.iter().any(|ev| matches!(
                 ev,
                 eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
-            )),
+            ))
+        })
+        .await,
         "expected DestinyEvent::CloakBall(cloaked=0) on stale slim_meta.is_cloaked clearance"
     );
     let stale_notifs = ctx.drain_notifications_for_char(char_id);
@@ -2754,12 +2754,12 @@ async fn ess_gate_force_decloak_preserves_concurrent_shield_armor_cap_tackle_and
     assert!(!sys.has_module_cycle(def_ship_id, def_cloak_id).await);
     assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&def_cloak_id)));
     assert!(
-        !sys.ballpark
-            .read()
-            .unwrap()
-            .ball_slim_meta
-            .get(&def_ship_id)
-            .is_some_and(|m| m.is_cloaked),
+        !sys.test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta
+                .get(&def_ship_id)
+                .is_some_and(|m| m.is_cloaked)
+        })
+        .await,
         "slim_meta.is_cloaked must clear on force_decloak"
     );
     assert!(
@@ -2811,7 +2811,7 @@ async fn ess_gate_force_decloak_preserves_concurrent_shield_armor_cap_tackle_and
     .await
     .unwrap();
     let _ = ctx.drain_notifications_for_char(cov_char_id);
-    sys.ballpark.write().unwrap().pending_events.clear();
+    sys.test_with_ballpark_mut_async(|bp| bp.pending_events.clear()).await;
 
     let gate_ok = try_activate_ess_acceleration_gate(&ctx, cov_char_id, null_sys, cov_ship_id, gate_id)
         .await

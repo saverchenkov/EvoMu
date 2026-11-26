@@ -7082,11 +7082,8 @@ async fn cmd_stargate_jump_cleans_attacker_cycles_ewar_remote_assist_and_notices
     );
     assert!(
         old_handle
-            .actor_state
-            .read()
-            .unwrap()
-            .active_module_cycles
-            .is_empty(),
+            .test_with_actor_state_async(|st| st.active_module_cycles.is_empty())
+            .await,
         "origin actor must retain none of the attacker cycles targeting jumped ship"
     );
 }
@@ -7573,14 +7570,15 @@ async fn cmd_stargate_jump_rollback_keeps_db_and_origin_actor_cycles_in_sync_123
                 .is_some_and(|r| r.overloaded_modules.contains(&hardener_mod_id)));
         });
 
-        let restored_ids: Vec<i64> = {
-            let st = old_handle.actor_state.read().unwrap();
-            st.active_module_cycles
-                .iter()
-                .filter(|c| c.ship_id == ship_id)
-                .map(|c| c.module_id)
-                .collect()
-        };
+        let restored_ids: Vec<i64> = old_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles
+                    .iter()
+                    .filter(|c| c.ship_id == ship_id)
+                    .map(|c| c.module_id)
+                    .collect()
+            })
+            .await;
         assert_eq!(restored_ids.len(), 3, "all 3 own cycles must be restored in origin actor: {restored_ids:?}");
         assert!(restored_ids.contains(&ab_mod_id));
         assert!(restored_ids.contains(&hardener_mod_id));
@@ -7601,13 +7599,14 @@ async fn cmd_stargate_jump_rollback_keeps_db_and_origin_actor_cycles_in_sync_123
 
         // Origin actor must keep advancing restored cycles when stepped.
         old_handle.step_manual(1.0).await.expect("origin step succeeds");
-        let elapsed_after_step = {
-            let st = old_handle.actor_state.read().unwrap();
-            st.active_module_cycles
-                .iter()
-                .find(|c| c.module_id == ab_mod_id)
-                .map(|c| c.elapsed_s)
-        };
+        let elapsed_after_step = old_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles
+                    .iter()
+                    .find(|c| c.module_id == ab_mod_id)
+                    .map(|c| c.elapsed_s)
+            })
+            .await;
         assert!(
             elapsed_after_step.is_some_and(|e| e >= 0.99),
             "restored actor cycle must keep advancing on origin steps: {elapsed_after_step:?}"
@@ -7769,14 +7768,15 @@ async fn cmd_stargate_jump_rollback_keeps_db_and_origin_actor_cycles_in_sync_123
                 "targeted cycle whose lock cleared on TakeBall must also clear DB active state on rollback"
             );
         });
-        let restored_ids: Vec<i64> = {
-            let st = old_handle.actor_state.read().unwrap();
-            st.active_module_cycles
-                .iter()
-                .filter(|c| c.ship_id == ship_id)
-                .map(|c| c.module_id)
-                .collect()
-        };
+        let restored_ids: Vec<i64> = old_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles
+                    .iter()
+                    .filter(|c| c.ship_id == ship_id)
+                    .map(|c| c.module_id)
+                    .collect()
+            })
+            .await;
         assert_eq!(restored_ids.len(), 4, "pre-commit rollback must restore untargeted origin actor cycles in sync with DB: {restored_ids:?}");
         assert!(!restored_ids.contains(&target_mod_id));
         let restored_cloak_cs = old_handle.get_combat_state(ship_id).await.unwrap().unwrap();

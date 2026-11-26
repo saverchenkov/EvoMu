@@ -1368,20 +1368,22 @@ async fn skyhook_zero_shield_during_theft_window_reinforces_after_window_and_rep
             .skyhook_theft_windows
             .insert(sh_c, (t_c + 5_000, t_c + 12_200));
     });
-    if let Ok(mut bp) = sys_h.ballpark.write() {
-        bp.combat_states.insert(
-            sh_c,
-            CombatState {
-                shield_hp: 0.0,
-                max_shield_hp: SKYHOOK_BASE_SHIELD_HP,
-                armor_hp: 0.0,
-                max_armor_hp: SKYHOOK_BASE_ARMOR_HP,
-                structure_hp: 4_000.0,
-                max_structure_hp: SKYHOOK_BASE_HULL_HP,
-                ..Default::default()
-            },
-        );
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.insert(
+                sh_c,
+                CombatState {
+                    shield_hp: 0.0,
+                    max_shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                    armor_hp: 0.0,
+                    max_armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                    structure_hp: 4_000.0,
+                    max_structure_hp: SKYHOOK_BASE_HULL_HP,
+                    ..Default::default()
+                },
+            );
+        })
+        .await;
 
     ctx.advance_secs(REPAIR_SHIELD_ARMOR_SECS);
     tick_skyhooks(&ctx, ctx.now_unix()).await;
@@ -1401,9 +1403,13 @@ async fn skyhook_zero_shield_during_theft_window_reinforces_after_window_and_rep
         assert_eq!(s.hull_hp, SKYHOOK_BASE_HULL_HP);
         assert_eq!(s.last_damage_unix, 0);
     });
-    let bp = sys_h.ballpark.read().unwrap();
-    let cs = &bp.combat_states[&sh_c];
-    assert_eq!(cs.shield_hp, SKYHOOK_BASE_SHIELD_HP);
-    assert_eq!(cs.armor_hp, SKYHOOK_BASE_ARMOR_HP);
-    assert_eq!(cs.structure_hp, SKYHOOK_BASE_HULL_HP);
+    let (shield_hp, armor_hp, structure_hp) = sys_h
+        .test_with_ballpark_async(move |bp| {
+            let cs = &bp.combat_states[&sh_c];
+            (cs.shield_hp, cs.armor_hp, cs.structure_hp)
+        })
+        .await;
+    assert_eq!(shield_hp, SKYHOOK_BASE_SHIELD_HP);
+    assert_eq!(armor_hp, SKYHOOK_BASE_ARMOR_HP);
+    assert_eq!(structure_hp, SKYHOOK_BASE_HULL_HP);
 }

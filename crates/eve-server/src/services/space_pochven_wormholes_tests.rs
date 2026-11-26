@@ -204,20 +204,33 @@ async fn r11_k12_collapsed_pochven_wormhole_skips_spawn_and_guards_have_slim_met
             })
             .collect()
     };
-    {
-        let bp = poch_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        for (gid, faction_id) in guard_entities {
-            let meta = bp.ball_slim_meta.get(&gid).expect("guard slim meta");
-            assert_eq!(meta.owner_id, faction_id as i64);
-            assert_eq!(
-                meta.corp_id,
-                crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
-                    &ctx.sde,
-                    meta.owner_id,
-                )
-            );
-            assert_eq!(meta.category_id, 11);
-            assert!(meta.name.is_some());
-        }
+    let guard_metas = poch_handle
+        .test_with_ballpark_async(move |bp| {
+            guard_entities
+                .into_iter()
+                .map(|(gid, faction_id)| {
+                    let meta = bp.ball_slim_meta.get(&gid).expect("guard slim meta");
+                    (
+                        faction_id,
+                        meta.owner_id,
+                        meta.corp_id,
+                        meta.category_id,
+                        meta.name.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .await;
+    for (faction_id, owner_id, corp_id, category_id, has_name) in guard_metas {
+        assert_eq!(owner_id, faction_id as i64);
+        assert_eq!(
+            corp_id,
+            crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_sde_faction(
+                &ctx.sde,
+                owner_id,
+            )
+        );
+        assert_eq!(category_id, 11);
+        assert!(has_name);
     }
 }

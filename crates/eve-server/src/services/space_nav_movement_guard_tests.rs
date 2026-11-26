@@ -123,11 +123,12 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
     //    even when `warp_scramble_strength == 0`.
     let bubble_id = 10_000_999i64;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.add_warp_bubble(bubble_id, origin, 20_000.0);
-        bp.step(0.1);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.add_warp_bubble(bubble_id, origin, 20_000.0);
+            bp.step(0.1);
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id })
             .await
@@ -171,19 +172,21 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
         "WarpScrambled"
     );
     let _ = sys_handle.remove_ball(bubble_id).await;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.remove_warp_bubble(bubble_id);
-        bp.step(0.1);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.remove_warp_bubble(bubble_id);
+            bp.step(0.1);
+        })
+        .await;
 
     // 3. Explicit `lance_disrupted_remaining_s > 0.0` blocks movement (including Stargate & Wormhole!).
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.lance_disrupted_remaining_s = 12.0;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.lance_disrupted_remaining_s = 12.0;
+            }
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(
             char_id,
@@ -199,12 +202,13 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
         .code,
         "DisruptiveLanceDebuffActive"
     );
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.lance_disrupted_remaining_s = 0.0;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.lance_disrupted_remaining_s = 0.0;
+            }
+        })
+        .await;
 
     // 4. Immobilizing module (Bastion 33400 active) blocks Warp and Wormhole.
     ctx.db.with_mut_snapshot(|snap| {
@@ -272,14 +276,15 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
         .remove(&(ctx.instance_id as usize, ship_id));
 
     // 6. Non-covert cloak blocks Warp; covert cloak allows Warp.
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_cloaked = true;
-            cs.is_covert_cloak = false;
-            cs.gate_cloak_remaining_ticks = 0;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_cloaked = true;
+                cs.is_covert_cloak = false;
+                cs.gate_cloak_remaining_ticks = 0;
+            }
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_id, ship_id, MovementIntent::BookmarkWarp { sys_id })
             .await
@@ -287,12 +292,13 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
             .code,
         "CloakedCannotWarp"
     );
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_covert_cloak = true;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_covert_cloak = true;
+            }
+        })
+        .await;
     assert!(
         ctx.validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id })
             .await
@@ -433,11 +439,12 @@ async fn bubble_interdiction_blocks_mmju_agency_warp_vector_and_drifter_roam() {
     spawn_test_ship(&ctx, sys_id, char_id, ship_id, 587, pos, 1_000_000.0, CombatState::default()).await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let bubble_id = 10_001_009i64;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.add_warp_bubble(bubble_id, pos, 20_000.0);
-        bp.step(0.1);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.add_warp_bubble(bubble_id, pos, 20_000.0);
+            bp.step(0.1);
+        })
+        .await;
 
     let mut sess = eve_machonet::SessionState::default();
     sess.user_id = Some(1);
@@ -507,11 +514,12 @@ async fn bubble_interdiction_blocks_mmju_agency_warp_vector_and_drifter_roam() {
         )
         .await
         .unwrap();
-    {
-        let mut bp = wh_handle.ballpark.write().unwrap();
-        bp.add_warp_bubble(wh_bubble_id, drifter_pos, 20_000.0);
-        bp.step(0.1);
-    }
+    wh_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.add_warp_bubble(wh_bubble_id, drifter_pos, 20_000.0);
+            bp.step(0.1);
+        })
+        .await;
     crate::services::wormhole_pve_escalations::register_test_triggered_drifter_relay(
         &ctx,
         wh_sys,
@@ -525,11 +533,12 @@ async fn bubble_interdiction_blocks_mmju_agency_warp_vector_and_drifter_roam() {
         !matches!(drifter_ball_bubbled.mode, MovementMode::Warp { .. }),
         "Drifter inside warp disruption bubble must not initiate roam warp"
     );
-    {
-        let mut bp = wh_handle.ballpark.write().unwrap();
-        bp.remove_warp_bubble(wh_bubble_id);
-        bp.step(0.1);
-    }
+    wh_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.remove_warp_bubble(wh_bubble_id);
+            bp.step(0.1);
+        })
+        .await;
     ctx.advance_secs(300);
     crate::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, wh_sys, 600.0).await;
     let (_, drifter_ball_clear) = wh_handle.get_ball_snapshot(drifter_bid).await.unwrap().unwrap();
@@ -708,46 +717,70 @@ async fn sync_pre_movement_helpers_and_piloted_structure_guard() {
 
     // 5. `can_warp_in_ballpark`: bubble, lance disruption, non-covert cloak, gate cloak, covert cloak.
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    {
-        let bp = sys_handle.ballpark.read().unwrap();
-        assert!(can_warp_in_ballpark(&bp, ship_id));
-    }
+    assert!(
+        sys_handle
+            .test_with_ballpark_async(move |bp| can_warp_in_ballpark(bp, ship_id))
+            .await
+    );
     let bubble_id = 10_002_005i64;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.add_warp_bubble(bubble_id, origin, 15_000.0);
-        bp.step(0.1);
-        assert!(!can_warp_in_ballpark(&bp, ship_id));
-        bp.remove_warp_bubble(bubble_id);
-        bp.step(0.1);
-        assert!(can_warp_in_ballpark(&bp, ship_id));
+    let (
+        can_warp_in_bubble,
+        can_warp_out_bubble,
+        can_warp_lance,
+        can_warp_noncovert_cloak,
+        can_warp_gate_cloak,
+        can_warp_covert_cloak,
+    ) = sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.add_warp_bubble(bubble_id, origin, 15_000.0);
+            bp.step(0.1);
+            let can_warp_in_bubble = can_warp_in_ballpark(bp, ship_id);
+            bp.remove_warp_bubble(bubble_id);
+            bp.step(0.1);
+            let can_warp_out_bubble = can_warp_in_ballpark(bp, ship_id);
 
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.lance_disrupted_remaining_s = 5.0;
-        }
-        assert!(!can_warp_in_ballpark(&bp, ship_id));
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.lance_disrupted_remaining_s = 5.0;
+            }
+            let can_warp_lance = can_warp_in_ballpark(bp, ship_id);
 
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.lance_disrupted_remaining_s = 0.0;
-            cs.is_cloaked = true;
-            cs.gate_cloak_remaining_ticks = 0;
-            cs.is_covert_cloak = false;
-        }
-        assert!(!can_warp_in_ballpark(&bp, ship_id));
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.lance_disrupted_remaining_s = 0.0;
+                cs.is_cloaked = true;
+                cs.gate_cloak_remaining_ticks = 0;
+                cs.is_covert_cloak = false;
+            }
+            let can_warp_noncovert_cloak = can_warp_in_ballpark(bp, ship_id);
 
-        // Gate cloak allows warp even without covert cloak.
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.gate_cloak_remaining_ticks = 10;
-        }
-        assert!(can_warp_in_ballpark(&bp, ship_id));
+            // Gate cloak allows warp even without covert cloak.
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.gate_cloak_remaining_ticks = 10;
+            }
+            let can_warp_gate_cloak = can_warp_in_ballpark(bp, ship_id);
 
-        // Covert cloak allows warp without gate cloak.
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.gate_cloak_remaining_ticks = 0;
-            cs.is_covert_cloak = true;
-        }
-        assert!(can_warp_in_ballpark(&bp, ship_id));
-    }
+            // Covert cloak allows warp without gate cloak.
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.gate_cloak_remaining_ticks = 0;
+                cs.is_covert_cloak = true;
+            }
+            let can_warp_covert_cloak = can_warp_in_ballpark(bp, ship_id);
+
+            (
+                can_warp_in_bubble,
+                can_warp_out_bubble,
+                can_warp_lance,
+                can_warp_noncovert_cloak,
+                can_warp_gate_cloak,
+                can_warp_covert_cloak,
+            )
+        })
+        .await;
+    assert!(!can_warp_in_bubble);
+    assert!(can_warp_out_bubble);
+    assert!(!can_warp_lance);
+    assert!(!can_warp_noncovert_cloak);
+    assert!(can_warp_gate_cloak);
+    assert!(can_warp_covert_cloak);
 }
 
 #[tokio::test]
@@ -779,11 +812,12 @@ async fn intent_variants_vector_warp_ansiblex_cyno_bridge_conduit_shipcaster() {
     // 2. AnsiblexJump: ignores warp bubble, enforces 1.48 Mt exact boundary & supercap prohibition.
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let bubble_id = 10_003_009i64;
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.add_warp_bubble(bubble_id, origin, 20_000.0);
-        bp.step(0.1);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.add_warp_bubble(bubble_id, origin, 20_000.0);
+            bp.step(0.1);
+        })
+        .await;
     let ans_ok_ship = 10_003_002i64;
     spawn_test_ship(
         &ctx,
@@ -999,11 +1033,12 @@ async fn intent_variants_vector_warp_ansiblex_cyno_bridge_conduit_shipcaster() {
             .code,
         "WarpScrambled"
     );
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.remove_warp_bubble(bubble_id);
-        bp.step(0.1);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.remove_warp_bubble(bubble_id);
+            bp.step(0.1);
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_id, v_ship, sc_intent).await.is_ok());
 }
 
@@ -1414,19 +1449,20 @@ async fn filament_db_fallback_cloak_tether_and_in_warp_errors() {
     // 3. Active warp mode handling across BookmarkWarp (ShipNotInSpace even in Aligning),
     //    Warp (Aligning ok, Cruising -> ShipAlreadyInWarp), RandomFilament (CannotActivateFilamentInWarp),
     //    and non-warp StargateJump (ShipInWarp).
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(b) = bp.balls.get_mut(&space_ship) {
-            b.mode = MovementMode::Warp {
-                origin,
-                destination: origin + DVec3::new(1_000_000.0, 0.0, 0.0),
-                warp_speed_au_s: 3.0,
-                total_distance: 1_000_000.0,
-                elapsed_warp_time: 0.0,
-                phase: eve_destiny::WarpPhase::Aligning,
-            };
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&space_ship) {
+                b.mode = MovementMode::Warp {
+                    origin,
+                    destination: origin + DVec3::new(1_000_000.0, 0.0, 0.0),
+                    warp_speed_au_s: 3.0,
+                    total_distance: 1_000_000.0,
+                    elapsed_warp_time: 0.0,
+                    phase: eve_destiny::WarpPhase::Aligning,
+                };
+            }
+        })
+        .await;
     assert!(
         ctx.validate_ship_movement(char_id, space_ship, MovementIntent::Warp { sys_id })
             .await
@@ -1462,14 +1498,15 @@ async fn filament_db_fallback_cloak_tether_and_in_warp_errors() {
         "ShipInWarp"
     );
 
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        if let Some(b) = bp.balls.get_mut(&space_ship) {
-            if let MovementMode::Warp { ref mut phase, .. } = b.mode {
-                *phase = eve_destiny::WarpPhase::Cruising;
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&space_ship) {
+                if let MovementMode::Warp { ref mut phase, .. } = b.mode {
+                    *phase = eve_destiny::WarpPhase::Cruising;
+                }
             }
-        }
-    }
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_id, space_ship, MovementIntent::Warp { sys_id })
             .await
@@ -2192,81 +2229,90 @@ async fn w4_mutant_killers_boundaries_structure_piloting_ranks_mass_and_tackle()
     sys_h.set_combat_state(ship_a, CombatState { warp_core_strength: 1, ..Default::default() }).await.unwrap();
 
     // 5. Exact mass limits: WormholeJump (ball_opt vs None DB/SDE fallback), Ansiblex, AccelerationGate(Generic rig/mass & AnomicBurner)
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().mass = 100_000_000.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().mass = 100_000_000.0;
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::WormholeJump { from_sys: sys_ls_edge, max_jump_mass: Some(100_000_000.0) }).await.is_ok());
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::WormholeJump { from_sys: sys_ls_edge, max_jump_mass: Some(99_999_999.0) }).await.unwrap_err().code,
         "ShipExceedsWormholeJumpMass"
     );
 
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().mass = 1_480_000_000.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().mass = 1_480_000_000.0;
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AnsiblexJump { from_sys: sys_ls_edge, to_sys: sys_hs_edge }).await.is_ok());
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().mass = 1_480_000_001.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().mass = 1_480_000_001.0;
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AnsiblexJump { from_sys: sys_ls_edge, to_sys: sys_hs_edge }).await.unwrap_err().code,
         "ShipNotAllowedThroughAnsiblex"
     );
 
     // Generic gate: mass == 500e6 ok, 500e6+1 err; rig == 4.0 err, rig == 3.0 ok
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        let b = bp.balls.get_mut(&ship_a).unwrap();
-        b.type_id = tid_rig3;
-        b.mass = 500_000_000.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            let b = bp.balls.get_mut(&ship_a).unwrap();
+            b.type_id = tid_rig3;
+            b.mass = 500_000_000.0;
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AccelerationGate { sys_id: sys_ls_edge, kind: AccelerationGateKind::Generic }).await.is_ok());
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().mass = 500_000_001.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().mass = 500_000_001.0;
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AccelerationGate { sys_id: sys_ls_edge, kind: AccelerationGateKind::Generic }).await.unwrap_err().code,
         "ShipTooLargeForGate"
     );
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        let b = bp.balls.get_mut(&ship_a).unwrap();
-        b.type_id = tid_rig4;
-        b.mass = 10_000_000.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            let b = bp.balls.get_mut(&ship_a).unwrap();
+            b.type_id = tid_rig4;
+            b.mass = 10_000_000.0;
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AccelerationGate { sys_id: sys_ls_edge, kind: AccelerationGateKind::Generic }).await.unwrap_err().code,
         "ShipTooLargeForGate"
     );
 
     // AnomicBurner: 49_999_999 ok, 50_000_000 err (using ball_opt == None DB/SDE mass fallback too)
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.remove(&ship_a);
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.remove(&ship_a);
+        })
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_a).unwrap().type_id = tid_frigate;
     });
     spawn_test_ship(&ctx, sys_ls_edge, char_a, ship_a, tid_frigate, DVec3::ZERO, 49_999_999.0, CombatState::default()).await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AccelerationGate { sys_id: sys_ls_edge, kind: AccelerationGateKind::AnomicBurner }).await.is_ok());
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().mass = 50_000_000.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().mass = 50_000_000.0;
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::AccelerationGate { sys_id: sys_ls_edge, kind: AccelerationGateKind::AnomicBurner }).await.unwrap_err().code,
         "ShipRestrictedByGate"
     );
 
     // 6. Stargate highsec 0.45 vs 0.44 boundary, Pochven region 10_000_070, Zarzakh Orca vs Capital/Freighter, Supercap
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().type_id = tid_dread;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().type_id = tid_dread;
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::StargateJump { from_sys: sys_ls_edge, to_sys: sys_ls_edge, gate_id: 1 }).await.is_ok());
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::StargateJump { from_sys: sys_ls_edge, to_sys: sys_hs_edge, gate_id: 1 }).await.unwrap_err().code,
@@ -2277,10 +2323,11 @@ async fn w4_mutant_killers_boundaries_structure_piloting_ranks_mass_and_tackle()
         "ShipCannotUseStargate"
     );
 
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().type_id = tid_freighter;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().type_id = tid_freighter;
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::StargateJump { from_sys: sys_ls_edge, to_sys: sys_hs_edge, gate_id: 1 }).await.is_ok());
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::StargateJump { from_sys: sys_ls_edge, to_sys: sys_pochven, gate_id: 1 }).await.unwrap_err().code,
@@ -2291,16 +2338,18 @@ async fn w4_mutant_killers_boundaries_structure_piloting_ranks_mass_and_tackle()
         "ShipCannotUseStargate"
     );
 
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().type_id = tid_orca;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().type_id = tid_orca;
+        })
+        .await;
     assert!(ctx.validate_ship_movement(char_a, ship_a, MovementIntent::StargateJump { from_sys: sys_ls_edge, to_sys: zz_sys, gate_id: 1 }).await.is_ok());
 
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_a).unwrap().type_id = tid_super;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().type_id = tid_super;
+        })
+        .await;
     assert_eq!(
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::StargateJump { from_sys: sys_ls_edge, to_sys: sys_ls_edge, gate_id: 1 }).await.unwrap_err().code,
         "CapitalShipCannotJumpStargate"

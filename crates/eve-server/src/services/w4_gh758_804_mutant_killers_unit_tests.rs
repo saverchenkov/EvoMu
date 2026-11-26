@@ -539,39 +539,40 @@ async fn cycle_weapon_damage_flush_and_execute_pending_actions_boundaries() {
     }
     let _ = ctx.drain_notifications_for_char(acid);
     let _ = ctx.drain_notifications_for_char(vcid);
-    {
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
-            attacker_char_id: Some(acid),
-            attacker_ship_id: 200_100,
-            attacker_ship_type_id: 587,
-            target_id: 200_200,
-            target_char_id: Some(vcid),
-            module_type_id: 3640,
-            applied_dmg: 40.0,
-            notified: false,
-        });
-        st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
-            attacker_char_id: Some(acid),
-            attacker_ship_id: 200_100,
-            attacker_ship_type_id: 587,
-            target_id: 200_200,
-            target_char_id: Some(vcid),
-            module_type_id: 3640,
-            applied_dmg: 40.0,
-            notified: true,
-        });
-        st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
-            attacker_char_id: Some(acid),
-            attacker_ship_id: 200_100,
-            attacker_ship_type_id: 587,
-            target_id: 200_200,
-            target_char_id: Some(vcid),
-            module_type_id: 3640,
-            applied_dmg: 0.0,
-            notified: false,
-        });
-    }
+    sys_handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id: Some(acid),
+                attacker_ship_id: 200_100,
+                attacker_ship_type_id: 587,
+                target_id: 200_200,
+                target_char_id: Some(vcid),
+                module_type_id: 3640,
+                applied_dmg: 40.0,
+                notified: false,
+            });
+            st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id: Some(acid),
+                attacker_ship_id: 200_100,
+                attacker_ship_type_id: 587,
+                target_id: 200_200,
+                target_char_id: Some(vcid),
+                module_type_id: 3640,
+                applied_dmg: 40.0,
+                notified: true,
+            });
+            st.pending_cycle_actions.push(PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id: Some(acid),
+                attacker_ship_id: 200_100,
+                attacker_ship_type_id: 587,
+                target_id: 200_200,
+                target_char_id: Some(vcid),
+                module_type_id: 3640,
+                applied_dmg: 0.0,
+                notified: false,
+            });
+        })
+        .await;
     execute_pending_cycle_actions(&ctx, sys_id).await;
     let a_notifs = ctx.drain_notifications_for_char(acid);
     let v_notifs = ctx.drain_notifications_for_char(vcid);
@@ -1467,15 +1468,16 @@ async fn issue_818_target_lost_notifications_in_step_manual_and_try_step_full_ti
     // 1. `step_manual` (`system_actor.rs`): out-of-range lock drops (`mode == "lost"`),
     //    delivering `OnTarget(vic_ship, "lost")` + `OnMultiEvent(("OnTarget", "lost", vic_ship, ""))`
     //    to `att_char` and `OnMultiEvent(("OnTarget", "otherlost", att_ship, ""))` to `vic_char`.
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        bp.target_locks.insert(
-            att_ship,
-            vec![eve_destiny::TargetLock {
-                target_id: vic_ship, locked: true, remaining_lock_ms: 0.0, lock_time_ms: 1_000.0, max_range_m: Some(1_000.0),
-            }],
-        );
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.target_locks.insert(
+                att_ship,
+                vec![eve_destiny::TargetLock {
+                    target_id: vic_ship, locked: true, remaining_lock_ms: 0.0, lock_time_ms: 1_000.0, max_range_m: Some(1_000.0),
+                }],
+            );
+        })
+        .await;
     let _ = ctx.drain_notifications_for_char(att_char);
     let _ = ctx.drain_notifications_for_char(vic_char);
     handle.step_manual(1.0).await.unwrap();
@@ -1521,24 +1523,25 @@ async fn issue_818_target_lost_notifications_in_step_manual_and_try_step_full_ti
             },
         );
     });
-    {
-        let mut bp = handle.ballpark.write().unwrap();
-        if let Some(m) = bp.ball_slim_meta.get_mut(&att_ship) { m.char_id = None; }
-        if let Some(m) = bp.ball_slim_meta.get_mut(&vic_ship) { m.char_id = None; }
-        bp.target_locks.insert(
-            att_ship,
-            vec![eve_destiny::TargetLock {
-                target_id: vic_ship, locked: true, remaining_lock_ms: 0.0, lock_time_ms: 1_000.0, max_range_m: Some(1_000.0),
-            }],
-        );
-    }
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(m) = bp.ball_slim_meta.get_mut(&att_ship) { m.char_id = None; }
+            if let Some(m) = bp.ball_slim_meta.get_mut(&vic_ship) { m.char_id = None; }
+            bp.target_locks.insert(
+                att_ship,
+                vec![eve_destiny::TargetLock {
+                    target_id: vic_ship, locked: true, remaining_lock_ms: 0.0, lock_time_ms: 1_000.0, max_range_m: Some(1_000.0),
+                }],
+            );
+        })
+        .await;
     handle.try_step_full_tick(1.0);
     assert!(!ctx.drain_notifications_for_char(att_char).is_empty());
     assert!(!ctx.drain_notifications_for_char(vic_char).is_empty());
 
     // Direct helper boundary checks: `pending_opt = None`, `db_opt = None`, `mode = "locked"`,
     // `char_id <= 0`, and `target_char_id == source_char_id`.
-    let bp_snap = handle.ballpark.read().unwrap().clone();
+    let bp_snap = handle.test_with_ballpark_async(|bp| bp.clone()).await;
     crate::system_actor::flush_target_lost_notifications(
         &bp_snap,
         &[eve_destiny::DestinyEvent::OnTarget { mode: "lost".into(), source_id: att_ship, target_id: vic_ship }],

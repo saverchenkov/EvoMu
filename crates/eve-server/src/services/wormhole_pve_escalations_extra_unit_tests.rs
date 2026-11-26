@@ -836,9 +836,12 @@ async fn escalations_edge_branches_caps_bubble_scram_warping_guard_shattered_and
         bid
     });
     // Damage armor HP on relay and step -> auto-triggers Hyleus Tyrannos (86498)
-    let _ = h_c5.ballpark.write().unwrap().combat_states.get_mut(&relay_bid).map(|cs| {
-        cs.armor_hp = (cs.max_armor_hp - 10.0).max(0.0);
-    });
+    h_c5.test_with_ballpark_mut_async(move |bp| {
+        if let Some(cs) = bp.combat_states.get_mut(&relay_bid) {
+            cs.armor_hp = (cs.max_armor_hp - 10.0).max(0.0);
+        }
+    })
+    .await;
     step_wormhole_pve_system(&ctx, wh_c5, 1.0).await;
     assert!(on_decloaked_relay_attacked_sync(&ctx, wh_c5, relay_bid).is_none());
     let drifter_bid = with_pve_exploration_reg(&ctx, |reg| {
@@ -849,7 +852,9 @@ async fn escalations_edge_branches_caps_bubble_scram_warping_guard_shattered_and
     });
 
     // Bubble-scramble Drifter (no point needed!) suppresses roaming after 240s advance
-    let drifter_pos = h_c5.ballpark.read().unwrap().balls[&drifter_bid].position;
+    let drifter_pos = h_c5
+        .test_with_ballpark_async(move |bp| bp.balls[&drifter_bid].position)
+        .await;
     let _ = h_c5.add_warp_bubble(960_002_001, drifter_pos, 15_000.0).await;
     clock.advance_secs(245);
     step_wormhole_pve_system(&ctx, wh_c5, 1.0).await;
@@ -859,7 +864,9 @@ async fn escalations_edge_branches_caps_bubble_scram_warping_guard_shattered_and
     // Remove bubble -> next step initiates roam warp; subsequent +245s while still in Warp skips duplicate warp
     let _ = h_c5.remove_warp_bubble(960_002_001).await;
     step_wormhole_pve_system(&ctx, wh_c5, 1.0).await;
-    let first_hop_mode = h_c5.ballpark.read().unwrap().balls[&drifter_bid].mode.clone();
+    let first_hop_mode = h_c5
+        .test_with_ballpark_async(move |bp| bp.balls[&drifter_bid].mode.clone())
+        .await;
     assert!(matches!(first_hop_mode, MovementMode::Warp { .. }));
     clock.advance_secs(245);
     step_wormhole_pve_system(&ctx, wh_c5, 1.0).await;

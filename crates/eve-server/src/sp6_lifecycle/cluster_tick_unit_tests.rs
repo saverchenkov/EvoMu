@@ -494,18 +494,21 @@ async fn cluster_tick_catches_up_multi_second_warp_and_respects_dedicated_physic
 
     // 1. When dedicated_physics_ticker_active is true, tick_background_cluster skips physics
     // and step_active_systems_physics_tick owns simulation advancement.
-    let tick_initial = sys_h.ballpark.read().unwrap().current_tick;
+    let tick_initial = sys_h.test_with_ballpark_async(|bp| bp.current_tick).await;
     ctx.dedicated_physics_ticker_active
         .store(true, std::sync::atomic::Ordering::Release);
     ctx.clock().advance_secs(5);
     tick_background_cluster(&ctx).await;
-    let tick_after_bg = sys_h.ballpark.read().unwrap().current_tick;
+    let tick_after_bg = sys_h.test_with_ballpark_async(|bp| bp.current_tick).await;
     assert_eq!(
         tick_after_bg, tick_initial,
         "tick_background_cluster must not step physics when dedicated physics ticker is active"
     );
     crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
-    assert_eq!(sys_h.ballpark.read().unwrap().current_tick, tick_initial + 1);
+    assert_eq!(
+        sys_h.test_with_ballpark_async(|bp| bp.current_tick).await,
+        tick_initial + 1
+    );
 
     // 2. step_active_systems_physics_tick catches up multi-second wall-clock deltas so an
     // in-flight warp finishes strictly on schedule independent of background cluster ticks.
@@ -530,7 +533,7 @@ async fn cluster_tick_catches_up_multi_second_warp_and_respects_dedicated_physic
     ctx.clock().advance_secs(35);
     crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 35).await;
 
-    let tick_after_first_burst = sys_h.ballpark.read().unwrap().current_tick;
+    let tick_after_first_burst = sys_h.test_with_ballpark_async(|bp| bp.current_tick).await;
     assert_eq!(
         tick_after_first_burst,
         tick_initial + 1 + crate::sp6_lifecycle::MAX_PHYSICS_BACKLOG_STEPS,
@@ -541,19 +544,15 @@ async fn cluster_tick_catches_up_multi_second_warp_and_respects_dedicated_physic
         crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 3).await;
     }
 
-    let tick_after_catchup = sys_h.ballpark.read().unwrap().current_tick;
+    let tick_after_catchup = sys_h.test_with_ballpark_async(|bp| bp.current_tick).await;
     assert!(
         tick_after_catchup >= tick_initial + 36,
         "expected multi-second warp catchup ticks >= {}, got {tick_after_catchup}",
         tick_initial + 36
     );
     let ball = sys_h
-        .ballpark
-        .read()
-        .unwrap()
-        .balls
-        .get(&ship_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.balls.get(&ship_id).cloned())
+        .await
         .expect("ship ball exists");
     assert!(
         matches!(ball.mode, eve_destiny::MovementMode::Stop),
@@ -1079,7 +1078,7 @@ async fn engine_supervision_catch_unwind_system_actor_recovery_and_backlog_cap_8
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_warp_mirror_non_blocking_under_ballpark_write_lock_831_909() {
     let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
     let sys_id = 30_000_142_u32;
@@ -1120,15 +1119,28 @@ async fn committed_warp_mirror_non_blocking_under_ballpark_write_lock_831_909() 
     let _ = handle.step_manual(0.5).await.unwrap();
     assert!(ctx.systems.is_ball_in_committed_warp_sync(sys_id, ship_id));
 
-    // Hold `ballpark.write()` on the current thread and verify `is_ball_in_committed_warp_sync`
-    // and `committed_warp_destination_sync` read the leaf mirror lock without deadlocking (#831)!
-    let bp_write_guard = handle.ballpark.write().unwrap();
+    // Pause the system actor via the test seam on a background thread and verify
+    // `is_ball_in_committed_warp_sync` and `committed_warp_destination_sync` read lock-free
+    // mirrors without deadlocking (#831).
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+    let handle_bg = handle.clone();
+    let pause_thread = std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_bg.test_with_ballpark(|_| {
+                let _ = held_tx.send(());
+                let _ = rel_rx.recv();
+            });
+        }));
+    });
+    held_rx.recv().unwrap();
     assert!(ctx.systems.is_ball_in_committed_warp_sync(sys_id, ship_id));
     assert_eq!(
         handle.committed_warp_destination_sync(ship_id),
         Some(dest)
     );
-    drop(bp_write_guard);
+    let _ = rel_tx.send(());
+    pause_thread.join().unwrap();
 }
 
 #[tokio::test]
@@ -1227,13 +1239,8 @@ async fn skill_queue_invalidation_only_on_level_completion_and_single_system_syn
     );
     ctx.sync_ship_ballpark_stats(char_id, ship_id);
     let other_max_speed = other_sys_handle
-        .ballpark
-        .read()
-        .unwrap()
-        .balls
-        .get(&ship_id)
-        .unwrap()
-        .max_velocity;
+        .test_with_ballpark_async(move |bp| bp.balls.get(&ship_id).unwrap().max_velocity)
+        .await;
     assert_eq!(
         other_max_speed, 999.0,
         "sync_ship_ballpark_stats must only sync the character's active solar system"
@@ -1583,12 +1590,14 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
         "empty system with no dynamic balls or sessions must hibernate"
     );
     assert!(idle_handle.hibernated_since_unix() > 0);
-    let tick_before = idle_handle.ballpark.read().unwrap().current_tick;
+    let tick_before = idle_handle
+        .test_with_ballpark_async(|bp| bp.current_tick)
+        .await;
 
     // 2. Physics tick skips hibernated empty systems (0 per-tick physics work) and records idle ticks.
     crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
     assert_eq!(
-        idle_handle.ballpark.read().unwrap().current_tick,
+        idle_handle.test_with_ballpark_async(|bp| bp.current_tick).await,
         tick_before,
         "#919: hibernated empty system must do zero per-tick physics work"
     );
@@ -1617,7 +1626,7 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
     );
     crate::sp6_lifecycle::step_active_systems_physics_tick(&ctx, 1).await;
     assert_eq!(
-        idle_handle.ballpark.read().unwrap().current_tick,
+        idle_handle.test_with_ballpark_async(|bp| bp.current_tick).await,
         tick_before + 1,
         "awake system must advance physics tick"
     );
@@ -2330,8 +2339,12 @@ async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank
     );
 
     // Ensure current_tick >= last_attack_tick + 2 so both NPCs attack immediately.
-    handle_a.ballpark.write().unwrap().current_tick = 10;
-    handle_b.ballpark.write().unwrap().current_tick = 10;
+    handle_a
+        .test_with_ballpark_mut_async(|bp| bp.current_tick = 10)
+        .await;
+    handle_b
+        .test_with_ballpark_mut_async(|bp| bp.current_tick = 10)
+        .await;
     // Drain initial actor commands before testing cluster_tick paths.
     let _ = handle_a.get_ball_snapshot(ship_a2).await;
     let _ = handle_b.get_ball_snapshot(ship_b2).await;
@@ -2593,7 +2606,7 @@ fn assert_victim_death_committed_1168(
     ship_type_id: u32,
 ) {
     assert!(
-        !handle.ballpark.read().unwrap().balls.contains_key(&victim_ship_id),
+        !handle.view().contains_ball(victim_ship_id),
         "victim ship ball {victim_ship_id} must be removed from ballpark"
     );
     let capsule_id = ctx.db.with_snapshot(|snap| {
@@ -2633,11 +2646,8 @@ fn assert_victim_death_committed_1168(
     });
     assert!(
         handle
-            .ballpark
-            .read()
-            .unwrap()
-            .balls
-            .get(&capsule_id)
+            .view()
+            .ball(capsule_id)
             .is_some_and(|b| b.type_id == 670),
         "victim capsule {capsule_id} must exist in ballpark"
     );
@@ -2712,7 +2722,9 @@ async fn destroyed_balls_survive_step_timeout_and_apply_outside_ask_timeout_1168
     let _ = handle.list_balls().await.unwrap();
 
     assert!(
-        !handle.ballpark.read().unwrap().balls.contains_key(&victim_1_ship),
+        !handle
+            .test_with_ballpark_async(move |bp| bp.balls.contains_key(&victim_1_ship))
+            .await,
         "victim ship must already be removed from ballpark when actor step timed out"
     );
     assert_eq!(
@@ -2868,7 +2880,9 @@ async fn destroyed_balls_recover_across_dropped_reply_receiver_and_post_destruct
     let _ = handle.list_balls().await.unwrap();
 
     assert!(
-        !handle.ballpark.read().unwrap().balls.contains_key(&victim_a_ship),
+        !handle
+            .test_with_ballpark_async(move |bp| bp.balls.contains_key(&victim_a_ship))
+            .await,
         "victim A ship ball must already be removed before reply send"
     );
     assert_eq!(
@@ -2929,7 +2943,9 @@ async fn destroyed_balls_recover_across_dropped_reply_receiver_and_post_destruct
         "post-destruction command panic must be observed by SystemActor supervisor loop"
     );
     assert!(
-        !handle.ballpark.read().unwrap().balls.contains_key(&victim_b_ship),
+        !handle
+            .test_with_ballpark_async(move |bp| bp.balls.contains_key(&victim_b_ship))
+            .await,
         "victim B ship ball must have been removed prior to injected panic"
     );
     assert_eq!(
@@ -3158,7 +3174,11 @@ async fn try_step_full_tick_rolls_back_without_runtime_and_holds_lease_until_ste
         .join()
         .expect("no-runtime try_step_full_tick thread completed");
 
-    assert!(!handle.ballpark.read().unwrap().balls.contains_key(&victim_a_ship));
+    assert!(
+        !handle
+            .test_with_ballpark_async(move |bp| bp.balls.contains_key(&victim_a_ship))
+            .await
+    );
     assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (1, 0));
     assert!(handle.pending_destroyed_balls.is_non_empty());
     assert_eq!(count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id), wrecks_0);
@@ -3317,17 +3337,18 @@ async fn fire_weapon_cycle_volley_outbox_lease_rollback_and_ack_1168() {
     let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
     let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
     *handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
-        let _ = arrived_tx.send(());
+        let _ = arrived_tx.send(eve_db::lock_rank::held_lock_ranks().is_empty());
         let _ = proceed_rx.recv_timeout(Duration::from_secs(5));
     }));
     let rx_a = handle
         .start_fire_weapon_cycle_volley(attacker_ship, victims[0].2)
         .await
         .unwrap();
-    arrived_rx.await.unwrap();
     // Write guards must already be dropped before reply/hook delivery points.
-    assert!(handle.ballpark.try_read().is_ok(), "ballpark write guard leaked past lock scope");
-    assert!(handle.actor_state.try_read().is_ok(), "actor_state write guard leaked past lock scope");
+    assert!(
+        arrived_rx.await.unwrap(),
+        "actor write guard leaked past lock scope"
+    );
     drop(rx_a);
     let _ = proceed_tx.send(());
     let _ = handle.list_balls().await.unwrap();
@@ -3850,20 +3871,23 @@ async fn overrun_physics_tick_emits_sim_clock_rebase_for_skipped_secs_1169() {
         .acquire_online_lock(u_docked, 11_170, Some(char_docked), false, ctx.now_unix());
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let tick_0 = sys_h.ballpark.read().unwrap().current_tick;
+    let tick_0 = sys_h.test_with_ballpark_async(|bp| bp.current_tick).await;
     let _ = ctx.drain_notifications_for_char(char_space);
     let _ = ctx.drain_notifications_for_char(char_docked);
 
     // 0-second tick is a no-op once subsec remainder has not reached 1.0s.
     step_active_systems_physics_tick(&ctx, 0).await;
-    assert_eq!(sys_h.ballpark.read().unwrap().current_tick, tick_0);
+    assert_eq!(
+        sys_h.test_with_ballpark_async(|bp| bp.current_tick).await,
+        tick_0
+    );
     assert!(ctx.drain_notifications_for_char(char_space).is_empty());
 
     // 10s overrun steps MAX_PHYSICS_BACKLOG_STEPS (3) ticks and reconciles the 7 skipped seconds
     // via DoSimClockRebase for online in-space pilots only (not docked pilots).
     step_active_systems_physics_tick(&ctx, 10).await;
     assert_eq!(
-        sys_h.ballpark.read().unwrap().current_tick,
+        sys_h.test_with_ballpark_async(|bp| bp.current_tick).await,
         tick_0 + MAX_PHYSICS_BACKLOG_STEPS
     );
 

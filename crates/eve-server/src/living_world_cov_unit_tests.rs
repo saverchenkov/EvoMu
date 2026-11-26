@@ -145,21 +145,21 @@ async fn materialize_lod2_and_mining_op_under_fire_evasion_and_cleanup() {
     assert!(dir.step_npc_mining_op(cid + 1, &systems, &db, &sde).await.is_err());
 
     // Under-fire boundary: 0.5 shield loss (< 1.0 threshold) does NOT trigger warp evasion!
-    {
-        let mut bp = sh.ballpark.write().unwrap();
+    sh.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&cid).unwrap();
         cs.shield_hp = cs.max_shield_hp - 0.5;
-    }
+    })
+    .await;
     dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
     let (_, mb_calm) = sh.get_ball_snapshot(cid).await.unwrap().unwrap();
     assert!(!matches!(mb_calm.mode, MovementMode::Warp { .. }));
 
     // Inflict 2.0 armor damage (> 1.0 threshold) -> both miner and hauler enter Warp toward station!
-    {
-        let mut bp = sh.ballpark.write().unwrap();
+    sh.test_with_ballpark_mut_async(move |bp| {
         let cs = bp.combat_states.get_mut(&cid).unwrap();
         cs.armor_hp = cs.max_armor_hp - 2.0;
-    }
+    })
+    .await;
     clock.advance_secs(5);
     dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
     let (_, mb_evade) = sh.get_ball_snapshot(cid).await.unwrap().unwrap();

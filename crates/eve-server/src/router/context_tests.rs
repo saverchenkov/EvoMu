@@ -904,13 +904,8 @@ async fn unified_clock_tick_pipeline_syncs_ballpark_stats_and_preserves_ice_belt
         ball.max_velocity
     );
     let cs = sys_h
-        .ballpark
-        .read()
-        .unwrap()
-        .combat_states
-        .get(&ship_id)
-        .cloned()
-        .unwrap();
+        .test_with_ballpark_async(move |bp| bp.combat_states.get(&ship_id).cloned().unwrap())
+        .await;
     assert!((cs.max_shield_hp - expected.max_shield_hp).abs() < 1e-3);
 
     ctx.db.with_snapshot(|snap| {
@@ -1832,7 +1827,10 @@ async fn actor_ewar_deactivation_publishes_clean_fit_projection_and_concurrent_c
     let _ = h_jita.get_ball_snapshot(target_ship).await.unwrap();
 
     assert!(ctx.systems.ship_ewar_projections(target_ship).is_empty() && ctx.ship_fittings.read().unwrap().get(&target_ship).is_some_and(|f| f.projected_ewar.is_empty()));
-    let proj_after = h_jita.actor_state.read().unwrap().fit_projections.get(&target_ship).cloned().expect("FitProjection pushed after EWAR flush");
+    let proj_after = h_jita
+        .test_with_actor_state_async(move |st| st.fit_projections.get(&target_ship).cloned())
+        .await
+        .expect("FitProjection pushed after EWAR flush");
     assert!((proj_after.baseline.signature_radius - base_sig).abs() < 1e-6 && h_jita.get_combat_state(target_ship).await.unwrap().unwrap().tp_sig_multiplier.is_none());
     assert!((ctx.effective_target_signature_radius(target_ship, 40.0) - base_sig).abs() < 1e-6);
 
@@ -2204,7 +2202,7 @@ async fn hydrate_server_runtime_preserves_seq_zero_tidi_progress_and_dilated_coo
     seed_ships_and_mods(&ctx.db, sys1, &[s1], &[]);
     write_cooldown_rows(&ctx.db, sys1, &[((s1, m1, tid), cd_entry(t0 as f64, 20.0, sys1))], t0);
     let h1 = ctx.systems.get_or_spawn(sys1);
-    assert_eq!(h1.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
+    assert_eq!(h1.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_seq).await, 0);
     for _ in 0..20 { let _ = h1.step_manual(1.0).await.unwrap(); }
     ctx.hydrate_server_runtime_from_db();
     let c1 = h1.module_reactivation_cooldown(&(s1, m1, tid)).unwrap();
@@ -2218,7 +2216,7 @@ async fn hydrate_server_runtime_preserves_seq_zero_tidi_progress_and_dilated_coo
     seed_ships_and_mods(&ctx.db, sys2, &[s2], &[]);
     write_cooldown_rows(&ctx.db, sys2, &[((s2, m2, tid), cd_entry(t1 as f64, 20.0, sys2))], t1);
     let h2 = ctx.systems.get_or_spawn(sys2);
-    assert_eq!(h2.actor_state.read().unwrap().module_cooldown_checkpoint_seq, 0);
+    assert_eq!(h2.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_seq).await, 0);
     for _ in 0..10 { let _ = h2.step_manual(1.0).await.unwrap(); }
     h2.set_tidi_factor_raw(1.0);
     set_tidi_note(&ctx.db, sys2, "1.0", t1);
@@ -2236,7 +2234,7 @@ async fn hydrate_server_runtime_preserves_seq_zero_tidi_progress_and_dilated_coo
     seed_ships_and_mods(&ctx.db, sys3, &[s3], &[]);
     write_cooldown_rows(&ctx.db, sys3, &[((s3, m3, tid), cd_entry(t2 as f64, 20.0, sys3)), ((s3, m_exp, tid), cd_entry((t2 - 50) as f64, 5.0, sys3))], t2);
     let h3 = ctx.systems.get_or_spawn(sys3);
-    assert!(h3.actor_state.read().unwrap().module_cooldown_checkpoint_seq == 0 && h3.module_reactivation_cooldown(&(s3, m_exp, tid)).is_none());
+    assert!(h3.test_with_actor_state_async(|st| st.module_cooldown_checkpoint_seq).await == 0 && h3.module_reactivation_cooldown(&(s3, m_exp, tid)).is_none());
     for _ in 0..10 { let _ = h3.step_manual(1.0).await.unwrap(); }
     h3.set_tidi_factor_raw(0.2); set_tidi_note(&ctx.db, sys3, "0.2", t2);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t2 + 12)));

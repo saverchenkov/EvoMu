@@ -112,11 +112,15 @@ async fn test_security_mgr_insurgency_multipliers_sites_and_sentry_ewar() {
 
     // apply_counter_insurgency_sentry_ewar on ballpark combat state
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut bp = sys_handle.ballpark.write().unwrap();
-    bp.combat_states.insert(ship_id, eve_destiny::CombatState::default());
-    apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, ship_id, 50.0, 10_000.0);
-    let cs = bp.combat_states.get(&ship_id).unwrap();
-    assert!(cs.signature_radius > 50.0);
+    let sde = Arc::clone(&ctx.sde);
+    let sig = sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.insert(ship_id, eve_destiny::CombatState::default());
+            apply_counter_insurgency_sentry_ewar(&sde, bp, ship_id, 50.0, 10_000.0);
+            bp.combat_states.get(&ship_id).unwrap().signature_radius
+        })
+        .await;
+    assert!(sig > 50.0);
 }
 
 #[test]
@@ -434,66 +438,74 @@ async fn test_active_ci_sentries_ewar_boundaries_and_nearest_sentry_origin() {
     assert!(!has_active_counter_insurgency_sentries(&ctx, sys_id));
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.balls.insert(
-            sentry_ball_id,
-            eve_destiny::Ball {
-                id: sentry_ball_id,
-                type_id: 79_507,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1_000_000.0,
-                radius: 500.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            },
-        );
-        bp.combat_states.insert(
-            sentry_ball_id,
-            eve_destiny::CombatState {
-                structure_hp: 5000.0,
-                max_structure_hp: 5000.0,
-                ..Default::default()
-            },
-        );
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(
+                sentry_ball_id,
+                eve_destiny::Ball {
+                    id: sentry_ball_id,
+                    type_id: 79_507,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 500.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+            );
+            bp.combat_states.insert(
+                sentry_ball_id,
+                eve_destiny::CombatState {
+                    structure_hp: 5000.0,
+                    max_structure_hp: 5000.0,
+                    ..Default::default()
+                },
+            );
+        })
+        .await;
     assert!(has_active_counter_insurgency_sentries(&ctx, sys_id));
 
     // Destroyed sentry (structure_hp <= 0) -> false
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&sentry_ball_id).unwrap().structure_hp = 0.0;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&sentry_ball_id).unwrap().structure_hp = 0.0;
+        })
+        .await;
     assert!(!has_active_counter_insurgency_sentries(&ctx, sys_id));
 
     // EWAR range & base_signature_radius boundaries
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.combat_states.insert(
-            ship_id,
-            eve_destiny::CombatState {
-                signature_radius: 0.0,
-                base_signature_radius: None,
-                ..Default::default()
-            },
-        );
-        // Outside 250 km -> no TP and no ECM
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, ship_id, 20.0, 300_000.0);
-        assert_eq!(bp.combat_states[&ship_id].base_signature_radius, None);
+    let sde = Arc::clone(&ctx.sde);
+    let (base_far, base_tp, painted_sig, second_sig) = sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.insert(
+                ship_id,
+                eve_destiny::CombatState {
+                    signature_radius: 0.0,
+                    base_signature_radius: None,
+                    ..Default::default()
+                },
+            );
+            // Outside 250 km -> no TP and no ECM
+            apply_counter_insurgency_sentry_ewar(&sde, bp, ship_id, 20.0, 300_000.0);
+            let base_far = bp.combat_states[&ship_id].base_signature_radius;
 
-        // Between 75 km and 250 km -> TP applied (clamped min base 35.0 -> 52.5), no ECM
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, ship_id, 20.0, 100_000.0);
-        assert_eq!(bp.combat_states[&ship_id].base_signature_radius, Some(35.0));
-        let painted_sig = bp.combat_states[&ship_id].signature_radius;
-        assert!(painted_sig > 35.0);
+            // Between 75 km and 250 km -> TP applied (clamped min base 35.0 -> 52.5), no ECM
+            apply_counter_insurgency_sentry_ewar(&sde, bp, ship_id, 20.0, 100_000.0);
+            let base_tp = bp.combat_states[&ship_id].base_signature_radius;
+            let painted_sig = bp.combat_states[&ship_id].signature_radius;
 
-        // Second application does not compound base_signature_radius
-        apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, ship_id, 20.0, 100_000.0);
-        assert!((bp.combat_states[&ship_id].signature_radius - painted_sig).abs() < 1e-9);
-    }
+            // Second application does not compound base_signature_radius
+            apply_counter_insurgency_sentry_ewar(&sde, bp, ship_id, 20.0, 100_000.0);
+            let second_sig = bp.combat_states[&ship_id].signature_radius;
+            (base_far, base_tp, painted_sig, second_sig)
+        })
+        .await;
+    assert_eq!(base_far, None);
+    assert_eq!(base_tp, Some(35.0));
+    assert!(painted_sig > 35.0);
+    assert!((second_sig - painted_sig).abs() < 1e-9);
 
     // nearest_sentry_gun_origin near an SDE stargate/station vs far away
     if let Some(gate_pos) = ctx

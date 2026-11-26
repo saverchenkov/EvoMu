@@ -253,24 +253,24 @@ async fn space_warp_to_stuff_branches_invuln_and_cap_scaling() {
     });
     assert_eq!(handle_warp_jump(&ctx, &mut sess, Some(&bad_bound), "beyonce", "CmdWarpToStuff", &[kind_bm.clone(), PyRep::Integer(903)], &kw).await.unwrap().unwrap_err().code, "WarpDistanceTooShort");
 
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         if let Some(b) = bp.balls.get_mut(&ship_id) { b.mass = 1_000_000.0; }
         if let Some(cs) = bp.combat_states.get_mut(&ship_id) { cs.capacitor = 5.0; }
-    }
+    })
+    .await;
     assert!(handle_warp_jump(&ctx, &mut sess, Some(&bad_bound), "beyonce", "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(904)], &kw).await.unwrap().is_ok());
 
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         if let Some(b) = bp.balls.get_mut(&ship_id) { b.mode = eve_destiny::MovementMode::Stop; }
         if let Some(cs) = bp.combat_states.get_mut(&ship_id) { cs.capacitor = 0.0; }
-    }
+    })
+    .await;
     assert_eq!(handle_warp_jump(&ctx, &mut sess, Some(&bad_bound), "beyonce", "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(904)], &kw).await.unwrap().unwrap_err().code, "NotEnoughCapacitor");
 
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         if let Some(cs) = bp.combat_states.get_mut(&ship_id) { cs.capacitor = 500.0; }
-    }
+    })
+    .await;
     assert!(handle_warp_jump(&ctx, &mut sess, Some(&bad_bound), "beyonce", "CmdWarpToStuffAutopilot", &[PyRep::Integer(60_003_760)], &kw).await.unwrap().is_ok());
 
     sys.modify_combat_state(ship_id, |cs| {

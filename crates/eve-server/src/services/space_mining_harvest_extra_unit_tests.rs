@@ -697,21 +697,38 @@ async fn tick_all_ice_belt_respawns_matrix_and_wormhole_ore_guard_slim_meta() {
     )
     .await;
 
-    let bp = g_handle.ballpark.read().unwrap();
-    let m0 = bp.ball_slim_meta.get(&g0_id).expect("f0 guard meta");
-    assert_eq!(m0.group_id, 551);
-    assert_eq!(m0.category_id, 11);
-    assert_eq!(m0.owner_id, 500_021);
-    assert_eq!(m0.char_id, None);
-    assert_eq!(m0.corp_id, 1_000_431);
-    assert_eq!(m0.alliance_id, -1);
-    assert!((m0.security_status - (-1.0)).abs() < 1e-6);
-    assert!(!m0.is_cloaked);
-    assert_eq!(m0.name.as_deref(), Some("Zero Faction Guard"));
+    let (m0_tuple, m510_tuple) = g_handle
+        .test_with_ballpark_async(move |bp| {
+            let m0 = bp.ball_slim_meta.get(&g0_id).expect("f0 guard meta");
+            let m510 = bp.ball_slim_meta.get(&g510_id).expect("f510 guard meta");
+            (
+                (
+                    m0.group_id,
+                    m0.category_id,
+                    m0.owner_id,
+                    m0.char_id,
+                    m0.corp_id,
+                    m0.alliance_id,
+                    m0.security_status,
+                    m0.is_cloaked,
+                    m0.name.clone(),
+                ),
+                (m510.group_id, m510.owner_id, m510.corp_id, m510.name.clone()),
+            )
+        })
+        .await;
+    assert_eq!(m0_tuple.0, 551);
+    assert_eq!(m0_tuple.1, 11);
+    assert_eq!(m0_tuple.2, 500_021);
+    assert_eq!(m0_tuple.3, None);
+    assert_eq!(m0_tuple.4, 1_000_431);
+    assert_eq!(m0_tuple.5, -1);
+    assert!((m0_tuple.6 - (-1.0)).abs() < 1e-6);
+    assert!(!m0_tuple.7);
+    assert_eq!(m0_tuple.8.as_deref(), Some("Zero Faction Guard"));
 
-    let m510 = bp.ball_slim_meta.get(&g510_id).expect("f510 guard meta");
-    assert_eq!(m510.group_id, 552);
-    assert_eq!(m510.owner_id, 500_010);
-    assert_eq!(m510.corp_id, 1_000_127);
-    assert_eq!(m510.name.as_deref(), Some("Guristas Ore Guard"));
+    assert_eq!(m510_tuple.0, 552);
+    assert_eq!(m510_tuple.1, 500_010);
+    assert_eq!(m510_tuple.2, 1_000_127);
+    assert_eq!(m510_tuple.3.as_deref(), Some("Guristas Ore Guard"));
 }

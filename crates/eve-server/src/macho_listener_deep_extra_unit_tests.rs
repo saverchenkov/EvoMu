@@ -1746,11 +1746,11 @@ async fn death_respawn_from_space_to_station_detaches_without_stale_destiny_1010
     {}
 
     // Simulate fatal pod damage + DeathRespawn to home station + manual tick broadcast (#1010).
-    {
-        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    jita.test_with_ballpark_mut_async(move |bp| {
         let grid_id = bp.ball_grid_ids.get(&old_ship_id).copied();
         bp.emit_damage_and_destruction_events(old_ship_id, grid_id, 0.0, 0.0, 0.0, true);
-    }
+    })
+    .await;
     let _ = ctx
         .db
         .respawn_character_at_home_station(char_id, old_ship_id, &ctx.sde);
@@ -1883,16 +1883,17 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
     let _ = read_until_call_reply(&mut s).await;
 
     let jita = ctx.systems.get_or_spawn(sys_id);
-    let ship_pos = {
-        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let mut peer_ball = bp.balls.get(&old_ship_id).expect("undocked ship ball").clone();
-        let pos = peer_ball.position;
-        peer_ball.id = peer_ship_id;
-        peer_ball.position += DVec3::new(1_000.0, 0.0, 0.0);
-        assert!(bp.add_ball(peer_ball));
-        bp.observer_events.entry(peer_ship_id).or_default();
-        pos
-    };
+    let ship_pos = jita
+        .test_with_ballpark_mut_async(move |bp| {
+            let mut peer_ball = bp.balls.get(&old_ship_id).expect("undocked ship ball").clone();
+            let pos = peer_ball.position;
+            peer_ball.id = peer_ship_id;
+            peer_ball.position += DVec3::new(1_000.0, 0.0, 0.0);
+            assert!(bp.add_ball(peer_ball));
+            bp.observer_events.entry(peer_ship_id).or_default();
+            pos
+        })
+        .await;
     let _ = jita.step_manual(1.0).await.unwrap();
 
     write_framed_pyrep(
@@ -1924,12 +1925,12 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
     {}
 
     // 1. Fatal ship damage broadcast BEFORE execute_death_pipeline updates DB (the cycles.rs race #1039).
-    {
-        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    jita.test_with_ballpark_mut_async(move |bp| {
         let grid_id = bp.ball_grid_ids.get(&old_ship_id).copied();
         bp.observer_events.entry(peer_ship_id).or_default();
         bp.emit_damage_and_destruction_events(old_ship_id, grid_id, 0.0, 0.0, 0.0, true);
-    }
+    })
+    .await;
     let ship_tick = jita.step_manual(1.0).await.unwrap();
     let peer_ship_pyrep = ship_tick
         .observer_updates_pyrep
@@ -1988,12 +1989,12 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
     assert!(saw_pod_sess, "pod ejection must emit SessionChangeNotification");
 
     // 3. Rapid pod death within the 2-tick deferral window -> DeathRespawn to home station.
-    {
-        let mut bp = jita.ballpark.write().unwrap_or_else(|e| e.into_inner());
+    jita.test_with_ballpark_mut_async(move |bp| {
         let grid_id = bp.ball_grid_ids.get(&pod_id).copied();
         bp.observer_events.entry(peer_ship_id).or_default();
         bp.emit_damage_and_destruction_events(pod_id, grid_id, 0.0, 0.0, 0.0, true);
-    }
+    })
+    .await;
     let pod_tick = jita.step_manual(1.0).await.unwrap();
     let peer_pod_pyrep = pod_tick
         .observer_updates_pyrep

@@ -994,7 +994,9 @@ async fn maybe_emit_login_sim_clock_rebase_stays_client_anchored_across_advancet
 
     // 1. Un-dilated ballpark caught up to real client wallclock must NOT emit a bogus
     //    DoSimClockRebase when `/advancetime` shifts server virtual time +12.95 days ahead.
-    handle.ballpark.write().unwrap().sim_unix_secs = base;
+    handle
+        .test_with_ballpark_mut_async(move |bp| bp.sim_unix_secs = base)
+        .await;
     ctx.advance_secs_without_sim_clock_rebase(1_119_223);
     let _ = ctx.drain_notifications_for_char(char_id);
     maybe_emit_login_sim_clock_rebase(&ctx, char_id, sys_id);

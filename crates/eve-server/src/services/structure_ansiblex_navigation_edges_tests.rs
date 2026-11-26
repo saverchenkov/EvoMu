@@ -483,10 +483,11 @@ async fn ansiblex_jump_all_guards_and_specialized_fuel_bay_multi_stack_depletion
     });
 
     // Ball mass > ANSIBLEX_MAX_MASS_KG
-    {
-        let mut bp = sys_a_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().mass = ANSIBLEX_MAX_MASS_KG + 100.0;
-    }
+    sys_a_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().mass = ANSIBLEX_MAX_MASS_KG + 100.0;
+        })
+        .await;
     assert_eq!(
         handle_cmd_jump_through_structure_stargate(&ctx, &mut sess, &[PyRep::Integer(jb_a)])
             .await
@@ -494,10 +495,11 @@ async fn ansiblex_jump_all_guards_and_specialized_fuel_bay_multi_stack_depletion
             .code,
         "ShipNotAllowedThroughAnsiblex"
     );
-    {
-        let mut bp = sys_a_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().mass = 1_000_000.0;
-    }
+    sys_a_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().mass = 1_000_000.0;
+        })
+        .await;
 
     // OutsideJumpBridgeRange
     let _ = sys_a_h

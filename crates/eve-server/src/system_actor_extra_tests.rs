@@ -1020,13 +1020,13 @@ async fn activate_module_cycle_atomic_preserves_protection_when_break_false_and_
     assert_eq!(cs_after.gate_cloak_remaining_ticks, 60);
     assert!(db.with_snapshot(|s| s.module_active_states.contains(&mod_id)));
     let spool_still = h
-        .actor_state
-        .read()
-        .unwrap()
-        .active_module_cycles
-        .iter()
-        .find(|c| c.ship_id == ship_id && c.module_id == mod_id)
-        .map(|c| c.current_spool_cycles);
+        .test_with_actor_state_async(move |st| {
+            st.active_module_cycles
+                .iter()
+                .find(|c| c.ship_id == ship_id && c.module_id == mod_id)
+                .map(|c| c.current_spool_cycles)
+        })
+        .await;
     assert_eq!(spool_still, Some(3));
 }
 
@@ -1285,8 +1285,7 @@ async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs
     .await
     .unwrap();
 
-    {
-        let st = h.actor_state.read().unwrap();
+    h.test_with_actor_state_async(|st| {
         let epoch_of = |mid: i64| {
             st.active_module_cycles
                 .iter()
@@ -1298,7 +1297,8 @@ async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs
         assert_eq!(epoch_of(91_002), None);
         assert_eq!(epoch_of(91_003), Some(42));
         assert_eq!(epoch_of(91_004), Some(99));
-    }
+    })
+    .await;
 
     // TakeBall + RestoreBallIfAbsent preserves origin_scene_epoch verbatim even after DB epoch changes.
     let taken = h
@@ -1327,16 +1327,17 @@ async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs
     db.set_session_scene_epoch(sess_id, 123);
     h.restore_ball_if_absent(taken).await.unwrap();
 
-    let st_restored = h.actor_state.read().unwrap();
-    assert_eq!(
-        st_restored
-            .active_module_cycles
-            .iter()
-            .find(|c| c.module_id == 91_003)
-            .unwrap()
-            .origin_scene_epoch,
-        Some(42)
-    );
+    let restored_epoch = h
+        .test_with_actor_state_async(|st_restored| {
+            st_restored
+                .active_module_cycles
+                .iter()
+                .find(|c| c.module_id == 91_003)
+                .unwrap()
+                .origin_scene_epoch
+        })
+        .await;
+    assert_eq!(restored_epoch, Some(42));
     assert_eq!(
         st_restored
             .active_module_cycles

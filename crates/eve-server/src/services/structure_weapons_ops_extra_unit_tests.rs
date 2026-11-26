@@ -166,9 +166,11 @@ async fn target_locking_error_branches_structure_vs_structure_and_max_locked_tar
     sys_handle.try_update_combat_state(ship_id, |cs| {
         cs.is_cloaked = false;
     });
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(900_000.0, 0.0, 0.0);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(900_000.0, 0.0, 0.0);
+        })
+        .await;
     assert_eq!(
         handle_structure_add_target(&ctx, &sess, gunner_id, st_id, ship_id)
             .await
@@ -178,19 +180,21 @@ async fn target_locking_error_branches_structure_vs_structure_and_max_locked_tar
     );
 
     // 6. Fill target_locks to max_locks -> MaxLockedTargets
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(20_000.0, 0.0, 0.0);
-        let locks = bp.target_locks.entry(st_id).or_default();
-        for idx in 0..10 {
-            locks.push(TargetLock {
-                target_id: 800_000 + idx,
-                lock_time_ms: 0.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: Some(300_000.0),
-            });
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(20_000.0, 0.0, 0.0);
+            let locks = bp.target_locks.entry(st_id).or_default();
+            for idx in 0..10 {
+                locks.push(TargetLock {
+                    target_id: 800_000 + idx,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(300_000.0),
+                });
+            }
+        })
+        .await;
     assert_eq!(
         handle_structure_add_target(&ctx, &sess, gunner_id, st_id, ship_id)
             .await
@@ -448,9 +452,11 @@ async fn standup_weapon_highsec_superweapon_charge_capacitor_and_burst_projector
     }
 
     // 5. OutOfRange check
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(800_000.0, 0.0, 0.0);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(800_000.0, 0.0, 0.0);
+        })
+        .await;
     assert_eq!(
         handle_structure_module_activate(&ctx, &mut sess, gunner_id, st_id, mod_launch, "fx", Some(ship_id), false)
             .await
@@ -458,9 +464,11 @@ async fn standup_weapon_highsec_superweapon_charge_capacitor_and_burst_projector
             .code,
         "OutOfRange"
     );
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(15_000.0, 0.0, 0.0);
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(15_000.0, 0.0, 0.0);
+        })
+        .await;
 
     // 6. NoChargesLoaded & InvalidChargeGroup
     assert_eq!(

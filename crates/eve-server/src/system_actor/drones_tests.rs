@@ -491,10 +491,12 @@ async fn already_persisted_seq_without_commit_clears_dirty_and_restores_hibernat
     sys.upsert_active_drone(d.clone()).await.unwrap();
     assert!(!sys.is_hibernated());
     let _ = rtx.send(()); h.await.unwrap();
-    let shared = sys.ballpark.drone_hydration_shared().unwrap();
-    assert_eq!(drones::write_sqlite_for_shared(shared, sys_id, 1, &[(d.ball_id, d.clone())], true), drones::FlushWriteOutcome::Written);
+    let shared = sys
+        .test_with_actor_state_async(|st| st.drone_hydration.clone())
+        .await;
+    assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 1, &[(d.ball_id, d.clone())], true), drones::FlushWriteOutcome::Written);
     assert!(!sys.is_hibernated());
-    assert_eq!(drones::write_sqlite_for_shared(shared, sys_id, 1, &[(d.ball_id, d)], true), drones::FlushWriteOutcome::AlreadyAtOrPastSeq);
+    assert_eq!(drones::write_sqlite_for_shared(&shared, sys_id, 1, &[(d.ball_id, d)], true), drones::FlushWriteOutcome::AlreadyAtOrPastSeq);
     let _ = sys.step_manual(1.0).await.unwrap();
     let _ = sys.step_manual(1.0).await.unwrap();
     assert!(sys.is_hibernated() && !shared.dirty.load(std::sync::atomic::Ordering::Acquire));

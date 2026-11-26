@@ -396,27 +396,43 @@ async fn random_jump_filament_queues_set_state_and_valid_nullsec_ess_slim_items(
     .expect("essMgr handled")
     .expect("essMgr ok");
 
-    let bp = dest_h.ballpark.read().unwrap();
-    let visible = bp.visible_balls_for_observer(ship_id);
-    assert!(!visible.is_empty(), "expected visible destination balls");
-    for ball in visible {
-        let meta = eve_destiny::wire::resolve_slim_item_meta(Some(&bp), ball);
-        let slim = eve_destiny::wire::slim_item_dict(ball, &meta);
-        let tid = slim.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0);
-        let gid = slim.dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0);
-        let cid = slim.dict_get("categoryID").and_then(|v| v.as_i64()).unwrap_or(0);
-        assert!(tid > 0 && gid > 0 && cid > 0, "invalid slim item for ball {}: {:?}", ball.id, slim);
-        if matches!(ball.mode, eve_destiny::MovementMode::Rigid) {
-            assert_ne!(cid, 6, "rigid ball {} ({tid}) must not be misclassified as category Ship", ball.id);
+    let dest_sys_i64 = i64::from(dest_sys);
+    let visible_slims: Vec<(i64, bool, i64, i64, i64, String)> = dest_h
+        .test_with_ballpark_async(move |bp| {
+            let visible = bp.visible_balls_for_observer(ship_id);
+            visible
+                .into_iter()
+                .map(|ball| {
+                    let meta = eve_destiny::wire::resolve_slim_item_meta(Some(bp), ball);
+                    let slim = eve_destiny::wire::slim_item_dict(ball, &meta);
+                    let tid = slim.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let gid = slim.dict_get("groupID").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let cid = slim.dict_get("categoryID").and_then(|v| v.as_i64()).unwrap_or(0);
+                    (
+                        ball.id,
+                        matches!(ball.mode, eve_destiny::MovementMode::Rigid),
+                        tid,
+                        gid,
+                        cid,
+                        format!("{slim:?}"),
+                    )
+                })
+                .collect()
+        })
+        .await;
+    assert!(!visible_slims.is_empty(), "expected visible destination balls");
+    for (ball_id, is_rigid, tid, gid, cid, slim_dbg) in visible_slims {
+        assert!(tid > 0 && gid > 0 && cid > 0, "invalid slim item for ball {ball_id}: {slim_dbg}");
+        if is_rigid {
+            assert_ne!(cid, 6, "rigid ball {ball_id} ({tid}) must not be misclassified as category Ship");
         }
-        if ball.id == crate::services::pve_ess_reserve_banks::ESS_BEACON_ID_BASE + i64::from(dest_sys) {
+        if ball_id == crate::services::pve_ess_reserve_banks::ESS_BEACON_ID_BASE + dest_sys_i64 {
             assert_eq!((tid, gid, cid), (55914, 4079, 2));
         }
-        if ball.id == crate::services::pve_ess_reserve_banks::ESS_GATE_ID_BASE + i64::from(dest_sys) {
+        if ball_id == crate::services::pve_ess_reserve_banks::ESS_GATE_ID_BASE + dest_sys_i64 {
             assert_eq!((tid, gid, cid), (17831, 366, 2));
         }
     }
-    drop(bp);
 
     let (_st_tick, set_state_rep, _up) = dest_h.get_set_state(ship_id).await.expect("get_set_state");
     assert!(matches!(set_state_rep, PyRep::KeyVal(_)));

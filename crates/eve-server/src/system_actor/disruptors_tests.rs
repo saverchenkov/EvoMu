@@ -286,29 +286,33 @@ async fn try_remove_module_cycle_removes_matching_cycle_and_keeps_others() {
     let reg = crate::system_actor::SystemRegistry::new();
     let handle = reg.get_or_spawn(30_000_142);
 
-    {
-        let mut st = handle.actor_state.write().unwrap();
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id: 300,
-            module_id: 701,
-            elapsed_s: 4.5,
-            duration_s: 10.0,
-            ..ActiveModuleCycle::default()
-        });
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id: 300,
-            module_id: 702,
-            elapsed_s: 1.0,
-            duration_s: 10.0,
-            ..ActiveModuleCycle::default()
-        });
-    }
+    handle
+        .test_with_actor_state_mut_async(|st| {
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id: 300,
+                module_id: 701,
+                elapsed_s: 4.5,
+                duration_s: 10.0,
+                ..ActiveModuleCycle::default()
+            });
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id: 300,
+                module_id: 702,
+                elapsed_s: 1.0,
+                duration_s: 10.0,
+                ..ActiveModuleCycle::default()
+            });
+        })
+        .await;
 
     handle.try_remove_module_cycle(300, 701);
     handle.try_remove_module_cycle(300, 701);
-    let st = handle.actor_state.read().unwrap();
-    assert_eq!(st.active_module_cycles.len(), 1);
-    assert_eq!(st.active_module_cycles[0].module_id, 702);
+    let remaining_ids: Vec<i64> = handle
+        .test_with_actor_state_async(|st| {
+            st.active_module_cycles.iter().map(|c| c.module_id).collect()
+        })
+        .await;
+    assert_eq!(remaining_ids, vec![702]);
 }
 
 #[test]
@@ -400,17 +404,19 @@ async fn try_remove_module_cycle_clears_db_active_state_and_charges() {
         snap.module_active_states.insert(801);
         snap.module_active_charges.insert(801, 12);
     });
-    {
-        let mut st = handle.actor_state.write().unwrap();
-        st.db_opt = Some(Arc::clone(&db));
-        st.active_module_cycles.push(ActiveModuleCycle {
-            ship_id: 410,
-            module_id: 801,
-            elapsed_s: 2.0,
-            duration_s: 10.0,
-            ..ActiveModuleCycle::default()
-        });
-    }
+    let db_c = Arc::clone(&db);
+    handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.db_opt = Some(db_c);
+            st.active_module_cycles.push(ActiveModuleCycle {
+                ship_id: 410,
+                module_id: 801,
+                elapsed_s: 2.0,
+                duration_s: 10.0,
+                ..ActiveModuleCycle::default()
+            });
+        })
+        .await;
 
     handle.try_remove_module_cycle(410, 801);
     db.with_snapshot(|snap| {

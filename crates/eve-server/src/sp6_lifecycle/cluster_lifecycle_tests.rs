@@ -1358,32 +1358,41 @@ async fn sp6_lifecycle_hp_persistence_unification_filament_gates_logoff_and_reco
         "WeaponsTimerActive"
     );
     ctx.crimewatch.with_mut_crimewatch(|cw| cw.states.clear());
-    {
-        let mut bp_w = sys_h.ballpark.write().unwrap();
-        bp_w.combat_states.get_mut(&ship_id).unwrap().lance_disrupted_remaining_s = 12.0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp_w| {
+            bp_w.combat_states
+                .get_mut(&ship_id)
+                .unwrap()
+                .lance_disrupted_remaining_s = 12.0;
+        })
+        .await;
     assert_eq!(
         require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id)
             .unwrap_err()
             .code,
         "DisruptiveLanceDebuffActive"
     );
-    {
-        let mut bp_w = sys_h.ballpark.write().unwrap();
-        let cs = bp_w.combat_states.get_mut(&ship_id).unwrap();
-        cs.lance_disrupted_remaining_s = 0.0;
-        cs.warp_scramble_strength = 2;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp_w| {
+            let cs = bp_w.combat_states.get_mut(&ship_id).unwrap();
+            cs.lance_disrupted_remaining_s = 0.0;
+            cs.warp_scramble_strength = 2;
+        })
+        .await;
     assert_eq!(
         require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id)
             .unwrap_err()
             .code,
         "WarpScrambled"
     );
-    {
-        let mut bp_w = sys_h.ballpark.write().unwrap();
-        bp_w.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 0;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp_w| {
+            bp_w.combat_states
+                .get_mut(&ship_id)
+                .unwrap()
+                .warp_scramble_strength = 0;
+        })
+        .await;
 
     // 4. `maybe_abort_safe_logoff_on_action`, `handle_character_logoff_or_disconnect`, `reconnect_character_in_space_sync`
     assert!(!maybe_abort_safe_logoff_on_action(&ctx, char_id, "ModuleActivated"));

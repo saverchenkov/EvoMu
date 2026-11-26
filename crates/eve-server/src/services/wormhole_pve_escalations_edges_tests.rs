@@ -153,12 +153,8 @@ async fn spawn_missing_sde_warping_capital_non_cap_and_drifter_core_strength() {
     // Drifter gets warp core strength = 3 in both system actor_state and ballpark CombatState
     assert_eq!(
         sys_h
-            .actor_state
-            .read()
-            .unwrap()
-            .base_core_strengths
-            .get(&drifter_bid)
-            .copied(),
+            .test_with_actor_state_async(move |st| st.base_core_strengths.get(&drifter_bid).copied())
+            .await,
         Some(3)
     );
     let dr_cs = sys_h.get_combat_state(drifter_bid).await.unwrap().unwrap();
