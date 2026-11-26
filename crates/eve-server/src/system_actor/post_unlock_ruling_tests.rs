@@ -1713,7 +1713,8 @@ async fn track_1d_r2_bug01_legacy_rack_heat_cools_to_zero_without_resurrection()
         let mut st = sys.actor_state.write().unwrap();
         let seq = st.next_post_unlock_seq.saturating_add(1);
         st.ship_rack_heat.insert(ship_id, [0.05, 0.0, 0.0]);
-        let (rack_heat, rack_pending) = (&mut st.ship_rack_heat, &mut st.post_unlock_shadows.rack_heat_pending);
+        let st_ref = &mut *st;
+        let (rack_heat, rack_pending) = (&mut st_ref.ship_rack_heat, &mut st_ref.post_unlock_shadows.rack_heat_pending);
         step_rack_heat_per_tick_collecting(
             rack_heat,
             &[],
