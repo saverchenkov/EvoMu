@@ -770,7 +770,7 @@ fn emit_ess_fallback_cloak_deactivation(
             active: 0,
             duration: 0.0,
             repeat: 0,
-            start_time: now.as_ticks(),
+            start_time: now,
             time_from_start: 0.0,
             graphic_info: None,
         };

@@ -1509,3 +1509,163 @@ async fn recall_fighters_rejects_concurrent_dock_in_db_and_abandons_without_movi
     assert_eq!(sq.parent_ship_id, 0);
     assert_eq!(sq.target_id, None);
 }
+
+#[tokio::test]
+async fn fighter_tube_task_status_and_ability_activated_track_anchored_sim_filetime_under_tidi() {
+    use eve_db::clock::{FILETIME_TICKS_PER_MS, SimFileTime};
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let fid = 910_901_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fid,
+            make_fighter_item(fid, 23_057, char_id, ship_id, eve_db::InventoryFlag::FighterBay, 9),
+        );
+    });
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LoadFightersToTube",
+        &[PyRep::Integer(fid), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Freeze virtual wall clock and anchor system sim clock -300s behind it at TiDi = 0.25.
+    ctx.set_clock(std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_775_400_000,
+    )));
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 0.25);
+    let wall_0 = ctx.now_machonet_wall_filetime();
+    let sim_0 = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock");
+    assert_eq!(sim_0.as_ticks() - wall_0.as_ticks(), -300_000 * FILETIME_TICKS_PER_MS);
+
+    session.drain_notifications();
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(159)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fball = fighter_test_helpers::find_active_fighter_by_item(&ctx, fid)
+        .expect("launched fighter")
+        .ball_id;
+
+    let launch_notifs = session.drain_notifications();
+    let inspace_args = launch_notifs
+        .iter()
+        .find(|(ev, p)| ev == "OnFighterTubeTaskStatus" && p.get(1) == Some(&PyRep::String("INSPACE".into())))
+        .map(|(_, p)| p)
+        .expect("expected OnFighterTubeTaskStatus INSPACE notification");
+    let inspace_start = SimFileTime::from_ticks(inspace_args[2].as_i64().expect("INSPACE start_time"));
+    let inspace_end = SimFileTime::from_ticks(inspace_args[3].as_i64().expect("INSPACE end_time"));
+    assert_eq!(inspace_start, inspace_end);
+    assert!(
+        (0..=5).contains(&(inspace_start.as_ticks() - sim_0.as_ticks())),
+        "OnFighterTubeTaskStatus INSPACE timestamp ({}) must align with anchored SimFileTime ({})",
+        inspace_start.as_ticks(),
+        sim_0.as_ticks(),
+    );
+
+    // Advance 8 wall seconds at TiDi = 0.25 -> sim clock moves +2s.
+    ctx.advance_secs(8);
+    let sim_1 = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock after 8s");
+    assert_eq!(sim_1, sim_0.saturating_add_secs(2));
+
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdActivateAbilitySlots",
+        &[PyRep::List(vec![PyRep::Integer(fball)]), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate untargeted fighter ability slot 1");
+    let ab_notifs = session.drain_notifications();
+    let ab_args = ab_notifs
+        .iter()
+        .find(|(ev, _)| ev == "OnFighterAbilitySlotActivated")
+        .map(|(_, p)| p)
+        .expect("expected OnFighterAbilitySlotActivated notification");
+    let ab_start = SimFileTime::from_ticks(ab_args[3].as_i64().expect("ability start_time"));
+    assert!(
+        (0..=5).contains(&(ab_start.as_ticks() - sim_1.as_ticks())),
+        "OnFighterAbilitySlotActivated start_time ({}) must track dilated SimFileTime ({})",
+        ab_start.as_ticks(),
+        sim_1.as_ticks(),
+    );
+
+    // Advance 4 more wall seconds at TiDi = 0.25 -> sim clock moves +1s (total +3s sim).
+    ctx.advance_secs(4);
+    let sim_2 = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock after +4s");
+    assert_eq!(sim_2, sim_0.saturating_add_secs(3));
+    let _ = sys_handle.set_ball_position(fball, DVec3::new(100.0, 0.0, 0.0)).await;
+
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "RecallFightersToTubes",
+        &[PyRep::List(vec![PyRep::Integer(fball)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let recall_notifs = session.drain_notifications();
+    let refuel_args = recall_notifs
+        .iter()
+        .find(|(ev, p)| ev == "OnFighterTubeTaskStatus" && p.get(1) == Some(&PyRep::String("REFUELING".into())))
+        .map(|(_, p)| p)
+        .expect("expected OnFighterTubeTaskStatus REFUELING notification");
+    let refuel_start = SimFileTime::from_ticks(refuel_args[2].as_i64().expect("REFUELING start_time"));
+    let refuel_end = SimFileTime::from_ticks(refuel_args[3].as_i64().expect("REFUELING end_time"));
+    assert!(
+        (0..=5).contains(&(refuel_start.as_ticks() - sim_2.as_ticks())),
+        "OnFighterTubeTaskStatus REFUELING status_start_time ({}) must track dilated SimFileTime ({})",
+        refuel_start.as_ticks(),
+        sim_2.as_ticks(),
+    );
+    assert!(
+        refuel_end > refuel_start,
+        "REFUELING status_end_time ({}) must exceed status_start_time ({})",
+        refuel_end.as_ticks(),
+        refuel_start.as_ticks(),
+    );
+    assert_eq!(
+        (refuel_end.as_ticks() - refuel_start.as_ticks()) % eve_db::clock::FILETIME_TICKS_PER_SEC,
+        0,
+        "REFUELING duration must be an integral number of SimFileTime seconds"
+    );
+}

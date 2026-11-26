@@ -138,7 +138,7 @@ fn emit_salvage_stop_special_fx(
     let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) else {
         return;
     };
-    let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+    let now = ctx.now_system_sim_filetime_for_ship(char_id, ship_id);
     let sfx_notif = crate::router::notify_registry::OnSpecialFX {
         scene,
         ship_id,

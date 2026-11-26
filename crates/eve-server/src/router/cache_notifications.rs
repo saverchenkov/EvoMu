@@ -1975,7 +1975,7 @@ impl ServerContext {
                 target_id,
                 repeat,
                 duration_ms,
-                now.as_ticks(),
+                now,
                 charge_type_id_override,
             );
         }
@@ -1991,7 +1991,7 @@ impl ServerContext {
         repeat: i32, duration_ms: f64, charge_type_id_override: Option<u32>,
     ) {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
-        let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+        let now = self.now_system_sim_filetime_for_ship(char_id, ship_id);
         self.emit_module_special_fx_started(
             scene, char_id, ship_id, module_id, module_type_id, effect_id, effect_name, target_id, repeat, duration_ms, now, charge_type_id_override,
         );
@@ -2001,7 +2001,7 @@ impl ServerContext {
     fn emit_module_special_fx_started(
         &self, scene: crate::outbound_scene_scope::BallparkScene, char_id: i64, ship_id: i64,
         module_id: i64, module_type_id: u32, effect_id: i64, effect_name: Option<&str>,
-        target_id: Option<i64>, repeat: i32, duration_ms: f64, now: i64, charge_type_id_override: Option<u32>,
+        target_id: Option<i64>, repeat: i32, duration_ms: f64, now: eve_db::clock::SimFileTime, charge_type_id_override: Option<u32>,
     ) {
         if let Some((sfx_guid, is_offensive)) =
             crate::router::binding::special_fx_guid_for_module_sde(&self.sde, module_type_id, effect_id, effect_name)

@@ -306,7 +306,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                             name_opt,
                         )
                     {
-                        let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+                        let now = ctx.now_system_sim_filetime_for_ship(char_id, ship_id);
                         if let Some(scene) = session
                             .solar_system_id
                             .and_then(crate::router::notify_registry::BallparkScene::try_solar_system)

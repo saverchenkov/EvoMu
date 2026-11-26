@@ -9,9 +9,7 @@
 
 use crate::router::notify_registry::OnLPChange;
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::combat_crimewatch::{
-    with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
-};
+use crate::services::combat_crimewatch::{with_mut_combat_ephemeral, ExtendedNpcEntity};
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats;
 use crate::services::pve_special_sites::PveSpecialSitesRegistry;
@@ -49,19 +47,19 @@ const HOMEFRONT_WARP_ARRIVAL_RADIUS_M: f64 = 50_000.0;
 const HOMEFRONT_AAR_ROCKS_PER_WAVE: usize = 12;
 const HOMEFRONT_AAR_UNITS_PER_ROCK: u32 = 27;
 const HOMEFRONT_AAR_MUTANITE_TYPE_ID: TypeId = 77_524;
-const HOMEFRONT_AAR_BASILEUS_TYPE_ID: TypeId = 77_702;
-const HOMEFRONT_AAR_CACHE_TYPE_ID: TypeId = 77_727;
+pub(super) const HOMEFRONT_AAR_BASILEUS_TYPE_ID: TypeId = 77_702;
+pub(super) const HOMEFRONT_AAR_CACHE_TYPE_ID: TypeId = 77_727;
 const HOMEFRONT_AAR_CACHE_WRECK_TYPE_ID: TypeId = 84_467;
 const HOMEFRONT_SALVAGE_WRECK_TYPE_ID: TypeId = 81_438;
 const HOMEFRONT_SALVAGE_NPC_OWNER_ID: i64 = 1_000_125;
 pub const HOMEFRONT_SALVAGE_DATA_TYPE_ID: TypeId = 81_352;
 const HOMEFRONT_SALVAGE_WERPOST_TYPE_ID: TypeId = 83_590;
 const HOMEFRONT_MIN_SALVAGE_BONUS_PCT: f64 = 20.0;
-const HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID: TypeId = 81_383;
+pub(super) const HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID: TypeId = 81_383;
 const HOMEFRONT_MUTANITE_UNIT_VOLUME_M3: f64 = 4.0;
-const HOMEFRONT_RAID_CRATE_TYPE_ID: TypeId = 77_473;
+pub(super) const HOMEFRONT_RAID_CRATE_TYPE_ID: TypeId = 77_473;
 const HOMEFRONT_SIGNAL_VULN_WINDOW_SECS: u64 = 90;
-const HOMEFRONT_TRAFFIC_TIMER_SECS: u64 = 540;
+pub(super) const HOMEFRONT_TRAFFIC_TIMER_SECS: u64 = 540;
 const HOMEFRONT_MIN_SKILL_CONTRIBUTION: f64 = 1_000.0;
 
 pub const HOMEFRONT_SYSTEMS: &[SolarSystemId] =
@@ -245,7 +243,7 @@ fn hf_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 }
 
 /// Updates `is_tethered` on a Suspicious Signal relay via the `SystemHandle` actor API.
-fn set_homefront_relay_tethered(
+pub(super) fn set_homefront_relay_tethered(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     relay_id: i64,
@@ -258,16 +256,91 @@ fn set_homefront_relay_tethered(
     }
 }
 
+pub(super) fn spawn_aar_basileus_in_space(
+    ctx: &ServerContext,
+    sys_h: &SystemHandle,
+    sys_id: SolarSystemId,
+    bid: i64,
+    pocket_pos: DVec3,
+) {
+    spawn_ball_sync_with_claim(
+        ctx,
+        sys_h,
+        sys_id,
+        Ball {
+            id: bid,
+            type_id: HOMEFRONT_AAR_BASILEUS_TYPE_ID,
+            position: pocket_pos + DVec3::new(0.0, 2_000.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 380.0,
+            inertia: 0.4,
+            mass: 20_000_000.0,
+            radius: 260.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        ctx.build_type_combat_state(HOMEFRONT_AAR_BASILEUS_TYPE_ID),
+    );
+    register_homefront_npc_entity(
+        ctx,
+        sys_id,
+        bid,
+        HOMEFRONT_AAR_BASILEUS_TYPE_ID,
+        500_026,
+        "HomefrontHostile",
+        pocket_pos,
+        [0.25, 0.25, 0.25, 0.25],
+        650.0,
+        12_000.0,
+        40_000.0,
+    );
+}
+
+pub(super) fn spawn_aar_cache_in_space(
+    ctx: &ServerContext,
+    sys_h: &SystemHandle,
+    sys_id: SolarSystemId,
+    cid: i64,
+    pocket_pos: DVec3,
+) {
+    spawn_ball_sync_with_claim(
+        ctx,
+        sys_h,
+        sys_id,
+        Ball {
+            id: cid,
+            type_id: HOMEFRONT_AAR_CACHE_TYPE_ID,
+            position: pocket_pos + DVec3::new(2_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 500_000.0,
+            radius: 150.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 15_000.0,
+            max_shield_hp: 15_000.0,
+            armor_hp: 15_000.0,
+            max_armor_hp: 15_000.0,
+            structure_hp: 15_000.0,
+            max_structure_hp: 15_000.0,
+            ..CombatState::default()
+        },
+    );
+}
+
 /// Applies direct shield/armor/structure damage to a Homefront space entity via `SystemHandle`
 /// and removes its ball if structure HP reaches zero.
-fn apply_homefront_direct_damage_in_space(
+pub(super) fn apply_homefront_direct_damage_in_space(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     target_id: i64,
     dmg: f64,
-) {
+) -> bool {
+    let mut destroyed = false;
     if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-        let mut destroyed = false;
         sys_h.try_update_combat_state(target_id, |cs| {
             let mut rem = dmg;
             let ds = rem.min(cs.shield_hp);
@@ -283,6 +356,7 @@ fn apply_homefront_direct_damage_in_space(
             sys_h.try_remove_destroyed_ball(target_id);
         }
     }
+    destroyed
 }
 
 fn validate_finite_non_negative(name: &str, val: f64) -> Result<(), BridgeRpcError> {
@@ -678,7 +752,7 @@ fn record_to_runtime_state(rec: &HomefrontRuntimeRecord) -> HomefrontRuntimeStat
     }
 }
 
-fn runtime_record_objective_complete(rec: &HomefrontRuntimeRecord) -> bool {
+pub(super) fn runtime_record_objective_complete(rec: &HomefrontRuntimeRecord) -> bool {
     record_to_runtime_state(rec).is_objective_complete()
 }
 
@@ -748,6 +822,7 @@ fn initial_progress_record(
                 wave_time_remaining_secs: 180,
                 evacuation_active: false,
                 basileus_spawned: false,
+                basileus_ball_id: None,
                 cache_ball_id: None,
                 mutanite_units_remaining: (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32)
                     * HOMEFRONT_AAR_UNITS_PER_ROCK,
@@ -845,6 +920,9 @@ fn build_runtime_record_in_snap(
         entered_pilots: BTreeMap::new(),
         contributions: BTreeMap::new(),
         progress,
+        elapsed_sim_secs: 0.0,
+        last_sim_elapsed_secs: None,
+        sim_clock_initialized: true,
     }
 }
 
@@ -1009,8 +1087,11 @@ pub fn init_homefront_sites(ctx: &ServerContext, reg: &mut PveSpecialSitesRegist
 }
 
 /// Spawns ONLY the outer Homefront beacon (`77149`) and acceleration gate (`17831`) on the warp-in grid.
-pub fn spawn_homefront_outer_entry_sync(ctx: &ServerContext, rec: &HomefrontRuntimeRecord) {
-    let sys_h = ctx.systems.get_or_spawn(rec.solar_system_id);
+pub(super) fn spawn_homefront_outer_entry_with_handle(
+    ctx: &ServerContext,
+    sys_h: &SystemHandle,
+    rec: &HomefrontRuntimeRecord,
+) {
     let pos = DVec3::from_array(rec.site_position);
     let tethered_cs = || CombatState {
         is_tethered: true,
@@ -1063,6 +1144,11 @@ pub fn spawn_homefront_outer_entry_sync(ctx: &ServerContext, rec: &HomefrontRunt
     }
 }
 
+pub fn spawn_homefront_outer_entry_sync(ctx: &ServerContext, rec: &HomefrontRuntimeRecord) {
+    let sys_h = ctx.systems.get_or_spawn(rec.solar_system_id);
+    spawn_homefront_outer_entry_with_handle(ctx, &sys_h, rec);
+}
+
 /// Ensures outer beacon + acceleration gate exist in space for seeded Homefront sites,
 /// without spawning pocket NPCs or objectives directly in space.
 pub fn ensure_homefront_outer_entries_sync(
@@ -1110,7 +1196,17 @@ pub fn ensure_homefront_outer_entries_sync(
     );
     if let Ok(recs) = resolved {
         for rec in recs {
-            spawn_homefront_outer_entry_sync(ctx, &rec);
+            if rec.started && rec.pocket_spawned && !rec.completed && !rec.failed {
+                let sys_h = ctx.systems.get_or_spawn(rec.solar_system_id);
+                spawn_or_reconcile_pocket_entities_with_handle(
+                    ctx,
+                    &sys_h,
+                    rec.instance_id,
+                    true,
+                );
+            } else {
+                spawn_homefront_outer_entry_sync(ctx, &rec);
+            }
         }
     }
 }
@@ -1204,7 +1300,7 @@ fn ensure_homefront_sites_for_system_locked_with_seed(
     ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
 }
 
-fn register_homefront_npc_entity(
+pub(super) fn register_homefront_npc_entity(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     ball_id: i64,
@@ -1271,7 +1367,7 @@ fn spawn_ball_db_with_claim(
     sys_h.try_spawn_ball_with_combat(ball, cs);
 }
 
-fn spawn_ball_sync_with_claim(
+pub(super) fn spawn_ball_sync_with_claim(
     ctx: &ServerContext,
     sys_h: &SystemHandle,
     sys_id: SolarSystemId,
@@ -1359,7 +1455,7 @@ fn spawn_asteroid_sync_with_record(
 }
 
 /// Materializes a Homefront scene item into snapshot state via the tracked transient item API.
-fn insert_scene_item_in_snap(snap: &mut WorldStateSnapshot, item: InventoryItemRecord) {
+pub(super) fn insert_scene_item_in_snap(snap: &mut WorldStateSnapshot, item: InventoryItemRecord) {
     let id = item.item_id;
     snap.insert_transient_item(item);
     let _ = snap.materialize_transient_item(id);
@@ -1410,65 +1506,83 @@ fn spawn_container_item_in_snap(
     }
 }
 
-/// Spawns the inner pocket entities behind the acceleration gate (`pocket_position`), updating
-/// `spawned_ball_ids` and `pocket_spawned = true` in DB.
-fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
+/// Spawns inner pocket entities or non-destructively rebuilds missing outer/pocket entities
+/// after a ballpark restart (`reconcile_only` / `already_spawned`), preserving `progress`,
+/// `contributions`, `entered_pilots`, and `elapsed_sim_secs` (`#1196` RT-36).
+pub(super) fn spawn_or_reconcile_pocket_entities_with_handle(
+    ctx: &ServerContext,
+    sys_h: &SystemHandle,
+    instance_id: i64,
+    reconcile_only: bool,
+) {
     let rec_opt = ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime.homefront_runtimes.get(&instance_id).cloned()
     });
     let Some(mut rec) = rec_opt else {
         return;
     };
-    if rec.pocket_spawned {
+    let already_spawned = rec.pocket_spawned;
+    let view = sys_h.view();
+    let view_sim_elapsed = view.sim_elapsed_secs;
+    if already_spawned
+        && super::pve_homefront_runtime::pocket_anchor_balls_present_in_view(&rec, &view)
+    {
+        return;
+    }
+    if reconcile_only && !already_spawned {
         return;
     }
 
     let sys_id = rec.solar_system_id;
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
     let pos = DVec3::from_array(rec.pocket_position);
     let bp = record_to_bp(&rec.blueprint);
     let base_obj = 1_897_800_000 + rec.instance_id.saturating_mul(100);
     let now = ctx.now_unix();
     let mut spawned = vec![rec.outer_beacon_ball_id, rec.outer_gate_ball_id];
+    let mut seeded_raid_escape_at: Option<u64> = None;
 
-    spawn_homefront_outer_entry_sync(ctx, &rec);
+    spawn_homefront_outer_entry_with_handle(ctx, sys_h, &rec);
 
     // 1. Dispatch commander NPC inside pocket
     let boss_id = rec.dispatch_boss_ball_id;
     let boss_tid = bp.dispatch_commander_type_id;
     let boss_pos = pos + DVec3::new(0.0, 0.0, 2_500.0);
-    spawn_ball_sync_with_claim(
-        ctx,
-        &sys_h,
-        sys_id,
-        Ball {
-            id: boss_id,
-            type_id: boss_tid,
-            position: boss_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 260.0,
-            inertia: 0.6,
-            mass: 12_000_000.0,
-            radius: 180.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-        ctx.build_type_combat_state(boss_tid),
-    );
-    register_homefront_npc_entity(
-        ctx,
-        sys_id,
-        boss_id,
-        boss_tid,
-        bp.hostile_faction_id,
-        "HomefrontHostile",
-        boss_pos,
-        bp.damage_profile,
-        140.0,
-        4_500.0,
-        25_000.0,
-    );
-    spawned.push(boss_id);
+    if !view.balls.contains_key(&boss_id)
+        && (!already_spawned || rec.spawned_ball_ids.contains(&boss_id))
+    {
+        spawn_ball_sync_with_claim(
+            ctx,
+            sys_h,
+            sys_id,
+            Ball {
+                id: boss_id,
+                type_id: boss_tid,
+                position: boss_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 260.0,
+                inertia: 0.6,
+                mass: 12_000_000.0,
+                radius: 180.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(boss_tid),
+        );
+        register_homefront_npc_entity(
+            ctx,
+            sys_id,
+            boss_id,
+            boss_tid,
+            bp.hostile_faction_id,
+            "HomefrontHostile",
+            boss_pos,
+            bp.damage_profile,
+            140.0,
+            4_500.0,
+            25_000.0,
+        );
+        spawned.push(boss_id);
+    }
 
     // 2. Escort wave NPCs inside pocket
     let escort_tag = if bp.archetype == HomefrontArchetype::EmergencyAid {
@@ -1479,41 +1593,45 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
     let mut escort_ids = Vec::with_capacity(bp.escort_wave_type_ids.len());
     for (idx, &esc_tid) in bp.escort_wave_type_ids.iter().enumerate() {
         let esc_id = base_obj + 20 + (idx as i64);
-        let offset = DVec3::new(3_000.0 + (idx as f64) * 1_500.0, -2_000.0, 0.0);
-        let esc_pos = pos + offset;
-        spawn_ball_sync_with_claim(
-            ctx,
-            &sys_h,
-            sys_id,
-            Ball {
-                id: esc_id,
-                type_id: esc_tid,
-                position: esc_pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 260.0,
-                inertia: 0.5,
-                mass: 2_000_000.0,
-                radius: 120.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_type_combat_state(esc_tid),
-        );
-        register_homefront_npc_entity(
-            ctx,
-            sys_id,
-            esc_id,
-            esc_tid,
-            bp.hostile_faction_id,
-            escort_tag,
-            esc_pos,
-            bp.damage_profile,
-            90.0,
-            3_500.0,
-            20_000.0,
-        );
-        spawned.push(esc_id);
-        escort_ids.push(esc_id);
+        if !view.balls.contains_key(&esc_id)
+            && (!already_spawned || rec.spawned_ball_ids.contains(&esc_id))
+        {
+            let offset = DVec3::new(3_000.0 + (idx as f64) * 1_500.0, -2_000.0, 0.0);
+            let esc_pos = pos + offset;
+            spawn_ball_sync_with_claim(
+                ctx,
+                sys_h,
+                sys_id,
+                Ball {
+                    id: esc_id,
+                    type_id: esc_tid,
+                    position: esc_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 260.0,
+                    inertia: 0.5,
+                    mass: 2_000_000.0,
+                    radius: 120.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(esc_tid),
+            );
+            register_homefront_npc_entity(
+                ctx,
+                sys_id,
+                esc_id,
+                esc_tid,
+                bp.hostile_faction_id,
+                escort_tag,
+                esc_pos,
+                bp.damage_profile,
+                90.0,
+                3_500.0,
+                20_000.0,
+            );
+            spawned.push(esc_id);
+            escort_ids.push(esc_id);
+        }
     }
 
     let ally_target_opt = match &rec.progress {
@@ -1541,302 +1659,566 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
             active_hauler_escape_at_sec,
             freighter_ball_id,
             delivery_depot_ball_id,
+            dropped_crate_ball_ids,
             ..
         } => {
-            *active_hauler_escape_at_sec = now.saturating_add(90);
+            if !already_spawned {
+                *active_hauler_escape_at_sec = now.saturating_add(90);
+            } else if (*active_hauler_ball_id).is_some() && *active_hauler_escape_at_sec == 0 {
+                let esc = now.saturating_add(90);
+                *active_hauler_escape_at_sec = esc;
+                seeded_raid_escape_at = Some(esc);
+            }
             if let Some(hauler_id) = *active_hauler_ball_id {
-                let hauler_tid = bp.objective_structure_type_id.unwrap_or(77_192);
-                let h_pos = pos + DVec3::new(4_000.0, 0.0, 2_000.0);
-                spawn_ball_sync_with_claim(
-                    ctx,
-                    &sys_h,
-                    sys_id,
-                    raid_hauler_ball(hauler_id, hauler_tid, h_pos),
-                    ctx.build_type_combat_state(hauler_tid),
-                );
+                if !view.balls.contains_key(&hauler_id) {
+                    let hauler_tid = bp.objective_structure_type_id.unwrap_or(77_192);
+                    let h_pos = pos + DVec3::new(4_000.0, 0.0, 2_000.0);
+                    spawn_ball_sync_with_claim(
+                        ctx,
+                        sys_h,
+                        sys_id,
+                        raid_hauler_ball(hauler_id, hauler_tid, h_pos),
+                        ctx.build_type_combat_state(hauler_tid),
+                    );
+                }
                 spawned.push(hauler_id);
             }
-            let freighter_tid = bp.support_entity_type_id.unwrap_or(HOMEFRONT_BEACON_TYPE_ID);
-            let f_pos = pos + DVec3::new(-4_000.0, -4_000.0, 0.0);
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *freighter_ball_id,
-                    type_id: freighter_tid,
-                    position: f_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 50_000_000.0,
-                    radius: 600.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    is_tethered: true,
-                    shield_hp: 200_000.0,
-                    max_shield_hp: 200_000.0,
-                    armor_hp: 200_000.0,
-                    max_armor_hp: 200_000.0,
-                    structure_hp: 200_000.0,
-                    max_structure_hp: 200_000.0,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(*freighter_ball_id);
-
-            let depot_id = *delivery_depot_ball_id;
-            let depot_pos = pos + DVec3::new(-4_000.0, -5_500.0, 0.0);
-            let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                spawn_container_item_in_snap(
-                    snap,
-                    sys_id,
-                    depot_id,
-                    0,
-                    depot_pos.to_array(),
-                    now,
-                    &[],
-                );
-                Ok(())
-            });
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: depot_id,
-                    type_id: HOMEFRONT_CARGO_CONTAINER_TYPE_ID,
-                    position: depot_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 2_000.0,
-                    radius: 50.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    is_tethered: true,
-                    structure_hp: 5_000.0,
-                    max_structure_hp: 5_000.0,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(depot_id);
-        }
-        HomefrontProgressRecord::EmergencyAid {
-            protectee_ball_id,
-            protectee_max_hp,
-            ..
-        } => {
-            let p_tid = bp.support_entity_type_id.unwrap_or(77_196);
-            let p_pos = pos + DVec3::new(0.0, 0.0, 0.0);
-            let each_layer = *protectee_max_hp / 3.0;
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *protectee_ball_id,
-                    type_id: p_tid,
-                    position: p_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 10.0,
-                    inertia: 1.0,
-                    mass: 25_000_000.0,
-                    radius: 400.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    shield_hp: each_layer,
-                    max_shield_hp: each_layer,
-                    armor_hp: each_layer,
-                    max_armor_hp: each_layer,
-                    structure_hp: each_layer,
-                    max_structure_hp: each_layer,
-                    is_tethered: false,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(*protectee_ball_id);
-        }
-        HomefrontProgressRecord::MetaliminalMeteoroid {
-            meteoroid_ball_id,
-            mutanite_type_id,
-            total_units,
-            ..
-        } => {
-            spawn_asteroid_sync_with_record(
-                ctx,
-                &sys_h,
-                sys_id,
-                *meteoroid_ball_id,
-                *mutanite_type_id,
-                *total_units,
-                pos + DVec3::new(0.0, 0.0, 3_000.0),
-                450.0,
-            );
-            spawned.push(*meteoroid_ball_id);
-        }
-        HomefrontProgressRecord::DreadAssault {
-            dread_ball_id,
-            base_ball_id,
-            enemy_base_max_hp,
-            ..
-        } => {
-            let d_tid = bp.support_entity_type_id.unwrap_or(77_197);
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *dread_ball_id,
-                    type_id: d_tid,
-                    position: pos + DVec3::new(-4_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 40.0,
-                    inertia: 1.0,
-                    mass: 90_000_000.0,
-                    radius: 900.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    shield_hp: 150_000.0,
-                    max_shield_hp: 150_000.0,
-                    armor_hp: 150_000.0,
-                    max_armor_hp: 150_000.0,
-                    structure_hp: 150_000.0,
-                    max_structure_hp: 150_000.0,
-                    capacitor: 0.0,
-                    max_capacitor: 120_000.0,
-                    capacitor_recharge_time_ms: 1.0e12,
-                    is_tethered: false,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(*dread_ball_id);
-
-            let b_tid = bp.objective_structure_type_id.unwrap_or(77_195);
-            let each_layer = *enemy_base_max_hp / 3.0;
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *base_ball_id,
-                    type_id: b_tid,
-                    position: pos + DVec3::new(8_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 200_000_000.0,
-                    radius: 1_500.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    shield_hp: each_layer,
-                    max_shield_hp: each_layer,
-                    armor_hp: each_layer,
-                    max_armor_hp: each_layer,
-                    structure_hp: each_layer,
-                    max_structure_hp: each_layer,
-                    is_tethered: false,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(*base_ball_id);
-        }
-        HomefrontProgressRecord::AbyssalArtifactRecovery { rock_ball_ids, .. } => {
-            sys_h.try_add_mobile_warp_disruptor(base_obj + 9, pos, 150_000.0);
-            for (idx, &rock_id) in rock_ball_ids.iter().enumerate() {
-                let angle = (idx as f64) * std::f64::consts::TAU
-                    / (HOMEFRONT_AAR_ROCKS_PER_WAVE as f64);
-                let rock_pos = pos + DVec3::new(angle.cos() * 7_500.0, 0.0, angle.sin() * 7_500.0);
-                spawn_asteroid_sync_with_record(
-                    ctx,
-                    &sys_h,
-                    sys_id,
-                    rock_id,
-                    HOMEFRONT_AAR_MUTANITE_TYPE_ID,
-                    HOMEFRONT_AAR_UNITS_PER_ROCK,
-                    rock_pos,
-                    120.0,
-                );
-                spawned.push(rock_id);
-            }
-        }
-        HomefrontProgressRecord::SuspiciousSignal {
-            relay_ball_id,
-            array_ball_ids,
-            relay_max_hp,
-            ..
-        } => {
-            let r_tid = bp.objective_structure_type_id.unwrap_or(77_199);
-            let each_layer = *relay_max_hp / 3.0;
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *relay_ball_id,
-                    type_id: r_tid,
-                    position: pos + DVec3::new(0.0, 2_500.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 50_000_000.0,
-                    radius: 500.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    shield_hp: each_layer,
-                    max_shield_hp: each_layer,
-                    armor_hp: each_layer,
-                    max_armor_hp: each_layer,
-                    structure_hp: each_layer,
-                    max_structure_hp: each_layer,
-                    is_tethered: true,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(*relay_ball_id);
-
-            let arr_tid = bp.support_entity_type_id.unwrap_or(77_198);
-            for (idx, &arr_id) in array_ball_ids.iter().enumerate() {
-                let offset = DVec3::new((idx as f64 - 1.0) * 12_000.0, -5_000.0, 0.0);
+            if !view.balls.contains_key(freighter_ball_id) {
+                let freighter_tid = bp.support_entity_type_id.unwrap_or(HOMEFRONT_BEACON_TYPE_ID);
+                let f_pos = pos + DVec3::new(-4_000.0, -4_000.0, 0.0);
                 spawn_ball_sync_with_claim(
                     ctx,
-                    &sys_h,
+                    sys_h,
                     sys_id,
                     Ball {
-                        id: arr_id,
-                        type_id: arr_tid,
-                        position: pos + offset,
+                        id: *freighter_ball_id,
+                        type_id: freighter_tid,
+                        position: f_pos,
                         velocity: DVec3::ZERO,
                         max_velocity: 0.0,
                         inertia: 1.0,
-                        mass: 5_000_000.0,
-                        radius: 300.0,
+                        mass: 50_000_000.0,
+                        radius: 600.0,
                         speed_fraction: 0.0,
                         mode: MovementMode::Stop,
                     },
                     CombatState {
                         is_tethered: true,
-                        shield_hp: 50_000.0,
-                        max_shield_hp: 50_000.0,
-                        armor_hp: 50_000.0,
-                        max_armor_hp: 50_000.0,
-                        structure_hp: 50_000.0,
-                        max_structure_hp: 50_000.0,
+                        shield_hp: 200_000.0,
+                        max_shield_hp: 200_000.0,
+                        armor_hp: 200_000.0,
+                        max_armor_hp: 200_000.0,
+                        structure_hp: 200_000.0,
+                        max_structure_hp: 200_000.0,
                         ..CombatState::default()
                     },
                 );
+            }
+            spawned.push(*freighter_ball_id);
+
+            let depot_id = *delivery_depot_ball_id;
+            let depot_pos = pos + DVec3::new(-4_000.0, -5_500.0, 0.0);
+            let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                if !already_spawned || !snap.items.contains_key(&depot_id) {
+                    spawn_container_item_in_snap(
+                        snap,
+                        sys_id,
+                        depot_id,
+                        0,
+                        depot_pos.to_array(),
+                        now,
+                        &[],
+                    );
+                }
+                Ok(())
+            });
+            if !view.balls.contains_key(&depot_id) {
+                spawn_ball_sync_with_claim(
+                    ctx,
+                    sys_h,
+                    sys_id,
+                    Ball {
+                        id: depot_id,
+                        type_id: HOMEFRONT_CARGO_CONTAINER_TYPE_ID,
+                        position: depot_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 2_000.0,
+                        radius: 50.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        is_tethered: true,
+                        structure_hp: 5_000.0,
+                        max_structure_hp: 5_000.0,
+                        ..CombatState::default()
+                    },
+                );
+            } else {
+                ctx.systems.claim_special_site_ball(sys_id, depot_id);
+                let _ = sys_h.try_update_combat_state(depot_id, |cs| {
+                    cs.is_tethered = true;
+                    cs.structure_hp = 5_000.0;
+                    cs.max_structure_hp = 5_000.0;
+                });
+            }
+            spawned.push(depot_id);
+
+            if already_spawned && !dropped_crate_ball_ids.is_empty() {
+                let live_crates: Vec<(i64, DVec3)> = ctx.db.with_snapshot(|snap| {
+                    dropped_crate_ball_ids
+                        .iter()
+                        .copied()
+                        .filter(|cid| snap.items.contains_key(cid))
+                        .map(|cid| {
+                            let cpos = snap
+                                .item_positions
+                                .get(&cid)
+                                .copied()
+                                .map(DVec3::from_array)
+                                .unwrap_or(pos + DVec3::new(3_500.0, 0.0, 0.0));
+                            (cid, cpos)
+                        })
+                        .collect()
+                });
+                for (cid, cpos) in live_crates {
+                    if !view.balls.contains_key(&cid) {
+                        spawn_ball_sync_with_claim(
+                            ctx,
+                            sys_h,
+                            sys_id,
+                            Ball {
+                                id: cid,
+                                type_id: HOMEFRONT_CARGO_CONTAINER_TYPE_ID,
+                                position: cpos,
+                                velocity: DVec3::ZERO,
+                                max_velocity: 0.0,
+                                inertia: 1.0,
+                                mass: 2_000.0,
+                                radius: 40.0,
+                                speed_fraction: 0.0,
+                                mode: MovementMode::Stop,
+                            },
+                            CombatState {
+                                structure_hp: 1_500.0,
+                                max_structure_hp: 1_500.0,
+                                ..CombatState::default()
+                            },
+                        );
+                    } else {
+                        ctx.systems.claim_special_site_ball(sys_id, cid);
+                    }
+                    spawned.push(cid);
+                }
+            }
+        }
+        HomefrontProgressRecord::EmergencyAid {
+            protectee_ball_id,
+            protectee_hp,
+            protectee_max_hp,
+            ..
+        } => {
+            if !view.balls.contains_key(protectee_ball_id) {
+                let p_tid = bp.support_entity_type_id.unwrap_or(77_196);
+                let p_pos = pos + DVec3::new(0.0, 0.0, 0.0);
+                let max_layer = *protectee_max_hp / 3.0;
+                let cur_hp = if already_spawned {
+                    (*protectee_hp).clamp(1.0, *protectee_max_hp)
+                } else {
+                    *protectee_max_hp
+                };
+                let cur_layer = cur_hp / 3.0;
+                spawn_ball_sync_with_claim(
+                    ctx,
+                    sys_h,
+                    sys_id,
+                    Ball {
+                        id: *protectee_ball_id,
+                        type_id: p_tid,
+                        position: p_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 10.0,
+                        inertia: 1.0,
+                        mass: 25_000_000.0,
+                        radius: 400.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: cur_layer,
+                        max_shield_hp: max_layer,
+                        armor_hp: cur_layer,
+                        max_armor_hp: max_layer,
+                        structure_hp: cur_layer,
+                        max_structure_hp: max_layer,
+                        is_tethered: false,
+                        ..CombatState::default()
+                    },
+                );
+            }
+            spawned.push(*protectee_ball_id);
+        }
+        HomefrontProgressRecord::MetaliminalMeteoroid {
+            meteoroid_ball_id,
+            mutanite_type_id,
+            remaining_units,
+            total_units,
+            ..
+        } => {
+            let units = if already_spawned {
+                *remaining_units
+            } else {
+                *total_units
+            };
+            if units > 0 && !view.balls.contains_key(meteoroid_ball_id) {
+                let ast_pos = pos + DVec3::new(0.0, 0.0, 3_000.0);
+                if !already_spawned {
+                    spawn_asteroid_sync_with_record(
+                        ctx,
+                        sys_h,
+                        sys_id,
+                        *meteoroid_ball_id,
+                        *mutanite_type_id,
+                        *total_units,
+                        ast_pos,
+                        450.0,
+                    );
+                } else {
+                    ctx.systems.claim_special_site_ball(sys_id, *meteoroid_ball_id);
+                    sys_h.try_spawn_asteroid(
+                        AsteroidState {
+                            asteroid_id: *meteoroid_ball_id,
+                            belt_id: 0,
+                            type_id: *mutanite_type_id,
+                            initial_units: u64::from(*total_units),
+                            remaining_units: u64::from(units),
+                            unit_volume: HOMEFRONT_MUTANITE_UNIT_VOLUME_M3,
+                            depleted: false,
+                            respawn_at_tick: None,
+                        },
+                        Ball {
+                            id: *meteoroid_ball_id,
+                            type_id: *mutanite_type_id,
+                            position: ast_pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: 500_000.0,
+                            radius: 450.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        },
+                    );
+                    let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                        snap.asteroids.entry(*meteoroid_ball_id).or_insert_with(|| AsteroidRecord {
+                            asteroid_id: *meteoroid_ball_id,
+                            type_id: *mutanite_type_id,
+                            solar_system_id: sys_id,
+                            belt_id: 0,
+                            quantity: i64::from(units),
+                            initial_quantity: i64::from(*total_units),
+                            position: (ast_pos.x, ast_pos.y, ast_pos.z),
+                            radius: 450.0,
+                        });
+                        Ok(())
+                    });
+                }
+            }
+            spawned.push(*meteoroid_ball_id);
+        }
+        HomefrontProgressRecord::DreadAssault {
+            dread_ball_id,
+            base_ball_id,
+            capacitor_gj,
+            enemy_base_hp,
+            enemy_base_max_hp,
+            ..
+        } => {
+            if !view.balls.contains_key(dread_ball_id) {
+                let d_tid = bp.support_entity_type_id.unwrap_or(77_197);
+                spawn_ball_sync_with_claim(
+                    ctx,
+                    sys_h,
+                    sys_id,
+                    Ball {
+                        id: *dread_ball_id,
+                        type_id: d_tid,
+                        position: pos + DVec3::new(-4_000.0, 0.0, 0.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 40.0,
+                        inertia: 1.0,
+                        mass: 90_000_000.0,
+                        radius: 900.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: 150_000.0,
+                        max_shield_hp: 150_000.0,
+                        armor_hp: 150_000.0,
+                        max_armor_hp: 150_000.0,
+                        structure_hp: 150_000.0,
+                        max_structure_hp: 150_000.0,
+                        capacitor: if already_spawned {
+                            (*capacitor_gj).clamp(0.0, 120_000.0)
+                        } else {
+                            0.0
+                        },
+                        max_capacitor: 120_000.0,
+                        capacitor_recharge_time_ms: 1.0e12,
+                        is_tethered: false,
+                        ..CombatState::default()
+                    },
+                );
+            }
+            spawned.push(*dread_ball_id);
+
+            if *enemy_base_hp > 0.0 && !view.balls.contains_key(base_ball_id) {
+                let b_tid = bp.objective_structure_type_id.unwrap_or(77_195);
+                let max_layer = *enemy_base_max_hp / 3.0;
+                let cur_hp = if already_spawned {
+                    (*enemy_base_hp).clamp(1.0, *enemy_base_max_hp)
+                } else {
+                    *enemy_base_max_hp
+                };
+                let cur_layer = cur_hp / 3.0;
+                spawn_ball_sync_with_claim(
+                    ctx,
+                    sys_h,
+                    sys_id,
+                    Ball {
+                        id: *base_ball_id,
+                        type_id: b_tid,
+                        position: pos + DVec3::new(8_000.0, 0.0, 0.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 200_000_000.0,
+                        radius: 1_500.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: cur_layer,
+                        max_shield_hp: max_layer,
+                        armor_hp: cur_layer,
+                        max_armor_hp: max_layer,
+                        structure_hp: cur_layer,
+                        max_structure_hp: max_layer,
+                        is_tethered: false,
+                        ..CombatState::default()
+                    },
+                );
+            }
+            spawned.push(*base_ball_id);
+        }
+        HomefrontProgressRecord::AbyssalArtifactRecovery {
+            rock_ball_ids,
+            wave_hostile_ball_ids,
+            basileus_ball_id,
+            cache_ball_id,
+            warp_bubble_active,
+            ..
+        } => {
+            if !already_spawned || *warp_bubble_active {
+                sys_h.try_add_mobile_warp_disruptor(base_obj + 9, pos, 150_000.0);
+            }
+            let total_rocks = rock_ball_ids.len().max(HOMEFRONT_AAR_ROCKS_PER_WAVE);
+            for (idx, &rock_id) in rock_ball_ids.iter().enumerate() {
+                if !view.balls.contains_key(&rock_id) {
+                    let angle = (idx as f64) * std::f64::consts::TAU / (total_rocks as f64);
+                    let rock_pos = pos + DVec3::new(angle.cos() * 7_500.0, 0.0, angle.sin() * 7_500.0);
+                    if !already_spawned {
+                        spawn_asteroid_sync_with_record(
+                            ctx,
+                            sys_h,
+                            sys_id,
+                            rock_id,
+                            HOMEFRONT_AAR_MUTANITE_TYPE_ID,
+                            HOMEFRONT_AAR_UNITS_PER_ROCK,
+                            rock_pos,
+                            120.0,
+                        );
+                    } else {
+                        let units = ctx.db.with_snapshot(|snap| {
+                            snap.asteroids
+                                .get(&rock_id)
+                                .and_then(|a| u32::try_from(a.quantity.max(1)).ok())
+                                .unwrap_or(HOMEFRONT_AAR_UNITS_PER_ROCK)
+                        });
+                        ctx.systems.claim_special_site_ball(sys_id, rock_id);
+                        sys_h.try_spawn_asteroid(
+                            AsteroidState {
+                                asteroid_id: rock_id,
+                                belt_id: 0,
+                                type_id: HOMEFRONT_AAR_MUTANITE_TYPE_ID,
+                                initial_units: u64::from(HOMEFRONT_AAR_UNITS_PER_ROCK),
+                                remaining_units: u64::from(units),
+                                unit_volume: HOMEFRONT_MUTANITE_UNIT_VOLUME_M3,
+                                depleted: false,
+                                respawn_at_tick: None,
+                            },
+                            Ball {
+                                id: rock_id,
+                                type_id: HOMEFRONT_AAR_MUTANITE_TYPE_ID,
+                                position: rock_pos,
+                                velocity: DVec3::ZERO,
+                                max_velocity: 0.0,
+                                inertia: 1.0,
+                                mass: 500_000.0,
+                                radius: 120.0,
+                                speed_fraction: 0.0,
+                                mode: MovementMode::Stop,
+                            },
+                        );
+                    }
+                }
+                spawned.push(rock_id);
+            }
+            if already_spawned {
+                for (idx, &eid) in wave_hostile_ball_ids.iter().enumerate() {
+                    if !view.balls.contains_key(&eid) {
+                        let etid = bp
+                            .escort_wave_type_ids
+                            .get(idx % bp.escort_wave_type_ids.len().max(1))
+                            .copied()
+                            .unwrap_or(bp.dispatch_commander_type_id);
+                        let epos = pos + DVec3::new(((idx as f64) - 2.0) * 2_000.0, 2_500.0, 0.0);
+                        spawn_ball_sync_with_claim(
+                            ctx,
+                            sys_h,
+                            sys_id,
+                            Ball {
+                                id: eid,
+                                type_id: etid,
+                                position: epos,
+                                velocity: DVec3::ZERO,
+                                max_velocity: 280.0,
+                                inertia: 0.5,
+                                mass: 2_000_000.0,
+                                radius: 120.0,
+                                speed_fraction: 0.0,
+                                mode: MovementMode::Stop,
+                            },
+                            ctx.build_type_combat_state(etid),
+                        );
+                        register_homefront_npc_entity(
+                            ctx,
+                            sys_id,
+                            eid,
+                            etid,
+                            bp.hostile_faction_id,
+                            "HomefrontHostile",
+                            epos,
+                            bp.damage_profile,
+                            100.0 + (idx as f64) * 5.0,
+                            3_500.0,
+                            20_000.0,
+                        );
+                    }
+                    spawned.push(eid);
+                }
+                if let Some(bid) = *basileus_ball_id {
+                    if !view.balls.contains_key(&bid) {
+                        spawn_aar_basileus_in_space(ctx, sys_h, sys_id, bid, pos);
+                    }
+                    spawned.push(bid);
+                }
+                if let Some(cid) = *cache_ball_id {
+                    if !view.balls.contains_key(&cid) {
+                        spawn_aar_cache_in_space(ctx, sys_h, sys_id, cid, pos);
+                    }
+                    spawned.push(cid);
+                }
+            }
+        }
+        HomefrontProgressRecord::SuspiciousSignal {
+            relay_ball_id,
+            array_ball_ids,
+            arrays_hacked,
+            vulnerability_window_secs,
+            relay_hp,
+            relay_max_hp,
+            ..
+        } => {
+            if *relay_hp > 0.0 && !view.balls.contains_key(relay_ball_id) {
+                let r_tid = bp.objective_structure_type_id.unwrap_or(77_199);
+                let max_layer = *relay_max_hp / 3.0;
+                let cur_hp = if already_spawned {
+                    (*relay_hp).clamp(1.0, *relay_max_hp)
+                } else {
+                    *relay_max_hp
+                };
+                let cur_layer = cur_hp / 3.0;
+                let tethered = if already_spawned {
+                    !arrays_hacked.iter().all(|&h| h) || *vulnerability_window_secs == 0
+                } else {
+                    true
+                };
+                spawn_ball_sync_with_claim(
+                    ctx,
+                    sys_h,
+                    sys_id,
+                    Ball {
+                        id: *relay_ball_id,
+                        type_id: r_tid,
+                        position: pos + DVec3::new(0.0, 2_500.0, 0.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 50_000_000.0,
+                        radius: 500.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: cur_layer,
+                        max_shield_hp: max_layer,
+                        armor_hp: cur_layer,
+                        max_armor_hp: max_layer,
+                        structure_hp: cur_layer,
+                        max_structure_hp: max_layer,
+                        is_tethered: tethered,
+                        ..CombatState::default()
+                    },
+                );
+            }
+            spawned.push(*relay_ball_id);
+
+            let arr_tid = bp.support_entity_type_id.unwrap_or(77_198);
+            for (idx, &arr_id) in array_ball_ids.iter().enumerate() {
+                if !view.balls.contains_key(&arr_id) {
+                    let offset = DVec3::new((idx as f64 - 1.0) * 12_000.0, -5_000.0, 0.0);
+                    spawn_ball_sync_with_claim(
+                        ctx,
+                        sys_h,
+                        sys_id,
+                        Ball {
+                            id: arr_id,
+                            type_id: arr_tid,
+                            position: pos + offset,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: 5_000_000.0,
+                            radius: 300.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        },
+                        CombatState {
+                            is_tethered: true,
+                            shield_hp: 50_000.0,
+                            max_shield_hp: 50_000.0,
+                            armor_hp: 50_000.0,
+                            max_armor_hp: 50_000.0,
+                            structure_hp: 50_000.0,
+                            max_structure_hp: 50_000.0,
+                            ..CombatState::default()
+                        },
+                    );
+                }
                 spawned.push(arr_id);
             }
         }
@@ -1845,36 +2227,38 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
             wreck_ball_ids,
             ..
         } => {
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *werpost_ball_id,
-                    type_id: HOMEFRONT_SALVAGE_WERPOST_TYPE_ID,
-                    position: pos + DVec3::new(0.0, 4_000.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 20_000_000.0,
-                    radius: 400.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    is_tethered: true,
-                    shield_hp: 100_000.0,
-                    max_shield_hp: 100_000.0,
-                    armor_hp: 100_000.0,
-                    max_armor_hp: 100_000.0,
-                    structure_hp: 100_000.0,
-                    max_structure_hp: 100_000.0,
-                    ..CombatState::default()
-                },
-            );
+            if !view.balls.contains_key(werpost_ball_id) {
+                spawn_ball_sync_with_claim(
+                    ctx,
+                    sys_h,
+                    sys_id,
+                    Ball {
+                        id: *werpost_ball_id,
+                        type_id: HOMEFRONT_SALVAGE_WERPOST_TYPE_ID,
+                        position: pos + DVec3::new(0.0, 4_000.0, 0.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 20_000_000.0,
+                        radius: 400.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        is_tethered: true,
+                        shield_hp: 100_000.0,
+                        max_shield_hp: 100_000.0,
+                        armor_hp: 100_000.0,
+                        max_armor_hp: 100_000.0,
+                        structure_hp: 100_000.0,
+                        max_structure_hp: 100_000.0,
+                        ..CombatState::default()
+                    },
+                );
+            }
             spawned.push(*werpost_ball_id);
 
-            let wreck_positions: Vec<(i64, DVec3)> = wreck_ball_ids
+            let mut wreck_positions: Vec<(i64, DVec3)> = wreck_ball_ids
                 .iter()
                 .enumerate()
                 .map(|(idx, &wid)| {
@@ -1891,90 +2275,110 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
                 .collect();
 
             let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                for &(wid, wpos) in &wreck_positions {
-                    insert_scene_item_in_snap(
-                        snap,
-                        InventoryItemRecord {
-                            item_id: wid,
-                            type_id: HOMEFRONT_SALVAGE_WRECK_TYPE_ID,
-                            owner_id: HOMEFRONT_SALVAGE_NPC_OWNER_ID,
-                            location_id: sys_id as i64,
-                            flag: InventoryFlag::None,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    snap.item_positions.insert(wid, wpos.to_array());
-                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-                        snap, wid, now, true,
-                    );
+                for (wid, wpos) in &mut wreck_positions {
+                    if let Some(saved_pos) = snap.item_positions.get(wid).copied() {
+                        *wpos = DVec3::from_array(saved_pos);
+                    }
+                    if !already_spawned || !snap.items.contains_key(wid) {
+                        insert_scene_item_in_snap(
+                            snap,
+                            InventoryItemRecord {
+                                item_id: *wid,
+                                type_id: HOMEFRONT_SALVAGE_WRECK_TYPE_ID,
+                                owner_id: HOMEFRONT_SALVAGE_NPC_OWNER_ID,
+                                location_id: sys_id as i64,
+                                flag: InventoryFlag::None,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                        snap.item_positions.insert(*wid, wpos.to_array());
+                        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                            snap, *wid, now, true,
+                        );
+                    }
                 }
                 Ok(())
             });
 
             for (wid, wpos) in wreck_positions {
-                spawn_ball_sync_with_claim(
-                    ctx,
-                    &sys_h,
-                    sys_id,
-                    Ball {
-                        id: wid,
-                        type_id: HOMEFRONT_SALVAGE_WRECK_TYPE_ID,
-                        position: wpos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: 10_000.0,
-                        radius: 60.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    },
-                    CombatState {
-                        structure_hp: 1_500.0,
-                        max_structure_hp: 1_500.0,
-                        ..CombatState::default()
-                    },
-                );
+                if !view.balls.contains_key(&wid) {
+                    spawn_ball_sync_with_claim(
+                        ctx,
+                        sys_h,
+                        sys_id,
+                        Ball {
+                            id: wid,
+                            type_id: HOMEFRONT_SALVAGE_WRECK_TYPE_ID,
+                            position: wpos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: 10_000.0,
+                            radius: 60.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        },
+                        CombatState {
+                            structure_hp: 1_500.0,
+                            max_structure_hp: 1_500.0,
+                            ..CombatState::default()
+                        },
+                    );
+                } else {
+                    ctx.systems.claim_special_site_ball(sys_id, wid);
+                }
                 spawned.push(wid);
             }
         }
-        HomefrontProgressRecord::StabilizeRift { array_ball_ids, .. } => {
+        HomefrontProgressRecord::StabilizeRift {
+            array_ball_ids,
+            arrays_cap_pct,
+            ..
+        } => {
             let arr_tid = bp.support_entity_type_id.unwrap_or(81_402);
             for (idx, &arr_id) in array_ball_ids.iter().enumerate() {
-                let ang = (idx as f64) * std::f64::consts::TAU / 5.0;
-                let a_pos = pos + DVec3::new(ang.cos() * 8_000.0, 0.0, ang.sin() * 8_000.0);
-                spawn_ball_sync_with_claim(
-                    ctx,
-                    &sys_h,
-                    sys_id,
-                    Ball {
-                        id: arr_id,
-                        type_id: arr_tid,
-                        position: a_pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: 10_000_000.0,
-                        radius: 350.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    },
-                    CombatState {
-                        shield_hp: 150_000.0,
-                        max_shield_hp: 150_000.0,
-                        armor_hp: 150_000.0,
-                        max_armor_hp: 150_000.0,
-                        structure_hp: 150_000.0,
-                        max_structure_hp: 150_000.0,
-                        capacitor: 4_000.0,
-                        max_capacitor: 4_000.0,
-                        capacitor_recharge_time_ms: 120_000.0,
-                        is_tethered: false,
-                        ..CombatState::default()
-                    },
-                );
+                if !view.balls.contains_key(&arr_id) {
+                    let ang = (idx as f64) * std::f64::consts::TAU / 5.0;
+                    let a_pos = pos + DVec3::new(ang.cos() * 8_000.0, 0.0, ang.sin() * 8_000.0);
+                    let cap_now = if already_spawned {
+                        arrays_cap_pct.get(idx).copied().unwrap_or(1.0).clamp(0.0, 1.0) * 4_000.0
+                    } else {
+                        4_000.0
+                    };
+                    spawn_ball_sync_with_claim(
+                        ctx,
+                        sys_h,
+                        sys_id,
+                        Ball {
+                            id: arr_id,
+                            type_id: arr_tid,
+                            position: a_pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: 10_000_000.0,
+                            radius: 350.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        },
+                        CombatState {
+                            shield_hp: 150_000.0,
+                            max_shield_hp: 150_000.0,
+                            armor_hp: 150_000.0,
+                            max_armor_hp: 150_000.0,
+                            structure_hp: 150_000.0,
+                            max_structure_hp: 150_000.0,
+                            capacitor: cap_now,
+                            max_capacitor: 4_000.0,
+                            capacitor_recharge_time_ms: 120_000.0,
+                            is_tethered: false,
+                            ..CombatState::default()
+                        },
+                    );
+                }
                 spawned.push(arr_id);
             }
         }
@@ -1985,112 +2389,141 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
             civilian_ball_ids,
             ..
         } => {
-            let st_tid = bp.objective_structure_type_id.unwrap_or(77_304);
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: *station_ball_id,
-                    type_id: st_tid,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 80_000_000.0,
-                    radius: 800.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    is_tethered: true,
-                    shield_hp: 250_000.0,
-                    max_shield_hp: 250_000.0,
-                    armor_hp: 250_000.0,
-                    max_armor_hp: 250_000.0,
-                    structure_hp: 250_000.0,
-                    max_structure_hp: 250_000.0,
-                    ..CombatState::default()
-                },
-            );
-            spawned.push(*station_ball_id);
-
-            let hauler_tid = 649_u32; // Industrial hauler
-            let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                for idx in 0..6 {
-                    snap.next_entity_id += 1;
-                    let hid = snap.next_entity_id;
-                    active_hauler_ball_ids.push(hid);
-                    smuggler_ball_ids.push(hid);
-                    snap.next_entity_id += 1;
-                    let cargo_id = snap.next_entity_id;
-                    insert_scene_item_in_snap(
-                        snap,
-                        InventoryItemRecord {
-                            item_id: cargo_id,
-                            type_id: HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID,
-                            owner_id: i64::from(bp.hostile_faction_id),
-                            location_id: hid,
-                            flag: InventoryFlag::Cargo,
-                            quantity: 1,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    let _ = idx;
-                }
-                for _ in 0..3 {
-                    snap.next_entity_id += 1;
-                    let cid = snap.next_entity_id;
-                    active_hauler_ball_ids.push(cid);
-                    civilian_ball_ids.push(cid);
-                }
-                Ok(())
-            });
-            for (idx, &hid) in active_hauler_ball_ids.iter().enumerate() {
-                let h_pos = pos + DVec3::new((idx as f64 - 4.0) * 2_500.0, 2_000.0, -3_000.0);
+            if !view.balls.contains_key(station_ball_id) {
+                let st_tid = bp.objective_structure_type_id.unwrap_or(77_304);
                 spawn_ball_sync_with_claim(
                     ctx,
-                    &sys_h,
+                    sys_h,
                     sys_id,
                     Ball {
-                        id: hid,
-                        type_id: hauler_tid,
-                        position: h_pos,
+                        id: *station_ball_id,
+                        type_id: st_tid,
+                        position: pos,
                         velocity: DVec3::ZERO,
-                        max_velocity: 140.0,
-                        inertia: 0.9,
-                        mass: 12_000_000.0,
-                        radius: 220.0,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 80_000_000.0,
+                        radius: 800.0,
                         speed_fraction: 0.0,
                         mode: MovementMode::Stop,
                     },
                     CombatState {
-                        shield_hp: 10_000.0,
-                        max_shield_hp: 10_000.0,
-                        armor_hp: 8_000.0,
-                        max_armor_hp: 8_000.0,
-                        structure_hp: 8_000.0,
-                        max_structure_hp: 8_000.0,
-                        is_tethered: false,
+                        is_tethered: true,
+                        shield_hp: 250_000.0,
+                        max_shield_hp: 250_000.0,
+                        armor_hp: 250_000.0,
+                        max_armor_hp: 250_000.0,
+                        structure_hp: 250_000.0,
+                        max_structure_hp: 250_000.0,
                         ..CombatState::default()
                     },
                 );
+            }
+            spawned.push(*station_ball_id);
+
+            let hauler_tid = 649_u32; // Industrial hauler
+            if !already_spawned {
+                let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                    for idx in 0..6 {
+                        snap.next_entity_id += 1;
+                        let hid = snap.next_entity_id;
+                        active_hauler_ball_ids.push(hid);
+                        smuggler_ball_ids.push(hid);
+                        snap.next_entity_id += 1;
+                        let cargo_id = snap.next_entity_id;
+                        insert_scene_item_in_snap(
+                            snap,
+                            InventoryItemRecord {
+                                item_id: cargo_id,
+                                type_id: HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID,
+                                owner_id: i64::from(bp.hostile_faction_id),
+                                location_id: hid,
+                                flag: InventoryFlag::Cargo,
+                                quantity: 1,
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                        let _ = idx;
+                    }
+                    for _ in 0..3 {
+                        snap.next_entity_id += 1;
+                        let cid = snap.next_entity_id;
+                        active_hauler_ball_ids.push(cid);
+                        civilian_ball_ids.push(cid);
+                    }
+                    Ok(())
+                });
+            }
+            for (idx, &hid) in active_hauler_ball_ids.iter().enumerate() {
+                if !view.balls.contains_key(&hid) {
+                    let h_pos = pos + DVec3::new((idx as f64 - 4.0) * 2_500.0, 2_000.0, -3_000.0);
+                    spawn_ball_sync_with_claim(
+                        ctx,
+                        sys_h,
+                        sys_id,
+                        Ball {
+                            id: hid,
+                            type_id: hauler_tid,
+                            position: h_pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 140.0,
+                            inertia: 0.9,
+                            mass: 12_000_000.0,
+                            radius: 220.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        },
+                        CombatState {
+                            shield_hp: 10_000.0,
+                            max_shield_hp: 10_000.0,
+                            armor_hp: 8_000.0,
+                            max_armor_hp: 8_000.0,
+                            structure_hp: 8_000.0,
+                            max_structure_hp: 8_000.0,
+                            is_tethered: false,
+                            ..CombatState::default()
+                        },
+                    );
+                }
                 spawned.push(hid);
             }
         }
     }
 
-    rec.pocket_spawned = true;
-    rec.spawned_ball_ids = spawned;
     let progress_snapshot = rec.progress.clone();
-    let spawned_snapshot = rec.spawned_ball_ids.clone();
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         if let Some(live) = snap.dungeon_runtime.homefront_runtimes.get_mut(&instance_id) {
             live.pocket_spawned = true;
-            live.spawned_ball_ids = spawned_snapshot;
-            live.progress = progress_snapshot;
+            if !already_spawned {
+                live.spawned_ball_ids = spawned;
+                live.progress = progress_snapshot;
+                if live.last_sim_elapsed_secs.is_none() {
+                    live.last_sim_elapsed_secs = Some(view_sim_elapsed);
+                }
+            } else {
+                for bid in spawned {
+                    if !live.spawned_ball_ids.contains(&bid) {
+                        live.spawned_ball_ids.push(bid);
+                    }
+                }
+                if let Some(esc_sec) = seeded_raid_escape_at {
+                    if let HomefrontProgressRecord::Raid {
+                        active_hauler_ball_id: Some(_),
+                        active_hauler_escape_at_sec,
+                        ..
+                    } = &mut live.progress
+                    {
+                        if *active_hauler_escape_at_sec == 0 {
+                            *active_hauler_escape_at_sec = esc_sec;
+                        }
+                    }
+                }
+                if live.last_sim_elapsed_secs.is_none_or(|prev| view_sim_elapsed < prev) {
+                    live.last_sim_elapsed_secs = Some(view_sim_elapsed);
+                }
+            }
         }
         Ok(())
     });
@@ -2202,47 +2635,100 @@ pub async fn activate_homefront_acceleration_gate(
     }
 
     let now = ctx.now_unix();
-    let elig = ctx.db.try_with_mut_snapshot(|snap| -> Result<HomefrontShipEligibility, BridgeRpcError> {
-        let site_done = resolve_site_record_completed_in_snap(snap, instance_id);
-        let rec = resolve_runtime_record_in_snap(snap, &ctx.sde, instance_id).ok_or_else(|| {
-            hf_err(
-                "HomefrontSiteNotFound",
-                format!("Unknown Homefront site instance {instance_id}"),
-            )
-        })?;
-        if rec.completed || site_done {
-            return Err(hf_err(
-                "SiteAlreadyCompleted",
-                format!("Homefront operation {instance_id} is already completed"),
-            ));
+    let entry_sim_elapsed = sys_h.view().sim_elapsed_secs;
+    enum GateSnapshotResult {
+        Admitted(HomefrontShipEligibility),
+        Rejected {
+            err: BridgeRpcError,
+            despawn: Option<(SolarSystemId, Vec<i64>)>,
+        },
+    }
+    let gate_res = ctx.db.try_with_mut_snapshot(
+        |snap| -> Result<GateSnapshotResult, BridgeRpcError> {
+            let site_done = resolve_site_record_completed_in_snap(snap, instance_id);
+            let rec =
+                resolve_runtime_record_in_snap(snap, &ctx.sde, instance_id).ok_or_else(|| {
+                    hf_err(
+                        "HomefrontSiteNotFound",
+                        format!("Unknown Homefront site instance {instance_id}"),
+                    )
+                })?;
+            if rec.completed || site_done {
+                return Err(hf_err(
+                    "SiteAlreadyCompleted",
+                    format!("Homefront operation {instance_id} is already completed"),
+                ));
+            }
+            if rec.failed {
+                return Err(failed_site_err(rec));
+            }
+            let arch = kind_to_arch(rec.blueprint.archetype);
+            let elig = validate_homefront_ship_eligibility(&ctx.sde, ship_type_id, arch)?;
+            if !rec.started {
+                rec.started = true;
+                rec.started_at_sec = now;
+                rec.last_tick_sec = now;
+                rec.elapsed_sim_secs = 0.0;
+                rec.last_sim_elapsed_secs = Some(entry_sim_elapsed);
+                rec.sim_clock_initialized = true;
+                rec.expires_at_sec = now.saturating_add(rec.blueprint.time_limit_secs);
+            } else {
+                let eff_sim = super::pve_homefront_runtime::effective_elapsed_sim_secs(
+                    rec,
+                    Some(entry_sim_elapsed),
+                );
+                if rec.blueprint.time_limit_secs > 0
+                    && (eff_sim + 1e-9) >= rec.blueprint.time_limit_secs as f64
+                {
+                    rec.elapsed_sim_secs = rec.blueprint.time_limit_secs as f64;
+                    rec.failed = true;
+                    rec.failure_reason = Some(format!(
+                        "Homefront {} exceeded {}-second operation timer",
+                        rec.blueprint.dungeon_name, rec.blueprint.time_limit_secs
+                    ));
+                    let mut balls = rec.spawned_ball_ids.clone();
+                    if !balls.contains(&rec.outer_beacon_ball_id) {
+                        balls.push(rec.outer_beacon_ball_id);
+                    }
+                    if !balls.contains(&rec.outer_gate_ball_id) {
+                        balls.push(rec.outer_gate_ball_id);
+                    }
+                    return Ok(GateSnapshotResult::Rejected {
+                        err: failed_site_err(rec),
+                        despawn: Some((rec.solar_system_id, balls)),
+                    });
+                }
+                if rec.last_sim_elapsed_secs.is_none_or(|prev| entry_sim_elapsed < prev) {
+                    rec.last_sim_elapsed_secs = Some(entry_sim_elapsed);
+                    super::pve_homefront_runtime::update_homefront_expires_at_sec(rec, now);
+                }
+            }
+            rec.entered_pilots.insert(char_id, elig_to_record(&elig));
+            if !rec.contributions.contains_key(&char_id) {
+                rec.next_entry_sequence = rec.next_entry_sequence.saturating_add(1);
+                rec.contributions.insert(
+                    char_id,
+                    HomefrontContributionRecord {
+                        character_id: char_id,
+                        entry_sequence: rec.next_entry_sequence,
+                        ..Default::default()
+                    },
+                );
+            }
+            Ok(GateSnapshotResult::Admitted(elig))
+        },
+    )?;
+    let elig = match gate_res {
+        GateSnapshotResult::Admitted(elig) => elig,
+        GateSnapshotResult::Rejected { err, despawn } => {
+            if let Some((despawn_sys_id, balls)) = despawn {
+                despawn_homefront_balls_sync(ctx, despawn_sys_id, instance_id, &balls);
+            }
+            return Err(err);
         }
-        if rec.failed {
-            return Err(failed_site_err(rec));
-        }
-        let arch = kind_to_arch(rec.blueprint.archetype);
-        let elig = validate_homefront_ship_eligibility(&ctx.sde, ship_type_id, arch)?;
-        if !rec.started {
-            rec.started = true;
-            rec.started_at_sec = now;
-            rec.last_tick_sec = now;
-            rec.expires_at_sec = now.saturating_add(rec.blueprint.time_limit_secs);
-        }
-        rec.entered_pilots.insert(char_id, elig_to_record(&elig));
-        if !rec.contributions.contains_key(&char_id) {
-            rec.next_entry_sequence = rec.next_entry_sequence.saturating_add(1);
-            rec.contributions.insert(
-                char_id,
-                HomefrontContributionRecord {
-                    character_id: char_id,
-                    entry_sequence: rec.next_entry_sequence,
-                    ..Default::default()
-                },
-            );
-        }
-        Ok(elig)
-    })?;
+    };
 
-    spawn_pocket_entities_sync(ctx, instance_id);
+    spawn_or_reconcile_pocket_entities_with_handle(ctx, &sys_h, instance_id, false);
 
     let idx_offset = (char_id.unsigned_abs() % 7) as f64 * 300.0;
     let dest = pocket_pos + DVec3::new(idx_offset, HOMEFRONT_POCKET_LANDING_Y_M, 0.0);
@@ -2337,12 +2823,25 @@ fn failed_site_err(rec: &HomefrontRuntimeRecord) -> BridgeRpcError {
     )
 }
 
+fn peek_instance_sim_elapsed_secs(ctx: &ServerContext, instance_id: i64) -> Option<f64> {
+    let sys_id = ctx.db.with_snapshot(|snap| {
+        snap.dungeon_runtime
+            .homefront_runtimes
+            .get(&instance_id)
+            .map(|r| r.solar_system_id)
+    })?;
+    ctx.systems
+        .get_handle(sys_id)
+        .map(|h| h.view().sim_elapsed_secs)
+}
+
 fn verify_active_pilot_and_timeout_in_snap<'a>(
     snap: &'a mut WorldStateSnapshot,
     sde: &SdeRegistry,
     char_id: i64,
     instance_id: i64,
-    now: u64,
+    _now: u64,
+    cur_sim_opt: Option<f64>,
 ) -> Result<&'a mut HomefrontRuntimeRecord, Result<HomefrontRuntimeState, BridgeRpcError>> {
     let site_done = resolve_site_record_completed_in_snap(snap, instance_id);
     let Some(rec) = resolve_runtime_record_in_snap(snap, sde, instance_id) else {
@@ -2367,7 +2866,11 @@ fn verify_active_pilot_and_timeout_in_snap<'a>(
             "Pilot must pass the Homefront acceleration gate first",
         )));
     }
-    if rec.expires_at_sec > 0 && now >= rec.expires_at_sec {
+    let eff_sim = super::pve_homefront_runtime::effective_elapsed_sim_secs(rec, cur_sim_opt);
+    if rec.blueprint.time_limit_secs > 0
+        && (eff_sim + 1e-9) >= rec.blueprint.time_limit_secs as f64
+    {
+        rec.elapsed_sim_secs = rec.blueprint.time_limit_secs as f64;
         rec.failed = true;
         rec.failure_reason = Some(format!(
             "Homefront {} exceeded {}-second operation timer",
@@ -2392,10 +2895,17 @@ where
 {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
+    let cur_sim_opt = peek_instance_sim_elapsed_secs(ctx, instance_id);
     let res = ctx.db.try_with_mut_snapshot(
         |snap| -> Result<Result<HomefrontRuntimeState, BridgeRpcError>, BridgeRpcError> {
-            match verify_active_pilot_and_timeout_in_snap(snap, &ctx.sde, char_id, instance_id, now)
-            {
+            match verify_active_pilot_and_timeout_in_snap(
+                snap,
+                &ctx.sde,
+                char_id,
+                instance_id,
+                now,
+                cur_sim_opt,
+            ) {
                 Ok(_) => Ok(f(snap, char_id, now)),
                 Err(inner_err) => Ok(inner_err),
             }
@@ -2404,7 +2914,7 @@ where
     res
 }
 
-fn ensure_contribution_fields<'a>(
+pub(super) fn ensure_contribution_fields<'a>(
     contributions: &'a mut BTreeMap<i64, HomefrontContributionRecord>,
     next_entry_sequence: &mut u64,
     char_id: i64,
@@ -2997,6 +3507,7 @@ pub async fn abyssal_clear_wave(
     }
 
     let now = ctx.now_unix();
+    let cur_sim_opt = peek_instance_sim_elapsed_secs(ctx, instance_id);
     let mut disperse_bubble = false;
     let mut respawn_bubble = false;
     let mut sys_id_out = 0;
@@ -3020,6 +3531,7 @@ pub async fn abyssal_clear_wave(
                     char_id,
                     instance_id,
                     now,
+                    cur_sim_opt,
                 ) {
                     Ok(rec) => rec,
                     Err(Ok(timed_out_state)) => return Ok(Ok((timed_out_state, None))),
@@ -3410,14 +3922,16 @@ fn despawn_homefront_balls_db(
     instance_id: i64,
     balls: &[i64],
 ) {
-    let sys_h = systems.get_or_spawn(sys_id);
+    let Some(sys_h) = systems.get_handle(sys_id) else {
+        return;
+    };
     for bid in balls {
         sys_h.try_remove_ball(*bid);
     }
     sys_h.try_remove_warp_bubble(1_897_800_000 + instance_id.saturating_mul(100) + 9);
 }
 
-fn despawn_homefront_balls_sync(
+pub(super) fn despawn_homefront_balls_sync(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     instance_id: i64,
@@ -3766,7 +4280,7 @@ fn pay_aar_wave_live_if_needed(ctx: &ServerContext, instance_id: i64, wave_num: 
     }
 }
 
-fn try_settle_completed_homefront_live(ctx: &ServerContext, instance_id: i64) {
+pub(super) fn try_settle_completed_homefront_live(ctx: &ServerContext, instance_id: i64) {
     let _ = settle_homefront_completion_atomic_sync(ctx, instance_id, None);
 }
 
@@ -3899,7 +4413,7 @@ fn spawn_next_aar_wave_db(
     spawn_next_aar_wave_db_with_despawns(systems, db, sde, instance_id, next_wave).1
 }
 
-fn spawn_next_aar_wave_in_space(ctx: &ServerContext, instance_id: i64, next_wave: u8) {
+pub(super) fn spawn_next_aar_wave_in_space(ctx: &ServerContext, instance_id: i64, next_wave: u8) {
     let (despawned, spawned) =
         spawn_next_aar_wave_db_with_despawns(&ctx.systems, &ctx.db, &ctx.sde, instance_id, next_wave);
     if !despawned.is_empty() {
@@ -4123,7 +4637,7 @@ pub async fn on_homefront_combat_damage_event(
     );
 }
 
-fn raid_hauler_ball(id: i64, type_id: TypeId, position: DVec3) -> Ball {
+pub(super) fn raid_hauler_ball(id: i64, type_id: TypeId, position: DVec3) -> Ball {
     Ball {
         id,
         type_id,
@@ -4138,7 +4652,7 @@ fn raid_hauler_ball(id: i64, type_id: TypeId, position: DVec3) -> Ball {
     }
 }
 
-fn advance_next_raid_hauler(
+pub(super) fn advance_next_raid_hauler(
     next_entity_id: &mut i64,
     now: u64,
     hauler_tid: TypeId,
@@ -4199,6 +4713,9 @@ pub async fn on_homefront_entity_destroyed_core(
     }
 
     let now = db.clock().now_unix_secs();
+    let pre_sys_sim = systems
+        .get_handle(sys_id)
+        .map(|h| h.view().sim_elapsed_secs);
 
     let action_res = db.try_with_mut_snapshot(
         |snap| -> Result<Option<PostKillAction>, BridgeRpcError> {
@@ -4261,6 +4778,7 @@ pub async fn on_homefront_entity_destroyed_core(
 
             let mut post = PostKillAction::None;
             let mut add_crate_to_snap: Option<(i64, [f64; 3])> = None;
+            let mut prune_killed_ball = true;
 
             let spawned_ball_ids = &mut rec.spawned_ball_ids;
             match &mut rec.progress {
@@ -4346,6 +4864,9 @@ pub async fn on_homefront_entity_destroyed_core(
                     if arrays_hacked.iter().all(|&h| h) {
                         *relay_hp = 0.0;
                         post = PostKillAction::SettleComplete(inst_id);
+                    } else {
+                        // Invulnerable relay rejected premature destruction; preserve ID in `spawned_ball_ids`.
+                        prune_killed_ball = false;
                     }
                 }
                 HomefrontProgressRecord::DreadAssault {
@@ -4373,6 +4894,7 @@ pub async fn on_homefront_entity_destroyed_core(
                     mutanite_units_remaining,
                     evacuation_active,
                     basileus_spawned,
+                    basileus_ball_id,
                     cache_ball_id,
                     caches_recovered,
                     ..
@@ -4382,6 +4904,8 @@ pub async fn on_homefront_entity_destroyed_core(
                         *caches_recovered += 1;
                         let cpos = ball_pos.unwrap_or(pocket_pos);
                         post = PostKillAction::DropAarCacheWreck(extra_id, cpos);
+                    } else if *basileus_ball_id == Some(ball_id) {
+                        *basileus_ball_id = None;
                     } else if wave_hostile_ball_ids.contains(&ball_id) {
                         wave_hostile_ball_ids.retain(|&id| id != ball_id);
                         *wave_hostiles_remaining = wave_hostile_ball_ids.len() as u8;
@@ -4427,7 +4951,30 @@ pub async fn on_homefront_entity_destroyed_core(
                         }
                     }
                 }
+                HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. } => {
+                    wreck_ball_ids.retain(|&id| id != ball_id);
+                }
                 _ => {}
+            }
+
+            if prune_killed_ball {
+                rec.spawned_ball_ids.retain(|&id| id != ball_id);
+            }
+
+            if matches!(
+                post,
+                PostKillAction::SpawnRaidHauler { .. }
+                    | PostKillAction::DropRaidCrate {
+                        next_hauler_opt: Some(_),
+                        ..
+                    }
+            ) {
+                let _ = super::pve_homefront_runtime::advance_homefront_sim_clock(
+                    rec,
+                    pre_sys_sim,
+                    now,
+                );
+                rec.last_tick_sec = now;
             }
 
             if let Some((crate_id, pos_arr)) = add_crate_to_snap {
@@ -5239,743 +5786,11 @@ pub async fn on_homefront_remote_repair_event(
     on_homefront_remote_repair_event_sync(ctx, char_id, Some(sys_id), target_id, repaired_hp);
 }
 
-/// Synchronous 1 Hz / `advance_pve_special_clock` Homefront tick across all systems.
-pub fn tick_homefront_operations_sync(ctx: &ServerContext) {
-    let now = ctx.now_unix();
-    let active_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime
-            .homefront_runtimes
-            .values()
-            .filter(|r| r.started && !r.completed && !r.failed)
-            .map(|r| r.instance_id)
-            .collect()
-    });
-    if active_ids.is_empty() {
-        return;
-    }
+pub use super::pve_homefront_runtime::{
+    tick_homefront_operations_for_system_sync, tick_homefront_operations_on_clock,
+    tick_homefront_operations_sync,
+};
 
-    for inst_id in active_ids {
-        tick_single_homefront_instance_sync(ctx, inst_id, now);
-    }
-}
-
-/// Synchronous 1 Hz per-system Homefront tick called from `combat_npc_ai::step_extended_npc_ai_sync`.
-pub fn tick_homefront_operations_for_system_sync(ctx: &ServerContext, sys_id: SolarSystemId) {
-    let now = ctx.now_unix();
-    let active_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime
-            .homefront_runtimes
-            .values()
-            .filter(|r| r.solar_system_id == sys_id && r.started && !r.completed && !r.failed)
-            .map(|r| r.instance_id)
-            .collect()
-    });
-    if active_ids.is_empty() {
-        return;
-    }
-
-    for inst_id in active_ids {
-        tick_single_homefront_instance_sync(ctx, inst_id, now);
-    }
-}
-
-fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u64) {
-    #[derive(Default)]
-    struct SideEffects {
-        settle_complete: bool,
-        despawn_fail: Option<(SolarSystemId, Vec<i64>)>,
-        despawn_escaped_balls: Option<(SolarSystemId, Vec<i64>)>,
-        spawn_traffic_smugglers: Option<(SolarSystemId, Vec<(i64, DVec3)>)>,
-        retether_relay: Option<(SolarSystemId, i64)>,
-        spawn_aar_wave: Option<u8>,
-        spawn_basileus: Option<(SolarSystemId, DVec3)>,
-        werpost_attack: Option<(SolarSystemId, i64, f64)>,
-        dread_siege_dmg: Option<(SolarSystemId, i64, f64)>,
-        respawn_raid_hauler: Option<(SolarSystemId, i64, TypeId, DVec3, i64)>,
-    }
-
-    let snapshot_pre = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime.homefront_runtimes.get(&inst_id).cloned()
-    });
-    let Some(pre) = snapshot_pre else {
-        return;
-    };
-    let sys_h_opt = ctx.systems.get_handle(pre.solar_system_id);
-
-    // Sample live ballpark CombatState outside DB write lock (strict lock order!)
-    let mut live_dread_cap: Option<f64> = None;
-    let mut live_rift_caps: Option<[f64; 5]> = None;
-    let mut live_protectee_hp: Option<f64> = None;
-    let mut live_raid_scrambled = false;
-    let mut live_hostile_target: Option<i64> = None;
-    let mut scrambled_traffic_smugglers: Vec<i64> = Vec::new();
-
-    if let Some(sys_h) = sys_h_opt.as_ref() {
-        let view = sys_h.view();
-        match &pre.progress {
-            HomefrontProgressRecord::DreadAssault { dread_ball_id, .. } => {
-                if let Some(cs) = view.combat_states.get(dread_ball_id) {
-                    live_dread_cap = Some(cs.capacitor);
-                }
-            }
-            HomefrontProgressRecord::StabilizeRift { array_ball_ids, .. } => {
-                let mut caps = [1.0_f64; 5];
-                let mut any_ball = false;
-                for (i, aid) in array_ball_ids.iter().enumerate().take(5) {
-                    if let Some(cs) = view.combat_states.get(aid) {
-                        caps[i] = if cs.max_capacitor > 0.0 {
-                            (cs.capacitor / cs.max_capacitor).clamp(0.0, 1.0)
-                        } else {
-                            1.0
-                        };
-                        any_ball = true;
-                    }
-                }
-                if any_ball {
-                    live_rift_caps = Some(caps);
-                }
-            }
-            HomefrontProgressRecord::EmergencyAid { protectee_ball_id, .. } => {
-                if let Some(cs) = view.combat_states.get(protectee_ball_id) {
-                    live_protectee_hp = Some(cs.shield_hp + cs.armor_hp + cs.structure_hp);
-                }
-            }
-            HomefrontProgressRecord::Raid {
-                active_hauler_ball_id: Some(hid),
-                ..
-            } => {
-                live_raid_scrambled = sys_h.is_ball_scrambled_sync(*hid);
-            }
-            HomefrontProgressRecord::TrafficStop { smuggler_ball_ids, .. } => {
-                for &sid in smuggler_ball_ids {
-                    if sys_h.is_ball_scrambled_sync(sid) {
-                        scrambled_traffic_smugglers.push(sid);
-                    }
-                }
-            }
-            HomefrontProgressRecord::SalvageResearch {
-                werpost_activated: true,
-                ..
-            } => {
-                live_hostile_target = pre
-                    .spawned_ball_ids
-                    .iter()
-                    .copied()
-                    .find(|bid| *bid == pre.dispatch_boss_ball_id && view.balls.contains_key(bid));
-            }
-            _ => {}
-        }
-    }
-
-    let fx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<SideEffects, BridgeRpcError> {
-        let mut fx = SideEffects::default();
-        let (raid_depot_count, raid_per_owner) = snap
-            .dungeon_runtime
-            .homefront_runtimes
-            .get(&inst_id)
-            .and_then(|rec| match &rec.progress {
-                HomefrontProgressRecord::Raid {
-                    delivery_depot_ball_id,
-                    ..
-                } => {
-                    let loot_tid = rec
-                        .blueprint
-                        .loot_commodity_type_id
-                        .unwrap_or(HOMEFRONT_RAID_CRATE_TYPE_ID);
-                    let mut total: i64 = 0;
-                    let mut per_owner: BTreeMap<i64, u32> = BTreeMap::new();
-                    for it in snap.items.values() {
-                        if it.location_id == *delivery_depot_ball_id
-                            && it.type_id == loot_tid
-                            && it.quantity > 0
-                            && rec.entered_pilots.contains_key(&it.owner_id)
-                        {
-                            let qty = u32::try_from(it.quantity).unwrap_or(0);
-                            total += i64::from(it.quantity);
-                            *per_owner.entry(it.owner_id).or_insert(0) += qty;
-                        }
-                    }
-                    Some((
-                        u8::try_from(total.max(0)).unwrap_or(u8::MAX),
-                        per_owner,
-                    ))
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| (0, BTreeMap::new()));
-        let mut traffic_replacement_req: Option<(SolarSystemId, DVec3, u32, u8)> = None;
-        let mut traffic_failed = false;
-        let mut traffic_escaped_balls: Vec<i64> = Vec::new();
-        let (sys_id, hostile_faction_id) = {
-            let next_entity_id = &mut snap.next_entity_id;
-            let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) else {
-                return Ok(fx);
-            };
-            if !rec.started || rec.completed || rec.failed {
-                return Ok(fx);
-            }
-            let dt = now.saturating_sub(rec.last_tick_sec.max(rec.started_at_sec));
-            rec.last_tick_sec = now;
-
-            if rec.expires_at_sec > 0 && now >= rec.expires_at_sec {
-                rec.failed = true;
-                rec.failure_reason = Some(format!(
-                    "Homefront {} exceeded {}-second operation timer",
-                    rec.blueprint.dungeon_name, rec.blueprint.time_limit_secs
-                ));
-                fx.despawn_fail = Some((rec.solar_system_id, rec.spawned_ball_ids.clone()));
-                return Ok(fx);
-            }
-
-            if let HomefrontProgressRecord::Raid {
-                cargo_delivered,
-                required_deliveries,
-                ..
-            } = &mut rec.progress
-            {
-                if raid_depot_count > *cargo_delivered {
-                    let mut rem = u32::from(raid_depot_count - *cargo_delivered);
-                    *cargo_delivered = raid_depot_count;
-                    for (&pid, &owned_qty) in &raid_per_owner {
-                        if rem == 0 {
-                            break;
-                        }
-                        let already = rec.contributions.get(&pid).map_or(0, |c| c.cargo_delivered);
-                        let credit = owned_qty.saturating_sub(already).min(rem);
-                        if credit > 0 {
-                            ensure_contribution_fields(
-                                &mut rec.contributions,
-                                &mut rec.next_entry_sequence,
-                                pid,
-                            )
-                            .cargo_delivered += credit;
-                            rem -= credit;
-                        }
-                    }
-                    if rem > 0 {
-                        if let Some((&fallback_pid, _)) = raid_per_owner.iter().next() {
-                            ensure_contribution_fields(
-                                &mut rec.contributions,
-                                &mut rec.next_entry_sequence,
-                                fallback_pid,
-                            )
-                            .cargo_delivered += rem;
-                        }
-                    }
-                    if *cargo_delivered >= *required_deliveries {
-                        fx.settle_complete = true;
-                    }
-                }
-            }
-            if dt == 0 {
-                return Ok(fx);
-            }
-
-            let sys_id = rec.solar_system_id;
-            let pocket_pos = DVec3::from_array(rec.pocket_position);
-            let hostile_faction_id = rec.blueprint.hostile_faction_id;
-        let hauler_tid = rec
-            .blueprint
-            .objective_structure_type_id
-            .unwrap_or(77_192);
-
-        match &mut rec.progress {
-            HomefrontProgressRecord::Raid {
-                haulers_spawned,
-                haulers_destroyed,
-                haulers_escaped,
-                active_hauler_ball_id,
-                active_hauler_tackled,
-                active_hauler_escape_at_sec,
-                required_deliveries,
-                ..
-            } => {
-                if live_raid_scrambled {
-                    *active_hauler_tackled = true;
-                }
-                if let Some(old_hid) = *active_hauler_ball_id {
-                    if !*active_hauler_tackled
-                        && *active_hauler_escape_at_sec > 0
-                        && now >= *active_hauler_escape_at_sec
-                    {
-                        *haulers_escaped = haulers_escaped.saturating_add(1);
-                        rec.spawned_ball_ids.retain(|&id| id != old_hid);
-                        if let Some((new_hid, h_tid, h_pos)) = advance_next_raid_hauler(
-                            next_entity_id,
-                            now,
-                            hauler_tid,
-                            pocket_pos,
-                            haulers_spawned,
-                            *haulers_destroyed,
-                            *required_deliveries,
-                            active_hauler_ball_id,
-                            active_hauler_tackled,
-                            active_hauler_escape_at_sec,
-                            &mut rec.spawned_ball_ids,
-                        ) {
-                            fx.respawn_raid_hauler = Some((sys_id, old_hid, h_tid, h_pos, new_hid));
-                        }
-                    }
-                }
-            }
-            HomefrontProgressRecord::EmergencyAid {
-                protectee_hp,
-                survival_elapsed_secs,
-                required_survival_secs,
-                waves_repelled,
-                ..
-            } => {
-                if let Some(lhp) = live_protectee_hp {
-                    *protectee_hp = lhp;
-                }
-                if *protectee_hp <= 0.0 {
-                    rec.failed = true;
-                    rec.failure_reason =
-                        Some("Emergency Aid allied vessel was destroyed".into());
-                    fx.despawn_fail = Some((sys_id, rec.spawned_ball_ids.clone()));
-                    return Ok(fx);
-                }
-                *survival_elapsed_secs =
-                    survival_elapsed_secs.saturating_add(dt).min(*required_survival_secs);
-                *waves_repelled = (*waves_repelled).max((*survival_elapsed_secs / 200).min(3) as u8);
-                if *survival_elapsed_secs >= *required_survival_secs {
-                    fx.settle_complete = true;
-                }
-            }
-            HomefrontProgressRecord::DreadAssault {
-                base_ball_id,
-                capacitor_gj,
-                capacitor_target_gj,
-                siege_cycles_completed,
-                target_siege_cycles,
-                in_siege_mode,
-                siege_remaining_secs,
-                enemy_base_hp,
-                enemy_base_max_hp,
-                ..
-            } => {
-                if !*in_siege_mode {
-                    if let Some(dcap) = live_dread_cap {
-                        if dcap > *capacitor_gj {
-                            *capacitor_gj = dcap.clamp(0.0, *capacitor_target_gj);
-                        }
-                    }
-                    if *capacitor_gj >= *capacitor_target_gj {
-                        *in_siege_mode = true;
-                        *siege_remaining_secs = 90;
-                    }
-                }
-                if *in_siege_mode {
-                    if dt >= *siege_remaining_secs {
-                        *siege_remaining_secs = 0;
-                        *in_siege_mode = false;
-                        *capacitor_gj = 0.0;
-                        *siege_cycles_completed = siege_cycles_completed.saturating_add(1);
-                        let chunk =
-                            *enemy_base_max_hp / f64::from((*target_siege_cycles).max(1));
-                        *enemy_base_hp = (*enemy_base_hp - chunk).max(0.0);
-                        fx.dread_siege_dmg = Some((sys_id, *base_ball_id, chunk));
-                        if *siege_cycles_completed >= *target_siege_cycles && *enemy_base_hp <= 0.0
-                        {
-                            fx.settle_complete = true;
-                        }
-                    } else {
-                        *siege_remaining_secs -= dt;
-                    }
-                }
-            }
-            HomefrontProgressRecord::AbyssalArtifactRecovery {
-                current_wave,
-                total_waves,
-                setup_remaining_secs,
-                wave_time_remaining_secs,
-                evacuation_active,
-                basileus_spawned,
-                extraction_window_secs,
-                mutanite_units_remaining,
-                ..
-            } => {
-                if *setup_remaining_secs > 0 {
-                    *setup_remaining_secs = setup_remaining_secs.saturating_sub(dt);
-                } else if *evacuation_active {
-                    if dt >= *extraction_window_secs {
-                        *extraction_window_secs = 0;
-                        if !*basileus_spawned {
-                            *basileus_spawned = true;
-                            fx.spawn_basileus = Some((sys_id, pocket_pos));
-                        }
-                    } else {
-                        *extraction_window_secs -= dt;
-                    }
-                } else if *mutanite_units_remaining > 0 {
-                    if dt >= *wave_time_remaining_secs {
-                        *wave_time_remaining_secs = 0;
-                        rec.failed = true;
-                        rec.failure_reason = Some(format!(
-                            "Abyssal Artifact Recovery wave {} timed out with {} Mutanite unmined",
-                            *current_wave, *mutanite_units_remaining
-                        ));
-                        fx.despawn_fail = Some((sys_id, rec.spawned_ball_ids.clone()));
-                        return Ok(fx);
-                    } else {
-                        *wave_time_remaining_secs -= dt;
-                    }
-                } else if *current_wave < *total_waves {
-                    fx.spawn_aar_wave = Some(*current_wave + 1);
-                }
-            }
-            HomefrontProgressRecord::SuspiciousSignal {
-                relay_ball_id,
-                arrays_hacked,
-                vulnerability_window_secs,
-                relay_hp,
-                ..
-            } => {
-                if *vulnerability_window_secs > 0 && *relay_hp > 0.0 {
-                    if dt >= *vulnerability_window_secs {
-                        *vulnerability_window_secs = 0;
-                        *arrays_hacked = [false; 3];
-                        fx.retether_relay = Some((sys_id, *relay_ball_id));
-                    } else {
-                        *vulnerability_window_secs -= dt;
-                    }
-                }
-            }
-            HomefrontProgressRecord::SalvageResearch {
-                werpost_activated: true,
-                ..
-            } => {
-                if let Some(target_id) = live_hostile_target {
-                    fx.werpost_attack = Some((sys_id, target_id, (dt as f64) * 350.0));
-                }
-            }
-            HomefrontProgressRecord::StabilizeRift {
-                arrays_cap_pct,
-                held_low_secs,
-                required_hold_secs,
-                ..
-            } => {
-                if let Some(caps) = live_rift_caps {
-                    *arrays_cap_pct = caps;
-                }
-                if arrays_cap_pct.iter().all(|&p| p < 0.20) {
-                    *held_low_secs =
-                        held_low_secs.saturating_add(dt).min(*required_hold_secs);
-                    if *held_low_secs >= *required_hold_secs {
-                        fx.settle_complete = true;
-                    }
-                } else {
-                    *held_low_secs = 0;
-                }
-            }
-            HomefrontProgressRecord::TrafficStop {
-                active_hauler_ball_ids,
-                smuggler_ball_ids,
-                survival_elapsed_secs,
-                required_survival_secs,
-                smugglers_destroyed,
-                required_smugglers,
-                smugglers_escaped,
-                civilians_harmed,
-                ..
-            } => {
-                const ESCAPE_CHECKPOINTS: [u64; 6] = [90, 165, 240, 315, 390, 465];
-                let prev_elapsed = *survival_elapsed_secs;
-                let req_secs = (*required_survival_secs).max(HOMEFRONT_TRAFFIC_TIMER_SECS);
-                let next_elapsed = prev_elapsed.saturating_add(dt).min(req_secs);
-                *survival_elapsed_secs = next_elapsed;
-
-                for cp in ESCAPE_CHECKPOINTS {
-                    if cp > prev_elapsed && cp <= next_elapsed {
-                        if let Some(pos_idx) = smuggler_ball_ids
-                            .iter()
-                            .position(|id| !scrambled_traffic_smugglers.contains(id))
-                        {
-                            let escaped_id = smuggler_ball_ids.remove(pos_idx);
-                            active_hauler_ball_ids.retain(|&id| id != escaped_id);
-                            traffic_escaped_balls.push(escaped_id);
-                            *smugglers_escaped = smugglers_escaped.saturating_add(1);
-                        }
-                    }
-                }
-
-                if *smugglers_escaped >= 5 || *civilians_harmed >= 3 {
-                    traffic_failed = true;
-                } else if !traffic_escaped_balls.is_empty() {
-                    let alive_plus_killed =
-                        smugglers_destroyed.saturating_add(smuggler_ball_ids.len() as u8);
-                    let need_rep = required_smugglers.saturating_sub(alive_plus_killed);
-                    if need_rep > 0 {
-                        traffic_replacement_req =
-                            Some((sys_id, pocket_pos, hostile_faction_id, need_rep));
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        if !traffic_escaped_balls.is_empty() {
-            rec.spawned_ball_ids
-                .retain(|id| !traffic_escaped_balls.contains(id));
-            fx.despawn_escaped_balls = Some((sys_id, traffic_escaped_balls));
-        }
-        if traffic_failed {
-            rec.failed = true;
-            rec.failure_reason = Some("Traffic Stop objectives failed".into());
-            fx.despawn_escaped_balls = None;
-            fx.despawn_fail = Some((sys_id, rec.spawned_ball_ids.clone()));
-            return Ok(fx);
-        }
-        if matches!(rec.progress, HomefrontProgressRecord::TrafficStop { .. })
-            && runtime_record_objective_complete(rec)
-        {
-            fx.settle_complete = true;
-        }
-        let _ = rec;
-        (sys_id, hostile_faction_id)
-    };
-
-    if let Some((rep_sys, rep_pos, rep_faction, rep_count)) = traffic_replacement_req {
-        let mut rep_allocs = Vec::with_capacity(usize::from(rep_count));
-        for i in 0..rep_count {
-            snap.next_entity_id += 1;
-            let hid = snap.next_entity_id;
-            snap.next_entity_id += 1;
-            let cargo_id = snap.next_entity_id;
-            insert_scene_item_in_snap(
-                snap,
-                InventoryItemRecord {
-                    item_id: cargo_id,
-                    type_id: HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID,
-                    owner_id: i64::from(rep_faction),
-                    location_id: hid,
-                    flag: InventoryFlag::Cargo,
-                    quantity: 1,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-            let spawn_pos = rep_pos + DVec3::new((f64::from(i) + 1.0) * 2_500.0, 2_000.0, -3_000.0);
-            rep_allocs.push((hid, spawn_pos));
-        }
-        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) {
-            if let HomefrontProgressRecord::TrafficStop {
-                active_hauler_ball_ids,
-                smuggler_ball_ids,
-                ..
-            } = &mut rec.progress
-            {
-                for &(hid, _) in &rep_allocs {
-                    active_hauler_ball_ids.push(hid);
-                    smuggler_ball_ids.push(hid);
-                    rec.spawned_ball_ids.push(hid);
-                }
-            }
-        }
-        fx.spawn_traffic_smugglers = Some((rep_sys, rep_allocs));
-    }
-    let _ = (sys_id, hostile_faction_id);
-        Ok(fx)
-    });
-
-    let Ok(fx) = fx_res else {
-        return;
-    };
-    if let Some((sys_id, balls)) = fx.despawn_escaped_balls {
-        despawn_homefront_balls_sync(ctx, sys_id, inst_id, &balls);
-    }
-    if let Some((sys_id, new_smugglers)) = fx.spawn_traffic_smugglers {
-        let sys_h = ctx.systems.get_or_spawn(sys_id);
-        for (hid, h_pos) in new_smugglers {
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: hid,
-                    type_id: 649_u32,
-                    position: h_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 140.0,
-                    inertia: 0.9,
-                    mass: 12_000_000.0,
-                    radius: 220.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    shield_hp: 10_000.0,
-                    max_shield_hp: 10_000.0,
-                    armor_hp: 8_000.0,
-                    max_armor_hp: 8_000.0,
-                    structure_hp: 8_000.0,
-                    max_structure_hp: 8_000.0,
-                    is_tethered: false,
-                    ..CombatState::default()
-                },
-            );
-        }
-    }
-    if let Some((sys_id, old_hid, h_tid, pos, new_hid)) = fx.respawn_raid_hauler {
-        let sys_h = ctx.systems.get_or_spawn(sys_id);
-        sys_h.try_remove_ball(old_hid);
-        spawn_ball_sync_with_claim(
-            ctx,
-            &sys_h,
-            sys_id,
-            raid_hauler_ball(new_hid, h_tid, pos),
-            ctx.build_type_combat_state(h_tid),
-        );
-    }
-    if let Some((sys_id, relay_id)) = fx.retether_relay {
-        set_homefront_relay_tethered(ctx, sys_id, relay_id, true);
-    }
-    if let Some((sys_id, base_id, dmg)) = fx.dread_siege_dmg {
-        apply_homefront_direct_damage_in_space(ctx, sys_id, base_id, dmg);
-        if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            let _ = sys_h.try_update_combat_state(1_897_800_000 + inst_id * 100 + 13, |d_cs| {
-                d_cs.capacitor = 0.0;
-            });
-        }
-    }
-    if let Some((sys_id, target_id, dmg)) = fx.werpost_attack {
-        apply_homefront_direct_damage_in_space(ctx, sys_id, target_id, dmg);
-    }
-    if let Some(next_w) = fx.spawn_aar_wave {
-        spawn_next_aar_wave_in_space(ctx, inst_id, next_w);
-    }
-    if let Some((sys_id, pocket_pos)) = fx.spawn_basileus {
-        let mut basileus_ids = None;
-        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-            snap.next_entity_id += 1;
-            let bid = snap.next_entity_id;
-            snap.next_entity_id += 1;
-            let cid = snap.next_entity_id;
-            if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) {
-                rec.spawned_ball_ids.push(bid);
-                rec.spawned_ball_ids.push(cid);
-                if let HomefrontProgressRecord::AbyssalArtifactRecovery { cache_ball_id, .. } =
-                    &mut rec.progress
-                {
-                    *cache_ball_id = Some(cid);
-                }
-                basileus_ids = Some((bid, cid));
-            }
-            Ok(())
-        });
-        if let Some((bid, cid)) = basileus_ids {
-            let sys_h = ctx.systems.get_or_spawn(sys_id);
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: bid,
-                    type_id: HOMEFRONT_AAR_BASILEUS_TYPE_ID,
-                    position: pocket_pos + DVec3::new(0.0, 2_000.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 380.0,
-                    inertia: 0.4,
-                    mass: 20_000_000.0,
-                    radius: 260.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(HOMEFRONT_AAR_BASILEUS_TYPE_ID),
-            );
-            register_homefront_npc_entity(
-                ctx,
-                sys_id,
-                bid,
-                HOMEFRONT_AAR_BASILEUS_TYPE_ID,
-                500_026,
-                "HomefrontHostile",
-                pocket_pos,
-                [0.25, 0.25, 0.25, 0.25],
-                650.0,
-                12_000.0,
-                40_000.0,
-            );
-            spawn_ball_sync_with_claim(
-                ctx,
-                &sys_h,
-                sys_id,
-                Ball {
-                    id: cid,
-                    type_id: HOMEFRONT_AAR_CACHE_TYPE_ID,
-                    position: pocket_pos + DVec3::new(2_500.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 500_000.0,
-                    radius: 150.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                CombatState {
-                    shield_hp: 15_000.0,
-                    max_shield_hp: 15_000.0,
-                    armor_hp: 15_000.0,
-                    max_armor_hp: 15_000.0,
-                    structure_hp: 15_000.0,
-                    max_structure_hp: 15_000.0,
-                    ..CombatState::default()
-                },
-            );
-        }
-    }
-    if let Some((sys_id, balls)) = fx.despawn_fail {
-        despawn_homefront_balls_sync(ctx, sys_id, inst_id, &balls);
-    }
-    if fx.settle_complete {
-        try_settle_completed_homefront_live(ctx, inst_id);
-        return;
-    }
-
-    // Ensure AAR wave escorts spawned inside DB-only destruction hooks also have ExtendedNpcEntity AI.
-    if let HomefrontProgressRecord::AbyssalArtifactRecovery {
-        wave_hostile_ball_ids,
-        ..
-    } = &pre.progress
-    {
-        if !wave_hostile_ball_ids.is_empty() {
-            let missing_ids: Vec<i64> = with_combat_ephemeral(ctx, |rt| {
-                wave_hostile_ball_ids
-                    .iter()
-                    .copied()
-                    .filter(|id| !rt.npc_entities.contains_key(id))
-                    .collect()
-            });
-            if !missing_ids.is_empty() {
-                let sys_h = ctx.systems.get_or_spawn(pre.solar_system_id);
-                let view = sys_h.view();
-                for (idx, eid) in missing_ids.into_iter().enumerate() {
-                    if let Some(ball) = view.balls.get(&eid) {
-                        register_homefront_npc_entity(
-                            ctx,
-                            pre.solar_system_id,
-                            eid,
-                            ball.type_id,
-                            pre.blueprint.hostile_faction_id,
-                            "HomefrontHostile",
-                            ball.position,
-                            [0.25, 0.25, 0.25, 0.25],
-                            100.0 + (idx as f64) * 5.0,
-                            3_500.0,
-                            20_000.0,
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Async entry point for server clock tick (`pve_special_sites` / `combat_npc_ai`).
-pub async fn tick_homefront_operations_on_clock(ctx: &ServerContext) {
-    tick_homefront_operations_sync(ctx);
-}
 
 pub fn handle_get_homefront_site_instances(
     ctx: &ServerContext,

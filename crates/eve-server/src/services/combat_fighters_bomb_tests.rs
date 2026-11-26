@@ -588,3 +588,67 @@ async fn fighter_ability_r9_carrier_fighter_target_pos_and_ewar_guards() {
     .unwrap_err();
     assert_eq!(err_warp_bomb.code, "ShipInWarp");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fighter_point_bomb_ability_activated_tracks_anchored_sim_filetime_under_tidi() {
+    use eve_db::clock::{FILETIME_TICKS_PER_MS, SimFileTime};
+
+    let (ctx, mut session, char_id, ship_id, _high_sys) = make_ability_test_ctx();
+    let low_sys = 30_000_200_u32;
+    let bomber_id = 800_000_930_i64;
+    session.solar_system_id = Some(low_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = low_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(low_sys);
+        }
+    });
+    spawn_fighter_and_ship(&ctx, low_sys, ship_id, bomber_id, 23_063, char_id).await;
+    crate::services::combat_crimewatch::set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
+
+    // Freeze virtual wall clock and anchor system sim clock -300s behind it at TiDi = 0.25.
+    ctx.set_clock(std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_775_400_000,
+    )));
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(low_sys, -300_000, 0.25);
+    let wall_0 = ctx.now_machonet_wall_filetime();
+    let sim_0 = ctx.peek_system_sim_filetime(low_sys).expect("anchored lowsec sim clock");
+    assert_eq!(sim_0.as_ticks() - wall_0.as_ticks(), -300_000 * FILETIME_TICKS_PER_MS);
+
+    ctx.advance_secs(12);
+    let sim_1 = ctx.peek_system_sim_filetime(low_sys).expect("anchored sim clock after 12s");
+    assert_eq!(sim_1, sim_0.saturating_add_secs(3));
+    session.drain_notifications();
+
+    let _ = handle_activate_fighter_ability_slots_on_point(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(bomber_id),
+            PyRep::Integer(2),
+            PyRep::Tuple(vec![PyRep::Real(5_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap()
+    .expect("point bomb activation must succeed");
+
+    let notifs = session.drain_notifications();
+    let ab_args = notifs
+        .iter()
+        .find(|(ev, _)| ev == "OnFighterAbilitySlotActivated")
+        .map(|(_, p)| p)
+        .expect("expected OnFighterAbilitySlotActivated from point bomb");
+    let ab_start = SimFileTime::from_ticks(ab_args[3].as_i64().expect("bomb ability start_time"));
+    assert!(
+        (0..=5).contains(&(ab_start.as_ticks() - sim_1.as_ticks())),
+        "Point-bomb OnFighterAbilitySlotActivated start_time ({}) must track dilated SimFileTime ({})",
+        ab_start.as_ticks(),
+        sim_1.as_ticks(),
+    );
+}

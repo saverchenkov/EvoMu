@@ -640,7 +640,17 @@ pub(crate) fn populate_persisted_space_objects_with_warps(
             }
 
             // Check decay lifetimes before spawning (`feat:lifecycle.wreck-restart`, `feat:lifecycle.mobile_warp_disruptor-lifecycle`, `feat:lifecycle.pi-launch-canister`)
-            if obj_meta.and_then(|m| m.planet_id).is_some() {
+            let is_active_homefront_obj =
+                crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
+                    snap,
+                    item.item_id,
+                );
+            if is_active_homefront_obj {
+                // Active Homefront depots, dropped Raid crates, and salvage wrecks must survive
+                // downtime / TiDi without aging out under jetcan or wreck timers, and are spawned
+                // with full Homefront CombatState/claims by RT-36 pocket reconciliation (`#1196`).
+                continue;
+            } else if obj_meta.and_then(|m| m.planet_id).is_some() {
                 if let Some(created) = obj_meta.and_then(|m| m.created_unix) {
                     if now_unix >= created.saturating_add(PLANETARY_LAUNCH_DECAY_SECS) {
                         expired_item_ids.push(item.item_id);
@@ -1807,6 +1817,12 @@ pub fn on_advance_secs_internal(
 
         for item in snap.items.values() {
             if !(30_000_000..=34_000_000).contains(&item.location_id) {
+                continue;
+            }
+            if crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
+                snap,
+                item.item_id,
+            ) {
                 continue;
             }
             let sys_id = item.location_id as u32;

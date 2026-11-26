@@ -16,7 +16,6 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
 
     ctx.db.with_mut_snapshot(|snap| {
         {
-            let st = snap.sp6_lifecycle.as_inner_mut();
             let npc_wreck_ids: Vec<(i64, u32)> = snap
                 .items
                 .values()
@@ -27,11 +26,18 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
                             .types
                             .get(&i.type_id)
                             .is_some_and(|t| t.group_id == 186);
-                    let is_npc_wreck = st
+                    let is_npc_wreck = snap
+                        .sp6_lifecycle
                         .space_object_meta
                         .get(&i.item_id)
                         .is_some_and(|m| m.is_npc_wreck);
-                    is_wreck && is_npc_wreck && (30_000_000..=34_000_000).contains(&i.location_id)
+                    is_wreck
+                        && is_npc_wreck
+                        && (30_000_000..=34_000_000).contains(&i.location_id)
+                        && !crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
+                            snap,
+                            i.item_id,
+                        )
                 })
                 .map(|i| (i.item_id, i.location_id as u32))
                 .collect();
@@ -39,8 +45,11 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
             for (wid, sys_id) in npc_wreck_ids {
                 snap.items.remove(&wid);
                 snap.item_positions.remove(&wid);
-                st.space_object_meta.remove(&wid);
-                st.ship_combat_hp.remove(&wid);
+                {
+                    let st = snap.sp6_lifecycle.as_inner_mut();
+                    st.space_object_meta.remove(&wid);
+                    st.ship_combat_hp.remove(&wid);
+                }
                 snap.items.retain(|_, child| child.location_id != wid);
                 removed_wreck_balls.push((sys_id, wid));
             }

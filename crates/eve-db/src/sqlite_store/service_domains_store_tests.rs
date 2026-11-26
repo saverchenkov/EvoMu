@@ -2280,3 +2280,78 @@ fn all_17_service_domains_survive_tx_commit_restart_and_scalar_reset() {
     drop(reopened_reset);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn homefront_legacy_row_without_sim_fields_seeds_elapsed_sim_secs_on_sqlite_load() {
+    use crate::persistence::WorldRepository;
+    use crate::service_domains::{HomefrontBlueprintRecord, HomefrontProgressRecord, HomefrontRuntimeRecord};
+
+    let path = temp_db_path("homefront_legacy_seed");
+    let mut conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    let mut snap = WorldStateSnapshot::default();
+    let legacy_rec = HomefrontRuntimeRecord {
+        blueprint: HomefrontBlueprintRecord {
+            time_limit_secs: 900,
+            ..Default::default()
+        },
+        solar_system_id: 30_000_142,
+        instance_id: 77_001,
+        started: true,
+        pocket_spawned: true,
+        started_at_sec: 1_800_000_000,
+        expires_at_sec: 1_800_000_900,
+        last_tick_sec: 1_800_000_245,
+        progress: HomefrontProgressRecord::default(),
+        ..Default::default()
+    };
+    let post_migration_zero_rec = HomefrontRuntimeRecord {
+        sim_clock_initialized: true,
+        elapsed_sim_secs: 0.0,
+        last_sim_elapsed_secs: Some(42.0),
+        instance_id: 77_002,
+        ..legacy_rec.clone()
+    };
+    snap.dungeon_runtime.homefront_runtimes.insert(77_001, legacy_rec);
+    snap.dungeon_runtime
+        .homefront_runtimes
+        .insert(77_002, post_migration_zero_rec);
+    replace_sqlite_from_snapshot(&mut conn, &snap).expect("persist");
+
+    // Strip the new sim-clock fields from row 77001 to simulate a pre-migration row; leave 77002 intact.
+    let raw_json: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = 'service_domains.dungeon_runtime' AND key = 'homefront_runtimes/77001'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("fetch raw homefront_runtimes row");
+    let mut val: serde_json::Value = serde_json::from_str(&raw_json).expect("parse json");
+    if let Some(obj) = val.as_object_mut() {
+        obj.remove("elapsed_sim_secs");
+        obj.remove("last_sim_elapsed_secs");
+        obj.remove("sim_clock_initialized");
+    }
+    conn.execute(
+        "UPDATE domain_rows SET value = ?1 WHERE domain = 'service_domains.dungeon_runtime' AND key = 'homefront_runtimes/77001'",
+        rusqlite::params![val.to_string()],
+    )
+    .expect("write pre-migration json row");
+    drop(conn);
+
+    let reopened = WorldRepository::open_sqlite(&path).expect("reopen sqlite");
+    reopened.with_snapshot(|loaded| {
+        let r = &loaded.dungeon_runtime.homefront_runtimes[&77_001];
+        assert_eq!(r.elapsed_sim_secs, 245.0);
+        assert_eq!(r.last_sim_elapsed_secs, None);
+        assert!(r.sim_clock_initialized);
+
+        let r2 = &loaded.dungeon_runtime.homefront_runtimes[&77_002];
+        assert_eq!(r2.elapsed_sim_secs, 0.0);
+        assert_eq!(r2.last_sim_elapsed_secs, None);
+        assert!(r2.sim_clock_initialized);
+    });
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
+}

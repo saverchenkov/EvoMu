@@ -1898,7 +1898,7 @@ impl ServerContext {
                                 active: 0,
                                 duration: cycle.duration_s * 1000.0,
                                 repeat: 0,
-                                start_time: now.as_ticks(),
+                                start_time: now,
                                 time_from_start: 0.0,
                                 graphic_info: None,
                             };

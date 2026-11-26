@@ -663,9 +663,11 @@ mod multi_role_unit_tests {
             record_homefront_combat_and_logistics(&ctx, s, traf3.instance_id, 2_000.0, 0.0).unwrap();
         }
         traffic_stop_scan_and_intercept(&ctx, &logi, traf3.instance_id, 6, 0, 2_000.0).unwrap();
+        sys_h.step_manual(539.0).await.unwrap();
         ctx.advance_secs(539);
         tick_homefront_operations_sync(&ctx);
         assert!(!get_homefront_runtime_record(&ctx, traf3.instance_id).unwrap().completed);
+        sys_h.step_manual(1.0).await.unwrap();
         ctx.advance_secs(1);
         tick_homefront_operations_sync(&ctx);
         assert!(get_homefront_runtime_record(&ctx, traf3.instance_id).unwrap().completed);
@@ -679,8 +681,9 @@ mod multi_role_unit_tests {
             other => panic!("expected TrafficStop, got {other:?}"),
         };
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys_h.try_update_combat_state(first_smuggler, |cs| cs.warp_scramble_strength = 2);
+        sys_h.set_warp_scramble_strength(first_smuggler, 2).await.unwrap();
         for dt_step in [90_u64, 75, 75, 75, 75] {
+            sys_h.step_manual(dt_step as f64).await.unwrap();
             ctx.advance_secs(dt_step);
             tick_homefront_operations_sync(&ctx);
         }
@@ -848,6 +851,7 @@ mod multi_role_unit_tests {
         enter_hf_gate_at_site(&ctx, &pilot, aar1.instance_id)
             .await
             .expect("enter AAR #1");
+        sys_h.step_manual(90.0).await.unwrap();
         ctx.advance_secs(90);
         tick_homefront_operations_sync(&ctx);
         for _ in 1..=9_u8 {
@@ -873,6 +877,7 @@ mod multi_role_unit_tests {
                 other => panic!("expected AAR record, got {other:?}"),
             }
         });
+        sys_h.step_manual(30.0).await.unwrap();
         ctx.advance_secs(30);
         tick_homefront_operations_sync(&ctx);
         assert!(matches!(
@@ -882,6 +887,7 @@ mod multi_role_unit_tests {
                 ..
             }
         ));
+        sys_h.step_manual(30.0).await.unwrap();
         ctx.advance_secs(30);
         tick_homefront_operations_sync(&ctx);
         let (basileus_id_opt, cache_id_opt) = ctx.db.with_snapshot(|snap| {
@@ -959,9 +965,11 @@ mod multi_role_unit_tests {
         });
         let _ = ctx.drain_notifications_for_char(960_002);
         if setup2 > 0 {
+            sys_h.step_manual(setup2 as f64).await.unwrap();
             ctx.advance_secs(setup2);
             tick_homefront_operations_sync(&ctx);
         }
+        sys_h.step_manual(wave2_limit as f64).await.unwrap();
         ctx.advance_secs(wave2_limit);
         tick_homefront_operations_sync(&ctx);
         let aar2_after = get_homefront_runtime_record(&ctx, aar2.instance_id).unwrap();
@@ -1012,9 +1020,11 @@ mod multi_role_unit_tests {
             }
         });
         if setup9 > 0 {
+            sys_h.step_manual(setup9 as f64).await.unwrap();
             ctx.advance_secs(setup9);
             tick_homefront_operations_sync(&ctx);
         }
+        sys_h.step_manual(wave9_limit as f64).await.unwrap();
         ctx.advance_secs(wave9_limit);
         tick_homefront_operations_sync(&ctx);
         let aar3_after = get_homefront_runtime_record(&ctx, aar3.instance_id).unwrap();
@@ -1070,5 +1080,972 @@ mod multi_role_unit_tests {
                 "AAR completion must NEVER pay retroactive ISK for skipped/unmined waves"
             );
         });
+    }
+
+    #[tokio::test]
+    async fn homefront_r14_tidi_sim_clock_and_cold_system_timer_behaviour() {
+        use crate::services::pve_homefront_sites::{
+            get_homefront_runtime_record, tick_homefront_operations_sync,
+        };
+        use crate::services::serverops_cluster::set_system_tidi_factor;
+        use eve_db::{HomefrontBlueprintRecord, HomefrontProgressRecord, HomefrontRuntimeRecord};
+
+        let ctx = fresh_homefront_ctx();
+        let sys_id: SolarSystemId = 30_000_142;
+
+        // 1. Cold system (`get_handle(sys_id).is_none()`): ticks must not wake the system or advance `elapsed_sim_secs`.
+        let cold_inst_id = 990_001_i64;
+        let now0 = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.dungeon_runtime.homefront_runtimes.insert(
+                cold_inst_id,
+                HomefrontRuntimeRecord {
+                    blueprint: HomefrontBlueprintRecord {
+                        dungeon_id: 10_347,
+                        dungeon_name: "ColdRaid".into(),
+                        time_limit_secs: 900,
+                        ..Default::default()
+                    },
+                    solar_system_id: sys_id,
+                    instance_id: cold_inst_id,
+                    started: true,
+                    started_at_sec: now0,
+                    last_tick_sec: now0,
+                    expires_at_sec: now0 + 900,
+                    sim_clock_initialized: true,
+                    progress: HomefrontProgressRecord::default(),
+                    ..Default::default()
+                },
+            );
+        });
+        assert!(ctx.systems.get_handle(sys_id).is_none());
+        for _ in 0..3 {
+            ctx.advance_secs(500);
+            tick_homefront_operations_sync(&ctx);
+            assert!(
+                ctx.systems.get_handle(sys_id).is_none(),
+                "multiple cold Homefront ticks across >time_limit_secs wall advance must never get_or_spawn a cold solar system"
+            );
+            let cold_after = get_homefront_runtime_record(&ctx, cold_inst_id).unwrap();
+            assert_eq!(cold_after.elapsed_sim_secs, 0.0);
+            assert!(!cold_after.failed);
+            assert!(cold_after.sim_clock_initialized);
+        }
+
+        // Cold expiration despawn must fail cleanly without waking the cold solar system (`despawn_homefront_balls_db`).
+        ctx.db.with_mut_snapshot(|snap| {
+            let rec = snap
+                .dungeon_runtime
+                .homefront_runtimes
+                .get_mut(&cold_inst_id)
+                .unwrap();
+            rec.elapsed_sim_secs = rec.blueprint.time_limit_secs as f64;
+            rec.spawned_ball_ids.push(99_990_001);
+        });
+        tick_homefront_operations_sync(&ctx);
+        assert!(
+            ctx.systems.get_handle(sys_id).is_none(),
+            "despawn_homefront_balls_db must never wake a cold solar system"
+        );
+        let cold_expired = get_homefront_runtime_record(&ctx, cold_inst_id).unwrap();
+        assert!(cold_expired.failed);
+
+        // 2. Live site at TiDi = 0.25: 100 wall seconds advance `elapsed_sim_secs` by ~25s, then expire cleanly on remaining sim time.
+        let pilot = seed_hf_pilot(&ctx, 7701, 970_101, 870_101, 649, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).unwrap();
+        enter_hf_gate_at_site(&ctx, &pilot, raid.instance_id)
+            .await
+            .expect("enter Raid site");
+        let sys_h = ctx.systems.get_handle(sys_id).expect("awake system after gate entry");
+        let applied = set_system_tidi_factor(&ctx, sys_id, 0.25);
+        assert!((applied - 0.25).abs() < 1e-9);
+
+        for _ in 0..100 {
+            sys_h.step_manual(1.0).await.unwrap();
+            ctx.advance_secs(1);
+            tick_homefront_operations_sync(&ctx);
+        }
+
+        let mid = get_homefront_runtime_record(&ctx, raid.instance_id).unwrap();
+        assert!(
+            (mid.elapsed_sim_secs - 25.0).abs() < 1e-6,
+            "100 wall ticks at TiDi=0.25 must advance elapsed_sim_secs by ~25.0s, got {}",
+            mid.elapsed_sim_secs
+        );
+        assert!(!mid.failed);
+        let expected_rem = mid.blueprint.time_limit_secs.saturating_sub(25);
+        assert_eq!(mid.expires_at_sec, ctx.now_unix() + expected_rem);
+        match &mid.progress {
+            HomefrontProgressRecord::Raid { haulers_escaped, .. } => {
+                assert_eq!(
+                    *haulers_escaped, 0,
+                    "Raid 90s sim escape timer must not fire at 25s sim elapsed (100s wall)"
+                );
+            }
+            other => panic!("expected Raid progress, got {other:?}"),
+        }
+
+        // Advance remaining sim time up to 1s before limit -> still active; final 4 wall secs (+1s sim) -> expires cleanly.
+        let rem_sim_before_last = (mid.blueprint.time_limit_secs as f64) - mid.elapsed_sim_secs - 1.0;
+        let wall_before_last = rem_sim_before_last * 4.0;
+        sys_h.step_manual(wall_before_last).await.unwrap();
+        ctx.advance_secs(wall_before_last.round() as u64);
+        tick_homefront_operations_sync(&ctx);
+        assert!(
+            !get_homefront_runtime_record(&ctx, raid.instance_id)
+                .unwrap()
+                .failed,
+            "Homefront site must remain active with 1 sim second remaining"
+        );
+
+        sys_h.step_manual(4.0).await.unwrap();
+        ctx.advance_secs(4);
+        tick_homefront_operations_sync(&ctx);
+        let expired = get_homefront_runtime_record(&ctx, raid.instance_id).unwrap();
+        assert!(
+            expired.failed,
+            "Homefront site must expire cleanly once elapsed_sim_secs reaches time_limit_secs"
+        );
+        assert!(
+            expired.elapsed_sim_secs + 1e-9 >= expired.blueprint.time_limit_secs as f64,
+            "elapsed_sim_secs ({}) must reach time_limit_secs ({})",
+            expired.elapsed_sim_secs,
+            expired.blueprint.time_limit_secs,
+        );
+        assert_eq!(
+            record_homefront_combat_and_logistics(&ctx, &pilot, raid.instance_id, 500.0, 0.0)
+                .unwrap_err()
+                .code,
+            "OperationTimedOut"
+        );
+    }
+
+    #[tokio::test]
+    async fn homefront_rt36_sqlite_restart_preserves_progress_sim_clock_and_rebuilds_pocket() {
+        use crate::services::pve_homefront_sites::{
+            ensure_homefront_outer_entries_sync, get_homefront_runtime_record,
+            on_homefront_entity_destroyed_core, tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let sde = super::shared_sde();
+        let sys_id: SolarSystemId = 30_000_142;
+        let tmp_db = std::env::temp_dir().join(format!(
+            "evomu_hf_rt36_{}_{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp_db);
+
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+        repo1.with_mut_snapshot(|snap| {
+            let mut ch = template_ch.clone();
+            ch.character_id = 90_000_001;
+            snap.characters.insert(90_000_001, ch);
+        });
+        let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+        ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+        let pilot_id = 950_901_i64;
+        let tayra = seed_hf_pilot(&ctx1, 7702, pilot_id, 850_901, 649, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx1, sys_id, 10_347).unwrap();
+        enter_hf_gate_at_site(&ctx1, &tayra, raid.instance_id)
+            .await
+            .expect("enter Raid site before restart");
+        record_homefront_combat_and_logistics(&ctx1, &tayra, raid.instance_id, 7_500.0, 0.0)
+            .expect("record partial damage");
+
+        let sys_h1 = ctx1.systems.get_or_spawn(sys_id);
+        sys_h1.step_manual(120.0).await.unwrap();
+        ctx1.advance_secs(120);
+        tick_homefront_operations_sync(&ctx1);
+
+        let h_live = match &get_homefront_runtime_record(&ctx1, raid.instance_id)
+            .unwrap()
+            .progress
+        {
+            HomefrontProgressRecord::Raid {
+                active_hauler_ball_id: Some(hid),
+                ..
+            } => *hid,
+            other => panic!("expected active Raid hauler, got {other:?}"),
+        };
+        sys_h1.set_warp_scramble_strength(h_live, 3).await.unwrap();
+        let _ = on_homefront_entity_destroyed_core(
+            &ctx1.systems,
+            &ctx1.db,
+            &ctx1.sde,
+            sys_id,
+            h_live,
+            Some(pilot_id),
+        )
+        .await;
+
+        let pre_restart = get_homefront_runtime_record(&ctx1, raid.instance_id).unwrap();
+        assert!((pre_restart.elapsed_sim_secs - 120.0).abs() < 1e-6);
+        let time_limit = pre_restart.blueprint.time_limit_secs;
+        let (pre_freighter, pre_depot, pre_hauler2, pre_crate) = match &pre_restart.progress {
+            HomefrontProgressRecord::Raid {
+                freighter_ball_id,
+                delivery_depot_ball_id,
+                active_hauler_ball_id: Some(h2),
+                dropped_crate_ball_ids,
+                haulers_destroyed,
+                cargo_dropped,
+                ..
+            } => {
+                assert_eq!(*haulers_destroyed, 1);
+                assert_eq!(*cargo_dropped, 1);
+                (
+                    *freighter_ball_id,
+                    *delivery_depot_ball_id,
+                    *h2,
+                    dropped_crate_ball_ids[0],
+                )
+            }
+            other => panic!("expected Raid progress pre-restart, got {other:?}"),
+        };
+        let pre_damage = pre_restart.contributions[&pilot_id].damage_dealt;
+
+        drop(sys_h1);
+        drop(ctx1);
+        drop(repo1);
+
+        // Simulate server downtime of +3,600s (> time_limit_secs) and reopen SQLite into fresh context.
+        let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+        let ctx2 = ServerContext::with_sde_and_repository(sde, repo2);
+        ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(
+            1_775_400_120 + 3_600.max(time_limit + 600),
+        )));
+
+        // Cold ticks must neither fail the site nor advance `elapsed_sim_secs`.
+        tick_homefront_operations_sync(&ctx2);
+        assert!(ctx2.systems.get_handle(sys_id).is_none());
+        let cold_reopened = get_homefront_runtime_record(&ctx2, raid.instance_id).unwrap();
+        assert!(!cold_reopened.failed);
+        assert!((cold_reopened.elapsed_sim_secs - 120.0).abs() < 1e-6);
+
+        // Wake the system and run outer-entry + tick reconciliation.
+        let sys_h2 = ctx2.systems.get_or_spawn(sys_id);
+        ensure_homefront_outer_entries_sync(&ctx2, Some(sys_id), Some(raid.instance_id));
+        tick_homefront_operations_sync(&ctx2);
+
+        let post_wake = get_homefront_runtime_record(&ctx2, raid.instance_id).unwrap();
+        assert!(
+            !post_wake.failed,
+            "RT-36 wake after >time_limit_secs wall downtime must not fail active Homefront site"
+        );
+        assert!(
+            (post_wake.elapsed_sim_secs - 120.0).abs() < 1e-6,
+            "RT-36 must preserve elapsed_sim_secs across restart (got {})",
+            post_wake.elapsed_sim_secs
+        );
+        assert_eq!(post_wake.last_sim_elapsed_secs, Some(0.0));
+        assert!(post_wake.entered_pilots.contains_key(&pilot_id));
+        assert_eq!(post_wake.contributions[&pilot_id].damage_dealt, pre_damage);
+        match &post_wake.progress {
+            HomefrontProgressRecord::Raid {
+                haulers_destroyed,
+                cargo_dropped,
+                ..
+            } => {
+                assert_eq!(*haulers_destroyed, 1);
+                assert_eq!(*cargo_dropped, 1);
+            }
+            other => panic!("expected Raid progress after wake, got {other:?}"),
+        }
+
+        assert!(
+            ctx2.db.with_snapshot(|s| s.items.contains_key(&pre_crate)),
+            "RT-36 persisted crate {pre_crate} must remain in snap.items after SQLite restart (dropped_crate_ball_ids={:?})",
+            match &post_wake.progress {
+                HomefrontProgressRecord::Raid { dropped_crate_ball_ids, .. } => dropped_crate_ball_ids.clone(),
+                _ => Vec::new(),
+            }
+        );
+        let view2 = sys_h2.view();
+        for expected_ball in [
+            post_wake.outer_beacon_ball_id,
+            post_wake.outer_gate_ball_id,
+            pre_freighter,
+            pre_depot,
+            pre_hauler2,
+            pre_crate,
+        ] {
+            assert!(
+                view2.balls.contains_key(&expected_ball),
+                "RT-36 wake must rebuild missing Homefront ball {expected_ball}"
+            );
+        }
+        let depot_cs = view2
+            .combat_states
+            .get(&pre_depot)
+            .expect("reconciled Raid delivery depot must have CombatState");
+        assert!(
+            depot_cs.is_tethered,
+            "RT-36 wake must preserve Raid delivery depot is_tethered invulnerability"
+        );
+        assert!(
+            (depot_cs.structure_hp - 5_000.0).abs() < 1e-6,
+            "RT-36 wake must preserve Raid delivery depot 5,000 HP (got {})",
+            depot_cs.structure_hp
+        );
+        assert!(
+            ctx2.systems.is_special_site_ball_spawned(sys_id, pre_depot),
+            "RT-36 wake must claim Raid delivery depot as special-site ball"
+        );
+        assert!(
+            ctx2.systems.is_special_site_ball_spawned(sys_id, pre_crate),
+            "RT-36 wake must claim persisted Raid crate as special-site ball"
+        );
+
+        // BF-HF-DECAY-01: Live clock advance + background cluster tick after >=3,600s restart must
+        // never sweep active Homefront Raid depot, dropped crate, or crate mission cargo.
+        ctx2.advance_secs(1);
+        crate::sp6_lifecycle::tick_background_cluster(&ctx2).await;
+        ctx2.db.with_snapshot(|s| {
+            assert!(
+                s.items.contains_key(&pre_depot),
+                "Raid delivery depot {pre_depot} must survive live background tick after >=3,600s restart"
+            );
+            assert!(
+                s.items.contains_key(&pre_crate),
+                "Dropped Raid crate {pre_crate} must survive live background tick after >=3,600s restart"
+            );
+            assert!(
+                s.items.values().any(|it| {
+                    it.location_id == pre_crate
+                        && it.type_id == HOMEFRONT_RAID_CRATE_TYPE_ID
+                        && it.quantity > 0
+                }),
+                "Mission cargo inside dropped Raid crate {pre_crate} must survive background tick"
+            );
+        });
+        let view_post_bg = sys_h2.view();
+        assert!(view_post_bg.balls.contains_key(&pre_depot));
+        assert!(view_post_bg.balls.contains_key(&pre_crate));
+
+        drop(sys_h2);
+        drop(ctx2);
+        let _ = std::fs::remove_file(&tmp_db);
+    }
+
+    #[tokio::test]
+    async fn homefront_gate_activation_timeout_commits_failure_and_despawns_balls() {
+        use crate::services::pve_homefront_sites::get_homefront_runtime_record;
+
+        let ctx = fresh_homefront_ctx();
+        let sys_id: SolarSystemId = 30_000_142;
+        let pilot1 = seed_hf_pilot(&ctx, 7711, 970_201, 870_201, 649, sys_id, &[]).await;
+        let pilot2 = seed_hf_pilot(&ctx, 7712, 970_202, 870_202, 621, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).unwrap();
+
+        enter_hf_gate_at_site(&ctx, &pilot1, raid.instance_id)
+            .await
+            .expect("first pilot enters site before timeout");
+        let pre_timeout = get_homefront_runtime_record(&ctx, raid.instance_id).unwrap();
+        assert!(!pre_timeout.spawned_ball_ids.is_empty());
+
+        let sys_h = ctx.systems.get_handle(sys_id).expect("awake system");
+        let past_limit = pre_timeout.blueprint.time_limit_secs as f64 + 10.0;
+        sys_h.step_manual(past_limit).await.unwrap();
+        assert!(
+            !get_homefront_runtime_record(&ctx, raid.instance_id).unwrap().failed,
+            "precondition: site must still be un-failed before gate activation"
+        );
+
+        // Second pilot triggers timeout check directly inside activate_homefront_acceleration_gate
+        // without running tick_homefront_operations_sync first.
+        let gate_err = enter_hf_gate_at_site(&ctx, &pilot2, raid.instance_id)
+            .await
+            .expect_err("expired gate activation must return OperationTimedOut");
+        assert_eq!(gate_err.code, "OperationTimedOut");
+
+        let post_timeout = get_homefront_runtime_record(&ctx, raid.instance_id).unwrap();
+        assert!(
+            post_timeout.failed,
+            "OperationTimedOut from activate_homefront_acceleration_gate must commit rec.failed = true (not roll back)"
+        );
+        assert!(post_timeout.failure_reason.is_some());
+        assert!(
+            (post_timeout.elapsed_sim_secs - pre_timeout.blueprint.time_limit_secs as f64).abs()
+                < 1e-6,
+            "elapsed_sim_secs must commit at time_limit_secs ({}), got {}",
+            pre_timeout.blueprint.time_limit_secs,
+            post_timeout.elapsed_sim_secs
+        );
+
+        let view = sys_h.view();
+        for bid in pre_timeout
+            .spawned_ball_ids
+            .iter()
+            .copied()
+            .chain([pre_timeout.outer_beacon_ball_id, pre_timeout.outer_gate_ball_id])
+        {
+            assert!(
+                !view.balls.contains_key(&bid),
+                "timed-out gate rejection must despawn Homefront ball {bid}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn homefront_live_reconciliation_preserves_elapsed_sim_time_on_non_restarted_system() {
+        use crate::services::pve_homefront_sites::{
+            get_homefront_runtime_record, raid_tackle_and_destroy_hauler,
+            tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let ctx = fresh_homefront_ctx();
+        let sys_id: SolarSystemId = 30_000_142;
+        let pilot = seed_hf_pilot(&ctx, 7721, 970_301, 870_301, 649, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).unwrap();
+        enter_hf_gate_at_site(&ctx, &pilot, raid.instance_id)
+            .await
+            .expect("enter Raid site");
+
+        let sys_h = ctx.systems.get_handle(sys_id).expect("awake system");
+        sys_h.step_manual(20.0).await.unwrap();
+        ctx.advance_secs(20);
+        tick_homefront_operations_sync(&ctx);
+
+        let mid = get_homefront_runtime_record(&ctx, raid.instance_id).unwrap();
+        assert!((mid.elapsed_sim_secs - 20.0).abs() < 1e-6);
+        assert_eq!(mid.last_sim_elapsed_secs, Some(20.0));
+
+        // Step live sim clock without restarting, then allocate a replacement Raid hauler in DB
+        // without spawning its ball so the next tick exercises live pocket reconciliation first.
+        sys_h.step_manual(15.0).await.unwrap();
+        raid_tackle_and_destroy_hauler(&ctx, &pilot, raid.instance_id, true, 1_000.0)
+            .expect("raid_tackle_and_destroy_hauler advances active_hauler_ball_id");
+        let new_hauler_id = match &get_homefront_runtime_record(&ctx, raid.instance_id)
+            .unwrap()
+            .progress
+        {
+            HomefrontProgressRecord::Raid {
+                active_hauler_ball_id: Some(hid),
+                ..
+            } => *hid,
+            other => panic!("expected replacement hauler id, got {other:?}"),
+        };
+        assert!(!sys_h.view().balls.contains_key(&new_hauler_id));
+
+        tick_homefront_operations_sync(&ctx);
+
+        let post = get_homefront_runtime_record(&ctx, raid.instance_id).unwrap();
+        assert!(
+            (post.elapsed_sim_secs - 35.0).abs() < 1e-6,
+            "live non-restarted reconciliation must NOT erase elapsed sim delta (expected 35.0, got {})",
+            post.elapsed_sim_secs
+        );
+        assert_eq!(post.last_sim_elapsed_secs, Some(35.0));
+        assert!(
+            sys_h.view().balls.contains_key(&new_hauler_id),
+            "reconciliation must spawn the missing replacement Raid hauler ball"
+        );
+    }
+
+    #[tokio::test]
+    async fn homefront_rt36_rebuilds_aar_basileus_when_cache_destroyed_before_restart() {
+        use crate::services::pve_homefront_sites::{
+            ensure_homefront_outer_entries_sync, get_homefront_runtime_record,
+            on_homefront_entity_destroyed_core, tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let sde = super::shared_sde();
+        let sys_id: SolarSystemId = 30_000_142;
+        let tmp_db = std::env::temp_dir().join(format!(
+            "evomu_hf_rt36_basileus_{}_{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp_db);
+
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+        repo1.with_mut_snapshot(|snap| {
+            let mut ch = template_ch.clone();
+            ch.character_id = 90_000_001;
+            snap.characters.insert(90_000_001, ch);
+        });
+        let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+        ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+        let pilot_id = 970_302_i64;
+        let pilot = seed_hf_pilot(&ctx1, 7722, pilot_id, 870_302, 32_880, sys_id, &[483]).await;
+        let sys_h1 = ctx1.systems.get_or_spawn(sys_id);
+        let _ = sys_h1.try_update_combat_state(870_302, |cs| {
+            cs.shield_hp = 5_000_000.0;
+            cs.max_shield_hp = 5_000_000.0;
+            cs.armor_hp = 5_000_000.0;
+            cs.max_armor_hp = 5_000_000.0;
+            cs.structure_hp = 5_000_000.0;
+            cs.max_structure_hp = 5_000_000.0;
+        });
+
+        let aar = spawn_homefront_site_for_dungeon(&ctx1, sys_id, 10_346).unwrap();
+        enter_hf_gate_at_site(&ctx1, &pilot, aar.instance_id)
+            .await
+            .expect("enter AAR site");
+        sys_h1.step_manual(90.0).await.unwrap();
+        ctx1.advance_secs(90);
+        tick_homefront_operations_sync(&ctx1);
+        for _ in 1..=9_u8 {
+            abyssal_clear_wave(&ctx1, &pilot, aar.instance_id, 324, 2_500.0, true)
+                .await
+                .expect("clear AAR wave");
+        }
+        sys_h1.step_manual(60.0).await.unwrap();
+        ctx1.advance_secs(60);
+        tick_homefront_operations_sync(&ctx1);
+
+        let (basileus_id, cache_id) = match &get_homefront_runtime_record(&ctx1, aar.instance_id)
+            .unwrap()
+            .progress
+        {
+            HomefrontProgressRecord::AbyssalArtifactRecovery {
+                basileus_spawned: true,
+                basileus_ball_id: Some(bid),
+                cache_ball_id: Some(cid),
+                ..
+            } => (*bid, *cid),
+            other => panic!("expected live AAR Basileus and Cache, got {other:?}"),
+        };
+        let _ = on_homefront_entity_destroyed_core(
+            &ctx1.systems,
+            &ctx1.db,
+            &ctx1.sde,
+            sys_id,
+            cache_id,
+            Some(pilot_id),
+        )
+        .await;
+        let pre_restart = get_homefront_runtime_record(&ctx1, aar.instance_id).unwrap();
+        assert!(!pre_restart.completed && !pre_restart.failed);
+        let pre_elapsed = pre_restart.elapsed_sim_secs;
+
+        drop(sys_h1);
+        drop(ctx1);
+        drop(repo1);
+
+        let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+        let ctx2 = ServerContext::with_sde_and_repository(sde, repo2);
+        ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_402_000)));
+        // Verify stale actor-epoch cursor is cleared on SQLite load.
+        assert_eq!(
+            get_homefront_runtime_record(&ctx2, aar.instance_id)
+                .unwrap()
+                .last_sim_elapsed_secs,
+            None
+        );
+
+        let sys_h2 = ctx2.systems.get_or_spawn(sys_id);
+        // Advance new actor sim clock slightly before Homefront ticks or reconciles.
+        sys_h2.step_manual(5.0).await.unwrap();
+        ensure_homefront_outer_entries_sync(&ctx2, Some(sys_id), Some(aar.instance_id));
+
+        assert!(
+            sys_h2.view().balls.contains_key(&basileus_id),
+            "RT-36 must rebuild AAR Basileus {basileus_id} after restart even when Cache was destroyed"
+        );
+        tick_homefront_operations_sync(&ctx2);
+        let post_wake = get_homefront_runtime_record(&ctx2, aar.instance_id).unwrap();
+        assert!(
+            (post_wake.elapsed_sim_secs - pre_elapsed).abs() < 1e-6,
+            "re-anchoring against fresh post-restart actor epoch must preserve elapsed_sim_secs ({pre_elapsed}), got {}",
+            post_wake.elapsed_sim_secs
+        );
+        assert_eq!(post_wake.last_sim_elapsed_secs, Some(5.0));
+
+        drop(sys_h2);
+        drop(ctx2);
+        let _ = std::fs::remove_file(&tmp_db);
+    }
+
+    #[tokio::test]
+    async fn homefront_rt36_prunes_dead_boss_and_escorts_across_restart() {
+        use crate::services::pve_homefront_sites::{
+            ensure_homefront_outer_entries_sync, get_homefront_runtime_record,
+            on_homefront_entity_destroyed_core, tick_homefront_operations_sync,
+        };
+
+        let sde = super::shared_sde();
+        let sys_id: SolarSystemId = 30_000_142;
+        let tmp_db = std::env::temp_dir().join(format!(
+            "evomu_hf_rt36_npcs_{}_{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp_db);
+
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+        repo1.with_mut_snapshot(|snap| {
+            let mut ch = template_ch.clone();
+            ch.character_id = 90_000_001;
+            snap.characters.insert(90_000_001, ch);
+        });
+        let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+        ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+        let pilot_id = 970_303_i64;
+        let pilot = seed_hf_pilot(&ctx1, 7723, pilot_id, 870_303, 649, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx1, sys_id, 10_347).unwrap();
+        enter_hf_gate_at_site(&ctx1, &pilot, raid.instance_id)
+            .await
+            .expect("enter Raid site");
+
+        let sys_h1 = ctx1.systems.get_handle(sys_id).expect("awake system");
+        let view1 = sys_h1.view();
+        let pre_rec = get_homefront_runtime_record(&ctx1, raid.instance_id).unwrap();
+        let boss_id = pre_rec.dispatch_boss_ball_id;
+        let base_obj = 1_897_800_000 + raid.instance_id.saturating_mul(100);
+        let escorts: Vec<i64> = (20_i64..30)
+            .map(|o| base_obj + o)
+            .filter(|id| view1.balls.contains_key(id))
+            .collect();
+        assert!(view1.balls.contains_key(&boss_id));
+        assert!(!escorts.is_empty());
+        let dead_escort = escorts[0];
+
+        let _ = on_homefront_entity_destroyed_core(
+            &ctx1.systems,
+            &ctx1.db,
+            &ctx1.sde,
+            sys_id,
+            boss_id,
+            Some(pilot_id),
+        )
+        .await;
+        let _ = on_homefront_entity_destroyed_core(
+            &ctx1.systems,
+            &ctx1.db,
+            &ctx1.sde,
+            sys_id,
+            dead_escort,
+            Some(pilot_id),
+        )
+        .await;
+        let post_kill = get_homefront_runtime_record(&ctx1, raid.instance_id).unwrap();
+        assert!(!post_kill.spawned_ball_ids.contains(&boss_id));
+        assert!(!post_kill.spawned_ball_ids.contains(&dead_escort));
+
+        drop(sys_h1);
+        drop(ctx1);
+        drop(repo1);
+
+        let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+        let ctx2 = ServerContext::with_sde_and_repository(sde, repo2);
+        ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_500)));
+
+        let sys_h2 = ctx2.systems.get_or_spawn(sys_id);
+        ensure_homefront_outer_entries_sync(&ctx2, Some(sys_id), Some(raid.instance_id));
+        tick_homefront_operations_sync(&ctx2);
+
+        let view2 = sys_h2.view();
+        assert!(
+            !view2.balls.contains_key(&boss_id),
+            "RT-36 must NOT resurrect killed dispatch commander {boss_id}"
+        );
+        assert!(
+            !view2.balls.contains_key(&dead_escort),
+            "RT-36 must NOT resurrect killed escort NPC {dead_escort}"
+        );
+        for &surviving_escort in escorts.iter().skip(1) {
+            assert!(
+                view2.balls.contains_key(&surviving_escort),
+                "RT-36 must rebuild surviving escort NPC {surviving_escort}"
+            );
+        }
+
+        drop(sys_h2);
+        drop(ctx2);
+        let _ = std::fs::remove_file(&tmp_db);
+    }
+
+    #[tokio::test]
+    async fn homefront_rt36_salvage_wrecks_survive_7200s_background_decay() {
+        use crate::services::pve_homefront_sites::get_homefront_runtime_record;
+        use eve_db::HomefrontProgressRecord;
+
+        let ctx = fresh_homefront_ctx();
+        let sys_id: SolarSystemId = 30_000_142;
+        let coercer =
+            seed_hf_pilot(&ctx, 7724, 970_304, 870_304, 16_236, sys_id, &[25_861, 22_175, 533])
+                .await;
+        let sal = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_713).unwrap();
+        enter_hf_gate_at_site(&ctx, &coercer, sal.instance_id)
+            .await
+            .expect("enter SalvageResearch site");
+
+        let wreck_ids = match &get_homefront_runtime_record(&ctx, sal.instance_id)
+            .unwrap()
+            .progress
+        {
+            HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. } => {
+                wreck_ball_ids.clone()
+            }
+            other => panic!("expected SalvageResearch progress, got {other:?}"),
+        };
+        assert!(!wreck_ids.is_empty());
+
+        // Advance >=7,200s wall time (WRECK_DECAY_LIFETIME_SECS) and run background cluster tick;
+        // without sim-clock expiry, all active Homefront salvage wrecks must remain intact.
+        ctx.advance_secs(7_500);
+        crate::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+        let post = get_homefront_runtime_record(&ctx, sal.instance_id).unwrap();
+        assert!(!post.failed);
+        let sys_h = ctx.systems.get_handle(sys_id).expect("awake system");
+        let view = sys_h.view();
+        ctx.db.with_snapshot(|s| {
+            for wid in &wreck_ids {
+                assert!(
+                    s.items.contains_key(wid),
+                    "active Homefront salvage wreck {wid} must survive >=7,200s on_advance_secs_internal"
+                );
+                assert!(
+                    view.balls.contains_key(wid),
+                    "active Homefront salvage wreck ball {wid} must survive >=7,200s background tick"
+                );
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn homefront_r14_freshly_entered_zero_elapsed_survives_sqlite_restart_and_cold_ticks() {
+        use crate::services::pve_homefront_sites::{
+            get_homefront_runtime_record, tick_homefront_operations_sync,
+        };
+
+        let sde = super::shared_sde();
+        let sys_id: SolarSystemId = 30_000_142;
+        let tmp_db = std::env::temp_dir().join(format!(
+            "evomu_hf_r14_zero_cold_{}_{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp_db);
+
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+        repo1.with_mut_snapshot(|snap| {
+            let mut ch = template_ch.clone();
+            ch.character_id = 90_000_001;
+            snap.characters.insert(90_000_001, ch);
+        });
+        let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+        ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+        let pilot = seed_hf_pilot(&ctx1, 7725, 950_902, 850_902, 649, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx1, sys_id, 10_347).unwrap();
+        enter_hf_gate_at_site(&ctx1, &pilot, raid.instance_id)
+            .await
+            .expect("enter Raid site cleanly");
+
+        // Run a zero-sim-delta tick before restart so last_tick_sec > started_at_sec while elapsed_sim_secs == 0.0.
+        ctx1.advance_secs(5);
+        tick_homefront_operations_sync(&ctx1);
+        let pre = get_homefront_runtime_record(&ctx1, raid.instance_id).unwrap();
+        assert_eq!(pre.elapsed_sim_secs, 0.0);
+        assert!(pre.sim_clock_initialized);
+        assert!(!pre.failed);
+        let time_limit = pre.blueprint.time_limit_secs;
+
+        drop(ctx1);
+        drop(repo1);
+
+        // Restart SQLite with > time_limit_secs downtime while solar system remains cold.
+        let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+        let ctx2 = ServerContext::with_sde_and_repository(sde, repo2);
+        ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(
+            1_775_400_005 + time_limit + 600,
+        )));
+
+        let loaded = get_homefront_runtime_record(&ctx2, raid.instance_id).unwrap();
+        assert_eq!(loaded.elapsed_sim_secs, 0.0);
+        assert_eq!(loaded.last_sim_elapsed_secs, None);
+        assert!(loaded.sim_clock_initialized);
+        assert!(!loaded.failed);
+
+        // Multiple cold ticks + active-pilot RPC must neither charge downtime, fail the site, nor wake the cold system.
+        for delta in [0, 5, 10] {
+            if delta > 0 {
+                ctx2.advance_secs(delta);
+            }
+            tick_homefront_operations_sync(&ctx2);
+            assert!(ctx2.systems.get_handle(sys_id).is_none());
+            let after_cold = get_homefront_runtime_record(&ctx2, raid.instance_id).unwrap();
+            assert_eq!(after_cold.elapsed_sim_secs, 0.0);
+            assert!(!after_cold.failed);
+        }
+        record_homefront_combat_and_logistics(&ctx2, &pilot, raid.instance_id, 50.0, 0.0)
+            .expect("cold pilot RPC must not misclassify restarted elapsed_sim_secs == 0.0 as expired");
+        assert!(ctx2.systems.get_handle(sys_id).is_none());
+
+        // Waking the system and stepping 20s resumes normal sim-clock progression cleanly from 0.0s.
+        let sys_h2 = ctx2.systems.get_or_spawn(sys_id);
+        tick_homefront_operations_sync(&ctx2);
+        sys_h2.step_manual(20.0).await.unwrap();
+        ctx2.advance_secs(20);
+        tick_homefront_operations_sync(&ctx2);
+
+        let post_wake = get_homefront_runtime_record(&ctx2, raid.instance_id).unwrap();
+        assert!(!post_wake.failed);
+        assert!(
+            (post_wake.elapsed_sim_secs - 20.0).abs() < 1e-6,
+            "expected 20.0s sim time after wake, got {}",
+            post_wake.elapsed_sim_secs
+        );
+
+        drop(sys_h2);
+        drop(ctx2);
+        let _ = std::fs::remove_file(&tmp_db);
+    }
+
+    #[tokio::test]
+    async fn homefront_rt36_salvage_werpost_kill_does_not_resurrect_boss_across_ticks_or_restart() {
+        use crate::services::pve_homefront_sites::{
+            ensure_homefront_outer_entries_sync, get_homefront_runtime_record,
+            on_homefront_entity_destroyed_core, tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let sde = super::shared_sde();
+        let sys_id: SolarSystemId = 30_000_142;
+        let tmp_db = std::env::temp_dir().join(format!(
+            "evomu_hf_werpost_boss_{}_{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp_db);
+
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+        repo1.with_mut_snapshot(|snap| {
+            let mut ch = template_ch.clone();
+            ch.character_id = 90_000_001;
+            snap.characters.insert(90_000_001, ch);
+        });
+        let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+        ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+        let coercer =
+            seed_hf_pilot(&ctx1, 7726, 950_903, 850_903, 16_236, sys_id, &[25_861, 22_175, 533])
+                .await;
+        let sal = spawn_homefront_site_for_dungeon(&ctx1, sys_id, 10_713).unwrap();
+        enter_hf_gate_at_site(&ctx1, &coercer, sal.instance_id)
+            .await
+            .expect("enter SalvageResearch site");
+
+        let pre = get_homefront_runtime_record(&ctx1, sal.instance_id).unwrap();
+        let boss_id = pre.dispatch_boss_ball_id;
+        let dead_wreck_id = match &pre.progress {
+            HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. } => wreck_ball_ids[0],
+            other => panic!("expected SalvageResearch progress, got {other:?}"),
+        };
+        assert!(pre.spawned_ball_ids.contains(&boss_id));
+        let sys_h1 = ctx1.systems.get_handle(sys_id).expect("awake system");
+        let boss_hp = {
+            let v = sys_h1.view();
+            let cs = &v.combat_states[&boss_id];
+            cs.shield_hp + cs.armor_hp + cs.structure_hp
+        };
+
+        // Activate Werpost via SalvageResearch RPC and step until Werpost destroys dispatch_boss_ball_id.
+        salvage_research_process_wreck(&ctx1, &coercer, sal.instance_id, 0, true)
+            .expect("activate Werpost");
+        let kill_secs = ((boss_hp / 350.0).ceil() as u64).max(1) + 2;
+        for _ in 0..kill_secs {
+            sys_h1.step_manual(1.0).await.unwrap();
+            ctx1.advance_secs(1);
+            tick_homefront_operations_sync(&ctx1);
+        }
+
+        let after_kill = get_homefront_runtime_record(&ctx1, sal.instance_id).unwrap();
+        assert!(!after_kill.failed);
+        assert!(
+            !after_kill.spawned_ball_ids.contains(&boss_id),
+            "Werpost-killed dispatch_boss_ball_id {boss_id} must be pruned from spawned_ball_ids"
+        );
+        assert!(
+            !sys_h1.view().balls.contains_key(&boss_id),
+            "Werpost-killed dispatch_boss_ball_id {boss_id} must not remain in space"
+        );
+
+        // 5 additional 1 Hz ticks must never resurrect the dead boss.
+        for _ in 0..5 {
+            sys_h1.step_manual(1.0).await.unwrap();
+            ctx1.advance_secs(1);
+            tick_homefront_operations_sync(&ctx1);
+            assert!(
+                !sys_h1.view().balls.contains_key(&boss_id),
+                "Werpost-killed dispatch_boss_ball_id {boss_id} must not resurrect on subsequent 1 Hz ticks"
+            );
+            let tick_rec = get_homefront_runtime_record(&ctx1, sal.instance_id).unwrap();
+            assert!(!tick_rec.spawned_ball_ids.contains(&boss_id));
+        }
+
+        // Destroying a Salvage wreck via entity destruction also prunes wreck_ball_ids (no restart respawn).
+        on_homefront_entity_destroyed_core(
+            &ctx1.systems,
+            &ctx1.db,
+            &ctx1.sde,
+            sys_id,
+            dead_wreck_id,
+            None,
+        )
+        .await;
+        sys_h1.try_remove_destroyed_ball(dead_wreck_id);
+
+        drop(sys_h1);
+        drop(ctx1);
+        drop(repo1);
+
+        // Restart SQLite, wake solar system, and reconcile pocket: neither boss nor destroyed wreck resurrects.
+        let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+        let ctx2 = ServerContext::with_sde_and_repository(sde, repo2);
+        let sys_h2 = ctx2.systems.get_or_spawn(sys_id);
+        ensure_homefront_outer_entries_sync(&ctx2, Some(sys_id), Some(sal.instance_id));
+        tick_homefront_operations_sync(&ctx2);
+
+        let reopened = get_homefront_runtime_record(&ctx2, sal.instance_id).unwrap();
+        assert!(!reopened.spawned_ball_ids.contains(&boss_id));
+        match &reopened.progress {
+            HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. } => {
+                assert!(!wreck_ball_ids.contains(&dead_wreck_id));
+            }
+            other => panic!("expected SalvageResearch after restart, got {other:?}"),
+        }
+        let view2 = sys_h2.view();
+        assert!(!view2.balls.contains_key(&boss_id));
+        assert!(!view2.balls.contains_key(&dead_wreck_id));
+
+        drop(sys_h2);
+        drop(ctx2);
+        let _ = std::fs::remove_file(&tmp_db);
     }
 }

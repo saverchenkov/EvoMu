@@ -1267,7 +1267,7 @@ async fn activate_single_fighter_ability(
         (reserved.squadron_size, reserved.remaining_charges)
     };
 
-    let now_ft = ctx.now_client_sim_filetime_ticks();
+    let now_ft = ctx.now_system_sim_filetime_for_ship(char_id, fighter.parent_ship_id);
     push_typed_session_notification(
         session,
         OnFighterAbilitySlotActivated {
@@ -1621,7 +1621,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         .and_then(|t| t.default_attributes.get(&2123).copied())
         .filter(|&v| v > 0.0)
         .unwrap_or(10_000.0);
-    let now_ft = ctx.now_client_sim_filetime_ticks();
+    let now_ft = ctx.now_system_sim_filetime_for_ship(char_id, fighter.parent_ship_id);
     push_typed_session_notification(
         session,
         OnFighterAbilitySlotActivated {

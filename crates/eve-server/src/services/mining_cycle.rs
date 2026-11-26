@@ -874,7 +874,7 @@ pub(crate) fn emit_mining_godma_and_special_fx(
             active: flag,
             duration: duration_ms as f64,
             repeat,
-            start_time: now_ft.as_ticks(),
+            start_time: now_ft,
             time_from_start: 0.0,
             graphic_info: None,
         };

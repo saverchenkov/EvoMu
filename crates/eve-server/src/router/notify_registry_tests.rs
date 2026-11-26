@@ -427,7 +427,7 @@ fn typed_notification_into_args_preserves_registered_arity() {
             active: 0,
             duration: 0.0,
             repeat: 0,
-            start_time: 1_335_000_000_000_000_00,
+            start_time: SimFileTime::from_ticks(1_335_000_000_000_000_00),
             time_from_start: 0.0,
             graphic_info: None,
         }
@@ -1040,7 +1040,7 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
         active: 0,
         duration: 0.0,
         repeat: 0,
-        start_time: 1_335_000_000_000_000_00,
+        start_time: SimFileTime::from_ticks(1_335_000_000_000_000_00),
         time_from_start: 0.0,
         graphic_info: None,
     };
@@ -1080,5 +1080,245 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
         )
         .is_none(),
         "build_pending_registered_notification must return None without panicking for @ballpark event"
+    );
+}
+
+#[test]
+fn notify_registry_timestamps_exhaustive_guard() {
+    const REGISTRY_SRC: &str = include_str!("notify_registry.rs");
+    const FILETIME_MIN_TICKS: i64 = 100_000_000_000_000_000;
+    const NUMERIC_DURATION_EXCLUSIONS: &[&str] = &[
+        "time_ms",
+        "time_left",
+        "capture_time",
+        "time_from_start",
+        "timer_type",
+    ];
+
+    fn match_delim(s: &str, open_idx: usize, open_c: char, close_c: char) -> Result<(&str, usize), String> {
+        let bytes = s.as_bytes();
+        let ob = open_c as u8;
+        let cb = close_c as u8;
+        let mut depth = 0usize;
+        let mut i = open_idx;
+        let mut in_str = false;
+        let mut in_line_comment = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_line_comment {
+                if b == b'\n' {
+                    in_line_comment = false;
+                }
+            } else if in_str {
+                if b == b'\\' {
+                    i += 1;
+                } else if b == b'"' {
+                    in_str = false;
+                }
+            } else if i + 1 < bytes.len() && b == b'/' && bytes[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 1;
+            } else if b == b'"' {
+                in_str = true;
+            } else if b == ob {
+                depth += 1;
+            } else if b == cb {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((&s[open_idx + 1..i], i + 1));
+                }
+            }
+            i += 1;
+        }
+        Err(format!("unclosed delimiter `{open_c}` at byte offset {open_idx}"))
+    }
+
+    fn split_top_level_commas(s: &str) -> Vec<&str> {
+        let bytes = s.as_bytes();
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut in_line_comment = false;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_line_comment {
+                if b == b'\n' {
+                    in_line_comment = false;
+                }
+            } else if in_str {
+                if b == b'\\' {
+                    i += 1;
+                } else if b == b'"' {
+                    in_str = false;
+                }
+            } else if i + 1 < bytes.len() && b == b'/' && bytes[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 1;
+            } else if b == b'"' {
+                in_str = true;
+            } else if matches!(b, b'(' | b'[' | b'{') {
+                depth += 1;
+            } else if matches!(b, b')' | b']' | b'}') {
+                depth = depth.saturating_sub(1);
+            } else if b == b',' && depth == 0 {
+                let part = s[start..i].trim();
+                if !part.is_empty() {
+                    out.push(part);
+                }
+                start = i + 1;
+            }
+            i += 1;
+        }
+        let tail = s[start..].trim();
+        if !tail.is_empty() {
+            out.push(tail);
+        }
+        out
+    }
+
+    fn split_macro_entries(block: &str) -> Vec<(String, &str)> {
+        let mut items = Vec::new();
+        let mut pos = 0usize;
+        while let Some(rel) = block[pos..].find("=>") {
+            let idx = pos + rel;
+            let line_start = block[..idx].rfind('\n').map_or(0, |n| n + 1);
+            let prefix = block[line_start..idx].trim();
+            if prefix.starts_with("//") {
+                pos = block[idx..].find('\n').map_or(block.len(), |n| idx + n + 1);
+                continue;
+            }
+            let struct_name = prefix
+                .split_whitespace()
+                .last()
+                .expect("notification struct identifier before `=>`")
+                .to_string();
+            let Some(brace_rel) = block[idx..].find('{') else {
+                break;
+            };
+            let brace_idx = idx + brace_rel;
+            let (body, end) = match_delim(block, brace_idx, '{', '}').expect("balanced entry body");
+            items.push((struct_name, body));
+            pos = end;
+        }
+        items
+    }
+
+    fn parse_sample_filetime_integer(arg: &str) -> Option<i64> {
+        let compact: String = arg.chars().filter(|c| !c.is_whitespace()).collect();
+        let rest = compact.strip_prefix("eve_proto::").unwrap_or(&compact);
+        let inner = rest.strip_prefix("PyRep::Integer(")?.strip_suffix(')')?;
+        let inner = inner.strip_suffix("i64").unwrap_or(inner);
+        let digits: String = inner.chars().filter(|&c| c != '_').collect();
+        let val = digits.parse::<i64>().ok()?;
+        (val >= FILETIME_MIN_TICKS).then_some(val)
+    }
+
+    fn is_suspicious_timestamp_field_name(name: &str) -> bool {
+        if NUMERIC_DURATION_EXCLUSIONS.contains(&name) {
+            return false;
+        }
+        name.ends_with("_time")
+            || name.ends_with("_date")
+            || name == "timestamp"
+            || name.ends_with("_timestamp")
+            || name == "created"
+            || name.ends_with("_created")
+            || name == "deadline"
+            || name.ends_with("_deadline")
+            || name == "last_incident"
+            || name == "time"
+    }
+
+    let src_bytes = REGISTRY_SRC.as_bytes();
+    let mut entries = Vec::new();
+    for (macro_name, open_c, close_c) in [
+        ("define_notifications!", '{', '}'),
+        ("define_notification_item!", '(', ')'),
+    ] {
+        for (idx, _) in REGISTRY_SRC.match_indices(macro_name) {
+            if idx > 0 && src_bytes[idx - 1] != b'\n' {
+                continue;
+            }
+            let after = idx + macro_name.len();
+            let open_rel = REGISTRY_SRC[after..]
+                .find(open_c)
+                .expect("macro opening delimiter");
+            let (content, _) =
+                match_delim(REGISTRY_SRC, after + open_rel, open_c, close_c).expect("balanced macro invocation");
+            entries.extend(split_macro_entries(content));
+        }
+    }
+    assert!(
+        entries.len() >= 500,
+        "expected >= 500 parsed notification entries from notify_registry.rs, found {}",
+        entries.len()
+    );
+
+    let mut violations = Vec::new();
+    for (struct_name, body) in entries {
+        let header_slice = body.find("samples:").map_or(body, |s| &body[..s]);
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for section in ["fields:", "optional:"] {
+            if let Some(sidx) = header_slice.find(section) {
+                let b_rel = header_slice[sidx + section.len()..]
+                    .find('{')
+                    .expect("fields/optional opening `{`");
+                let (sec_body, _) =
+                    match_delim(header_slice, sidx + section.len() + b_rel, '{', '}')
+                        .expect("balanced fields/optional block");
+                for raw_field in split_top_level_commas(sec_body) {
+                    if let Some((fn_raw, ft_raw)) = raw_field.split_once(':') {
+                        let fname = fn_raw.trim().to_string();
+                        let ftype: String = ft_raw.chars().filter(|c| !c.is_whitespace()).collect();
+                        fields.push((fname, ftype));
+                    }
+                }
+            }
+        }
+
+        let mut filetime_sample_indices = std::collections::BTreeSet::new();
+        if let Some(sidx) = body.find("samples:") {
+            if let Some(ov_rel) = body[sidx..].find("vec![") {
+                let (outer_vec, _) = match_delim(body, sidx + ov_rel + 4, '[', ']')
+                    .expect("balanced samples outer vec");
+                let mut p = 0usize;
+                while let Some(iv_rel) = outer_vec[p..].find("vec![") {
+                    let (sample_vec, end) = match_delim(outer_vec, p + iv_rel + 4, '[', ']')
+                        .expect("balanced sample inner vec");
+                    for (idx, arg) in split_top_level_commas(sample_vec).into_iter().enumerate() {
+                        if parse_sample_filetime_integer(arg).is_some() {
+                            filetime_sample_indices.insert(idx);
+                        }
+                    }
+                    p = end;
+                }
+            }
+        }
+
+        for (idx, (fname, ftype)) in fields.iter().enumerate() {
+            let is_bare_untyped = matches!(
+                ftype.as_str(),
+                "i64" | "Option<i64>" | "PyRep" | "Option<PyRep>"
+            );
+            if !is_bare_untyped {
+                continue;
+            }
+            let by_sample = filetime_sample_indices.contains(&idx);
+            let by_name = is_suspicious_timestamp_field_name(fname);
+            if by_sample || by_name {
+                violations.push(format!(
+                    "{struct_name}.{fname}: {ftype} (filetime_sample={by_sample}, timestamp_name={by_name})"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "untyped FILETIME/timestamp notification fields found ({}):\n{}",
+        violations.len(),
+        violations.join("\n")
     );
 }

@@ -1660,6 +1660,10 @@ impl ServerContext {
                 it.type_id == 23
                     && it.flag == eve_db::InventoryFlag::None
                     && (30_000_000..=33_000_000).contains(&it.location_id)
+                    && !crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
+                        snap,
+                        it.item_id,
+                    )
                     && snap
                         .sp6_lifecycle
                         .space_object_meta
@@ -1680,6 +1684,10 @@ impl ServerContext {
                         item.type_id == 23
                             && item.flag == eve_db::InventoryFlag::None
                             && (30_000_000..=33_000_000).contains(&item.location_id)
+                            && !crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
+                                snap,
+                                item.item_id,
+                            )
                             && snap
                                 .sp6_lifecycle
                                 .space_object_meta
