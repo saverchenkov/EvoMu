@@ -7,7 +7,7 @@ use eve_db::{BookmarkRecord, MissionInstance, MissionState, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 fn splitmix64_hash(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -165,8 +165,121 @@ pub(crate) fn resolve_accepted_mission_warp_origin(
         })
 }
 
-/// Matches the targeted mission on a `beyonce.CmdWarpToStuff` / fleet warp and materializes both
-/// its encounter NPCs and persisted mining asteroid using the already-loaded `handle` (`PVE-020`).
+fn resolve_mission_pocket_match_in_snap(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    sys_id: u32,
+    stuff_type: &str,
+    target_id: i64,
+    dest_pos: DVec3,
+    now_unix: u64,
+) -> Option<(i64, u32, DVec3)> {
+    if !dest_pos.is_finite()
+        || sys_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH
+    {
+        return None;
+    }
+    let is_mission_stuff = matches!(stuff_type, "mission" | "dungeon" | "location");
+    let target_bm = (stuff_type == "bookmark")
+        .then(|| {
+            (!crate::services::fleet_social::is_bookmark_expired_in_snap(snap, target_id, now_unix))
+                .then(|| snap.bookmarks.get(&target_id))
+                .flatten()
+                .filter(|bm| {
+                    bm.solar_system_id == sys_id
+                        && bm.item_id.is_none()
+                        && bm.x.is_finite()
+                        && bm.y.is_finite()
+                        && bm.z.is_finite()
+                })
+        })
+        .flatten();
+
+    let mut best: Option<((u8, i64), (i64, u32, DVec3))> = None;
+    let mut consider = |m: &MissionInstance, allow_site_fallback: bool, tier: u8| {
+        if m.state != MissionState::Accepted || m.solar_system_id != sys_id {
+            return;
+        }
+        let Ok(Some(pocket_pos)) = resolve_mission_pocket_origin_in_snap(
+            ctx,
+            snap,
+            None,
+            m,
+            sys_id,
+            now_unix,
+            allow_site_fallback,
+        ) else {
+            return;
+        };
+        if !pocket_pos.is_finite() || dest_pos.distance(pocket_pos) > 200_000.0 {
+            return;
+        }
+        let key = (tier, m.instance_id);
+        if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
+            best = Some((key, (m.character_id, m.template_id, pocket_pos)));
+        }
+    };
+
+    if let Some(bm) = target_bm {
+        for m in snap.missions.iter() {
+            let tier = if m.bookmark_id == Some(target_id) {
+                0
+            } else if m.character_id == char_id {
+                1
+            } else if m.character_id == bm.owner_id {
+                2
+            } else {
+                3
+            };
+            consider(m, false, tier);
+        }
+    } else {
+        for m in snap.missions.iter_by_character(char_id) {
+            let explicit_mission_match = is_mission_stuff
+                && (target_id == i64::from(m.template_id) || target_id == m.agent_id);
+            let tier = if explicit_mission_match
+                || (stuff_type == "bookmark" && m.bookmark_id == Some(target_id))
+            {
+                0
+            } else {
+                1
+            };
+            consider(m, explicit_mission_match, tier);
+        }
+    }
+
+    best.map(|(_, matched)| matched)
+}
+
+async fn materialize_matched_mission_pocket(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    mission_owner_id: i64,
+    sys_id: u32,
+    mid: u32,
+    pocket_pos: DVec3,
+) {
+    super::reconcile_stale_mission_npcs(ctx, handle, mission_owner_id, mid);
+    let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        ctx,
+        mission_owner_id,
+        sys_id,
+        pocket_pos,
+        Some(mid),
+    );
+    super::agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
+        ctx,
+        handle,
+        mission_owner_id,
+        sys_id,
+        Some(mid),
+    )
+    .await;
+}
+
+/// Matches the targeted mission on a `beyonce.CmdWarpToStuff` / solo warp and materializes both
+/// its encounter NPCs and persisted mining asteroid under `mission_owner_id` (`PVE-020`).
 pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
@@ -180,62 +293,27 @@ pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
         return;
     }
     let now_unix = ctx.now_unix();
-    let is_mission_stuff = matches!(stuff_type, "mission" | "dungeon" | "location");
     let matched_mission = ctx.db.with_snapshot(|snap| {
-        let mut by_proximity = None;
-        for m in snap.missions.iter_by_character(char_id) {
-            if m.state != MissionState::Accepted || m.solar_system_id != sys_id {
-                continue;
-            }
-            let explicit_mission_match = is_mission_stuff
-                && (target_id == i64::from(m.template_id) || target_id == m.agent_id);
-            let Ok(Some(pocket_pos)) = resolve_mission_pocket_origin_in_snap(
-                ctx,
-                snap,
-                None,
-                m,
-                sys_id,
-                now_unix,
-                explicit_mission_match,
-            ) else {
-                continue;
-            };
-            if !pocket_pos.is_finite() || dest_pos.distance(pocket_pos) > 200_000.0 {
-                continue;
-            }
-            if (stuff_type == "bookmark" && m.bookmark_id == Some(target_id))
-                || explicit_mission_match
-            {
-                return Some((m.template_id, pocket_pos));
-            }
-            if by_proximity.is_none() {
-                by_proximity = Some((m.template_id, pocket_pos));
-            }
-        }
-        by_proximity
-    });
-    if let Some((mid, pocket_pos)) = matched_mission {
-        super::reconcile_stale_mission_npcs(ctx, handle, char_id, mid);
-        let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        resolve_mission_pocket_match_in_snap(
             ctx,
+            snap,
             char_id,
             sys_id,
-            pocket_pos,
-            Some(mid),
-        );
-        super::agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
-            ctx,
-            handle,
-            char_id,
-            sys_id,
-            Some(mid),
+            stuff_type,
+            target_id,
+            dest_pos,
+            now_unix,
         )
-        .await;
+    });
+    if let Some((mission_owner_id, mid, pocket_pos)) = matched_mission {
+        materialize_matched_mission_pocket(ctx, handle, mission_owner_id, sys_id, mid, pocket_pos)
+            .await;
     }
 }
 
 /// Materializes mission pockets for warped fleet members whose actual landing points reached within
-/// `200 km` of the pocket (`CmdWarpToStuff(..., fleet=true)` / direct `handle_fleet_warp`).
+/// `200 km` of the pocket (`CmdWarpToStuff(..., fleet=true)` / direct `handle_fleet_warp`),
+/// deduplicating snapshot matches into one snapshot scan (`P2-2`).
 pub(crate) async fn materialize_mission_pocket_on_fleet_warp(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
@@ -245,29 +323,46 @@ pub(crate) async fn materialize_mission_pocket_on_fleet_warp(
     target_id: i64,
     warped_landings: &[(i64, DVec3)],
 ) {
-    for &(member_char_id, landing_pos) in warped_landings {
-        materialize_mission_pocket_on_cmd_warp(
-            ctx,
-            handle,
-            caller_char_id,
-            sys_id,
-            stuff_type,
-            target_id,
-            landing_pos,
-        )
-        .await;
-        if member_char_id != caller_char_id && stuff_type == "bookmark" {
-            materialize_mission_pocket_on_cmd_warp(
+    if warped_landings.is_empty()
+        || sys_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH
+    {
+        return;
+    }
+    let now_unix = ctx.now_unix();
+    let mut targets: BTreeMap<(i64, u32), DVec3> = BTreeMap::new();
+    ctx.db.with_snapshot(|snap| {
+        for &(member_char_id, landing_pos) in warped_landings {
+            if let Some((owner_id, mid, pocket_pos)) = resolve_mission_pocket_match_in_snap(
                 ctx,
-                handle,
-                member_char_id,
+                snap,
+                caller_char_id,
                 sys_id,
                 stuff_type,
                 target_id,
                 landing_pos,
-            )
-            .await;
+                now_unix,
+            ) {
+                targets.entry((owner_id, mid)).or_insert(pocket_pos);
+            }
+            if member_char_id != caller_char_id && stuff_type == "bookmark" {
+                if let Some((owner_id, mid, pocket_pos)) = resolve_mission_pocket_match_in_snap(
+                    ctx,
+                    snap,
+                    member_char_id,
+                    sys_id,
+                    stuff_type,
+                    target_id,
+                    landing_pos,
+                    now_unix,
+                ) {
+                    targets.entry((owner_id, mid)).or_insert(pocket_pos);
+                }
+            }
         }
+    });
+    for ((mission_owner_id, mid), pocket_pos) in targets {
+        materialize_matched_mission_pocket(ctx, handle, mission_owner_id, sys_id, mid, pocket_pos)
+            .await;
     }
 }
 

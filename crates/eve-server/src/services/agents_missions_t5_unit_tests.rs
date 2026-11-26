@@ -3568,3 +3568,247 @@ async fn agent_warp_to_location_fleet_bookmark_materializes_wingmate_pocket() {
         }
     }
 }
+
+struct SharedMissionBookmarkFixture {
+    ctx: ServerContext,
+    sys_id: u32,
+    pilot_a: i64,
+    pilot_b: i64,
+    ship_a: i64,
+    ship_b: i64,
+    bm_enc: i64,
+    bm_mine: i64,
+    ast_id: i64,
+    mid_enc: u32,
+    mid_mine: u32,
+    pos_enc: glam::DVec3,
+    pos_mine: glam::DVec3,
+    fleet_id: i64,
+    sess_a: SessionState,
+}
+
+async fn setup_shared_mission_bookmark_fixture(
+    takes_fleet_warp_b: bool,
+    dock_b: bool,
+) -> SharedMissionBookmarkFixture {
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let mut agents: Vec<i64> = ctx.sde.agents.keys().copied().collect();
+    agents.sort_unstable();
+    let (corp_id, folder_id) = (98_960_001_i64, 960_010_i64);
+    let (pilot_a, pilot_b) = (960_001_i64, 960_002_i64);
+    let (ship_a, ship_b) = (960_011_i64, 960_012_i64);
+    let (fleet_id, bm_enc, bm_mine, ast_id) = (960_020_i64, 960_030_i64, 960_031_i64, 960_032_i64);
+    let (mid_enc, mid_mine) = (98_520_u32, 98_521_u32);
+    let pos_enc = glam::DVec3::new(9.6e12, 0.0, 0.0);
+    let pos_mine = glam::DVec3::new(9.9e12, 0.0, 0.0);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl_acc = snap.accounts.values().next().unwrap().clone();
+        let tpl_ch = snap.characters.values().next().unwrap().clone();
+        for (idx, (cid, sid, docked)) in
+            [(pilot_a, ship_a, false), (pilot_b, ship_b, dock_b)].into_iter().enumerate()
+        {
+            let uid = 960_050 + idx as u64;
+            let mut acc = tpl_acc.clone();
+            acc.user_id = uid;
+            acc.username = format!("shared_bm_{idx}");
+            snap.accounts.insert(acc.username.clone(), acc);
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: if docked { station_id } else { i64::from(sys_id) },
+                    flag: if docked { eve_db::InventoryFlag::Hangar } else { eve_db::InventoryFlag::None },
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let mut ch = tpl_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.corporation_id = corp_id;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = docked.then_some(station_id);
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+            mission_fixture::clear_character(snap, cid);
+        }
+        snap.bookmark_folders.insert(
+            folder_id,
+            eve_db::BookmarkFolderRecord {
+                folder_id,
+                owner_id: pilot_b,
+                folder_name: "ACL Shared".into(),
+                is_shared: true,
+                corporation_id: Some(corp_id),
+                ..Default::default()
+            },
+        );
+        snap.bookmark_folder_acls.insert(folder_id, vec![pilot_a, pilot_b]);
+        for (bid, label, pos) in [(bm_enc, "Shared Enc", pos_enc), (bm_mine, "Shared Mine", pos_mine)] {
+            snap.bookmarks.insert(
+                bid,
+                eve_db::BookmarkRecord {
+                    bookmark_id: bid,
+                    owner_id: pilot_b,
+                    solar_system_id: sys_id,
+                    label: label.into(),
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    item_id: None,
+                    memo: label.into(),
+                    folder_id: Some(folder_id),
+                    is_shared: true,
+                },
+            );
+        }
+        snap.asteroids.insert(
+            ast_id,
+            eve_db::AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (pos_mine.x + 8_000.0, pos_mine.y, pos_mine.z),
+                radius: 50.0,
+            },
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(pilot_b, mid_enc, agents[0], sys_id)
+                .bookmark_id(Some(bm_enc))
+                .site_origin_m(Some([pos_enc.x as i64, 0, 0]))
+                .npcs_remaining(2)
+                .initial_wave_count(Some(2))
+                .initial_wave_types(Some(vec![34_155])),
+        );
+        mission_fixture::insert(
+            snap,
+            MissionFixture::accepted(pilot_b, mid_mine, agents[1], sys_id)
+                .bookmark_id(Some(bm_mine))
+                .site_origin_m(Some([pos_mine.x as i64, 0, 0]))
+                .asteroid_entity_id(Some(ast_id))
+                .required_delivery_type_id(Some(1230))
+                .required_delivery_qty(100),
+        );
+        snap.missions
+            .update_by_character_template(pilot_b, mid_mine, |m| m.kind = eve_db::MissionKind::Mining)
+            .unwrap();
+        let mut member_details = HashMap::new();
+        member_details.insert(pilot_a, eve_db::FleetMemberRecord { character_id: pilot_a, role: eve_db::FleetRole::FleetCommander, takes_fleet_warp: true, ..Default::default() });
+        member_details.insert(pilot_b, eve_db::FleetMemberRecord { character_id: pilot_b, role: eve_db::FleetRole::SquadMember, takes_fleet_warp: takes_fleet_warp_b, ..Default::default() });
+        snap.fleets.insert(fleet_id, eve_db::FleetRecord { fleet_id, boss_id: pilot_a, members: vec![pilot_a, pilot_b], member_details, ..Default::default() });
+    });
+    for (idx, (cid, sid, spawn_ball)) in
+        [(pilot_a, ship_a, true), (pilot_b, ship_b, !dock_b)].into_iter().enumerate()
+    {
+        if spawn_ball {
+            let mut cs = ctx.build_type_combat_state(587);
+            cs.capacitor = 250.0;
+            cs.max_capacitor = 250.0;
+            sys_handle
+                .spawn_ball_with_combat(
+                    eve_destiny::Ball { id: sid, type_id: 587, position: glam::DVec3::new((idx as f64) * 1_000.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+                    cs,
+                )
+                .await
+                .unwrap();
+        }
+        ctx.db.acquire_online_lock(960_050 + idx as u64, 960_070 + idx as u64, Some(cid), true, now).unwrap();
+    }
+    let mut sess_a = docked_session(pilot_a, sys_id, None);
+    sess_a.user_id = Some(960_050);
+    sess_a.session_id = 960_070;
+    sess_a.corporation_id = Some(corp_id);
+    sess_a.ship_id = Some(ship_a);
+    sess_a.fleet_id = Some(fleet_id);
+    SharedMissionBookmarkFixture { ctx, sys_id, pilot_a, pilot_b, ship_a, ship_b, bm_enc, bm_mine, ast_id, mid_enc, mid_mine, pos_enc, pos_mine, fleet_id, sess_a }
+}
+
+#[tokio::test]
+async fn solo_shared_bookmark_warp_materializes_owner_encounter_and_mining_pockets() {
+    let mut f = setup_shared_mission_bookmark_fixture(true, false).await;
+    let kw = HashMap::new();
+    let h = f.ctx.systems.get_or_spawn(f.sys_id);
+    let _ = f.ctx.dispatch_rpc(&mut f.sess_a, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(f.bm_enc)], &kw, None).await.expect("solo CmdWarpToStuff shared enc");
+    let _ = h.set_movement_mode(f.ship_a, eve_destiny::MovementMode::Stop).await;
+    let _ = h.set_ball_position(f.ship_a, glam::DVec3::ZERO).await;
+    h.try_update_combat_state(f.ship_a, |cs| {
+        cs.capacitor = 250.0;
+        cs.max_capacitor = 250.0;
+    });
+    f.ctx.dispatch_rpc(&mut f.sess_a, "agentMgr", None, "WarpToLocation", &[PyRep::String("bookmark".into()), PyRep::Integer(f.bm_mine), PyRep::Real(0.0), PyRep::Bool(false)], &kw, None).await.expect("solo WarpToLocation shared mine");
+    let (bids, mine_ok) = f.ctx.db.with_snapshot(|s| (
+        mission_fixture::get(s, f.pilot_b, f.mid_enc).unwrap().spawned_npc_ball_ids,
+        mission_fixture::get(s, f.pilot_b, f.mid_mine).is_some(),
+    ));
+    assert!(mine_ok);
+    assert_eq!(bids.len(), 2);
+    assert!(h.get_ball_snapshot(bids[0]).await.unwrap().unwrap().1.position.distance(f.pos_enc) <= 5_000.0);
+    let (_, ast_b) = h.get_ball_snapshot(f.ast_id).await.unwrap().expect("shared mining asteroid");
+    assert!(ast_b.position.distance(f.pos_mine) <= 9_000.0);
+}
+
+#[tokio::test]
+async fn solo_copied_bookmark_warp_materializes_source_mission_pocket() {
+    let mut f = setup_shared_mission_bookmark_fixture(true, false).await;
+    let kw = HashMap::new();
+    let h = f.ctx.systems.get_or_spawn(f.sys_id);
+    let copied = f.ctx.dispatch_rpc(&mut f.sess_a, "bookmark", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::List(vec![PyRep::Integer(f.bm_enc)]), PyRep::None], &kw, None).await.expect("copy shared bookmark");
+    let bm_copy = match copied { PyRep::KeyVal(kv) => kv.get("bookmarkIDs").and_then(|v| match v { PyRep::List(l) => l.first().and_then(PyRep::as_i64), _ => None }).unwrap(), _ => panic!("expected KeyVal") };
+    f.ctx.db.with_snapshot(|s| assert_eq!(s.bookmarks.get(&bm_copy).unwrap().owner_id, f.pilot_a));
+    assert_ne!(bm_copy, f.bm_enc);
+    let _ = f.ctx.dispatch_rpc(&mut f.sess_a, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(bm_copy)], &kw, None).await.expect("solo warp to copied bookmark");
+    let bids = f.ctx.db.with_snapshot(|s| mission_fixture::get(s, f.pilot_b, f.mid_enc).unwrap().spawned_npc_ball_ids);
+    assert_eq!(bids.len(), 2);
+    assert!(h.get_ball_snapshot(bids[0]).await.unwrap().unwrap().1.position.distance(f.pos_enc) <= 5_000.0);
+}
+
+#[tokio::test]
+async fn fleet_bookmark_warp_owner_exempt_or_docked_still_materializes_pocket() {
+    let mut f = setup_shared_mission_bookmark_fixture(false, false).await;
+    let kw = HashMap::new();
+    let h = f.ctx.systems.get_or_spawn(f.sys_id);
+    f.ctx.dispatch_rpc(&mut f.sess_a, "fleetMgr", None, "FleetWarp", &[PyRep::Integer(f.bm_enc), PyRep::Real(0.0)], &kw, None).await.expect("FleetWarp with takes_fleet_warp=false owner");
+    let bids = f.ctx.db.with_snapshot(|s| mission_fixture::get(s, f.pilot_b, f.mid_enc).unwrap().spawned_npc_ball_ids);
+    assert_eq!(bids.len(), 2);
+    assert!(h.get_ball_snapshot(bids[0]).await.unwrap().is_some());
+    let _ = f.ship_b;
+
+    let mut f_docked = setup_shared_mission_bookmark_fixture(true, true).await;
+    let mut fleet_kw = HashMap::new();
+    fleet_kw.insert("fleet".into(), PyRep::Bool(true));
+    let _ = f_docked.ctx.dispatch_rpc(&mut f_docked.sess_a, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(f_docked.bm_mine)], &fleet_kw, None).await.expect("fleet CmdWarpToStuff with docked owner");
+    assert!(f_docked.ctx.systems.get_or_spawn(f_docked.sys_id).get_ball_snapshot(f_docked.ast_id).await.unwrap().is_some());
+    assert_eq!(f_docked.fleet_id, 960_020);
+}
+
+#[tokio::test]
+async fn expired_or_item_attached_bookmark_never_materializes_foreign_mission() {
+    let f = setup_shared_mission_bookmark_fixture(true, false).await;
+    let now = f.ctx.now_unix();
+    let (bm_exp, bm_item) = (960_090_i64, 960_091_i64);
+    f.ctx.db.with_mut_snapshot(|snap| {
+        for (bid, item_id) in [(bm_exp, None), (bm_item, Some(999_i64))] {
+            snap.bookmarks.insert(bid, eve_db::BookmarkRecord { bookmark_id: bid, owner_id: f.pilot_b, solar_system_id: f.sys_id, label: "Invalid".into(), x: f.pos_enc.x, y: f.pos_enc.y, z: f.pos_enc.z, item_id, memo: "Invalid".into(), folder_id: None, is_shared: true });
+        }
+        snap.bookmark_expiries.insert(bm_exp, now.saturating_sub(10));
+    });
+    let h = f.ctx.systems.get_or_spawn(f.sys_id);
+    for bid in [bm_exp, bm_item] {
+        agents_missions_warp::materialize_mission_pocket_on_cmd_warp(&f.ctx, &h, f.pilot_a, f.sys_id, "bookmark", bid, f.pos_enc).await;
+        agents_missions_warp::materialize_mission_pocket_on_fleet_warp(&f.ctx, &h, f.pilot_a, f.sys_id, "bookmark", bid, &[(f.pilot_a, f.pos_enc)]).await;
+    }
+    f.ctx.db.with_snapshot(|s| assert!(mission_fixture::get(s, f.pilot_b, f.mid_enc).unwrap().spawned_npc_ball_ids.is_empty()));
+}
