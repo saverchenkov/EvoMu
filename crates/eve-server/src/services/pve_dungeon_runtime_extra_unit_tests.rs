@@ -1502,9 +1502,12 @@ async fn t2a2_r2_set_objective_progression_final_room_lock_short_circuit_and_sde
     });
     assert_eq!(drain_prog(), vec![("OnProgressionAdvanced".into(), vec![PyRep::Integer(9101), PyRep::Integer(0)])]);
 
-    // Case 1b + P2-1: OnKill -> LockGate sets 980101; subsequent repeatable OnApproach preserves final-room LockGate & 980101 across tx.
+    // Case 1b + P2-1: OnKill -> LockGate sets 980101; exit + re-enter repeatable OnApproach preserves final-room LockGate & 980101 across tx (I3 latch).
     on_dungeon_npc_killed(&ctx, sys_id, m0.npc_ids[0], char_id).await;
     let _ = ctx.drain_notifications_for_char(char_id);
+    assert!(sys_handle.set_ball_position(ship_id, DVec3::new(r1_pos[0] + 5_000.0, 0.0, 0.0)).await);
+    assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 0);
+    assert!(sys_handle.set_ball_position(ship_id, DVec3::from_array(r1_pos)).await);
     assert_eq!(on_dungeon_approach(&ctx, char_id, sys_id, ship_id, None).await, 1);
     read_dungeon_runtime_store(&ctx, |s| {
         let rt = &s.instances[&inst_a];

@@ -7,6 +7,8 @@
 pub(crate) mod actions;
 #[path = "pve_dungeon_runtime_ops.rs"]
 mod ops;
+#[path = "pve_dungeon_runtime_triggers.rs"]
+pub(crate) mod triggers;
 
 use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::{
@@ -22,7 +24,7 @@ use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 
-const POCKET_RADIUS_M: f64 = 200_000.0;
+pub(crate) const POCKET_RADIUS_M: f64 = 200_000.0;
 pub(crate) const GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
 pub(crate) const ACCELERATION_GATE_TYPE_ID: u32 = 17831;
 pub(crate) const DEFAULT_CONTAINER_TYPE_ID: u32 = 23;
@@ -236,7 +238,12 @@ pub fn has_runtime_gate_target(
 
 /// Evaluates and fires any armed delayed dungeon triggers whose `delay_secs` timer has elapsed.
 pub async fn tick_due_delayed_dungeon_triggers(ctx: &ServerContext) -> usize {
-    actions::tick_due_delayed_dungeon_triggers_impl(actions::DungeonRuntimeDeps::from_ctx(ctx)).await
+    triggers::tick_due_delayed_dungeon_triggers_impl(actions::DungeonRuntimeDeps::from_ctx(ctx)).await
+}
+
+/// 1 Hz system-step sweep for subwarp `OnApproach`, `OnTimer`, `OnNpcDamaged`, delay-armed triggers, and expired loot grace.
+pub async fn tick_dungeon_runtime_system_step(ctx: &ServerContext, sys_id: SolarSystemId) {
+    triggers::tick_dungeon_runtime_system_step_impl(actions::DungeonRuntimeDeps::from_ctx(ctx), sys_id).await;
 }
 
 pub(crate) fn prune_stale_despawned_instances(store: &mut DungeonRuntimeStore, now_unix: u64) {
@@ -1196,6 +1203,7 @@ pub(crate) fn plan_npc_group_spawns_in_snap(
     let total_npcs: usize = entries.iter().map(|e| e.count.max(1)).sum();
     let alloc_ids: Vec<i64> = (0..total_npcs).map(|_| snap.alloc_entity_id()).collect();
     let room_pos = room.position;
+    let spawned_gid = room.npc_groups[grp_idx].group_id;
     let mut spawned_any = false;
     {
         let grp = &mut room.npc_groups[grp_idx];
@@ -1254,6 +1262,7 @@ pub(crate) fn plan_npc_group_spawns_in_snap(
     }
     if spawned_any {
         room.cleared = false;
+        triggers::clear_latches_for_spawned_group(room, spawned_gid);
     }
 }
 
@@ -1612,7 +1621,7 @@ pub async fn on_dungeon_room_entered(
     room_vec_idx: usize,
     char_id: i64,
 ) {
-    actions::on_dungeon_room_entered_impl(
+    triggers::on_dungeon_room_entered_impl(
         actions::DungeonRuntimeDeps::from_ctx(ctx),
         sys_id,
         instance_id,
@@ -1926,7 +1935,7 @@ pub fn check_dungeon_runtime_gate_ship_allowed(sde: &eve_sde::SdeRegistry, dunge
 
 /// Evaluates `OnKill` triggers and room/dungeon completion when an NPC ball is destroyed in `sys_id`.
 pub async fn on_dungeon_npc_killed(ctx: &ServerContext, sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64) {
-    actions::on_dungeon_npc_killed_impl(
+    triggers::on_dungeon_npc_killed_impl(
         actions::DungeonRuntimeDeps::from_ctx(ctx),
         sys_id,
         npc_ball_id,
@@ -1942,7 +1951,7 @@ pub async fn on_dungeon_npc_killed_core(
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
     sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
 ) {
-    actions::on_dungeon_npc_killed_impl(
+    triggers::on_dungeon_npc_killed_impl(
         actions::DungeonRuntimeDeps::from_parts(
             systems,
             db,

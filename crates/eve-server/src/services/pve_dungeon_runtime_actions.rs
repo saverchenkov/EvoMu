@@ -5,8 +5,8 @@
 
 use super::{
     insert_container_and_loot_in_snap, instance_is_finished, plan_npc_group_spawns_in_snap,
-    record_room_actor, resolve_room_recipient, room_is_entered, spawn_gate_ball,
-    spawn_object_ball, wake_dungeon_system_handle, NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
+    resolve_room_recipient, spawn_gate_ball, spawn_object_ball, wake_dungeon_system_handle,
+    NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::build_specialized_npc_spawn_item;
@@ -15,7 +15,7 @@ use crate::services::pve_expeditions::{create_escalation_expedition_with_options
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::service_domains::pve_sites::{
     DungeonObjective, DungeonObjectiveStatus, DungeonRuntimeInstance, DungeonRuntimeObject,
-    DungeonTriggerAction, DungeonTriggerKind,
+    DungeonTriggerAction,
 };
 use eve_db::types::{IskCents, StandingTransactionRecord, WalletJournalEntry};
 use eve_db::WorldStateSnapshot;
@@ -68,6 +68,12 @@ impl<'a> DungeonRuntimeDeps<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum ProgressionNotice {
+    TaskEvents(i64, Vec<(i64, i64)>),
+    AdvancedOnly(i64, i64, i64),
+}
+
 #[derive(Default)]
 pub(crate) struct TriggerTxEffects {
     pub(crate) despawn_npc_ids: Vec<i64>,
@@ -76,8 +82,7 @@ pub(crate) struct TriggerTxEffects {
     pub(crate) spawn_objects: Vec<ObjectSpawnOrder>,
     pub(crate) spawn_npcs: Vec<NpcSpawnOrder>,
     pub(crate) notify_actions: Vec<(i64, u32, Vec<i64>, Vec<DungeonTriggerAction>)>,
-    pub(crate) progression_events: Vec<(i64, Vec<(i64, i64)>)>,
-    pub(crate) progression_advanced_only: Vec<(i64, i64, i64)>,
+    pub(crate) progression_notices: Vec<ProgressionNotice>,
     pub(crate) completed_sites: Vec<(i64, u32, i64)>,
     pub(crate) failed_notices: Vec<(i64, u32, i64)>,
     pub(crate) escalation_requests: Vec<(i64, u32, Option<u32>, u16, Option<String>, [f64; 3], i64)>,
@@ -98,7 +103,7 @@ impl TriggerTxEffects {
     }
 }
 
-type TriggerBatch = Vec<(u32, Option<usize>, bool, i64, Vec<DungeonTriggerAction>)>;
+pub(crate) type TriggerBatch = Vec<(u32, Option<usize>, bool, i64, Vec<DungeonTriggerAction>)>;
 
 fn deterministic_roll_bps(seed_a: i64, seed_b: u64) -> u16 {
     let mut x = (seed_a as u64) ^ seed_b.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -140,7 +145,7 @@ pub(crate) async fn despawn_dungeon_npc_ids(
     }
 }
 
-fn finish_instance_entities_in_snap(
+pub(crate) fn finish_instance_entities_in_snap(
     snap: &mut WorldStateSnapshot, instance_id: i64, actor_char_id: i64, now_unix: u64,
     is_fail: bool, force_full_despawn: bool, effects: &mut TriggerTxEffects,
 ) {
@@ -275,9 +280,9 @@ fn apply_set_objective_in_inst(
     }
     if recip > 0 {
         if completed {
-            effects.progression_events.push((recip, vec![(resolved, resolved)]));
+            effects.progression_notices.push(ProgressionNotice::TaskEvents(recip, vec![(resolved, resolved)]));
         } else {
-            effects.progression_advanced_only.push((recip, resolved, inst.last_completed_task_id.unwrap_or(0)));
+            effects.progression_notices.push(ProgressionNotice::AdvancedOnly(recip, resolved, inst.last_completed_task_id.unwrap_or(0)));
         }
     }
     resolved
@@ -320,8 +325,10 @@ pub(crate) fn apply_single_action_in_inst(
         }
         DungeonTriggerAction::DespawnNpcGroup(gid) => {
             if let Some(r) = inst.rooms.get_mut(r_idx) {
+                let mut any_despawned = false;
                 for g in &mut r.npc_groups {
                     if g.group_id == *gid {
+                        any_despawned = true;
                         for bid in g.npc_ball_ids.drain(..) {
                             if !g.dead_npc_ball_ids.contains(&bid) { g.dead_npc_ball_ids.push(bid); }
                             effects.despawn_npc_ids.push(bid);
@@ -329,6 +336,9 @@ pub(crate) fn apply_single_action_in_inst(
                         g.npc_ball_meta.clear(); g.npc_ball_tags.clear(); g.npc_ball_names.clear(); g.npc_ball_bounties.clear();
                         g.spawned = true; g.cleared = true;
                     }
+                }
+                if any_despawned {
+                    r.armed_timers.entry(format!("__group_cleared:{gid}")).or_insert(now_unix);
                 }
             }
             if r_idx != src_r_idx && !effects.affected_clear_rooms.contains(&r_idx) {
@@ -361,6 +371,14 @@ pub(crate) fn apply_single_action_in_inst(
         }
         DungeonTriggerAction::FailDungeon { reason } => {
             effects.fail_reason = Some(reason.clone());
+            default_oid
+        }
+        DungeonTriggerAction::StartTimer { timer_id, delay_secs } => {
+            if !timer_id.is_empty() && !timer_id.starts_with("__") {
+                if let Some(r) = inst.rooms.get_mut(r_idx) {
+                    r.armed_timers.insert(timer_id.clone(), now_unix.saturating_add(*delay_secs));
+                }
+            }
             default_oid
         }
         DungeonTriggerAction::SetObjective { objective_id, objective_key, title, completed } => {
@@ -411,7 +429,9 @@ pub(crate) fn unlock_room_gates_on_clear_in_inst(
         let evs = vec![(room.room_id * 100 + 99, oid)];
         crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(inst, &evs);
         let recip = resolve_room_recipient(inst, Some(r_idx), actor);
-        if recip > 0 { effects.progression_events.push((recip, evs)); }
+        if recip > 0 {
+            effects.progression_notices.push(ProgressionNotice::TaskEvents(recip, evs));
+        }
     }
     if r_idx + 1 == total_rooms
         && !inst.rooms[r_idx].gate_locked
@@ -422,7 +442,7 @@ pub(crate) fn unlock_room_gates_on_clear_in_inst(
     }
 }
 
-fn finish_room_clear_checks_in_inst(
+pub(crate) fn finish_room_clear_checks_in_inst(
     inst: &mut DungeonRuntimeInstance, primary_r_idx: usize, actor: i64,
     had_room_actions: bool, allow_empty_groups_clear: bool, effects: &mut TriggerTxEffects,
 ) {
@@ -436,16 +456,17 @@ fn finish_room_clear_checks_in_inst(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_trigger_batch_in_inst(
+pub(crate) fn run_trigger_batch_in_inst(
     snap: &mut WorldStateSnapshot, sys_id: SolarSystemId, inst: &mut DungeonRuntimeInstance,
     sde_opt: Option<&eve_sde::SdeRegistry>, r_idx: usize, fallback_actor: i64, now_unix: u64,
     batch: TriggerBatch, effects: &mut TriggerTxEffects,
-) -> usize {
+) -> (usize, usize) {
     let source_room_id = inst.rooms.get(r_idx).map(|r| r.room_id).unwrap_or(0);
-    let mut fired_actions = 0usize;
+    let (mut executed_triggers, mut fired_actions) = (0usize, 0usize);
     for (trig_id, target_room_index, trig_rep, trig_actor, actions) in batch {
         if effects.fail_reason.is_some() || effects.complete_now { break; }
         if actions.is_empty() { continue; }
+        executed_triggers += 1;
         let eff_actor = if trig_actor > 0 { trig_actor } else { fallback_actor };
         let recip = resolve_room_recipient(inst, Some(r_idx), eff_actor);
         let (mut primary_oid, mut had_explicit_objective) = (None, false);
@@ -460,18 +481,20 @@ fn run_trigger_batch_in_inst(
                 primary_oid = Some(oid);
             }
         }
-        if !had_explicit_objective {
+        if !had_explicit_objective && effects.fail_reason.is_none() {
             if let Some(oid) = primary_oid {
                 let evs = vec![(source_room_id * 100 + i64::from(trig_id), oid)];
                 crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(inst, &evs);
-                if recip > 0 { effects.progression_events.push((recip, evs)); }
+                if recip > 0 {
+                    effects.progression_notices.push(ProgressionNotice::TaskEvents(recip, evs));
+                }
             }
         }
     }
-    fired_actions
+    (executed_triggers, fired_actions)
 }
 
-fn finalize_terminal_in_snap(
+pub(crate) fn finalize_terminal_in_snap(
     snap: &mut WorldStateSnapshot, inst: DungeonRuntimeInstance, actor: i64, now_unix: u64, effects: &mut TriggerTxEffects,
 ) {
     let inst_id = inst.instance_id;
@@ -495,210 +518,13 @@ pub(crate) async fn apply_dungeon_trigger_actions_impl(
     deps.db.with_mut_snapshot(|snap| {
         let Some(mut inst) = snap.dungeon_runtime.instances.remove(&instance_id) else { return };
         if instance_is_finished(&inst) { snap.dungeon_runtime.instances.insert(instance_id, inst); return; }
-        record_room_actor(&mut inst, room_vec_idx, char_id);
+        super::record_room_actor(&mut inst, room_vec_idx, char_id);
         let batch: TriggerBatch = actions.into_iter().map(|(tid, a)| (tid, None, false, char_id, vec![a])).collect();
-        fired = run_trigger_batch_in_inst(snap, sys_id, &mut inst, deps.sde, room_vec_idx, char_id, now_unix, batch, &mut effects);
+        fired = run_trigger_batch_in_inst(snap, sys_id, &mut inst, deps.sde, room_vec_idx, char_id, now_unix, batch, &mut effects).1;
         finalize_terminal_in_snap(snap, inst, char_id, now_unix, &mut effects);
     });
     flush_trigger_effects(deps, sys_id, effects).await;
     fired
-}
-
-#[allow(clippy::too_many_arguments)]
-fn eval_kill_room_in_snap(
-    snap: &mut WorldStateSnapshot, sys_id: SolarSystemId, inst: &mut DungeonRuntimeInstance,
-    sde_opt: Option<&eve_sde::SdeRegistry>, r_idx: usize, killed_npc_ball_id: Option<i64>,
-    matched_group_ids: &[u8], actor: i64, now_unix: u64, effects: &mut TriggerTxEffects,
-) {
-    let mut batch = Vec::new();
-    if let Some(room) = inst.rooms.get_mut(r_idx) {
-        let all_dead = room.npc_groups.iter().filter(|g| g.spawned).all(|g| g.npc_ball_ids.is_empty());
-        let all_spawned = room.npc_groups.iter().all(|g| g.spawned);
-        for trig in &mut room.triggers {
-            if trig.fired || trig.armed_at_unix.is_some() { continue; }
-            if let DungeonTriggerKind::OnKill { target_npc_group, target_ball_id } = &trig.kind {
-                let ok = if let Some(tbid) = target_ball_id {
-                    killed_npc_ball_id.map_or_else(|| room.npc_groups.iter().any(|g| g.dead_npc_ball_ids.contains(tbid)), |k| *tbid == k)
-                } else if let Some(tgrp) = target_npc_group { matched_group_ids.contains(tgrp) } else { all_dead && all_spawned };
-                if !ok { continue; }
-                if trig.delay_secs > 0 {
-                    trig.armed_at_unix = Some(now_unix); trig.armed_by_char_id = (actor > 0).then_some(actor); continue;
-                }
-                if !trig.repeatable { trig.fired = true; }
-                batch.push((trig.trigger_id, trig.target_room_index, trig.repeatable, actor, trig.all_actions().cloned().collect()));
-            }
-        }
-    }
-    let had_actions = !batch.is_empty();
-    let _ = run_trigger_batch_in_inst(snap, sys_id, inst, sde_opt, r_idx, actor, now_unix, batch, effects);
-    finish_room_clear_checks_in_inst(inst, r_idx, actor, had_actions, true, effects);
-}
-
-pub(crate) async fn on_dungeon_npc_killed_impl(
-    deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
-) {
-    if !super::has_dungeon_runtime_store_db(deps.db) { return; }
-    let now_unix = deps.db.clock().now_unix_secs();
-    let mut effects = TriggerTxEffects::default();
-    deps.db.with_mut_snapshot(|snap| {
-        let ids: Vec<i64> = snap.dungeon_runtime.instances.values()
-            .filter(|i| !instance_is_finished(i) && i.solar_system_id == sys_id && i.rooms.iter().any(|r| r.npc_groups.iter().any(|g| g.npc_ball_ids.contains(&npc_ball_id))))
-            .map(|i| i.instance_id).collect();
-        for inst_id in ids {
-            let Some(mut inst) = snap.dungeon_runtime.instances.remove(&inst_id) else { continue };
-            if instance_is_finished(&inst) || inst.solar_system_id != sys_id { snap.dungeon_runtime.instances.insert(inst_id, inst); continue; }
-            let mut ie = TriggerTxEffects::default();
-            for r_idx in 0..inst.rooms.len() {
-                if ie.fail_reason.is_some() || ie.complete_now { break; }
-                let (mut matched_grps, mut removed) = (Vec::new(), false);
-                let entered = {
-                    let room = &mut inst.rooms[r_idx];
-                    for grp in &mut room.npc_groups {
-                        if let Some(pos) = grp.npc_ball_ids.iter().position(|&id| id == npc_ball_id) {
-                            grp.npc_ball_ids.remove(pos);
-                            if !grp.dead_npc_ball_ids.contains(&npc_ball_id) { grp.dead_npc_ball_ids.push(npc_ball_id); }
-                            grp.kills_recorded = grp.kills_recorded.saturating_add(1);
-                            grp.npc_ball_meta.remove(&npc_ball_id); grp.npc_ball_tags.remove(&npc_ball_id);
-                            grp.npc_ball_names.remove(&npc_ball_id); grp.npc_ball_bounties.remove(&npc_ball_id);
-                            removed = true;
-                            if grp.npc_ball_ids.is_empty() { grp.cleared = true; matched_grps.push(grp.group_id); }
-                        }
-                    }
-                    room_is_entered(room)
-                };
-                if !removed || !entered { continue; }
-                record_room_actor(&mut inst, r_idx, killer_char_id);
-                eval_kill_room_in_snap(snap, sys_id, &mut inst, deps.sde, r_idx, Some(npc_ball_id), &matched_grps, killer_char_id, now_unix, &mut ie);
-            }
-            finalize_terminal_in_snap(snap, inst, killer_char_id, now_unix, &mut ie);
-            merge_effects(&mut effects, ie);
-        }
-    });
-    flush_trigger_effects(deps, sys_id, effects).await;
-}
-
-pub(crate) async fn on_dungeon_room_entered_impl(
-    deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, instance_id: i64, room_vec_idx: usize, char_id: i64,
-) {
-    let now_unix = deps.db.clock().now_unix_secs();
-    let needs = deps.db.with_snapshot(|snap| {
-        snap.dungeon_runtime.instances.get(&instance_id).is_some_and(|i| {
-            !instance_is_finished(i) && i.solar_system_id == sys_id
-                && i.rooms.get(room_vec_idx).is_some_and(|r| !r.entered || (char_id > 0 && (i.last_actor_char_id != char_id || r.last_actor_char_id != char_id)))
-        })
-    });
-    if !needs { return; }
-    let mut effects = TriggerTxEffects::default();
-    deps.db.with_mut_snapshot(|snap| {
-        let Some(mut inst) = snap.dungeon_runtime.instances.remove(&instance_id) else { return };
-        if instance_is_finished(&inst) || inst.solar_system_id != sys_id { snap.dungeon_runtime.instances.insert(instance_id, inst); return; }
-        let Some((was_ent, has_kills, cleared_grps)) = inst.rooms.get_mut(room_vec_idx).map(|r| {
-            let was = r.entered; r.entered = true; r.entered_unix.get_or_insert(now_unix);
-            let prior = r.npc_groups.iter().any(|g| g.kills_recorded > 0 || !g.dead_npc_ball_ids.is_empty());
-            let cl: Vec<u8> = r.npc_groups.iter().filter(|g| g.spawned && g.cleared && g.npc_ball_ids.is_empty()).map(|g| g.group_id).collect();
-            (was, !was && prior, cl)
-        }) else { snap.dungeon_runtime.instances.insert(instance_id, inst); return; };
-        record_room_actor(&mut inst, room_vec_idx, char_id);
-        if !was_ent && has_kills { eval_kill_room_in_snap(snap, sys_id, &mut inst, deps.sde, room_vec_idx, None, &cleared_grps, char_id, now_unix, &mut effects); }
-        finalize_terminal_in_snap(snap, inst, char_id, now_unix, &mut effects);
-    });
-    flush_trigger_effects(deps, sys_id, effects).await;
-}
-
-pub(crate) async fn execute_room_triggers_in_snap<F>(
-    deps: DungeonRuntimeDeps<'_>, sys_id_opt: Option<SolarSystemId>, actor: i64, mut matcher: F,
-) -> usize
-where
-    F: FnMut(&[DungeonRuntimeObject], &eve_db::DungeonTrigger) -> bool,
-{
-    let now_unix = deps.db.clock().now_unix_secs();
-    let (mut count, mut effects_by_sys): (usize, HashMap<SolarSystemId, TriggerTxEffects>) = (0, HashMap::new());
-    deps.db.with_mut_snapshot(|snap| {
-        let ids: Vec<i64> = snap.dungeon_runtime.instances.values()
-            .filter(|i| !instance_is_finished(i) && sys_id_opt.is_none_or(|sid| i.solar_system_id == sid))
-            .map(|i| i.instance_id).collect();
-        for inst_id in ids {
-            let Some(mut inst) = snap.dungeon_runtime.instances.remove(&inst_id) else { continue };
-            if instance_is_finished(&inst) || sys_id_opt.is_some_and(|sid| inst.solar_system_id != sid) {
-                snap.dungeon_runtime.instances.insert(inst_id, inst); continue;
-            }
-            let (inst_sys, mut ie) = (inst.solar_system_id, TriggerTxEffects::default());
-            for r_idx in 0..inst.rooms.len() {
-                if ie.fail_reason.is_some() || ie.complete_now { break; }
-                let (mut batch, mut any_room_hit) = (Vec::new(), false);
-                {
-                    let room = &mut inst.rooms[r_idx];
-                    if !room.spawned || !room_is_entered(room) { continue; }
-                    let objs = &room.objects;
-                    for trig in &mut room.triggers {
-                        if trig.fired || trig.armed_at_unix.is_some() || !matcher(objs, trig) { continue; }
-                        count += 1;
-                        any_room_hit = true;
-                        if trig.delay_secs > 0 { trig.armed_at_unix = Some(now_unix); trig.armed_by_char_id = (actor > 0).then_some(actor); continue; }
-                        if !trig.repeatable { trig.fired = true; }
-                        batch.push((trig.trigger_id, trig.target_room_index, trig.repeatable, actor, trig.all_actions().cloned().collect()));
-                    }
-                }
-                if any_room_hit {
-                    record_room_actor(&mut inst, r_idx, actor);
-                }
-                if !batch.is_empty() {
-                    let _ = run_trigger_batch_in_inst(snap, inst_sys, &mut inst, deps.sde, r_idx, actor, now_unix, batch, &mut ie);
-                    finish_room_clear_checks_in_inst(&mut inst, r_idx, actor, true, false, &mut ie);
-                }
-            }
-            finalize_terminal_in_snap(snap, inst, actor, now_unix, &mut ie);
-            merge_effects(effects_by_sys.entry(inst_sys).or_default(), ie);
-        }
-    });
-    for (sys_id, effects) in effects_by_sys { flush_trigger_effects(deps, sys_id, effects).await; }
-    count
-}
-
-/// Fires armed delayed triggers whose `delay_secs` elapsed, attributing public dungeons via
-/// `armed_by_char_id` / `last_actor_char_id` (`OWN-R5-05`).
-pub(crate) async fn tick_due_delayed_dungeon_triggers_impl(deps: DungeonRuntimeDeps<'_>) -> usize {
-    if !super::has_dungeon_runtime_store_db(deps.db) { return 0; }
-    let now_unix = deps.db.clock().now_unix_secs();
-    let due_ids: Vec<i64> = deps.db.with_snapshot(|snap| {
-        snap.dungeon_runtime.instances.values()
-            .filter(|i| !instance_is_finished(i) && i.rooms.iter().any(|r| r.triggers.iter().any(|t| !t.fired && t.armed_at_unix.is_some_and(|t0| now_unix >= t0.saturating_add(t.delay_secs)))))
-            .map(|i| i.instance_id).collect()
-    });
-    if due_ids.is_empty() { return 0; }
-    let (mut fired_total, mut effects_by_sys): (usize, HashMap<SolarSystemId, TriggerTxEffects>) = (0, HashMap::new());
-    deps.db.with_mut_snapshot(|snap| {
-        for inst_id in due_ids {
-            let Some(mut inst) = snap.dungeon_runtime.instances.remove(&inst_id) else { continue };
-            if instance_is_finished(&inst) { snap.dungeon_runtime.instances.insert(inst_id, inst); continue; }
-            let (inst_sys, mut ie, mut last_actor) = (inst.solar_system_id, TriggerTxEffects::default(), 0i64);
-            for r_idx in 0..inst.rooms.len() {
-                if ie.fail_reason.is_some() || ie.complete_now { break; }
-                let room_fallback_actor = resolve_room_recipient(&inst, Some(r_idx), 0);
-                let mut batch = Vec::new();
-                for trig in &mut inst.rooms[r_idx].triggers {
-                    if !trig.fired && trig.armed_at_unix.is_some_and(|t0| now_unix >= t0.saturating_add(trig.delay_secs)) {
-                        let armed_by = trig.armed_by_char_id.unwrap_or(0);
-                        trig.armed_at_unix = None; trig.armed_by_char_id = None;
-                        if !trig.repeatable { trig.fired = true; }
-                        fired_total += 1;
-                        let actor = if armed_by > 0 { armed_by } else { room_fallback_actor };
-                        if actor > 0 { last_actor = actor; }
-                        batch.push((trig.trigger_id, trig.target_room_index, trig.repeatable, actor, trig.all_actions().cloned().collect()));
-                    }
-                }
-                if !batch.is_empty() {
-                    record_room_actor(&mut inst, r_idx, last_actor);
-                    let _ = run_trigger_batch_in_inst(snap, inst_sys, &mut inst, deps.sde, r_idx, last_actor, now_unix, batch, &mut ie);
-                    finish_room_clear_checks_in_inst(&mut inst, r_idx, last_actor, true, false, &mut ie);
-                }
-            }
-            finalize_terminal_in_snap(snap, inst, last_actor, now_unix, &mut ie);
-            merge_effects(effects_by_sys.entry(inst_sys).or_default(), ie);
-        }
-    });
-    for (sys_id, effects) in effects_by_sys { flush_trigger_effects(deps, sys_id, effects).await; }
-    fired_total
 }
 
 pub(crate) async fn complete_and_flush_instance(
@@ -713,12 +539,12 @@ pub(crate) async fn complete_and_flush_instance(
     flush_trigger_effects(deps, sys_id, effects).await;
 }
 
-fn merge_effects(dst: &mut TriggerTxEffects, mut src: TriggerTxEffects) {
+pub(crate) fn merge_effects(dst: &mut TriggerTxEffects, mut src: TriggerTxEffects) {
     src.cancel_dead_spawns();
     dst.despawn_npc_ids.extend(src.despawn_npc_ids); dst.despawn_other_balls.extend(src.despawn_other_balls);
     dst.spawn_gates.extend(src.spawn_gates); dst.spawn_objects.extend(src.spawn_objects); dst.spawn_npcs.extend(src.spawn_npcs);
-    dst.notify_actions.extend(src.notify_actions); dst.progression_events.extend(src.progression_events);
-    dst.progression_advanced_only.extend(src.progression_advanced_only); dst.completed_sites.extend(src.completed_sites);
+    dst.notify_actions.extend(src.notify_actions); dst.progression_notices.extend(src.progression_notices);
+    dst.completed_sites.extend(src.completed_sites);
     dst.failed_notices.extend(src.failed_notices); dst.escalation_requests.extend(src.escalation_requests);
     dst.cancel_dead_spawns();
 }
@@ -741,11 +567,19 @@ pub(crate) async fn flush_trigger_effects(deps: DungeonRuntimeDeps<'_>, sys_id: 
             crate::services::notify_emitters_channel_events::dispatch_dungeon_trigger_notify_actions(deps.db, deps.pending_notifications, deps.notify_tx, recip, i64::from(did), &obj_ids, acts);
         }
     }
-    for (recip, evs) in effects.progression_events {
-        if recip > 0 && !evs.is_empty() { crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(deps.db, deps.pending_notifications, deps.notify_tx, recip, &evs); }
-    }
-    for (recip, oid, tid) in effects.progression_advanced_only {
-        if recip > 0 { crate::services::notify_emitters_ess_bounties::emit_progression_advanced_with_db(deps.db, deps.pending_notifications, deps.notify_tx, recip, oid, tid); }
+    for notice in effects.progression_notices {
+        match notice {
+            ProgressionNotice::TaskEvents(recip, evs) => {
+                if recip > 0 && !evs.is_empty() {
+                    crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(deps.db, deps.pending_notifications, deps.notify_tx, recip, &evs);
+                }
+            }
+            ProgressionNotice::AdvancedOnly(recip, oid, tid) => {
+                if recip > 0 {
+                    crate::services::notify_emitters_ess_bounties::emit_progression_advanced_with_db(deps.db, deps.pending_notifications, deps.notify_tx, recip, oid, tid);
+                }
+            }
+        }
     }
     for (cid, did, iid) in effects.failed_notices {
         if cid > 0 {

@@ -6,14 +6,13 @@
 use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
 use crate::services::pve_dungeon_runtime::{
-    actions::{complete_and_flush_instance, execute_room_triggers_in_snap, DungeonRuntimeDeps},
-    dist3, has_unlooted_containers_in_snap, instance_is_finished,
-    materialize_dungeon_room_entities, on_dungeon_room_entered, prune_stale_despawned_instances,
-    read_dungeon_runtime_store, record_dungeon_actor, resolve_runtime_gate_in_snap,
-    room_is_entered, unix_to_filetime_ticks, with_dungeon_runtime_store, DungeonGateLink,
-    DungeonInstanceId, DungeonNpcGroup, DungeonObjectiveStatus, DungeonRuntimeInstance,
-    DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId, DungeonTrigger,
-    DungeonTriggerAction, DungeonTriggerKind, MaterializedDungeonRoomEntities, RuntimeGateMatch,
+    actions::DungeonRuntimeDeps, instance_is_finished, materialize_dungeon_room_entities,
+    on_dungeon_room_entered, prune_stale_despawned_instances, read_dungeon_runtime_store,
+    record_dungeon_actor, resolve_runtime_gate_in_snap, triggers, unix_to_filetime_ticks,
+    with_dungeon_runtime_store, DungeonGateLink, DungeonInstanceId, DungeonNpcGroup,
+    DungeonNpcSpawnEntry, DungeonObjectiveStatus, DungeonRuntimeInstance, DungeonRuntimeObject,
+    DungeonRuntimeRoom, DungeonTemplateId, DungeonTrigger, DungeonTriggerAction,
+    DungeonTriggerKind, MaterializedDungeonRoomEntities, RuntimeGateMatch,
     DEFAULT_CONTAINER_TYPE_ID, GATE_ACTIVATION_RANGE_M,
 };
 use eve_db::lock_rank::AnyRwLock;
@@ -342,6 +341,16 @@ fn parse_dungeon_trigger_action(spec: &PyRep, fallback: &PyRep) -> DungeonTrigge
         "FailDungeon" => DungeonTriggerAction::FailDungeon {
             reason: src.dict_get("reason").and_then(|v| v.as_str()).unwrap_or("DungeonFailed").to_string(),
         },
+        "StartTimer" => DungeonTriggerAction::StartTimer {
+            timer_id: src
+                .dict_get("timerID")
+                .or_else(|| src.dict_get("timerId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && !s.starts_with("__"))
+                .unwrap_or("")
+                .to_string(),
+            delay_secs: src.dict_get("delaySecs").and_then(|v| v.as_i64()).and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
+        },
         "SetObjective" => DungeonTriggerAction::SetObjective {
             objective_id: src.dict_get("objectiveID").or_else(|| src.dict_get("objectiveId")).and_then(|v| v.as_i64()).unwrap_or(0),
             objective_key: src.dict_get("objectiveKey").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -486,10 +495,7 @@ fn parse_rooms_from_pyrep(
                                 if pair.len() >= 2 {
                                     if let (Some(ntid), Some(ncnt)) = (
                                         pair[0].as_i64().and_then(|v| u32::try_from(v).ok()),
-                                        pair[1]
-                                            .as_i64()
-                                            .and_then(|v| usize::try_from(v).ok())
-                                            .map(|c| c.clamp(1, 500)),
+                                        pair[1].as_i64().and_then(|v| usize::try_from(v).ok()).map(|c| c.clamp(1, 500)),
                                     ) {
                                         npc_specs.push((ntid, ncnt));
                                     }
@@ -497,13 +503,30 @@ fn parse_rooms_from_pyrep(
                             }
                         }
                     }
-                    if npc_specs.is_empty() {
+                    let mut npc_entries = Vec::new();
+                    if let Some(PyRep::List(ents) | PyRep::Tuple(ents)) = g_rep.dict_get("npcEntries") {
+                        for e_rep in ents.iter().take(32) {
+                            if let Some(ntid) = e_rep.dict_get("typeID").or_else(|| e_rep.dict_get("typeId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).filter(|&t| t > 0) {
+                                let count = e_rep.dict_get("count").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()).unwrap_or(1).clamp(1, 500);
+                                npc_entries.push(DungeonNpcSpawnEntry {
+                                    type_id: ntid,
+                                    count,
+                                    tag: e_rep.dict_get("tag").and_then(|v| v.as_str()).map(str::to_string),
+                                    custom_name: e_rep.dict_get("customName").and_then(|v| v.as_str()).map(str::to_string),
+                                    destructible: e_rep.dict_get("destructible").and_then(|v| v.as_bool()),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                    if npc_specs.is_empty() && npc_entries.is_empty() {
                         npc_specs.push((10_043, 1));
                     }
                     npc_groups.push(DungeonNpcGroup {
                         group_id,
                         wave,
                         npc_specs,
+                        npc_entries,
                         npc_ball_ids: Vec::new(),
                         spawn_immediately,
                         spawned: false,
@@ -520,69 +543,27 @@ fn parse_rooms_from_pyrep(
             let mut triggers = Vec::new();
             if let Some(PyRep::List(trigs) | PyRep::Tuple(trigs)) = r_rep.dict_get("triggers") {
                 for (t_i, t_rep) in trigs.iter().take(64).enumerate() {
-                    let kind_str = t_rep
-                        .dict_get("kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("kill")
-                        .to_ascii_lowercase();
                     let action = parse_dungeon_trigger_action(t_rep, t_rep);
+                    let mut extra_uses_wrapper_start_timer_delay = false;
                     let extra_actions = match t_rep.dict_get("extraActions") {
                         Some(PyRep::List(list) | PyRep::Tuple(list)) => list
                             .iter()
                             .take(16)
-                            .map(|a_rep| parse_dungeon_trigger_action(a_rep, t_rep))
+                            .map(|a_rep| {
+                                let parsed = parse_dungeon_trigger_action(a_rep, t_rep);
+                                if matches!(parsed, DungeonTriggerAction::StartTimer { .. }) && a_rep.as_str().is_some() {
+                                    extra_uses_wrapper_start_timer_delay = true;
+                                }
+                                parsed
+                            })
                             .collect(),
                         _ => Vec::new(),
                     };
-                    let kind = match kind_str.as_str() {
-                        "approach" => {
-                            let target_obj_idx = t_rep
-                                .dict_get("targetObjectIndex")
-                                .and_then(|v| v.as_i64())
-                                .and_then(|v| usize::try_from(v).ok());
-                            let radius_m = t_rep
-                                .dict_get("radius")
-                                .and_then(finite_f64)
-                                .filter(|&v| v >= 0.0)
-                                .map(|v| v.clamp(0.0, 1_000_000.0))
-                                .unwrap_or(5_000.0);
-                            let anchor = target_obj_idx
-                                .and_then(|oi| objects.get(oi))
-                                .map(|o| o.position)
-                                .unwrap_or(room_pos);
-                            DungeonTriggerKind::OnApproach {
-                                target_ball_id: None,
-                                target_object_index: target_obj_idx,
-                                anchor_pos: anchor,
-                                radius_m,
-                            }
-                        }
-                        "loot" => {
-                            let target_obj_idx = t_rep
-                                .dict_get("targetObjectIndex")
-                                .and_then(|v| v.as_i64())
-                                .and_then(|v| usize::try_from(v).ok());
-                            let item_tid = t_rep
-                                .dict_get("itemTypeID")
-                                .and_then(|v| v.as_i64())
-                                .and_then(|v| u32::try_from(v).ok());
-                            DungeonTriggerKind::OnLoot {
-                                container_ball_id: None,
-                                target_object_index: target_obj_idx,
-                                item_type_id: item_tid,
-                            }
-                        }
-                        _ => {
-                            let target_grp = t_rep
-                                .dict_get("targetGroup")
-                                .and_then(|v| v.as_i64())
-                                .and_then(|v| u8::try_from(v).ok());
-                            DungeonTriggerKind::OnKill {
-                                target_npc_group: target_grp,
-                                target_ball_id: None,
-                            }
-                        }
-                    };
+                    let kind = parse_dungeon_trigger_kind(t_rep, &objects, room_pos, 0);
+                    let delay_consumed_by_payload = matches!(kind, DungeonTriggerKind::OnTimer { .. })
+                        || matches!(action, DungeonTriggerAction::StartTimer { .. })
+                        || extra_uses_wrapper_start_timer_delay;
+                    let target_room_consumed_by_kind = matches!(kind, DungeonTriggerKind::OnRoomEntered { .. });
                     triggers.push(DungeonTrigger {
                         trigger_id: u32::try_from(t_i + 1).unwrap_or(u32::MAX),
                         kind,
@@ -594,12 +575,14 @@ fn parse_rooms_from_pyrep(
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false),
                         delay_secs: t_rep
-                            .dict_get("delaySecs")
+                            .dict_get("triggerDelaySecs")
+                            .or_else(|| (!delay_consumed_by_payload).then(|| t_rep.dict_get("delaySecs")).flatten())
                             .and_then(|v| v.as_i64())
                             .and_then(|v| u64::try_from(v).ok())
                             .unwrap_or(0),
                         target_room_index: t_rep
-                            .dict_get("targetRoomIndex")
+                            .dict_get("actionTargetRoomIndex")
+                            .or_else(|| (!target_room_consumed_by_kind).then(|| t_rep.dict_get("targetRoomIndex")).flatten())
                             .and_then(|v| v.as_i64())
                             .and_then(|v| usize::try_from(v).ok()),
                         ..Default::default()
@@ -1428,102 +1411,93 @@ pub async fn check_dungeon_triggers(
     on_dungeon_approach(ctx, char_id, sys_id, ship_id, None).await
 }
 
-fn matches_approach_trigger_parts(
+const MAX_TRIGGER_COMPOUND_DEPTH: usize = 4;
+
+fn parse_dungeon_trigger_kind(
+    t_rep: &PyRep,
     objects: &[DungeonRuntimeObject],
-    trig: &DungeonTrigger,
-    ship_pos: [f64; 3],
-    target_id_opt: Option<i64>,
-) -> bool {
-    if trig.fired || trig.armed_at_unix.is_some() {
-        return false;
+    room_pos: [f64; 3],
+    depth: usize,
+) -> DungeonTriggerKind {
+    let kind_str = t_rep
+        .dict_get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("kill")
+        .to_ascii_lowercase();
+    match kind_str.as_str() {
+        "approach" | "onapproach" | "on_approach" => {
+            let target_obj_idx = t_rep.dict_get("targetObjectIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok());
+            let radius_m = t_rep
+                .dict_get("radius")
+                .and_then(finite_f64)
+                .filter(|&v| v >= 0.0)
+                .map(|v| v.clamp(0.0, 1_000_000.0))
+                .unwrap_or(5_000.0);
+            let anchor = target_obj_idx.and_then(|oi| objects.get(oi)).map(|o| o.position).unwrap_or(room_pos);
+            DungeonTriggerKind::OnApproach { target_ball_id: None, target_object_index: target_obj_idx, anchor_pos: anchor, radius_m }
+        }
+        "loot" | "onloot" | "on_loot" => DungeonTriggerKind::OnLoot {
+            container_ball_id: None,
+            target_object_index: t_rep.dict_get("targetObjectIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()),
+            item_type_id: t_rep.dict_get("itemTypeID").or_else(|| t_rep.dict_get("itemTypeId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()),
+        },
+        "kill_tagged" | "onkilltagged" | "killtagged" => DungeonTriggerKind::OnKillTagged {
+            target_tag: t_rep.dict_get("targetTag").or_else(|| t_rep.dict_get("tag")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            required_kills: t_rep.dict_get("requiredKills").and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).map(|n| n.max(1)),
+            type_ids: match t_rep.dict_get("typeIDs").or_else(|| t_rep.dict_get("typeIds")) {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().take(32).filter_map(|e| e.as_i64().and_then(|v| u32::try_from(v).ok())).collect(),
+                _ => Vec::new(),
+            },
+        },
+        "kill_count" | "onkillcount" | "killcount" => DungeonTriggerKind::OnKillCount {
+            target_npc_group: t_rep.dict_get("targetGroup").and_then(|v| v.as_i64()).and_then(|v| u8::try_from(v).ok()),
+            required_kills: t_rep.dict_get("requiredKills").and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(1).max(1),
+        },
+        "timer" | "ontimer" | "on_timer" => DungeonTriggerKind::OnTimer {
+            delay_secs: t_rep.dict_get("delaySecs").and_then(|v| v.as_i64()).and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
+            timer_id: t_rep
+                .dict_get("timerID")
+                .or_else(|| t_rep.dict_get("timerId"))
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    if s.is_empty() || s.starts_with("__") {
+                        String::new()
+                    } else {
+                        s.to_string()
+                    }
+                }),
+            after_group_cleared: t_rep.dict_get("afterGroupCleared").and_then(|v| v.as_i64()).and_then(|v| u8::try_from(v).ok()),
+        },
+        "room_entered" | "onroomentered" | "roomentered" | "enter" => DungeonTriggerKind::OnRoomEntered {
+            target_room_index: t_rep.dict_get("targetRoomIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()),
+        },
+        "npc_damaged" | "onnpcdamaged" | "npcdamaged" | "damaged" => DungeonTriggerKind::OnNpcDamaged {
+            target_npc_group: t_rep.dict_get("targetGroup").and_then(|v| v.as_i64()).and_then(|v| u8::try_from(v).ok()),
+            target_tag: t_rep.dict_get("targetTag").or_else(|| t_rep.dict_get("tag")).and_then(|v| v.as_str()).map(str::to_string),
+            target_ball_id: t_rep.dict_get("targetBallID").or_else(|| t_rep.dict_get("targetBallId")).and_then(|v| v.as_i64()).filter(|&b| b > 0),
+            hull_or_shield_below_pct: t_rep.dict_get("belowPct").or_else(|| t_rep.dict_get("hullOrShieldBelowPct")).and_then(|v| v.as_i64()).map(|v| v.clamp(0, 100) as u8).unwrap_or(50),
+            on_first_attack: t_rep.dict_get("onFirstAttack").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
+        "and" | "compound_and" | "compoundand" if depth < MAX_TRIGGER_COMPOUND_DEPTH => DungeonTriggerKind::CompoundAnd {
+            clauses: match t_rep.dict_get("clauses") {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().take(16).map(|c| parse_dungeon_trigger_kind(c, objects, room_pos, depth + 1)).collect(),
+                _ => Vec::new(),
+            },
+        },
+        "or" | "compound_or" | "compoundor" if depth < MAX_TRIGGER_COMPOUND_DEPTH => DungeonTriggerKind::CompoundOr {
+            clauses: match t_rep.dict_get("clauses") {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().take(16).map(|c| parse_dungeon_trigger_kind(c, objects, room_pos, depth + 1)).collect(),
+                _ => Vec::new(),
+            },
+        },
+        _ => DungeonTriggerKind::OnKill {
+            target_npc_group: t_rep.dict_get("targetGroup").and_then(|v| v.as_i64()).and_then(|v| u8::try_from(v).ok()),
+            target_ball_id: t_rep.dict_get("targetBallID").or_else(|| t_rep.dict_get("targetBallId")).and_then(|v| v.as_i64()).filter(|&b| b > 0),
+        },
     }
-    let DungeonTriggerKind::OnApproach {
-        target_ball_id,
-        target_object_index,
-        anchor_pos,
-        radius_m,
-    } = &trig.kind
-    else {
-        return false;
-    };
-    let (resolved_target_ball, obj_pos) = if let Some(bid) = *target_ball_id {
-        if bid <= 0 {
-            return false;
-        }
-        if let Some(obj) = objects.iter().find(|o| o.ball_id == bid) {
-            if !obj.spawned || obj.destroyed {
-                return false;
-            }
-            (Some(bid), obj.position)
-        } else {
-            (Some(bid), *anchor_pos)
-        }
-    } else if let Some(idx) = *target_object_index {
-        let Some(obj) = objects.get(idx) else {
-            return false;
-        };
-        if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
-            return false;
-        }
-        (Some(obj.ball_id), obj.position)
-    } else {
-        (None, *anchor_pos)
-    };
-    let effective_radius = radius_m.max(2_500.0);
-    let within_radius = dist3(ship_pos, obj_pos) <= effective_radius;
-    let explicit_target_close = target_id_opt.is_some()
-        && target_id_opt == resolved_target_ball
-        && dist3(ship_pos, obj_pos) <= effective_radius.max(5_000.0);
-    within_radius || explicit_target_close
 }
 
-fn matches_loot_trigger_parts(
-    objects: &[DungeonRuntimeObject],
-    trig: &DungeonTrigger,
-    container_ball_id: i64,
-    item_type_id: TypeId,
-) -> bool {
-    if trig.fired || trig.armed_at_unix.is_some() || container_ball_id <= 0 {
-        return false;
-    }
-    let DungeonTriggerKind::OnLoot {
-        container_ball_id: trig_cont,
-        target_object_index,
-        item_type_id: trig_tid,
-    } = &trig.kind
-    else {
-        return false;
-    };
-    let resolved_cont = if let Some(cid) = *trig_cont {
-        if cid <= 0 {
-            return false;
-        }
-        if objects.iter().any(|o| o.ball_id == cid && (!o.spawned || o.destroyed)) {
-            return false;
-        }
-        Some(cid)
-    } else if let Some(idx) = *target_object_index {
-        let Some(obj) = objects.get(idx) else {
-            return false;
-        };
-        if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
-            return false;
-        }
-        Some(obj.ball_id)
-    } else {
-        None
-    };
-    let cont_ok = resolved_cont.is_none_or(|cid| cid == container_ball_id);
-    let tid_ok = trig_tid.is_none_or(|tid| tid == item_type_id);
-    let room_has_cont = objects
-        .iter()
-        .any(|o| o.ball_id == container_ball_id && o.spawned && !o.destroyed);
-    cont_ok && tid_ok && (resolved_cont.is_some() || room_has_cont)
-}
-
-/// Evaluates `OnApproach` triggers when a pilot issues an approach/orbit/goto/stop command or updates state.
-/// Performs read-only snapshot & trigger-distance checks first and ONLY opens a write transaction
-/// when at least one trigger actually transitions (`PVE-212`).
+/// Evaluates `OnApproach` triggers via [`triggers::on_dungeon_approach_impl`] (`OWN-R5-01`, `PVE-212`).
 pub async fn on_dungeon_approach(
     ctx: &ServerContext,
     char_id: i64,
@@ -1531,66 +1505,10 @@ pub async fn on_dungeon_approach(
     ship_id: i64,
     target_id_opt: Option<i64>,
 ) -> usize {
-    let has_pending_approach = read_dungeon_runtime_store(ctx, |store| {
-        store.instances.values().any(|inst| {
-            !instance_is_finished(inst)
-                && inst.solar_system_id == sys_id
-                && inst.rooms.iter().any(|room| {
-                    room.spawned
-                        && room_is_entered(room)
-                        && room.triggers.iter().any(|trig| {
-                            !trig.fired
-                                && trig.armed_at_unix.is_none()
-                                && matches!(trig.kind, DungeonTriggerKind::OnApproach { .. })
-                        })
-                })
-        })
-    });
-    if !has_pending_approach {
-        return 0;
-    }
-
-    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
-        return 0;
-    };
-    let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return 0;
-    };
-    let ship_pos = ship_ball.position.to_array();
-
-    let approach_ready = read_dungeon_runtime_store(ctx, |store| {
-        store.instances.values().any(|inst| {
-            !instance_is_finished(inst)
-                && inst.solar_system_id == sys_id
-                && inst.rooms.iter().any(|room| {
-                    room.spawned
-                        && room_is_entered(room)
-                        && room.triggers.iter().any(|trig| {
-                            matches_approach_trigger_parts(
-                                &room.objects,
-                                trig,
-                                ship_pos,
-                                target_id_opt,
-                            )
-                        })
-                })
-        })
-    });
-    if !approach_ready {
-        return 0;
-    }
-
-    execute_room_triggers_in_snap(
-        DungeonRuntimeDeps::from_ctx(ctx),
-        Some(sys_id),
-        char_id,
-        |objs, trig| matches_approach_trigger_parts(objs, trig, ship_pos, target_id_opt),
-    )
-    .await
+    triggers::on_dungeon_approach_impl(DungeonRuntimeDeps::from_ctx(ctx), char_id, sys_id, ship_id, target_id_opt).await
 }
 
-/// Evaluates `OnLoot` triggers when an item is looted from a container/wreck in space,
-/// and finalizes post-completion loot-grace despawn once the last container is emptied (`PVE-207`).
+/// Evaluates `OnLoot` triggers and post-completion loot-grace expiry via [`triggers::on_dungeon_item_looted_impl`] (`PVE-207`).
 pub async fn on_dungeon_item_looted(
     ctx: &ServerContext,
     char_id: i64,
@@ -1598,66 +1516,7 @@ pub async fn on_dungeon_item_looted(
     container_ball_id: i64,
     item_type_id: TypeId,
 ) {
-    let (has_matching_loot, loot_grace_finished) = ctx.db.with_snapshot(|snap| {
-        let mut trigger_match = false;
-        let mut grace_done = Vec::new();
-        for inst in snap.dungeon_runtime.instances.values() {
-            if sys_id_opt.is_some_and(|sid| inst.solar_system_id != sid) {
-                continue;
-            }
-            if !instance_is_finished(inst) {
-                if inst.rooms.iter().any(|room| {
-                    room.spawned
-                        && room_is_entered(room)
-                        && room.triggers.iter().any(|trig| {
-                            matches_loot_trigger_parts(
-                                &room.objects,
-                                trig,
-                                container_ball_id,
-                                item_type_id,
-                            )
-                        })
-                }) {
-                    trigger_match = true;
-                }
-            } else if (inst.completed || inst.failed)
-                && !inst.despawned
-                && inst.loot_grace_until_unix.or(inst.despawn_after_unix).is_some()
-                && inst.rooms.iter().any(|r| {
-                    r.objects.iter().any(|o| {
-                        o.is_container
-                            && o.spawned
-                            && !o.destroyed
-                            && o.ball_id == container_ball_id
-                    })
-                })
-                && !has_unlooted_containers_in_snap(snap, inst)
-            {
-                grace_done.push((inst.solar_system_id, inst.instance_id));
-            }
-        }
-        (trigger_match, grace_done)
-    });
-    if has_matching_loot {
-        let _ = execute_room_triggers_in_snap(
-            DungeonRuntimeDeps::from_ctx(ctx),
-            sys_id_opt,
-            char_id,
-            |objs, trig| matches_loot_trigger_parts(objs, trig, container_ball_id, item_type_id),
-        )
-        .await;
-    }
-
-    for (sys_id, inst_id) in loot_grace_finished {
-        complete_and_flush_instance(
-            DungeonRuntimeDeps::from_ctx(ctx),
-            sys_id,
-            inst_id,
-            char_id,
-            true,
-        )
-        .await;
-    }
+    triggers::on_dungeon_item_looted_impl(DungeonRuntimeDeps::from_ctx(ctx), char_id, sys_id_opt, container_ball_id, item_type_id).await;
 }
 
 pub fn record_dungeon_progression_events(
