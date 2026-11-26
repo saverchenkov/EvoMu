@@ -2093,7 +2093,7 @@ impl SystemHandle {
             &mut bp, active_module_cycles, rng_ref, sde_opt.as_deref(), db_opt.as_ref(),
             mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
             Some((&mut post_unlock_shadows.mmju_spool_fired_at, next_post_unlock_seq.saturating_add(1))),
-            Some(&mut post_unlock_shadows.observatory_pings_done), &mut post_unlock_ops,
+            Some((&mut post_unlock_shadows.observatory_pings_done, next_post_unlock_seq.saturating_add(1))), &mut post_unlock_ops,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         super::post_unlock::step_module_reloads_sim_clock_collecting(

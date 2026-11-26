@@ -755,7 +755,7 @@ pub(crate) fn step_ext_deployables_in_actor_collecting(
     solar_system_id: u32,
     now_unix: u64,
     mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
-    obs_ping_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
+    obs_ping_shadow: Option<(&mut std::collections::HashMap<i64, (u32, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) {
     step_mmju_spools_in_actor_collecting(
@@ -940,14 +940,21 @@ fn step_observatories_in_actor_collecting(
     rng_opt: Option<&MechanicRng>,
     solar_system_id: u32,
     now_unix: u64,
-    mut obs_ping_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
+    mut obs_ping_shadow: Option<(&mut std::collections::HashMap<i64, (u32, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) {
-    let (observatories, mut pings_done_map, cloak_starts): (
+    let (committed_seq, observatories, mut pings_done_map, cloak_starts): (
+        u64,
         Vec<MobileDeployableRecord>,
         std::collections::HashMap<i64, u32>,
         std::collections::HashMap<i64, u64>,
     ) = db.with_snapshot(|snap| {
+        let cseq = snap
+            .sp6_lifecycle
+            .post_unlock_committed_seq
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(0);
         let st = read_deployable_state_snap(snap);
         let obs = st
             .deployables
@@ -960,17 +967,22 @@ fn step_observatories_in_actor_collecting(
             })
             .cloned()
             .collect();
-        (obs, st.observatory_pings_done, st.cloak_activated_unix)
+        (cseq, obs, st.observatory_pings_done, st.cloak_activated_unix)
     });
+    if let Some((shadow, _)) = obs_ping_shadow.as_mut() {
+        shadow.retain(|_, (_, seq)| *seq > committed_seq);
+    }
     if observatories.is_empty() {
         return;
     }
-    if let Some(shadow) = obs_ping_shadow.as_deref() {
-        for (&oid, &cnt) in shadow {
-            pings_done_map
-                .entry(oid)
-                .and_modify(|v| *v = (*v).max(cnt))
-                .or_insert(cnt);
+    if let Some((shadow, _)) = obs_ping_shadow.as_ref() {
+        for (&oid, &(cnt, seq)) in shadow.iter() {
+            if seq > committed_seq {
+                pings_done_map
+                    .entry(oid)
+                    .and_modify(|v| *v = (*v).max(cnt))
+                    .or_insert(cnt);
+            }
         }
     }
 
@@ -1001,8 +1013,8 @@ fn step_observatories_in_actor_collecting(
             continue;
         }
         pings_done_map.insert(obs.item_id, due_pings);
-        if let Some(shadow) = obs_ping_shadow.as_deref_mut() {
-            shadow.insert(obs.item_id, due_pings);
+        if let Some((shadow, pending_seq)) = obs_ping_shadow.as_mut() {
+            shadow.insert(obs.item_id, (due_pings, *pending_seq));
         }
         updated_obs.push((obs.item_id, due_pings));
 

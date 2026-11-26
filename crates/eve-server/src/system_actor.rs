@@ -1367,7 +1367,18 @@ impl SystemRegistry {
         let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
         let completed_post_unlock_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let completed_post_unlock_seq_actor = Arc::clone(&completed_post_unlock_seq);
-        let (post_unlock_tx, mut post_commit_rx, post_unlock_worker_join) =
+        let post_commit_targets = post_unlock::PostCommitActorTargets {
+            solar_system_id,
+            ballpark: Arc::downgrade(&ballpark_shared),
+            actor_state: Arc::clone(&actor_state_shared),
+            ball_positions: Arc::clone(&ball_positions),
+            scrambled_balls: Arc::clone(&scrambled_balls),
+            view_tx: Arc::clone(&view_tx),
+            tidi_factor_bits: Arc::clone(&tidi_factor_bits),
+            module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
+            event_tx: event_tx.clone(),
+        };
+        let (post_unlock_tx, post_unlock_worker_join) =
             post_unlock::spawn_post_unlock_worker(
                 solar_system_id,
                 post_unlock_worker_thread_id.clone(),
@@ -1376,6 +1387,7 @@ impl SystemRegistry {
                 module_deactivation_hook_actor.clone(),
                 target_lock_completed_hook_actor.clone(),
                 post_unlock_actions_actor.clone(),
+                post_commit_targets,
             );
         if !initial_post_unlock_ops.is_empty() {
             let _ = post_unlock::send_post_unlock_item(
@@ -1399,31 +1411,12 @@ impl SystemRegistry {
             let mut post_unlock_tx_opt = post_unlock_shutdown;
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
-            let mut post_commit_open = true;
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
-            let post_commit_targets = post_unlock::PostCommitActorTargets {
-                solar_system_id,
-                ballpark: Arc::clone(&ballpark_actor),
-                actor_state: Arc::clone(&actor_state_actor),
-                ball_positions: Arc::clone(&ball_positions_actor),
-                scrambled_balls: Arc::clone(&scrambled_balls_actor),
-                view_tx: Arc::clone(&view_tx_actor),
-                tidi_factor_bits: Arc::clone(&tidi_factor_bits_actor),
-                module_deactivation_hook: Arc::clone(&module_deactivation_hook_actor),
-                post_unlock_in_flight: Arc::clone(&post_unlock_in_flight_actor),
-            };
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
-            while let Some((cmd_batch, shutdown_requested)) = post_unlock::next_actor_cmd_batch(
-                &mut cmd_rx,
-                &mut post_commit_rx,
-                &mut post_commit_open,
-                post_unlock_tx_opt.0.as_ref(),
-                &post_commit_targets,
-                &mut shutdown_reply.0,
-            )
-            .await
+            while let Some((cmd_batch, shutdown_requested)) =
+                post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0).await
             {
 
                 let mut batch_view_dirty = false;
@@ -2361,7 +2354,6 @@ impl SystemRegistry {
                 post_unlock_worker_join,
             )
             .await;
-            post_unlock::drain_post_commit_rx(&mut post_commit_rx, None, &post_commit_targets);
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,

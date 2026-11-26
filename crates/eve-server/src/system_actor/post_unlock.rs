@@ -14,7 +14,7 @@ use eve_sde::{attr_ids, SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock},
+    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock, Weak},
 };
 
 use super::types::{
@@ -203,6 +203,7 @@ pub(crate) struct PostUnlockOps {
 impl PostUnlockActorShadows {
     pub(in crate::system_actor) fn prune_committed(&mut self, done_seq: u64) {
         self.mmju_spool_fired_at.retain(|_, (_, seq)| *seq > done_seq);
+        self.observatory_pings_done.retain(|_, (_, seq)| *seq > done_seq);
         self.abyssal_boundary_ticks.retain(|_, (_, seq)| *seq > done_seq);
         self.abyssal_active_clouds.retain(|_, (_, seq)| *seq > done_seq);
         self.arena_hazard_ticks.retain(|_, (_, seq)| *seq > done_seq);
@@ -1140,6 +1141,11 @@ pub(crate) fn execute_post_unlock_ops(
 }
 
 /// Flushes collected [`PostUnlockOps`] for standalone / non-actor entrypoints (`#1170`).
+pub(in crate::system_actor) enum PostCommitBallparkTarget<'a> {
+    Standalone(&'a mut eve_destiny::Ballpark),
+    Actor(&'a PostCommitActorTargets),
+}
+
 pub(crate) fn execute_post_unlock_ops_for_standalone(
     db_opt: Option<&WorldRepository>,
     db_arc_opt: Option<&Arc<WorldRepository>>,
@@ -1156,8 +1162,7 @@ pub(crate) fn execute_post_unlock_ops_for_standalone(
         deactivation_hook,
         None,
         None,
-        None,
-        standalone_ballpark_opt,
+        standalone_ballpark_opt.map(PostCommitBallparkTarget::Standalone),
     );
 }
 
@@ -1179,7 +1184,6 @@ pub(crate) fn execute_post_unlock_ops_with_seq(
         lock_completed_hook,
         seq_meta,
         None,
-        None,
     )
 }
 
@@ -1194,13 +1198,14 @@ pub(in crate::system_actor) fn apply_post_commit_op_to_ballpark(
             ball.speed_fraction = 0.0;
             ball.mode = eve_destiny::MovementMode::Rigid;
             let bid = ball.id;
-            bp.add_static_ball_with_meta(ball.clone(), slim_meta);
-            bp.pending_events
-                .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
-            bp.queue_event_for_all_grid_observers(
-                Some(bid),
-                &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
-            );
+            if bp.add_static_ball_with_meta(ball.clone(), slim_meta) {
+                bp.pending_events
+                    .push(eve_destiny::DestinyEvent::AddBall { ball: ball.clone() });
+                bp.queue_event_for_all_grid_observers(
+                    Some(bid),
+                    &eve_destiny::DestinyEvent::AddBalls2 { balls: vec![ball] },
+                );
+            }
         }
         PostCommitBallparkOp::AddBallWithCombatAndMeta {
             ball,
@@ -1236,8 +1241,7 @@ fn execute_post_unlock_ops_inner(
     deactivation_hook: Option<&ModuleDeactivationHook>,
     lock_completed_hook: Option<&TargetLockCompletedHook>,
     seq_meta: Option<(SolarSystemId, u64)>,
-    post_commit_tx_opt: Option<&tokio::sync::mpsc::UnboundedSender<PostCommitBallparkOp>>,
-    mut standalone_ballpark_opt: Option<&mut eve_destiny::Ballpark>,
+    post_commit_target: Option<PostCommitBallparkTarget<'_>>,
 ) -> (Vec<PendingCycleAction>, bool) {
     if ops.is_empty() {
         return (Vec::new(), false);
@@ -1327,32 +1331,15 @@ fn execute_post_unlock_ops_inner(
     }
 
     if can_write_db {
-        for op in post_commit_bp_ops {
-            match op {
-                PostCommitBallparkOp::RemoveCrossSystemTraceBalls {
-                    origin_sys,
-                    trace_ids,
-                } => {
-                    if let Some(db_arc) = db_arc_opt {
-                        for tid in trace_ids {
-                            crate::system_actor::try_remove_ball_for_db(db_arc, origin_sys, tid);
-                        }
-                    }
-                }
-                other => {
-                    if let Some(bp) = standalone_ballpark_opt.as_deref_mut() {
-                        apply_post_commit_op_to_ballpark(bp, other);
-                    } else if let Some(tx) = post_commit_tx_opt {
-                        if let Err(err) = tx.send(other) {
-                            tracing::warn!(
-                                op = ?err.0,
-                                "SystemActor post_commit_tx closed while delivering PostCommitBallparkOp"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        apply_post_commit_bp_ops(
+            db_opt,
+            db_arc_opt,
+            sde_opt,
+            post_commit_bp_ops,
+            deactivation_hook,
+            lock_completed_hook,
+            post_commit_target,
+        );
         if let Some(db_arc) = db_arc_opt {
             for pc in post_commit_arena {
                 crate::services::pvp_filament_arena::emit_proving_arena_post_commit(
@@ -1649,6 +1636,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
         PostUnlockWaitTicket::RunDirectAfterUnlock(unsent) => {
             let unsent = *unsent;
             if safe_sync {
+                let direct_targets = PostCommitActorTargets::from_handle(handle);
                 let (extra_actions, tx_committed) = execute_post_unlock_ops_inner(
                     unsent.db_opt.as_deref(),
                     unsent.db_opt.as_ref(),
@@ -1657,8 +1645,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
                     deact_guard,
                     lock_guard,
                     Some((handle.solar_system_id, unsent.work_seq)),
-                    None,
-                    None,
+                    Some(PostCommitBallparkTarget::Actor(&direct_targets)),
                 );
                 if unsent.work_seq > 0 && !tx_committed {
                     handle.completed_post_unlock_seq.store(unsent.work_seq, Ordering::Release);
@@ -1705,69 +1692,126 @@ impl Drop for PostUnlockShutdownGuard { fn drop(&mut self) { self.send_shutdown(
 #[derive(Clone)]
 pub(in crate::system_actor) struct PostCommitActorTargets {
     pub solar_system_id: SolarSystemId,
-    pub ballpark: Arc<super::celestials::BallparkHandle>,
+    /// Weak reference so actor-owned post-commit delivery never bumps `Arc::strong_count(&h.ballpark)` above 3 during idle eviction (`lifecycle_sm`).
+    pub ballpark: Weak<super::celestials::BallparkHandle>,
     pub actor_state: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
     pub ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub scrambled_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub view_tx: Arc<tokio::sync::watch::Sender<Arc<SystemView>>>,
     pub tidi_factor_bits: Arc<AtomicU64>,
     pub module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    pub post_unlock_in_flight: Arc<AtomicUsize>,
+    pub event_tx: tokio::sync::broadcast::Sender<super::TickBroadcast>,
 }
 
-fn apply_drained_post_commit_ops(
-    first: Option<PostCommitBallparkOp>,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
-    post_unlock_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
-    targets: &PostCommitActorTargets,
+impl PostCommitActorTargets {
+    fn from_handle(handle: &super::SystemHandle) -> Self {
+        Self {
+            solar_system_id: handle.solar_system_id,
+            ballpark: Arc::downgrade(&handle.ballpark),
+            actor_state: Arc::clone(&handle.actor_state),
+            ball_positions: Arc::clone(&handle.ball_positions),
+            scrambled_balls: Arc::clone(&handle.scrambled_balls),
+            view_tx: Arc::clone(&handle.view_tx),
+            tidi_factor_bits: Arc::clone(&handle.tidi_factor_bits),
+            module_deactivation_hook: Arc::clone(&handle.module_deactivation_hook),
+            event_tx: handle.event_tx.clone(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_post_commit_bp_ops(
+    db_opt: Option<&WorldRepository>,
+    db_arc_opt: Option<&Arc<WorldRepository>>,
+    sde_opt: Option<&SdeRegistry>,
+    ops: Vec<PostCommitBallparkOp>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    lock_completed_hook: Option<&TargetLockCompletedHook>,
+    target: Option<PostCommitBallparkTarget<'_>>,
 ) {
-    let mut ops = Vec::new();
-    if let Some(op) = first {
-        ops.push(op);
-    }
-    while let Ok(op) = rx.try_recv() {
-        ops.push(op);
-    }
     if ops.is_empty() {
         return;
     }
-    let mut cleanup_ops = PostUnlockOps::default();
-    {
-        let mut bp = targets.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
-        let mut actor_st = targets.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        for op in ops {
-            match op {
-                PostCommitBallparkOp::RemoveBall { ball_id } => {
-                    let _ = super::ball_ops::remove_ball_for_post_commit(
-                        targets.solar_system_id,
-                        &mut bp,
-                        &mut actor_st,
-                        &targets.ball_positions,
-                        &targets.scrambled_balls,
-                        &targets.module_deactivation_hook,
-                        &mut cleanup_ops,
-                        ball_id,
-                    );
+    let mut local_ops = Vec::new();
+    for op in ops {
+        match op {
+            PostCommitBallparkOp::RemoveCrossSystemTraceBalls {
+                origin_sys,
+                trace_ids,
+            } => {
+                if let Some(db_arc) = db_arc_opt {
+                    for tid in trace_ids {
+                        crate::system_actor::try_remove_ball_for_db(db_arc, origin_sys, tid);
+                    }
                 }
-                other => apply_post_commit_op_to_ballpark(&mut bp, other),
+            }
+            other => local_ops.push(other),
+        }
+    }
+    if local_ops.is_empty() {
+        return;
+    }
+    let Some(target) = target else {
+        return;
+    };
+    match target {
+        PostCommitBallparkTarget::Standalone(bp) => {
+            for op in local_ops {
+                apply_post_commit_op_to_ballpark(bp, op);
             }
         }
-        super::sync_ball_positions(&bp, &targets.ball_positions, &targets.scrambled_balls);
-        super::protection::sync_all_protection_registry_in_actor(&bp, &mut actor_st);
-        let cur_tidi = super::celestials::clamp_tidi_factor_bits(&targets.tidi_factor_bits);
-        let prev_view = { targets.view_tx.borrow().clone() };
-        let next_view = SystemView::from_ballpark(&bp, Some(&actor_st), cur_tidi, Some(prev_view.as_ref()));
-        let _ = targets.view_tx.send(Arc::new(next_view));
-        enqueue_actor_cmd_post_unlock_ops(&mut actor_st, post_unlock_tx, &targets.post_unlock_in_flight, cleanup_ops);
+        PostCommitBallparkTarget::Actor(targets) => {
+            let Some(bp_handle) = targets.ballpark.upgrade() else {
+                return;
+            };
+            let mut cleanup_ops = PostUnlockOps::default();
+            {
+                let mut bp = bp_handle.write_untracked().unwrap_or_else(|e| e.into_inner());
+                let mut actor_st = targets.actor_state.write().unwrap_or_else(|e| e.into_inner());
+                for op in local_ops {
+                    match op {
+                        PostCommitBallparkOp::RemoveBall { ball_id } => {
+                            let _ = super::ball_ops::remove_ball_for_post_commit(
+                                targets.solar_system_id,
+                                &mut bp,
+                                &mut actor_st,
+                                &targets.ball_positions,
+                                &targets.scrambled_balls,
+                                &targets.module_deactivation_hook,
+                                &mut cleanup_ops,
+                                ball_id,
+                            );
+                        }
+                        other => apply_post_commit_op_to_ballpark(&mut bp, other),
+                    }
+                }
+                super::sync_ball_positions(&bp, &targets.ball_positions, &targets.scrambled_balls);
+                super::protection::sync_all_protection_registry_in_actor(&bp, &mut actor_st);
+                super::celestials::update_system_hibernation_flag(
+                    &actor_st,
+                    &bp,
+                    targets.event_tx.receiver_count(),
+                );
+                let cur_tidi = super::celestials::clamp_tidi_factor_bits(&targets.tidi_factor_bits);
+                let prev_view = { targets.view_tx.borrow().clone() };
+                let next_view = SystemView::from_ballpark(&bp, Some(&actor_st), cur_tidi, Some(prev_view.as_ref()));
+                let _ = targets.view_tx.send(Arc::new(next_view));
+            }
+            drop(bp_handle);
+            if !cleanup_ops.is_empty() && can_run_post_unlock_sync_now() {
+                let _ = execute_post_unlock_ops_inner(
+                    db_opt,
+                    db_arc_opt,
+                    sde_opt,
+                    cleanup_ops,
+                    deactivation_hook,
+                    lock_completed_hook,
+                    None,
+                    None,
+                );
+            }
+        }
     }
-}
-
-pub(in crate::system_actor) fn drain_post_commit_rx(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
-    post_unlock_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
-    targets: &PostCommitActorTargets,
-) {
-    apply_drained_post_commit_ops(None, rx, post_unlock_tx, targets);
 }
 
 fn is_batch_barrier_cmd(cmd: &SystemCommand) -> bool {
@@ -1782,36 +1826,17 @@ fn is_batch_barrier_cmd(cmd: &SystemCommand) -> bool {
 
 pub(in crate::system_actor) async fn next_actor_cmd_batch(
     cmd_rx: &mut tokio::sync::mpsc::Receiver<SystemCommand>,
-    post_commit_rx: &mut tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
-    post_commit_open: &mut bool,
-    post_unlock_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>>,
-    targets: &PostCommitActorTargets,
     shutdown_reply: &mut Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Option<(Vec<SystemCommand>, bool)> {
     const MAX_ACTOR_COMMAND_BATCH: usize = 64;
-    let first_cmd = loop {
-        drain_post_commit_rx(post_commit_rx, post_unlock_tx, targets);
-        tokio::select! {
-            biased;
-            maybe_op = post_commit_rx.recv(), if *post_commit_open => {
-                match maybe_op {
-                    Some(op) => apply_drained_post_commit_ops(Some(op), post_commit_rx, post_unlock_tx, targets),
-                    None => *post_commit_open = false,
-                }
-            }
-            maybe_cmd = cmd_rx.recv() => {
-                match maybe_cmd {
-                    Some(SystemCommand::ShutdownActor { reply }) => {
-                        *shutdown_reply = Some(reply);
-                        return None;
-                    }
-                    Some(cmd) => break cmd,
-                    None => return None,
-                }
-            }
+    let first_cmd = match cmd_rx.recv().await {
+        Some(SystemCommand::ShutdownActor { reply }) => {
+            *shutdown_reply = Some(reply);
+            return None;
         }
+        Some(cmd) => cmd,
+        None => return None,
     };
-    drain_post_commit_rx(post_commit_rx, post_unlock_tx, targets);
     let mut shutdown_requested = false;
     let stop_after_first = is_batch_barrier_cmd(&first_cmd);
     let mut cmd_batch = Vec::with_capacity(1);
@@ -1849,13 +1874,12 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
     deact_hook_worker: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     post_unlock_actions_worker: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+    post_commit_targets: PostCommitActorTargets,
 ) -> (
     tokio::sync::mpsc::UnboundedSender<PostUnlockMsg>,
-    tokio::sync::mpsc::UnboundedReceiver<PostCommitBallparkOp>,
     tokio::sync::oneshot::Receiver<()>,
 ) {
     let (post_unlock_tx, mut post_unlock_rx) = tokio::sync::mpsc::unbounded_channel::<PostUnlockMsg>();
-    let (post_commit_tx, post_commit_rx) = tokio::sync::mpsc::unbounded_channel::<PostCommitBallparkOp>();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::Builder::new().name(format!("post-unlock-{solar_system_id}")).spawn(move || {
         struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
@@ -1875,8 +1899,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
                     deact_hook.as_ref(),
                     lock_hook.as_ref(),
                     Some((solar_system_id, work_seq)),
-                    Some(&post_commit_tx),
-                    None,
+                    Some(PostCommitBallparkTarget::Actor(&post_commit_targets)),
                 )
             })).unwrap_or_else(|_| { tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker"); (Vec::new(), false) });
             if work_seq > 0 && !tx_committed {
@@ -1901,7 +1924,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
             }
         }
     }).expect("spawn post_unlock worker thread");
-    (post_unlock_tx, post_commit_rx, done_rx)
+    (post_unlock_tx, done_rx)
 }
 
 #[cfg(test)]

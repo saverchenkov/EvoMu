@@ -1141,7 +1141,7 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                     return false;
                 }
                 if let Some(it) = snap.items.get(&raw_id) {
-                    if (32_000_001..=32_999_999).contains(&(it.location_id as u32))
+                    if (32_000_001_i64..=32_999_999_i64).contains(&it.location_id)
                         && it.location_id != i64::from(solar_system_id)
                     {
                         return true;
@@ -1156,13 +1156,17 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                 }) {
                     return true;
                 }
+                if snap.abyssal_state.void_space_sessions.values().any(|vs| vs.ship_id == raw_id) {
+                    return true;
+                }
                 snap.abyssal_state.pockets.values().any(|p| {
                     !p.completed
                         && !p.collapsed_destroyed
                         && p.abyssal_solar_system_id != solar_system_id
                         && (p.ship_id == raw_id
                             || p.fleet_ship_ids.contains(&raw_id)
-                            || p.ship_room.contains_key(&raw_id))
+                            || p.ship_room.contains_key(&raw_id)
+                            || p.rooms.iter().any(|r| r.npc_ball_ids.contains(&raw_id)))
                 })
             };
             active_clouds = snap

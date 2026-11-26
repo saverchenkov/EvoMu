@@ -533,7 +533,7 @@ fn step_ext_deployables_in_ball_ops(
         ctx.solar_system_id,
         now_unix,
         Some((&mut ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at, next_pu_seq)),
-        Some(&mut ctx.actor_st.post_unlock_shadows.observatory_pings_done),
+        Some((&mut ctx.actor_st.post_unlock_shadows.observatory_pings_done, next_pu_seq)),
         ctx.post_unlock_ops,
     );
     protection::sync_all_protection_registry_in_actor(ctx.ballpark, ctx.actor_st);

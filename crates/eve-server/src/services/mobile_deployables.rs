@@ -842,7 +842,7 @@ pub(crate) fn step_mobile_deployables_in_actor_collecting(
     dt: f64,
     now_unix: u64,
     mmju_shadow: Option<(&mut std::collections::HashMap<i64, (u64, u64)>, u64)>,
-    obs_ping_shadow: Option<&mut std::collections::HashMap<i64, u32>>,
+    mut obs_ping_shadow: Option<(&mut std::collections::HashMap<i64, (u32, u64)>, u64)>,
     post_unlock: &mut PostUnlockOps,
 ) {
     let (Some(db), Some(sde)) = (db_opt, sde_opt) else { return; };
@@ -931,13 +931,18 @@ pub(crate) fn step_mobile_deployables_in_actor_collecting(
             solar_system_id,
             now_unix,
             mmju_shadow,
-            obs_ping_shadow,
+            obs_ping_shadow.as_mut().map(|(m, seq)| (&mut **m, *seq)),
             post_unlock,
         );
     }
 
     // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
     if !expired_ids.is_empty() {
+        if let Some((sh, _)) = obs_ping_shadow.as_mut() {
+            for eid in &expired_ids {
+                sh.remove(eid);
+            }
+        }
         for &eid in &expired_ids {
             ballpark.balls.remove(&eid);
             ballpark.combat_states.remove(&eid);

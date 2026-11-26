@@ -861,8 +861,8 @@ async fn track_1d_zero_db_writes_under_actor_locks_tactical_and_deployables() {
         }
         let dmg = handle_ball_damage_in_actor_collecting(&st.db_opt, &st.sde_opt, SYS_ID, depot_id, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), bp, now + 100, Some((&mut st.post_unlock_shadows.depot_reinforced_until, next_seq)), &mut ops);
         assert!(dmg.is_some_and(|(_, destroyed, _)| destroyed));
-        step_mobile_deployables_in_actor_collecting(bp, &mut st.active_module_cycles, &ctx.mechanic_rng, Some(&ctx.sde), st.db_opt.as_ref(), Some(&ctx.mechanic_rng), SYS_ID, 1.0, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
-        step_ext_deployables_in_actor_collecting(bp, Some(&mut st.active_module_cycles), &ctx.sde, &ctx.db, Some(&ctx.mechanic_rng), SYS_ID, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some(&mut st.post_unlock_shadows.observatory_pings_done), &mut ops);
+        step_mobile_deployables_in_actor_collecting(bp, &mut st.active_module_cycles, &ctx.mechanic_rng, Some(&ctx.sde), st.db_opt.as_ref(), Some(&ctx.mechanic_rng), SYS_ID, 1.0, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some((&mut st.post_unlock_shadows.observatory_pings_done, next_seq)), &mut ops);
+        step_ext_deployables_in_actor_collecting(bp, Some(&mut st.active_module_cycles), &ctx.sde, &ctx.db, Some(&ctx.mechanic_rng), SYS_ID, now + 5_000, Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)), Some((&mut st.post_unlock_shadows.observatory_pings_done, next_seq)), &mut ops);
     }
     assert!(burned_out);
     assert_eq!(deact_calls.load(Ordering::SeqCst), 0, "DeactivationHook must not run under actor locks");
@@ -1417,9 +1417,7 @@ async fn track_1d_bf04_post_commit_no_drop_static_loot_and_noncombat_corpse() {
     send_in_flight(&sys, &ctx, ops);
 
     release_writer(held);
-    let _ = sys.wait_for_post_unlock_barrier().await;
-    // Trigger one actor turn so `next_actor_cmd_batch` drains `post_commit_rx` completely before reading `ballpark`.
-    sys.ask_step_tick_only(0.0).await.unwrap();
+    assert!(sys.wait_for_post_unlock_barrier().await);
 
     let (can_ids, corpse_id) = ctx.db.with_snapshot(|snap| {
         let cans: Vec<i64> = snap.items.values()
@@ -1433,8 +1431,14 @@ async fn track_1d_bf04_post_commit_no_drop_static_loot_and_noncombat_corpse() {
     });
     assert_eq!(can_ids.len(), N_DEPOTS as usize, "all {} loot containers must persist in snap", N_DEPOTS);
     let corpse_id = corpse_id.expect("corpse item persisted");
+    assert_eq!(sys.dynamic_ball_count.load(std::sync::atomic::Ordering::Relaxed), 1, "post-commit dynamic corpse must update dynamic_ball_count before barrier reply");
+    assert!(!sys.is_hibernated(), "post-commit dynamic corpse must unhibernate system before barrier reply");
+    let view = sys.view_rx.borrow().clone();
+    assert!(view.balls.contains_key(&corpse_id), "SystemView must contain post-commit corpse immediately after barrier");
+    assert!(!view.combat_states.contains_key(&corpse_id), "SystemView corpse must not have CombatState");
     let bp = sys.ballpark.read().unwrap();
     for &cid in &can_ids {
+        assert!(view.balls.contains_key(&cid) && view.static_ball_ids.contains(&cid), "SystemView missing rigid static loot can {cid} immediately after barrier");
         assert!(bp.balls.contains_key(&cid), "missing post-commit loot can {cid} (>256 channel test)");
         assert!(bp.is_static_ball(cid), "loot can {cid} must be rigid static ball");
         assert!(!bp.combat_states.contains_key(&cid), "loot can {cid} must not have CombatState");
@@ -1600,7 +1604,7 @@ async fn track_1d_bf05_current_thread_mmju_prune() {
         step_ext_deployables_in_actor_collecting(
             bp, Some(&mut st.active_module_cycles), &ctx.sde, &ctx.db, Some(&ctx.mechanic_rng), SYS_ID, now,
             Some((&mut st.post_unlock_shadows.mmju_spool_fired_at, next_seq)),
-            Some(&mut st.post_unlock_shadows.observatory_pings_done),
+            Some((&mut st.post_unlock_shadows.observatory_pings_done, next_seq)),
             &mut ops,
         );
         let _ = super::enqueue_tick_post_unlock_or_barrier_under_locks(&sys, st, ops, false);
@@ -1686,4 +1690,122 @@ async fn track_1d_bf06_doomsday_expiry_shadow_preserves_new_tackle() {
     let _ = sys.wait_for_post_unlock_barrier().await;
     let rt_after = read_superweapon_runtime(&ctx.db);
     assert!(rt_after.is_none_or(|rt| rt.active_cycles.iter().all(|c| c.sys_id != SYS_ID) && rt.warp_suppressions.iter().all(|s| s.sys_id != SYS_ID)));
+}
+
+/// Regression test (`R2-BUG-01`): ship with non-zero legacy `dynamic_attributes` rack heat cooling to 0.0
+/// clears `dynamic_attributes` and `transient_item_attributes` instead of resurrecting pre-cooling heat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_r2_bug01_legacy_rack_heat_cools_to_zero_without_resurrection() {
+    use crate::services::tactical_module_mechanics::{
+        step_rack_heat_per_tick_collecting, RACK_HEAT_ATTR_IDS,
+    };
+
+    let ship_id = 779_700_001_i64;
+    let (ctx, sys) = boot_ship(ship_id, &[], None, Some(make_combat_state(100.0, 100.0, 100.0, 100.0))).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.dynamic_attributes.insert(RACK_HEAT_ATTR_IDS[0], 0.05);
+        }
+    });
+
+    let mut ops = PostUnlockOps::default();
+    {
+        let mut st = sys.actor_state.write().unwrap();
+        let seq = st.next_post_unlock_seq.saturating_add(1);
+        st.ship_rack_heat.insert(ship_id, [0.05, 0.0, 0.0]);
+        let (rack_heat, rack_pending) = (&mut st.ship_rack_heat, &mut st.post_unlock_shadows.rack_heat_pending);
+        step_rack_heat_per_tick_collecting(
+            rack_heat,
+            &[],
+            &Some(Arc::clone(&ctx.sde)),
+            &Some(Arc::clone(&ctx.db)),
+            10_000.0,
+            Some((rack_pending, seq)),
+            &mut ops,
+        );
+        assert!(!rack_heat.contains_key(&ship_id), "cooled ship must drop from actor ship_rack_heat");
+    }
+    send_in_flight(&sys, &ctx, ops);
+    assert!(sys.wait_for_post_unlock_barrier().await);
+
+    ctx.db.with_snapshot(|snap| {
+        let sh = &snap.items[&ship_id];
+        for aid in RACK_HEAT_ATTR_IDS {
+            assert!(!sh.dynamic_attributes.contains_key(&aid), "legacy dynamic rack heat {aid} must be removed");
+        }
+        let tr_heat = snap
+            .transient_item_attributes
+            .get(&ship_id)
+            .and_then(|m| m.get(&RACK_HEAT_ATTR_IDS[0]))
+            .copied();
+        assert_eq!(tr_heat, None, "cooled legacy rack heat must not be resurrected in transient_item_attributes");
+    });
+}
+
+/// Regression test (`R2-BUG-03`): concurrent Abyssal pocket systems preserve each other's room NPC `active_clouds`,
+/// while high-bit 64-bit `location_id`s whose low 32 bits match `solar_system_id` do not suppress cleanup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_1d_r2_bug03_concurrent_abyssal_systems_preserve_npc_active_clouds() {
+    use crate::services::pve_abyssal_hazards::TACHYON_CLOUD_TYPE_ID;
+    use crate::services::pve_special_sites_abyssal::{AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind};
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let (sys_a, sys_b) = (32_000_002_u32, 32_000_003_u32);
+    let (ship_a, cloud_a, npc_b, cloud_b, high_loc_ship) = (
+        779_700_101_i64,
+        1_898_000_101_i64,
+        1_890_000_001_i64,
+        1_898_000_201_i64,
+        779_700_102_i64,
+    );
+    let alias_high_loc = (1_i64 << 32) | i64::from(sys_b);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_a, make_item(ship_a, 587, CHAR_ID, i64::from(sys_a), InventoryFlag::None, 1));
+        snap.items.insert(high_loc_ship, make_item(high_loc_ship, 587, CHAR_ID, alias_high_loc, InventoryFlag::None, 1));
+        snap.abyssal_state.active_clouds.insert(high_loc_ship, TACHYON_CLOUD_TYPE_ID);
+        let mk_rooms = |npcs: Vec<i64>| [
+            AbyssalRoomRecord { room_index: 1, dungeon_id: 1, dungeon_name: "r1".into(), npc_ball_ids: npcs, cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+            AbyssalRoomRecord { room_index: 2, dungeon_id: 1, dungeon_name: "r2".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+            AbyssalRoomRecord { room_index: 3, dungeon_id: 1, dungeon_name: "r3".into(), npc_ball_ids: Vec::new(), cache_item_id: 0, cleared: false, gate_unlocked_at_sec: None },
+        ];
+        snap.abyssal_state.pockets.insert(CHAR_ID, AbyssalPocketSession {
+            pocket_id: 1, character_id: CHAR_ID, ship_id: ship_a, origin_solar_system_id: SYS_ID,
+            abyssal_solar_system_id: sys_a, origin_position: [0.0; 3], grid_offset: [0.0; 3],
+            filament_type_id: 47762, tier: 1, weather: AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 0.0, weather_bonus_pct: 0.0, npc_difficulty_mult: 1.0,
+            current_room: 1, rooms: mk_rooms(Vec::new()), started_at_sec: now, collapse_at_sec: now + 1200,
+            completed: false, collapsed_destroyed: false, trace_ball_id: 0,
+            fleet_ship_ids: vec![ship_a], ship_room: [(ship_a, 1)].into_iter().collect(), max_ships: 1,
+        });
+        snap.abyssal_state.pockets.insert(CHAR_ID + 10, AbyssalPocketSession {
+            pocket_id: 2, character_id: CHAR_ID + 10, ship_id: 779_700_109, origin_solar_system_id: SYS_ID,
+            abyssal_solar_system_id: sys_b, origin_position: [0.0; 3], grid_offset: [0.0; 3],
+            filament_type_id: 47762, tier: 1, weather: AbyssalWeatherKind::Electrical,
+            weather_penalty_pct: 0.0, weather_bonus_pct: 0.0, npc_difficulty_mult: 1.0,
+            current_room: 1, rooms: mk_rooms(vec![npc_b]), started_at_sec: now, collapse_at_sec: now + 1200,
+            completed: false, collapsed_destroyed: false, trace_ball_id: 0,
+            fleet_ship_ids: Vec::new(), ship_room: HashMap::new(), max_ships: 1,
+        });
+    });
+
+    let sys_handle_a = ctx.systems.get_or_spawn(sys_a);
+    sys_handle_a.spawn_ball_with_combat(make_ball(ship_a, 587, DVec3::new(10_000.0, 0.0, 0.0)), make_combat_state(500.0, 500.0, 500.0, 100.0)).await.unwrap();
+    sys_handle_a.spawn_ball(make_ball(cloud_a, TACHYON_CLOUD_TYPE_ID, DVec3::new(10_000.0, 0.0, 0.0))).await.unwrap();
+
+    let sys_handle_b = ctx.systems.get_or_spawn(sys_b);
+    sys_handle_b.spawn_ball_with_combat(make_ball(npc_b, 587, DVec3::new(10_000.0, 0.0, 0.0)), make_combat_state(500.0, 500.0, 500.0, 100.0)).await.unwrap();
+    sys_handle_b.spawn_ball(make_ball(cloud_b, TACHYON_CLOUD_TYPE_ID, DVec3::new(10_000.0, 0.0, 0.0))).await.unwrap();
+
+    sys_handle_b.ask_step_tick_only(1.0).await.unwrap();
+    assert!(sys_handle_b.wait_for_post_unlock_barrier().await);
+    assert_eq!(ctx.db.with_snapshot(|s| s.abyssal_state.active_clouds.get(&npc_b).copied()), Some(TACHYON_CLOUD_TYPE_ID));
+
+    sys_handle_a.ask_step_tick_only(1.0).await.unwrap();
+    assert!(sys_handle_a.wait_for_post_unlock_barrier().await);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.abyssal_state.active_clouds.get(&npc_b).copied(), Some(TACHYON_CLOUD_TYPE_ID), "system A ticks must not evict system B room NPC active_clouds");
+        assert!(!snap.abyssal_state.active_clouds.contains_key(&high_loc_ship), "high 64-bit location_id aliasing sys_b in low 32 bits must not block stale cleanup");
+    });
 }

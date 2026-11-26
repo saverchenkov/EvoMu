@@ -941,21 +941,16 @@ pub(crate) fn apply_rack_heat_persist_in_snap(
     snap: &mut WorldStateSnapshot,
     op: &RackHeatPersistDbOp,
 ) {
-    let mut migrated = [None; 3];
     if op.migrate_legacy_dyn_attrs {
         if let Some(sh) = snap.items.get_mut(&op.ship_id) {
-            for (idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
-                migrated[idx] = sh.dynamic_attributes.remove(&aid);
+            for &aid in &RACK_HEAT_ATTR_IDS {
+                sh.dynamic_attributes.remove(&aid);
             }
         }
     }
     let tr = snap.transient_item_attributes.entry(op.ship_id).or_default();
     for (idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
-        let val = if op.heat_snap[idx] > 0.0 || migrated[idx].is_none() {
-            op.heat_snap[idx]
-        } else {
-            migrated[idx].unwrap_or(0.0).clamp(0.0, 1.0)
-        };
+        let val = op.heat_snap[idx].clamp(0.0, 1.0);
         if val > 0.0 {
             tr.insert(aid, val);
         } else {

@@ -2266,7 +2266,7 @@ pub(in crate::system_actor) fn execute_pending_step_in_actor(
             dt_sim,
             step_now_unix,
             Some((&mut exec_ctx.actor_st.post_unlock_shadows.mmju_spool_fired_at, next_pu_seq)),
-            Some(&mut exec_ctx.actor_st.post_unlock_shadows.observatory_pings_done),
+            Some((&mut exec_ctx.actor_st.post_unlock_shadows.observatory_pings_done, next_pu_seq)),
             exec_ctx.post_unlock_ops,
         );
         let pre_bosonic_len = destroyed_balls.len();

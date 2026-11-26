@@ -908,7 +908,7 @@ pub(crate) struct PendingFobStateShadow {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PostUnlockActorShadows {
     pub mmju_spool_fired_at: HashMap<ItemId, (u64, u64)>,
-    pub observatory_pings_done: HashMap<ItemId, u32>,
+    pub observatory_pings_done: HashMap<ItemId, (u32, u64)>,
     pub abyssal_boundary_ticks: HashMap<ItemId, (Option<u32>, u64)>,
     pub abyssal_active_clouds: HashMap<ItemId, (Option<TypeId>, u64)>,
     pub arena_hazard_ticks: HashMap<ItemId, (Option<u32>, u64)>,
