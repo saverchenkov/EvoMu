@@ -1222,7 +1222,7 @@ impl BallparkWriteHoldGuard {
         let sys_bg = sys.clone();
         let bg = std::thread::spawn(move || {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sys_bg.test_with_ballpark_mut(|_| {
+                sys_bg.test_with_ballpark_mut(move |_| {
                     let _ = held_tx.send(());
                     let _ = release_rx.recv();
                 });

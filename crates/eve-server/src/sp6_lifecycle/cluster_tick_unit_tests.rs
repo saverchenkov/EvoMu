@@ -1127,7 +1127,7 @@ async fn committed_warp_mirror_non_blocking_under_ballpark_write_lock_831_909() 
     let handle_bg = handle.clone();
     let pause_thread = std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle_bg.test_with_ballpark(|_| {
+            handle_bg.test_with_ballpark(move |_| {
                 let _ = held_tx.send(());
                 let _ = rel_rx.recv();
             });

@@ -27,7 +27,7 @@ impl PausedActorGuard {
         let sys_pause = sys_handle.clone();
         let join_handle = std::thread::spawn(move || {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sys_pause.test_with_ballpark(|_| {
+                sys_pause.test_with_ballpark(move |_| {
                     let _ = held_tx.send(());
                     let _ = release_rx.recv();
                 });

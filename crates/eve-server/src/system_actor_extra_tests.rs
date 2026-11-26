@@ -1327,26 +1327,26 @@ async fn active_module_cycle_records_origin_scene_epoch_for_pilots_none_for_npcs
     db.set_session_scene_epoch(sess_id, 123);
     h.restore_ball_if_absent(taken).await.unwrap();
 
-    let restored_epoch = h
+    let (epoch_91003, epoch_91004) = h
         .test_with_actor_state_async(|st_restored| {
-            st_restored
-                .active_module_cycles
-                .iter()
-                .find(|c| c.module_id == 91_003)
-                .unwrap()
-                .origin_scene_epoch
+            (
+                st_restored
+                    .active_module_cycles
+                    .iter()
+                    .find(|c| c.module_id == 91_003)
+                    .unwrap()
+                    .origin_scene_epoch,
+                st_restored
+                    .active_module_cycles
+                    .iter()
+                    .find(|c| c.module_id == 91_004)
+                    .unwrap()
+                    .origin_scene_epoch,
+            )
         })
         .await;
-    assert_eq!(restored_epoch, Some(42));
-    assert_eq!(
-        st_restored
-            .active_module_cycles
-            .iter()
-            .find(|c| c.module_id == 91_004)
-            .unwrap()
-            .origin_scene_epoch,
-        Some(99)
-    );
+    assert_eq!(epoch_91003, Some(42));
+    assert_eq!(epoch_91004, Some(99));
 }
 
 #[tokio::test]

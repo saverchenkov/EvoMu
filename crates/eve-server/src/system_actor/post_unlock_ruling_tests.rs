@@ -344,7 +344,7 @@ async fn bf5_target_lock_hook_runs_post_commit_flush_guarded_and_would_block_can
         let sys_bg = sys.clone();
         let pauser = std::thread::spawn(move || {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sys_bg.test_with_actor_state(|_| {
+                sys_bg.test_with_actor_state(move |_| {
                     let _ = held_tx.send(());
                     let _ = rel_rx.recv();
                 });

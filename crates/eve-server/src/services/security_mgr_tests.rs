@@ -112,7 +112,7 @@ async fn test_security_mgr_insurgency_multipliers_sites_and_sentry_ewar() {
 
     // apply_counter_insurgency_sentry_ewar on ballpark combat state
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let sde = Arc::clone(&ctx.sde);
+    let sde = std::sync::Arc::clone(&ctx.sde);
     let sig = sys_handle
         .test_with_ballpark_mut_async(move |bp| {
             bp.combat_states.insert(ship_id, eve_destiny::CombatState::default());
@@ -476,7 +476,7 @@ async fn test_active_ci_sentries_ewar_boundaries_and_nearest_sentry_origin() {
     assert!(!has_active_counter_insurgency_sentries(&ctx, sys_id));
 
     // EWAR range & base_signature_radius boundaries
-    let sde = Arc::clone(&ctx.sde);
+    let sde = std::sync::Arc::clone(&ctx.sde);
     let (base_far, base_tp, painted_sig, second_sig) = sys_handle
         .test_with_ballpark_mut_async(move |bp| {
             bp.combat_states.insert(

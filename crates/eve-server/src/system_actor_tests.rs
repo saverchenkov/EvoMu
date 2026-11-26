@@ -1910,7 +1910,7 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
     let ((tx1, rx1), (tx2, rx2), h2) = (std::sync::mpsc::channel(), std::sync::mpsc::channel(), h.clone());
     let holder = std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            h2.test_with_actor_state(|_| {
+            h2.test_with_actor_state(move |_| {
                 let _ = tx1.send(());
                 let _ = rx2.recv();
             });
