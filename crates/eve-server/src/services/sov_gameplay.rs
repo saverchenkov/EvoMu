@@ -1294,29 +1294,32 @@ pub async fn dispatch_special_structure_attack(
     let mut charge_counts: std::collections::BTreeMap<i64, i32> = std::collections::BTreeMap::new();
     for &cid in charges {
         let entry = charge_counts.entry(cid).or_insert(0);
-        *entry = entry.saturating_add(1);
-    }
-    if !charge_counts.is_empty() {
-        ctx.db.with_snapshot(|snap| {
-            for (&cid, &needed) in &charge_counts {
-                let item = snap
-                    .items
-                    .get(&cid)
-                    .ok_or_else(|| BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))?;
-                snap.validate_item_for_consumption(item, &charge_opts)
-                    .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
-                if item.quantity < needed {
-                    return Err(BridgeRpcError::no_charges_loaded(
-                        0,
-                        format!("Charge {cid} needs {needed} units (has {})", item.quantity),
-                    ));
-                }
-            }
-            Ok::<(), BridgeRpcError>(())
+        *entry = entry.checked_add(1).ok_or_else(|| {
+            BridgeRpcError::no_charges_loaded(0, format!("Charge {cid} count overflow"))
         })?;
     }
-    let rep = if st_type_id == TYPE_MERCENARY_DEN {
-        apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await?
+    let consumed_backups: Vec<(eve_db::InventoryItemRecord, Option<String>, i32)> =
+        if !charge_counts.is_empty() {
+            ctx.db.try_with_mut_snapshot(|snap| {
+                let mut backups = Vec::with_capacity(charge_counts.len());
+                for (&cid, &needed) in &charge_counts {
+                    let pre_rec = snap
+                        .items
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound))?;
+                    let pre_cname = snap.item_custom_names.get(&cid).cloned();
+                    snap.consume_exact_item_quantity(cid, needed, charge_opts.clone())
+                        .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
+                    backups.push((pre_rec, pre_cname, needed));
+                }
+                Ok::<_, BridgeRpcError>(backups)
+            })?
+        } else {
+            Vec::new()
+        };
+    let dmg_res = if st_type_id == TYPE_MERCENARY_DEN {
+        apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await
     } else if st_type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
         let q = volley_dmg.max(0.0) * 0.25;
         sov_gameplay_skyhook::apply_skyhook_weapon_damage_with_attacker(
@@ -1327,15 +1330,22 @@ pub async fn dispatch_special_structure_attack(
             q,
             q,
             char_id,
-        )?
+        )
     } else {
-        crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await?
+        crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await
+    };
+    let rep = match dmg_res {
+        Ok(rep) => rep,
+        Err(e) => {
+            if !consumed_backups.is_empty() {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.restore_consumed_stacks_direct(&consumed_backups);
+                });
+            }
+            return Err(e);
+        }
     };
     ctx.db.try_with_mut_snapshot(|snap| {
-        for (&cid, &needed) in &charge_counts {
-            snap.consume_exact_item_quantity(cid, needed, charge_opts.clone())
-                .map_err(|e| BridgeRpcError::no_charges_loaded(0, e.to_string()))?;
-        }
         if let Some(s) = snap.structures.get_mut(&structure_id) {
             s.last_damage_tick = tick;
         }
@@ -1820,6 +1830,47 @@ mod r3_charge_policy_tests {
             assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
             assert_eq!(snap.items[&foreign_charge_id].quantity, 2);
             assert_eq!(snap.items[&valid_charge_id].quantity, 3);
+        });
+
+        // R7-04: Duplicate cid against 1-round stack rejects before damage, concurrent 1-round race consumes once, and failed damage restores 1-round stack.
+        let one_round_id = 1_099_000_116_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                one_round_id,
+                InventoryItemRecord {
+                    item_id: one_round_id, type_id: 200, owner_id: char_id,
+                    location_id: 1_099_000_100, flag: InventoryFlag::HiSlot0, quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 80, &[one_round_id, one_round_id],
+            ).await.unwrap_err().code,
+            "NoChargesLoaded"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.structures[&den_id].shield_hp, 5_000.0);
+            assert_eq!(snap.items[&one_round_id].quantity, 1);
+        });
+        assert_eq!(
+            dispatch_special_structure_attack(
+                &ctx, char_id, dead_den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 81, &[one_round_id],
+            ).await.unwrap_err().code,
+            "StructureDestroyed"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&one_round_id].quantity, 1);
+        });
+        let (r1, r2) = tokio::join!(
+            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 82, &[one_round_id]),
+            dispatch_special_structure_attack(&ctx, char_id, den_id, TYPE_MERCENARY_DEN, false, 1_000.0, 83, &[one_round_id]),
+        );
+        assert!(matches!((r1, r2), (Ok(_), Err(_)) | (Err(_), Ok(_))));
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.items.contains_key(&one_round_id));
+            assert_eq!(snap.structures[&den_id].shield_hp, 4_000.0);
         });
     }
 }

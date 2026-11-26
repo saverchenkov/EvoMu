@@ -969,23 +969,34 @@ pub(crate) fn handle_load_ammo(
         }
         let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
             Vec::new();
-        let pre_source = snap.items.get(&first_charge_id).cloned();
-        let src_flag = pre_source.as_ref().map(|it| it.flag).unwrap_or(InventoryFlag::Cargo);
-        let charge_owner = pre_source.as_ref().map(|it| it.owner_id).unwrap_or(char_id);
+        let pre_source = snap.items.get(&first_charge_id).cloned().ok_or_else(|| {
+            BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ItemNotFound)
+        })?;
+        let src_flag = pre_source.flag;
+        let charge_owner = pre_source.owner_id;
+        let is_crystal_type = ctx.sde.types.get(&charge_type_id).is_some_and(|ct| {
+            matches!(ct.group_id, 86 | 374 | 375 | 482 | 663)
+        });
+        let is_single_crystal_move = is_crystal_type
+            && pre_source.singleton
+            && pre_source.quantity == 1
+            && mod_allocations.len() == 1
+            && total_needed == 1;
+        let policy = if is_single_crystal_move {
+            eve_db::ItemClassPolicy::ExactAssembledItem
+        } else {
+            eve_db::ItemClassPolicy::StackableCommodity
+        };
         snap.consume_exact_item_quantity(
             first_charge_id,
             total_needed,
-            eve_db::ConsumeExactOptions::for_owner_exact(
-                Some(char_id),
-                charge_owner,
-                eve_db::ItemClassPolicy::ExactAssembledItem,
-            ),
+            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), charge_owner, policy),
         )
         .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
         let post_source = snap.items.get(&first_charge_id).cloned();
         let move_source_in_place = mod_allocations.len() == 1 && post_source.is_none();
         if !move_source_in_place {
-            diffs.push((pre_source.clone(), post_source));
+            diffs.push((Some(pre_source.clone()), post_source));
         }
         for &(mod_id, alloc_qty) in &mod_allocations {
             let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
@@ -1013,20 +1024,13 @@ pub(crate) fn handle_load_ammo(
                 }
             }
             if move_source_in_place {
-                let pre_ver = pre_source.as_ref().map(|p| p.version).unwrap_or(1);
-                let moved_rec = eve_db::InventoryItemRecord {
-                    item_id: first_charge_id,
-                    type_id: charge_type_id,
-                    owner_id: char_id,
-                    location_id: ship_id,
-                    flag: slot_flag,
-                    quantity: alloc_qty,
-                    singleton: false,
-                    version: pre_ver + 1,
-                    ..Default::default()
-                };
+                let mut moved_rec = pre_source.clone();
+                moved_rec.location_id = ship_id;
+                moved_rec.flag = slot_flag;
+                moved_rec.quantity = alloc_qty;
+                moved_rec.version = pre_source.version + 1;
                 snap.items.insert(first_charge_id, moved_rec.clone());
-                diffs.push((pre_source.clone(), Some(moved_rec)));
+                diffs.push((Some(pre_source.clone()), Some(moved_rec)));
             } else {
                 let next_max = snap
                     .next_entity_id

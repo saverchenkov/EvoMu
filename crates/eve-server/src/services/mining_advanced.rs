@@ -1657,32 +1657,20 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                 for &(mat_tid, per_cycle_qty) in &hourly_materials {
                     let mat_qty = per_cycle_qty.saturating_mul(runnable_cycles as u64);
                     let add_qty = i32::try_from(mat_qty).unwrap_or(i32::MAX);
-                    if let Some(existing_item) = snap.items.values_mut().find(|it| {
-                        it.location_id == structure_id
-                            && it.owner_id == st_owner_corp
-                            && it.flag == InventoryFlag::SpecializedMineralHold
-                            && it.type_id == mat_tid
-                            && !it.singleton
-                    }) {
-                        existing_item.quantity = existing_item.quantity.saturating_add(add_qty);
-                    } else {
-                        snap.next_entity_id += 1;
-                        let item_id = snap.next_entity_id;
-                        snap.items.insert(
-                            item_id,
-                            InventoryItemRecord {
-                                item_id,
-                                type_id: mat_tid,
-                                owner_id: st_owner_corp,
-                                location_id: structure_id,
-                                flag: InventoryFlag::SpecializedMineralHold,
-                                quantity: add_qty,
-                                singleton: false,
-                                version: 1,
-                                ..Default::default()
-                            },
-                        );
+                    if add_qty <= 0 {
+                        continue;
                     }
+                    let _ = snap.mint_inventory_item_in_snap(eve_db::MintItemSpec {
+                        type_id: mat_tid,
+                        owner_id: st_owner_corp,
+                        location_id: structure_id,
+                        flag: InventoryFlag::SpecializedMineralHold,
+                        quantity: add_qty,
+                        singleton: false,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                        merge_existing_stack: true,
+                    });
                 }
             }
 

@@ -64,13 +64,18 @@ fn is_weapon_autoload_stack_consumable(
     if item.singleton && !is_crystal_singleton {
         return false;
     }
+    let policy = if is_crystal_singleton && item.singleton {
+        eve_db::ItemClassPolicy::ExactAssembledItem
+    } else {
+        eve_db::ItemClassPolicy::StackableCommodity
+    };
     let opts = eve_db::ConsumeExactOptions {
         reject_fitted: false,
         active_ship_id: Some(ship_id),
         ..eve_db::ConsumeExactOptions::for_owner_exact(
             Some(char_id),
             char_id,
-            eve_db::ItemClassPolicy::ExactAssembledItem,
+            policy,
         )
     };
     if snap.validate_item_for_consumption(item, &opts).is_err() {
@@ -274,15 +279,18 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
         loaded_bank.push(tid);
         created_slot_charges.push((tid, plan.cargo_stack_id));
     } else {
-        if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
-            if st.quantity > plan.total_take {
-                st.quantity -= plan.total_take;
-                st.version += 1;
-            } else {
-                snap.items.remove(&plan.cargo_stack_id);
-            }
-        }
-        let post_stack = snap.items.get(&plan.cargo_stack_id).cloned();
+        let stack_opts = eve_db::ConsumeExactOptions {
+            reject_fitted: false,
+            active_ship_id: Some(ship_id),
+            ..eve_db::ConsumeExactOptions::for_owner_exact(
+                Some(char_id),
+                plan.owner_id,
+                eve_db::ItemClassPolicy::StackableCommodity,
+            )
+        };
+        let post_stack = snap
+            .consume_exact_item_quantity(plan.cargo_stack_id, plan.total_take, stack_opts)
+            .map_err(|_| BridgeRpcError::no_charges(mod_type.type_id as i64))?;
         autoload_diffs.push((Some(stack_pre), post_stack));
         for &(tid, tf, give) in &plan.slot_allocations {
             if give <= 0 {
@@ -298,8 +306,6 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
                 quantity: give,
                 singleton: false,
                 version: 1,
-                dynamic_attributes: pre_dynamic_attributes.clone(),
-                source_mutaplasmid_id: pre_source_mutaplasmid_id,
                 ..Default::default()
             };
             snap.items.insert(cid, new_rec.clone());

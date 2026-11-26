@@ -2183,6 +2183,37 @@ impl WorldStateSnapshot {
         diffs
     }
 
+    /// Compensating restore for stacks consumed prior to a fallible external async step,
+    /// preserving original item IDs, quantities, and custom names.
+    pub fn restore_consumed_stacks_direct(
+        &mut self,
+        consumed: &[(InventoryItemRecord, Option<String>, i32)],
+    ) {
+        for (pre, pre_cname, needed) in consumed {
+            if *needed <= 0 {
+                continue;
+            }
+            match self.items.get_mut(&pre.item_id) {
+                Some(cur) if cur.owner_id == pre.owner_id && cur.type_id == pre.type_id => {
+                    if let Some(new_qty) = cur.quantity.checked_add(*needed) {
+                        cur.quantity = new_qty;
+                        cur.version = cur.version.max(pre.version).saturating_add(1);
+                    }
+                }
+                _ => {
+                    let mut restored = pre.clone();
+                    restored.quantity = *needed;
+                    restored.version = restored.version.saturating_add(1);
+                    let iid = restored.item_id;
+                    self.items.insert(iid, restored);
+                    if let Some(cname) = pre_cname {
+                        self.item_custom_names.insert(iid, cname.clone());
+                    }
+                }
+            }
+        }
+    }
+
     fn is_merge_stack_candidate(
         &self,
         it: &InventoryItemRecord,
@@ -2195,6 +2226,9 @@ impl WorldStateSnapshot {
             && it.location_id == location_id
             && it.flag == flag
             && it.type_id == type_id
+            && it.quantity > 0
+            && it.insured_payout_isk.is_finite()
+            && it.insured_payout_isk == 0.0
             && self.is_clean_stackable_item(it)
             && !Self::has_locked_flag_or_wrap_type(it)
             && !self.is_item_or_ancestor_locked_or_impounded(it.item_id)
@@ -2238,7 +2272,7 @@ impl WorldStateSnapshot {
             let existing_id = self
                 .items
                 .values()
-                .find(|it| {
+                .filter(|it| {
                     self.is_merge_stack_candidate(
                         it,
                         spec.owner_id,
@@ -2247,6 +2281,7 @@ impl WorldStateSnapshot {
                         spec.type_id,
                     ) && it.quantity.checked_add(spec.quantity).is_some()
                 })
+                .min_by_key(|it| it.item_id)
                 .map(|it| it.item_id);
             if let Some(existing_id) = existing_id {
                 let existing = self.items.get_mut(&existing_id).ok_or_else(|| {

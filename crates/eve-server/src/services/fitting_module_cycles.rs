@@ -701,7 +701,7 @@ async fn activate_interdiction_sphere_module(
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-async fn activate_survey_probe_launcher(
+pub(crate) async fn activate_survey_probe_launcher(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
     sys_id: u32,
@@ -738,13 +738,21 @@ async fn activate_survey_probe_launcher(
             let reload_into_slot = |snap: &mut eve_db::WorldStateSnapshot,
                                     touched_pre: &mut HashMap<i64, Option<eve_db::InventoryItemRecord>>|
              -> Option<(i64, u32, i32)> {
+                let reload_opts = eve_db::ConsumeExactOptions {
+                    active_ship_id: Some(ship_id),
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        char_id,
+                        eve_db::ItemClassPolicy::StackableCommodity,
+                    )
+                };
                 let (src_id, p_tid, avail) = snap
                     .items
                     .values()
                     .filter(|i| {
                         i.location_id == ship_id && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold) && i.quantity > 0
                             && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
-                            && crate::services::fitting_cycles_overheat::is_valid_loaded_assembled_charge(snap, Some(char_id), Some(ship_id), i)
+                            && snap.validate_item_for_consumption(i, &reload_opts).is_ok()
                     })
                     .min_by_key(|i| i.item_id)
                     .map(|i| (i.item_id, i.type_id, i.quantity))?;
@@ -758,11 +766,10 @@ async fn activate_survey_probe_launcher(
                     }
                     Some((src_id, p_tid, move_qty))
                 } else {
-                    if let Some(it) = snap.items.get_mut(&src_id) {
-                        touched_pre.entry(src_id).or_insert_with(|| Some(it.clone()));
-                        it.quantity -= move_qty;
-                        it.version += 1;
+                    if let Some(pre) = snap.items.get(&src_id).cloned() {
+                        touched_pre.entry(src_id).or_insert(Some(pre));
                     }
+                    snap.consume_exact_item_quantity(src_id, move_qty, reload_opts).ok()?;
                     snap.next_entity_id += 1;
                     let new_id = snap.next_entity_id;
                     touched_pre.insert(new_id, None);
