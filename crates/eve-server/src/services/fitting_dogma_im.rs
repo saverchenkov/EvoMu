@@ -749,12 +749,7 @@ fn handle_item_get_info(
 
     // 1. Check if raw_id is an item in the world DB or a launched space drone ball
     let space_drone_opt = if subloc_key_opt.is_none() {
-        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space
-                .values()
-                .find(|d| d.ball_id == raw_id || d.drone_item_id == raw_id)
-                .cloned()
-        })
+        ctx.systems.find_active_drone_by_item(raw_id).map(|(_, d)| d)
     } else {
         None
     };

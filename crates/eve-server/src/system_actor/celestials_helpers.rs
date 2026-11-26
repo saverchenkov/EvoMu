@@ -13,6 +13,36 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Atomically assigns the next monotonic `TickBroadcast.broadcast_seq` and sends `broadcast`
+/// onto `event_tx` while holding `broadcast_seq_gate`, preserving strict FIFO seq ordering (`GH #1172`).
+pub(crate) fn send_tick_broadcast_sequenced_owned(
+    event_tx: &super::broadcast::Sender<super::TickBroadcast>,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+    mut broadcast: super::TickBroadcast,
+) {
+    let mut seq = broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *seq = seq.saturating_add(1);
+    broadcast.broadcast_seq = *seq;
+    let _ = event_tx.send(broadcast);
+}
+
+/// Assigns `broadcast.broadcast_seq` in-place under `broadcast_seq_gate` and sends a clone onto
+/// `event_tx` (`GH #1172`).
+pub(crate) fn send_tick_broadcast_sequenced(
+    event_tx: &super::broadcast::Sender<super::TickBroadcast>,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+    broadcast: &mut super::TickBroadcast,
+) {
+    let mut seq = broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *seq = seq.saturating_add(1);
+    broadcast.broadcast_seq = *seq;
+    let _ = event_tx.send(broadcast.clone());
+}
+
 #[derive(Clone)]
 struct DbBallparkEntry {
     ballpark: std::sync::Weak<BallparkHandle>,
@@ -22,6 +52,8 @@ struct DbBallparkEntry {
     active_module_ships: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     view_tx: std::sync::Weak<tokio::sync::watch::Sender<Arc<crate::system_actor::SystemView>>>,
     tidi_factor_bits: std::sync::Weak<std::sync::atomic::AtomicU64>,
+    cmd_tx: tokio::sync::mpsc::WeakSender<crate::system_actor::SystemCommand>,
+    drone_hydration: crate::system_actor::drones::ActiveDronesSharedCtx,
 }
 
 fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
@@ -50,6 +82,8 @@ pub(crate) fn register_db_system_ballpark(
             active_module_ships: Arc::downgrade(&handle.active_module_ships),
             view_tx: Arc::downgrade(&handle.view_tx),
             tidi_factor_bits: Arc::downgrade(&handle.tidi_factor_bits),
+            cmd_tx: handle.cmd_tx.downgrade(),
+            drone_hydration: handle.ballpark.drone_hydration_shared().cloned().unwrap_or_default(),
         },
     );
 }
@@ -331,9 +365,16 @@ pub fn try_remove_ball_for_db(
             let remove_with =
                 |bp: &mut Ballpark, mut st_opt: Option<&mut crate::system_actor::SystemActorState>| {
                     let removed_ball = bp.remove_ball(ball_id).is_some();
-                    let mut removed_ext = false;
+                    let (mut removed_ext, mut removed_drone) = (false, false);
                     if let Some(st) = st_opt.as_mut() {
                         st.protection_registry.remove(&ball_id);
+                        removed_drone = st.active_drones_in_space.contains_key(&ball_id);
+                        crate::system_actor::drones::clear_removed_ball_drones_in_state(st, ball_id);
+                        if st.active_drones_checkpoint_dirty {
+                            st.hibernated.store(false, std::sync::atomic::Ordering::Relaxed);
+                            st.hibernated_since_unix.store(0, std::sync::atomic::Ordering::Relaxed);
+                            st.idle_ticks.store(0, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let before = st.external_active_modules.len();
                         st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
                         removed_ext = st.external_active_modules.len() != before;
@@ -346,7 +387,7 @@ pub fn try_remove_ball_for_db(
                             }
                         }
                     }
-                    if removed_ball || removed_ext {
+                    if removed_ball || removed_ext || removed_drone {
                         if let Some(vtx) = entry.view_tx.upgrade() {
                             let tidi = entry
                                 .tidi_factor_bits
@@ -381,14 +422,23 @@ pub fn try_remove_ball_for_db(
                     sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
             } else {
-                let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(st_arc) = st_opt.as_ref() {
-                    let mut st = st_arc.write().unwrap_or_else(|e| e.into_inner());
-                    remove_with(&mut bp, Some(&mut st));
-                } else {
-                    remove_with(&mut bp, None);
+                {
+                    let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(st_arc) = st_opt.as_ref() {
+                        let mut st = st_arc.write().unwrap_or_else(|e| e.into_inner());
+                        remove_with(&mut bp, Some(&mut st));
+                    } else {
+                        remove_with(&mut bp, None);
+                    }
+                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
-                sync_ball_positions(&bp, &pos_arc, &scram_arc);
+                if let Some(cmd_tx) = entry.cmd_tx.upgrade() {
+                    crate::system_actor::drones::try_flush_from_sender(
+                        solar_system_id,
+                        &cmd_tx,
+                        &entry.drone_hydration,
+                    );
+                }
             }
         }
     }
@@ -932,6 +982,14 @@ pub(crate) fn update_system_hibernation_flag(
         || !state.active_nanite_repairs.is_empty()
         || !state.active_drone_miners.is_empty()
         || state.fighters.active_fighters.values().any(|f| !f.is_abandoned)
+        || !state.reserved_drone_launches.is_empty()
+        || state
+            .active_drones_in_space
+            .values()
+            .any(|d| !d.is_abandoned || d.target_id.is_some())
+        || (state.db_opt.is_some()
+            && (state.active_drones_checkpoint_dirty
+                || state.active_drones_needs_sqlite_hydration))
         || state.pending_destroyed_balls.is_non_empty()
         || state
             .asteroids

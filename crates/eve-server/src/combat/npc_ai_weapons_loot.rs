@@ -1803,30 +1803,28 @@ pub struct EdencomHostilityMeta {
 }
 
 impl EdencomHostilityMeta {
-    pub(crate) fn collect(ctx: &ServerContext, _solar_system_id: u32, ball_ids: &[i64]) -> Self {
+    pub(crate) fn collect(ctx: &ServerContext, solar_system_id: u32, ball_ids: &[i64]) -> Self {
         let mut drone_owner_cids: HashMap<i64, i64> = HashMap::new();
         let mut hostile_npc_ids: HashSet<i64> = HashSet::new();
+        let sys_view = ctx.systems.get_handle(solar_system_id).map(|h| h.hydrated_view());
+        for &id in ball_ids {
+            let d_opt = sys_view
+                .as_ref()
+                .and_then(|v| v.active_drones_in_space.get(&id).cloned())
+                .or_else(|| ctx.systems.find_active_drone(id).map(|(_, d)| d));
+            if let Some(d) = d_opt.filter(|d| d.ball_id > 0) {
+                drone_owner_cids.insert(id, d.owner_char_id);
+            }
+        }
         with_combat_ephemeral(ctx, |rt| {
             for &id in ball_ids {
-                if let Some(d) = rt.active_drones_in_space.get(&id) {
-                    drone_owner_cids.insert(id, d.owner_char_id);
-                }
                 if let Some(other_npc) = rt.npc_entities.get(&id) {
                     let hostile_arch = matches!(
                         other_npc.archetype.as_str(),
-                        "Triglavian"
-                            | "Sleeper"
-                            | "PochvenHypnosianSleeper"
-                            | "Drifter"
-                            | "RogueDrone"
-                            | "BeltRat"
-                            | "Officer"
-                            | "Pirate"
+                        "Triglavian" | "Sleeper" | "PochvenHypnosianSleeper" | "Drifter"
+                            | "RogueDrone" | "BeltRat" | "Officer" | "Pirate"
                     );
-                    let hostile_fac = matches!(
-                        other_npc.faction_id,
-                        500_026 | 500_024 | 500_021 | 500_025 | 500_010..=500_020
-                    );
+                    let hostile_fac = matches!(other_npc.faction_id, 500_026 | 500_024 | 500_021 | 500_025 | 500_010..=500_020);
                     if hostile_arch || hostile_fac {
                         hostile_npc_ids.insert(id);
                     }

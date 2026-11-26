@@ -9,7 +9,7 @@ use eve_server::combat::npc_ai::npc_test_helpers::{get_npc_entity, update_npc_en
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     derive_npc_archetype, destroy_specialized_npc_and_queue_bounty, spawn_npc_entity_from_sde,
-    spawn_specialized_npc_entity, step_extended_npc_ai, with_mut_combat_runtime, DroneSpaceState,
+    spawn_specialized_npc_entity, step_extended_npc_ai, DroneSpaceState,
 };
 use glam::DVec3;
 
@@ -527,38 +527,36 @@ async fn test_npc_standings_aggression_player_drones_and_navy_police() {
                 },
             );
         });
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.active_drones_in_space.insert(
-                drone_id,
-                DroneSpaceState {
-                    ball_id: drone_id,
-                    drone_item_id: drone_id,
-                    type_id: 2464,
-                    group_id: 100,
-                    owner_char_id: owner_id,
-                    original_owner_char_id: owner_id,
-                    parent_ship_id: parent_ship,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1000.0,
-                    optimal_range: 5000.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 0.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        });
+        eve_server::services::drone_test_helpers::seed_active_drone(
+            &ctx,
+            DroneSpaceState {
+                ball_id: drone_id,
+                drone_item_id: drone_id,
+                type_id: 2464,
+                group_id: 100,
+                owner_char_id: owner_id,
+                original_owner_char_id: owner_id,
+                parent_ship_id: parent_ship,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1000.0,
+                optimal_range: 5000.0,
+                damage_vector: DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
     };
 
     spawn_drone(friendly_drone_id, friendly_char_id, friendly_ship_id, DVec3::new(2_500.0, 0.0, 0.0));

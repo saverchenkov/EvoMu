@@ -16,7 +16,6 @@ use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta};
 use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::mission_fixture::{self, MissionFixture};
 use eve_server::sp6_lifecycle::{
     handle_character_logoff_or_disconnect, record_wreck_or_container_meta_in_snap,
@@ -548,9 +547,8 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
     assert!(ds_ball.position.distance(DVec3::new(25_000.0, 3_000.0, 1_000.0)) < 1.0);
 
     // Verify abandoned `DroneSpaceState` was seeded into `active_drones_in_space` on SQLite restart
-    let drone_state = with_combat_runtime(&ctx2, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).map(|d| (d.drone_item_id, d.is_abandoned))
-    });
+    let drone_state = eve_server::services::drone_test_helpers::active_drone(&ctx2, drone_ball_id)
+        .map(|d| (d.drone_item_id, d.is_abandoned));
     assert_eq!(drone_state, Some((drone_item_id, true)));
 
     // Pilot 90_000_001 reconnects, loots the restarted wreck (`invbroker.LootAll`), scoops the restarted drone,
@@ -736,4 +734,149 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
             "Respawned mission NPC ball {bid} must be registered in NPC runtime"
         );
     }
+}
+
+#[tokio::test]
+async fn test_sqlite_restart_abandons_launched_engaged_drones_and_allows_reconnect_or_scoop() {
+    struct TempSqliteCleanup(std::path::PathBuf);
+    impl Drop for TempSqliteCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(format!("{}-wal", self.0.display())));
+            let _ = std::fs::remove_file(std::path::PathBuf::from(format!("{}-shm", self.0.display())));
+        }
+    }
+
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_sp7_sqlite_drone_restart_{}.sqlite",
+        std::process::id()
+    ));
+    let _guard = TempSqliteCleanup(db_path.clone());
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(std::path::PathBuf::from(format!("{}-wal", db_path.display())));
+    let _ = std::fs::remove_file(std::path::PathBuf::from(format!("{}-shm", db_path.display())));
+
+    let sde = ServerContext::new().sde;
+    let empty = HashMap::new();
+    let d1_item = 880_950_001i64;
+    let d2_item = 880_950_002i64;
+    let target_npc_id = 990_950_001i64;
+    let other_sys = 30_000_144u32;
+    let d_other_ball = 880_950_099i64;
+
+    let (sys_id, ship_id, d1_ball, d2_ball) = {
+        let repo1 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite 1"));
+        repo1.with_mut_snapshot(|snap| *snap = eve_db::WorldRepository::with_demo_seed().with_snapshot(|s| s.clone()));
+        let ctx1 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&repo1));
+        pin_clock(&ctx1);
+        let (mut sess, sys_id, ship_id) = setup_pilot_in_space(&ctx1, 90_000_001).await;
+        ctx1.db.with_mut_snapshot(|snap| {
+            if let Some(sh) = snap.items.get_mut(&ship_id) { sh.type_id = 626; }
+            for stid in [3_435_u32, 3_436_u32, 3_434_u32] {
+                snap.skills.entry(90_000_001).or_default().insert(stid, TrainedSkillRecord { type_id: stid, level: 5, skill_points: 256_000.0 });
+            }
+            for did in [d1_item, d2_item] {
+                snap.items.insert(did, sp6_item(did, 2_454, 90_000_001, ship_id, InventoryFlag::DroneBay, HashMap::new()));
+            }
+        });
+        ctx1.invalidate_ship_fitting(ship_id);
+
+        let sys_handle = ctx1.systems.get_or_spawn(sys_id);
+        let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.unwrap().expect("pilot ship ball").1.position;
+        let launch_rep = ctx1.dispatch_rpc(&mut sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(d1_item), PyRep::Integer(d2_item)])], &empty, None).await.expect("LaunchDrones");
+        let PyRep::List(launched) = launch_rep else { panic!("expected List from LaunchDrones, got {launch_rep:?}"); };
+        let (d1_ball, d2_ball) = (launched[0].as_i64().unwrap(), launched[1].as_i64().unwrap());
+
+        let _ = sys_handle.spawn_ball_with_combat(Ball {
+            id: target_npc_id, type_id: 587, position: ship_pos + DVec3::new(1_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1_000_000.0,
+            radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }, CombatState::default()).await.unwrap();
+        ctx1.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_npc_id)], &empty, None).await.expect("AddTarget");
+        for _ in 0..20 {
+            if sys_handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_npc_id && l.locked) { break; }
+            let _ = sys_handle.step_manual(1.0).await;
+        }
+        ctx1.dispatch_rpc(&mut sess, "entity", None, "CmdEngage", &[PyRep::List(vec![PyRep::Integer(d1_ball)]), PyRep::Integer(target_npc_id)], &empty, None).await.expect("CmdEngage d1");
+
+        let pre_d1 = eve_server::services::drone_test_helpers::active_drone(&ctx1, d1_ball).expect("d1 active before restart");
+        assert!(!pre_d1.is_abandoned && pre_d1.owner_char_id == 90_000_001 && pre_d1.parent_ship_id == ship_id && pre_d1.activity_state == 1 && pre_d1.target_id == Some(target_npc_id));
+
+        // Also seed a controlled checkpointed drone with custom stats in another system without `snap.items`.
+        let h_other = ctx1.systems.get_or_spawn(other_sys);
+        h_other.upsert_active_drone(eve_server::services::combat_crimewatch::DroneSpaceState {
+            ball_id: d_other_ball, drone_item_id: d_other_ball, type_id: 2_454, group_id: 100,
+            owner_char_id: 90_000_001, original_owner_char_id: 90_000_001, parent_ship_id: ship_id,
+            solar_system_id: other_sys, target_id: Some(target_npc_id), activity_state: 1,
+            assist_char_id: Some(90_000_002), guard_char_id: Some(90_000_003),
+            bandwidth_used: 5.0, max_velocity: 1_500.0, optimal_range: 5_000.0,
+            damage_vector: DamageVector { em: 42.0, ..Default::default() }, web_speed_factor: 1.0,
+            ..Default::default()
+        }).await.unwrap();
+
+        assert!(ctx1.systems.stop_system(sys_id).await);
+        assert!(ctx1.systems.stop_system(other_sys).await);
+
+        // Simulate crash-window stale `KIND_ACTIVE_DRONES` rows for a drone already scooped to bay
+        // and a drone recorded as recently destroyed before shutdown.
+        let (d_scooped_stale, d_dead_stale) = (880_950_097i64, 880_950_098i64);
+        ctx1.db.with_mut_snapshot(|snap| {
+            snap.items.insert(d_scooped_stale, sp6_item(d_scooped_stale, 2_454, 90_000_001, ship_id, InventoryFlag::DroneBay, HashMap::new()));
+            snap.combat_crimewatch_state.record_destroyed_item_id(d_dead_stale);
+        });
+        let now_stale = ctx1.db.clock().now_unix_secs();
+        ctx1.db.with_sqlite_conn(|conn| {
+            let mut rows = eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<eve_server::services::combat_crimewatch::DroneSpaceState>(
+                conn, sys_id, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES,
+            )?;
+            for stale_id in [d_scooped_stale, d_dead_stale] {
+                rows.push((stale_id.to_string(), eve_server::services::combat_crimewatch::DroneSpaceState { ball_id: stale_id, drone_item_id: stale_id, ..pre_d1.clone() }));
+            }
+            eve_db::sqlite_store::system_checkpoint::replace_system_checkpoints_for_kind(
+                conn, sys_id, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES, &rows, now_stale,
+            )
+        }).expect("seed stale crash-window drone checkpoints");
+
+        (sys_id, ship_id, d1_ball, d2_ball)
+    };
+
+    // Real SQLite server restart (`WorldRepository::open_sqlite` + `ServerContext::with_sde_and_repository`).
+    let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite 2"));
+    let ctx2 = ServerContext::with_sde_and_repository(sde, Arc::clone(&repo2));
+    pin_clock(&ctx2);
+
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx2, 880_950_097).is_none());
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx2, 880_950_098).is_none());
+
+    // Launched + engaged drones from `sys_id` must restore abandoned (never controlled for offline pilot).
+    for bid in [d1_ball, d2_ball] {
+        let d = eve_server::services::drone_test_helpers::active_drone(&ctx2, bid)
+            .unwrap_or_else(|| panic!("drone {bid} must restore across SQLite restart"));
+        assert!(d.is_abandoned && d.owner_char_id == 0 && d.parent_ship_id == 0 && d.target_id.is_none());
+        assert_eq!((d.activity_state, d.assist_char_id, d.guard_char_id, d.original_owner_char_id), (0, None, None, 90_000_001));
+    }
+
+    // Checkpointed-only cold `other_sys` stays cold until entered, then restores abandoned preserving stats.
+    assert!(ctx2.systems.get_handle(other_sys).is_none(), "cold checkpointed system {other_sys} must not wake prematurely");
+    let h_other2 = ctx2.systems.get_or_spawn(other_sys);
+    let d_other = h_other2.active_drone(d_other_ball).expect("checkpointed drone in other_sys must restore when woken");
+    assert!(d_other.is_abandoned && d_other.owner_char_id == 0 && d_other.parent_ship_id == 0 && d_other.target_id.is_none());
+    assert_eq!((d_other.activity_state, d_other.assist_char_id, d_other.guard_char_id, d_other.original_owner_char_id), (0, None, None, 90_000_001));
+    assert!((d_other.damage_vector.em - 42.0).abs() < 1e-6);
+
+    // Pilot reconnects, regains control of `d1_ball`, and scoops `d2_ball`.
+    let (mut sess2, _, ship_id2) = setup_pilot_in_space(&ctx2, 90_000_001).await;
+    assert_eq!(ship_id2, ship_id);
+    let sys2 = ctx2.systems.get_or_spawn(sys_id);
+    let d1_pos = sys2.get_ball_snapshot(d1_ball).await.unwrap().expect("d1 ball").1.position;
+    let _ = sys2.set_ball_position(ship_id2, d1_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+
+    ctx2.dispatch_rpc(&mut sess2, "entity", None, "CmdReconnectToDrones", &[PyRep::List(vec![PyRep::Integer(d1_ball)])], &empty, None).await.expect("CmdReconnectToDrones after restart");
+    let reconnected_d1 = eve_server::services::drone_test_helpers::active_drone(&ctx2, d1_ball).expect("reconnected d1");
+    assert!(!reconnected_d1.is_abandoned && reconnected_d1.owner_char_id == 90_000_001 && reconnected_d1.parent_ship_id == ship_id2);
+
+    let d2_pos = sys2.get_ball_snapshot(d2_ball).await.unwrap().expect("d2 ball").1.position;
+    let _ = sys2.set_ball_position(ship_id2, d2_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+    ctx2.dispatch_rpc(&mut sess2, "ship", None, "ScoopToDroneBay", &[PyRep::Integer(d2_ball)], &empty, None).await.expect("ScoopToDroneBay after restart");
+    assert_eq!(ctx2.db.with_snapshot(|s| (s.items[&d2_item].location_id, s.items[&d2_item].flag)), (ship_id2, InventoryFlag::DroneBay));
 }

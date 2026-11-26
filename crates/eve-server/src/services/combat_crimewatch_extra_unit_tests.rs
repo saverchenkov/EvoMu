@@ -1189,39 +1189,6 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
         },
         |r: &mut CombatRuntimeState| r.crimewatch_timer_triggered_at.clear()
     );
-    let drone_st = DroneSpaceState {
-        ball_id: 1,
-        drone_item_id: 2,
-        type_id: 2454,
-        group_id: 100,
-        owner_char_id: 3,
-        original_owner_char_id: 3,
-        parent_ship_id: 4,
-        solar_system_id: 30_000_142,
-        target_id: None,
-        activity_state: 0,
-        assist_char_id: None,
-        guard_char_id: None,
-        is_abandoned: false,
-        is_sentry: false,
-        bandwidth_used: 5.0,
-        max_velocity: 100.0,
-        optimal_range: 1000.0,
-        damage_vector: dmg,
-        shield_repair_amount: 0.0,
-        armor_repair_amount: 0.0,
-        hull_repair_amount: 0.0,
-        web_speed_factor: 1.0,
-        neut_amount: 0.0,
-        ecm_strength: 0.0,
-        tp_sig_bonus_pct: 0.0,
-    };
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            crate::services::drone_test_helpers::seed_active_drone_in_runtime(r, drone_st.clone());
-        },
-        |r: &mut CombatRuntimeState| crate::services::drone_test_helpers::clear_active_drones_in_runtime(r)
-    );
     let npc_st = ExtendedNpcEntity {
         ball_id: 1,
         type_id: 10_000,

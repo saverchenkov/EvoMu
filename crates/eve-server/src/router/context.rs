@@ -897,6 +897,9 @@ impl ServerContext {
                 crate::services::ice_heist_ops::step_ice_heist_system(&ctx, sys_id).await;
                 crate::services::doomsday_aoe_ops::step_bosonic_doomsday_system(&ctx, sys_id).await;
                 crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
+                if let Some(h) = (dt > 0.0).then(|| ctx.systems.get_handle(sys_id)).flatten() {
+                    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones_in_system(&ctx, &h, ctx.now_unix()).await;
+                }
             })
         }));
         ctx.db.with_mut_snapshot(|snap| {
@@ -911,6 +914,7 @@ impl ServerContext {
         crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(&ctx);
         ctx.hydrate_server_runtime_from_db();
         crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
+        crate::system_actor::migrate_legacy_active_drones_at_startup(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
         {
@@ -2654,7 +2658,10 @@ impl ServerContext {
     /// `FitProjection` to the system actor when the ship is in space (`#834`, `#922`).
     pub(crate) fn invalidate_and_push_fit(&self, ship_id: i64) -> Option<eve_dogma::FitRev> {
         self.invalidate_ship_fitting_cache_only(ship_id);
-        self.push_fit_projection_for_ship(ship_id)
+        let rev = self.push_fit_projection_for_ship(ship_id);
+        // Drop cached fit without bumping FitRev again so invalidation contract holds.
+        self.ship_fittings.write().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+        rev
     }
 
     /// Resolves the owner/pilot for `ship_id` and invokes [`Self::push_fit_projection`].
@@ -2984,20 +2991,16 @@ impl ServerContext {
                     }
                     changed
                 });
-            crate::services::combat_crimewatch::with_combat_ephemeral(self, |rt| {
-                for d in rt.active_drones_in_space.values() {
-                    if d.parent_ship_id == ship_id && !d.is_abandoned {
-                        if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
-                            existing.drones.push((d.drone_item_id, d.type_id));
-                            drones_changed = true;
-                        }
-                        if !existing.drones.iter().any(|&(id, _)| id == d.ball_id) {
-                            existing.drones.push((d.ball_id, d.type_id));
+            for (_, d) in self.systems.all_active_drones() {
+                if d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned {
+                    for id in [d.drone_item_id, d.ball_id] {
+                        if !existing.drones.iter().any(|&(eid, _)| eid == id) {
+                            existing.drones.push((id, d.type_id));
                             drones_changed = true;
                         }
                     }
                 }
-            });
+            }
             for &(probe_id, probe_type_id) in &active_probes {
                 if !existing.drones.iter().any(|&(id, _)| id == probe_id) {
                     existing.drones.push((probe_id, probe_type_id));
@@ -3211,18 +3214,15 @@ impl ServerContext {
                 fit.drones.push((item.item_id, item.type_id));
             }
         }
-        crate::services::combat_crimewatch::with_combat_runtime(self, |rt| {
-            for d in rt.active_drones_in_space.values() {
-                if d.parent_ship_id == ship_id && !d.is_abandoned {
-                    if !fit.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
-                        fit.drones.push((d.drone_item_id, d.type_id));
-                    }
-                    if !fit.drones.iter().any(|&(id, _)| id == d.ball_id) {
-                        fit.drones.push((d.ball_id, d.type_id));
+        for (_, d) in self.systems.all_active_drones() {
+            if d.ball_id > 0 && d.parent_ship_id == ship_id && !d.is_abandoned {
+                for id in [d.drone_item_id, d.ball_id] {
+                    if !fit.drones.iter().any(|&(eid, _)| eid == id) {
+                        fit.drones.push((id, d.type_id));
                     }
                 }
             }
-        });
+        }
         for &(probe_id, probe_type_id) in &active_probes {
             if !fit.drones.iter().any(|&(id, _)| id == probe_id) {
                 fit.drones.push((probe_id, probe_type_id));

@@ -1014,16 +1014,17 @@ async fn resolve_direct_weapon_target(
         Ok(tid)
     } else if is_fof_missile {
         let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+        sys_handle.ensure_active_drones_hydrated().await;
+        let sys_view = sys_handle.view();
         let nearest = all_balls
             .into_iter()
             .filter(|b| {
                 b.id != ship_id
-                    && (with_combat_runtime(ctx, |rt| {
-                        rt.npc_entities.contains_key(&b.id)
-                            || rt.active_drones_in_space.contains_key(&b.id)
-                    }) || ctx.sde.types.get(&b.type_id).is_some_and(|t| {
-                        matches!(t.category_id, 6 | 11 | 18 | 65)
-                    }))
+                    && (sys_view.active_drones_in_space.contains_key(&b.id)
+                        || with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&b.id))
+                        || ctx.sde.types.get(&b.type_id).is_some_and(|t| {
+                            matches!(t.category_id, 6 | 11 | 18 | 65)
+                        }))
             })
             .min_by(|a, b| {
                 attacker_ball

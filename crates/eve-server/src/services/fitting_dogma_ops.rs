@@ -85,12 +85,10 @@ pub(crate) async fn handle_dogma_ops(
             let is_authorized = session.ship_id == Some(source_id)
                 || is_assumed_structure
                 || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))
-                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.active_drones_in_space.values().any(|d| {
-                        (d.ball_id == source_id || d.drone_item_id == source_id)
-                            && d.owner_char_id == char_id
-                    })
-                });
+                || ctx
+                    .systems
+                    .find_active_drone_by_item(source_id)
+                    .is_some_and(|(_, d)| d.owner_char_id == char_id);
 
             if !is_authorized {
                 return Some(Err(BridgeRpcError {
@@ -414,12 +412,10 @@ pub(crate) async fn handle_dogma_ops(
             let is_authorized = session.ship_id == Some(source_id)
                 || is_assumed_structure
                 || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))
-                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.active_drones_in_space.values().any(|d| {
-                        (d.ball_id == source_id || d.drone_item_id == source_id)
-                            && d.owner_char_id == char_id
-                    })
-                });
+                || ctx
+                    .systems
+                    .find_active_drone_by_item(source_id)
+                    .is_some_and(|(_, d)| d.owner_char_id == char_id);
 
             if !is_authorized {
                 return Some(Err(BridgeRpcError {
@@ -1075,13 +1071,12 @@ pub(crate) async fn handle_dogma_ops(
                 },
             );
 
-            let active_drones = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space
-                    .values()
-                    .filter(|d| d.owner_char_id == char_id)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
+            let active_drones: Vec<_> = ctx
+                .systems
+                .all_active_drones()
+                .into_iter()
+                .filter_map(|(_, d)| (d.ball_id > 0 && d.owner_char_id == char_id).then_some(d))
+                .collect();
             for d in active_drones {
                 let Some(scene) =
                     crate::router::notify_registry::BallparkScene::try_solar_system(d.solar_system_id)
@@ -1155,13 +1150,8 @@ fn resolve_parent_ship_for_dogma_item(
     if db_parent.is_some() {
         return (item_opt, db_parent);
     }
-    if let Some(sd_parent) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .find(|d| d.ball_id == item_id || d.drone_item_id == item_id)
-            .map(|d| (d.owner_char_id, d.parent_ship_id))
-    }) {
-        return (item_opt, Some(sd_parent));
+    if let Some((_, sd)) = ctx.systems.find_active_drone_by_item(item_id) {
+        return (item_opt, Some((sd.owner_char_id, sd.parent_ship_id)));
     }
     if let Some(probe_parent) = ctx
         .active_scanner_probes
@@ -1532,11 +1522,11 @@ fn check_dogma_item_access(
             }
         }
         false
-    }) || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.values().any(|d| {
-            (d.ball_id == item_id || d.drone_item_id == item_id) && d.owner_char_id == char_id
-        })
     }) || ctx
+        .systems
+        .find_active_drone_by_item(item_id)
+        .is_some_and(|(_, d)| d.owner_char_id == char_id)
+    || ctx
         .active_scanner_probes
         .read()
         .ok()

@@ -272,7 +272,7 @@ async fn drone_control_range_damage_destruction_and_salvager_tractor_guards() {
         (0.0, false)
     );
     ctx.db.with_mut_snapshot(|snap| {
-        let it = make_fighter_item(drone_item_id, 2_456, char_id, sys_id as i64, InventoryFlag::DroneBay, 1);
+        let it = make_fighter_item(drone_item_id, 2_456, char_id, sys_id as i64, InventoryFlag::None, 1);
         snap.items.insert(drone_item_id, it);
         snap.items.insert(
             wreck_id,

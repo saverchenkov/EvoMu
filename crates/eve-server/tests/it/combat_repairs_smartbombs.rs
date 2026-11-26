@@ -561,15 +561,13 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
         id: probe_ball_id, type_id: 30013, position: ship_ball.position + DVec3::new(900.0, 0.0, 0.0),
         velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000.0, radius: 2.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }, low_hp_cs).await.unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(drone_ball_id, DroneSpaceState {
-            ball_id: drone_ball_id, drone_item_id: drone_ball_id, type_id: 2454, group_id: 100,
-            owner_char_id: neutral_char_id, original_owner_char_id: neutral_char_id, parent_ship_id: neutral_ship_id,
-            solar_system_id: sys_id, target_id: None, activity_state: 2, assist_char_id: None, guard_char_id: None,
-            is_abandoned: false, is_sentry: false, bandwidth_used: 5.0, max_velocity: 1000.0, optimal_range: 5000.0,
-            damage_vector: eve_destiny::DamageVector::default(), shield_repair_amount: 0.0, armor_repair_amount: 0.0,
-            hull_repair_amount: 0.0, web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
+    eve_server::services::drone_test_helpers::seed_active_drone(&ctx, DroneSpaceState {
+        ball_id: drone_ball_id, drone_item_id: drone_ball_id, type_id: 2454, group_id: 100,
+        owner_char_id: neutral_char_id, original_owner_char_id: neutral_char_id, parent_ship_id: neutral_ship_id,
+        solar_system_id: sys_id, target_id: None, activity_state: 2, assist_char_id: None, guard_char_id: None,
+        is_abandoned: false, is_sentry: false, bandwidth_used: 5.0, max_velocity: 1000.0, optimal_range: 5000.0,
+        damage_vector: eve_destiny::DamageVector::default(), shield_repair_amount: 0.0, armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0, web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
     });
 
     ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)], &kw, None).await.unwrap();
@@ -603,7 +601,10 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
     );
     assert_eq!(sys.get_combat_state(outside_ship_id).await.unwrap().unwrap().shield_hp, outside_hp_before, "Entity outside smartbomb range (6000m > 5000m) must be left unharmed");
     assert!(sys.get_ball_snapshot(drone_ball_id).await.unwrap().is_none() && sys.get_ball_snapshot(probe_ball_id).await.unwrap().is_none());
-    assert!(with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&drone_ball_id)), "Drone destroyed by Smartbomb AoE must be removed from active space drones");
+    assert!(
+        !eve_server::services::drone_test_helpers::has_active_drone(&ctx, drone_ball_id),
+        "Drone destroyed by Smartbomb AoE must be removed from active space drones"
+    );
     assert!(with_combat_runtime(&ctx, |rt| rt.in_flight_missiles.get(&missile_ball_id).is_some_and(|m| m.destroyed)), "In-flight missile within smartbomb range must be destroyed");
     assert!(sys.get_ball_snapshot(missile_ball_id).await.unwrap().is_none(), "Destroyed missile ball must be removed from space");
     let cw_sb = ctx.crimewatch.with_crimewatch(|cw| cw.states.get(&char_id).cloned().unwrap_or_default());
@@ -654,15 +655,13 @@ async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_impl() {
         id: wreck3_id, type_id: 26561, position: ship_ball.position + DVec3::new(1_400.0, 0.0, 0.0),
         velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 10_000.0, radius: 25.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }, CombatState::default()).await.unwrap();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(100_921_085, DroneSpaceState {
-            ball_id: 100_921_085, drone_item_id: 100_921_085, type_id: 32787, group_id: 1159,
-            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
-            solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None, guard_char_id: None,
-            is_abandoned: false, is_sentry: false, bandwidth_used: 5.0, max_velocity: 1000.0, optimal_range: 5000.0,
-            damage_vector: eve_destiny::DamageVector::default(), shield_repair_amount: 0.0, armor_repair_amount: 0.0,
-            hull_repair_amount: 0.0, web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
+    eve_server::services::drone_test_helpers::seed_active_drone(&ctx, DroneSpaceState {
+        ball_id: 100_921_085, drone_item_id: 100_921_085, type_id: 32787, group_id: 1159,
+        owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
+        solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None, guard_char_id: None,
+        is_abandoned: false, is_sentry: false, bandwidth_used: 5.0, max_velocity: 1000.0, optimal_range: 5000.0,
+        damage_vector: eve_destiny::DamageVector::default(), shield_repair_amount: 0.0, armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0, web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
     });
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdSalvage", &[PyRep::Integer(wreck3_id)], &kw, None)
         .await.expect("Salvage Drone CmdSalvage on foreign yellow wreck on Safety Green must succeed");

@@ -321,6 +321,16 @@ async fn drone_mining_validates_ice_excavator_rorqual_and_registers_active_miner
     assert_eq!(handle(&ctx, &mut sess, "entity", "CmdMineRepeatedly", &[PyRep::Integer(exc_drone), PyRep::Integer(ore_ast)], None).await.unwrap().unwrap_err().code, "IndustrialCoreRequired");
 
     ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.insert(core_id); });
+    crate::services::drone_test_helpers::seed_active_drones(
+        &ctx,
+        [(ore_drone, 994_005), (exc_drone, 994_007)].map(|(id, type_id)| {
+            crate::system_actor::DroneSpaceState {
+                ball_id: id, drone_item_id: id, type_id, group_id: 101,
+                owner_char_id: char_id, original_owner_char_id: char_id,
+                parent_ship_id: ship_id, solar_system_id: sys_id, ..Default::default()
+            }
+        }),
+    );
     let res = handle(&ctx, &mut sess, "entity", "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(ore_drone), PyRep::Integer(exc_drone)]), PyRep::Integer(ore_ast)], None).await.unwrap().unwrap();
     assert_eq!(res, PyRep::Dict(Vec::new()));
     assert_eq!(handle(&ctx, &mut sess, "entity", "CmdMineRepeatedly", &[PyRep::Integer(exc_drone), PyRep::Integer(ore_ast)], None).await.unwrap().unwrap_err().code, "DroneAlreadyMining");

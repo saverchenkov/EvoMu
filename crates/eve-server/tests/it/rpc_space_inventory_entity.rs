@@ -19,7 +19,7 @@ use super::common;
 use eve_server::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, ExtendedNpcEntity,
+    with_combat_runtime, ExtendedNpcEntity,
 };
 
 const SYS_JITA: u32 = 30_000_142;
@@ -592,9 +592,8 @@ async fn test_entity_drone_space_commands() {
     assert!(dmg > 0.0, "Engaged drones must deal combat damage");
 
     // Verify active drone in space updated its target_id
-    let drone_target = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).and_then(|d| d.target_id)
-    });
+    let drone_target = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+        .and_then(|d| d.target_id);
     assert_eq!(drone_target, Some(target_ball_id));
 
     // 2. rpc:entity.CmdReturnHome: command drones to return home and orbit ship
@@ -604,9 +603,9 @@ async fn test_entity_drone_space_commands() {
     let returned_count = home_res.as_i64().unwrap_or(0);
     assert!(returned_count >= 1, "At least 1 drone returned home");
 
-    let drone_target_after_home = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).and_then(|d| d.target_id)
-    });
+    let drone_target_after_home =
+        eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+            .and_then(|d| d.target_id);
     assert_eq!(drone_target_after_home, None, "Returning home clears combat target");
 
     // 3. rpc:entity.CmdAssist & rpc:entity.CmdGuard: fleet commands
@@ -624,9 +623,8 @@ async fn test_entity_drone_space_commands() {
     assert_eq!(dict_get(&assist_res, "mode"), Some(&PyRep::String("CmdAssist".into())));
     assert_eq!(dict_get(&assist_res, "assignedToCharID"), Some(&PyRep::Integer(fleetmate_char_id)));
 
-    let drone_assist = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).and_then(|d| d.assist_char_id)
-    });
+    let drone_assist = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+        .and_then(|d| d.assist_char_id);
     assert_eq!(drone_assist, Some(fleetmate_char_id));
 
     let guard_res = rpc_call(
@@ -642,9 +640,8 @@ async fn test_entity_drone_space_commands() {
     assert_eq!(dict_get(&guard_res, "mode"), Some(&PyRep::String("CmdGuard".into())));
     assert_eq!(dict_get(&guard_res, "assignedToCharID"), Some(&PyRep::Integer(fleetmate_char_id)));
 
-    let drone_guard = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).and_then(|d| d.guard_char_id)
-    });
+    let drone_guard = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+        .and_then(|d| d.guard_char_id);
     assert_eq!(drone_guard, Some(fleetmate_char_id));
 
     // 4. rpc:entity.CmdAbandonDrone: abandon active drones in space
@@ -653,9 +650,9 @@ async fn test_entity_drone_space_commands() {
         .expect("CmdAbandonDrone");
     assert_eq!(abandon_res, PyRep::Dict(Vec::new()));
 
-    let is_abandoned = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).map(|d| d.is_abandoned).unwrap_or(false)
-    });
+    let is_abandoned = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+        .map(|d| d.is_abandoned)
+        .unwrap_or(false);
     assert!(is_abandoned, "Drone must be flagged as abandoned");
 
     // 5. rpc:entity.CmdReconnectToDrones: reconnect to abandoned drones
@@ -664,9 +661,9 @@ async fn test_entity_drone_space_commands() {
         .expect("CmdReconnectToDrones");
     assert!(matches!(reconnect_res, PyRep::Dict(_)));
 
-    let reconnected_owner = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.get(&drone_ball_id).map(|d| (d.is_abandoned, d.owner_char_id))
-    });
+    let reconnected_owner =
+        eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+            .map(|d| (d.is_abandoned, d.owner_char_id));
     assert_eq!(reconnected_owner, Some((false, char_id)));
 
     // A drone farther than 250km is out of control range and cannot be reconnected
@@ -685,13 +682,14 @@ async fn test_entity_drone_space_commands() {
             mode: MovementMode::Stop,
         })
         .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        let mut d = rt.active_drones_in_space.get(&drone_ball_id).cloned().expect("drone");
+    {
+        let mut d = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+            .expect("drone");
         d.ball_id = distant_drone_id;
         d.drone_item_id = distant_drone_id;
         d.is_abandoned = true;
-        rt.active_drones_in_space.insert(distant_drone_id, d);
-    });
+        eve_server::services::drone_test_helpers::seed_active_drone(&ctx, d);
+    }
     let reconnect_distant = rpc_call(&ctx, &mut sess, "entity", "CmdReconnectToDrones", &[], &kw)
         .await
         .expect("CmdReconnectToDrones distant check");

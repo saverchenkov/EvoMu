@@ -711,11 +711,9 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     .await
     .expect("CmdReturnBay");
     assert_eq!(recalled, PyRep::Dict(vec![]));
-    with_combat_runtime(&ctx, |rt| {
-        for &bid in &launched_balls {
-            assert!(!rt.active_drones_in_space.contains_key(&bid));
-        }
-    });
+    for &bid in &launched_balls {
+        assert!(!eve_server::services::drone_test_helpers::has_active_drone(&ctx, bid));
+    }
 
     // 5. Launch Warden I (`23559` immobile sentry), 'Augmented' Ogre (`28288`), Berserker SW-900 (`23536`), Salvage Drone I (`32787`), and Mutated Hobgoblin (`2454`)
     ctx.db.with_mut_snapshot(|snap| {
@@ -916,17 +914,15 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
         PyRep::Dict(d) => assert!(d.is_empty(), "CmdReconnectToDrones returned errors: {d:?}"),
         other => panic!("Expected dict response from CmdReconnectToDrones, got {other:?}"),
     }
-    let (reconnected_count, reconnected_states) = with_combat_runtime(&ctx, |rt| {
-        let matching: Vec<_> = rt
-            .active_drones_in_space
-            .values()
-            .filter(|d| d.owner_char_id == char_id && !d.is_abandoned)
-            .collect();
+    let (reconnected_count, reconnected_states) = {
+        let matching = eve_server::services::drone_test_helpers::active_drones_matching(&ctx, |d| {
+            d.owner_char_id == char_id && !d.is_abandoned
+        });
         (
             matching.len(),
             matching.iter().map(|d| d.activity_state).collect::<Vec<_>>(),
         )
-    });
+    };
     assert_eq!(reconnected_count, 5, "Expected all 5 abandoned drones to be reconnected");
     for st in reconnected_states {
         assert_eq!(st, 0, "Reconnected drone activity_state must be 0 (idle)");
@@ -1448,12 +1444,10 @@ async fn tristan_v24_partial_drone_stack_launch_contract() {
         PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())])
     );
 
-    let active_hobs = with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| d.parent_ship_id == tristan_a && !d.is_abandoned)
-            .count()
-    });
+    let active_hobs = eve_server::services::drone_test_helpers::active_drones_for_ship(&ctx, tristan_a)
+        .into_iter()
+        .filter(|d| !d.is_abandoned)
+        .count();
     assert_eq!(active_hobs, 5, "5 Hobgoblin I drones must be active in space");
     assert_eq!(
         ctx.db.with_snapshot(|s| s.items.get(&hob_stack_id).map(|i| i.quantity)),
@@ -1567,4 +1561,94 @@ async fn tristan_v24_partial_drone_stack_launch_contract() {
     .await
     .expect_err("LaunchDrones when 0 remaining drones fit bandwidth must fail with MaxBandwidthExceeded");
     assert_eq!(bw_err.code, "MaxBandwidthExceeded");
+}
+
+#[tokio::test]
+async fn test_player_drone_destroyed_via_smartbomb_and_aoe_emits_control_loss_and_cleans_distinct_item_id()
+{
+    let ctx = ServerContext::new();
+    let (sys_id, attacker_char, attacker_ship, victim_char, victim_ship, smartbomb_id) =
+        (30_002_537u32, 91_000_901i64, 101_000_901i64, 91_000_902i64, 101_000_902i64, 101_900_901i64);
+
+    let mut attacker_sess = setup_pilot_session(&ctx, 8901, attacker_char, attacker_ship, 645, sys_id, DVec3::ZERO).await;
+    let _victim_sess = setup_pilot_session(&ctx, 8902, victim_char, victim_ship, 626, sys_id, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk_entry = snap.skills.entry(attacker_char).or_default();
+        for sid in [3426u32, 3413, 3418, 3417, 3416, 3392, 3393, 3436] {
+            sk_entry.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        if let Some(t) = ctx.sde.types.get(&3993) {
+            for attr in [eve_sde::attr_ids::REQUIRED_SKILL_1, eve_sde::attr_ids::REQUIRED_SKILL_2, eve_sde::attr_ids::REQUIRED_SKILL_3] {
+                if let Some(&req_sid) = t.default_attributes.get(&attr) {
+                    if req_sid as u32 > 0 {
+                        sk_entry.insert(req_sid as u32, TrainedSkillRecord { type_id: req_sid as u32, level: 5, skill_points: 256_000.0 });
+                    }
+                }
+            }
+        }
+        snap.items.insert(smartbomb_id, InventoryItemRecord {
+            item_id: smartbomb_id, type_id: 3993, owner_id: attacker_char, location_id: attacker_ship,
+            flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+        snap.module_online_states.insert(smartbomb_id, true);
+    });
+    ctx.invalidate_ship_fitting(attacker_ship);
+    crate::common::borrow_wire_harness(&ctx, &mut attacker_sess)
+        .call_exchange("crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)], &kw).await.result.expect("SetSafetyLevel Red");
+
+    let seed_distinct_drone = |drone_item_id: i64, ball_id: i64, pos: DVec3| {
+        let (ctx_ref, sys_ref) = (&ctx, &sys_handle);
+        async move {
+            ctx_ref.db.with_mut_snapshot(|snap| {
+                snap.items.insert(drone_item_id, InventoryItemRecord {
+                    item_id: drone_item_id, type_id: 2454, owner_id: victim_char, location_id: sys_id as i64,
+                    flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
+                });
+                snap.sp6_lifecycle.space_object_meta.insert(drone_item_id, eve_db::PersistedSpaceObjectMeta { drone_ball_id: Some(ball_id), ..Default::default() });
+            });
+            let low_hp = eve_destiny::CombatState { shield_hp: 5.0, armor_hp: 5.0, structure_hp: 5.0, ..Default::default() };
+            sys_ref.spawn_ball_with_combat(Ball {
+                id: ball_id, type_id: 2454, position: pos, velocity: DVec3::ZERO, max_velocity: 300.0,
+                inertia: 1.0, mass: 5_000.0, radius: 5.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+            }, low_hp).await.unwrap();
+            eve_server::services::drone_test_helpers::seed_active_drone(ctx_ref, eve_server::services::combat_crimewatch::DroneSpaceState {
+                ball_id, drone_item_id, type_id: 2454, group_id: 100, owner_char_id: victim_char,
+                original_owner_char_id: victim_char, parent_ship_id: victim_ship, solar_system_id: sys_id,
+                target_id: Some(attacker_ship), activity_state: 1, bandwidth_used: 5.0,
+                max_velocity: 1000.0, optimal_range: 5000.0, ..Default::default()
+            });
+        }
+    };
+    let assert_control_loss = |notifs: &[eve_server::router::PendingMachoNotification], item_id: i64| {
+        assert!(notifs.iter().any(|n| n.event == "OnDroneStateChange" && [0, 1, 2, 3].iter().zip([item_id, 0, 0, 0]).all(|(&i, exp)| n.args.get(i).and_then(|v| v.as_i64()) == Some(exp))), "OnDroneStateChange(0,0,0) for {item_id}: {notifs:?}");
+        assert!(notifs.iter().any(|n| n.event == "OnDroneActivityChange" && n.args.first().and_then(|v| v.as_i64()) == Some(item_id) && n.args.get(1).and_then(|v| v.as_i64()) == Some(0) && matches!(n.args.get(2), Some(PyRep::None))), "OnDroneActivityChange(0, None) for {item_id}");
+        assert!(notifs.iter().any(|n| n.event == "OnDroneControlLost" && n.args.first().and_then(|v| v.as_i64()) == Some(item_id)), "OnDroneControlLost for {item_id}");
+    };
+
+    // 1. Destroy drone #1 via live Smartbomb AoE (`dogmaIM.Activate` -> `cleanup_destroyed_non_ship_ball`).
+    let (drone_item_1, drone_ball_1) = (310_901i64, 320_901i64);
+    seed_distinct_drone(drone_item_1, drone_ball_1, DVec3::new(800.0, 0.0, 0.0)).await;
+    let _ = ctx.drain_notifications_for_char(victim_char);
+    crate::common::borrow_wire_harness(&ctx, &mut attacker_sess).call_exchange(
+        "dogmaIM", None, "Activate", &[PyRep::Integer(smartbomb_id), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(0)], &kw,
+    ).await.result.expect("Smartbomb Activate must destroy player drone");
+    assert!(sys_handle.get_ball_snapshot(drone_ball_1).await.unwrap().is_none());
+    assert!(!eve_server::services::drone_test_helpers::has_active_drone(&ctx, drone_ball_1));
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&drone_item_1)));
+    assert_control_loss(&ctx.drain_notifications_for_char(victim_char), drone_item_1);
+
+    // 2. Direct turret/missile destruction pipeline (`handle_destroyed_ball_from_missile_or_aoe`) when `drone_item_id != ball_id`.
+    let (drone_item_2, drone_ball_2) = (310_902i64, 320_902i64);
+    seed_distinct_drone(drone_item_2, drone_ball_2, DVec3::new(15_000.0, 0.0, 0.0)).await;
+    let _ = ctx.drain_notifications_for_char(victim_char);
+    eve_server::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+        &ctx, sys_id, attacker_char, drone_ball_2, 2454, DVec3::new(15_000.0, 0.0, 0.0), ctx.now_unix(),
+    ).await;
+    assert!(sys_handle.get_ball_snapshot(drone_ball_2).await.unwrap().is_none());
+    assert!(!eve_server::services::drone_test_helpers::has_active_drone(&ctx, drone_ball_2));
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&drone_item_2)));
+    assert_control_loss(&ctx.drain_notifications_for_char(victim_char), drone_item_2);
 }

@@ -8,7 +8,7 @@ use eve_destiny::{Ball, DVec3, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
 use std::collections::HashMap;
 
 fn new_ctx() -> ServerContext {
@@ -116,9 +116,9 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
         })
         .await;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            mobile_close,
+    eve_server::services::drone_test_helpers::seed_active_drones(
+        &ctx,
+        [
             DroneSpaceState {
                 ball_id: mobile_close,
                 drone_item_id: mobile_close,
@@ -146,9 +146,6 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
                 ecm_strength: 0.0,
                 tp_sig_bonus_pct: 0.0,
             },
-        );
-        rt.active_drones_in_space.insert(
-            sentry_far,
             DroneSpaceState {
                 ball_id: sentry_far,
                 drone_item_id: sentry_far,
@@ -176,8 +173,8 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
                 ecm_strength: 0.0,
                 tp_sig_bonus_pct: 0.0,
             },
-        );
-    });
+        ],
+    );
 
     // 1. Pre-validation: Calling CmdReturnBay with both drones must fail because sentry is out of range,
     // and mobile drone must NOT be scooped!
@@ -196,10 +193,14 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     assert_eq!(pre_err.code, "SentryDroneOutOfScoopRange");
 
     // Both drones must still be in space
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space.contains_key(&mobile_close), "Mobile drone must not be scooped on error");
-        assert!(rt.active_drones_in_space.contains_key(&sentry_far), "Sentry drone must not be scooped");
-    });
+    assert!(
+        eve_server::services::drone_test_helpers::has_active_drone(&ctx, mobile_close),
+        "Mobile drone must not be scooped on error"
+    );
+    assert!(
+        eve_server::services::drone_test_helpers::has_active_drone(&ctx, sentry_far),
+        "Sentry drone must not be scooped"
+    );
     ctx.db.with_snapshot(|snap| {
         assert_ne!(snap.items.get(&mobile_close).unwrap().flag, InventoryFlag::DroneBay);
     });
@@ -238,9 +239,12 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     assert_eq!(ret_res, PyRep::Dict(vec![]));
 
     // Drone state must be returning (activity_state = 4)
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.active_drones_in_space.get(&mobile_close).unwrap().activity_state, 4);
-    });
+    assert_eq!(
+        eve_server::services::drone_test_helpers::active_drone(&ctx, mobile_close)
+            .unwrap()
+            .activity_state,
+        4
+    );
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnDroneStateChange"));
 
@@ -264,9 +268,10 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     eve_server::sp6_lifecycle::step_returning_drones(&ctx).await;
 
     // Drone must now be scooped into bay
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&mobile_close), "Returning drone must be scooped on tick");
-    });
+    assert!(
+        !eve_server::services::drone_test_helpers::has_active_drone(&ctx, mobile_close),
+        "Returning drone must be scooped on tick"
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.get(&mobile_close).unwrap().flag, InventoryFlag::DroneBay);
         assert_eq!(snap.items.get(&mobile_close).unwrap().location_id, ship_id);
@@ -279,16 +284,14 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     // 4. Drones left behind on warp stay owned and cannot be stolen by third parties (R-DRN-01)
     let warp_drone = 892_020i64;
     seed_item(&ctx, warp_drone, 2464, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(warp_drone, DroneSpaceState {
-            ball_id: warp_drone, drone_item_id: warp_drone, type_id: 2464, group_id: 100,
-            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
-            solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None,
-            guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
-            max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
-            shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
-            web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
+    eve_server::services::drone_test_helpers::seed_active_drone(&ctx, DroneSpaceState {
+        ball_id: warp_drone, drone_item_id: warp_drone, type_id: 2464, group_id: 100,
+        owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
+        solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None,
+        guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+        max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
+        shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
+        web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
     });
     let _ = sys_handle.spawn_ball(Ball {
         id: warp_drone, type_id: 2464, position: DVec3::new(100.0, 0.0, 0.0), velocity: DVec3::ZERO,
@@ -297,12 +300,13 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
 
     eve_server::sp6_lifecycle::disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
 
-    with_combat_runtime(&ctx, |rt| {
-        let d = rt.active_drones_in_space.get(&warp_drone).expect("drone still in space");
+    {
+        let d = eve_server::services::drone_test_helpers::active_drone(&ctx, warp_drone)
+            .expect("drone still in space");
         assert!(!d.is_abandoned, "Drone must NOT be abandoned on warp");
         assert_eq!(d.owner_char_id, char_id, "Drone owner must be preserved");
         assert_eq!(d.parent_ship_id, 0, "Drone parent ship must be cleared");
-    });
+    }
 
     let third_char = 90_000_003i64;
     let third_ship = 100_000_003i64;
@@ -327,10 +331,11 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
         &mut sess, "entity", None, "CmdReconnectToDrones", &[], &kw, None,
     ).await.expect("CmdReconnectToDrones by owner must succeed");
     assert!(matches!(rec_res, PyRep::Dict(_)));
-    with_combat_runtime(&ctx, |rt| {
-        let d = rt.active_drones_in_space.get(&warp_drone).expect("drone reconnected");
+    {
+        let d = eve_server::services::drone_test_helpers::active_drone(&ctx, warp_drone)
+            .expect("drone reconnected");
         assert_eq!(d.parent_ship_id, ship_id, "Drone must be reconnected to ship");
-    });
+    }
 
     // 6. Owner can recall drones to drone bay (R-DRN-02)
     let ret_res = ctx.dispatch_rpc(
@@ -346,16 +351,14 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     // Recalling a disconnected drone directly (parent_ship_id == 0) also succeeds (R-DRN-02)
     let warp_drone2 = 892_021i64;
     seed_item(&ctx, warp_drone2, 2464, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(warp_drone2, DroneSpaceState {
-            ball_id: warp_drone2, drone_item_id: warp_drone2, type_id: 2464, group_id: 100,
-            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: 0,
-            solar_system_id: sys_id, target_id: None, activity_state: 0, assist_char_id: None,
-            guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
-            max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
-            shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
-            web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
+    eve_server::services::drone_test_helpers::seed_active_drone(&ctx, DroneSpaceState {
+        ball_id: warp_drone2, drone_item_id: warp_drone2, type_id: 2464, group_id: 100,
+        owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: 0,
+        solar_system_id: sys_id, target_id: None, activity_state: 0, assist_char_id: None,
+        guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+        max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
+        shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
+        web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
     });
     let _ = sys_handle.spawn_ball(Ball {
         id: warp_drone2, type_id: 2464, position: DVec3::new(50.0, 0.0, 0.0), velocity: DVec3::ZERO,
@@ -757,13 +760,12 @@ async fn issue_1008_1020_fighting_drones_return_bay_and_destroyed_drone_clear_it
         .await
         .result
         .expect("CmdEngage succeeds");
-    with_combat_runtime(&ctx, |rt| {
-        for did in [d_close, d_far] {
-            let d = rt.active_drones_in_space.get(&did).expect("drone active");
-            assert_eq!(d.activity_state, 1);
-            assert_eq!(d.target_id, Some(npc_id));
-        }
-    });
+    for did in [d_close, d_far] {
+        let d = eve_server::services::drone_test_helpers::active_drone(&ctx, did)
+            .expect("drone active");
+        assert_eq!(d.activity_state, 1);
+        assert_eq!(d.target_id, Some(npc_id));
+    }
 
     // 2. CmdReturnBay on fighting drones: even if speed_fraction dropped to 0.0, close scoops immediately,
     //    far enters returning (4) with speed_fraction=1.0, auto-aggression does not hijack it, and it flies back to bay.
@@ -782,11 +784,14 @@ async fn issue_1008_1020_fighting_drones_return_bay_and_destroyed_drone_clear_it
         assert_eq!(snap.items[&d_close].flag, InventoryFlag::DroneBay);
         assert_eq!(snap.items[&d_close].location_id, ship_id);
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&d_close));
-        let far = rt.active_drones_in_space.get(&d_far).expect("far drone returning");
+    assert!(!eve_server::services::drone_test_helpers::has_active_drone(&ctx, d_close));
+    {
+        let far = eve_server::services::drone_test_helpers::active_drone(&ctx, d_far)
+            .expect("far drone returning");
         assert_eq!(far.activity_state, 4);
         assert_eq!(far.target_id, Some(ship_id));
+    }
+    with_mut_combat_runtime(&ctx, |rt| {
         rt.drone_settings.entry(char_id).or_default().aggressive = true;
     });
     let hijacked = eve_server::services::combat_crimewatch::combat_npcs_drones::step_drone_auto_aggression_and_assist(
@@ -797,13 +802,14 @@ async fn issue_1008_1020_fighting_drones_return_bay_and_destroyed_drone_clear_it
     for _ in 0..15 {
         let _ = sys_handle.step_manual(1.0).await;
         eve_server::sp6_lifecycle::step_returning_drones(&ctx).await;
-        if with_combat_runtime(&ctx, |rt| !rt.active_drones_in_space.contains_key(&d_far)) {
+        if !eve_server::services::drone_test_helpers::has_active_drone(&ctx, d_far) {
             break;
         }
     }
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&d_far), "returning drone must fly into 2500m scoop range and return to bay");
-    });
+    assert!(
+        !eve_server::services::drone_test_helpers::has_active_drone(&ctx, d_far),
+        "returning drone must fly into 2500m scoop range and return to bay"
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&d_far].flag, InventoryFlag::DroneBay);
         assert_eq!(snap.items[&d_far].location_id, ship_id);

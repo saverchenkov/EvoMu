@@ -37,10 +37,10 @@ pub use cluster_tick::{
     accumulate_physics_ticker_steps, catch_unwind_future, clamp_physics_ticker_backlog,
     compute_physics_step_lateness_ms, on_advance_secs, on_advance_secs_internal,
     on_advance_secs_with_sim_clock_rebase, populate_persisted_space_objects,
-    seed_persisted_abandoned_drones, step_active_systems_physics_tick,
-    step_active_systems_physics_tick_with_budget, step_active_systems_physics_tick_with_lateness,
-    tick_background_cluster, tick_background_cluster_with_step, MAX_PHYSICS_BACKLOG_STEPS,
-    PHYSICS_TICK_STEP_BUDGET, SYSTEM_STEP_ASK_TIMEOUT,
+    step_active_systems_physics_tick, step_active_systems_physics_tick_with_budget,
+    step_active_systems_physics_tick_with_lateness, tick_background_cluster,
+    tick_background_cluster_with_step, MAX_PHYSICS_BACKLOG_STEPS, PHYSICS_TICK_STEP_BUDGET,
+    SYSTEM_STEP_ASK_TIMEOUT,
 };
 pub(crate) use cluster_tick::{
     populate_persisted_space_objects_with_warps, sweep_expired_cosmic_anomalies_and_signatures,
@@ -54,8 +54,8 @@ pub use cluster_tick_downtime::{
 pub use drone_return::{
     abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,
     disconnect_drones_for_ship_on_warp_sync, handle_cmd_abandon_drone,
-    handle_cmd_reconnect_to_drones, handle_cmd_return_bay, step_repeating_drone_mining,
-    step_returning_drones,
+    handle_cmd_reconnect_to_drones, handle_cmd_return_bay, seed_persisted_abandoned_drones,
+    step_repeating_drone_mining, step_returning_drones,
 };
 
 use crate::router::notify_registry::{
@@ -1464,10 +1464,11 @@ pub fn safe_logoff_blocking_space_conditions(
         conds.push("SAFE_LOGOFF_IN_WARP");
     }
 
-    let has_drones_or_fighters = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
+    let has_drones_or_fighters = ctx.systems.get_handle(sys_id).is_some_and(|h| {
+        h.hydrated_view()
+            .active_drones_in_space
             .values()
-            .any(|d| !d.is_abandoned && (d.owner_char_id == char_id || d.parent_ship_id == ship_id))
+            .any(|d| d.ball_id > 0 && !d.is_abandoned && (d.owner_char_id == char_id || d.parent_ship_id == ship_id))
     }) || ctx
         .systems
         .snapshot_fighters_for_system(sys_id)

@@ -533,6 +533,7 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
                 type_id: 2454,
                 owner_id: char1,
                 location_id: sys_id as i64,
+                flag: InventoryFlag::None,
                 ..Default::default()
             },
         );
@@ -543,6 +544,7 @@ async fn step_ai_chase_idle_threat_weights_and_ball_destructions() {
                 type_id: 597,
                 owner_id: 1,
                 location_id: sys_id as i64,
+                flag: InventoryFlag::None,
                 ..Default::default()
             },
         );

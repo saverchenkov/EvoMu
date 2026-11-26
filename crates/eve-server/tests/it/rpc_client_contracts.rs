@@ -1956,43 +1956,41 @@ async fn reset_contract_space_drones_and_fighters(ctx: &ServerContext) {
         cs.is_tethered = false;
         cs.cloak_velocity_multiplier = None;
     });
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            ACTIVE_DRONE_ID,
-            eve_server::services::combat_crimewatch::DroneSpaceState {
-                ball_id: ACTIVE_DRONE_ID,
-                drone_item_id: ACTIVE_DRONE_ID,
-                type_id: 2_454,
-                group_id: 100,
-                owner_char_id: CHAR_ID,
-                original_owner_char_id: CHAR_ID,
-                parent_ship_id: SHIP_ID,
-                solar_system_id: SYSTEM_ID,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 2_600.0,
-                optimal_range: 2_000.0,
-                damage_vector: eve_destiny::DamageVector {
-                    em: 0.0,
-                    thermal: 20.0,
-                    kinetic: 0.0,
-                    explosive: 0.0,
-                },
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
+    eve_server::services::drone_test_helpers::seed_active_drone(
+        ctx,
+        eve_server::services::combat_crimewatch::DroneSpaceState {
+            ball_id: ACTIVE_DRONE_ID,
+            drone_item_id: ACTIVE_DRONE_ID,
+            type_id: 2_454,
+            group_id: 100,
+            owner_char_id: CHAR_ID,
+            original_owner_char_id: CHAR_ID,
+            parent_ship_id: SHIP_ID,
+            solar_system_id: SYSTEM_ID,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 2_600.0,
+            optimal_range: 2_000.0,
+            damage_vector: eve_destiny::DamageVector {
+                em: 0.0,
+                thermal: 20.0,
+                kinetic: 0.0,
+                explosive: 0.0,
             },
-        );
-    });
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
     eve_server::services::fighter_test_helpers::insert_active_fighter(
         ctx,
         ACTIVE_FIGHTER_ID,

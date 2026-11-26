@@ -1226,6 +1226,10 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
         .into_iter()
         .filter(|(_, m)| m.owner_char_id == CHAR_B_ID || b_ships.contains(&m.ship_id))
         .count();
+    let drones_count = eve_server::services::drone_test_helpers::active_drones_matching(&fix.ctx, |d| {
+        d.owner_char_id == CHAR_B_ID || b_ships.contains(&d.parent_ship_id)
+    })
+    .len();
     eve_server::services::combat_crimewatch::with_combat_runtime(&fix.ctx, |rt| CombatRuntimeBSig {
         duel_challenges,
         corp_aggression: rt.corp_aggression_settings.get(&CORP_B_ID).copied(),
@@ -1251,11 +1255,7 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
             .iter()
             .filter_map(|&sid| rt.self_destruct_generations.get(&sid).map(|&g| (sid, g)))
             .collect(),
-        drones_count: rt
-            .active_drones_in_space
-            .values()
-            .filter(|d| d.owner_char_id == CHAR_B_ID || b_ships.contains(&d.parent_ship_id))
-            .count(),
+        drones_count,
         drone_miners_count,
         behavior_debug_b: b_ships.iter().any(|s| rt.behavior_debugging_active.contains(s))
             || rt.behavior_debugging_active.contains(&CHAR_B_ID),

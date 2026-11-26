@@ -555,12 +555,8 @@ async fn test_sp7_self_destruct_server_timer_detonates_without_second_client_cal
         ch.active_ship_id
     });
     assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
-    let is_abandoned = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .find(|d| d.drone_item_id == drone_id)
-            .map(|d| d.is_abandoned)
-    });
+    let is_abandoned = eve_server::services::drone_test_helpers::find_active_drone_by_item(&ctx, drone_id)
+        .map(|d| d.is_abandoned);
     assert_eq!(is_abandoned, Some(true), "Drone in space must be abandoned when ship self-destructs on server timer");
     let death_notifs = ctx.drain_notifications_for_char(90_000_001);
     assert!(

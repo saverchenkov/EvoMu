@@ -1048,95 +1048,8 @@ pub(crate) fn populate_persisted_space_objects_with_warps(
     pending_disruptors
 }
 
-/// Seeds abandoned [`crate::services::combat_crimewatch::DroneSpaceState`] entries for any persisted
-/// in-space drones (`category_id == 18`, `location_id` in `30_000_000..=34_000_000`) when a
-/// [`ServerContext`] initializes from SQLite (`feat:lifecycle.drones-in-space-persist-restart`).
-// parity: feat:lifecycle.drones-in-space-persist-restart
-pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
-    let mut drones = Vec::new();
-    let mut fighters = Vec::new();
-    ctx.db.with_snapshot(|snap| {
-        for item in snap.items.values() {
-            if !(30_000_000..=34_000_000).contains(&item.location_id) {
-                continue;
-            }
-            let Some(t) = ctx.sde.types.get(&item.type_id) else {
-                continue;
-            };
-            let ball_id = snap
-                .sp6_lifecycle
-                .space_object_meta
-                .get(&item.item_id)
-                .and_then(|m| m.drone_ball_id)
-                .unwrap_or(item.item_id);
-            if t.category_id == 87 {
-                let max_sq = t.default_attributes.get(&2215).copied().map(|v| v as u32).unwrap_or(9);
-                fighters.push((item.location_id as u32, crate::system_actor::ActiveFighterSquadron {
-                    ball_id, item_id: item.item_id, type_id: item.type_id, owner_char_id: item.owner_id,
-                    parent_ship_id: 0, tube_index: 0, squadron_size: (item.quantity.max(1) as u32).min(max_sq),
-                    target_id: None, is_abandoned: true, mwd_active: false,
-                }));
-                continue;
-            }
-            if t.category_id != 18 {
-                continue;
-            }
-            let attr = |aid: u16| -> Option<f64> {
-                item.dynamic_attributes
-                    .get(&aid)
-                    .or_else(|| t.default_attributes.get(&aid))
-                    .copied()
-            };
-            let bw_used = attr(1272).unwrap_or(5.0);
-            let max_vel = attr(37).unwrap_or(1_500.0);
-            let opt_range = attr(54).unwrap_or(5_000.0);
-            let dmg_mult = attr(64).unwrap_or(1.0);
-            let dmg_vec = eve_destiny::DamageVector {
-                em: attr(114).unwrap_or(0.0) * dmg_mult,
-                explosive: attr(116).unwrap_or(0.0) * dmg_mult,
-                kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
-                thermal: attr(118).unwrap_or(0.0) * dmg_mult,
-            };
-            drones.push(crate::services::combat_crimewatch::DroneSpaceState {
-                ball_id,
-                drone_item_id: item.item_id,
-                type_id: item.type_id,
-                group_id: t.group_id,
-                owner_char_id: 0,
-                original_owner_char_id: item.owner_id,
-                parent_ship_id: 0,
-                solar_system_id: item.location_id as u32,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: true,
-                is_sentry: max_vel < 1.0,
-                bandwidth_used: bw_used,
-                max_velocity: max_vel,
-                optimal_range: opt_range,
-                damage_vector: dmg_vec,
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 1.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            });
-        }
-    });
-    if !drones.is_empty() {
-        with_mut_combat_runtime(ctx, |rt| {
-            for d in drones {
-                rt.active_drones_in_space.insert(d.ball_id, d);
-            }
-        });
-    }
-    if !fighters.is_empty() {
-        ctx.systems.seed_abandoned_fighters_by_system(fighters);
-    }
-}
+#[cfg(test)]
+pub(super) use super::drone_return::seed_persisted_abandoned_drones;
 
 /// Synchronously executes server-driven self-destruct when `now_unix >= detonate_at_unix`
 /// (`feat:lifecycle.self-destruct-server-timer`).
@@ -2369,7 +2282,6 @@ async fn tick_background_cluster_with_step_inner(ctx: &ServerContext, explicit_s
     let _ = crate::services::mining_cycle::process_mining_cycles(ctx).await;
     let _ = crate::sp6_lifecycle::step_repeating_drone_mining(ctx, now_unix).await;
     let _ = crate::sp6_lifecycle::step_returning_drones(ctx).await;
-    crate::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones(ctx, now_unix).await;
     let active_handles = ctx.systems.active_system_handles();
     let active_sys_set: std::collections::HashSet<u32> =
         active_handles.iter().map(|&(sys_id, _)| sys_id).collect();

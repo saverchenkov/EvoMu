@@ -1351,7 +1351,10 @@ async fn test_crimewatch_safety_setting_green_yellow_red_enforcement() {
     lock_target(&ctx, &mut atk_sess, jita, ally_s).await;
     lock_target(&ctx, &mut ally_sess, jita, vic_s).await;
     rpc(&ctx, &mut atk_sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(84_000_106)])]).await.unwrap();
-    let hob_ball = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.keys().copied().next().unwrap());
+    let hob_ball = eve_server::services::drone_test_helpers::active_drone_ids(&ctx)
+        .into_iter()
+        .next()
+        .unwrap();
 
     // 1. Safety Green (`2`) in high-sec blocks turret, Smartbomb, Burst Jammer, offensive drone, and remote repair onto LE/Suspect (`CantDoInCurrentSafetyLevel`)
     let _ = ctx.drain_notifications_for_char(atk_c);
@@ -1478,7 +1481,7 @@ use eve_db::{CorporationRecord, InventoryFlag, TrainedSkillRecord, UpwellStructu
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
 use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
-use eve_server::services::combat_crimewatch::{spawn_specialized_npc_entity, with_combat_runtime};
+use eve_server::services::combat_crimewatch::spawn_specialized_npc_entity;
 use eve_server::services::fighter_test_helpers;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
@@ -1510,7 +1513,10 @@ async fn test_crimewatch_weapons_timer_and_highsec_criminal_movement_restriction
         seed_item(&ctx, 85_000_109, 2454, a_id, sa_id, InventoryFlag::DroneBay, 1, true);
         lock_target(&ctx, &mut sa_sess, nullsec, sb_id).await;
         rpc(&ctx, &mut sa_sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(85_000_109)])]).await.unwrap();
-        let drone_ball = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.keys().copied().next().unwrap());
+        let drone_ball = eve_server::services::drone_test_helpers::active_drone_ids(&ctx)
+            .into_iter()
+            .next()
+            .unwrap();
 
         for (label, svc, method, args) in [
             ("turret", "dogmaIM", "Activate", vec![PyRep::Integer(85_000_101), PyRep::Integer(sb_id)]),
@@ -1739,7 +1745,11 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     assert_eq!(rpc(&ctx, &mut sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(ogre_1), PyRep::Integer(ogre_2), PyRep::Integer(ogre_3)])]).await.unwrap_err().code, "MaxBandwidthExceeded");
 
     // 2. Sentry drone stationary tracking (`Garde I` 23561 stays at 0 m/s; >2500m scoop/return rejected)
-    let garde_ball = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.values().find(|d| d.type_id == 23561).unwrap().ball_id);
+    let garde_ball = eve_server::services::drone_test_helpers::active_drones_matching(&ctx, |d| d.type_id == 23561)
+        .into_iter()
+        .next()
+        .unwrap()
+        .ball_id;
     let (_, garde_ball_snap) = sys_h.get_ball_snapshot(garde_ball).await.unwrap().unwrap();
     assert_eq!(garde_ball_snap.max_velocity, 0.0, "Sentry drone must have max_velocity == 0");
 
@@ -1748,7 +1758,7 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     assert_eq!(garde_after_snap.max_velocity, 0.0, "Sentry drone remains stationary at 0 m/s");
 
     // Sentry drone optimal, falloff, and tracking turret formula hit-chance evaluation
-    let d = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.get(&garde_ball).unwrap().clone());
+    let d = eve_server::services::drone_test_helpers::active_drone(&ctx, garde_ball).unwrap();
     let d_ball = Ball { id: garde_ball, type_id: 23561, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop };
     let falloff = d.effective_falloff_range(&ctx);
     let t_opt = Ball { id: 10004, type_id: 10004, position: DVec3::new(d.optimal_range, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
@@ -1792,7 +1802,11 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     assert_eq!(get_npc_entity(&ctx, frig_npc).and_then(|n| n.target_id), Some(tristan_id));
 
     rpc(&ctx, &mut frig_sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(frig_hob_item)])]).await.unwrap();
-    let frig_hob_ball = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space.values().find(|d| d.owner_char_id == frig_c).unwrap().ball_id);
+    let frig_hob_ball = eve_server::services::drone_test_helpers::active_drones_for_owner(&ctx, frig_c)
+        .into_iter()
+        .next()
+        .unwrap()
+        .ball_id;
     let _ = frig_h.set_ball_position(frig_hob_ball, DVec3::new(1_000.0, 0.0, 0.0)).await;
     ctx.advance_virtual_clock(1);
     tick_background_cluster(&ctx).await;
@@ -1817,11 +1831,12 @@ async fn test_drones_bandwidth_sentry_and_npc_aggro_switching_end_to_end() {
     assert_eq!(get_npc_entity(&ctx, npc_id).and_then(|n| n.target_id), Some(vexor_id));
 
     rpc(&ctx, &mut sess, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(ogre_1), PyRep::Integer(hobs[0])])]).await.unwrap();
-    let (ogre_ball, hob_ball) = with_combat_runtime(&ctx, |rt| {
-        let ob = rt.active_drones_in_space.values().find(|d| d.type_id == 2444).unwrap().ball_id;
-        let hb = rt.active_drones_in_space.values().find(|d| d.type_id == 2454).unwrap().ball_id;
+    let (ogre_ball, hob_ball) = {
+        let drones = eve_server::services::drone_test_helpers::active_drones_matching(&ctx, |_| true);
+        let ob = drones.iter().find(|d| d.type_id == 2444).unwrap().ball_id;
+        let hb = drones.iter().find(|d| d.type_id == 2454).unwrap().ball_id;
         (ob, hb)
-    });
+    };
     let _ = sys_h.set_ball_position(ogre_ball, DVec3::new(1_000.0, 0.0, 0.0)).await;
     let _ = sys_h.set_ball_position(hob_ball, DVec3::new(22_000.0, 0.0, 0.0)).await;
     ctx.advance_virtual_clock(1);

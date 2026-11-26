@@ -54,14 +54,28 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     ball_id: i64,
 ) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_handle.remove_ball(ball_id).await;
     crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, ball_id);
-    let _ = crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id);
     with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.remove(&ball_id);
     });
+    if crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id) {
+        let _ = sys_handle.remove_ball(ball_id).await;
+        return;
+    }
+    let _ = sys_handle.remove_ball(ball_id).await;
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
+        if snap.items.get(&ball_id).is_some_and(|it| {
+            it.location_id != i64::from(sys_id)
+                || (ctx
+                    .sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.category_id == 18)
+                    && it.flag != eve_db::InventoryFlag::None)
+        }) {
+            return;
+        }
         snap.combat_crimewatch_state
             .record_destroyed_item_id(ball_id);
         snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
@@ -844,7 +858,7 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                             snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
                                 .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|&oid| snap.characters.contains_key(&oid)))
                         })
-                        .or_else(|| with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&b.id).map(|d| d.owner_char_id)))
+                        .or_else(|| sys_handle.active_drone(b.id).map(|d| d.owner_char_id))
                         .or_else(|| sys_handle.view().fighters.active_fighters.get(&b.id).map(|f| f.owner_char_id))
                         .or_else(|| ctx.active_scanner_probes.read().ok().and_then(|ap| ap.get(&b.id).map(|p| p.owner_char_id)));
                         if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, sb_dmg, 5.0, now_unix).await {

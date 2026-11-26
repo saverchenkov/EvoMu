@@ -4,7 +4,6 @@
 
 use crate::router::notify_registry::{BallparkScene, OnDamageMessage, OnDamageMessages};
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::fleet_social::stream_fleet_watchlist_damage;
 use crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change_in_scene;
 use crate::services::notify_emitters_ess_bounties::emit_combat_message_in_scene;
@@ -92,14 +91,12 @@ pub(crate) fn emit_combat_log_and_damage_state(
     } else {
         3
     };
-    let active_drone = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.get(&target_ball_id).map(|d| {
-            (
-                !d.is_abandoned && d.owner_char_id > 0,
-                d.owner_char_id,
-                d.solar_system_id,
-            )
-        })
+    let active_drone = ctx.systems.find_active_drone(target_ball_id).map(|(_, d)| {
+        (
+            !d.is_abandoned && d.owner_char_id > 0,
+            d.owner_char_id,
+            d.solar_system_id,
+        )
     });
     let active_fighter = combat_sys_id
         .filter(|&id| id != 0)

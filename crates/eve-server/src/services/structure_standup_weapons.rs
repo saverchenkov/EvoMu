@@ -5,7 +5,7 @@
 
 use crate::formulas::vorton_arc_targets_with_cap;
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{char_safety_level, with_combat_runtime, SafetyLevel};
+use crate::services::combat_crimewatch::{char_safety_level, SafetyLevel};
 use crate::services::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state, InFlightGuidedBombRecord,
 };
@@ -217,7 +217,7 @@ fn consume_structure_charge(
 }
 
 fn resolve_victim_owner(ctx: &ServerContext, sys_handle: &SystemHandle, ball_id: i64) -> (Option<i64>, bool) {
-    if let Some(dc) = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&ball_id).map(|d| d.owner_char_id)) {
+    if let Some(dc) = sys_handle.active_drone(ball_id).map(|d| d.owner_char_id) {
         return (Some(dc), true);
     }
     if let Some(fc) = sys_handle
@@ -270,7 +270,7 @@ fn is_hostile_to_structure(
         .fighters
         .active_fighters
         .contains_key(&ball.id);
-    let is_drone = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.contains_key(&ball.id));
+    let is_drone = sys_handle.has_active_drone(ball.id);
     if let Some(bt) = ctx.sde.types.get(&ball.type_id) {
         if bt.group_id == GROUP_STANDUP_GUIDED_BOMB {
             return false;

@@ -913,6 +913,22 @@ pub(crate) struct SystemActorState {
     pub(crate) pending_launch_reservations: HashMap<i64, ((i64, usize), (i64, u32))>,
     pub(crate) pending_recall_or_scoop_claims: HashMap<i64, super::PendingClaimedSquadron>,
     pub(crate) fighters_removed_pre_hydration: HashSet<i64>,
+    pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    /// In-flight `LaunchDrones` capacity/bandwidth reservations held between `ReserveDroneLaunches`
+    /// and DB commit/`FinalizeDroneLaunches`. Stored separately from `active_drones_in_space` and
+    /// never published into `SystemView` so negative reservation IDs cannot leak into command,
+    /// mining, fitting, fleet, or evacuation scans (`#1541`).
+    pub(crate) reserved_drone_launches: HashMap<BallId, super::DroneSpaceState>,
+    /// Transient in-memory claim map preventing double-scoop races without mutating
+    /// `active_drones_in_space` or dirtying SQLite checkpoints until a scoop commits.
+    /// Stores an optional deferred abandon/disconnect action stamped if warp/logoff/abandon
+    /// arrives while the scoop awaits DB commit (`ReleaseClaim` executes it; `ConsumeScoop` discards it).
+    pub(crate) scoop_claimed_drones: HashMap<BallId, Option<super::PendingScoopAbandon>>,
+    pub(crate) active_drones_checkpoint_dirty: bool,
+    pub(crate) active_drones_checkpoint_seq: u64,
+    pub(crate) active_drones_needs_sqlite_hydration: bool,
+    pub(crate) active_drones_removed_pre_hydration: HashSet<BallId>,
+    pub(crate) drone_hydration: super::ActiveDronesSharedCtx,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1741,6 +1757,49 @@ pub enum SystemCommand {
         op: super::FighterTestHelperOp,
         reply: oneshot::Sender<super::FighterTestHelperOut>,
     },
+    UpsertActiveDrones {
+        drones: Vec<super::DroneSpaceState>,
+        only_if_absent: bool,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    ReserveDroneLaunches {
+        req: super::ReserveDroneLaunchesReq,
+        reply: oneshot::Sender<Result<super::ReserveDroneLaunchesOutcome, String>>,
+    },
+    FinalizeDroneLaunches {
+        mappings: Vec<(BallId, BallId, i64)>,
+        rollback_res_ids: Vec<BallId>,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    ReconnectDrones {
+        req: super::ReconnectDronesReq,
+        reply: oneshot::Sender<Result<super::ReconnectDronesOutcome, String>>,
+    },
+    MutateActiveDrones {
+        op: super::ActiveDroneMutOp,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    MutateActiveDronesWithClaims {
+        op: super::ActiveDroneMutWithClaimsOp,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ScoopDroneClaimOp {
+        ball_id: BallId,
+        action: super::DroneScoopClaimAction,
+        reply: oneshot::Sender<Result<super::DroneScoopClaimOutcome, String>>,
+    },
+    HydrateActiveDronesFromSqlite {
+        drones: Vec<super::DroneSpaceState>,
+        legacy_dirty: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SnapshotDirtyActiveDrones {
+        reply: oneshot::Sender<Result<Option<(u64, Vec<(BallId, super::DroneSpaceState)>)>, String>>,
+    },
+    CommitActiveDronesFlushed {
+        seq: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1802,6 +1861,8 @@ impl SystemCommand {
                 | Self::FlushConditionCheckpoint { .. }
                 | Self::FlushFighterCheckpoint { .. }
                 | Self::GetProtectionSnapshot { .. }
+                | Self::SnapshotDirtyActiveDrones { .. }
+                | Self::CommitActiveDronesFlushed { .. }
                 | Self::ShutdownActor { .. }
         )
     }
@@ -1945,6 +2006,8 @@ pub struct SystemView {
     pub pending_warp_finished: HashSet<BallId>,
     pub active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     pub drone_next_ready_unix: HashMap<BallId, u64>,
+    pub active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    pub active_drones_needs_sqlite_hydration: bool,
     pub stargate_activation_states: BTreeMap<BallId, eve_destiny::StargateActivationState>,
     pub active_module_cycles: Vec<ActiveModuleCycle>,
     pub external_active_modules: HashSet<(BallId, ItemId)>,
@@ -1993,6 +2056,8 @@ impl Default for SystemView {
             pending_warp_finished: HashSet::new(),
             active_drone_miners: HashMap::new(),
             drone_next_ready_unix: HashMap::new(),
+            active_drones_in_space: HashMap::new(),
+            active_drones_needs_sqlite_hydration: false,
             stargate_activation_states: BTreeMap::new(),
             active_module_cycles: Vec::new(),
             external_active_modules: HashSet::new(),
@@ -2022,6 +2087,8 @@ struct ViewActorSnapshot {
     pending_warp_finished: HashSet<BallId>,
     active_drone_miners: HashMap<BallId, super::DroneMiningState>,
     drone_next_ready_unix: HashMap<BallId, u64>,
+    active_drones_in_space: HashMap<BallId, super::DroneSpaceState>,
+    active_drones_needs_sqlite_hydration: bool,
     active_module_cycles: Vec<ActiveModuleCycle>,
     external_active_modules: HashSet<(BallId, ItemId)>,
     active_nanite_repairs: Vec<ActiveNaniteRepair>,
@@ -2120,6 +2187,8 @@ impl SystemView {
                 pending_warp_finished: st.warp_state.pending_warp_finished.clone(),
                 active_drone_miners: st.active_drone_miners.clone(),
                 drone_next_ready_unix: st.drone_next_ready_unix.clone(),
+                active_drones_in_space: st.active_drones_in_space.clone(),
+                active_drones_needs_sqlite_hydration: st.active_drones_needs_sqlite_hydration,
                 active_module_cycles: st.active_module_cycles.clone(),
                 external_active_modules: st.external_active_modules.clone(),
                 active_nanite_repairs: st.active_nanite_repairs.clone(),
@@ -2147,6 +2216,8 @@ impl SystemView {
                 pending_warp_finished: prev.pending_warp_finished.clone(),
                 active_drone_miners: prev.active_drone_miners.clone(),
                 drone_next_ready_unix: prev.drone_next_ready_unix.clone(),
+                active_drones_in_space: prev.active_drones_in_space.clone(),
+                active_drones_needs_sqlite_hydration: prev.active_drones_needs_sqlite_hydration,
                 active_module_cycles: prev.active_module_cycles.clone(),
                 external_active_modules: prev.external_active_modules.clone(),
                 active_nanite_repairs: prev.active_nanite_repairs.clone(),
@@ -2203,6 +2274,8 @@ impl SystemView {
             pending_warp_finished: actor.pending_warp_finished,
             active_drone_miners: actor.active_drone_miners,
             drone_next_ready_unix: actor.drone_next_ready_unix,
+            active_drones_in_space: actor.active_drones_in_space,
+            active_drones_needs_sqlite_hydration: actor.active_drones_needs_sqlite_hydration,
             stargate_activation_states: ballpark.stargate_activation_states.clone(),
             active_module_cycles: actor.active_module_cycles,
             external_active_modules: actor.external_active_modules,

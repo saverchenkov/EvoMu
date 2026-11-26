@@ -68,36 +68,6 @@ pub(in crate::system_actor) use tokio::sync::{broadcast, mpsc};
 /// Bounded mailbox capacity per solar system actor.
 pub const SYSTEM_MAILBOX_CAPACITY: usize = 256;
 
-/// Atomically assigns the next monotonic `TickBroadcast.broadcast_seq` and sends `broadcast`
-/// onto `event_tx` while holding `broadcast_seq_gate`, preserving strict FIFO seq ordering (`GH #1172`).
-pub(crate) fn send_tick_broadcast_sequenced_owned(
-    event_tx: &broadcast::Sender<TickBroadcast>,
-    broadcast_seq_gate: &std::sync::Mutex<u64>,
-    mut broadcast: TickBroadcast,
-) {
-    let mut seq = broadcast_seq_gate
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *seq = seq.saturating_add(1);
-    broadcast.broadcast_seq = *seq;
-    let _ = event_tx.send(broadcast);
-}
-
-/// Assigns `broadcast.broadcast_seq` in-place under `broadcast_seq_gate` and sends a clone onto
-/// `event_tx` (`GH #1172`).
-pub(crate) fn send_tick_broadcast_sequenced(
-    event_tx: &broadcast::Sender<TickBroadcast>,
-    broadcast_seq_gate: &std::sync::Mutex<u64>,
-    broadcast: &mut TickBroadcast,
-) {
-    let mut seq = broadcast_seq_gate
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *seq = seq.saturating_add(1);
-    broadcast.broadcast_seq = *seq;
-    let _ = event_tx.send(broadcast.clone());
-}
-
 fn drain_observer_updates_in_actor(
     ballpark: &mut Ballpark,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
@@ -385,6 +355,7 @@ pub struct SystemRegistry {
     pub(crate) lifecycle_test_hooks: lifecycle_sm::LifecycleTestHooks,
     /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
     pub system_wide_effects: RankedRwLock<types::SystemWideEffectsState, RANK_LEAF>,
+    pub(crate) drone_rt_state: drones::RegistryDroneRuntimeState,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -437,6 +408,7 @@ impl SystemRegistry {
             #[cfg(test)]
             lifecycle_test_hooks: Default::default(),
             system_wide_effects: RankedRwLock::new(types::SystemWideEffectsState::default()),
+            drone_rt_state: drones::RegistryDroneRuntimeState::default(),
         }
     }
 
@@ -1044,8 +1016,9 @@ impl SystemRegistry {
             return 0;
         }
         let mut total = 0usize;
-        for (_sys_id, handle) in self.active_system_handles() {
+        for (_, handle) in self.active_system_handles() {
             total += handle.flush_dirty_condition_checkpoint_sync();
+            drones::flush_from_handle(&handle);
         }
         total
     }
@@ -1196,6 +1169,7 @@ impl SystemRegistry {
             fighters: initial_fighters, fighters_lifecycle_gen: generation, fighters_needs_sqlite_hydration: initial_fighters_needs_hydration, fighters_persist: Arc::clone(&self.fighter_persist),
             ..Default::default()
         };
+        drones::init_actor_active_drones(&mut initial_actor_state, self, solar_system_id, db_read_safe);
         let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
         if db_read_safe {
             let dyn_ids: Vec<BallId> = initial_ballpark
@@ -1263,6 +1237,7 @@ impl SystemRegistry {
             Arc::clone(&view_tx),
             Arc::clone(&tidi_factor_bits),
         ));
+        ballpark_shared.attach_drone_hydration(initial_actor_state.drone_hydration.clone());
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
         ballpark_shared.attach_actor_state(&actor_state_shared);
@@ -1404,6 +1379,7 @@ impl SystemRegistry {
         let post_unlock_tx_handle = post_unlock_tx.clone();
         // Wrap BEFORE `spawn` so `Runtime::drop()` before first poll still sends `PostUnlockMsg::Shutdown`.
         let post_unlock_shutdown = post_unlock::PostUnlockShutdownGuard(Some(post_unlock_tx));
+        let drone_hydration_actor = ballpark_shared.drone_hydration_shared().cloned().unwrap_or_default();
         rt_handle.spawn(async move {
             // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
             let mut post_unlock_tx_opt = post_unlock_shutdown;
@@ -1413,6 +1389,25 @@ impl SystemRegistry {
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
+            let flush_actor_active_drones = |blocking: bool| {
+                if !eve_db::lock_rank::held_lock_ranks().is_empty() { return; }
+                let (mut dirty, needs) = drones::active_drone_flush_flags(&drone_hydration_actor);
+                if !dirty && !needs { return; }
+                if needs {
+                    let Some((h, l)) = drones::read_sqlite_for_shared(&drone_hydration_actor, solar_system_id, blocking) else { return; };
+                    let (bp, mut st) = (ballpark_actor.read().unwrap_or_else(|e| e.into_inner()), actor_state_actor.write().unwrap_or_else(|e| e.into_inner()));
+                    dirty |= drones::hydrate_in_actor_and_refresh(solar_system_id, &bp, &mut st, &view_tx_actor, &tidi_factor_bits_actor, event_tx_actor.receiver_count(), h, l);
+                }
+                if !dirty { return; }
+                let batch = drones::capture_dirty_active_drones_snapshot(&actor_state_actor.read().unwrap_or_else(|e| e.into_inner()));
+                if let Some((seq, _, entries)) = batch {
+                    if drones::write_sqlite_for_shared(&drone_hydration_actor, solar_system_id, seq, &entries, blocking).is_persisted() {
+                        let (bp, mut st) = (ballpark_actor.read().unwrap_or_else(|e| e.into_inner()), actor_state_actor.write().unwrap_or_else(|e| e.into_inner()));
+                        drones::finish_flush_in_actor(&bp, &mut st, event_tx_actor.receiver_count(), seq);
+                    }
+                }
+            };
+            flush_actor_active_drones(false);
             while let Some((cmd_batch, shutdown_requested)) =
                 post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0).await
             {
@@ -2339,6 +2334,7 @@ impl SystemRegistry {
                     }
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
+                flush_actor_active_drones(false);
                 if shutdown_requested {
                     break;
                 }
@@ -2367,6 +2363,7 @@ impl SystemRegistry {
                     }
                 }
             }
+            flush_actor_active_drones(true);
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,

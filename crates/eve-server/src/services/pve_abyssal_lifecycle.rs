@@ -426,25 +426,57 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         abyss_handle.try_remove_ball(*sid);
         let mut destroyed_drones: Vec<ItemId> = Vec::new();
         let mut cross_sys_drones: Vec<(ItemId, u32)> = Vec::new();
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.retain(|&did, d| {
-                if d.owner_char_id == *cid
-                    || d.original_owner_char_id == *cid
-                    || d.parent_ship_id == *sid
-                {
-                    destroyed_drones.push(did);
-                    if d.drone_item_id != did {
-                        destroyed_drones.push(d.drone_item_id);
+        let char_id_val = *cid;
+        let ship_id_val = *sid;
+        let abyss_sys_val = *abyss_sys;
+        for (_, h) in ctx.systems.active_system_handles() {
+            let view = h.view();
+            let has_match = view.active_drones_needs_sqlite_hydration
+                || view.active_drones_in_space.values().any(|d| {
+                    d.ball_id > 0
+                        && (d.owner_char_id == char_id_val
+                            || d.original_owner_char_id == char_id_val
+                            || d.parent_ship_id == ship_id_val)
+                });
+            if !has_match {
+                continue;
+            }
+            if let Ok((mut removed_ids, mut cross_ids)) = h.mutate_active_drones_sync(move |drones, _, _| {
+                let mut local_destroyed = Vec::new();
+                let mut local_cross = Vec::new();
+                let mut dirty = false;
+                drones.retain(|&did, d| {
+                    if did > 0
+                        && (d.owner_char_id == char_id_val
+                            || d.original_owner_char_id == char_id_val
+                            || d.parent_ship_id == ship_id_val)
+                    {
+                        local_destroyed.push(did);
+                        if d.drone_item_id != did {
+                            local_destroyed.push(d.drone_item_id);
+                        }
+                        if d.solar_system_id != abyss_sys_val {
+                            local_cross.push((did, d.solar_system_id));
+                        }
+                        dirty = true;
+                        false
+                    } else {
+                        true
                     }
-                    if d.solar_system_id != *abyss_sys {
-                        cross_sys_drones.push((did, d.solar_system_id));
-                    }
-                    false
-                } else {
-                    true
+                });
+                (dirty, (local_destroyed, local_cross))
+            }) {
+                destroyed_drones.append(&mut removed_ids);
+                cross_sys_drones.append(&mut cross_ids);
+            }
+        }
+        if !destroyed_drones.is_empty() {
+            ctx.db.with_mut_snapshot(|snap| {
+                for &did in &destroyed_drones {
+                    snap.combat_crimewatch_state.record_destroyed_item_id(did);
                 }
             });
-        });
+        }
         for did in &destroyed_drones {
             abyss_handle.try_remove_ball(*did);
         }
@@ -534,20 +566,25 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             continue;
         }
         let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
-        let mut orphaned_drone_ids: Vec<ItemId> = Vec::new();
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.retain(|&did, d| {
-                if d.solar_system_id == abyss_sys {
-                    orphaned_drone_ids.push(did);
-                    if d.drone_item_id != did {
-                        orphaned_drone_ids.push(d.drone_item_id);
+        let mut orphaned_drone_ids: Vec<ItemId> = abyss_handle
+            .mutate_active_drones_sync(move |drones, _, _| {
+                let mut local_ids = Vec::new();
+                let mut dirty = false;
+                drones.retain(|&did, d| {
+                    if did > 0 && d.solar_system_id == abyss_sys {
+                        local_ids.push(did);
+                        if d.drone_item_id != did {
+                            local_ids.push(d.drone_item_id);
+                        }
+                        dirty = true;
+                        false
+                    } else {
+                        true
                     }
-                    false
-                } else {
-                    true
-                }
-            });
-        });
+                });
+                (dirty, local_ids)
+            })
+            .unwrap_or_default();
         ctx.db.with_mut_snapshot(|snap| {
             let item_drone_ids: Vec<ItemId> = snap
                 .items

@@ -1929,20 +1929,22 @@ fn apply_ai_step_world_effects(
         // must not resolve to former owners, while docked/out-of-system suppression is enforced
         // downstream by outbound scene scoping (`#1190`).
         let active_craft_owners: HashMap<i64, Option<i64>> = {
-            let mut map = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                applied_hits
-                    .iter()
-                    .filter_map(|&(_, _, tid, ..)| {
-                        rt.active_drones_in_space.get(&tid).map(|d| {
+            let sys_view_opt = ctx.systems.get_handle(sys_id).map(|h| h.hydrated_view());
+            let mut map = applied_hits
+                .iter()
+                .filter_map(|&(_, _, tid, ..)| {
+                    sys_view_opt
+                        .as_ref()
+                        .and_then(|v| v.active_drones_in_space.get(&tid))
+                        .map(|d| {
                             let owner = (!d.is_abandoned
                                 && d.owner_char_id > 0
                                 && d.solar_system_id == sys_id)
                                 .then_some(d.owner_char_id);
                             (tid, owner)
                         })
-                    })
-                    .collect::<HashMap<i64, Option<i64>>>()
-            });
+                })
+                .collect::<HashMap<i64, Option<i64>>>();
             if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
                 ctx.systems.ensure_live_fighters_hydrated_if_unlocked_sync(sys_id, &sys_h);
                 let view = sys_h.view();

@@ -516,6 +516,16 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ReloadFighterStateClean { .. } => "ReloadFighterStateClean",
             SystemCommand::MergeFighterState { .. } => "MergeFighterState",
             SystemCommand::TestHelperFighterOp { .. } => "TestHelperFighterOp",
+            SystemCommand::UpsertActiveDrones { .. } => "UpsertActiveDrones",
+            SystemCommand::ReserveDroneLaunches { .. } => "ReserveDroneLaunches",
+            SystemCommand::FinalizeDroneLaunches { .. } => "FinalizeDroneLaunches",
+            SystemCommand::ReconnectDrones { .. } => "ReconnectDrones",
+            SystemCommand::MutateActiveDrones { .. } => "MutateActiveDrones",
+            SystemCommand::MutateActiveDronesWithClaims { .. } => "MutateActiveDronesWithClaims",
+            SystemCommand::ScoopDroneClaimOp { .. } => "ScoopDroneClaimOp",
+            SystemCommand::HydrateActiveDronesFromSqlite { .. } => "HydrateActiveDronesFromSqlite",
+            SystemCommand::SnapshotDirtyActiveDrones { .. } => "SnapshotDirtyActiveDrones",
+            SystemCommand::CommitActiveDronesFlushed { .. } => "CommitActiveDronesFlushed",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -897,6 +907,61 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::ReloadFighterStateClean { state: crate::system_actor::SystemFighterState::default(), reply: oneshot::channel().0 },
         SystemCommand::MergeFighterState { state: crate::system_actor::SystemFighterState::default(), mark_dirty: false, clear_hydration: true, reply: oneshot::channel().0 },
         SystemCommand::TestHelperFighterOp { op: crate::system_actor::FighterTestHelperOp::ClearAllActive, reply: oneshot::channel().0 },
+        SystemCommand::UpsertActiveDrones {
+            drones: Vec::new(),
+            only_if_absent: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ReserveDroneLaunches {
+            req: crate::system_actor::ReserveDroneLaunchesReq {
+                ship_id: 1,
+                max_drones_allowed: 5,
+                max_bandwidth: 25.0,
+                partial_ok: false,
+                drones: Vec::new(),
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::FinalizeDroneLaunches {
+            mappings: Vec::new(),
+            rollback_res_ids: Vec::new(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ReconnectDrones {
+            req: crate::system_actor::ReconnectDronesReq {
+                char_id: 1,
+                ship_id: 2,
+                max_drones_allowed: 1,
+                max_bandwidth: 5.0,
+                target_ids: Vec::new(),
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::MutateActiveDrones {
+            op: Box::new(|_, _, _| false),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::MutateActiveDronesWithClaims {
+            op: Box::new(|_, _, _, _| false),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ScoopDroneClaimOp {
+            ball_id: 1,
+            action: crate::system_actor::DroneScoopClaimAction::ReleaseClaim,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::HydrateActiveDronesFromSqlite {
+            drones: Vec::new(),
+            legacy_dirty: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SnapshotDirtyActiveDrones {
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::CommitActiveDronesFlushed {
+            seq: 0,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -908,7 +973,7 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 117);
+    assert_eq!(tags.len(), 127);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -937,9 +1002,19 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[112], "ReloadFighterStateClean");
     assert_eq!(tags[113], "MergeFighterState");
     assert_eq!(tags[114], "TestHelperFighterOp");
-    assert_eq!(tags[115], "ShutdownActor");
+    assert_eq!(tags[115], "UpsertActiveDrones");
+    assert_eq!(tags[116], "ReserveDroneLaunches");
+    assert_eq!(tags[117], "FinalizeDroneLaunches");
+    assert_eq!(tags[118], "ReconnectDrones");
+    assert_eq!(tags[119], "MutateActiveDrones");
+    assert_eq!(tags[120], "MutateActiveDronesWithClaims");
+    assert_eq!(tags[121], "ScoopDroneClaimOp");
+    assert_eq!(tags[122], "HydrateActiveDronesFromSqlite");
+    assert_eq!(tags[123], "SnapshotDirtyActiveDrones");
+    assert_eq!(tags[124], "CommitActiveDronesFlushed");
+    assert_eq!(tags[125], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[116], "TestAccess");
+    assert_eq!(tags[126], "TestAccess");
 }
 
 #[test]

@@ -9,7 +9,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, DroneSpaceState,
+    with_combat_runtime, DroneSpaceState,
 };
 use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 use std::collections::HashMap;
@@ -159,38 +159,36 @@ async fn test_drones_recall_reconnect_abandon_control() {
                 mode: MovementMode::Stop,
             })
             .await;
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.active_drones_in_space.insert(
-                did,
-                DroneSpaceState {
-                    ball_id: did,
-                    drone_item_id: did,
-                    type_id: 2464,
-                    group_id: 100,
-                    owner_char_id: char_id,
-                    original_owner_char_id: char_id,
-                    parent_ship_id: ship_id,
-                    solar_system_id: sys_id,
-                    target_id: None,
-                    activity_state: 0,
-                    assist_char_id: None,
-                    guard_char_id: None,
-                    is_abandoned: false,
-                    is_sentry: false,
-                    bandwidth_used: 5.0,
-                    max_velocity: 1000.0,
-                    optimal_range: 5000.0,
-                    damage_vector: DamageVector::default(),
-                    shield_repair_amount: 0.0,
-                    armor_repair_amount: 0.0,
-                    hull_repair_amount: 0.0,
-                    web_speed_factor: 0.0,
-                    neut_amount: 0.0,
-                    ecm_strength: 0.0,
-                    tp_sig_bonus_pct: 0.0,
-                },
-            );
-        });
+        eve_server::services::drone_test_helpers::seed_active_drone(
+            &ctx,
+            DroneSpaceState {
+                ball_id: did,
+                drone_item_id: did,
+                type_id: 2464,
+                group_id: 100,
+                owner_char_id: char_id,
+                original_owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                solar_system_id: sys_id,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1000.0,
+                optimal_range: 5000.0,
+                damage_vector: DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
     }
 
     // 1. Abandon ONLY d2
@@ -206,11 +204,9 @@ async fn test_drones_recall_reconnect_abandon_control() {
         .expect("CmdAbandonDrone");
     assert_eq!(abandon_res, PyRep::Dict(Vec::new()));
 
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.get(&d1).expect("d1 active drone").is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
-        assert!(!rt.active_drones_in_space.get(&d3).expect("d3 active drone").is_abandoned);
-    });
+    assert!(!eve_server::services::drone_test_helpers::active_drone(&ctx, d1).expect("d1 active drone").is_abandoned);
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, d2).expect("d2 active drone").is_abandoned);
+    assert!(!eve_server::services::drone_test_helpers::active_drone(&ctx, d3).expect("d3 active drone").is_abandoned);
 
     // 2. Reconnect ONLY d2
     let reconn_res = common::borrow_wire_harness(&ctx, &mut sess)
@@ -225,24 +221,19 @@ async fn test_drones_recall_reconnect_abandon_control() {
         .expect("CmdReconnectToDrones");
     assert_eq!(reconn_res, PyRep::Dict(vec![]));
 
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
-    });
+    assert!(!eve_server::services::drone_test_helpers::active_drone(&ctx, d2).expect("d2 active drone").is_abandoned);
 
     // 3. Stargate jump / dock abandons drones in space
     eve_server::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(rt.active_drones_in_space.get(&d1).expect("d1 active drone").is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d3).expect("d3 active drone").is_abandoned);
-        assert_eq!(
-            rt.active_drones_in_space
-                .get(&d1)
-                .expect("d1 active drone")
-                .original_owner_char_id,
-            char_id
-        );
-    });
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, d1).expect("d1 active drone").is_abandoned);
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, d2).expect("d2 active drone").is_abandoned);
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, d3).expect("d3 active drone").is_abandoned);
+    assert_eq!(
+        eve_server::services::drone_test_helpers::active_drone(&ctx, d1)
+            .expect("d1 active drone")
+            .original_owner_char_id,
+        char_id
+    );
 
     // Reconnect d1
     let reconn_d1 = common::borrow_wire_harness(&ctx, &mut sess)
@@ -256,10 +247,8 @@ async fn test_drones_recall_reconnect_abandon_control() {
         .await
         .expect("CmdReconnectToDrones d1");
     assert_eq!(reconn_d1, PyRep::Dict(vec![]));
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.get(&d1).expect("d1 active drone").is_abandoned);
-        assert!(rt.active_drones_in_space.get(&d2).expect("d2 active drone").is_abandoned);
-    });
+    assert!(!eve_server::services::drone_test_helpers::active_drone(&ctx, d1).expect("d1 active drone").is_abandoned);
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, d2).expect("d2 active drone").is_abandoned);
 
     // 4. Return to bay
     let recall_res = common::borrow_wire_harness(&ctx, &mut sess)
@@ -273,9 +262,7 @@ async fn test_drones_recall_reconnect_abandon_control() {
         .await
         .expect("CmdReturnBay");
     assert_eq!(recall_res, PyRep::Dict(vec![]));
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.active_drones_in_space.contains_key(&d1));
-    });
+    assert!(!eve_server::services::drone_test_helpers::has_active_drone(&ctx, d1));
 }
 
 #[tokio::test]
@@ -431,38 +418,36 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
     let miner_drone_id = 860_010i64;
     let asteroid_id = 860_020i64;
     seed_item(&ctx, miner_drone_id, 10250, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            miner_drone_id,
-            DroneSpaceState {
-                ball_id: miner_drone_id,
-                drone_item_id: miner_drone_id,
-                type_id: 10250,
-                group_id: 101,
-                owner_char_id: char_id,
-                original_owner_char_id: char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1000.0,
-                optimal_range: 5000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    eve_server::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: miner_drone_id,
+            drone_item_id: miner_drone_id,
+            type_id: 10250,
+            group_id: 101,
+            owner_char_id: char_id,
+            original_owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1000.0,
+            optimal_range: 5000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
 
     let _ = sys_handle
         .spawn_ball(Ball {
@@ -518,38 +503,36 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
 
     let alien_drone_id = 860_011i64;
     seed_item(&ctx, alien_drone_id, 2464, other_char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(
-            alien_drone_id,
-            DroneSpaceState {
-                ball_id: alien_drone_id,
-                drone_item_id: alien_drone_id,
-                type_id: 2464,
-                group_id: 100,
-                owner_char_id: other_char_id,
-                original_owner_char_id: other_char_id,
-                parent_ship_id: ship_id,
-                solar_system_id: sys_id,
-                target_id: None,
-                activity_state: 0,
-                assist_char_id: None,
-                guard_char_id: None,
-                is_abandoned: false,
-                is_sentry: false,
-                bandwidth_used: 5.0,
-                max_velocity: 1000.0,
-                optimal_range: 5000.0,
-                damage_vector: DamageVector::default(),
-                shield_repair_amount: 0.0,
-                armor_repair_amount: 0.0,
-                hull_repair_amount: 0.0,
-                web_speed_factor: 0.0,
-                neut_amount: 0.0,
-                ecm_strength: 0.0,
-                tp_sig_bonus_pct: 0.0,
-            },
-        );
-    });
+    eve_server::services::drone_test_helpers::seed_active_drone(
+        &ctx,
+        DroneSpaceState {
+            ball_id: alien_drone_id,
+            drone_item_id: alien_drone_id,
+            type_id: 2464,
+            group_id: 100,
+            owner_char_id: other_char_id,
+            original_owner_char_id: other_char_id,
+            parent_ship_id: ship_id,
+            solar_system_id: sys_id,
+            target_id: None,
+            activity_state: 0,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1000.0,
+            optimal_range: 5000.0,
+            damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 0.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        },
+    );
 
     let alien_err = common::borrow_wire_harness(&ctx, &mut sess)
         .call(
@@ -583,15 +566,12 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
         .map(|(_, m)| m)
         .expect("miner_st active_drone_miners");
     assert_eq!(miner_st.asteroid_id, asteroid_id);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(
-            rt.active_drones_in_space
-                .get(&miner_drone_id)
-                .expect("miner drone in space")
-                .activity_state,
-            2
-        );
-    });
+    assert_eq!(
+        eve_server::services::drone_test_helpers::active_drone(&ctx, miner_drone_id)
+            .expect("miner drone in space")
+            .activity_state,
+        2
+    );
     let initial_ast_qty = ctx
         .db
         .with_snapshot(|s| s.asteroids.get(&asteroid_id).map(|a| a.quantity))
@@ -642,16 +622,14 @@ async fn test_drone_mine_repeatedly_duplicate_ids_dedup_and_reject_active() {
     let drone_id = 860_050i64;
     let ast_id = 860_060i64;
     seed_item(&ctx, drone_id, 10250, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space.insert(drone_id, DroneSpaceState {
-            ball_id: drone_id, drone_item_id: drone_id, type_id: 10250, group_id: 101,
-            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
-            solar_system_id: sys_id, target_id: None, activity_state: 0, assist_char_id: None,
-            guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
-            max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
-            shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
-            web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
-        });
+    eve_server::services::drone_test_helpers::seed_active_drone(&ctx, DroneSpaceState {
+        ball_id: drone_id, drone_item_id: drone_id, type_id: 10250, group_id: 101,
+        owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
+        solar_system_id: sys_id, target_id: None, activity_state: 0, assist_char_id: None,
+        guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+        max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
+        shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
+        web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
     });
 
     let _ = sys_handle.spawn_ball(Ball {

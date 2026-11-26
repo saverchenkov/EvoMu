@@ -1758,7 +1758,7 @@ pub(crate) fn resolve_corp_ship_owner_in_snap(
 ///
 /// Routes any ball reaching 0 structure HP — whether from a weapon/turret module cycle,
 /// missile/smartbomb/bomb/doomsday impact, or NPC AI tick — through one entry point:
-/// 1. Active player drones in space (`rt.active_drones_in_space`) -> cleaned up without ship death.
+/// 1. Active player drones in space (`SystemActor` `active_drones_in_space`) -> cleaned up without ship death.
 /// 2. Extended NPC entities (`rt.npc_entities`) -> cleaned up without player ship death.
 /// 3. Capsuleer ships (`category_id == 6` in `snap.items`, piloted, disconnected, or unpiloted
 ///    character-owned) -> routed through `execute_death_pipeline_sync` (producing wreck, loot roll,
@@ -1994,23 +1994,32 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
     sys_handle: &crate::system_actor::SystemHandle,
     ball_id: i64,
 ) -> bool {
-    let Some(d) = crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
-        &ctx.db,
-        &*ctx.combat_ephemeral,
-        |snap, rt| {
-            let d = rt.active_drones_in_space.remove(&ball_id)?;
-            snap.combat_crimewatch_state
-                .record_destroyed_item_id(d.ball_id);
-            snap.combat_crimewatch_state
-                .record_destroyed_item_id(d.drone_item_id);
-            snap.items.remove(&d.drone_item_id);
-            snap.item_positions.remove(&d.ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
-            Some(d)
-        },
-    ) else {
+    let Some(d) = sys_handle.remove_active_drone_sync(ball_id).ok().flatten() else {
         return false;
     };
+    let still_in_space = ctx.db.with_mut_snapshot(|snap| {
+        if snap.items.get(&d.drone_item_id).is_some_and(|it| {
+            it.location_id != i64::from(sys_handle.solar_system_id)
+                || it.flag != eve_db::InventoryFlag::None
+        }) {
+            return false;
+        }
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(d.ball_id);
+        snap.combat_crimewatch_state
+            .record_destroyed_item_id(d.drone_item_id);
+        snap.items.remove(&d.drone_item_id);
+        snap.item_positions.remove(&d.ball_id);
+        snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+        if d.drone_item_id != d.ball_id {
+            snap.sp6_lifecycle.space_object_meta.remove(&d.drone_item_id);
+        }
+        true
+    });
+    if !still_in_space {
+        // Scoop already committed this item to a bay/hangar; abort DB deletion, tombstoning, and control-lost alerts.
+        return true;
+    }
     let _ = sys_handle.clear_drone_runtime_sync(ball_id);
     sys_handle.try_remove_ball(ball_id);
     if d.owner_char_id > 0 {

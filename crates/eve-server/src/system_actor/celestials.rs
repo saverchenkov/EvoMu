@@ -212,6 +212,7 @@ pub struct BallparkHandle {
     view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
     tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
     actor_state: std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
+    drone_hydration: std::sync::OnceLock<super::drones::ActiveDronesSharedCtx>,
 }
 
 impl std::ops::Deref for BallparkHandle {
@@ -234,8 +235,14 @@ impl BallparkHandle {
             view_tx,
             tidi_factor_bits,
             actor_state: std::sync::OnceLock::new(),
+            drone_hydration: std::sync::OnceLock::new(),
         }
     }
+
+    #[inline]
+    pub(in crate::system_actor) fn attach_drone_hydration(&self, s: super::drones::ActiveDronesSharedCtx) { let _ = self.drone_hydration.set(s); }
+    #[inline]
+    pub(in crate::system_actor) fn drone_hydration_shared(&self) -> Option<&super::drones::ActiveDronesSharedCtx> { self.drone_hydration.get() }
 
     /// Attaches the owning system's `actor_state` lock so drop-time `SystemView` refreshes
     /// capture `sim_elapsed_secs` and active-module flags when `actor_state` is rank-safe.
@@ -1127,8 +1134,6 @@ impl SystemHandle {
                         base_scramble_strengths,
                         base_core_strengths,
                         protection_registry,
-                        active_drone_miners,
-                        drone_next_ready_unix,
                         db_opt,
                         sde_opt,
                         ..
@@ -1146,8 +1151,6 @@ impl SystemHandle {
                     base_scramble_strengths.remove(&ball_id);
                     base_core_strengths.remove(&ball_id);
                     protection_registry.remove(&ball_id);
-                    active_drone_miners.remove(&ball_id);
-                    drone_next_ready_unix.remove(&ball_id);
                     if emit_destruction_fx {
                         let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
                     } else {
@@ -1157,6 +1160,7 @@ impl SystemHandle {
                     (removed_cycles, fallback_slim_owner, db_opt.clone(), sde_opt.clone())
                 };
                 let _ = st.clear_fighter_ball_and_track(ball_id);
+                super::drones::clear_removed_ball_drones_in_state(st, ball_id);
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
                 celestials_helpers::update_system_hibernation_flag(st, bp, self.event_tx.receiver_count());
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
@@ -1202,6 +1206,7 @@ impl SystemHandle {
             remove_from_bp_and_st(&mut bp, &mut st)
         };
         super::post_unlock::finish_post_unlock_after_unlock(self, deact_guard.as_ref(), None, ticket);
+        super::drones::try_flush_from_handle(self);
     }
 
     pub fn has_active_nanite_repair_sync(&self, ship_id: BallId, module_id: i64) -> bool {
@@ -2383,10 +2388,12 @@ impl SystemHandle {
     /// Asks the actor to flush all dirty condition checkpoint entries and commits them to
     /// `WorldRepository` via its ordered `post_unlock_worker` (`W1`, `W4`, `W6`, `#1170`, `#919`).
     pub async fn flush_condition_checkpoint(&self) -> Result<usize, String> {
-        super::protection::call_actor_reply(self, "FlushConditionCheckpoint", |reply| {
+        let count = super::protection::call_actor_reply(self, "FlushConditionCheckpoint", |reply| {
             SystemCommand::FlushConditionCheckpoint { reply }
         })
-        .await
+        .await?;
+        super::drones::flush_from_handle_async(self).await;
+        Ok(count)
     }
 
     async fn commit_destroyed_ball_hooks(
@@ -3108,7 +3115,8 @@ pub(crate) use celestials_helpers::{
     fast_forward_clock_in_actor_collecting,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
     register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,
-    remove_ball_checkpoint_tracking, sync_ball_positions, clear_db_system_ballpark_if_matching,
+    remove_ball_checkpoint_tracking, send_tick_broadcast_sequenced,
+    send_tick_broadcast_sequenced_owned, sync_ball_positions, clear_db_system_ballpark_if_matching,
     update_system_hibernation_flag,
 };
 #[cfg(test)]

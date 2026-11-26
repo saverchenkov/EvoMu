@@ -7,7 +7,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     apply_damage_to_drone_in_space, compute_drone_control_range, dispatch_combat_rpc,
-    execute_wreck_salvage_cycle, with_combat_runtime,
+    execute_wreck_salvage_cycle,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -154,14 +154,14 @@ async fn test_plan_c7_sentry_scoop_and_same_grid_recall_and_abandon() {
     let _ = sys_handle.spawn_ball(Ball { position: DVec3::new(ctrl_range + 15_000.0, 0.0, 0.0), ..mob_ball.clone() }).await;
 
     dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)])], &kw).await.expect("CmdReturnBay skips out-of-range drone");
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&mob_ball_id].activity_state), 0);
+    assert_eq!(eve_server::services::drone_test_helpers::active_drone(&ctx, mob_ball_id).unwrap().activity_state, 0);
     let oor_home = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)])], &kw).await.expect("CmdReturnHome returns count of recalled drones");
     assert_eq!(oor_home, PyRep::Integer(0));
     let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id: dummy_target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let engage_oor = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)]), PyRep::Integer(dummy_target_id)], &kw)
         .await.expect("CmdEngage skips out-of-range drone");
     assert_eq!(dict_get(&engage_oor, "totalDamageDealt"), Some(&PyRep::Real(0.0)));
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&mob_ball_id].activity_state), 0);
+    assert_eq!(eve_server::services::drone_test_helpers::active_drone(&ctx, mob_ball_id).unwrap().activity_state, 0);
 
     let _ = sys_handle.spawn_ball(Ball {
         position: DVec3::new(1_500.0, 0.0, 0.0), velocity: DVec3::new(100.0, 0.0, 0.0),
@@ -173,7 +173,7 @@ async fn test_plan_c7_sentry_scoop_and_same_grid_recall_and_abandon() {
     let celestial_id = far_celestial_id(&ctx, sys_id);
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_bound), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(celestial_id), PyRep::Real(0.0)], &kw, None).await.expect("CmdWarpToStuff");
 
-    let d_rt = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&mob_ball_id].clone());
+    let d_rt = eve_server::services::drone_test_helpers::active_drone(&ctx, mob_ball_id).unwrap();
     assert!(d_rt.is_abandoned && d_rt.owner_char_id == 0 && d_rt.parent_ship_id == 0);
     let (_, stopped_ball) = sys_handle.get_ball_snapshot(mob_ball_id).await.unwrap().unwrap();
     assert_eq!((stopped_ball.mode, stopped_ball.speed_fraction, stopped_ball.velocity), (MovementMode::Stop, 0.0, DVec3::ZERO));
@@ -227,7 +227,7 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
     assert_eq!(sess.solar_system_id, Some(dest_sys));
 
     for &bid in &jita_balls {
-        let st = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&bid].clone());
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, bid).unwrap();
         assert!(st.is_abandoned && st.owner_char_id == 0 && st.parent_ship_id == 0);
     }
     let cross_sys_err = dispatch_combat_rpc(
@@ -235,7 +235,7 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
     ).await.expect_err("CmdReturnHome from another system must reject with DroneNotFound");
     assert_eq!(cross_sys_err.code, "DroneNotFound");
     for (&bid, &did) in jita_balls.iter().zip(drone_ids[0..2].iter()) {
-        let st = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&bid].clone());
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, bid).unwrap();
         assert!(
             st.is_abandoned
                 && st.owner_char_id == 0
@@ -279,7 +279,7 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
     let recon = ctx.dispatch_rpc(&mut sess, "entity", None, "CmdReconnectToDrones", &[], &kw, None).await.expect("CmdReconnectToDrones in Jita");
     assert_eq!(recon, PyRep::Dict(vec![]));
     for &bid in &jita_balls {
-        let st = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&bid].clone());
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, bid).unwrap();
         assert!(!st.is_abandoned && st.owner_char_id == char_id && st.parent_ship_id == ship_id);
     }
 
@@ -290,7 +290,7 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(60_003_760)], &kw, None).await.expect("Dock at Jita 4-4");
     for &bid in &jita_balls {
-        assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&bid].is_abandoned));
+        assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, bid).unwrap().is_abandoned);
     }
 
     ctx.advance_secs(12);
@@ -300,13 +300,13 @@ async fn test_plan_c7_drones_stargate_jump_reconnect_dock_logoff_death() {
     ).await.expect("Launch 2 drones for logoff/death checks");
     let (logoff_ball, death_ball) = match launch_logoff { PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()), _ => panic!() };
     eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id).await;
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&logoff_ball].is_abandoned));
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&death_ball].is_abandoned));
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, logoff_ball).unwrap().is_abandoned);
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, death_ball).unwrap().is_abandoned);
 
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdReconnectToDrones", &[], &kw, None).await.expect("Reconnect before death");
-    assert!(!with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&death_ball].is_abandoned));
+    assert!(!eve_server::services::drone_test_helpers::active_drone(&ctx, death_ball).unwrap().is_abandoned);
     eve_server::combat::death_pipeline::execute_death_pipeline_sync(&ctx, jita_sys, char_id, ship_id, 0, DVec3::ZERO, 1).expect("execute_death_pipeline_sync");
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&death_ball].is_abandoned));
+    assert!(eve_server::services::drone_test_helpers::active_drone(&ctx, death_ball).unwrap().is_abandoned);
 }
 
 // parity: plan:C-7
@@ -384,7 +384,7 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let gecko_launch = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(gecko_id)])], &kw)
         .await.expect("Gecko (50 Mbit/s) launches into 50 Mbit/s bandwidth");
     let gecko_ball_id = match gecko_launch { PyRep::List(v) => v[0].as_i64().unwrap(), _ => panic!() };
-    let gecko_rt = with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&gecko_ball_id].clone());
+    let gecko_rt = eve_server::services::drone_test_helpers::active_drone(&ctx, gecko_ball_id).unwrap();
     assert_eq!(gecko_rt.bandwidth_used, 50.0);
     assert!(gecko_rt.damage_vector.em > 0.0 && gecko_rt.damage_vector.thermal > 0.0 && gecko_rt.damage_vector.kinetic > 0.0 && gecko_rt.damage_vector.explosive > 0.0);
     let gecko_eng1 = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
@@ -411,7 +411,10 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
 
     let launch_mut = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(aug_id), PyRep::Integer(mut_hob_id)])], &kw).await.expect("Launch Augmented Hammerhead + Mutated Hobgoblin II");
     let (aug_ball_id, mut_ball_id) = match launch_mut { PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()), _ => panic!() };
-    let (aug_rt, mut_rt) = with_combat_runtime(&ctx, |rt| (rt.active_drones_in_space[&aug_ball_id].clone(), rt.active_drones_in_space[&mut_ball_id].clone()));
+    let (aug_rt, mut_rt) = (
+        eve_server::services::drone_test_helpers::active_drone(&ctx, aug_ball_id).unwrap(),
+        eve_server::services::drone_test_helpers::active_drone(&ctx, mut_ball_id).unwrap(),
+    );
     assert!(aug_rt.damage_vector.thermal > 0.0 && aug_rt.damage_vector.kinetic > 0.0, "Augmented Hammerhead must have split thermal+kinetic damage");
     assert_eq!((mut_rt.max_velocity, mut_rt.effective_tracking_speed(&ctx)), (4500.0, 4.5));
     let (_, mut_ball) = sys_handle.get_ball_snapshot(mut_ball_id).await.unwrap().unwrap();
@@ -1038,7 +1041,6 @@ use eve_server::combat::crimewatch::{
 };
 use eve_server::combat::npc_ai::{NpcAiState, NpcCombatEntity, NpcSpawnManager};
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -469,12 +469,13 @@ async fn launch_drones_state_change_tuple_values_and_detach_rules() {
             .any(|(ev, args)| ev == "OnDroneControlLost" && args == &vec![PyRep::Integer(d1)]),
         "CmdAbandonDrone must emit OnDroneControlLost({d1}): {ab_notes:?}"
     );
-    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let st = rt.active_drones_in_space.get(&d1).expect("abandoned drone still in space");
+    {
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, d1)
+            .expect("abandoned drone still in space");
         assert!(st.is_abandoned);
         assert_eq!(st.owner_char_id, 0);
         assert_eq!(st.parent_ship_id, 0);
-    });
+    }
 
     // 4. Reconnect to abandoned drone and scoop it back into DroneBay
     let reconn = ok(
@@ -486,12 +487,13 @@ async fn launch_drones_state_change_tuple_values_and_detach_rules() {
     )
     .await;
     assert_eq!(reconn, PyRep::Dict(Vec::new()));
-    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let st = rt.active_drones_in_space.get(&d1).expect("reconnected drone active");
+    {
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, d1)
+            .expect("reconnected drone active");
         assert!(!st.is_abandoned);
         assert_eq!(st.owner_char_id, vexor.char_id);
         assert_eq!(st.parent_ship_id, vexor.ship_id);
-    });
+    }
 
     let scoop = ok(
         &ctx,
@@ -530,12 +532,13 @@ async fn launch_drones_state_change_tuple_values_and_detach_rules() {
     )
     .await;
     assert_eq!(alien_reconn, PyRep::Dict(Vec::new()));
-    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let st = rt.active_drones_in_space.get(&d2).expect("d2 still active");
+    {
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, d2)
+            .expect("d2 still active");
         assert!(!st.is_abandoned);
         assert_eq!(st.owner_char_id, vexor.char_id);
         assert_eq!(st.parent_ship_id, vexor.ship_id);
-    });
+    }
 
     let scoop_err = call(
         &ctx,
