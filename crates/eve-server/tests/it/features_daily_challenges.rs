@@ -1016,15 +1016,28 @@ async fn test_b36_storyline_offer_counter() {
     .into_iter()
     .enumerate()
     {
-        if non_qual_agent.agent_type_id == 3 {
-            complete_live_courier(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
+        let clear_agent_missions = || {
             ctx.db.with_mut_snapshot(|snap| {
-                for m in eve_server::services::mission_fixture::list(snap) {
-                    if m.agent_id == non_qual_agent.agent_id {
-                        eve_server::services::mission_fixture::remove(snap, m.character_id, m.mission_id);
-                    }
+                let mids: Vec<u32> = snap
+                    .missions
+                    .iter_by_character(char_id)
+                    .filter(|m| m.agent_id == non_qual_agent.agent_id)
+                    .map(|m| m.template_id)
+                    .chain(
+                        snap.missions
+                            .iter_history_by_character(char_id)
+                            .filter(|h| h.agent_id == non_qual_agent.agent_id)
+                            .map(|h| h.template_id),
+                    )
+                    .collect();
+                for mid in mids {
+                    eve_server::services::mission_fixture::remove(snap, char_id, mid);
                 }
             });
+        };
+        if non_qual_agent.agent_type_id == 3 {
+            complete_live_courier(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
+            clear_agent_missions();
         } else if non_qual_agent.agent_type_id == 5 {
             let dc_sys = non_qual_agent.solar_system_id.unwrap();
             let dc_sta = non_qual_agent.station_id.or_else(|| ctx.sde.solar_systems[&dc_sys].stations.first().map(|s| s.station_id)).unwrap_or(60_003_760);
@@ -1053,18 +1066,10 @@ async fn test_b36_storyline_offer_counter() {
             let mid = off["missionID"].as_i64().unwrap();
             ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &kw, None).await.unwrap();
             ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid)], &kw, None).await.unwrap();
-            ctx.db.with_mut_snapshot(|snap| {
-                eve_server::services::mission_fixture::remove(snap, char_id, mid as u32);
-            });
+            clear_agent_missions();
         } else {
             complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
-            ctx.db.with_mut_snapshot(|snap| {
-                for m in eve_server::services::mission_fixture::list(snap) {
-                    if m.agent_id == non_qual_agent.agent_id {
-                        eve_server::services::mission_fixture::remove(snap, m.character_id, m.mission_id);
-                    }
-                }
-            });
+            clear_agent_missions();
         }
     }
     let j = query_journal_missions(&ctx, &mut sess).await;

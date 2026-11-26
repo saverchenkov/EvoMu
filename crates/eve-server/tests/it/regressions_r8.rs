@@ -529,10 +529,17 @@ async fn test_review_r8_regressions() {
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
     ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdFollowBall", &[PyRep::Integer(s2_npc_1001), PyRep::Real(500.0)], &kw, None).await.unwrap();
-    for _ in 0..50 {
+    for _ in 0..150 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
+        if let (Some((_, sb)), Some((_, nb))) = (
+            jita_handle.get_ball_snapshot(100_000_002).await.unwrap(),
+            jita_handle.get_ball_snapshot(s2_npc_1001).await.unwrap(),
+        ) {
+            if sb.position.distance(nb.position) <= 1_000.0 {
+                break;
+            }
+        }
     }
-    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     let _ = jita_handle
         .add_target_lock(
             100_000_002,
