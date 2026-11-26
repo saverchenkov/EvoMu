@@ -977,12 +977,12 @@ fn validate_entity_drone_presence(
             let found = if require_same_system {
                 ctx.systems
                     .get_handle(sys_id)
-                    .is_some_and(|h| h.view().active_drones_in_space.values().any(matches_drone))
+                    .is_some_and(|h| h.hydrated_view().active_drones_in_space.values().any(matches_drone))
             } else {
                 ctx.systems
                     .active_system_handles()
                     .into_iter()
-                    .any(|(_, h)| h.view().active_drones_in_space.values().any(matches_drone))
+                    .any(|(_, h)| h.hydrated_view().active_drones_in_space.values().any(matches_drone))
             };
             if found {
                 Ok(())
@@ -995,7 +995,7 @@ fn validate_entity_drone_presence(
         }
         EntityDroneFilter::All => {
             let found = ctx.systems.get_handle(sys_id).is_some_and(|h| {
-                h.view().active_drones_in_space.values().any(|d| {
+                h.hydrated_view().active_drones_in_space.values().any(|d| {
                     if d.ball_id <= 0 || d.solar_system_id != sys_id {
                         return false;
                     }
@@ -1058,6 +1058,7 @@ async fn validate_return_bay_filter(
                 let mut own = false;
                 let mut foreign = false;
                 for (_, h) in ctx.systems.active_system_handles() {
+                    h.ensure_active_drones_hydrated().await;
                     let view = h.view();
                     for &id in ids {
                         for d in view.active_drones_in_space.values() {
@@ -1231,6 +1232,7 @@ pub async fn handle_npcs_drones(
                 ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             }
             let (max_drones_allowed, ship_bw, _ship_drone_cap) = pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
+            sys_handle_guard.ensure_active_drones_hydrated().await;
             let (cur_count, cur_bw) = {
                 let view = sys_handle_guard.view();
                 let active: Vec<&DroneSpaceState> = view
@@ -1729,6 +1731,7 @@ pub async fn handle_npcs_drones(
             };
             let ship_pos = ship_ball.position;
             let max_ctrl_range = compute_drone_control_range(ctx, char_id, ship_id);
+            sys_handle.ensure_active_drones_hydrated().await;
             let drones: Vec<DroneSpaceState> = sys_handle
                 .view()
                 .active_drones_in_space
@@ -2439,6 +2442,7 @@ pub async fn handle_npcs_drones(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            sys_handle.ensure_active_drones_hydrated().await;
             let has_salvage_drone = sys_handle.view().active_drones_in_space.values().any(|d| {
                 d.ball_id > 0
                     && d.solar_system_id == sys_id

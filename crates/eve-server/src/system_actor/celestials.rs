@@ -212,6 +212,7 @@ pub struct BallparkHandle {
     view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
     tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
     actor_state: std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
+    drone_hydration: std::sync::OnceLock<super::drones::ActiveDronesSharedCtx>,
 }
 
 impl std::ops::Deref for BallparkHandle {
@@ -234,8 +235,14 @@ impl BallparkHandle {
             view_tx,
             tidi_factor_bits,
             actor_state: std::sync::OnceLock::new(),
+            drone_hydration: std::sync::OnceLock::new(),
         }
     }
+
+    #[inline]
+    pub(in crate::system_actor) fn attach_drone_hydration(&self, s: super::drones::ActiveDronesSharedCtx) { let _ = self.drone_hydration.set(s); }
+    #[inline]
+    pub(in crate::system_actor) fn drone_hydration_shared(&self) -> Option<&super::drones::ActiveDronesSharedCtx> { self.drone_hydration.get() }
 
     /// Attaches the owning system's `actor_state` lock so drop-time `SystemView` refreshes
     /// capture `sim_elapsed_secs` and active-module flags when `actor_state` is rank-safe.
@@ -2385,7 +2392,7 @@ impl SystemHandle {
             SystemCommand::FlushConditionCheckpoint { reply }
         })
         .await?;
-        super::drones::flush_from_handle(self);
+        super::drones::flush_from_handle_async(self).await;
         Ok(count)
     }
 

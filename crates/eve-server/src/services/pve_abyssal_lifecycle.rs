@@ -430,12 +430,14 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         let ship_id_val = *sid;
         let abyss_sys_val = *abyss_sys;
         for (_, h) in ctx.systems.active_system_handles() {
-            let has_match = h.view().active_drones_in_space.values().any(|d| {
-                d.ball_id > 0
-                    && (d.owner_char_id == char_id_val
-                        || d.original_owner_char_id == char_id_val
-                        || d.parent_ship_id == ship_id_val)
-            });
+            let view = h.view();
+            let has_match = view.active_drones_needs_sqlite_hydration
+                || view.active_drones_in_space.values().any(|d| {
+                    d.ball_id > 0
+                        && (d.owner_char_id == char_id_val
+                            || d.original_owner_char_id == char_id_val
+                            || d.parent_ship_id == ship_id_val)
+                });
             if !has_match {
                 continue;
             }

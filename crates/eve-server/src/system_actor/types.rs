@@ -928,9 +928,7 @@ pub(crate) struct SystemActorState {
     pub(crate) active_drones_checkpoint_seq: u64,
     pub(crate) active_drones_needs_sqlite_hydration: bool,
     pub(crate) active_drones_removed_pre_hydration: HashSet<BallId>,
-    pub(crate) active_drones_flush_mutex: Arc<std::sync::Mutex<()>>,
-    pub(crate) migrated_legacy_drone_systems_opt:
-        Option<Arc<RankedMutex<HashSet<SolarSystemId>, RANK_LEAF>>>,
+    pub(crate) drone_hydration: super::ActiveDronesSharedCtx,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1795,6 +1793,13 @@ pub enum SystemCommand {
         legacy_dirty: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SnapshotDirtyActiveDrones {
+        reply: oneshot::Sender<Result<Option<(u64, Vec<(BallId, super::DroneSpaceState)>)>, String>>,
+    },
+    CommitActiveDronesFlushed {
+        seq: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     ShutdownActor {
         reply: oneshot::Sender<()>,
     },
@@ -1856,6 +1861,8 @@ impl SystemCommand {
                 | Self::FlushConditionCheckpoint { .. }
                 | Self::FlushFighterCheckpoint { .. }
                 | Self::GetProtectionSnapshot { .. }
+                | Self::SnapshotDirtyActiveDrones { .. }
+                | Self::CommitActiveDronesFlushed { .. }
                 | Self::ShutdownActor { .. }
         )
     }

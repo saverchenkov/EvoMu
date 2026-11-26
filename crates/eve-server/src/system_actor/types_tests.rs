@@ -524,6 +524,8 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::MutateActiveDronesWithClaims { .. } => "MutateActiveDronesWithClaims",
             SystemCommand::ScoopDroneClaimOp { .. } => "ScoopDroneClaimOp",
             SystemCommand::HydrateActiveDronesFromSqlite { .. } => "HydrateActiveDronesFromSqlite",
+            SystemCommand::SnapshotDirtyActiveDrones { .. } => "SnapshotDirtyActiveDrones",
+            SystemCommand::CommitActiveDronesFlushed { .. } => "CommitActiveDronesFlushed",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
@@ -953,6 +955,13 @@ fn system_command_all_variants_construct_and_match() {
             legacy_dirty: false,
             reply: oneshot::channel().0,
         },
+        SystemCommand::SnapshotDirtyActiveDrones {
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::CommitActiveDronesFlushed {
+            seq: 0,
+            reply: oneshot::channel().0,
+        },
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
@@ -964,7 +973,7 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 125);
+    assert_eq!(tags.len(), 127);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
@@ -1001,9 +1010,11 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[120], "MutateActiveDronesWithClaims");
     assert_eq!(tags[121], "ScoopDroneClaimOp");
     assert_eq!(tags[122], "HydrateActiveDronesFromSqlite");
-    assert_eq!(tags[123], "ShutdownActor");
+    assert_eq!(tags[123], "SnapshotDirtyActiveDrones");
+    assert_eq!(tags[124], "CommitActiveDronesFlushed");
+    assert_eq!(tags[125], "ShutdownActor");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[124], "TestAccess");
+    assert_eq!(tags[126], "TestAccess");
 }
 
 #[test]

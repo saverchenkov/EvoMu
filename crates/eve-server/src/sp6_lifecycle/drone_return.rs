@@ -77,6 +77,7 @@ pub async fn handle_cmd_return_bay(
         ));
     };
     let max_ctrl_range = crate::services::combat_crimewatch::combat_npcs_drones::compute_drone_control_range(ctx, char_id, ship_id);
+    sys_handle.ensure_active_drones_hydrated().await;
 
     let mut candidates: Vec<DroneSpaceState> = sys_handle
         .view()
@@ -865,11 +866,13 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
 ) {
     let mut lost_balls: Vec<(crate::system_actor::SystemHandle, i64, i64, u32, u32)> = Vec::new();
     for (_actor_sys_id, h) in ctx.systems.active_system_handles() {
-        let has_match = h.view().active_drones_in_space.values().any(|d| {
-            d.ball_id > 0
-                && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
-                && !d.is_abandoned
-        });
+        let view = h.view();
+        let has_match = view.active_drones_needs_sqlite_hydration
+            || view.active_drones_in_space.values().any(|d| {
+                d.ball_id > 0
+                    && (d.owner_char_id == char_id || d.parent_ship_id == ship_id)
+                    && !d.is_abandoned
+            });
         if !has_match {
             continue;
         }

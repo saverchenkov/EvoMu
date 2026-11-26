@@ -1014,6 +1014,7 @@ async fn resolve_direct_weapon_target(
         Ok(tid)
     } else if is_fof_missile {
         let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+        sys_handle.ensure_active_drones_hydrated().await;
         let sys_view = sys_handle.view();
         let nearest = all_balls
             .into_iter()

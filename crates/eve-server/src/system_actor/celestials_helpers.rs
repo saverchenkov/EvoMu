@@ -52,6 +52,8 @@ struct DbBallparkEntry {
     active_module_ships: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     view_tx: std::sync::Weak<tokio::sync::watch::Sender<Arc<crate::system_actor::SystemView>>>,
     tidi_factor_bits: std::sync::Weak<std::sync::atomic::AtomicU64>,
+    cmd_tx: tokio::sync::mpsc::WeakSender<crate::system_actor::SystemCommand>,
+    drone_hydration: crate::system_actor::drones::ActiveDronesSharedCtx,
 }
 
 fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
@@ -80,6 +82,8 @@ pub(crate) fn register_db_system_ballpark(
             active_module_ships: Arc::downgrade(&handle.active_module_ships),
             view_tx: Arc::downgrade(&handle.view_tx),
             tidi_factor_bits: Arc::downgrade(&handle.tidi_factor_bits),
+            cmd_tx: handle.cmd_tx.downgrade(),
+            drone_hydration: handle.ballpark.drone_hydration_shared().cloned().unwrap_or_default(),
         },
     );
 }
@@ -422,20 +426,11 @@ pub fn try_remove_ball_for_db(
                     }
                     sync_ball_positions(&bp, &pos_arc, &scram_arc);
                 }
-                if let (Some(st_arc), Some(vtx), Some(tidi)) = (
-                    st_opt.as_ref(),
-                    entry.view_tx.upgrade(),
-                    entry.tidi_factor_bits.upgrade(),
-                ) {
-                    crate::system_actor::drones::try_flush_actor_active_drones_checkpoint_post_unlock_with_view(
+                if let Some(cmd_tx) = entry.cmd_tx.upgrade() {
+                    crate::system_actor::drones::try_flush_from_sender(
                         solar_system_id,
-                        crate::system_actor::drones::ActiveDroneViewCtx {
-                            ballpark: &bp_arc,
-                            actor_state: st_arc,
-                            view_tx: &vtx,
-                            tidi_factor_bits: &tidi,
-                            active_subscribers: 0,
-                        },
+                        &cmd_tx,
+                        &entry.drone_hydration,
                     );
                 }
             }

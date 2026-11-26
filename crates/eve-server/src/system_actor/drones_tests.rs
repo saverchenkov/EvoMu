@@ -149,45 +149,26 @@ async fn drone_runtime_apply_damage_destruction_clears_state_and_allows_hibernat
     assert!(sys.is_hibernated());
 }
 
-fn make_space_drone(
-    ball_id: i64,
-    owner_char_id: i64,
-    parent_ship_id: i64,
-    solar_system_id: u32,
-    is_abandoned: bool,
-) -> DroneSpaceState {
+fn make_space_drone(ball_id: i64, owner_char_id: i64, parent_ship_id: i64, solar_system_id: u32, is_abandoned: bool) -> DroneSpaceState {
     DroneSpaceState {
-        ball_id,
-        drone_item_id: ball_id,
-        type_id: 2454,
-        group_id: 100,
-        owner_char_id: if is_abandoned { 0 } else { owner_char_id },
-        original_owner_char_id: owner_char_id,
-        parent_ship_id: if is_abandoned { 0 } else { parent_ship_id },
-        solar_system_id,
-        target_id: None,
-        activity_state: 0,
-        assist_char_id: None,
-        guard_char_id: None,
-        is_abandoned,
-        is_sentry: false,
-        bandwidth_used: 5.0,
-        max_velocity: 1_000.0,
-        optimal_range: 5_000.0,
-        damage_vector: DamageVector {
-            em: 0.0,
-            thermal: 40.0,
-            kinetic: 0.0,
-            explosive: 0.0,
-        },
-        shield_repair_amount: 0.0,
-        armor_repair_amount: 0.0,
-        hull_repair_amount: 0.0,
-        web_speed_factor: 0.0,
-        neut_amount: 0.0,
-        ecm_strength: 0.0,
-        tp_sig_bonus_pct: 0.0,
+        ball_id, drone_item_id: ball_id, type_id: 2454, group_id: 100,
+        owner_char_id: if is_abandoned { 0 } else { owner_char_id }, original_owner_char_id: owner_char_id,
+        parent_ship_id: if is_abandoned { 0 } else { parent_ship_id }, solar_system_id,
+        target_id: None, activity_state: 0, assist_char_id: None, guard_char_id: None,
+        is_abandoned, is_sentry: false, bandwidth_used: 5.0, max_velocity: 1_000.0, optimal_range: 5_000.0,
+        damage_vector: DamageVector { em: 0.0, thermal: 40.0, kinetic: 0.0, explosive: 0.0 },
+        ..Default::default()
     }
+}
+
+fn hold_writer(db: &Arc<eve_db::WorldRepository>) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (db_c, (ltx, lrx), (rtx, rrx)) = (Arc::clone(db), tokio::sync::oneshot::channel::<()>(), tokio::sync::oneshot::channel::<()>());
+    let h = tokio::task::spawn_blocking(move || db_c.with_mut_snapshot(|_| { let _ = ltx.send(()); let _ = rrx.blocking_recv(); }));
+    (lrx, rtx, h)
 }
 
 struct TempSqliteGuard(std::path::PathBuf);
@@ -289,66 +270,27 @@ async fn reserve_finalize_mutate_and_hibernation_policy() {
     let sys_id = 30_000_142u32;
     let sys = reg.get_or_spawn(sys_id);
 
-    // Partial-ok launch reservation enforces cap/bandwidth and keeps valid prefix.
-    let res = sys
-        .reserve_drone_launches(ReserveDroneLaunchesReq {
-            ship_id: 900_001,
-            max_drones_allowed: 1,
-            max_bandwidth: 10.0,
-            partial_ok: true,
-            drones: vec![
-                (1, make_space_drone(-200_001, 100_001, 900_001, sys_id, false)),
-                (2, make_space_drone(-200_002, 100_001, 900_001, sys_id, false)),
-            ],
-        })
-        .await
-        .unwrap();
-    assert_eq!(res.kept_indices, vec![0]);
-    assert_eq!(res.reserved_ids, vec![-200_001]);
-    assert_eq!(res.per_item_errors, vec![(2, "NoDroneManagementAbilitiesLeft")]);
-    assert_eq!(res.rejected_error, None);
-    assert!(
-        sys.active_drones_snapshot().is_empty() && reg.all_active_drones().is_empty(),
-        "in-flight LaunchDrones reservations must never leak into active_drones_in_space or SystemView"
-    );
-    assert!(reg.find_active_drone_by_item(-200_001).is_none());
-    assert!(!sys.is_hibernated());
-    let second_res = sys
-        .reserve_drone_launches(ReserveDroneLaunchesReq {
-            ship_id: 900_001,
-            max_drones_allowed: 1,
-            max_bandwidth: 10.0,
-            partial_ok: false,
-            drones: vec![(3, make_space_drone(-200_009, 100_001, 900_001, sys_id, false))],
-        })
-        .await
-        .unwrap();
-    assert_eq!(second_res.rejected_error, Some("NoDroneManagementAbilitiesLeft"));
+    let res = sys.reserve_drone_launches(ReserveDroneLaunchesReq {
+        ship_id: 900_001, max_drones_allowed: 1, max_bandwidth: 10.0, partial_ok: true,
+        drones: vec![(1, make_space_drone(-200_001, 100_001, 900_001, sys_id, false)), (2, make_space_drone(-200_002, 100_001, 900_001, sys_id, false))],
+    }).await.unwrap();
+    assert_eq!((res.kept_indices, res.reserved_ids.clone(), res.per_item_errors, res.rejected_error), (vec![0], vec![-200_001], vec![(2, "NoDroneManagementAbilitiesLeft")], None));
+    assert!(sys.active_drones_snapshot().is_empty() && reg.all_active_drones().is_empty() && reg.find_active_drone_by_item(-200_001).is_none() && !sys.is_hibernated());
+    assert_eq!(sys.reserve_drone_launches(ReserveDroneLaunchesReq {
+        ship_id: 900_001, max_drones_allowed: 1, max_bandwidth: 10.0, partial_ok: false,
+        drones: vec![(3, make_space_drone(-200_009, 100_001, 900_001, sys_id, false))],
+    }).await.unwrap().rejected_error, Some("NoDroneManagementAbilitiesLeft"));
 
-    // Rollback deletes pending reservation.
-    sys.finalize_drone_launches(Vec::new(), res.reserved_ids)
-        .await
-        .unwrap();
+    sys.finalize_drone_launches(Vec::new(), res.reserved_ids).await.unwrap();
     assert!(sys.active_drones_snapshot().is_empty());
 
-    // Commit promotes reservation to persistent ball ID and keeps empty-ballpark system awake while controlled.
-    let res2 = sys
-        .reserve_drone_launches(ReserveDroneLaunchesReq {
-            ship_id: 900_001,
-            max_drones_allowed: 1,
-            max_bandwidth: 10.0,
-            partial_ok: false,
-            drones: vec![(1, make_space_drone(-200_003, 100_001, 900_001, sys_id, false))],
-        })
-        .await
-        .unwrap();
+    let res2 = sys.reserve_drone_launches(ReserveDroneLaunchesReq {
+        ship_id: 900_001, max_drones_allowed: 1, max_bandwidth: 10.0, partial_ok: false,
+        drones: vec![(1, make_space_drone(-200_003, 100_001, 900_001, sys_id, false))],
+    }).await.unwrap();
     assert_eq!(res2.rejected_error, None);
-    let _ = sys
-        .finalize_drone_launches(vec![(-200_003, 950_001, 950_001)], Vec::new())
-        .await
-        .unwrap();
-    assert!(sys.active_drone(950_001).is_some());
-    assert!(sys.active_drone(-200_003).is_none());
+    let _ = sys.finalize_drone_launches(vec![(-200_003, 950_001, 950_001)], Vec::new()).await.unwrap();
+    assert!(sys.active_drone(950_001).is_some() && sys.active_drone(-200_003).is_none());
     assert!(!sys.is_hibernated());
 
     // Marking the drone abandoned and idle lets the zero-ball system hibernate cleanly.
@@ -388,40 +330,23 @@ async fn system_actor_step_manual_drives_engaged_drones_in_system() {
                 shield_hp: 500.0,
                 max_shield_hp: 500.0,
                 armor_hp: 500.0,
-                max_armor_hp: 500.0,
-                structure_hp: 500.0,
-                max_structure_hp: 500.0,
-                signature_radius: 100.0,
-                ..CombatState::default()
-            },
-        )
-        .await
-        .unwrap();
+                max_armor_hp: 500.0, structure_hp: 500.0, max_structure_hp: 500.0,
+                signature_radius: 100.0, ..CombatState::default()
+            }).await.unwrap();
 
     let mut d = make_space_drone(drone_id, 90_000_001, 100_001, sys_id, false);
-    d.target_id = Some(target_id);
-    d.activity_state = 1;
+    (d.target_id, d.activity_state) = (Some(target_id), 1);
     sys.upsert_active_drone(d).await.unwrap();
 
-    // Cooldown in future -> actor step_manual does NOT fire volley yet.
     let now = ctx.now_unix();
     assert!(sys.set_drone_next_ready_unix(drone_id, now + 60).await.unwrap());
     let _ = sys.step_manual(1.0).await.unwrap();
-    let cs_before = sys.get_combat_state(target_id).await.unwrap().unwrap();
-    assert!((cs_before.shield_hp - 500.0).abs() < 1e-6);
+    assert!((sys.get_combat_state(target_id).await.unwrap().unwrap().shield_hp - 500.0).abs() < 1e-6);
 
-    // Cooldown ready -> SystemActor::step_manual executes step_engaged_drones_in_system via system_step_hook.
     assert!(sys.set_drone_next_ready_unix(drone_id, now).await.unwrap());
     let _ = sys.step_manual(1.0).await.unwrap();
-    let cs_after = sys.get_combat_state(target_id).await.unwrap().unwrap();
-    assert!(
-        cs_after.shield_hp < 500.0,
-        "SystemActor::step_manual must fire engaged drone volley automatically"
-    );
-    assert!(
-        sys.drone_next_ready_unix(drone_id).unwrap_or(0) > now,
-        "step_engaged_drones_in_system must advance drone cooldown"
-    );
+    assert!(sys.get_combat_state(target_id).await.unwrap().unwrap().shield_hp < 500.0, "SystemActor::step_manual must fire engaged drone volley");
+    assert!(sys.drone_next_ready_unix(drone_id).unwrap_or(0) > now, "step_engaged_drones_in_system must advance drone cooldown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -457,19 +382,14 @@ async fn dirty_active_drone_checkpoint_prevents_hibernation_until_flushed() {
     let sys_id = 30_000_142u32;
     let sys = reg.get_or_spawn(sys_id);
 
-    let db_hold = Arc::clone(&db);
-    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-    let holder = tokio::task::spawn_blocking(move || {
-        db_hold.with_mut_snapshot(|_| { let _ = locked_tx.send(()); let _ = release_rx.blocking_recv(); });
-    });
-    locked_rx.await.unwrap();
+    let (lrx, rtx, holder) = hold_writer(&db);
+    lrx.await.unwrap();
 
     sys.upsert_active_drone(make_space_drone(950_777, 100_001, 900_001, sys_id, true)).await.unwrap();
     let _ = sys.step_manual(1.0).await.unwrap();
     assert!(!sys.is_hibernated(), "actor with un-flushed dirty checkpoint must not hibernate while writer contended");
 
-    let _ = release_tx.send(());
+    let _ = rtx.send(());
     holder.await.unwrap();
     let _ = sys.step_manual(1.0).await.unwrap();
     let _ = sys.step_manual(1.0).await.unwrap();
@@ -494,11 +414,6 @@ async fn deferred_sqlite_hydration_contended_and_unsafe_read_preserves_view_hibe
 
     let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 2"));
     let reg2 = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db2)));
-    let hold_writer = |db: &Arc<eve_db::WorldRepository>| {
-        let (db_c, (ltx, lrx), (rtx, rrx)) = (Arc::clone(db), tokio::sync::oneshot::channel::<()>(), tokio::sync::oneshot::channel::<()>());
-        let h = tokio::task::spawn_blocking(move || db_c.with_mut_snapshot(|_| { let _ = ltx.send(()); let _ = rrx.blocking_recv(); }));
-        (lrx, rtx, h)
-    };
 
     // (a) Contended `db.writer` wake stays non-hibernated, never overwrites SQLite, republishes SystemView, and enforces capacity.
     let (lrx1, rtx1, h1) = hold_writer(&db2);
@@ -540,4 +455,54 @@ async fn deferred_sqlite_hydration_contended_and_unsafe_read_preserves_view_hibe
     let _ = ren.flush_condition_checkpoint().await.unwrap();
     assert!(ren.active_drone(951_301).is_some() && ren.is_hibernated());
     assert!(reg2.stop_system(jita_sys).await && reg2.stop_system(ren_sys).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_hydration_removed_drone_dirties_checkpoint_and_never_resurrects() {
+    let (tmp, _guard) = temp_sqlite_db("pre_hyd_remove_6");
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let (jita_sys, perim_sys) = (30_000_142u32, 30_000_144u32);
+    {
+        let db1 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 1"));
+        let reg1 = Arc::new(SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db1)));
+        let (jita, perim) = (reg1.get_or_spawn(jita_sys), reg1.get_or_spawn(perim_sys));
+        jita.upsert_active_drones(vec![make_space_drone(951_401, 100_001, 900_001, jita_sys, true), make_space_drone(951_402, 100_001, 900_001, jita_sys, true)], false).await.unwrap();
+        perim.upsert_active_drones(vec![make_space_drone(951_501, 100_002, 900_002, perim_sys, true), make_space_drone(951_502, 100_002, 900_002, perim_sys, true)], false).await.unwrap();
+        assert!(reg1.stop_system(jita_sys).await && reg1.stop_system(perim_sys).await);
+    }
+
+    let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 2"));
+    let reg2 = Arc::new(SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db2)));
+    // (a) Remove ball while `db.writer` held (pre-hydration) -> hydration dirties checkpoint & SQLite purges on flush/stop.
+    let (lrx, rtx, h) = hold_writer(&db2);
+    lrx.await.unwrap();
+    let jita2 = reg2.get_or_spawn(jita_sys);
+    let _ = jita2.spawn_ball_with_combat(make_drone_ball(951_401), CombatState::default()).await.unwrap();
+    assert!(jita2.remove_ball(951_401).await.is_some());
+    assert!(jita2.view().active_drones_needs_sqlite_hydration);
+    let _ = rtx.send(()); h.await.unwrap();
+    let _ = jita2.step_manual(1.0).await.unwrap();
+    assert!(jita2.active_drone(951_401).is_none() && jita2.active_drone(951_402).is_some());
+    assert!(reg2.stop_system(jita_sys).await);
+
+    // (b) Remove ball after `!db_read_safe` wake before hydration -> dirties checkpoint and flushes cleanly.
+    let (lrx2, rtx2, h2) = hold_writer(&db2);
+    lrx2.await.unwrap();
+    let perim2 = db2.with_snapshot(|_| reg2.get_or_spawn(perim_sys));
+    let _ = perim2.spawn_ball_with_combat(make_drone_ball(951_501), CombatState::default()).await.unwrap();
+    assert!(perim2.remove_ball(951_501).await.is_some());
+    assert!(perim2.view().active_drones_needs_sqlite_hydration);
+    let _ = rtx2.send(()); h2.await.unwrap();
+    let _ = perim2.flush_condition_checkpoint().await.unwrap();
+    assert!(perim2.is_hibernated() && reg2.stop_system(perim_sys).await);
+
+    let db3 = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite 3"));
+    let reg3 = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db3)));
+    let (jita3, perim3) = (reg3.get_or_spawn(jita_sys), reg3.get_or_spawn(perim_sys));
+    assert!(jita3.active_drone(951_401).is_none() && jita3.active_drone(951_402).is_some());
+    assert!(perim3.active_drone(951_501).is_none() && perim3.active_drone(951_502).is_some());
+    let rows_j = db3.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(c, jita_sys, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES)).unwrap();
+    let rows_p = db3.with_sqlite_conn(|c| eve_db::sqlite_store::system_checkpoint::load_system_checkpoints::<DroneSpaceState>(c, perim_sys, eve_db::sqlite_store::system_checkpoint::KIND_ACTIVE_DRONES)).unwrap();
+    assert_eq!((rows_j.len(), rows_j[0].1.ball_id, rows_p.len(), rows_p[0].1.ball_id), (1, 951_402, 1, 951_502));
+    assert!(reg3.stop_system(jita_sys).await && reg3.stop_system(perim_sys).await);
 }

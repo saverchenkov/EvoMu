@@ -1929,7 +1929,7 @@ fn apply_ai_step_world_effects(
         // must not resolve to former owners, while docked/out-of-system suppression is enforced
         // downstream by outbound scene scoping (`#1190`).
         let active_craft_owners: HashMap<i64, Option<i64>> = {
-            let sys_view_opt = ctx.systems.get_handle(sys_id).map(|h| h.view());
+            let sys_view_opt = ctx.systems.get_handle(sys_id).map(|h| h.hydrated_view());
             let mut map = applied_hits
                 .iter()
                 .filter_map(|&(_, _, tid, ..)| {

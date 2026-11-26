@@ -242,6 +242,7 @@ pub(crate) async fn handle_mine(
     drone_ids.dedup();
 
     // Reject drones already present in active_drone_miners for this ship/target (`NF-1`)
+    handle.ensure_active_drones_hydrated().await;
     let already_mining = {
         let view = handle.view();
         drone_ids.iter().any(|did| {

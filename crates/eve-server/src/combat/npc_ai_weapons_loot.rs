@@ -1806,7 +1806,7 @@ impl EdencomHostilityMeta {
     pub(crate) fn collect(ctx: &ServerContext, solar_system_id: u32, ball_ids: &[i64]) -> Self {
         let mut drone_owner_cids: HashMap<i64, i64> = HashMap::new();
         let mut hostile_npc_ids: HashSet<i64> = HashSet::new();
-        let sys_view = ctx.systems.get_handle(solar_system_id).map(|h| h.view());
+        let sys_view = ctx.systems.get_handle(solar_system_id).map(|h| h.hydrated_view());
         for &id in ball_ids {
             let d_opt = sys_view
                 .as_ref()

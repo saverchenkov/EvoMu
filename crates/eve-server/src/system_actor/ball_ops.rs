@@ -122,6 +122,7 @@ pub(crate) async fn call_actor_result_with_deadline<T>(
 
 fn run_direct_ball_op_on_current_thread<R>(
     handle: &SystemHandle,
+    run_post_flush: bool,
     op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
 ) -> R {
     let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(handle);
@@ -199,14 +200,17 @@ fn run_direct_ball_op_on_current_thread<R>(
         lock_guard.as_ref(),
         ticket,
     );
-    super::drones::try_flush_from_handle(handle);
+    if run_post_flush {
+        super::drones::try_flush_from_handle(handle);
+    }
     out
 }
 
-pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
+fn dispatch_actor_sync_reply_with_deadline_inner<P, T>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
+    run_post_flush: bool,
     payload: P,
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
@@ -220,7 +224,7 @@ pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
                 // Legacy `#[tokio::test(flavor = "current_thread")]` caller running on the
                 // actor's single thread cannot block synchronously on the mailbox; run the exact
                 // same shared actor handler directly under the actor locks + publish view.
-                Ok(run_direct_ball_op_on_current_thread(handle, |ctx| {
+                Ok(run_direct_ball_op_on_current_thread(handle, run_post_flush, |ctx| {
                     direct_fn(ctx, payload)
                 }))
             }
@@ -248,6 +252,19 @@ pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
     }
 }
 
+pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T>(
+    handle: &SystemHandle,
+    label: &str,
+    timeout_dur: Duration,
+    payload: P,
+    make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
+    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
+) -> Result<T, String> {
+    dispatch_actor_sync_reply_with_deadline_inner(
+        handle, label, timeout_dur, true, payload, make_cmd, direct_fn,
+    )
+}
+
 pub(in crate::system_actor) fn dispatch_actor_sync_with_deadline<P, T>(
     handle: &SystemHandle,
     label: &str,
@@ -256,7 +273,22 @@ pub(in crate::system_actor) fn dispatch_actor_sync_with_deadline<P, T>(
     make_cmd: impl FnOnce(P, oneshot::Sender<Result<T, String>>) -> SystemCommand,
     direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
 ) -> Result<T, String> {
-    dispatch_actor_sync_reply_with_deadline(handle, label, timeout_dur, payload, make_cmd, direct_fn)?
+    dispatch_actor_sync_reply_with_deadline_inner(
+        handle, label, timeout_dur, true, payload, make_cmd, direct_fn,
+    )?
+}
+
+pub(in crate::system_actor) fn dispatch_actor_sync_no_flush_with_deadline<P, T>(
+    handle: &SystemHandle,
+    label: &str,
+    timeout_dur: Duration,
+    payload: P,
+    make_cmd: impl FnOnce(P, oneshot::Sender<Result<T, String>>) -> SystemCommand,
+    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
+) -> Result<T, String> {
+    dispatch_actor_sync_reply_with_deadline_inner(
+        handle, label, timeout_dur, false, payload, make_cmd, direct_fn,
+    )?
 }
 
 fn convert_ball_to_rigid_at_in_actor(

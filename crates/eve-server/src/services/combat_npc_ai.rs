@@ -827,7 +827,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
     let mut non_npc_drones: Vec<(i64, Option<(u32, i64, Option<i64>, f64)>)> = Vec::new();
     if !cand_ball_ids.is_empty() {
-        let sys_view_opt = ctx.systems.get_handle(solar_system_id).map(|h| h.view());
+        let sys_view_opt = ctx.systems.get_handle(solar_system_id).map(|h| h.hydrated_view());
         with_combat_ephemeral(ctx, |rt| {
             for cid in cand_ball_ids {
                 if !rt.npc_entities.contains_key(&cid) {
@@ -993,7 +993,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         });
 
         if raws.iter().any(|r| r.is_player_drone && r.owner_cid.is_none()) {
-            let sys_view_opt = ctx.systems.get_handle(solar_system_id).map(|h| h.view());
+            let sys_view_opt = ctx.systems.get_handle(solar_system_id).map(|h| h.hydrated_view());
             let fallback_owners: HashMap<i64, i64> = sys_view_opt
                 .as_ref()
                 .map(|v| {

@@ -1237,6 +1237,7 @@ impl SystemRegistry {
             Arc::clone(&view_tx),
             Arc::clone(&tidi_factor_bits),
         ));
+        ballpark_shared.attach_drone_hydration(initial_actor_state.drone_hydration.clone());
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
         ballpark_shared.attach_actor_state(&actor_state_shared);
@@ -1378,6 +1379,7 @@ impl SystemRegistry {
         let post_unlock_tx_handle = post_unlock_tx.clone();
         // Wrap BEFORE `spawn` so `Runtime::drop()` before first poll still sends `PostUnlockMsg::Shutdown`.
         let post_unlock_shutdown = post_unlock::PostUnlockShutdownGuard(Some(post_unlock_tx));
+        let drone_hydration_actor = ballpark_shared.drone_hydration_shared().cloned().unwrap_or_default();
         rt_handle.spawn(async move {
             // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
             let mut post_unlock_tx_opt = post_unlock_shutdown;
@@ -1387,10 +1389,25 @@ impl SystemRegistry {
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
             let mut ball_spawn_tokens: HashMap<BallId, u64> = HashMap::new();
-            drones::flush_actor_active_drones_with_view(
-                solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
-                &tidi_factor_bits_actor, event_tx_actor.receiver_count(), false,
-            );
+            let flush_actor_active_drones = |blocking: bool| {
+                if !eve_db::lock_rank::held_lock_ranks().is_empty() { return; }
+                let (mut dirty, needs) = drones::active_drone_flush_flags(&drone_hydration_actor);
+                if !dirty && !needs { return; }
+                if needs {
+                    let Some((h, l)) = drones::read_sqlite_for_shared(&drone_hydration_actor, solar_system_id, blocking) else { return; };
+                    let (bp, mut st) = (ballpark_actor.read().unwrap_or_else(|e| e.into_inner()), actor_state_actor.write().unwrap_or_else(|e| e.into_inner()));
+                    dirty |= drones::hydrate_in_actor_and_refresh(solar_system_id, &bp, &mut st, &view_tx_actor, &tidi_factor_bits_actor, event_tx_actor.receiver_count(), h, l);
+                }
+                if !dirty { return; }
+                let batch = drones::capture_dirty_active_drones_snapshot(&actor_state_actor.read().unwrap_or_else(|e| e.into_inner()));
+                if let Some((seq, _, entries)) = batch {
+                    if drones::write_sqlite_for_shared(&drone_hydration_actor, solar_system_id, &entries, blocking) {
+                        let (bp, mut st) = (ballpark_actor.read().unwrap_or_else(|e| e.into_inner()), actor_state_actor.write().unwrap_or_else(|e| e.into_inner()));
+                        drones::finish_flush_in_actor(&bp, &mut st, event_tx_actor.receiver_count(), seq);
+                    }
+                }
+            };
+            flush_actor_active_drones(false);
             while let Some((cmd_batch, shutdown_requested)) =
                 post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0).await
             {
@@ -2317,10 +2334,7 @@ impl SystemRegistry {
                     }
                 }
                 flush_post_unlock_actions(&post_unlock_actions_actor);
-                drones::flush_actor_active_drones_with_view(
-                    solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
-                    &tidi_factor_bits_actor, event_tx_actor.receiver_count(), false,
-                );
+                flush_actor_active_drones(false);
                 if shutdown_requested {
                     break;
                 }
@@ -2349,10 +2363,7 @@ impl SystemRegistry {
                     }
                 }
             }
-            drones::flush_actor_active_drones_with_view(
-                solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
-                &tidi_factor_bits_actor, event_tx_actor.receiver_count(), true,
-            );
+            flush_actor_active_drones(true);
             drop((
                 ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor,
                 scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor,

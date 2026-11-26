@@ -1465,7 +1465,7 @@ pub fn safe_logoff_blocking_space_conditions(
     }
 
     let has_drones_or_fighters = ctx.systems.get_handle(sys_id).is_some_and(|h| {
-        h.view()
+        h.hydrated_view()
             .active_drones_in_space
             .values()
             .any(|d| d.ball_id > 0 && !d.is_abandoned && (d.owner_char_id == char_id || d.parent_ship_id == ship_id))
