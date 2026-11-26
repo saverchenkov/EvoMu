@@ -815,12 +815,23 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept combat mission");
     ctx.advance_secs(31);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock for combat mission");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "agentMgr",
+        Some(sec_oid),
+        "WarpToLocation",
+        &[PyRep::String("dungeon".into()), PyRep::Integer(i64::from(chosen_mid))],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Warp to combat mission pocket spawns wave");
 
     let (expected_rem, mission_npc_ids) = ctx.db.with_snapshot(|s| {
         let m = eve_server::services::mission_fixture::get(s, char_id, chosen_mid).unwrap();
         (m.npcs_remaining, m.spawned_npc_ball_ids)
     });
-    assert!(!mission_npc_ids.is_empty(), "Mission must spawn its own NPCs");
+    assert!(!mission_npc_ids.is_empty(), "Mission must spawn its own NPCs on pocket entry");
 
     // Kill an ambient non-mission NPC in the same system -> must NOT decrement mission npcs_remaining
     let ambient_rep = crate::common::slash_cmd(&ctx, &mut sess, "/spawnnpc 10035").await;
@@ -1205,7 +1216,14 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
     assert_eq!(acc_denial.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(3_600)));
     assert_eq!(acc_denial.dict_get("bonusExpiryUnix"), Some(&PyRep::Integer((now0 + 3_600) as i64)));
 
-    // Kill the spawned mission NPCs in space via system actor
+    // Materialize mission NPCs on pocket entry and destroy them in space via system actor
+    let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        &ctx,
+        char_id,
+        hi_sys,
+        glam::DVec3::ZERO,
+        Some(13_777),
+    );
     let denial_balls = ctx.db.with_snapshot(|s| mission_fixture::get(s, char_id, 13_777).unwrap().spawned_npc_ball_ids);
     assert!(!denial_balls.is_empty());
     let hi_handle = ctx.systems.get_or_spawn(hi_sys);

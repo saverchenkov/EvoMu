@@ -404,8 +404,21 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
         for iid in candidate_ids {
             let Some((wave_count, wave_types)) = snap.missions.get(iid).and_then(|mission| {
                 let enc = mission.encounter()?;
-                let matches_target =
-                    target_mission_id.is_none_or(|mid| mission.template_id == mid);
+                let matches_target = match target_mission_id {
+                    Some(mid) => mission.template_id == mid,
+                    None => {
+                        let known_origin = mission
+                            .site_origin_f64()
+                            .map(DVec3::from)
+                            .or_else(|| {
+                                mission
+                                    .bookmark_id
+                                    .and_then(|bmid| snap.bookmarks.get(&bmid))
+                                    .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
+                            });
+                        known_origin.is_none_or(|pos| pocket_origin.distance(pos) <= 200_000.0)
+                    }
+                };
                 let needs_respawn = enc.awaiting_downtime_respawn
                     || (enc.spawned_npc_ball_ids.is_empty() && enc.npcs_remaining > 0);
                 if mission.state != eve_db::MissionState::Accepted

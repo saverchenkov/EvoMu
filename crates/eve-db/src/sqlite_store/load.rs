@@ -2226,6 +2226,9 @@ fn migrate_legacy_missions_table(
                 accepted_at_unix: meta.accepted_at_unix,
                 accept_expiry_unix: meta.accept_expiry_unix,
                 bonus_expiry_unix: meta.bonus_expiry_unix,
+                site_origin_m: None,
+                asteroid_entity_id: None,
+                dungeon_instance_id: None,
                 objective,
             };
             snap.missions.try_insert(instance)

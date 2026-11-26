@@ -9,10 +9,22 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-pub(crate) fn deterministic_mission_site_origin(
+fn splitmix64_hash(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// Computes a deterministic, per-instance mission site origin in `mission_sys_id` (`PVE-001`).
+///
+/// Anchors off the system's first station (or `DVec3::ZERO`) and offsets by a SplitMix64-derived
+/// vector quantized onto 500 km cells spanning `+/- 50,000 km` outside station undock grids
+/// (`>= 5,000,000 m` per axis), so distinct `(mission_sys_id, instance_id)` sites never collide.
+pub(crate) fn mission_site_origin_for_instance(
     ctx: &ServerContext,
     mission_sys_id: u32,
-    mission_id: u32,
+    instance_id: i64,
 ) -> DVec3 {
     let base = ctx
         .sde
@@ -20,13 +32,76 @@ pub(crate) fn deterministic_mission_site_origin(
         .get(&mission_sys_id)
         .and_then(|s| s.stations.first().map(|st| st.position))
         .unwrap_or(DVec3::ZERO);
-    // Place mission dungeons well outside station undock grids so warps always exceed 150 km.
-    let offset = DVec3::new(
-        5_000_000.0 + ((mission_id % 97) as f64) * 50_000.0,
-        2_000_000.0 + ((mission_id % 13) as f64) * 25_000.0,
-        ((mission_id % 7) as f64) * 10_000.0,
+    let seed = splitmix64_hash(
+        (mission_sys_id as u64).rotate_left(32)
+            ^ (instance_id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
     );
-    base + offset
+    let hx = splitmix64_hash(seed);
+    let hy = splitmix64_hash(hx);
+    let hz = splitmix64_hash(hy);
+    let axis_offset = |h: u64| -> f64 {
+        let sign = if (h & 1) == 0 { 1.0 } else { -1.0 };
+        let cell = ((h >> 1) % 91) as f64;
+        sign * (5_000_000.0 + cell * 500_000.0)
+    };
+    let pos = base + DVec3::new(axis_offset(hx), axis_offset(hy), axis_offset(hz));
+    DVec3::new(pos.x.round(), pos.y.round(), pos.z.round())
+}
+
+/// Matches the targeted mission on a `beyonce.CmdWarpToStuff` warp and materializes both its
+/// encounter NPCs and persisted mining asteroid using the already-loaded `handle` (`PVE-020`).
+pub(crate) async fn materialize_mission_pocket_on_cmd_warp(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    sys_id: u32,
+    stuff_type: &str,
+    target_id: i64,
+    dest_pos: DVec3,
+) {
+    let warp_mission_id = ctx.db.with_snapshot(|snap| {
+        snap.missions
+            .iter_by_character(char_id)
+            .find(|m| {
+                if m.state != MissionState::Accepted || m.solar_system_id != sys_id {
+                    return false;
+                }
+                if stuff_type == "bookmark" && m.bookmark_id == Some(target_id) {
+                    return true;
+                }
+                let pocket_pos = m
+                    .site_origin_f64()
+                    .map(DVec3::from)
+                    .or_else(|| {
+                        m.bookmark_id
+                            .and_then(|bid| snap.bookmarks.get(&bid))
+                            .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
+                    });
+                pocket_pos.is_some_and(|p| dest_pos.distance(p) <= 200_000.0)
+            })
+            .map(|m| m.template_id)
+    });
+    if let Some(mid) = warp_mission_id {
+        let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+            ctx,
+            char_id,
+            sys_id,
+            dest_pos,
+            Some(mid),
+        );
+        super::agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
+            ctx,
+            handle,
+            char_id,
+            sys_id,
+            Some(mid),
+        )
+        .await;
+    } else {
+        let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
+            ctx, char_id, sys_id, dest_pos,
+        );
+    }
 }
 
 pub(crate) const MIN_AGENT_WARP_DISTANCE_M: f64 = 150_000.0;
@@ -574,9 +649,11 @@ fn mission_dungeon_warp_target(
             && bm.z.is_finite())
         .then(|| DVec3::new(bm.x, bm.y, bm.z)))
     })?;
-    let anchor_pos = bm_pos.unwrap_or_else(|| {
-        deterministic_mission_site_origin(ctx, mission_sys_id, mission.template_id)
-    });
+    let anchor_pos = bm_pos
+        .or_else(|| mission.site_origin_f64().map(DVec3::from))
+        .unwrap_or_else(|| {
+            mission_site_origin_for_instance(ctx, mission_sys_id, mission.instance_id)
+        });
     Ok(WarpTarget::Dungeon {
         mission_id: mission.template_id,
         bookmark_id: bm_pos.and(target_bmid),

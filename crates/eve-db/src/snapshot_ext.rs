@@ -1929,6 +1929,7 @@ impl WorldStateSnapshot {
             .chain(self.missions.keys())
             .chain(self.missions.history_keys())
             .chain(self.missions.spawned_npc_ball_ids())
+            .chain(self.missions.asteroid_entity_ids())
             .chain(self.owner_notes.values().filter_map(decode_owner_note_entity_id))
     }
 

@@ -565,20 +565,38 @@ async fn test_security_status_gain_caps_tag_bands_and_transactions() {
         ctx.dispatch_rpc(&mut pilot_sess, "agentMgr", Some(a_oid), "DoAction", &[PyRep::Integer(3)], &HashMap::new(), None).await.unwrap();
         ctx.advance_secs(12);
         rpc(&ctx, &mut pilot_sess, "stationSvc", "Undock", &[]).await.unwrap();
-        let spawned = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, pilot_id, mid).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids)));
-        if let Some((mission_sys, spawned_ids)) = spawned {
-            if let Some(&m_rat_id) = spawned_ids.first() {
+        let m_info = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, pilot_id, mid).map(|m| (m.solar_system_id, m.npcs_remaining)));
+        if let Some((mission_sys, npcs_rem)) = m_info {
+            if npcs_rem > 0 {
                 if mission_sys != asys {
                     slash(&ctx, &mut pilot_sess, &format!("/tr {mission_sys}")).await;
                 }
-                let m_handle = ctx.systems.get_or_spawn(mission_sys);
-                if let (Some(ship_id), Ok(Some((_, rat_b)))) = (pilot_sess.ship_id, m_handle.get_ball_snapshot(m_rat_id).await) {
-                    m_handle.set_ball_position(ship_id, rat_b.position + glam::DVec3::new(2_000.0, 0.0, 0.0)).await;
+                let warp_res = ctx.dispatch_rpc(
+                    &mut pilot_sess,
+                    "agentMgr",
+                    None,
+                    "WarpToLocation",
+                    &[PyRep::String("dungeon".into()), PyRep::Integer(i64::from(mid))],
+                    &HashMap::new(),
+                    None,
+                ).await;
+                warp_res.expect("Warp to mission pocket");
+                let spawned_ids = ctx.db.with_snapshot(|s| {
+                    eve_server::services::mission_fixture::get(s, pilot_id, mid)
+                        .map(|m| m.spawned_npc_ball_ids)
+                        .unwrap_or_default()
+                });
+                if let Some(&m_rat_id) = spawned_ids.first() {
+                    let m_handle = ctx.systems.get_or_spawn(mission_sys);
+                    if let (Some(ship_id), Ok(Some((_, rat_b)))) = (pilot_sess.ship_id, m_handle.get_ball_snapshot(m_rat_id).await) {
+                        let _ = m_handle.set_movement_mode(ship_id, eve_destiny::MovementMode::Stop).await;
+                        m_handle.set_ball_position(ship_id, rat_b.position + glam::DVec3::new(2_000.0, 0.0, 0.0)).await;
+                    }
+                    slash(&ctx, &mut pilot_sess, "/heal").await;
+                    lock_and_destroy(&ctx, &mut pilot_sess, mission_sys, &guns, m_rat_id).await;
+                    mission_rat_killed = true;
+                    break;
                 }
-                slash(&ctx, &mut pilot_sess, "/heal").await;
-                lock_and_destroy(&ctx, &mut pilot_sess, mission_sys, &guns, m_rat_id).await;
-                mission_rat_killed = true;
-                break;
             }
         }
     }

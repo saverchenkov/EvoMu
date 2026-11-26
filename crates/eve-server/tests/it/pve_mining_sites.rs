@@ -306,8 +306,23 @@ async fn test_mn18_mining_missions_market_and_goals() {
     };
     assert_eq!(accept_kv["state"].as_str(), Some("Accepted"));
 
-    let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
+    let pocket_ast_id = accept_kv
+        .get("asteroidEntityID")
+        .and_then(|v| v.as_i64())
+        .expect("allocated asteroidEntityID");
+    assert_ne!(pocket_ast_id, 910_000_000 + (mission_id as i64) * 1000 + 1);
     let handle = ctx.systems.get_or_spawn(system_id);
+    assert!(
+        handle.get_asteroid_state(pocket_ast_id).await.unwrap().is_none(),
+        "mining asteroid must not spawn in space on accept before pocket entry"
+    );
+    eve_server::services::agents_missions::ensure_mission_asteroid_spawned_on_pocket_entry(
+        &ctx,
+        char_id,
+        system_id,
+        Some(mission_id),
+    )
+    .await;
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap().expect("pocket asteroid");
     // L1 mission 4801 ("Starting Simple") resolves to Scordite (1228, volume 0.15 m3)
     assert_eq!(pocket_ast.type_id, 1228);

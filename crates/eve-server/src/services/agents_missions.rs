@@ -358,6 +358,14 @@ async fn handle_agent_warp_to_location(
             anchor_pos,
             Some(mission_id),
         );
+        agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
+            ctx,
+            &sys_handle,
+            char_id,
+            sys_id,
+            Some(mission_id),
+        )
+        .await;
     }
 
     for (warped_cid, start_pos, dest_pos) in leave_entries {
@@ -384,8 +392,10 @@ fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
         .max(2)
 }
 
-/// Reclaims mission-scoped courier cargo, removes any mission bookmark, and archives
-/// the character's mission instance into persistent history with terminal `new_state`.
+/// Reclaims mission-scoped courier cargo, removes any mission bookmark and persisted mining
+/// asteroid, and archives the character's mission instance into persistent history with terminal
+/// `new_state`, returning `(solar_system_id, asteroid_entity_id, spawned_npc_ball_ids)` for
+/// optional post-commit live-system despawn.
 fn finalize_mission_state_cleanup(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -393,17 +403,27 @@ fn finalize_mission_state_cleanup(
     new_state: MissionState,
     zero_npcs: bool,
     ended_at_unix: u64,
-) {
+) -> (u32, Option<i64>, Vec<i64>) {
     let mut bmid = None;
+    let mut m_sys_id = 0_u32;
+    let mut ast_id = None;
+    let mut ball_ids = Vec::new();
     let _ = snap.missions
         .update_by_character_template(char_id, mission_id, |m| {
+            m_sys_id = m.solar_system_id;
+            ast_id = m.asteroid_entity_id.take();
+            ball_ids = m.spawned_npc_ball_ids().to_vec();
             if zero_npcs {
                 if let Some(enc) = m.encounter_mut() {
                     enc.npcs_remaining = 0;
+                    enc.spawned_npc_ball_ids.clear();
                 }
             }
             bmid = m.bookmark_id.take();
         });
+    if let Some(aid) = ast_id {
+        snap.asteroids.remove(&aid);
+    }
     if let Some(bmid) = bmid {
         snap.bookmarks.remove(&bmid);
     }
@@ -411,6 +431,150 @@ fn finalize_mission_state_cleanup(
     let _ = snap
         .missions
         .archive_by_character_template(char_id, mission_id, new_state, ended_at_unix);
+    (m_sys_id, ast_id, ball_ids)
+}
+
+/// Formats concise mission objective text consistent with persisted `MissionInstance` fields (`PVE-012`).
+pub(super) fn format_mission_objective_text(
+    ctx: &ServerContext,
+    m: &MissionInstance,
+) -> String {
+    let req_pair = m.required_delivery();
+    let req_tid_opt = req_pair.map(|(tid, _)| tid);
+    let req_qty = req_pair.map_or(0_i64, |(_, q)| i64::from(q));
+    let agent_lvl = ctx.sde.agents.get(&m.agent_id).map_or(1, |a| a.level);
+    let tmpl = ctx.sde.missions.get(&m.template_id);
+    match m.kind {
+        MissionKind::ResearchTurnIn => {
+            let item_tid = req_tid_opt.unwrap_or(34);
+            let item_name = ctx
+                .sde
+                .types
+                .get(&item_tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or("Tritanium");
+            let qty = if req_qty > 0 {
+                req_qty
+            } else {
+                i64::from(rnd_tritanium_required_qty(agent_lvl))
+            };
+            format!("Deliver {qty} units of {item_name} to agent station hangar.")
+        }
+        MissionKind::DataCenterTurnIn => {
+            let tag_tid = req_tid_opt.unwrap_or(17202);
+            let tag_name = ctx
+                .sde
+                .types
+                .get(&tag_tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or("Pirate Tag");
+            let qty = if req_qty > 0 { req_qty } else { 1 };
+            if qty == 1 {
+                format!("Deliver 1 {tag_name} to agent station hangar.")
+            } else {
+                format!("Deliver {qty} units of {tag_name} to agent station hangar.")
+            }
+        }
+        MissionKind::Heraldry => {
+            let derived = (req_tid_opt.is_none() || req_qty <= 0)
+                .then(|| tmpl.map(|t| resolve_heraldry_mission_details(ctx, t)))
+                .flatten();
+            let ship_tid = req_tid_opt
+                .or_else(|| derived.map(|d| d.ship_type_id))
+                .unwrap_or(587);
+            let ship_name = ctx
+                .sde
+                .types
+                .get(&ship_tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or("ship hull");
+            let qty = if req_qty > 0 {
+                req_qty
+            } else {
+                derived.map_or(1, |d| i64::from(d.quantity))
+            };
+            format!("Deliver {qty}x {ship_name} (packaged) to the Paragon station hangar.")
+        }
+        MissionKind::Mining => {
+            let derived = (req_tid_opt.is_none() || req_qty <= 0)
+                .then(|| tmpl.map(|t| resolve_mining_mission_details(ctx, t)))
+                .flatten();
+            let ore_tid = req_tid_opt
+                .or_else(|| derived.as_ref().map(|d| d.ore_type_id))
+                .unwrap_or(1230);
+            let ore_name = ctx
+                .sde
+                .types
+                .get(&ore_tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or("ore");
+            let qty = if req_qty > 0 {
+                req_qty
+            } else {
+                derived.map_or(500, |d| i64::from(d.required_units))
+            };
+            format!("Mine {qty} units of {ore_name} and deliver to the agent station hangar.")
+        }
+        MissionKind::Courier => {
+            let inst_dest = m.destination_station_id();
+            let derived = (req_tid_opt.is_none() || req_qty <= 0 || inst_dest.is_none())
+                .then(|| {
+                    tmpl.and_then(|t| {
+                        ctx.sde
+                            .agents
+                            .get(&m.agent_id)
+                            .and_then(|a| resolve_courier_mission_details(ctx, t, a).ok())
+                    })
+                })
+                .flatten();
+            let cargo_tid = req_tid_opt
+                .or_else(|| derived.as_ref().map(|d| d.cargo_type_id))
+                .unwrap_or(3683);
+            let cargo_name = ctx
+                .sde
+                .types
+                .get(&cargo_tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or("cargo");
+            let dest_name = inst_dest
+                .or_else(|| derived.as_ref().map(|d| d.destination_station_id))
+                .and_then(|sid| ctx.sde.stations.get(&sid))
+                .map(|s| s.name.as_str())
+                .unwrap_or("destination station");
+            let qty = if req_qty > 0 {
+                req_qty
+            } else {
+                derived.as_ref().map_or(10, |d| i64::from(d.cargo_quantity))
+            };
+            format!("Transport {qty} units of {cargo_name} to {dest_name}.")
+        }
+        MissionKind::Trade => {
+            let derived = (req_tid_opt.is_none() || req_qty <= 0)
+                .then(|| tmpl.map(|t| resolve_trade_mission_details(ctx, t)))
+                .flatten();
+            let trade_tid = req_tid_opt
+                .or_else(|| derived.as_ref().map(|d| d.trade_type_id))
+                .unwrap_or(43);
+            let trade_name = ctx
+                .sde
+                .types
+                .get(&trade_tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or("trade goods");
+            let qty = if req_qty > 0 {
+                req_qty
+            } else {
+                derived.map_or(20, |d| i64::from(d.trade_quantity))
+            };
+            format!("Acquire and deliver {qty} units of {trade_name} to the agent station hangar.")
+        }
+        MissionKind::Encounter => {
+            format!(
+                "Eliminate hostile pirate vessels ({} targets remaining) and report back.",
+                m.npcs_remaining()
+            )
+        }
+    }
 }
 
 /// Resolves mission-specific briefing text from SDE templates, agent/corp/system/station
@@ -522,7 +686,9 @@ fn build_mission_briefing_text(
             )
         }
         MissionKind::Heraldry => {
-            let derived = tmpl_opt.map(|t| resolve_heraldry_mission_details(ctx, t));
+            let derived = (req_tid.is_none() || req_qty <= 0)
+                .then(|| tmpl_opt.map(|t| resolve_heraldry_mission_details(ctx, t)))
+                .flatten();
             let tid = req_tid
                 .or_else(|| derived.map(|d| d.ship_type_id))
                 .unwrap_or(587);
@@ -537,7 +703,9 @@ fn build_mission_briefing_text(
             )
         }
         MissionKind::Trade => {
-            let derived = tmpl_opt.map(|t| resolve_trade_mission_details(ctx, t));
+            let derived = (req_tid.is_none() || req_qty <= 0)
+                .then(|| tmpl_opt.map(|t| resolve_trade_mission_details(ctx, t)))
+                .flatten();
             let tid = req_tid
                 .or_else(|| derived.as_ref().map(|d| d.trade_type_id))
                 .unwrap_or(43);
@@ -552,9 +720,14 @@ fn build_mission_briefing_text(
             )
         }
         MissionKind::Courier => {
-            let derived = tmpl_opt.and_then(|t| {
-                agent_opt.and_then(|a| resolve_courier_mission_details(ctx, t, a).ok())
-            });
+            let inst_dest = inst.and_then(|i| i.destination_station_id());
+            let derived = (req_tid.is_none() || req_qty <= 0 || inst_dest.is_none())
+                .then(|| {
+                    tmpl_opt.and_then(|t| {
+                        agent_opt.and_then(|a| resolve_courier_mission_details(ctx, t, a).ok())
+                    })
+                })
+                .flatten();
             let tid = req_tid
                 .or_else(|| derived.as_ref().map(|d| d.cargo_type_id))
                 .unwrap_or(3814);
@@ -564,9 +737,7 @@ fn build_mission_briefing_text(
                 derived.as_ref().map_or(10, |d| d.cargo_quantity)
             };
             let cargo = item_label(tid, "diplomatic cargo");
-            let dest_sid = inst
-                .and_then(|i| i.destination_station_id())
-                .or_else(|| derived.as_ref().map(|d| d.destination_station_id));
+            let dest_sid = inst_dest.or_else(|| derived.as_ref().map(|d| d.destination_station_id));
             let dest_station = dest_sid
                 .and_then(|sid| ctx.sde.stations.get(&sid))
                 .map(|st| {
@@ -587,7 +758,9 @@ fn build_mission_briefing_text(
             )
         }
         MissionKind::Mining => {
-            let derived = tmpl_opt.map(|t| resolve_mining_mission_details(ctx, t));
+            let derived = (req_tid.is_none() || req_qty <= 0)
+                .then(|| tmpl_opt.map(|t| resolve_mining_mission_details(ctx, t)))
+                .flatten();
             let ore_tid = req_tid
                 .or_else(|| derived.as_ref().map(|d| d.ore_type_id))
                 .unwrap_or(1230);
@@ -846,7 +1019,7 @@ pub async fn handle_with_bound(
                 .filter(|b| b.service == "agentMgr" && b.object_id > 0)
                 .map(|b| b.object_id);
             let now = ctx.now_unix();
-            let (missions, research) = ctx.db.with_mut_snapshot(|snap| {
+            let (missions, research, expired_cleanups) = ctx.db.with_mut_snapshot(|snap| {
                 // Sweep and transition any expired offers or accepted missions (feat:pve.mission-expiration)
                 let expired_updates: Vec<(u32, MissionState, bool)> = snap
                     .missions
@@ -866,8 +1039,16 @@ pub async fn handle_with_bound(
                         }
                     })
                     .collect();
+                let mut expired_cleanups = Vec::with_capacity(expired_updates.len());
                 for (mid, target_state, zero_npcs) in expired_updates {
-                    finalize_mission_state_cleanup(snap, char_id, mid, target_state, zero_npcs, now);
+                    expired_cleanups.push(finalize_mission_state_cleanup(
+                        snap,
+                        char_id,
+                        mid,
+                        target_state,
+                        zero_npcs,
+                        now,
+                    ));
                 }
 
                 let mut active: Vec<MissionInstance> = snap
@@ -994,8 +1175,20 @@ pub async fn handle_with_bound(
                         ])
                     })
                     .collect::<Vec<PyRep>>();
-                (mission_list, research_list)
+                (mission_list, research_list, expired_cleanups)
             });
+            for (clean_sys, ast_id, ball_ids) in expired_cleanups {
+                if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
+                    if let Some(handle) = ctx.systems.get_handle(clean_sys) {
+                        for bid in ball_ids {
+                            let _ = handle.remove_ball(bid).await;
+                        }
+                        if let Some(aid) = ast_id {
+                            let _ = handle.remove_ball(aid).await;
+                        }
+                    }
+                }
+            }
             Some(Ok(PyRep::Tuple(vec![PyRep::List(missions), PyRep::List(research)])))
         }
 
@@ -1146,73 +1339,7 @@ pub async fn handle_with_bound(
             let is_mining = m.kind == MissionKind::Mining;
             let is_heraldry = m.kind == MissionKind::Heraldry;
             let agent_lvl = ctx.sde.agents.get(&m.agent_id).map_or(1, |a| a.level);
-            let objectives = match m.kind {
-                MissionKind::ResearchTurnIn => {
-                    let item_tid = req_tid_opt.unwrap_or(34);
-                    let item_name = ctx.sde.types.get(&item_tid).map(|t| t.name.as_str()).unwrap_or("Tritanium");
-                    let qty = if req_qty > 0 { req_qty } else { i64::from(rnd_tritanium_required_qty(agent_lvl)) };
-                    format!("Deliver {qty} units of {item_name} to agent station hangar.")
-                }
-                MissionKind::DataCenterTurnIn => {
-                    let tag_tid = req_tid_opt.unwrap_or(17202);
-                    let tag_name = ctx.sde.types.get(&tag_tid).map(|t| t.name.as_str()).unwrap_or("Pirate Tag");
-                    let qty = if req_qty > 0 { req_qty } else { 1 };
-                    if qty == 1 {
-                        format!("Deliver 1 {tag_name} to agent station hangar.")
-                    } else {
-                        format!("Deliver {qty} units of {tag_name} to agent station hangar.")
-                    }
-                }
-                MissionKind::Heraldry => {
-                    let derived = tmpl.map(|t| resolve_heraldry_mission_details(ctx, t));
-                    let ship_tid = req_tid_opt
-                        .or_else(|| derived.map(|d| d.ship_type_id))
-                        .unwrap_or(587);
-                    let ship_name = ctx
-                        .sde
-                        .types
-                        .get(&ship_tid)
-                        .map(|t| t.name.as_str())
-                        .unwrap_or("ship hull");
-                    let qty = if req_qty > 0 {
-                        req_qty
-                    } else {
-                        derived.map_or(1, |d| i64::from(d.quantity))
-                    };
-                    format!(
-                        "Deliver {qty}x {ship_name} (packaged) to the Paragon station hangar."
-                    )
-                }
-                MissionKind::Mining => {
-                    let ore_tid = req_tid_opt.unwrap_or(1230);
-                    let ore_name = ctx.sde.types.get(&ore_tid).map(|t| t.name.as_str()).unwrap_or("ore");
-                    let qty = if req_qty > 0 { req_qty } else { 500 };
-                    format!("Mine {qty} units of {ore_name} and deliver to the agent station hangar.")
-                }
-                MissionKind::Courier => {
-                    let cargo_tid = req_tid_opt.unwrap_or(3683);
-                    let cargo_name = ctx.sde.types.get(&cargo_tid).map(|t| t.name.as_str()).unwrap_or("cargo");
-                    let dest_name = m
-                        .destination_station_id()
-                        .and_then(|sid| ctx.sde.stations.get(&sid))
-                        .map(|s| s.name.as_str())
-                        .unwrap_or("destination station");
-                    let qty = if req_qty > 0 { req_qty } else { 10 };
-                    format!("Transport {qty} units of {cargo_name} to {dest_name}.")
-                }
-                MissionKind::Trade => {
-                    let trade_tid = req_tid_opt.unwrap_or(3683);
-                    let trade_name = ctx.sde.types.get(&trade_tid).map(|t| t.name.as_str()).unwrap_or("trade goods");
-                    let qty = if req_qty > 0 { req_qty } else { 10 };
-                    format!("Acquire and deliver {qty} units of {trade_name} to the agent station hangar.")
-                }
-                MissionKind::Encounter => {
-                    format!(
-                        "Eliminate hostile pirate vessels ({} targets remaining) and report back.",
-                        m.npcs_remaining()
-                    )
-                }
-            };
+            let objectives = format_mission_objective_text(ctx, &m);
             let mission_state = m.state.client_state_num();
             let offer_lvl = m
                 .offered_level
@@ -1285,8 +1412,10 @@ pub async fn handle_with_bound(
             let dungeon_loc = has_dungeon_site.then(|| {
                 let (dx, dy, dz) = bm_coords
                     .map(|(_, x, y, z)| (x, y, z))
+                    .or_else(|| m.site_origin_f64().map(|[x, y, z]| (x, y, z)))
                     .unwrap_or_else(|| {
-                        let origin = deterministic_mission_site_origin(ctx, dun_sys, mission_id);
+                        let origin =
+                            mission_site_origin_for_instance(ctx, dun_sys, m.instance_id);
                         (origin.x, origin.y, origin.z)
                     });
                 let dun_bm_rep = m.bookmark_id.map(PyRep::Integer).unwrap_or(PyRep::None);
@@ -1497,7 +1626,9 @@ pub async fn handle_with_bound(
                             if req_qty > 0 { req_qty } else { 1 },
                         )
                     } else if is_heraldry {
-                        let hd = tmpl.map(|t| resolve_heraldry_mission_details(ctx, t));
+                        let hd = (req_tid_opt.is_none() || req_qty <= 0)
+                            .then(|| tmpl.map(|t| resolve_heraldry_mission_details(ctx, t)))
+                            .flatten();
                         (
                             i64::from(
                                 req_tid_opt
@@ -1511,7 +1642,9 @@ pub async fn handle_with_bound(
                             },
                         )
                     } else if is_mining {
-                        let md = tmpl.map(|t| resolve_mining_mission_details(ctx, t));
+                        let md = (req_tid_opt.is_none() || req_qty <= 0)
+                            .then(|| tmpl.map(|t| resolve_mining_mission_details(ctx, t)))
+                            .flatten();
                         (
                             i64::from(
                                 req_tid_opt
@@ -1525,17 +1658,19 @@ pub async fn handle_with_bound(
                             },
                         )
                     } else {
-                        let td = tmpl.map(|t| resolve_trade_mission_details(ctx, t));
+                        let td = (req_tid_opt.is_none() || req_qty <= 0)
+                            .then(|| tmpl.map(|t| resolve_trade_mission_details(ctx, t)))
+                            .flatten();
                         (
                             i64::from(
                                 req_tid_opt
                                     .or_else(|| td.as_ref().map(|d| d.trade_type_id))
-                                    .unwrap_or(3683),
+                                    .unwrap_or(43),
                             ),
                             if req_qty > 0 {
                                 req_qty
                             } else {
-                                td.map_or(10, |d| i64::from(d.trade_quantity))
+                                td.map_or(20, |d| i64::from(d.trade_quantity))
                             },
                         )
                     };
@@ -1877,4 +2012,5 @@ pub(crate) const RPCS: &[RpcEntry] = &[
 #[cfg(test)] #[path = "agents_missions_unit_tests.rs"] mod agents_missions_unit_tests;
 #[cfg(test)] #[path = "agents_missions_edges2_tests.rs"] mod agents_missions_edges2_tests;
 #[cfg(test)] #[path = "agents_missions_tests.rs"] mod agents_missions_tests;
+#[cfg(test)] #[path = "agents_missions_t5_unit_tests.rs"] mod agents_missions_t5_unit_tests;
 

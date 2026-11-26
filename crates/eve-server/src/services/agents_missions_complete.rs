@@ -3,14 +3,15 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    apply_mission_completion_standings, compute_character_mission_rewards,
-    epic_arc_required_missions, finalize_mission_state_cleanup, is_agent_colocated, is_fw_agent,
-    is_rnd_agent, is_storyline_template, load_epic_arc_states, load_rnd_research_entries,
-    notify_standing_changes, resolve_agent_and_corp_for_system, resolve_courier_mission_details,
-    resolve_epic_arc_id_for_agent, resolve_heraldry_mission_details,
-    resolve_mining_mission_details, resolve_security_mission_encounter,
-    resolve_target_mission_id, resolve_trade_mission_details, rnd_tritanium_required_qty,
-    save_epic_arc_states, save_rnd_research_entries, CharacterMissionRewards, EpicArcStateEntry,
+    apply_mission_completion_standings, apply_mission_penalty_standings,
+    compute_character_mission_rewards, epic_arc_required_missions, finalize_mission_state_cleanup,
+    is_agent_colocated, is_fw_agent, is_rnd_agent, is_storyline_template, load_epic_arc_states,
+    load_rnd_research_entries, notify_standing_changes, resolve_agent_and_corp_for_system,
+    resolve_courier_mission_details, resolve_epic_arc_id_for_agent,
+    resolve_heraldry_mission_details, resolve_mining_mission_details,
+    resolve_security_mission_encounter, resolve_target_mission_id, resolve_trade_mission_details,
+    rnd_tritanium_required_qty, save_epic_arc_states, save_rnd_research_entries,
+    CharacterMissionRewards, EpicArcStateEntry,
 };
 use crate::router::notify_registry::{
     OnAgentMissionChange, OnAgentMissionObjectivesCompleted, OnAgentMissionObjectivesFailed,
@@ -19,8 +20,7 @@ use crate::router::{NotificationTarget, ServerContext};
 use crate::services::notify_emitters_character_services::emit_agent_mission_dialogue;
 use eve_db::{
     decide_mission_kind, CourierObjective, DeliveryObjective, EncounterObjective, IskCents,
-    MissionInstance, MissionKind, MissionObjective, MissionState, StandingTransactionRecord,
-    WalletJournalEntry,
+    MissionInstance, MissionKind, MissionObjective, MissionState, WalletJournalEntry,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -102,30 +102,40 @@ pub(super) async fn handle_mission_complete_action(
             .is_some_and(|exp| exp > 0 && now > exp)
     });
     if is_expired {
-        ctx.db.with_mut_snapshot(|snap| {
-            finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Failed, true, now);
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                let cur_ag = ch.standings.get(&active_agent_id).copied().unwrap_or(0.0);
-                ch.standings.insert(active_agent_id, (cur_ag - 0.10).max(-10.0));
-                let cur_corp = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
-                ch.standings.insert(corp_id, (cur_corp - 0.10).max(-10.0));
-                if let Some(fac_id) = faction_id {
-                    let cur_fac = ch.standings.get(&fac_id).copied().unwrap_or(0.0);
-                    ch.standings.insert(fac_id, (cur_fac - 0.05).max(-10.0));
+        let ((clean_sys, ast_id, ball_ids), st_changes) = ctx.db.with_mut_snapshot(|snap| {
+            let cleanup = finalize_mission_state_cleanup(
+                snap,
+                char_id,
+                mission_id,
+                MissionState::Failed,
+                true,
+                now,
+            );
+            let changes = apply_mission_penalty_standings(
+                ctx,
+                snap,
+                char_id,
+                active_agent_id,
+                corp_id,
+                faction_id,
+                -0.10,
+                -0.10,
+                -0.5,
+                84,
+            );
+            (cleanup, changes)
+        });
+        notify_standing_changes(ctx, char_id, &st_changes);
+        if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
+            if let Some(handle) = ctx.systems.get_handle(clean_sys) {
+                for bid in ball_ids {
+                    let _ = handle.remove_ball(bid).await;
+                }
+                if let Some(aid) = ast_id {
+                    let _ = handle.remove_ball(aid).await;
                 }
             }
-            snap.next_entity_id += 1;
-            let ev_id = snap.next_entity_id;
-            snap.standing_transactions.entry(char_id).or_default().push(
-                StandingTransactionRecord {
-                    event_id: ev_id,
-                    from_id: corp_id,
-                    to_id: char_id,
-                    modification: -0.10,
-                    event_type_id: 84,
-                },
-            );
-        });
+        }
         ctx.emit_typed(
             NotificationTarget::Character(char_id),
             OnAgentMissionObjectivesFailed {
@@ -227,7 +237,7 @@ pub(super) async fn handle_mission_complete_action(
             )?;
         }
 
-        finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Completed, false, now);
+        let cleanup_space = finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Completed, false, now);
 
         let bonus_granted = m_bonus_expiry.is_none_or(|bexp| now <= bexp);
         let bonus_paid = if bonus_granted { bonus_reward } else { 0 };
@@ -514,6 +524,9 @@ pub(super) async fn handle_mission_complete_action(
                             accepted_at_unix: None,
                             accept_expiry_unix: None,
                             bonus_expiry_unix: None,
+                            site_origin_m: None,
+                            asteroid_entity_id: None,
+                            dungeon_instance_id: None,
                             objective: sl_objective,
                         })
                         .map_err(super::mission_store_rpc_err)?;
@@ -522,12 +535,22 @@ pub(super) async fn handle_mission_complete_action(
         }
         let delivery_station = ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id).or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id)).unwrap_or(0);
         let item_reward = crate::services::agents_mission_rewards::mint_mission_item_reward_in_snap(ctx, snap, char_id, delivery_station, &tmpl, ctx.sde.agents.get(&m_agent_id));
-        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward, credited_lp, m_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now))
+        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward, credited_lp, m_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now, cleanup_space))
     });
 
     match res {
-        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now)) => {
+        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now, (clean_sys, clean_ast_id, clean_ball_ids))) => {
             notify_standing_changes(ctx, char_id, &st_changes);
+            if clean_sys > 0 && (!clean_ball_ids.is_empty() || clean_ast_id.is_some()) {
+                if let Some(handle) = ctx.systems.get_handle(clean_sys) {
+                    for bid in clean_ball_ids {
+                        let _ = handle.remove_ball(bid).await;
+                    }
+                    if let Some(aid) = clean_ast_id {
+                        let _ = handle.remove_ball(aid).await;
+                    }
+                }
+            }
             let mission_title_career = ctx.sde.missions.get(&mission_id).map(|m| m.title.as_str()).unwrap_or("");
             let is_fw_mission_agent = ctx.sde.agents.get(&completed_agent_id).is_some_and(is_fw_agent);
             crate::quasar_gateway::isolate_side_effect("agents_missions.career_mission_complete", || {

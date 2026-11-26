@@ -2285,15 +2285,15 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
             .unwrap_or(0.0)
     });
 
-    // Check if mission spawned pocket NPCs or assigned courier destination
-    let (spawned_balls, dest_station_opt) = ctx.db.with_snapshot(|s| {
+    // Check if mission has encounter NPCs or assigned courier destination
+    let (npcs_rem, m_sys, dest_station_opt) = ctx.db.with_snapshot(|s| {
         eve_server::services::mission_fixture::get(s, char_id, mission_id)
-            .map(|m| (m.spawned_npc_ball_ids, m.destination_station_id))
-            .unwrap_or_default()
+            .map(|m| (m.npcs_remaining, m.solar_system_id, m.destination_station_id))
+            .unwrap_or((0, agent_sys, None))
     });
 
     // Negative check: trying DoAction(6) before clearing objectives or remotely when in space fails
-    if !spawned_balls.is_empty() {
+    if npcs_rem > 0 {
         let early_complete = ctx
             .dispatch_rpc(
                 &mut sess,
@@ -2312,11 +2312,46 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
 
         undock_from_station(&ctx, &mut sess, agent_sys).await;
         let active_ship = combat_ship_id;
+        if m_sys != agent_sys {
+            fly_stargates_to_fast(&ctx, &mut sess, m_sys).await;
+        }
+        if ctx
+            .dispatch_rpc(
+                &mut sess,
+                "agentMgr",
+                None,
+                "WarpToLocation",
+                &[PyRep::String("dungeon".into()), PyRep::Integer(i64::from(mission_id))],
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .is_err()
+        {
+            let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+                &ctx,
+                char_id,
+                m_sys,
+                glam::DVec3::ZERO,
+                Some(mission_id),
+            );
+        }
+        let _ = ctx
+            .systems
+            .get_or_spawn(m_sys)
+            .set_movement_mode(active_ship, eve_destiny::MovementMode::Stop)
+            .await;
+        let spawned_balls = ctx.db.with_snapshot(|s| {
+            eve_server::services::mission_fixture::get(s, char_id, mission_id)
+                .map(|m| m.spawned_npc_ball_ids)
+                .unwrap_or_default()
+        });
+        assert!(!spawned_balls.is_empty(), "Mission wave must spawn on pocket entry");
         for ball_id in spawned_balls {
             warp_and_engage_ball(
                 &ctx,
                 &mut sess,
-                agent_sys,
+                m_sys,
                 active_ship,
                 &guns,
                 ball_id,
@@ -2324,6 +2359,9 @@ async fn agent_mission_completion_isk_lp_standing_and_reload() {
                 PyRep::Integer(ball_id),
             )
             .await;
+        }
+        if m_sys != agent_sys {
+            fly_stargates_to_fast(&ctx, &mut sess, agent_sys).await;
         }
         warp_and_dock_at_station_fast(&ctx, &mut sess, active_ship, agent_sys, agent_station).await;
     } else if let Some(dest_sid) = dest_station_opt {

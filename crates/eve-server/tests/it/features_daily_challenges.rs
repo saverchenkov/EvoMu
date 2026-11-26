@@ -671,9 +671,10 @@ async fn complete_live_fw_mission(
     )
     .await
     .expect("Accept FW mission");
-    let (m_sys_id, npc_ids) = ctx.db.with_snapshot(|s| {
-        let m = eve_server::services::mission_fixture::get(s, char_id, mid as u32).unwrap();
-        (m.solar_system_id, m.spawned_npc_ball_ids)
+    let m_sys_id = ctx.db.with_snapshot(|s| {
+        eve_server::services::mission_fixture::get(s, char_id, mid as u32)
+            .unwrap()
+            .solar_system_id
     });
 
     dock_at_station(ctx, sess, char_id, m_sys_id, None);
@@ -695,6 +696,25 @@ async fn complete_live_fw_mission(
             ctx.build_type_combat_state(639),
         )
         .await;
+    let pocket_anchor = ctx
+        .db
+        .with_snapshot(|s| {
+            eve_server::services::mission_fixture::get(s, char_id, mid as u32)
+                .and_then(|m| m.site_origin_f64().map(DVec3::from))
+        })
+        .unwrap_or(DVec3::ZERO);
+    let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+        ctx,
+        char_id,
+        m_sys_id,
+        pocket_anchor,
+        Some(mid as u32),
+    );
+    let npc_ids = ctx.db.with_snapshot(|s| {
+        eve_server::services::mission_fixture::get(s, char_id, mid as u32)
+            .unwrap()
+            .spawned_npc_ball_ids
+    });
     for nid in npc_ids {
         let _ = sys_h.set_ball_position(nid, DVec3::new(1_000.0, 0.0, 0.0)).await;
         ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(nid)], &kw, None)
@@ -1123,7 +1143,7 @@ async fn test_b36_storyline_offer_counter() {
             .await
             .expect("Accept Storyline mission"),
     );
-    let sl_npcs = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().spawned_npc_ball_ids);
+    let sl_npcs_rem = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().npcs_remaining);
     if let Some(dest_sta) = briefing_1.get("destinationStationID").and_then(|v| v.as_i64()) {
         let courier_tag = format!("courier_cargo:{char_id}:{first_sl_mid}");
         let cargo_iid = ctx.db.with_snapshot(|s| {
@@ -1136,10 +1156,12 @@ async fn test_b36_storyline_offer_counter() {
         });
         let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
         dock_at_station(&ctx, &mut sess, char_id, dest_sys, Some(dest_sta));
-    } else if !sl_npcs.is_empty() {
+    } else if sl_npcs_rem > 0 {
         dock_at_station(&ctx, &mut sess, char_id, sl_sys, None);
         let sys_h = ctx.systems.get_or_spawn(sl_sys);
         let _ = sys_h.spawn_ball_with_combat(Ball { id: ship_id, type_id: 639, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 100_000_000.0, radius: 250.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(639)).await;
+        let _ = eve_server::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(&ctx, char_id, sl_sys, DVec3::ZERO, Some(first_sl_mid as u32));
+        let sl_npcs = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().spawned_npc_ball_ids);
         for nid in sl_npcs {
             let _ = sys_h.set_ball_position(nid, DVec3::new(1_000.0, 0.0, 0.0)).await;
             ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(nid)], &kw, None).await.unwrap();

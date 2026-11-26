@@ -314,7 +314,7 @@ pub(super) async fn handle_mission_offer_action(
                 existing_active.solar_system_id,
                 Some(existing_active),
             );
-            let objectives = format!("Execute mission objectives for {} and report back.", title);
+            let objectives = super::format_mission_objective_text(ctx, existing_active);
             return Ok((mid, title, briefing, objectives, dest_sid));
         }
         let is_heraldry_agent = agent_info.agent_type_id == 13 || agent_info.division_id == 37;
@@ -506,6 +506,9 @@ pub(super) async fn handle_mission_offer_action(
             accepted_at_unix: None,
             accept_expiry_unix: None,
             bonus_expiry_unix: None,
+            site_origin_m: None,
+            asteroid_entity_id: None,
+            dungeon_instance_id: None,
             objective,
         };
         let briefing = build_mission_briefing_text(

@@ -194,6 +194,9 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
                 accepted_at_unix: None,
                 accept_expiry_unix: None,
                 bonus_expiry_unix: None,
+                site_origin_m: None,
+                asteroid_entity_id: None,
+                dungeon_instance_id: None,
                 objective: MissionObjective::Encounter(EncounterObjective {
                     npcs_remaining: 3,
                     spawned_npc_ball_ids: Vec::new(),
@@ -579,6 +582,9 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 accepted_at_unix: None,
                 accept_expiry_unix: None,
                 bonus_expiry_unix: None,
+                site_origin_m: None,
+                asteroid_entity_id: None,
+                dungeon_instance_id: None,
                 objective: MissionObjective::Encounter(EncounterObjective {
                     npcs_remaining: 2,
                     spawned_npc_ball_ids: vec![],

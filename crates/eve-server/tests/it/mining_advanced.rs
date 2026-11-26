@@ -1790,8 +1790,23 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let ore_sde_type = ctx.sde.types.get(&req_ore_tid).expect("required ore type must exist in SDE");
     assert_eq!(ore_sde_type.category_id, 25, "required mining mission item must belong to Asteroid category 25");
 
-    let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
+    let pocket_ast_id = accept_res
+        .dict_get("asteroidEntityID")
+        .and_then(|v| v.as_i64())
+        .expect("allocated asteroidEntityID");
+    assert_ne!(pocket_ast_id, 910_000_000 + (mission_id as i64) * 1000 + 1);
     let handle = ctx.systems.get_or_spawn(system_id);
+    assert!(
+        handle.get_asteroid_state(pocket_ast_id).await.unwrap().is_none(),
+        "mining asteroid must not materialize in space before pocket entry"
+    );
+    eve_server::services::agents_missions::ensure_mission_asteroid_spawned_on_pocket_entry(
+        &ctx,
+        char_id,
+        system_id,
+        Some(mission_id),
+    )
+    .await;
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap();
     assert_eq!(pocket_ast.unwrap().type_id, req_ore_tid);
     assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bookmark_id)));

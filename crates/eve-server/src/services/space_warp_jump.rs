@@ -1137,9 +1137,9 @@ async fn handle_cmd_warp_to_stuff(
                 ctx, &handle, char_id, ship_id, sys_id,
             )
             .await;
-            let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
-                ctx, char_id, sys_id, dest_pos,
-            );
+            crate::services::agents_missions::agents_missions_warp::materialize_mission_pocket_on_cmd_warp(
+                ctx, &handle, char_id, sys_id, &stuff_type, target_id, dest_pos,
+            ).await;
             crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
                 ctx, char_id, sys_id, current_ball.position.to_array(), dest_pos.to_array(),
             );
