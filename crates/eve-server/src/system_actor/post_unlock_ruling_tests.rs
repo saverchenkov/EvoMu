@@ -1396,6 +1396,19 @@ async fn track_1d_bf04_post_commit_no_drop_static_loot_and_noncombat_corpse() {
 
     let max_id_before = ctx.db.with_snapshot(|s| s.next_entity_id);
     let sys = ctx.systems.get_or_spawn(SYS_ID);
+    {
+        // Production `handle_ball_damage_in_actor_collecting` removes destroyed depot/pod balls in-actor
+        // before enqueueing `DepotDestroyed` / `PodBoundaryDestroyed` post-unlock ops.
+        let mut bp = sys.ballpark.write().unwrap();
+        for i in 0..N_DEPOTS {
+            let _ = bp.remove_ball(base_depot + i);
+        }
+        let _ = bp.remove_ball(pod_id);
+    }
+    sys.ask_step_tick_only(0.0).await.unwrap();
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    assert_eq!(sys.dynamic_ball_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(sys.is_hibernated(), "system must start hibernated before post-commit dynamic corpse");
     let held = hold_db_writer(&ctx.db);
     let mut ops = PostUnlockOps::default();
     for i in 0..N_DEPOTS {
