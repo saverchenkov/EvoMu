@@ -80,6 +80,8 @@ pub(crate) struct LifecycleTestHooks {
         RankedMutex<Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>, RANK_LEAF>,
     pub(in crate::system_actor) before_publish_hook:
         RankedMutex<Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>, RANK_LEAF>,
+    pub(in crate::system_actor) after_loading_apply_hook:
+        RankedMutex<Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>, RANK_LEAF>,
     pub(in crate::system_actor) before_evict_commit_hook:
         RankedMutex<Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>, RANK_LEAF>,
     pub(in crate::system_actor) before_stop_finish_hook:
@@ -95,6 +97,7 @@ impl Default for LifecycleTestHooks {
             after_read_probe_hook: RankedMutex::new(None),
             after_claim_loading_hook: RankedMutex::new(None),
             before_publish_hook: RankedMutex::new(None),
+            after_loading_apply_hook: RankedMutex::new(None),
             before_evict_commit_hook: RankedMutex::new(None),
             before_stop_finish_hook: RankedMutex::new(None),
             force_publish_wouldblock: AtomicBool::new(false),
@@ -580,13 +583,11 @@ impl Drop for LoadingSlotGuard<'_> {
         let mut cleared = false;
         if can_touch_gate {
             if let Some(mut guard) = try_write_systems_in_drop(&self.registry.systems) {
-                let mut empty = Vec::new();
                 cleared = self.registry.abort_loading_slot_to_cold_under_locks(
                     &mut guard,
                     self.solar_system_id,
                     self.generation,
                     &self.persist_gate,
-                    &mut empty,
                     tidi,
                     hist,
                     "loading_aborted_rollback",
@@ -1373,34 +1374,57 @@ impl SystemRegistry {
         let rt_handle = tokio::runtime::Handle::try_current()
             .map_err(|_| SystemActivationError::NoTokioRuntime { solar_system_id })?;
         loop {
-            let mut guard = self.systems.write().map_err(|_| SystemActivationError::PoisonedLock {
+            let guard = self.systems.write().map_err(|_| SystemActivationError::PoisonedLock {
                 solar_system_id: Some(solar_system_id),
                 lock: "systems",
             })?;
-            if let Some(SystemLifecycleSlot::Live { handle, .. }) = guard.get(&solar_system_id) {
-                if handle.cmd_tx.is_closed() {
-                    let Some(SystemLifecycleSlot::Live { generation: dead_gen, handle }) =
-                        guard.remove(&solar_system_id)
-                    else { unreachable!() };
-                    let gate = Arc::new(LifecycleGate::new_stopping());
-                    if let Ok(mut telem) = self.lifecycle_telemetry.write() {
-                        telem.mark_retired_floor(solar_system_id, dead_gen);
-                        telem.record_begin_stopping(solar_system_id, dead_gen, SystemLifecycleState::Live, "reclaim_dead_live_begin");
-                    }
-                    self.fighter_persist
-                        .slot_for(solar_system_id)
-                        .begin_stopping(dead_gen);
-                    persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner()).phase = CooldownGatePhase::Stopping;
-                    guard.insert(solar_system_id, SystemLifecycleSlot::Stopping { generation: dead_gen, gate: Arc::clone(&gate) });
-                    drop(guard);
-                    self.reclaim_dead_live_stopping_slot(solar_system_id, dead_gen, handle, &gate);
-                    continue;
-                }
-            }
+            let mut guard = match self.reclaim_dead_live_under_write_lock(guard, solar_system_id, &persist_gate) {
+                Ok(()) => continue,
+                Err(g) => g,
+            };
             return self.claim_loading_under_write_lock(
                 &mut guard, solar_system_id, wake_reason, rt_handle, any_lock_held, &persist_gate,
             );
         }
+    }
+
+    pub(crate) fn dead_live_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
+        self.read_systems_slot_map().iter().filter_map(|(&id, slot)| match slot {
+            SystemLifecycleSlot::Live { handle, .. } if handle.cmd_tx.is_closed() => Some((id, handle.clone())),
+            _ => None,
+        }).collect()
+    }
+
+    pub(crate) fn try_reclaim_dead_live_slot_to_cold(&self, solar_system_id: SolarSystemId) -> bool {
+        if !held_lock_ranks().is_empty() { return false; }
+        let persist_gate = self.cooldown_persist_gate(solar_system_id);
+        let Ok(guard) = self.systems.write() else { return false; };
+        self.reclaim_dead_live_under_write_lock(guard, solar_system_id, &persist_gate).is_ok()
+    }
+
+    fn reclaim_dead_live_under_write_lock<'a>(
+        &self,
+        mut guard: RankedRwLockWriteGuard<'a, HashMap<SolarSystemId, SystemLifecycleSlot>, { RANK_SYSTEM_REGISTRY }>,
+        solar_system_id: SolarSystemId,
+        persist_gate: &CooldownPersistGate,
+    ) -> Result<(), RankedRwLockWriteGuard<'a, HashMap<SolarSystemId, SystemLifecycleSlot>, { RANK_SYSTEM_REGISTRY }>> {
+        if !matches!(guard.get(&solar_system_id), Some(SystemLifecycleSlot::Live { handle, .. }) if handle.cmd_tx.is_closed()) {
+            return Err(guard);
+        }
+        let Some(SystemLifecycleSlot::Live { generation: dead_gen, handle }) = guard.remove(&solar_system_id) else { unreachable!() };
+        let gate = Arc::new(LifecycleGate::new_stopping());
+        if let Ok(mut telem) = self.lifecycle_telemetry.write() {
+            telem.mark_retired_floor(solar_system_id, dead_gen);
+            telem.record_begin_stopping(solar_system_id, dead_gen, SystemLifecycleState::Live, "reclaim_dead_live_begin");
+        }
+        self.fighter_persist
+            .slot_for(solar_system_id)
+            .begin_stopping(dead_gen);
+        persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner()).phase = CooldownGatePhase::Stopping;
+        guard.insert(solar_system_id, SystemLifecycleSlot::Stopping { generation: dead_gen, gate: Arc::clone(&gate) });
+        drop(guard);
+        self.reclaim_dead_live_stopping_slot(solar_system_id, dead_gen, handle, &gate);
+        Ok(())
     }
 
     fn claim_loading_under_write_lock(
@@ -1596,16 +1620,12 @@ impl SystemRegistry {
         }
 
         let mut persist_payload_opt = None;
-        let mut applied_log: Vec<PendingCooldownTransition> = Vec::new();
         loop {
             let db_read_safe = !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER);
             let (abort_tidi, abort_hist) = self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
             let mut guard = match self.write_systems_for_publish(solar_system_id) {
                 Ok(g) => g,
                 Err(err) => {
-                    if !applied_log.is_empty() {
-                        self.flush_aborted_loading_transitions(solar_system_id, &handle.cooldown_persist_gate, applied_log);
-                    }
                     self.shutdown_unregistered_handle(handle);
                     return Err(err);
                 }
@@ -1629,77 +1649,50 @@ impl SystemRegistry {
                     .slot_for(solar_system_id)
                     .retire_if_loading_gen(generation);
                 drop(guard);
-                loading_guard.disarm();
-                if !applied_log.is_empty() {
-                    self.flush_aborted_loading_transitions(solar_system_id, &handle.cooldown_persist_gate, applied_log);
-                }
-                gate.resolve(GateResolution::Aborted);
-                self.shutdown_unregistered_handle(handle);
-                return Err(SystemActivationError::ConcurrentActivationAborted { solar_system_id });
+                return self.abort_publish_handle(solar_system_id, gate, handle, loading_guard);
             }
-            let drained = {
-                let mut cg = handle.cooldown_persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-                let d = std::mem::take(&mut cg.pending_transitions);
-                handle.cooldown_persist_gate.clear_pending_transitions_flag();
-                if d.is_empty() {
-                    cg.phase = CooldownGatePhase::Live;
-                }
-                d
-            };
+            let mut cg = handle.cooldown_persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let drained = std::mem::take(&mut cg.pending_transitions);
             if !drained.is_empty() {
+                cg.in_flight_loading_transitions.extend(drained.iter().cloned());
+                drop(cg);
                 drop(guard);
                 let tidi = handle.tidi_factor();
                 let eff_hist = handle.cooldown_persist_gate.has_tidi_history() || tidi < 0.999_999;
-                applied_log.extend(drained.iter().cloned());
                 match handle.apply_loading_cooldown_transitions_sync(tidi, eff_hist, drained) {
                     Ok((_applied, payload_opt)) => {
                         if let Some(p) = payload_opt { persist_payload_opt = Some(p); }
+                        #[cfg(test)]
+                        self.run_after_loading_apply_hook_for_test(solar_system_id, generation);
                         continue;
                     }
                     Err(_) => {
                         let (t2, h2) = self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
                         if let Ok(mut g) = self.systems.write() {
-                            let _ = self.abort_loading_slot_to_cold_under_locks(
-                                &mut g, solar_system_id, generation, &handle.cooldown_persist_gate,
-                                &mut applied_log, t2, h2, "loading_aborted_rollback",
-                            );
+                            let _ = self.abort_loading_slot_to_cold_under_locks(&mut g, solar_system_id, generation, &handle.cooldown_persist_gate, t2, h2, "loading_aborted_rollback");
                         }
                         self.fighter_persist
                             .slot_for(solar_system_id)
                             .retire_if_loading_gen(generation);
-                        loading_guard.disarm();
-                        if !applied_log.is_empty() {
-                            self.flush_aborted_loading_transitions(solar_system_id, &handle.cooldown_persist_gate, applied_log);
-                        }
-                        gate.resolve(GateResolution::Aborted);
-                        self.shutdown_unregistered_handle(handle);
-                        return Err(SystemActivationError::ConcurrentActivationAborted { solar_system_id });
+                        return self.abort_publish_handle(solar_system_id, gate, handle, loading_guard);
                     }
                 }
             }
 
-            let telem_ok = self
-                .lifecycle_telemetry
-                .write()
-                .map(|mut telem| telem.record_publish_live(solar_system_id, generation, wake_reason))
-                .unwrap_or(false);
+            let telem_ok = self.lifecycle_telemetry.write().map(|mut t| t.record_publish_live(solar_system_id, generation, wake_reason)).unwrap_or(false);
             if !telem_ok {
-                let _ = self.abort_loading_slot_to_cold_under_locks(
-                    &mut guard, solar_system_id, generation, &handle.cooldown_persist_gate,
-                    &mut applied_log, abort_tidi, abort_hist, "loading_aborted_rollback",
-                );
+                drop(cg);
+                let _ = self.abort_loading_slot_to_cold_under_locks(&mut guard, solar_system_id, generation, &handle.cooldown_persist_gate, abort_tidi, abort_hist, "loading_aborted_rollback");
                 self.fighter_persist
                     .slot_for(solar_system_id)
                     .retire_if_loading_gen(generation);
-                loading_guard.disarm();
                 drop(guard);
-                if !applied_log.is_empty() {
-                    self.flush_aborted_loading_transitions(solar_system_id, &handle.cooldown_persist_gate, applied_log);
-                }
-                gate.resolve(GateResolution::Aborted);
-                self.shutdown_unregistered_handle(handle);
-                return Err(SystemActivationError::ConcurrentActivationAborted { solar_system_id });
+                return self.abort_publish_handle(solar_system_id, gate, handle, loading_guard);
             }
+            cg.in_flight_loading_transitions.clear();
+            handle.cooldown_persist_gate.clear_pending_transitions_flag();
+            cg.phase = CooldownGatePhase::Live;
+            drop(cg);
 
             if let Some(ref db) = self.db {
                 register_db_system_ballpark(db, solar_system_id, &handle);
@@ -1723,16 +1716,27 @@ impl SystemRegistry {
         Ok(handle)
     }
 
-    /// Atomically removes a matching `Loading` slot and flushes any accumulated + gate-queued
-    /// transitions to SQLite while holding `self.systems` write lock and `persist_gate` (`G1A-R8-P1-02`).
-    #[allow(clippy::too_many_arguments)]
+    fn abort_publish_handle(
+        &self,
+        solar_system_id: SolarSystemId,
+        gate: &Arc<LifecycleGate>,
+        handle: SystemHandle,
+        loading_guard: &mut LoadingSlotGuard<'_>,
+    ) -> Result<SystemHandle, SystemActivationError> {
+        loading_guard.disarm();
+        gate.resolve(GateResolution::Aborted);
+        self.shutdown_unregistered_handle(handle);
+        Err(SystemActivationError::ConcurrentActivationAborted { solar_system_id })
+    }
+
+    /// Atomically removes a matching `Loading` slot and flushes any in-flight + gate-queued
+    /// transitions to SQLite while holding `self.systems` write lock and `persist_gate` (`G1A-R9-P1-01`).
     fn abort_loading_slot_to_cold_under_locks(
         &self,
         guard: &mut HashMap<SolarSystemId, SystemLifecycleSlot>,
         solar_system_id: SolarSystemId,
         generation: u64,
         persist_gate: &CooldownPersistGate,
-        prior_applied: &mut Vec<PendingCooldownTransition>,
         tidi: f64,
         hist: bool,
         abort_detail: &'static str,
@@ -1746,9 +1750,7 @@ impl SystemRegistry {
         }
         let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
         let prev_phase = cg.phase;
-        let mut all_pending = std::mem::take(prior_applied);
-        all_pending.append(&mut cg.pending_transitions);
-        persist_gate.clear_pending_transitions_flag();
+        let all_pending = persist_gate.take_all_pending_transitions(&mut cg);
         cg.phase = CooldownGatePhase::Cold;
         let flushed = if !all_pending.is_empty() {
             self.db.as_ref().is_some_and(|db| {
@@ -1769,53 +1771,6 @@ impl SystemRegistry {
             telem.record_aborted_loading(solar_system_id, generation, abort_detail);
         });
         true
-    }
-
-    pub(in crate::system_actor) fn flush_aborted_loading_transitions(
-        &self,
-        solar_system_id: SolarSystemId,
-        persist_gate: &CooldownPersistGate,
-        pending: Vec<PendingCooldownTransition>,
-    ) {
-        if pending.is_empty() {
-            return;
-        }
-        let db_read_safe = !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER);
-        let (tidi, hist) = self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
-        for _ in 0..8 {
-            {
-                let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-                match cg.phase {
-                    CooldownGatePhase::Cold => {
-                        if let Some(ref db) = self.db {
-                            flush_cold_transitions_under_gate(
-                                db, solar_system_id, persist_gate, &mut cg, tidi, hist, &pending,
-                            );
-                        }
-                        return;
-                    }
-                    CooldownGatePhase::Loading | CooldownGatePhase::Stopping => {
-                        let mut merged = pending;
-                        merged.append(&mut cg.pending_transitions);
-                        cg.pending_transitions = merged;
-                        persist_gate.mark_pending_transitions();
-                        return;
-                    }
-                    CooldownGatePhase::Live => {}
-                }
-            }
-            if let Some(live_handle) = self.get_handle(solar_system_id) {
-                if let Ok((_, payload_opt)) =
-                    live_handle.apply_loading_cooldown_transitions_sync(tidi, hist, pending.clone())
-                {
-                    if let Some(payload) = payload_opt.filter(|_| db_read_safe) {
-                        let _ = live_handle.persist_cooldown_payload(payload);
-                    }
-                    return;
-                }
-            }
-            std::thread::yield_now();
-        }
     }
 
     fn move_live_slot_to_stopping_and_spawn(
@@ -1879,10 +1834,9 @@ impl SystemRegistry {
             },
             Some(SystemLifecycleSlot::Loading { generation, gate }) => {
                 let (generation, gate) = (*generation, Arc::clone(gate));
-                let mut empty = Vec::new();
                 let _ = self.abort_loading_slot_to_cold_under_locks(
                     &mut guard, solar_system_id, generation, &persist_gate,
-                    &mut empty, tidi, hist, "stop_preempted_loading",
+                    tidi, hist, "stop_preempted_loading",
                 );
                 self.fighter_persist
                     .slot_for(solar_system_id)
@@ -2012,8 +1966,7 @@ impl SystemRegistry {
             );
             if matches_gen {
                 let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-                let pending = std::mem::take(&mut cg.pending_transitions);
-                persist_gate.clear_pending_transitions_flag();
+                let pending = persist_gate.take_all_pending_transitions(&mut cg);
                 cg.phase = CooldownGatePhase::Cold;
                 let flushed = if !pending.is_empty() {
                     if let Some(ref db) = self.db {
@@ -2215,6 +2168,12 @@ impl SystemRegistry {
     }
 
     #[cfg(test)]
+    fn run_after_loading_apply_hook_for_test(&self, solar_system_id: SolarSystemId, generation: u64) {
+        let hook = self.lifecycle_test_hooks.after_loading_apply_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = hook { hook(solar_system_id, generation); }
+    }
+
+    #[cfg(test)]
     fn run_before_evict_commit_hook_for_test(
         &self,
         solar_system_id: SolarSystemId,
@@ -2282,6 +2241,14 @@ impl SystemRegistry {
             .before_publish_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_after_loading_apply_hook_for_test(
+        &self,
+        hook: Option<Arc<dyn Fn(SolarSystemId, u64) + Send + Sync>>,
+    ) {
+        *self.lifecycle_test_hooks.after_loading_apply_hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
     #[cfg(test)]

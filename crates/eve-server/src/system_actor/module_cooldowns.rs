@@ -80,6 +80,7 @@ pub enum PendingCooldownTransition {
 pub(in crate::system_actor) struct CooldownPersistGateState {
     pub last_persisted: Option<(u64, u64)>,
     pub phase: CooldownGatePhase,
+    pub in_flight_loading_transitions: Vec<PendingCooldownTransition>,
     pub pending_transitions: Vec<PendingCooldownTransition>,
 }
 
@@ -153,6 +154,16 @@ impl CooldownPersistGate {
         self.has_pending_transitions.load(Ordering::Acquire)
     }
 
+    pub(in crate::system_actor) fn take_all_pending_transitions(
+        &self,
+        guard: &mut CooldownPersistGateState,
+    ) -> Vec<PendingCooldownTransition> {
+        let mut all = std::mem::take(&mut guard.in_flight_loading_transitions);
+        all.append(&mut guard.pending_transitions);
+        self.clear_pending_transitions_flag();
+        all
+    }
+
     pub(in crate::system_actor) fn overlay_key_in_state(
         guard: &CooldownPersistGateState,
         key: (i64, i64, u32),
@@ -162,7 +173,7 @@ impl CooldownPersistGate {
         has_tidi_history: bool,
     ) -> Option<ModuleCooldownEntry> {
         let mut cur = base_entry;
-        for tr in &guard.pending_transitions {
+        for tr in guard.in_flight_loading_transitions.iter().chain(&guard.pending_transitions) {
             match *tr {
                 PendingCooldownTransition::ClearAll => cur = None,
                 PendingCooldownTransition::ClearShip { ship_id } if ship_id == key.0 => cur = None,
@@ -941,7 +952,12 @@ fn commit_migrated_cooldown_map_with_gate(
             }
             CooldownGatePhase::Live => {
                 drop(cg);
-                let Some(handle) = systems.get_handle(sys_id) else { std::thread::yield_now(); continue };
+                let Some(handle) = systems.get_handle(sys_id) else {
+                    if !systems.try_reclaim_dead_live_slot_to_cold(sys_id) {
+                        std::thread::yield_now();
+                    }
+                    continue;
+                };
                 if let Some((p_now, p_tidi, p_hist)) = prune_cfg {
                     if handle.prune_expired_module_cooldowns_sync(p_now, p_tidi, p_hist, migrated.is_empty()).is_err() { std::thread::yield_now(); continue; }
                 }
@@ -1235,6 +1251,7 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
             ctx.actor_st.has_tidi_history = true;
         }
         let cur_sim_s = ctx.actor_st.sim_elapsed_secs;
+        let now_eval = ctx.actor_st.db_opt.as_ref().map(|db| db.clock().now_unix_secs() as f64);
         let existing_map = &ctx.actor_st.module_cooldowns.reactivation_cooldowns;
         for (k, entry) in cooldowns.iter_mut() {
             if let Some(p) = existing_map.get(k) {
@@ -1242,7 +1259,11 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
                     p, entry.recorded_unix_f64, Some(ctx.solar_system_id), cur_sim_s,
                     ctx.tidi_factor, ctx.actor_st.has_tidi_history,
                 );
-                if entry.delay_s <= live_rem + 1e-6 {
+                if live_rem > 1e-6
+                    && (entry.delay_s <= live_rem + 1e-6
+                        || (entry.recorded_unix_f64 <= p.recorded_unix_f64 + 1e-6
+                            && entry.delay_s <= p.delay_s + 1e-6))
+                {
                     *entry = *p;
                     entry.solar_system_id.get_or_insert(ctx.solar_system_id);
                     continue;
@@ -1250,6 +1271,18 @@ pub(in crate::system_actor) fn replace_module_cooldowns_in_actor(
             }
             entry.recorded_sys_sim_s = cur_sim_s;
             entry.solar_system_id.get_or_insert(ctx.solar_system_id);
+        }
+        for (k, p) in existing_map {
+            if cooldowns.contains_key(k) { continue; }
+            let live_rem = remaining_cooldown_secs_with_tidi(
+                p, now_eval.unwrap_or(p.recorded_unix_f64), Some(ctx.solar_system_id), cur_sim_s,
+                ctx.tidi_factor, ctx.actor_st.has_tidi_history,
+            );
+            if live_rem > 1e-6 {
+                let mut kept = *p;
+                kept.solar_system_id.get_or_insert(ctx.solar_system_id);
+                cooldowns.insert(*k, kept);
+            }
         }
         ctx.actor_st.module_cooldown_checkpoint_seq = next_seq;
     } else {
@@ -1426,9 +1459,7 @@ pub(in crate::system_actor) fn take_stopped_cooldown_persist_payload_in_state(
     let gate_has_tidi = gate.has_tidi_history();
     let drained = {
         let mut gate_guard = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let d = std::mem::take(&mut gate_guard.pending_transitions);
-        gate.clear_pending_transitions_flag();
-        d
+        gate.take_all_pending_transitions(&mut gate_guard)
     };
     let has_tidi_history =
         st.has_tidi_history || gate_has_tidi || eff_tidi < 0.999_999 || reg_has_tidi_history;
@@ -1522,7 +1553,12 @@ impl SystemRegistry {
             let gate = self.cooldown_persist_gate(solar_system_id);
             let mut gate_guard = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
             match gate_guard.phase {
-                CooldownGatePhase::Live => { drop(gate_guard); std::thread::yield_now(); }
+                CooldownGatePhase::Live => {
+                    drop(gate_guard);
+                    if !self.try_reclaim_dead_live_slot_to_cold(solar_system_id) {
+                        std::thread::yield_now();
+                    }
+                }
                 CooldownGatePhase::Loading | CooldownGatePhase::Stopping => {
                     if let PendingCooldownTransition::Record { tidi_factor, has_tidi_history, .. } = &op {
                         if *tidi_factor < 0.999_999 || *has_tidi_history { gate.mark_tidi_history(); }

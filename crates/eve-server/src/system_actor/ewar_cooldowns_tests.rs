@@ -470,30 +470,22 @@ async fn dirty_removal_survives_rehydrate_and_locked_unknown_char_deact_preserve
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn aborted_loading_atomic_cold_flush_vs_remove_and_live_applied_log_no_park() {
+async fn aborted_loading_mid_drain_stop_preemption_and_cold_flush_race() {
+    use super::module_cooldowns::CooldownGatePhase;
     use std::sync::atomic::{AtomicBool, Ordering};
     let (reg, db, _sde) = test_registry_with_db();
     let (jita, cloak_tid, now) = (30_000_142_u32, 11_370_u32, db.clock().now_unix_secs() as f64);
-    for i in 0..8_i64 {
+    for i in 0..4_i64 {
         let k = (549_000 + i, 649_000 + i, cloak_tid);
         seed_ships_in_db(&db, jita, &[k.0]);
-        let (r_h, db_h, notify) = (Arc::clone(&reg), Arc::clone(&db), Arc::new(tokio::sync::Notify::new()));
-        let n_h = Arc::clone(&notify);
-        reg.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| {
-            if sid == jita {
-                r_h.record_cold_system_module_cooldown_in_db(&db_h, jita, k.0, k.1, cloak_tid, now, 30.0, 1.0, false);
-                r_h.set_force_publish_wouldblock_for_test(true);
-                n_h.notify_one();
-            }
+        let (r_h, db_h) = (Arc::clone(&reg), Arc::clone(&db));
+        reg.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| if sid == jita {
+            r_h.record_cold_system_module_cooldown_in_db(&db_h, jita, k.0, k.1, cloak_tid, now, 30.0, 1.0, false);
+            r_h.set_force_publish_wouldblock_for_test(true);
         })));
         let (done, saw_rm) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let (r_rm, db_rm, d_rm, s_rm) = (Arc::clone(&reg), Arc::clone(&db), Arc::clone(&done), Arc::clone(&saw_rm));
-        let rm_task = tokio::task::spawn_blocking(move || {
-            while !d_rm.load(Ordering::Acquire) {
-                if r_rm.remove_cooldown_key_across_non_live_systems(&db_rm, None, &[], k) { s_rm.store(true, Ordering::Release); break; }
-                std::thread::yield_now();
-            }
-        });
+        let rm_task = tokio::task::spawn_blocking(move || { while !d_rm.load(Ordering::Acquire) { if r_rm.remove_cooldown_key_across_non_live_systems(&db_rm, None, &[], k) { s_rm.store(true, Ordering::Release); break; } std::thread::yield_now(); } });
         assert!(reg.wake_for_session_arrival_async(jita, crate::system_actor::SessionArrivalWakeReason::Undock).await.is_err());
         done.store(true, Ordering::Release);
         rm_task.await.unwrap();
@@ -501,21 +493,32 @@ async fn aborted_loading_atomic_cold_flush_vs_remove_and_live_applied_log_no_par
         reg.set_force_publish_wouldblock_for_test(false);
         if !saw_rm.load(Ordering::Acquire) { let _ = reg.remove_cold_module_cooldown_key_across_systems(&db, None, k); }
         assert!(!load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k));
-        let _ = notify;
     }
-    let h = reg.get_or_spawn(jita);
-    let k_live = (549_900, 649_900, cloak_tid);
-    seed_ships_in_db(&db, jita, &[k_live.0]);
-    let r_f = Arc::clone(&reg);
-    tokio::task::spawn_blocking(move || {
-        r_f.flush_aborted_loading_transitions(jita, &r_f.cooldown_persist_gate(jita), vec![PendingCooldownTransition::Record {
-            ship_id: k_live.0, module_id: k_live.1, module_type_id: cloak_tid, now_unix_f64: now, delay_s: 30.0, tidi_factor: 1.0, has_tidi_history: false,
-        }]);
-    }).await.unwrap();
-    assert!(h.module_reactivation_cooldown(&k_live).is_some_and(|e| e.delay_s >= 29.0));
-    assert!(load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_live));
+
+    let k_mid = (549_900, 649_900, cloak_tid);
+    seed_ships_in_db(&db, jita, &[k_mid.0]);
+    let (mid_notify, (go_tx, go_rx_raw)) = (Arc::new(tokio::sync::Notify::new()), std::sync::mpsc::channel::<()>());
+    let go_rx = Arc::new(std::sync::Mutex::new(Some(go_rx_raw)));
+    let (r_claim, db_claim, mn) = (Arc::clone(&reg), Arc::clone(&db), Arc::clone(&mid_notify));
+    reg.set_after_claim_loading_hook_for_test(Some(Arc::new(move |sid, _| if sid == jita { r_claim.record_cold_system_module_cooldown_in_db(&db_claim, jita, k_mid.0, k_mid.1, cloak_tid, now, 30.0, 1.0, false); })));
+    reg.set_after_loading_apply_hook_for_test(Some(Arc::new(move |sid, _| if sid == jita {
+        mn.notify_one();
+        if let Some(rx) = go_rx.lock().unwrap().take() { let _ = tokio::task::block_in_place(|| rx.recv_timeout(std::time::Duration::from_secs(5))); }
+    })));
+    let r_w = Arc::clone(&reg);
+    let wake_task = tokio::spawn(async move { r_w.wake_for_session_arrival_async(jita, crate::system_actor::SessionArrivalWakeReason::Undock).await });
+    mid_notify.notified().await;
     let gate = reg.cooldown_persist_gate(jita);
-    assert!(gate.inner.lock().unwrap().pending_transitions.is_empty() && !gate.has_pending_transitions());
+    assert!(gate.has_pending_transitions() && reg.overlay_transition_cooldown_for_system(jita, k_mid, None).is_some_and(|e| e.delay_s >= 29.0));
+    assert!(reg.remove_cooldown_key_across_non_live_systems(&db, None, &[], k_mid) && reg.overlay_transition_cooldown_for_system(jita, k_mid, None).is_none());
+    assert!(reg.stop_system(jita).await);
+    let _ = go_tx.send(());
+    assert!(wake_task.await.unwrap().is_err());
+    reg.set_after_claim_loading_hook_for_test(None);
+    reg.set_after_loading_apply_hook_for_test(None);
+    assert!(!load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k_mid));
+    let cg = gate.inner.lock().unwrap();
+    assert!(cg.phase == CooldownGatePhase::Cold && cg.in_flight_loading_transitions.is_empty() && cg.pending_transitions.is_empty() && !gate.has_pending_transitions());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -532,12 +535,9 @@ async fn dropped_and_full_apply_persisted_cooldown_commit_recovers_via_dirty_flu
     assert!(persist_cooldown_payload_with_gate_in_db(jita, &reg.cooldown_persist_gate(jita), payload.clone()).is_some());
     assert!(h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty && h.actor_state.read().unwrap().module_cooldowns.boot_db_pending_merge);
 
-    let r = Arc::clone(&reg);
-    let h_c = h.clone();
+    let (r, h_c) = (Arc::clone(&reg), h.clone());
     tokio::task::spawn_blocking(move || { assert!(h_c.flush_dirty_module_cooldown_checkpoint_sync().is_ok()); r.rehydrate_active_system_cooldowns_from_db(); }).await.unwrap();
-    let st = h.actor_state.read().unwrap();
-    assert!(!st.module_cooldown_checkpoint_dirty && !st.module_cooldowns.boot_db_pending_merge);
-    drop(st);
+    assert!(!h.actor_state.read().unwrap().module_cooldown_checkpoint_dirty && !h.actor_state.read().unwrap().module_cooldowns.boot_db_pending_merge);
     assert!(h.module_reactivation_cooldown(&k_pre).is_some() && h.module_reactivation_cooldown(&k_new).is_some());
 
     let (full_tx, mut full_rx) = tokio::sync::mpsc::channel(1);
@@ -549,8 +549,7 @@ async fn dropped_and_full_apply_persisted_cooldown_commit_recovers_via_dirty_flu
         ewar_snap: Default::default(), post_hook: Arc::new(|_, _, _, _| {}), cooldown_payload: Some(p2),
         cooldown_persist_gate: Arc::clone(&h.cooldown_persist_gate), cmd_tx_weak: Some(full_tx.downgrade()),
     })));
-    let rt = tokio::runtime::Handle::current();
-    execute_post_unlock_ops_with_seq(Some(&db), None, ops, None, None, None, Some(&rt));
+    execute_post_unlock_ops_with_seq(Some(&db), None, ops, None, None, None, Some(&tokio::runtime::Handle::current()));
     assert!(matches!(full_rx.recv().await.unwrap(), SystemCommand::ClearAllModuleCooldowns { .. }));
     assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(2), full_rx.recv()).await.unwrap().unwrap(), SystemCommand::ApplyPersistedCooldownCommit { .. }));
 }

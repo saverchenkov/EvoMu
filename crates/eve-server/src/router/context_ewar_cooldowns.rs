@@ -86,6 +86,14 @@ impl ServerContext {
                 consider(Some(sid), entry, handle.sim_elapsed_secs(), tf, hist);
             }
         }
+        for (dead_sid, dead_handle) in self.systems.dead_live_system_handles() {
+            if !self.systems.try_reclaim_dead_live_slot_to_cold(dead_sid) {
+                if let Some(entry) = dead_handle.module_reactivation_cooldown(&key) {
+                    let (tf, hist) = self.resolve_sys_tidi_mode(Some(dead_sid));
+                    consider(Some(dead_sid), entry, dead_handle.sim_elapsed_secs(), tf, hist);
+                }
+            }
+        }
         let mut seen_non_live = std::collections::HashSet::new();
         for (cold_sid, entry) in crate::system_actor::find_all_cold_module_cooldown_entries_in_db(&self.db, key) {
             if let Some(live_h) = self.systems.get_handle(cold_sid) {
@@ -208,6 +216,14 @@ impl ServerContext {
                 if handle.remove_module_cooldown_sync(key).is_err() { retry_non_live.push(other_sid); }
             } else if view.module_cooldowns.boot_db_pending_merge && handle.remove_module_cooldown_sync(key).is_err() {
                 retry_non_live.push(other_sid);
+            }
+        }
+        for (dead_sid, dead_handle) in self.systems.dead_live_system_handles() {
+            if dead_sid != keep_sys_id && !self.systems.try_reclaim_dead_live_slot_to_cold(dead_sid) && measure_remaining {
+                if let Some(entry) = dead_handle.module_reactivation_cooldown(&key) {
+                    let (tidi, has_tidi) = self.resolve_sys_tidi_mode(Some(dead_sid));
+                    max_other_rem = max_other_rem.max(Self::remaining_cooldown_secs_with_tidi(&entry, now_unix_f64, Some(dead_sid), dead_handle.sim_elapsed_secs(), tidi, has_tidi));
+                }
             }
         }
         if measure_remaining {
