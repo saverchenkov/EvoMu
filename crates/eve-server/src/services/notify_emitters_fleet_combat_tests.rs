@@ -577,15 +577,17 @@ async fn set_password_covers_in_space_guards_station_override_corp_logs_and_clea
     // Stop ship + cloak via CombatState -> CannotDoWhileWarpingOrCloaked
     ship_ball.mode = eve_destiny::MovementMode::Stop;
     let _ = sys_handle.spawn_ball(ship_ball).await;
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.combat_states.insert(
-            ship_id,
-            eve_destiny::CombatState {
-                is_cloaked: true,
-                ..Default::default()
-            },
-        );
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.insert(
+                ship_id,
+                eve_destiny::CombatState {
+                    is_cloaked: true,
+                    ..Default::default()
+                },
+            );
+        })
+        .await;
     let cloak_err = handle_set_password(
         &ctx,
         &space_sess,
@@ -599,9 +601,11 @@ async fn set_password_covers_in_space_guards_station_override_corp_logs_and_clea
     assert_eq!(cloak_err.code, "CannotDoWhileWarpingOrCloaked");
 
     // Decloak without spawning container ball -> ContainerNotInSpace
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
+        })
+        .await;
     let no_cont = handle_set_password(
         &ctx,
         &space_sess,
@@ -1026,15 +1030,16 @@ async fn handle_set_password_covers_binding_inspace_corp_logs_and_clear_paths() 
     );
 
     // Cloaked via ball_slim_meta only -> CannotDoWhileWarpingOrCloaked
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_cloaked = false;
-        }
-        if let Some(meta) = bp.ball_slim_meta.get_mut(&ship_id) {
-            meta.is_cloaked = true;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_cloaked = false;
+            }
+            if let Some(meta) = bp.ball_slim_meta.get_mut(&ship_id) {
+                meta.is_cloaked = true;
+            }
+        })
+        .await;
     assert_eq!(
         handle_set_password(
             &ctx,
@@ -1051,19 +1056,21 @@ async fn handle_set_password_covers_binding_inspace_corp_logs_and_clear_paths() 
     );
 
     // Uncloak but warp -> CannotDoWhileWarpingOrCloaked
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(meta) = bp.ball_slim_meta.get_mut(&ship_id) {
-            meta.is_cloaked = false;
-        }
-        if let Some(b) = bp.balls.get_mut(&ship_id) {
-            b.mode = eve_destiny::MovementMode::new_warp(
-                ship_ball.position,
-                glam::DVec3::new(500_000.0, 0.0, 0.0),
-                3.0,
-            );
-        }
-    }
+    let ship_pos = ship_ball.position;
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(meta) = bp.ball_slim_meta.get_mut(&ship_id) {
+                meta.is_cloaked = false;
+            }
+            if let Some(b) = bp.balls.get_mut(&ship_id) {
+                b.mode = eve_destiny::MovementMode::new_warp(
+                    ship_pos,
+                    glam::DVec3::new(500_000.0, 0.0, 0.0),
+                    3.0,
+                );
+            }
+        })
+        .await;
     assert_eq!(
         handle_set_password(
             &ctx,
@@ -1080,12 +1087,13 @@ async fn handle_set_password_covers_binding_inspace_corp_logs_and_clear_paths() 
     );
 
     // Stop ship: unspawned container -> ContainerNotInSpace, far -> OutsideOperationalRange, near -> Ok
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(b) = bp.balls.get_mut(&ship_id) {
-            b.mode = eve_destiny::MovementMode::Stop;
-        }
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(b) = bp.balls.get_mut(&ship_id) {
+                b.mode = eve_destiny::MovementMode::Stop;
+            }
+        })
+        .await;
     assert_eq!(
         handle_set_password(
             &ctx,

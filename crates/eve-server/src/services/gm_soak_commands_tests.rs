@@ -390,13 +390,15 @@ async fn test_stop_logi_soak_flushes_stop_fx_before_remove_ball() {
     let npc_id = 900_000_055_i64;
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys.ballpark.write().expect("ballpark write");
-        bp.add_ball(make_test_ball(target_ship_id, 587, DVec3::ZERO));
-        bp.add_ball(make_test_ball(npc_id, 29_768, DVec3::new(12_000.0, 0.0, 0.0)));
+    let target_ball = make_test_ball(target_ship_id, 587, DVec3::ZERO);
+    let npc_ball = make_test_ball(npc_id, 29_768, DVec3::new(12_000.0, 0.0, 0.0));
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.add_ball(target_ball);
+        bp.add_ball(npc_ball);
         bp.register_observer(target_ship_id);
         let _ = bp.drain_observer_events(target_ship_id);
-    }
+    })
+    .await;
     let mut rx = sys.subscribe();
 
     with_mut_combat_runtime(&ctx, |rt| {
@@ -473,9 +475,13 @@ async fn test_stop_logi_soak_flushes_stop_fx_before_remove_ball() {
         ]
     );
 
-    let bp = sys.ballpark.read().expect("ballpark read after stop");
-    assert!(!bp.balls.contains_key(&npc_id));
-    assert!(bp.special_fx_meta.is_empty());
+    let (has_npc, fx_empty) = sys
+        .test_with_ballpark_async(move |bp| {
+            (bp.balls.contains_key(&npc_id), bp.special_fx_meta.is_empty())
+        })
+        .await;
+    assert!(!has_npc);
+    assert!(fx_empty);
 }
 
 #[tokio::test]

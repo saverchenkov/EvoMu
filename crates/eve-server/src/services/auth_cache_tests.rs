@@ -1348,11 +1348,12 @@ async fn slash_tr_same_system_zeroes_client_velocity_after_warp_and_subwarp_gh10
         })
         .await
         .expect("spawn far warping Venture");
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().velocity = DVec3::new(-252_511_539_724.72, 0.0, 0.0);
-        bp.drain_observer_events(ship_id);
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().velocity = DVec3::new(-252_511_539_724.72, 0.0, 0.0);
+            bp.drain_observer_events(ship_id);
+        })
+        .await;
 
     let tr_res = handle(
         &ctx,
@@ -1409,11 +1410,12 @@ async fn slash_tr_same_system_zeroes_client_velocity_after_warp_and_subwarp_gh10
     let _ = sys_h
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: DVec3::X })
         .await;
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().velocity = DVec3::new(335.0, 0.0, 0.0);
-        bp.drain_observer_events(ship_id);
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().velocity = DVec3::new(335.0, 0.0, 0.0);
+            bp.drain_observer_events(ship_id);
+        })
+        .await;
 
     let tr_sub = handle(
         &ctx,

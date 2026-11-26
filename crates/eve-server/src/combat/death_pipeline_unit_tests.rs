@@ -2116,12 +2116,10 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
     assert!(!ctx
         .systems
         .get_or_spawn(sys_id)
-        .actor_state
-        .read()
-        .unwrap()
-        .active_module_cycles
-        .iter()
-        .any(|c| c.ship_id == ship_id));
+        .test_with_actor_state_async(move |st| {
+            st.active_module_cycles.iter().any(|c| c.ship_id == ship_id)
+        })
+        .await);
 
     let notifs = ctx.drain_notifications_for_char(victim);
     for active_mid in [cycled_mod_id, uncycled_active_mod_id] {

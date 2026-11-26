@@ -111,9 +111,11 @@ async fn r7_tb_03_reconnect_return_warp_blocked_when_scrambled_or_bubbled() {
 
     reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect");
     {
-        let bp = sys.ballpark.read().unwrap();
+        let is_warping = sys
+            .test_with_ballpark_async(move |bp| matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }))
+            .await;
         assert!(
-            !matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }),
+            !is_warping,
             "Scrambled ship must not enter return warp on reconnect"
         );
     }
@@ -121,30 +123,34 @@ async fn r7_tb_03_reconnect_return_warp_blocked_when_scrambled_or_bubbled() {
     // 2. Inside warp disruption bubble without targeted scram -> must NOT enter return warp
     with_mut_sp6_state(&ctx.db, |st| insert_disc(st));
     sys.set_combat_state(ship_id, CombatState::default()).await.unwrap();
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.add_warp_bubble(910_001, current_pos, 20_000.0);
-    }
+    })
+    .await;
     reconnect_character_in_space(&ctx, char_id).await.expect("reconnect async");
     {
-        let bp = sys.ballpark.read().unwrap();
+        let is_warping = sys
+            .test_with_ballpark_async(move |bp| matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }))
+            .await;
         assert!(
-            !matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }),
+            !is_warping,
             "Bubbled ship must not enter return warp on reconnect"
         );
     }
 
     // 3. Clean unbubbled/unscrambled reconnect > 10km -> initiates return warp
     with_mut_sp6_state(&ctx.db, |st| insert_disc(st));
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.warp_bubble_mgr.bubbles.remove(&910_001);
-    }
+    })
+    .await;
     reconnect_character_in_space(&ctx, char_id).await.expect("reconnect clean");
     {
-        let bp = sys.ballpark.read().unwrap();
+        let is_warping = sys
+            .test_with_ballpark_async(move |bp| matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }))
+            .await;
         assert!(
-            matches!(bp.balls[&ship_id].mode, MovementMode::Warp { .. }),
+            is_warping,
             "Clean ship > 10km from pre-disconnect spot should return-warp on reconnect"
         );
     }

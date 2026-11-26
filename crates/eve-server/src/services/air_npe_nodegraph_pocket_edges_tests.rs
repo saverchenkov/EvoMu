@@ -130,11 +130,14 @@ async fn npe_pocket_starter_system_fallback_and_combat_timer_gates() {
     spawn_or_move_ship_in_pocket(&ctx, char_id, sys_id, ship_id, 596);
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.warp_scramble_strength = 5;
-            cs.warp_core_strength = 1;
-        }
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                    cs.warp_scramble_strength = 5;
+                    cs.warp_core_strength = 1;
+                }
+            })
+            .await;
     }
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
@@ -149,10 +152,13 @@ async fn npe_pocket_starter_system_fallback_and_combat_timer_gates() {
     // Clear scramble and test require_active_completion cleanup gates
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.warp_scramble_strength = 0;
-        }
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                    cs.warp_scramble_strength = 0;
+                }
+            })
+            .await;
     }
     assert_eq!(
         try_cleanup_npe_pocket_and_restore_ui(&ctx, Some(&mut session), 999_888_777, true)

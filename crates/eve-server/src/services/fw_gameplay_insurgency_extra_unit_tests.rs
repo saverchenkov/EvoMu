@@ -588,35 +588,54 @@ async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_c
         })
     };
 
-    let next_idle_dest = |sys: u32, bid: i64, stop_at: DVec3| -> DVec3 {
+    async fn next_idle_dest(
+        ctx: &crate::router::ServerContext,
+        sys: u32,
+        bid: i64,
+        stop_at: DVec3,
+    ) -> DVec3 {
         let sys_h = ctx.systems.get_or_spawn(sys);
-        {
-            let mut bp = sys_h.ballpark.write().unwrap();
-            let b = bp.balls.get_mut(&bid).unwrap();
-            b.position = stop_at;
-            b.mode = eve_destiny::MovementMode::Stop;
-        }
-        crate::services::combat_crimewatch::with_mut_combat_ephemeral(&ctx, |rt| {
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                let b = bp.balls.get_mut(&bid).unwrap();
+                b.position = stop_at;
+                b.mode = eve_destiny::MovementMode::Stop;
+            })
+            .await;
+        crate::services::combat_crimewatch::with_mut_combat_ephemeral(ctx, |rt| {
             rt.npc_entities.get_mut(&bid).unwrap().spawn_position = stop_at;
         });
         stop_at
-    };
+    }
 
     // 0 celestials: spawns at fallback0 = (24_000, 0, 8_000) (kills `vec![]`, `vec![Default::default()]`, `< 2 -> == 2 / > 2`)
     sync_campaign_system_npcs(&ctx, camp_id, sys_0).await;
     let bid0 = find_pirate_bid(sys_0);
-    let pos0 = ctx.systems.get_or_spawn(sys_0).ballpark.read().unwrap().balls[&bid0].position;
+    let pos0 = ctx
+        .systems
+        .get_or_spawn(sys_0)
+        .test_with_ballpark_async(move |bp| bp.balls[&bid0].position)
+        .await;
     assert_eq!(pos0, fallback0);
 
     // 1 celestial: spawns at wp0 (200_000 + 60_000 + 12_000 = 272_000); next idle patrol MUST go to fallback0 (len == 4, not len == 1!)
     let c_wp = |x: f64| DVec3::new(x + 10_000.0 + 50_000.0, 0.0, 0.0) + pirate_offset;
     sync_campaign_system_npcs(&ctx, camp_id, sys_1).await;
     let bid1 = find_pirate_bid(sys_1);
-    let pos1 = ctx.systems.get_or_spawn(sys_1).ballpark.read().unwrap().balls[&bid1].position;
+    let pos1 = ctx
+        .systems
+        .get_or_spawn(sys_1)
+        .test_with_ballpark_async(move |bp| bp.balls[&bid1].position)
+        .await;
     assert_eq!(pos1, c_wp(200_000.0));
     sync_campaign_system_npcs(&ctx, camp_id, sys_1).await;
-    let dest1 = match &ctx.systems.get_or_spawn(sys_1).ballpark.read().unwrap().balls[&bid1].mode {
-        eve_destiny::MovementMode::Warp { destination, .. } => *destination,
+    let dest1 = match ctx
+        .systems
+        .get_or_spawn(sys_1)
+        .test_with_ballpark_async(move |bp| bp.balls[&bid1].mode.clone())
+        .await
+    {
+        eve_destiny::MovementMode::Warp { destination, .. } => destination,
         other => panic!("expected Warp toward fallback0 from wp0, got {other:?}"),
     };
     assert_eq!(dest1, fallback0, "1 celestial must append fallback waypoints (`wps.len() < 2`)");
@@ -624,10 +643,15 @@ async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_c
     // 2 celestials: from wp1 (400k), next idle patrol MUST wrap back to wp0 (len == 2), NOT fallback0 (`< 2 -> <= 2 / == 2`)
     sync_campaign_system_npcs(&ctx, camp_id, sys_2).await;
     let bid2 = find_pirate_bid(sys_2);
-    let _ = next_idle_dest(sys_2, bid2, c_wp(400_000.0));
+    let _ = next_idle_dest(&ctx, sys_2, bid2, c_wp(400_000.0)).await;
     sync_campaign_system_npcs(&ctx, camp_id, sys_2).await;
-    let dest2 = match &ctx.systems.get_or_spawn(sys_2).ballpark.read().unwrap().balls[&bid2].mode {
-        eve_destiny::MovementMode::Warp { destination, .. } => *destination,
+    let dest2 = match ctx
+        .systems
+        .get_or_spawn(sys_2)
+        .test_with_ballpark_async(move |bp| bp.balls[&bid2].mode.clone())
+        .await
+    {
+        eve_destiny::MovementMode::Warp { destination, .. } => destination,
         other => panic!("expected Warp back to wp0, got {other:?}"),
     };
     assert_eq!(dest2, c_wp(100_000.0), "2 celestials must wrap 1 -> 0 without fallback waypoints");
@@ -635,10 +659,15 @@ async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_c
     // 3 celestials: from wp2 (700k), next idle patrol MUST wrap back to wp0 (len == 3), NOT fallback0 (`< 2 -> > 2`)
     sync_campaign_system_npcs(&ctx, camp_id, sys_3).await;
     let bid3 = find_pirate_bid(sys_3);
-    let _ = next_idle_dest(sys_3, bid3, c_wp(700_000.0));
+    let _ = next_idle_dest(&ctx, sys_3, bid3, c_wp(700_000.0)).await;
     sync_campaign_system_npcs(&ctx, camp_id, sys_3).await;
-    let dest3 = match &ctx.systems.get_or_spawn(sys_3).ballpark.read().unwrap().balls[&bid3].mode {
-        eve_destiny::MovementMode::Warp { destination, .. } => *destination,
+    let dest3 = match ctx
+        .systems
+        .get_or_spawn(sys_3)
+        .test_with_ballpark_async(move |bp| bp.balls[&bid3].mode.clone())
+        .await
+    {
+        eve_destiny::MovementMode::Warp { destination, .. } => destination,
         other => panic!("expected Warp back to wp0, got {other:?}"),
     };
     assert_eq!(dest3, c_wp(100_000.0), "3 celestials must wrap 2 -> 0 without fallback waypoints");

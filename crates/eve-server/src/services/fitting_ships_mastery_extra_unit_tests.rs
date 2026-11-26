@@ -812,8 +812,7 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
     );
 
     // 2. Board ShipInWarp both ways + ShipNotBoardable clauses + non-capsule swap preserving ship_c cycles + vacated slim meta
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_a).unwrap().mode = MovementMode::Warp {
             origin: DVec3::ZERO,
             destination: DVec3::new(1e8, 0.0, 0.0),
@@ -822,14 +821,14 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
             phase: WarpPhase::Cruising,
             elapsed_warp_time: 1.0,
         };
-    }
+    })
+    .await;
     let err_warp_src = handle_ships_mastery_and_fitting_ext(
         &ctx, &mut sp_sess, None, "ship", "Board", &[PyRep::Integer(ship_b)], &HashMap::new(),
     )
     .await.unwrap().unwrap_err();
     assert_eq!(err_warp_src.code, "ShipInWarp");
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_a).unwrap().mode = MovementMode::Stop;
         bp.balls.get_mut(&ship_b).unwrap().mode = MovementMode::Warp {
             origin: DVec3::ZERO,
@@ -839,16 +838,17 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
             phase: WarpPhase::Cruising,
             elapsed_warp_time: 1.0,
         };
-    }
+    })
+    .await;
     let err_warp_tgt = handle_ships_mastery_and_fitting_ext(
         &ctx, &mut sp_sess, None, "ship", "Board", &[PyRep::Integer(ship_b)], &HashMap::new(),
     )
     .await.unwrap().unwrap_err();
     assert_eq!(err_warp_tgt.code, "ShipInWarp");
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_b).unwrap().mode = MovementMode::Stop;
-    }
+    })
+    .await;
 
     // ShipNotBoardable clauses: piloted by other_char, non-singleton, contract-locked
     assert_eq!(
@@ -903,11 +903,16 @@ async fn ships_mastery_board_eject_launch_killmark_repair_kill_all_mutants() {
     assert!(!sys.has_active_module_cycle_sync(ship_a, 77_001));
     assert!(sys.has_active_module_cycle_sync(ship_c, 77_002));
     {
-        let bp = sys.ballpark.read().unwrap();
-        let m = bp.ball_slim_meta.get(&ship_a).expect("vacated ship_a slim meta");
+        let (m, mb) = sys
+            .test_with_ballpark_async(move |bp| {
+                (
+                    bp.ball_slim_meta.get(&ship_a).expect("vacated ship_a slim meta").clone(),
+                    bp.ball_slim_meta.get(&ship_b).expect("boarded ship_b slim meta").clone(),
+                )
+            })
+            .await;
         assert_eq!(m.char_id, None);
         assert_eq!(m.corp_id, corp_id);
-        let mb = bp.ball_slim_meta.get(&ship_b).expect("boarded ship_b slim meta");
         assert_eq!(mb.char_id, Some(char_id));
     }
 

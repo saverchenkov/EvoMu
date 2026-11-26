@@ -1045,14 +1045,15 @@ async fn test_c3_ship_death_session_change_timer_and_wreck_owner_victim() {
     assert_eq!(wreck_owner, victim_id, "Player ship wreck must be owned by victim");
     assert!(dropped_owners_all_victim, "Dropped items in victim wreck must be owned by victim");
 
+    let wreck_id = outcome.wreck_item_id;
     let slim_owner = sys_handle
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .ball_slim_meta
-        .get(&outcome.wreck_item_id)
-        .expect("wreck slim meta present")
-        .owner_id;
+        .test_with_ballpark_async(move |bp| {
+            bp.ball_slim_meta
+                .get(&wreck_id)
+                .expect("wreck slim meta present")
+                .owner_id
+        })
+        .await;
     assert_eq!(slim_owner, victim_id, "Wreck SlimItem owner_id must equal victim_id");
 
     // 4. Third-party looter taking from victim's wreck triggers Crimewatch Suspect flag
@@ -1176,13 +1177,10 @@ async fn test_c3_pod_death_corpse_implants_and_home_station_respawn() {
 
     let (_, corpse_ball) = sys_handle.get_ball_snapshot(outcome.wreck_item_id).await.unwrap().expect("corpse ball in ballpark");
     assert_eq!(corpse_ball.type_id, 25);
+    let corpse_id = outcome.wreck_item_id;
     let corpse_slim = sys_handle
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .ball_slim_meta
-        .get(&outcome.wreck_item_id)
-        .cloned()
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&corpse_id).cloned())
+        .await
         .expect("corpse slim meta");
     assert_eq!((corpse_slim.group_id, corpse_slim.category_id), (14, 2));
 

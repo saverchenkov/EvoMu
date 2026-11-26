@@ -1304,14 +1304,18 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
         .effective_optimal_range(&ctx);
     assert!(expected_range > 0.0);
     {
-        let st = sys_handle.actor_state.read().unwrap();
-        let web_cyc = st
-            .active_module_cycles
-            .iter()
-            .find(|c| c.ship_id == web_bid && c.module_id == -web_bid)
-            .expect("drone_web cycle active");
-        assert!(web_cyc.effect_name.starts_with("drone_web:"));
-        assert_eq!(web_cyc.max_effective_range_m, Some(expected_range));
+        let (web_effect_name, web_max_range) = sys_handle
+            .test_with_actor_state_async(move |st| {
+                let web_cyc = st
+                    .active_module_cycles
+                    .iter()
+                    .find(|c| c.ship_id == web_bid && c.module_id == -web_bid)
+                    .expect("drone_web cycle active");
+                (web_cyc.effect_name.clone(), web_cyc.max_effective_range_m)
+            })
+            .await;
+        assert!(web_effect_name.starts_with("drone_web:"));
+        assert_eq!(web_max_range, Some(expected_range));
     }
 
     // 2. CmdAssist clears active drone_web cycle and resets target_id
@@ -1327,7 +1331,11 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     .unwrap()
     .expect("CmdAssist succeeds");
     assert!(
-        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        !sys_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles.iter().any(|c| c.ship_id == web_bid)
+            })
+            .await,
         "CmdAssist must clear drone_web cycle"
     );
     let (_, ball_after_assist) = sys_handle.get_ball_snapshot(target_a).await.unwrap().unwrap();
@@ -1352,7 +1360,13 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     .await
     .unwrap()
     .expect("re-engage before CmdGuard");
-    assert!(sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid));
+    assert!(
+        sys_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles.iter().any(|c| c.ship_id == web_bid)
+            })
+            .await
+    );
     handle_npcs_drones(
         &ctx,
         &mut session,
@@ -1365,7 +1379,11 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     .unwrap()
     .expect("CmdGuard succeeds");
     assert!(
-        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        !sys_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles.iter().any(|c| c.ship_id == web_bid)
+            })
+            .await,
         "CmdGuard must clear drone_web cycle"
     );
     let web_drone = crate::services::drone_test_helpers::active_drone(&ctx, web_bid).unwrap();
@@ -1389,7 +1407,11 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     let future_ts = ctx.now_unix() + 120;
     step_engaged_drones(&ctx, future_ts).await;
     assert!(
-        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        !sys_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles.iter().any(|c| c.ship_id == web_bid)
+            })
+            .await,
         "step_engaged_drones must clear web cycle when drone moves out of SDE web range"
     );
 
@@ -1429,12 +1451,10 @@ async fn drone_web_sets_finite_max_range_and_clears_on_assist_guard_and_auto_swi
     .expect("CmdAbandonDrone succeeds");
     assert!(
         !sys_handle
-            .actor_state
-            .read()
-            .unwrap()
-            .active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == web_bid),
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles.iter().any(|c| c.ship_id == web_bid)
+            })
+            .await,
         "CmdAbandonDrone must clear drone_web cycle"
     );
     let (_, ball_after_abandon) = sys_handle.get_ball_snapshot(target_a).await.unwrap().unwrap();
@@ -1502,7 +1522,11 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     .expect("OOR CmdEngage succeeds with ewarApplied=false");
     assert_eq!(eng_oor.dict_get("ewarApplied"), Some(&PyRep::Bool(false)));
     assert!(
-        !sys_handle.actor_state.read().unwrap().active_module_cycles.iter().any(|c| c.ship_id == web_bid),
+        !sys_handle
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles.iter().any(|c| c.ship_id == web_bid)
+            })
+            .await,
         "OOR CmdEngage must not register active drone_web cycle"
     );
     let target_a_cs = sys_handle.get_combat_state(target_a).await.unwrap().unwrap();
@@ -1520,12 +1544,12 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     step_engaged_drones(&ctx, t1).await;
     assert!(
         sys_handle
-            .actor_state
-            .read()
-            .unwrap()
-            .active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == web_bid && c.target_id == Some(target_a)),
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles
+                    .iter()
+                    .any(|c| c.ship_id == web_bid && c.target_id == Some(target_a))
+            })
+            .await,
         "step_engaged_drones must apply drone_web once drone enters range"
     );
     assert!(sys_handle.get_combat_state(target_a).await.unwrap().unwrap().web_velocity_multiplier < 1.0);
@@ -1562,12 +1586,12 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     step_engaged_drones(&ctx, t2).await;
     assert!(
         sys_handle
-            .actor_state
-            .read()
-            .unwrap()
-            .active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == web_bid && c.target_id == Some(target_b)),
+            .test_with_actor_state_async(move |st| {
+                st.active_module_cycles
+                    .iter()
+                    .any(|c| c.ship_id == web_bid && c.target_id == Some(target_b))
+            })
+            .await,
         "step_engaged_drones must apply drone_web on target_b after cooldown"
     );
     assert!(sys_handle.get_combat_state(target_b).await.unwrap().unwrap().web_velocity_multiplier < 1.0);

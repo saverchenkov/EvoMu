@@ -748,8 +748,7 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
     assert_eq!(fb_wep.charge_type_id, Some(179));
 
     // 3. guards: WarpPhase::Cruising vs Aligning, gate cloak break, active non-gate cloak
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         if let Some(b) = bp.balls.get_mut(&ship_id) {
             b.mode = MovementMode::Warp {
                 origin: DVec3::ZERO,
@@ -760,7 +759,8 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
                 elapsed_warp_time: 5.0,
             };
         }
-    }
+    })
+    .await;
     assert_eq!(
         enforce_space_module_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, &ctx.sde.types[&SYN_AB_GENERIC])
             .await
@@ -787,8 +787,7 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
     );
 
     // Aligning is allowed + breaks gate cloak
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         if let Some(b) = bp.balls.get_mut(&ship_id) {
             b.mode = MovementMode::Warp {
                 origin: DVec3::ZERO,
@@ -803,7 +802,8 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
             cs.is_cloaked = true;
             cs.gate_cloak_remaining_ticks = 15;
         }
-    }
+    })
+    .await;
     assert!(
         enforce_space_action_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, "launch drones")
             .await
@@ -812,13 +812,13 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
     assert_eq!(sys.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 0);
 
     // Active non-gate cloak blocks action & weapon modules, permits cloak (330)
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.balls.get_mut(&ship_id).unwrap().mode = MovementMode::Stop;
         let cs = bp.combat_states.get_mut(&ship_id).unwrap();
         cs.is_cloaked = true;
         cs.gate_cloak_remaining_ticks = 0;
-    }
+    })
+    .await;
     assert_eq!(
         enforce_space_action_cloak_and_warp_guard(&ctx, &sys, char_id, ship_id, "engage")
             .await
@@ -838,7 +838,10 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
             .await
             .is_ok()
     );
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false;
+    })
+    .await;
 
     // 4. handle_module_cycles guards and branches
     let kw = HashMap::new();
@@ -960,7 +963,10 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
     );
 
     // Tethered blocks Smartbomb / empWave with CantActivateWhileTethered
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_tethered = true;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = true;
+    })
+    .await;
     assert_eq!(
         handle_module_cycles(
             &ctx,
@@ -977,7 +983,10 @@ async fn guards_warp_gate_cloak_fallback_weapon_and_module_cycles_error_paths() 
         .code,
         "CantActivateWhileTethered"
     );
-    sys.ballpark.write().unwrap().combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
+    })
+    .await;
 
     // Smartbomb in highsec with Green safety -> CantDoInCurrentSafetyLevel
     crate::services::combat_crimewatch::set_char_safety_level(
@@ -1213,13 +1222,13 @@ async fn cehe_duration_fallbacks_crystal_volatility_and_survey_cycle_completion(
     )
     .await
     .unwrap();
-    sys.ballpark
-        .write()
-        .unwrap()
-        .combat_states
-        .get_mut(&ship_id)
-        .unwrap()
-        .shield_boost_multiplier = 1.5;
+    sys.test_with_ballpark_mut_async(move |bp| {
+        bp.combat_states
+            .get_mut(&ship_id)
+            .unwrap()
+            .shield_boost_multiplier = 1.5;
+    })
+    .await;
 
     let kw = HashMap::new();
     let mut sess = SessionState {

@@ -785,12 +785,12 @@ async fn mmju_spool_blocker_flags_siphon_gate_and_flush_side_effects_mutants() {
     assert!((still_ball_cloak.position - ship_pos).length() < 5_000.0);
 
     //    (b) is_cloaked == false, is_mwd_mjd_disabled == true -> must NOT jump
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         let bcs = bp.combat_states.get_mut(&ship_id).unwrap();
         bcs.is_cloaked = false;
         bcs.is_mwd_mjd_disabled = true;
-    }
+    })
+    .await;
     write_deployable_state(&ctx, |st| {
         st.mmju_spools.insert(
             ship_id,

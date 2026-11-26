@@ -492,23 +492,25 @@ async fn agents_missions_in_space_rnd_epic_arc_trade_heraldry_and_respawn_branch
             if let Some(smid) = smid {
                 let handle = ctx.systems.get_or_spawn(s_sys);
                 let ship_id = 980_999_001_i64;
-                {
-                    let mut bp = handle.ballpark.write().unwrap();
-                    let mk = |eid: i64, x: f64| eve_destiny::Ball {
-                        id: eid,
-                        type_id: 587,
-                        position: eve_destiny::DVec3::new(x, 0.0, 0.0),
-                        velocity: eve_destiny::DVec3::ZERO,
-                        max_velocity: 300.0,
-                        inertia: 1.0,
-                        mass: 1e6,
-                        radius: 50.0,
-                        speed_fraction: 0.0,
-                        mode: eve_destiny::MovementMode::Stop,
-                    };
-                    bp.balls.insert(space_ag.agent_id, mk(space_ag.agent_id, 0.0));
-                    bp.balls.insert(ship_id, mk(ship_id, 10_000.0));
-                }
+                let space_agent_id = space_ag.agent_id;
+                handle
+                    .test_with_ballpark_mut_async(move |bp| {
+                        let mk = |eid: i64, x: f64| eve_destiny::Ball {
+                            id: eid,
+                            type_id: 587,
+                            position: eve_destiny::DVec3::new(x, 0.0, 0.0),
+                            velocity: eve_destiny::DVec3::ZERO,
+                            max_velocity: 300.0,
+                            inertia: 1.0,
+                            mass: 1e6,
+                            radius: 50.0,
+                            speed_fraction: 0.0,
+                            mode: eve_destiny::MovementMode::Stop,
+                        };
+                        bp.balls.insert(space_agent_id, mk(space_agent_id, 0.0));
+                        bp.balls.insert(ship_id, mk(ship_id, 10_000.0));
+                    })
+                    .await;
                 // Docked fails (`L62-63`)
                 let mut docked_ss = char_session(char_id, Some(s_sys), Some(60_003_760));
                 assert_eq!(call_agent_mgr(&ctx, &mut docked_ss, "DoAction", &[PyRep::Integer(3), PyRep::Integer(space_ag.agent_id), PyRep::Integer(smid as i64)], &kw).await.unwrap_err().code, "AgentNotCoLocated");

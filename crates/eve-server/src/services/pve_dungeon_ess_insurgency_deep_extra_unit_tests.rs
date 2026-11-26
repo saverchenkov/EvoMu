@@ -154,18 +154,22 @@ async fn pve_ess_reserve_banks_formulas_gate_guards_and_autopayout_branches() {
 
     // Stop warp, add scramble -> WarpScrambled
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.combat_states.entry(ship_id).or_default().warp_scramble_strength = 3;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.entry(ship_id).or_default().warp_scramble_strength = 3;
+        })
+        .await;
     assert_eq!(
         try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, ship_id, ess_gate).await.unwrap().unwrap_err().code,
         "WarpScrambled"
     );
 
     // Clear scramble, stay > 2500m from gate -> OutsideGateActivationRange
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.combat_states.entry(ship_id).or_default().warp_scramble_strength = 0;
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.entry(ship_id).or_default().warp_scramble_strength = 0;
+        })
+        .await;
     assert_eq!(
         try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, ship_id, ess_gate).await.unwrap().unwrap_err().code,
         "OutsideGateActivationRange"

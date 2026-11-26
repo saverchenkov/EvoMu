@@ -437,18 +437,22 @@ async fn compression_decompression_and_observer_ledger_exhaustive_error_branches
         eve_destiny::CombatState { is_cloaked: true, ..Default::default() },
     ).await.unwrap();
     assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "CannotCompressWhileCloaked");
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_cloaked = false;
-            cs.is_tethered = true;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_cloaked = false;
+                cs.is_tethered = true;
+            }
+        })
+        .await;
     assert_eq!(handle_in_space_compression_mgr(&ctx, &mut sess, &[PyRep::Integer(925_013)]).await.unwrap_err().code, "CannotCompressWhileTethered");
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.is_tethered = false;
-        }
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_tethered = false;
+            }
+        })
+        .await;
 
     // CompressItemInStructure & DecompressGasInStructure error branches
     assert_eq!(handle_structure_compression_mgr(&ctx, &mut sess, "CompressItemInStructure", &[PyRep::Integer(925_016)]).unwrap().unwrap_err().code, "NotDocked");

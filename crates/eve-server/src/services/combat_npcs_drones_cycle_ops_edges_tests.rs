@@ -248,15 +248,15 @@ async fn drone_ecm_jam_taunt_rule_immunity_and_timer_renewal() {
 
     // 2. Target tethered -> false
     d.ecm_strength = 500.0;
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&target_ship).unwrap().is_tethered = true;
-    }
+    })
+    .await;
     assert!(!try_apply_drone_ecm_jam(&ctx, &sys, &d, &drone_ball, target_ship, &target_ball).await);
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&target_ship).unwrap().is_tethered = false;
-    }
+    })
+    .await;
 
     // 3. Successful ECM jam preserves taunt lock on drone_ball_id while clearing other locks
     let _ = sys
@@ -394,10 +394,10 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
     assert_eq!(engaged.len(), 3);
 
     // Tethered parent ship skips auto-aggression and disengages in step_engaged_drones
-    {
-        let mut bp = sys.ballpark.write().unwrap();
+    sys.test_with_ballpark_mut_async(move |bp| {
         bp.combat_states.get_mut(&parent_ship).unwrap().is_tethered = true;
-    }
+    })
+    .await;
     let engaged_tethered = step_drone_auto_aggression_and_assist(
         &ctx,
         sys_id,

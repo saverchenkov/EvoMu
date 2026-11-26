@@ -263,10 +263,11 @@ async fn nanite_burned_tethered_zarzakh_and_covert_cloak_guards() {
     });
 
     // 3. CantActivateWhileTethered on offensive weapon
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = true;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = true;
+        })
+        .await;
     assert_eq!(
         handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(gun_id)], &kw)
             .await
@@ -275,10 +276,11 @@ async fn nanite_burned_tethered_zarzakh_and_covert_cloak_guards() {
             .code,
         "CantActivateWhileTethered"
     );
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false;
+        })
+        .await;
 
     // 4. ShipCannotUseCovertCloak on T1 Frigate (587)
     assert_eq!(

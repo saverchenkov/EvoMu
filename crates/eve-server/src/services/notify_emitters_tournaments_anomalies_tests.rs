@@ -198,23 +198,31 @@ async fn tales_incursions_system_effects_deathzone_and_expedition_notifications(
         }
     });
     let handle = ctx.systems.get_or_spawn(abyss_sys);
-    handle.ballpark.write().unwrap().balls.insert(
-        ship_id,
-        Ball {
-            id: ship_id,
-            type_id: 587,
-            position: DVec3::new(200_000.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 300.0,
-            inertia: 1.0,
-            mass: 1_000_000.0,
-            radius: 50.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-    );
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.insert(
+                ship_id,
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::new(200_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+            );
+        })
+        .await;
     sync_deathzone_state_notifications(&ctx, abyss_sys);
-    handle.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().position = DVec3::ZERO;
+    handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_id).unwrap().position = DVec3::ZERO;
+        })
+        .await;
     sync_deathzone_state_notifications(&ctx, abyss_sys);
     let dz_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(dz_notifs.len(), 2);

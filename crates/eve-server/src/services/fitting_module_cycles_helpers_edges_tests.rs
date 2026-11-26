@@ -374,26 +374,27 @@ async fn burst_jammer_safety_and_pending_cycle_actions_salvage_and_overload() {
         snap.module_online_states.insert(mod_id, false);
         snap.module_active_states.insert(salvager_id);
     });
-    {
-        let mut st = sys_h.actor_state.write().unwrap();
-        st.pending_cycle_actions.push(PendingCycleAction::SyncOverloadState {
-            char_id: Some(char_id),
-            ship_id,
-            module_id: mod_id,
-            is_overloaded: true,
-        });
-        st.pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
-            char_id,
-            ship_id,
-            module_id: salvager_id,
-            module_type_id: 484,
-            wreck_id: 0,
-            repeat: 1,
-            effect_name: "salvage".into(),
-            next_cycle_cap_deducted: false,
-            deducted_cap_gj: 0.0,
-        });
-    }
+    sys_h
+        .test_with_actor_state_mut_async(move |st| {
+            st.pending_cycle_actions.push(PendingCycleAction::SyncOverloadState {
+                char_id: Some(char_id),
+                ship_id,
+                module_id: mod_id,
+                is_overloaded: true,
+            });
+            st.pending_cycle_actions.push(PendingCycleAction::SalvageEnd {
+                char_id,
+                ship_id,
+                module_id: salvager_id,
+                module_type_id: 484,
+                wreck_id: 0,
+                repeat: 1,
+                effect_name: "salvage".into(),
+                next_cycle_cap_deducted: false,
+                deducted_cap_gj: 0.0,
+            });
+        })
+        .await;
     execute_pending_cycle_actions(&ctx, hi_sys).await;
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.module_active_states.contains(&mod_id));

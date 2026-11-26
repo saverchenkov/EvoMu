@@ -605,10 +605,13 @@ async fn actor_fob_damage_phases_and_idle_roamer_patrol_branches() {
     // Move an idle roamer far from its spawn_position so second tick updates spawn_position and warps/goes to next waypoint
     let moved_bid = with_combat_runtime(&ctx, |rt| rt.npc_entities.keys().next().copied());
     if let Some(bid) = moved_bid {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        if let Some(b) = bp.balls.get_mut(&bid) {
-            b.position = glam::DVec3::new(1.0e12, 0.0, 0.0);
-        }
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                if let Some(b) = bp.balls.get_mut(&bid) {
+                    b.position = glam::DVec3::new(1.0e12, 0.0, 0.0);
+                }
+            })
+            .await;
     }
     sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 2, 3).await;
 }

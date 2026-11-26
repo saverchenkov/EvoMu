@@ -1087,13 +1087,10 @@ async fn test_zarzakh_local_horizon_siege_chat_anchoring_and_cyno() {
     reloaded
         .systems
         .get_or_spawn(ZARZAKH_SYS)
-        .ballpark
-        .write()
-        .unwrap()
-        .balls
-        .get_mut(&ship_a)
-        .unwrap()
-        .position = DVec3::new(250_000.0, 0.0, 0.0);
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&ship_a).unwrap().position = DVec3::new(250_000.0, 0.0, 0.0);
+        })
+        .await;
     let caster_siege_err = rpc(
         &reloaded,
         &mut siege_exit,

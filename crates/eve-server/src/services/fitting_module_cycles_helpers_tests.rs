@@ -383,8 +383,7 @@ async fn survey_scanner_ecm_burst_jammer_and_pending_cycle_actions() {
     .expect("burst jammer activation");
 
     // 4. execute_pending_cycle_actions: LanceBeamFired + InvalidateShipFitting
-    {
-        let mut st = sys.actor_state.write().unwrap();
+    sys.test_with_actor_state_mut_async(move |st| {
         st.pending_cycle_actions.push(PendingCycleAction::LanceBeamFired {
             attacker_char_id: char_id,
             attacker_ship_id: ship_id,
@@ -397,7 +396,8 @@ async fn survey_scanner_ecm_burst_jammer_and_pending_cycle_actions() {
             char_id: Some(char_id),
             ship_id,
         });
-    }
+    })
+    .await;
     execute_pending_cycle_actions(&ctx, sys_id).await;
     assert!(ctx
         .drain_notifications_for_char(char_id)

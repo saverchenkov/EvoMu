@@ -630,16 +630,17 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
     let mut sys_rx = sys_handle.subscribe();
 
     // Negative case: failed roll leaves wreck intact and emits zero RemoveBall / OnItemChange / OnTarget.
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
-            target_id: wreck_fail,
-            lock_time_ms: 1_000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: None,
-        });
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
+                target_id: wreck_fail,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            });
+        })
+        .await;
     let fail_out = attempt_salvage_wreck(&ctx, sys_id, char_id, ship_id, wreck_fail, 0.0, 0.99)
         .await
         .unwrap();
@@ -649,19 +650,24 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
         ctx.drain_notifications_for_char(char_id).is_empty(),
         "failed salvage must not emit OnItemChange or OnTarget lost"
     );
-    assert!(sys_handle.ballpark.read().unwrap().balls.contains_key(&wreck_fail));
+    assert!(
+        sys_handle
+            .test_with_ballpark_async(move |bp| bp.balls.contains_key(&wreck_fail))
+            .await
+    );
 
     // Positive case A: `execute_wreck_salvage_cycle` with active target lock + Guristas Small Wreck (26573).
-    {
-        let mut bp = sys_handle.ballpark.write().unwrap();
-        bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
-            target_id: wreck_empty,
-            lock_time_ms: 1_000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: None,
-        });
-    }
+    sys_handle
+        .test_with_ballpark_mut_async(move |bp| {
+            bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
+                target_id: wreck_empty,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            });
+        })
+        .await;
     let cycle_rep = execute_wreck_salvage_cycle(
         &ctx,
         sys_id,
@@ -688,20 +694,18 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
         "flushed broadcast must include RemoveBalls([{wreck_empty}]): {:?}",
         bcast_a.observer_events
     );
-    assert!(
-        !sys_handle.ballpark.read().unwrap().balls.contains_key(&wreck_empty),
-        "wreck ball must be removed from ballpark"
-    );
-    assert!(
-        !sys_handle
-            .ballpark
-            .read()
-            .unwrap()
-            .target_locks
-            .get(&ship_id)
-            .is_some_and(|ls| ls.iter().any(|l| l.target_id == wreck_empty)),
-        "target lock on salvaged wreck must be cleared"
-    );
+    let (wreck_removed, lock_cleared) = sys_handle
+        .test_with_ballpark_async(move |bp| {
+            (
+                !bp.balls.contains_key(&wreck_empty),
+                !bp.target_locks
+                    .get(&ship_id)
+                    .is_some_and(|ls| ls.iter().any(|l| l.target_id == wreck_empty)),
+            )
+        })
+        .await;
+    assert!(wreck_removed, "wreck ball must be removed from ballpark");
+    assert!(lock_cleared, "target lock on salvaged wreck must be cleared");
 
     let notifs_a = ctx.drain_notifications_for_char(char_id);
     let cargo_inserts: Vec<_> = notifs_a
@@ -946,21 +950,22 @@ async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deacti
             .await
             .unwrap();
     }
-    {
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.pending_cycle_actions
-            .push(crate::system_actor::PendingCycleAction::SalvageEnd {
-                char_id,
-                ship_id,
-                module_id: mod_id,
-                module_type_id: mod_tid,
-                wreck_id,
-                repeat: 1000,
-                effect_name: "salvaging".to_string(),
-                next_cycle_cap_deducted: false,
-                deducted_cap_gj: 0.0,
-            });
-    }
+    sys_handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.pending_cycle_actions
+                .push(crate::system_actor::PendingCycleAction::SalvageEnd {
+                    char_id,
+                    ship_id,
+                    module_id: mod_id,
+                    module_type_id: mod_tid,
+                    wreck_id,
+                    repeat: 1000,
+                    effect_name: "salvaging".to_string(),
+                    next_cycle_cap_deducted: false,
+                    deducted_cap_gj: 0.0,
+                });
+        })
+        .await;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum RecordedEvent {
@@ -1082,21 +1087,22 @@ async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deacti
     // If a second repeating SalvageEnd ticks after the wreck and cycle were already removed,
     // it must NOT emit a duplicate OnGodmaShipEffect(false).
     let _ = ctx.drain_notifications_for_char(char_id);
-    {
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.pending_cycle_actions
-            .push(crate::system_actor::PendingCycleAction::SalvageEnd {
-                char_id,
-                ship_id,
-                module_id: mod_second,
-                module_type_id: mod_tid,
-                wreck_id,
-                repeat: 1000,
-                effect_name: "salvaging".to_string(),
-                next_cycle_cap_deducted: false,
-                deducted_cap_gj: 0.0,
-            });
-    }
+    sys_handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.pending_cycle_actions
+                .push(crate::system_actor::PendingCycleAction::SalvageEnd {
+                    char_id,
+                    ship_id,
+                    module_id: mod_second,
+                    module_type_id: mod_tid,
+                    wreck_id,
+                    repeat: 1000,
+                    effect_name: "salvaging".to_string(),
+                    next_cycle_cap_deducted: false,
+                    deducted_cap_gj: 0.0,
+                });
+        })
+        .await;
     crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
     let dup_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
@@ -1226,21 +1232,22 @@ async fn salvaged_wreck_flushes_remove_ball_before_cross_pilot_sibling_deactivat
             .await
             .unwrap();
     }
-    {
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.pending_cycle_actions
-            .push(crate::system_actor::PendingCycleAction::SalvageEnd {
-                char_id,
-                ship_id,
-                module_id: mod_id,
-                module_type_id: mod_tid,
-                wreck_id,
-                repeat: 1000,
-                effect_name: "salvaging".to_string(),
-                next_cycle_cap_deducted: false,
-                deducted_cap_gj: 0.0,
-            });
-    }
+    sys_handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.pending_cycle_actions
+                .push(crate::system_actor::PendingCycleAction::SalvageEnd {
+                    char_id,
+                    ship_id,
+                    module_id: mod_id,
+                    module_type_id: mod_tid,
+                    wreck_id,
+                    repeat: 1000,
+                    effect_name: "salvaging".to_string(),
+                    next_cycle_cap_deducted: false,
+                    deducted_cap_gj: 0.0,
+                });
+        })
+        .await;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum RecordedEvent {
@@ -1370,21 +1377,22 @@ async fn salvaged_wreck_flushes_remove_ball_before_cross_pilot_sibling_deactivat
     // Subsequent SalvageEnd for cross-pilot mod_other must not emit duplicate deactivation notices.
     let _ = ctx.drain_notifications_for_char(char_id);
     let _ = ctx.drain_notifications_for_char(other_char_id);
-    {
-        let mut st = sys_handle.actor_state.write().unwrap();
-        st.pending_cycle_actions
-            .push(crate::system_actor::PendingCycleAction::SalvageEnd {
-                char_id: other_char_id,
-                ship_id: other_ship_id,
-                module_id: mod_other,
-                module_type_id: mod_tid,
-                wreck_id,
-                repeat: 1000,
-                effect_name: "salvaging".to_string(),
-                next_cycle_cap_deducted: false,
-                deducted_cap_gj: 0.0,
-            });
-    }
+    sys_handle
+        .test_with_actor_state_mut_async(move |st| {
+            st.pending_cycle_actions
+                .push(crate::system_actor::PendingCycleAction::SalvageEnd {
+                    char_id: other_char_id,
+                    ship_id: other_ship_id,
+                    module_id: mod_other,
+                    module_type_id: mod_tid,
+                    wreck_id,
+                    repeat: 1000,
+                    effect_name: "salvaging".to_string(),
+                    next_cycle_cap_deducted: false,
+                    deducted_cap_gj: 0.0,
+                });
+        })
+        .await;
     crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
     for cid in [char_id, other_char_id] {
         let dup_notifs = ctx.drain_notifications_for_char(cid);
@@ -1405,13 +1413,10 @@ async fn salvaged_wreck_flushes_remove_ball_before_cross_pilot_sibling_deactivat
         );
     });
     let remaining_cycles: Vec<i64> = sys_handle
-        .actor_state
-        .read()
-        .unwrap()
-        .active_module_cycles
-        .iter()
-        .map(|c| c.module_id)
-        .collect();
+        .test_with_actor_state_async(move |st| {
+            st.active_module_cycles.iter().map(|c| c.module_id).collect()
+        })
+        .await;
     assert_eq!(
         remaining_cycles,
         vec![mod_unrelated],

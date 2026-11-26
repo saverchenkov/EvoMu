@@ -253,8 +253,11 @@ async fn test_air_npe_runner_auth_errors_trusted_checkpoints_and_none_session() 
     );
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.set_warp_scramble_strength(ship_id, 2);
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.set_warp_scramble_strength(ship_id, 2);
+            })
+            .await;
     }
     assert_eq!(
         transition_character_into_npe_pocket(&ctx, None, char_id)
@@ -273,8 +276,11 @@ async fn test_air_npe_runner_auth_errors_trusted_checkpoints_and_none_session() 
     ));
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys_h.ballpark.write().unwrap();
-        bp.set_warp_scramble_strength(ship_id, 0);
+        sys_h
+            .test_with_ballpark_mut_async(move |bp| {
+                bp.set_warp_scramble_strength(ship_id, 0);
+            })
+            .await;
     }
 
     // 6. Complete via complete_air_npe (session = None)

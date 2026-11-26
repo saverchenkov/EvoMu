@@ -1959,39 +1959,6 @@ fn collect_edencom_arc_hits(
     crate::formulas::vorton_arc_targets_with_cap(target_id, target_pos, &candidates, 10_000.0, 5)
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_extended_npc_attack_in_bp(
-    ctx: &ServerContext,
-    bp: &mut Ballpark,
-    npc: &mut ExtendedNpcEntity,
-    weapon_rt: &mut ExtendedNpcWeaponRuntime,
-    target_id: i64,
-    target_sig_radii: &HashMap<i64, f64>,
-    is_capital_target: bool,
-    sleeper_sentry_can_fire: bool,
-    edencom_meta: Option<&EdencomHostilityMeta>,
-    destroyed_in_call: &HashSet<i64>,
-    destroyed_in_tick: &mut Vec<(i64, i64, Ball)>,
-    homefront_damage_events: &mut Vec<(i64, i64, f64)>,
-) -> bool {
-    execute_extended_npc_attack_with_sde_and_rng(
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        bp,
-        npc,
-        weapon_rt,
-        target_id,
-        target_sig_radii,
-        is_capital_target,
-        sleeper_sentry_can_fire,
-        edencom_meta,
-        destroyed_in_call,
-        destroyed_in_tick,
-        homefront_damage_events,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_extended_npc_attack_with_sde_and_rng(
     sde: &SdeRegistry,

@@ -819,15 +819,17 @@ async fn group_2b_board_stored_ship_corp_password_space_guards_and_capsule_swap(
     // ShipInWarp guard
     {
         let sys = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys.ballpark.write().unwrap();
-        bp.balls.get_mut(&space_pod_id).unwrap().mode = MovementMode::Warp {
-            origin: DVec3::new(500.0, 0.0, 0.0),
-            destination: DVec3::new(10_000_000.0, 0.0, 0.0),
-            warp_speed_au_s: 3.0,
-            total_distance: 9_999_500.0,
-            phase: eve_destiny::WarpPhase::Cruising,
-            elapsed_warp_time: 5.0,
-        };
+        sys.test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&space_pod_id).unwrap().mode = MovementMode::Warp {
+                origin: DVec3::new(500.0, 0.0, 0.0),
+                destination: DVec3::new(10_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 9_999_500.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 5.0,
+            };
+        })
+        .await;
     }
     assert_eq!(
         board_stored_ship(&ctx, &mut space_sess, &[PyRep::Integer(space_host_id), PyRep::Integer(space_stored_1)], &kw)
@@ -838,8 +840,10 @@ async fn group_2b_board_stored_ship_corp_password_space_guards_and_capsule_swap(
     );
     {
         let sys = ctx.systems.get_or_spawn(sys_id);
-        let mut bp = sys.ballpark.write().unwrap();
-        bp.balls.get_mut(&space_pod_id).unwrap().mode = MovementMode::Stop;
+        sys.test_with_ballpark_mut_async(move |bp| {
+            bp.balls.get_mut(&space_pod_id).unwrap().mode = MovementMode::Stop;
+        })
+        .await;
     }
 
     // Boarding from capsule in space removes old capsule from snap.items
@@ -859,7 +863,9 @@ async fn group_2b_board_stored_ship_corp_password_space_guards_and_capsule_swap(
         assert!(snap.items.contains_key(&space_stored_1), "previous non-capsule ship must remain in space");
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let prev_char_id = sys.ballpark.read().unwrap().ball_slim_meta.get(&space_stored_1).and_then(|m| m.char_id);
+    let prev_char_id = sys
+        .test_with_ballpark_async(move |bp| bp.ball_slim_meta.get(&space_stored_1).and_then(|m| m.char_id))
+        .await;
     assert_eq!(prev_char_id, None);
 }
 

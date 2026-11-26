@@ -700,22 +700,23 @@ async fn fw_enlistment_docking_npc_corp_purge_and_ballpark_sync() {
     });
     // Spawn ship into system ballpark so `find_ball_system_sync` hits lines 225-232 & 683-690
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    {
-        let mut bp = sys_h.ballpark.write().unwrap();
-        let ball = eve_destiny::Ball {
-            id: ship_id,
-            type_id: 587,
-            position: glam::DVec3::ZERO,
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 200.0,
-            inertia: 1.0,
-            mass: 1e6,
-            radius: 50.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        };
-        bp.add_ball(ball);
-    }
+    sys_h
+        .test_with_ballpark_mut_async(move |bp| {
+            let ball = eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            };
+            bp.add_ball(ball);
+        })
+        .await;
 
     let mut sess = auth_session(1, cid, npc_corp, sys_id);
     sess.station_id = None;
