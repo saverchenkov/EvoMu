@@ -1092,8 +1092,8 @@ async fn metenox_tick_and_inspect_enforce_atomic_reagents_and_foreign_bay_isolat
             crate::services::mining_advanced::mining_compression::inspect_metenox_drill(
                 &ctx.sde,
                 snap,
-                char_id,
                 metenox_id,
+                char_id,
                 0.40,
                 now,
             )
@@ -1145,8 +1145,8 @@ async fn metenox_tick_and_inspect_enforce_atomic_reagents_and_foreign_bay_isolat
             crate::services::mining_advanced::mining_compression::inspect_metenox_drill(
                 &ctx.sde,
                 snap,
-                char_id,
                 metenox_id,
+                char_id,
                 0.40,
                 now,
             )

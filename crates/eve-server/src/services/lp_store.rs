@@ -1507,14 +1507,14 @@ mod r5_lp_policy_tests {
                 c.loyalty_points.insert(npc_corp, 5_000);
                 c.standings.insert(npc_corp, 5.0);
             }
-            let corp = CorporationRecord {
-                corporation_id: player_corp,
-                name: "LP Policy Corp".into(),
-                ticker: "LPPC".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            };
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = player_corp;
+            corp.name = "LP Policy Corp".into();
+            corp.ticker = "LPPC".into();
+            corp.ceo_id = char_id;
             snap.corporations.insert(player_corp, corp);
+            snap.items
+                .retain(|_, it| !(it.owner_id == char_id && it.type_id == 35));
 
             let mut damaged = make_fighter_item(damaged_id, 35, char_id, station_id, InventoryFlag::Hangar, 10);
             damaged.dynamic_attributes.insert(3, 0.0);

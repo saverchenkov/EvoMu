@@ -641,14 +641,20 @@ mod r5_ancillary_policy_tests {
 
     #[test]
     fn ancillary_planner_and_prepare_reject_bpc_and_courier_charges() {
-        let mut ctx = ServerContext::new();
+        let mut ctx = ServerContext::with_sde_and_repository(
+            Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+            Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        );
+        let base_inv = ctx.sde.types.get(&587).expect("seed type").clone();
         let sde = Arc::make_mut(&mut ctx.sde);
         let mk_mod = |type_id: u32, group_id: u32, attrs: &[(u16, f64)]| -> InvType {
-            let mut t = InvType::default();
+            let mut t = base_inv.clone();
             t.type_id = type_id;
             t.group_id = group_id;
             t.category_id = 7;
             t.name = format!("Mod {type_id}");
+            t.default_attributes.clear();
+            t.effect_ids.clear();
             for &(k, v) in attrs {
                 t.default_attributes.insert(k, v);
             }
@@ -666,8 +672,8 @@ mod r5_ancillary_policy_tests {
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
         for (mid, tid, flag, ctid, cqty) in [
-            (asb_id, 995_201_u32, InventoryFlag::MedSlot0 as u16, 11_283_u32, 1_i32),
-            (aar_id, 995_202_u32, InventoryFlag::LoSlot0 as u16, 28_668_u32, 4_i32),
+            (asb_id, 995_201_u32, InventoryFlag::MedSlot0 as u16, 11_283_u32, 1_u32),
+            (aar_id, 995_202_u32, InventoryFlag::LoSlot0 as u16, 28_668_u32, 4_u32),
         ] {
             fit.modules.insert(
                 mid,

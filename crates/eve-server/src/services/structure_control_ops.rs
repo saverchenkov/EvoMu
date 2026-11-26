@@ -1699,21 +1699,29 @@ mod r5_control_weapon_policy_tests {
 
     #[test]
     fn resolve_structure_weapon_tick_rejects_foreign_owned_weapon_charges() {
-        let mut ctx = ServerContext::new();
+        let mut ctx = ServerContext::with_sde_and_repository(
+            std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+            std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        );
+        let base_inv = ctx.sde.types.get(&587).expect("seed type").clone();
         let sde = std::sync::Arc::make_mut(&mut ctx.sde);
-        let mut wtype = eve_sde::InvType::default();
+        let mut wtype = base_inv.clone();
         wtype.type_id = 995_401;
         wtype.category_id = 66;
         wtype.group_id = 1330; // PDB
-        wtype.default_attributes.insert(604, 1559);
+        wtype.default_attributes.clear();
+        wtype.effect_ids.clear();
+        wtype.default_attributes.insert(604, 1559.0);
         wtype.default_attributes.insert(51, 3_000.0);
         wtype.default_attributes.insert(54, 40_000.0);
         wtype.default_attributes.insert(158, 10_000.0);
         sde.types.insert(995_401, wtype);
-        let mut ctype = eve_sde::InvType::default();
+        let mut ctype = base_inv;
         ctype.type_id = 995_402;
         ctype.category_id = 8;
         ctype.group_id = 1559;
+        ctype.default_attributes.clear();
+        ctype.effect_ids.clear();
         ctype.default_attributes.insert(114, 100.0);
         sde.types.insert(995_402, ctype);
 
@@ -1734,11 +1742,10 @@ mod r5_control_weapon_policy_tests {
         let target = HostileTargetInfo {
             ship_id: 995_401_099,
             pilot_id: 90_000_099,
-            ship_type_id: 587,
             position: DVec3::new(1_000.0, 0.0, 0.0),
-            dist_m: 1_000.0,
+            velocity: DVec3::ZERO,
             sig_radius: 40.0,
-            speed: 0.0,
+            dist_m: 1_000.0,
         };
 
         ctx.db.with_mut_snapshot(|snap| {

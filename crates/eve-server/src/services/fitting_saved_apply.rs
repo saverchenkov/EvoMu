@@ -1712,11 +1712,32 @@ fn validate_and_apply_fitting_with_options(
                 {
                     continue;
                 }
-                let fit_opts = eve_db::ConsumeExactOptions::for_owner_exact(
+                let stack_opts = eve_db::ConsumeExactOptions::for_owner_exact(
                     Some(char_id),
                     char_id,
                     eve_db::ItemClassPolicy::StackableCommodity,
                 );
+                let whole_singleton_opts = eve_db::ConsumeExactOptions {
+                    reject_blueprint_copy: true,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(
+                        Some(char_id),
+                        char_id,
+                        eve_db::ItemClassPolicy::ExactBlueprintOrSingleton,
+                    )
+                };
+                let is_valid_fit_stack =
+                    |snap_ref: &eve_db::WorldStateSnapshot, it: &eve_db::InventoryItemRecord| -> bool {
+                        if it.singleton {
+                            it.quantity == 1
+                                && snap_ref
+                                    .validate_item_for_consumption(it, &whole_singleton_opts)
+                                    .is_ok()
+                        } else {
+                            snap_ref
+                                .validate_item_for_consumption(it, &stack_opts)
+                                .is_ok()
+                        }
+                    };
                 let preferred_ids = options
                     .preferred_items_by_type
                     .and_then(|map| map.get(&tid));
@@ -1731,7 +1752,7 @@ fn validate_and_apply_fitting_with_options(
                             && i.type_id != 60
                             && i.quantity > 0
                             && !snap.is_item_in_alsc_lock(i.item_id)
-                            && snap.validate_item_for_consumption(i, &fit_opts).is_ok()
+                            && is_valid_fit_stack(snap, i)
                     })
                     .map(|i| (i.item_id, i.quantity))
                     .collect();
@@ -1740,8 +1761,8 @@ fn validate_and_apply_fitting_with_options(
                     (!is_preferred, item_id)
                 });
                 let total_avail: i64 = matching_stacks.iter().map(|(_, q)| *q as i64).sum();
-                if total_avail < req_qty as i64 {
-                    *missing.entry(tid).or_insert(0) += (req_qty as i64) - total_avail;
+                if total_avail == 0 {
+                    *missing.entry(tid).or_insert(0) += req_qty as i64;
                     ship_failed = true;
                     continue;
                 }
@@ -1785,7 +1806,7 @@ fn validate_and_apply_fitting_with_options(
                         if !snap
                             .items
                             .get(&cid)
-                            .is_some_and(|it| snap.validate_item_for_consumption(it, &fit_opts).is_ok())
+                            .is_some_and(|it| is_valid_fit_stack(snap, it))
                         {
                             continue;
                         }
@@ -1814,7 +1835,7 @@ fn validate_and_apply_fitting_with_options(
                         }
                     } else {
                         if snap
-                            .consume_exact_item_quantity(cid, take, fit_opts.clone())
+                            .consume_exact_item_quantity(cid, take, stack_opts.clone())
                             .is_err()
                         {
                             continue;
@@ -2231,6 +2252,7 @@ mod r5_fit_apply_policy_tests {
                     location_id: station_id,
                     flag: InventoryFlag::Hangar,
                     quantity: 1,
+                    singleton: true,
                     ..Default::default()
                 },
             );
@@ -2257,10 +2279,7 @@ mod r5_fit_apply_policy_tests {
         .await
         .expect("handled")
         .expect("clean fit");
-        assert_eq!(
-            ok,
-            PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::Integer(ship_id)])
-        );
+        assert_eq!(ok, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::None]));
         ctx.db.with_snapshot(|snap| {
             assert_eq!(snap.items[&clean_mod_id].location_id, ship_id);
             assert_eq!(snap.items[&clean_mod_id].flag, InventoryFlag::HiSlot0);

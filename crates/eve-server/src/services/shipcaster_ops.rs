@@ -19,7 +19,7 @@ use eve_db::InventoryFlag;
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::cluster_macho_misc_services::{
-    LandingPadRecord, LauncherRecord, persist_misc_state, with_misc_state,
+    ClusterMiscRuntimeState, LandingPadRecord, LauncherRecord, persist_misc_state, with_misc_state,
 };
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
@@ -205,7 +205,7 @@ pub async fn deploy_fw_beacon_constructor(
         .shipcaster_sde_components()
         .map_err(|e| rpc_err("SdeError", e.to_string()))?;
 
-    let ensure_no_existing_beacon = |st: &ClusterMiscRuntimeState| -> Result<(), BridgeRpcError> {
+    let ensure_no_existing_beacon = |st: &mut ClusterMiscRuntimeState| -> Result<(), BridgeRpcError> {
         if st
             .landing_pads
             .iter()

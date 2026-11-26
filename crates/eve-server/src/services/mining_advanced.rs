@@ -1504,7 +1504,8 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
             continue;
         };
 
-        let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut rollback_meta: Option<(u32, u64, f64, u64)> = None;
+        let tx_res: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
             let efficiency = snap
                 .auto_moon_miners
                 .get(&structure_id)
@@ -1649,7 +1650,8 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                     }
                 }
                 if rem_fuel != 0 || rem_gas != 0 {
-                    return Err((primary_mat_tid, hourly_yield, efficiency, cycle_secs));
+                    rollback_meta = Some((primary_mat_tid, hourly_yield, efficiency, cycle_secs));
+                    return Err(());
                 }
 
                 for &(mat_tid, per_cycle_qty) in &hourly_materials {
@@ -1711,7 +1713,9 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
             Ok(())
         });
 
-        if let Err((primary_mat_tid, hourly_yield, efficiency, cycle_secs)) = tx_res {
+        if let (Err(()), Some((primary_mat_tid, hourly_yield, efficiency, cycle_secs))) =
+            (tx_res, rollback_meta)
+        {
             ctx.db.with_mut_snapshot(|snap| {
                 let (after_fuel, _, _, after_gas) = collect_metenox_reagent_counts(
                     &ctx.sde,

@@ -1195,6 +1195,13 @@ async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
     });
 
     // R4-01 (1): Even with stale st.fuel_blocks > bpc_qty, both 1-arg and quantity-mode jettison fail without minting clean fuel blocks.
+    let cargo_fuel_before: std::collections::BTreeSet<i64> = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.type_id == FUEL_BLOCK_TYPE && i.flag == InventoryFlag::Cargo)
+            .map(|i| i.item_id)
+            .collect()
+    });
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&st_id).unwrap().fuel_blocks = 30;
         snap.items.get_mut(&bpc_fuel_id).unwrap().quantity = 10;
@@ -1214,7 +1221,11 @@ async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&bpc_fuel_id].quantity, 10);
         assert_eq!(snap.structures[&st_id].fuel_blocks, 30);
-        assert!(!snap.items.values().any(|i| i.type_id == FUEL_BLOCK_TYPE && i.flag == InventoryFlag::Cargo));
+        assert!(!snap.items.values().any(|i| {
+            !cargo_fuel_before.contains(&i.item_id)
+                && i.type_id == FUEL_BLOCK_TYPE
+                && i.flag == InventoryFlag::Cargo
+        }));
     });
 
     // R4-01 (2): Foreign-owner-only bay stack alongside st.fuel_blocks > 0 must block unbacked fallback across readers, consumers, and jettison.
@@ -1255,6 +1266,10 @@ async fn jettison_structure_fuel_rejects_non_commodity_bay_stacks() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&foreign_fuel_id].quantity, 5);
         assert_eq!(snap.structures[&st_id].fuel_blocks, 30);
-        assert!(!snap.items.values().any(|i| i.type_id == FUEL_BLOCK_TYPE && i.flag == InventoryFlag::Cargo));
+        assert!(!snap.items.values().any(|i| {
+            !cargo_fuel_before.contains(&i.item_id)
+                && i.type_id == FUEL_BLOCK_TYPE
+                && i.flag == InventoryFlag::Cargo
+        }));
     });
 }
