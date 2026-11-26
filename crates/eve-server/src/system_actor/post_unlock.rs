@@ -17,11 +17,13 @@ use std::{
     sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock, Weak},
 };
 
+use super::commands::SystemCommand;
 use super::types::{
     ActiveModuleCycle, CharacterId, ConditionCheckpointEntry, ItemId, ModuleDeactivationHook,
     PendingCycleAction, PostUnlockActorShadows, PostUnlockHookAction, SystemActorState,
-    SystemCommand, SystemView, TargetLockCompletedHook,
+    TargetLockCompletedHook,
 };
+use super::view::SystemView;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PostCommitBallparkOp {

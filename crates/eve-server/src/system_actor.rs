@@ -47,6 +47,10 @@ pub use lifecycle::{
 mod lifecycle_sm;
 mod types;
 pub use types::*;
+mod commands;
+pub use commands::*;
+mod view;
+pub use view::*;
 
 pub(in crate::system_actor) use belts::{build_tick_broadcast, ensure_default_slim_meta};
 pub(in crate::system_actor) use eve_db::lock_rank::{
@@ -361,7 +365,7 @@ pub struct SystemRegistry {
     #[cfg(test)]
     pub(crate) lifecycle_test_hooks: lifecycle_sm::LifecycleTestHooks,
     /// Per-solar-system environment effect overrides owned by this `SystemRegistry` (`#1583` Track 2).
-    pub system_wide_effects: RankedRwLock<types::SystemWideEffectsState, RANK_LEAF>,
+    pub system_wide_effects: RankedRwLock<view::SystemWideEffectsState, RANK_LEAF>,
     pub(crate) drone_rt_state: drones::RegistryDroneRuntimeState,
     runtime_handle: RankedRwLock<Option<tokio::runtime::Handle>, RANK_LEAF>,
 }
@@ -415,7 +419,7 @@ impl SystemRegistry {
             discarded_stale_completions: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             lifecycle_test_hooks: Default::default(),
-            system_wide_effects: RankedRwLock::new(types::SystemWideEffectsState::default()),
+            system_wide_effects: RankedRwLock::new(view::SystemWideEffectsState::default()),
             drone_rt_state: drones::RegistryDroneRuntimeState::default(),
             runtime_handle: RankedRwLock::new(None),
         }
@@ -454,7 +458,7 @@ impl SystemRegistry {
     /// Executes `f` with mutable access to this registry's `SystemWideEffectsState` (`#1583` Track 2).
     pub fn with_system_wide_effects_mut<R>(
         &self,
-        f: impl FnOnce(&mut types::SystemWideEffectsState) -> R,
+        f: impl FnOnce(&mut view::SystemWideEffectsState) -> R,
     ) -> R {
         let mut guard = self.system_wide_effects.write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
