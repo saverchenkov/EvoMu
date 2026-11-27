@@ -1707,9 +1707,9 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
     "by_dungeon_id": {{
       "991001": ["valid_site_1"],
       "991002": ["valid_site_2"],
-      "991003": ["rej_structure"],
+      "991003": ["valid_structure"],
       "991004": ["rej_can"],
-      "991005": ["rej_cargo"],
+      "991005": ["valid_cargo"],
       "991006": ["rej_ore_compound"],
       "991007": ["rej_unknown"]
     }}
@@ -1745,8 +1745,8 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
       }}]
     }},
     {{
-      "entry_id": "rej_structure",
-      "base_title": "Rejected Structure Trigger",
+      "entry_id": "valid_structure",
+      "base_title": "Valid Structure Trigger",
       "sde_matches": {{"dungeon_ids": [991003], "mission_ids": []}},
       "rooms": [{{
         "room_index": 1,
@@ -1754,7 +1754,13 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
           "wave_index": 1,
           "timing": "sequential_wave",
           "wave_trigger": {{ "kind": "structure_destroyed" }},
-          "spawns": []
+          "spawns": [{{
+            "raw_class": "Structure",
+            "raw_name": "Signal Relay",
+            "destructible": true,
+            "count": {{"min": 1, "max": 1}},
+            "resolution": {{"status": "resolved_exact", "type_ids": [16757], "candidate_type_ids": [], "had_ellipsis": false}}
+          }}]
         }}]
       }}]
     }},
@@ -1773,8 +1779,8 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
       }}]
     }},
     {{
-      "entry_id": "rej_cargo",
-      "base_title": "Rejected Cargo Trigger",
+      "entry_id": "valid_cargo",
+      "base_title": "Valid Cargo Trigger",
       "sde_matches": {{"dungeon_ids": [991005], "mission_ids": []}},
       "rooms": [{{
         "room_index": 1,
@@ -1782,8 +1788,11 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
           "wave_index": 1,
           "timing": "initial_spawn",
           "spawns": [{{
-            "raw_class": "Frigate",
-            "trigger": {{ "kind": "cargo_delivered" }}
+            "raw_class": "Container",
+            "raw_name": "Drop Box",
+            "count": {{"min": 1, "max": 1}},
+            "resolution": {{"status": "resolved_exact", "type_ids": [23], "candidate_type_ids": [], "had_ellipsis": false}},
+            "trigger": {{ "kind": "cargo_delivered", "item_type_id": 34, "required_quantity": 5 }}
           }}]
         }}]
       }}]
@@ -1852,33 +1861,35 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
     );
 
     let cat = parse_and_validate_wiki_pve_json(&payload).expect("catalog with unsupported entries loads valid subset");
-    assert_eq!(cat.entries.len(), 2);
-    assert_eq!(cat.stats.entries_total, 2);
-    assert_eq!(cat.stats.rejected_unsupported_trigger_entries, 5);
-    assert_eq!(cat.stats.rejected_by_trigger_kind.len(), 5);
-    assert_eq!(cat.stats.rejected_by_trigger_kind.get("structure_destroyed"), Some(&1));
+    assert_eq!(cat.entries.len(), 4);
+    assert_eq!(cat.stats.entries_total, 4);
+    assert_eq!(cat.stats.rejected_unsupported_trigger_entries, 3);
+    assert_eq!(cat.stats.rejected_by_trigger_kind.len(), 3);
     assert_eq!(cat.stats.rejected_by_trigger_kind.get("can_hacked"), Some(&1));
-    assert_eq!(cat.stats.rejected_by_trigger_kind.get("cargo_delivered"), Some(&1));
     assert_eq!(cat.stats.rejected_by_trigger_kind.get("ore_depleted"), Some(&1));
     assert_eq!(cat.stats.rejected_by_trigger_kind.get("unknown_future_trigger"), Some(&1));
 
     assert!(cat.by_entry_id.contains_key("valid_site_1"));
     assert!(cat.by_entry_id.contains_key("valid_site_2"));
+    assert!(cat.by_entry_id.contains_key("valid_structure"));
+    assert!(cat.by_entry_id.contains_key("valid_cargo"));
     assert!(cat.by_dungeon_id.contains_key(&991_001));
     assert!(cat.by_dungeon_id.contains_key(&991_002));
+    assert!(cat.by_dungeon_id.contains_key(&991_003));
+    assert!(cat.by_dungeon_id.contains_key(&991_005));
     assert!(cat.by_site_name.contains_key("valid complex one"));
     assert!(cat.by_site_name.contains_key("valid complex two"));
+    assert!(cat.by_site_name.contains_key("valid structure trigger"));
+    assert!(cat.by_site_name.contains_key("valid cargo trigger"));
 
-    for bad_id in ["rej_structure", "rej_can", "rej_cargo", "rej_ore_compound", "rej_unknown"] {
+    for bad_id in ["rej_can", "rej_ore_compound", "rej_unknown"] {
         assert!(!cat.by_entry_id.contains_key(bad_id));
     }
-    for bad_did in [991_003_u32, 991_004, 991_005, 991_006, 991_007] {
+    for bad_did in [991_004_u32, 991_006, 991_007] {
         assert!(!cat.by_dungeon_id.contains_key(&bad_did));
     }
     for bad_name in [
-        "rejected structure trigger",
         "rejected can trigger",
-        "rejected cargo trigger",
         "rejected ore compound trigger",
         "rejected unknown future trigger",
     ] {
@@ -1887,10 +1898,18 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
 
     let empty_w = std::collections::HashMap::new();
     let empty_r = std::collections::HashMap::new();
+    for ok_kind in ["cargo_delivered", "structure_destroyed"] {
+        let tr = WikiTrigger {
+            kind: Some(ok_kind.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            translate_wiki_trigger_kind(&tr, None, [0.0; 3], &[], &empty_w, &empty_r, None, false).is_ok(),
+            "expected Track 2c-1 trigger kind '{ok_kind}' to translate"
+        );
+    }
     for bad_kind in [
-        "structure_destroyed",
         "can_hacked",
-        "cargo_delivered",
         "ore_depleted",
         "unknown_future_trigger",
     ] {
@@ -1922,7 +1941,7 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
                 timing: "initial_spawn".to_string(),
                 spawn_chance_bps: Some(0),
                 wave_trigger: Some(WikiTrigger {
-                    kind: Some("structure_destroyed".to_string()),
+                    kind: Some("can_hacked".to_string()),
                     ..Default::default()
                 }),
                 spawns: vec![WikiSpawn {
@@ -4291,4 +4310,807 @@ async fn r6_bf01_on_npc_damaged_tags_and_bf02_on_approach_object_binding() {
     assert!(r0_b2.objects[0].spawn_on_trigger && !r0_b2.objects[1].spawn_on_trigger);
     assert!(r0_b2.triggers.iter().any(|t| matches!(t.kind, DungeonTriggerKind::OnApproach { target_object_index: Some(1), anchor_pos, .. } if anchor_pos == r0_b2.objects[1].position)));
     assert!(r0_b2.triggers.iter().any(|t| matches!(t.kind, DungeonTriggerKind::OnLoot { target_object_index: Some(1), .. })));
+}
+
+#[tokio::test]
+async fn own_diff_p1_01_combat_sentries_object_counts_and_destructible_defaults() {
+    let mk_t = |type_id: u32, group_id: u32, category_id: u32, name: &str| eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: name.into(),
+        mass: 1_000.0,
+        volume: 100.0,
+        capacity: 0.0,
+        radius: 100.0,
+        base_price: 100.0,
+        published: true,
+        portion_size: 100,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types
+        .entry(16_739)
+        .or_insert_with(|| mk_t(16_739, 383, 11, "Tower Sentry Angel I"));
+    sde.types
+        .entry(10_005)
+        .or_insert_with(|| mk_t(10_005, 550, 11, "Gistii Ambusher"));
+    sde.types
+        .entry(16_757)
+        .or_insert_with(|| mk_t(16_757, 319, 11, "Angel Bunker"));
+    sde.types
+        .entry(23)
+        .or_insert_with(|| mk_t(23, 12, 2, "Cargo Container"));
+    let ctx = make_ctx(Arc::new(sde));
+    let sys_id = 30_000_142u32;
+    let did_mixed = 993_101u32;
+    let did_sentry_only = 993_102u32;
+
+    let payload = format!(
+        r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{
+    "by_dungeon_id": {{
+      "{did_mixed}": ["p1_01_mixed"],
+      "{did_sentry_only}": ["p1_01_sentry_only"]
+    }}
+  }},
+  "entries": [
+    {{
+      "entry_id": "p1_01_mixed",
+      "base_title": "Mixed Sentries And Structures",
+      "sde_matches": {{ "dungeon_ids": [{did_mixed}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "spawns": [
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Tower Sentry Angel I",
+              "destructible": true,
+              "loot": "Scrap",
+              "count": {{"min": 2, "max": 2}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}}
+            }},
+            {{
+              "raw_class": "",
+              "raw_name": "Gistii Ambusher",
+              "destructible": true,
+              "loot": "9th Tier",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [10005]}}
+            }},
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Triggered Relay Sentry",
+              "destructible": true,
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}},
+              "trigger": {{"kind": "structure_destroyed"}}
+            }},
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Relay Pylon",
+              "tag": "pylon",
+              "destructible": true,
+              "count": {{"min": 2, "max": 2}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16757]}}
+            }},
+            {{
+              "raw_class": "Destructible Object",
+              "raw_name": "Omitted Flag Core",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "unresolved", "type_ids": []}}
+            }},
+            {{
+              "raw_class": "Destructible",
+              "raw_name": "Short Destructible Core",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "unresolved", "type_ids": []}}
+            }}
+          ]
+        }}]
+      }}]
+    }},
+    {{
+      "entry_id": "p1_01_sentry_only",
+      "base_title": "Sentry Only Wave",
+      "sde_matches": {{ "dungeon_ids": [{did_sentry_only}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "wave_trigger": {{"kind": "group_destroyed", "source_wave_index": 1, "unlocks_gate": true}},
+          "spawns": [
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Tower Sentry Angel I",
+              "destructible": true,
+              "count": {{"min": 3, "max": 3}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}}
+            }}
+          ]
+        }}]
+      }}]
+    }}
+  ]
+}}"#
+    );
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_01 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+
+    let built_mixed = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_mixed),
+        "Mixed Sentries And Structures",
+        [50_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("mixed build");
+    let r_mixed = &built_mixed.rooms[0];
+    assert_eq!(r_mixed.npc_groups.len(), 1);
+    assert_eq!(
+        r_mixed.npc_groups[0].npc_specs,
+        vec![(16_739, 2), (10_005, 1)],
+        "Cat-11 combat NPC sentry and blank-class NPC must remain CombatNpc instead of inert DungeonObject"
+    );
+    // Expected objects: 1 triggered relay sentry + 2 Relay Pylon copies + 1 Omitted Flag Core + 1 Short Destructible Core = 5.
+    assert_eq!(r_mixed.objects.len(), 5, "multi-count objects and explicit triggered object must materialize");
+    let triggered_sentry = r_mixed
+        .objects
+        .iter()
+        .find(|o| o.name == "Triggered Relay Sentry")
+        .expect("explicit structure_destroyed sentry object");
+    assert!(triggered_sentry.destructible && triggered_sentry.type_id == 16_739);
+
+    let pylons: Vec<&DungeonRuntimeObject> = r_mixed
+        .objects
+        .iter()
+        .filter(|o| o.name == "Relay Pylon")
+        .collect();
+    assert_eq!(pylons.len(), 2, "sp.count=2 must materialize 2 DungeonRuntimeObjects");
+    assert!(pylons.iter().all(|p| p.type_id == 16_757 && p.destructible && !p.is_container && p.tag.as_deref() == Some("pylon")));
+    assert_ne!(pylons[0].position, pylons[1].position);
+
+    for omitted_name in ["Omitted Flag Core", "Short Destructible Core"] {
+        let obj = r_mixed
+            .objects
+            .iter()
+            .find(|o| o.name == omitted_name)
+            .expect(omitted_name);
+        assert!(
+            obj.destructible && !obj.is_container,
+            "{omitted_name} with omitted destructible must default destructible=true, is_container=false"
+        );
+    }
+
+    let built_sentry = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_sentry_only),
+        "Sentry Only Wave",
+        [60_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("sentry-only build");
+    let r_sentry = &built_sentry.rooms[0];
+    assert!(
+        !r_sentry.objects.iter().any(|o| o.type_id == 16_739),
+        "Cat-11 combat NPC sentry must NOT become an inert DungeonRuntimeObject"
+    );
+    assert_eq!(r_sentry.npc_groups.len(), 1, "sentry-only wave must NOT be dropped");
+    assert_eq!(r_sentry.npc_groups[0].npc_specs, vec![(16_739, 3)]);
+    assert!(r_sentry.triggers.iter().any(|t| matches!(t.kind, DungeonTriggerKind::OnKill { target_npc_group: Some(1), .. })));
+}
+
+#[tokio::test]
+async fn own_diff_p1_05_explicit_object_triggers_with_omitted_destructible_and_loot_plus_multicount_binding(
+) {
+    let mk_t = |type_id: u32, group_id: u32, category_id: u32, name: &str| eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: name.into(),
+        mass: 1_000.0,
+        volume: 100.0,
+        capacity: 0.0,
+        radius: 100.0,
+        base_price: 100.0,
+        published: true,
+        portion_size: 100,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types
+        .entry(16_739)
+        .or_insert_with(|| mk_t(16_739, 383, 11, "Tower Sentry Angel I"));
+    sde.types
+        .entry(16_757)
+        .or_insert_with(|| mk_t(16_757, 319, 11, "Angel Bunker"));
+    sde.types
+        .entry(23)
+        .or_insert_with(|| mk_t(23, 12, 2, "Cargo Container"));
+    let ctx = make_ctx(Arc::new(sde));
+    let sys_id = 30_000_142u32;
+    let did_explicit = 993_201u32;
+    let did_unbound_mixed = 993_202u32;
+
+    let payload = format!(
+        r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{
+    "by_dungeon_id": {{
+      "{did_explicit}": ["p1_05_explicit"],
+      "{did_unbound_mixed}": ["p1_05_unbound_mixed"]
+    }}
+  }},
+  "entries": [
+    {{
+      "entry_id": "p1_05_explicit",
+      "base_title": "Omitted Destructible Explicit Triggers",
+      "sde_matches": {{ "dungeon_ids": [{did_explicit}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "wave_trigger": {{ "kind": "structure_destroyed", "target_tag": "tag_sentry" }},
+          "spawns": [
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Bare Bunker Objective",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16757]}},
+              "trigger": {{"kind": "structure_destroyed"}}
+            }},
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Triggered Sentry Inline",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}},
+              "trigger": {{"kind": "structure_destroyed"}}
+            }},
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Tag Triggered Sentry",
+              "tag": "tag_sentry",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}}
+            }},
+            {{
+              "raw_class": "Container",
+              "raw_name": "Destructible Bare Box",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [23]}},
+              "trigger": {{"kind": "structure_destroyed"}}
+            }},
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Dropoff Structure No Loot",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "unresolved", "type_ids": []}},
+              "trigger": {{"kind": "cargo_delivered", "item_type_id": 34, "required_quantity": 5}}
+            }},
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Twin Pylon",
+              "count": {{"min": 2, "max": 2}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16757]}},
+              "trigger": {{"kind": "structure_destroyed", "unlocks_gate": true}}
+            }}
+          ]
+        }}]
+      }}]
+    }},
+    {{
+      "entry_id": "p1_05_unbound_mixed",
+      "base_title": "Unbound Wave Trigger With Combat Sentries",
+      "sde_matches": {{ "dungeon_ids": [{did_unbound_mixed}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "wave_trigger": {{"kind": "structure_destroyed"}},
+          "spawns": [
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Room Target Bunker",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16757]}}
+            }},
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Combat Guard Sentry",
+              "count": {{"min": 2, "max": 2}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}}
+            }}
+          ]
+        }}]
+      }}]
+    }}
+  ]
+}}"#
+    );
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_05 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+
+    let built = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_explicit),
+        "Omitted Destructible Explicit Triggers",
+        [55_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("build explicit triggers");
+    let r = &built.rooms[0];
+    assert!(r.npc_groups.is_empty(), "all 6 explicit-object-triggered spawns must materialize as objects");
+    assert_eq!(r.objects.len(), 7, "1 + 1 + 1 + 1 + 1 + 2 Twin Pylon copies = 7 objects");
+
+    for (name, exp_tid, exp_container, exp_destructible) in [
+        ("Bare Bunker Objective", 16_757, false, true),
+        ("Triggered Sentry Inline", 16_739, false, true),
+        ("Tag Triggered Sentry", 16_739, false, true),
+        ("Destructible Bare Box", 23, true, true),
+        ("Dropoff Structure No Loot", 23, true, false),
+    ] {
+        let obj = r
+            .objects
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap_or_else(|| panic!("missing object {name}"));
+        assert_eq!(obj.type_id, exp_tid, "{name} type_id mismatch");
+        assert_eq!(obj.is_container, exp_container, "{name} is_container mismatch");
+        assert_eq!(obj.destructible, exp_destructible, "{name} destructible mismatch");
+    }
+
+    // P2-NEW-03: Twin Pylon (count=2, indices 5 and 6) must bind CompoundOr covering BOTH copies!
+    let pylon_indices: Vec<usize> = r
+        .objects
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, o)| (o.name == "Twin Pylon").then_some(idx))
+        .collect();
+    assert_eq!(pylon_indices.len(), 2);
+    assert!(r.objects.iter().filter(|o| o.name == "Twin Pylon").all(|o| o.destructible));
+    assert!(
+        r.triggers.iter().any(|t| matches!(
+            &t.kind,
+            DungeonTriggerKind::CompoundOr { clauses }
+                if pylon_indices.iter().all(|&pi| clauses.iter().any(|c| matches!(
+                    c,
+                    DungeonTriggerKind::OnStructureDestroyed { target_object_index: Some(oi), .. } if *oi == pi
+                )))
+        )),
+        "multi-count inline structure_destroyed without tag/type_id must cover all copies via CompoundOr: {:?}",
+        r.triggers
+    );
+
+    // Unbound wave structure_destroyed upgrades non-combat Structure to destructible object
+    // while keeping Cat-11 combat Sentry in npc_groups!
+    let built_unbound = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_unbound_mixed),
+        "Unbound Wave Trigger With Combat Sentries",
+        [65_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("build unbound mixed");
+    let ru = &built_unbound.rooms[0];
+    let bunker = ru
+        .objects
+        .iter()
+        .find(|o| o.name == "Room Target Bunker")
+        .expect("Room Target Bunker must materialize");
+    assert!(bunker.destructible && bunker.type_id == 16_757);
+    assert_eq!(ru.npc_groups.len(), 1);
+    assert_eq!(ru.npc_groups[0].npc_specs, vec![(16_739, 2)]);
+}
+
+#[tokio::test]
+async fn own_diff_p1_06_multi_wave_unbound_structure_and_cargo_triggers_preserve_wave1_objects() {
+    let mk_t = |type_id: u32, group_id: u32, category_id: u32, name: &str| eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: name.into(),
+        mass: 1_000.0,
+        volume: 100.0,
+        capacity: 0.0,
+        radius: 100.0,
+        base_price: 100.0,
+        published: true,
+        portion_size: 100,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types
+        .entry(10_005)
+        .or_insert_with(|| mk_t(10_005, 550, 11, "Gistii Ambusher"));
+    sde.types
+        .entry(16_757)
+        .or_insert_with(|| mk_t(16_757, 319, 11, "Angel Bunker"));
+    sde.types
+        .entry(23)
+        .or_insert_with(|| mk_t(23, 12, 2, "Cargo Container"));
+    let ctx = make_ctx(Arc::new(sde));
+    let sys_id = 30_000_142u32;
+    let did_mw_struct = 993_301u32;
+    let did_mw_cargo = 993_302u32;
+
+    let payload = format!(
+        r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{
+    "by_dungeon_id": {{
+      "{did_mw_struct}": ["p1_06_mw_struct"],
+      "{did_mw_cargo}": ["p1_06_mw_cargo"]
+    }}
+  }},
+  "entries": [
+    {{
+      "entry_id": "p1_06_mw_struct",
+      "base_title": "Multi Wave Unbound Structure",
+      "sde_matches": {{ "dungeon_ids": [{did_mw_struct}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [
+          {{
+            "wave_index": 1,
+            "timing": "initial_spawn",
+            "spawns": [
+              {{
+                "raw_class": "Structure",
+                "raw_name": "Wave1 Bare Bunker",
+                "count": {{"min": 1, "max": 1}},
+                "resolution": {{"status": "resolved_exact", "type_ids": [16757]}}
+              }}
+            ]
+          }},
+          {{
+            "wave_index": 2,
+            "timing": "sequential_wave",
+            "wave_trigger": {{"kind": "structure_destroyed", "unlocks_gate": true}},
+            "spawns": [
+              {{
+                "raw_class": "Frigate",
+                "raw_name": "Defense Frigate",
+                "count": {{"min": 1, "max": 1}},
+                "resolution": {{"status": "resolved_exact", "type_ids": [10005]}}
+              }}
+            ]
+          }}
+        ]
+      }}]
+    }},
+    {{
+      "entry_id": "p1_06_mw_cargo",
+      "base_title": "Multi Wave Unbound Cargo",
+      "sde_matches": {{ "dungeon_ids": [{did_mw_cargo}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [
+          {{
+            "wave_index": 1,
+            "timing": "static_structures",
+            "spawns": [
+              {{
+                "raw_class": "Structure",
+                "raw_name": "Wave1 Unmarked Dropoff",
+                "count": {{"min": 1, "max": 1}},
+                "resolution": {{"status": "unresolved", "type_ids": []}}
+              }}
+            ]
+          }},
+          {{
+            "wave_index": 2,
+            "timing": "sequential_wave",
+            "wave_trigger": {{"kind": "cargo_delivered", "source_wave_index": 1, "item_type_id": 34, "required_quantity": 5, "unlocks_gate": true}},
+            "spawns": [
+              {{
+                "raw_class": "Frigate",
+                "raw_name": "Guard Frigate",
+                "count": {{"min": 1, "max": 1}},
+                "resolution": {{"status": "resolved_exact", "type_ids": [10005]}}
+              }}
+            ]
+          }}
+        ]
+      }}]
+    }}
+  ]
+}}"#
+    );
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_06 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+
+    let b_struct = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_mw_struct),
+        "Multi Wave Unbound Structure",
+        [70_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("build multi-wave struct");
+    let r_struct = &b_struct.rooms[0];
+    let w1_bunker = r_struct
+        .objects
+        .iter()
+        .find(|o| o.name == "Wave1 Bare Bunker")
+        .expect("Wave 1 bare Structure must not be skipped when Wave 2 has unbound structure_destroyed");
+    assert!(w1_bunker.destructible && w1_bunker.type_id == 16_757);
+    assert!(r_struct
+        .triggers
+        .iter()
+        .any(|t| matches!(t.kind, DungeonTriggerKind::OnStructureDestroyed { .. })));
+
+    let b_cargo = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_mw_cargo),
+        "Multi Wave Unbound Cargo",
+        [72_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("build multi-wave cargo");
+    let r_cargo = &b_cargo.rooms[0];
+    let w1_dropoff = r_cargo
+        .objects
+        .iter()
+        .find(|o| o.name == "Wave1 Unmarked Dropoff")
+        .expect("Wave 1 bare Structure must materialize as container when Wave 2 has unbound cargo_delivered");
+    assert!(w1_dropoff.is_container && w1_dropoff.type_id == 23);
+    assert!(r_cargo
+        .triggers
+        .iter()
+        .any(|t| matches!(t.kind, DungeonTriggerKind::OnCargoDelivered { .. })));
+}
+
+#[tokio::test]
+async fn own_diff_p1_07_combat_npcs_stay_combat_on_compound_cross_target_and_ship_approached() {
+    let mk_t = |type_id: u32, group_id: u32, category_id: u32, name: &str| eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: name.into(),
+        mass: 1_000.0,
+        volume: 100.0,
+        capacity: 0.0,
+        radius: 100.0,
+        base_price: 100.0,
+        published: true,
+        portion_size: 100,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types
+        .entry(16_739)
+        .or_insert_with(|| mk_t(16_739, 383, 11, "Tower Sentry Angel I"));
+    sde.types
+        .entry(10_005)
+        .or_insert_with(|| mk_t(10_005, 550, 11, "Gistii Ambusher"));
+    sde.types
+        .entry(16_757)
+        .or_insert_with(|| mk_t(16_757, 319, 11, "Angel Bunker"));
+    sde.types
+        .entry(23)
+        .or_insert_with(|| mk_t(23, 12, 2, "Cargo Container"));
+    let ctx = make_ctx(Arc::new(sde));
+    let sys_id = 30_000_142u32;
+    let did = 993_303u32;
+
+    let payload = format!(
+        r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{
+    "by_dungeon_id": {{ "{did}": ["p1_07_npc_guard"] }}
+  }},
+  "entries": [
+    {{
+      "entry_id": "p1_07_npc_guard",
+      "base_title": "Combat NPC Trigger Guards",
+      "sde_matches": {{ "dungeon_ids": [{did}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "spawns": [
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Relay Bunker",
+              "tag": "relay_bunker",
+              "destructible": true,
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16757]}}
+            }},
+            {{
+              "raw_class": "Frigate",
+              "raw_name": "Compound Trigger Boss",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [10005]}},
+              "trigger": {{
+                "kind": "compound_and",
+                "unlocks_gate": true,
+                "clauses": [
+                  {{"kind": "this_ship_destroyed"}},
+                  {{"kind": "structure_destroyed", "target_tag": "relay_bunker"}}
+                ]
+              }}
+            }},
+            {{
+              "raw_class": "Frigate",
+              "raw_name": "Cross Target Escort",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [10005]}},
+              "trigger": {{
+                "kind": "cargo_delivered",
+                "target_object_index": 0,
+                "item_type_id": 34,
+                "required_quantity": 5,
+                "action": {{"kind": "trigger_message", "message_type": 1, "message_id": 11}}
+              }}
+            }},
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Proximity Alert Sentry",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}},
+              "trigger": {{"kind": "ship_approached", "radius_m": 4000, "action": {{"kind": "trigger_message", "message_type": 1, "message_id": 12}}}}
+            }},
+            {{
+              "raw_class": "",
+              "raw_name": "Proximity Alert Blank NPC",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [10005]}},
+              "trigger": {{"kind": "ship_approached", "radius_m": 4000, "action": {{"kind": "trigger_message", "message_type": 1, "message_id": 13}}}}
+            }}
+          ]
+        }}]
+      }}]
+    }}
+  ]
+}}"#
+    );
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_07 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+
+    let built = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did),
+        "Combat NPC Trigger Guards",
+        [75_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("build p1_07");
+    let r = &built.rooms[0];
+    assert_eq!(r.objects.len(), 1, "only Relay Bunker must be a DungeonRuntimeObject");
+    assert_eq!(r.objects[0].name, "Relay Bunker");
+    assert_eq!(r.npc_groups.len(), 1);
+    assert_eq!(
+        r.npc_groups[0].npc_specs,
+        vec![(10_005, 3), (16_739, 1)],
+        "all 3 Combat Frigate/Blank spawns + Combat Sentry must remain CombatNpc in npc_groups"
+    );
+}
+
+#[tokio::test]
+async fn own_diff_p1_13_structure_destroyed_trigger_ship_tag_binds_target_tag_not_objects_zero() {
+    let mk_s = |type_id: u32, name: &str| eve_sde::InvType {
+        type_id, group_id: 319, category_id: 11, name: name.into(), mass: 1_000.0, volume: 100.0, capacity: 0.0, radius: 100.0,
+        base_price: 100.0, published: true, portion_size: 100, market_group_id: None, race_id: None, faction_id: None,
+        variation_parent_type_id: None, description_id: None, icon_id: None, graphic_id: None, sound_id: None,
+        meta_group_id: None, meta_level: None, tech_level: None, default_effect_id: None, description: String::new(),
+        effect_ids: Vec::new(), default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types.entry(16_757).or_insert_with(|| mk_s(16_757, "Angel Bunker"));
+    sde.types.entry(16_758).or_insert_with(|| mk_s(16_758, "Radio Tower"));
+    let ctx = make_ctx(Arc::new(sde));
+    let (sys_id, did) = (30_000_142u32, 993_304u32);
+    let payload = format!(r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{ "by_dungeon_id": {{ "{did}": ["p1_13_tag_bind"] }} }},
+  "entries": [{{
+    "entry_id": "p1_13_tag_bind",
+    "base_title": "Trigger Ship Tag Test",
+    "sde_matches": {{ "dungeon_ids": [{did}], "mission_ids": [] }},
+    "rooms": [{{
+      "room_index": 1, "has_acceleration_gate": true,
+      "waves": [
+        {{ "wave_index": 1, "timing": "initial_spawn", "spawns": [
+          {{ "raw_class": "Structure", "raw_name": "Front Bunker", "tag": "front_bunker", "destructible": true, "count": {{"min": 1, "max": 1}}, "resolution": {{"status": "resolved_exact", "type_ids": [16757]}} }}
+        ]}},
+        {{ "wave_index": 2, "timing": "sequential_wave",
+           "wave_trigger": {{ "kind": "structure_destroyed", "trigger_ship_tag": "radio_tower", "unlocks_gate": true }},
+           "spawns": [
+             {{ "raw_class": "Structure", "raw_name": "Radio Tower", "tag": "radio_tower", "count": {{"min": 2, "max": 2}}, "resolution": {{"status": "resolved_exact", "type_ids": [16758]}} }}
+           ]
+        }}
+      ]
+    }},
+    {{ "room_index": 2, "has_acceleration_gate": false, "waves": [] }}
+  ]
+  }}]
+}}"#);
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_13 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+    let built = build_wiki_deadspace_rooms(&ctx, sys_id, DungeonTemplateId::new(did), "Trigger Ship Tag Test", [75_000_000.0, 0.0, 0.0], false).expect("build p1_13");
+    let r = &built.rooms[0];
+    assert_eq!(r.objects.len(), 3, "Front Bunker + 2 Radio Tower copies");
+    assert!(r.objects[1].destructible && r.objects[2].destructible);
+    assert_eq!(r.objects[1].tag.as_deref(), Some("radio_tower"));
+    assert_eq!(r.objects[2].tag.as_deref(), Some("radio_tower"));
+    assert!(r.triggers.iter().any(|t| matches!(&t.kind, DungeonTriggerKind::OnStructureDestroyed { target_object_index: None, target_tag: Some(tag), .. } if tag == "radio_tower") && matches!(t.action, DungeonTriggerAction::UnlockGate)));
 }

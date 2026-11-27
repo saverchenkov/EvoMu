@@ -1429,6 +1429,16 @@ fn all_17_service_domains_survive_tx_commit_restart_and_scalar_reset() {
             },
         )]),
         next_instance_id: 42,
+        pending_escalations: vec![pve_sites::PendingDungeonEscalation {
+            char_id: 9001,
+            solar_system_id: 30_000_142,
+            source_dungeon_id: 100,
+            target_dungeon_id: Some(200),
+            chance_bps: 10_000,
+            target_title: Some("Citadel".into()),
+            position: [1.0, 2.0, 3.0],
+            instance_id: 1,
+        }],
     };
 
     let expected_dungeon_ed = DungeonEditorStore {

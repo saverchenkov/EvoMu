@@ -648,19 +648,8 @@ async fn activate_single_fighter_ability(
         }
 
         let victim_char_opt = ctx.db.with_snapshot(|snap| {
-            if snap.characters.contains_key(&tid) {
-                Some(tid)
-            } else if let Some(item) = snap.items.get(&tid) {
-                if snap.characters.contains_key(&item.owner_id) {
-                    Some(item.owner_id)
-                } else {
-                    None
-                }
-            } else if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == tid) {
-                Some(ch.character_id)
-            } else {
-                None
-            }
+            super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), tid, true, false)
+                .map(|(vcid, _)| vcid)
         });
 
         if let Some(victim_char_id) = victim_char_opt {
@@ -1527,16 +1516,8 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                         continue;
                     }
                     let bomb_vic = ctx.db.with_snapshot(|snap| {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == b.id)
-                            .map(|c| c.character_id)
-                            .or_else(|| {
-                                snap.items
-                                    .get(&b.id)
-                                    .map(|i| i.owner_id)
-                                    .filter(|oid| snap.characters.contains_key(oid))
-                            })
+                        super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), b.id, false, false)
+                            .map(|(vcid, _)| vcid)
                     });
                     if let Some(vcid) = bomb_vic {
                         if vcid != char_id && sys_sec > 0.0 && b.type_id == 670 && safety == SafetyLevel::Yellow {

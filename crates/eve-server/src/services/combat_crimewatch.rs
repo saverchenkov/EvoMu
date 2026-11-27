@@ -2097,6 +2097,58 @@ pub(crate) fn validate_kill_right_live_preconditions(
     Ok(())
 }
 
+/// Resolves `(victim_char_id, resolved_ball_id)` for CrimeWatch/PvP checks, excluding Upwell
+/// structures and owned destructible dungeon objects (`OWN-DIFF-P1-02`) even when
+/// `is_container: true` registers them in `snap.items` under `owner_char_id`.
+pub(crate) fn resolve_pvp_target_info_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id_opt: Option<eve_sde::SolarSystemId>,
+    ball_id: i64,
+    allow_direct_char: bool,
+    include_item_corp_ceo: bool,
+) -> Option<(i64, i64)> {
+    if snap.structures.contains_key(&ball_id) {
+        return None;
+    }
+    let is_dungeon_obj = match sys_id_opt {
+        Some(sys_id) => crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_in_snap(
+            snap, sys_id, ball_id,
+        ),
+        None => crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(
+            snap, ball_id,
+        ),
+    };
+    if is_dungeon_obj {
+        return None;
+    }
+    if allow_direct_char {
+        if let Some(ch) = snap.characters.get(&ball_id) {
+            return Some((ch.character_id, ch.active_ship_id));
+        }
+    }
+    if let Some(ch) = snap
+        .characters
+        .values()
+        .find(|c| c.active_ship_id == ball_id)
+    {
+        return Some((ch.character_id, ch.active_ship_id));
+    }
+    let it = snap.items.get(&ball_id)?;
+    snap.characters
+        .get(&it.owner_id)
+        .map(|c| (c.character_id, ball_id))
+        .or_else(|| {
+            include_item_corp_ceo
+                .then(|| {
+                    snap.corporations
+                        .get(&it.owner_id)
+                        .and_then(|corp| snap.characters.get(&corp.ceo_id))
+                        .map(|c| (c.character_id, ball_id))
+                })
+                .flatten()
+        })
+}
+
 /// Emits limited engagement timeout start/stop and end notifications to `char_id`.
 pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, other_char_id: i64) {
     let timeout_ft = ctx.now_machonet_wall_filetime().saturating_add_secs(300);

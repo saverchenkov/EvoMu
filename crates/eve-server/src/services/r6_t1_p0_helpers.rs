@@ -171,7 +171,18 @@ pub(crate) async fn execute_lancer_beam_attack(
             b.id,
             b.type_id == 670,
         )?;
-        if sys_sec > 0.0 {
+        let is_non_self_pvp = b.type_id == 670
+            || ctx.db.with_snapshot(|snap| {
+                crate::services::combat_crimewatch::resolve_pvp_target_info_in_snap(
+                    snap,
+                    Some(sys_id),
+                    b.id,
+                    true,
+                    false,
+                )
+                .is_some_and(|(vcid, _)| vcid != char_id)
+            });
+        if sys_sec > 0.0 && is_non_self_pvp {
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
             let st = cw.get_or_create(char_id);
             if b.type_id == 670 || sys_sec >= 0.45 {

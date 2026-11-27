@@ -264,6 +264,21 @@ pub async fn handle_ship_or_npc_destruction(
     let mut generated_kill_id: i64 = 0;
     let mut generated_wreck_id: i64 = 0;
     let generated_km_hash;
+    if crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object(
+        ctx,
+        sys_id,
+        target_ball_id,
+    ) {
+        let _ = crate::combat::death_pipeline::on_ball_destroyed(
+            ctx,
+            sys_id,
+            target_ball_id,
+            (attacker_char_id > 0).then_some(attacker_char_id),
+            target_ball.position,
+        )
+        .await;
+        return ShipOrNpcDestructionResult::default();
+    }
 
     ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(sys_id, sys_handle).await;
     let is_active_fighter = sys_handle

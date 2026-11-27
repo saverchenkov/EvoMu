@@ -1843,7 +1843,7 @@ pub fn on_ball_destroyed_sync(
     }
 
     // 3. Capsuleer or unpiloted corporation ship (`category_id == 6` in `snap.items`)
-    let (ship_victim_and_killer_opt, mto_entity_opt, mto_killer_opt) = ctx.db.with_snapshot(|snap| {
+    let (ship_victim_and_killer_opt, mto_entity_opt, mto_killer_opt, resolved_killer_opt) = ctx.db.with_snapshot(|snap| {
         let resolved_killer = killer_id_opt.map(|kid| {
             snap.characters
                 .get(&kid)
@@ -1859,15 +1859,15 @@ pub fn on_ball_destroyed_sync(
         if snap.sov_runtime.mto_site_balls.contains_key(&ball_id) {
             let mto_type_id = snap.items.get(&ball_id).map(|it| it.type_id).unwrap_or(0);
             let mto_killer = resolved_killer.filter(|k| snap.characters.contains_key(k));
-            return (None, Some(mto_type_id), mto_killer);
+            return (None, Some(mto_type_id), mto_killer, resolved_killer);
         }
         if let Some(vic) = resolve_capsuleer_ship_char_in_snap(snap, &ctx.sde, ball_id) {
-            return (Some((vic, resolved_killer)), None, None);
+            return (Some((vic, resolved_killer)), None, None, resolved_killer);
         }
         if resolve_corp_ship_owner_in_snap(snap, &ctx.sde, ball_id).is_some() {
-            return (Some((0, resolved_killer)), None, None);
+            return (Some((0, resolved_killer)), None, None, resolved_killer);
         }
-        (None, None, None)
+        (None, None, None, resolved_killer)
     });
 
     if let Some((victim_char_id, resolved_killer_opt)) = ship_victim_and_killer_opt {
@@ -1932,6 +1932,13 @@ pub fn on_ball_destroyed_sync(
     }
 
     // 5. Non-ship space object (fighter, wreck, jetcan, deployable, POCO, or NPC structure)
+    if crate::services::pve_dungeon_runtime_hooks::on_dungeon_structure_destroyed_sync(
+        ctx, &sys_handle, sys_id, ball_id, resolved_killer_opt.unwrap_or(0),
+    ) || crate::services::pve_dungeon_runtime_hooks::is_dungeon_object_ball(ctx, sys_id, ball_id)
+      || crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object(ctx, sys_id, ball_id)
+    {
+        return Ok(None);
+    }
     let destroyed_npc_item_meta: Option<(u32, i64)> = if killer_id_opt.is_some() {
         ctx.db.with_snapshot(|snap| {
             snap.items.get(&ball_id).and_then(|it| {
@@ -1980,7 +1987,9 @@ pub async fn on_ball_destroyed(
         .flatten()
         .map(|(_, b)| b.position)
         .unwrap_or(fallback_pos);
-    on_ball_destroyed_sync(ctx, sys_id, ball_id, killer_id_opt, pos)
+    let res = on_ball_destroyed_sync(ctx, sys_id, ball_id, killer_id_opt, pos);
+    let _ = crate::services::pve_dungeon_runtime::flush_pending_dungeon_escalations(ctx).await;
+    res
 }
 
 /// Synchronous cleanup of a destroyed non-ship ball (fighter, wreck, jetcan, deployable, POCO).
@@ -2108,6 +2117,66 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
     });
     if is_destroyable_space_item {
         remove_destroyed_space_item_and_ball_sync(ctx, &sys_handle, ball_id);
+    }
+}
+
+/// Recursively removes `root_ball_id` and any nested child items in `snap.items`, fails any
+/// `InProgress` courier contracts referencing removed items, and clears space-object metadata
+/// (`P2-3` shared between `combat_missiles_aoe` and `pve_dungeon_runtime_hooks`).
+pub(crate) fn cleanup_destroyed_item_tree_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    root_ball_id: i64,
+    require_root_item: bool,
+    now_unix: u64,
+) {
+    snap.combat_crimewatch_state
+        .record_destroyed_item_id(root_ball_id);
+    snap.sp6_lifecycle.space_object_meta.remove(&root_ball_id);
+    snap.sp6_lifecycle.ship_combat_hp.remove(&root_ball_id);
+
+    let has_root = snap.items.contains_key(&root_ball_id);
+    if require_root_item && !has_root {
+        return;
+    }
+
+    let mut to_visit = vec![root_ball_id];
+    let mut to_remove: Vec<i64> = if has_root { vec![root_ball_id] } else { Vec::new() };
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::from([root_ball_id]);
+    while let Some(parent_id) = to_visit.pop() {
+        let children: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == parent_id && i.item_id != parent_id)
+            .map(|i| i.item_id)
+            .collect();
+        for cid in children {
+            if seen.insert(cid) {
+                to_remove.push(cid);
+                to_visit.push(cid);
+            }
+        }
+    }
+    if to_remove.is_empty() {
+        return;
+    }
+    let removed_set: std::collections::HashSet<i64> = to_remove.iter().copied().collect();
+    let courier_cids: Vec<i64> = snap
+        .contracts
+        .values()
+        .filter(|c| {
+            c.contract_type == "Courier"
+                && c.status == "InProgress"
+                && c.item_ids.iter().any(|iid| removed_set.contains(iid))
+        })
+        .map(|c| c.contract_id)
+        .collect();
+    for cid in courier_cids {
+        snap.fail_courier_contract(cid, now_unix);
+    }
+    for rid in to_remove {
+        snap.remove_system_cleanup_item(rid);
+        snap.sp6_lifecycle.space_object_meta.remove(&rid);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&rid);
     }
 }
 

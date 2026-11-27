@@ -20,7 +20,10 @@
 mod pve_dungeon_content_build;
 
 use crate::router::ServerContext;
-use eve_db::service_domains::{DungeonObjective, DungeonRuntimeRoom, DungeonTemplateId};
+use eve_db::service_domains::{
+    DungeonObjective, DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTemplateId,
+    DungeonTriggerKind,
+};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -371,6 +374,8 @@ pub struct WikiTrigger {
     pub target_room_index: Option<usize>,
     pub target_object_index: Option<usize>,
     pub item_type_id: Option<u32>,
+    pub required_quantity: Option<u32>,
+    pub target_type_id: Option<u32>,
     pub radius_m: Option<f64>,
     #[serde(alias = "hull_or_shield_below_pct", alias = "below_pct")]
     pub hull_below_pct: Option<u8>,
@@ -875,6 +880,459 @@ pub(super) fn select_entry_index_for_dungeon<'a>(
         }
     }
     None
+}
+
+pub(super) struct ObjectSpawnFlags {
+    pub default_type_id: u32,
+    pub default_name: &'static str,
+    pub is_container: bool,
+    pub destructible: bool,
+}
+
+pub(super) fn trimmed_opt_str(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn has_non_empty_loot_val(loot: &Option<serde_json::Value>) -> bool {
+    match loot {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+        Some(serde_json::Value::Array(a)) => !a.is_empty(),
+        Some(serde_json::Value::Object(o)) => !o.is_empty(),
+        Some(_) => true,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ObjectTriggerHint {
+    pub has_explicit_object_trigger: bool,
+    pub requires_destructible: bool,
+    pub requires_container: bool,
+}
+
+impl ObjectTriggerHint {
+    pub(super) fn merge(&mut self, other: Self) {
+        self.has_explicit_object_trigger |= other.has_explicit_object_trigger;
+        self.requires_destructible |= other.requires_destructible;
+        self.requires_container |= other.requires_container;
+    }
+}
+
+pub(super) fn classify_dungeon_object_spawn(
+    sp: &WikiSpawn,
+    hint: ObjectTriggerHint,
+) -> Option<ObjectSpawnFlags> {
+    let cls = sp.raw_class.trim().to_ascii_lowercase();
+    let is_explicit_container = matches!(
+        cls.as_str(),
+        "container" | "wreck" | "cache" | "hackable" | "hacking" | "hangar array"
+    );
+    let is_explicit_object = is_explicit_container
+        || matches!(
+            cls.as_str(),
+            "destructible object" | "large collidable object" | "destructible"
+        );
+    let has_loot = has_non_empty_loot_val(&sp.loot);
+    let is_structure_cls = matches!(
+        cls.as_str(),
+        "" | "structure"
+            | "prop"
+            | "object"
+            | "container"
+            | "wreck"
+            | "depot"
+            | "silo"
+            | "warehouse"
+            | "bunker"
+            | "tower"
+            | "sentry"
+            | "relay"
+            | "starbase"
+            | "destructible"
+    );
+    let explicit_trigger_object = hint.has_explicit_object_trigger
+        && (is_explicit_object
+            || is_structure_cls
+            || hint.requires_destructible
+            || hint.requires_container);
+    if is_explicit_object
+        || explicit_trigger_object
+        || (is_structure_cls && (has_loot || sp.destructible == Some(true)))
+    {
+        let is_container = is_explicit_container || has_loot || hint.requires_container;
+        let default_name = if is_container {
+            "Cargo Container"
+        } else {
+            "Destructible Structure"
+        };
+        let default_destructible = hint.requires_destructible
+            || matches!(cls.as_str(), "destructible object" | "destructible");
+        return Some(ObjectSpawnFlags {
+            default_type_id: if is_container { 23 } else { 16_757 },
+            default_name,
+            is_container,
+            destructible: sp.destructible.unwrap_or(default_destructible),
+        });
+    }
+    None
+}
+
+pub(super) fn is_non_empty_object_or_structure_class(raw_class: &str) -> bool {
+    matches!(
+        raw_class.trim().to_ascii_lowercase().as_str(),
+        "container"
+            | "wreck"
+            | "cache"
+            | "hackable"
+            | "hacking"
+            | "hangar array"
+            | "destructible object"
+            | "large collidable object"
+            | "destructible"
+            | "structure"
+            | "prop"
+            | "object"
+            | "depot"
+            | "silo"
+            | "warehouse"
+            | "bunker"
+            | "tower"
+            | "sentry"
+            | "relay"
+            | "starbase"
+    )
+}
+
+fn leaf_object_trigger_hint(kind_raw: Option<&str>) -> ObjectTriggerHint {
+    let kind_lc = kind_raw
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match kind_lc.as_str() {
+        "structure_destroyed"
+        | "on_structure_destroyed"
+        | "onstructuredestroyed"
+        | "destroy_structure"
+        | "object_destroyed" => ObjectTriggerHint {
+            has_explicit_object_trigger: true,
+            requires_destructible: true,
+            requires_container: false,
+        },
+        "loot_taken"
+        | "on_loot"
+        | "onloot"
+        | "cargo_delivered"
+        | "on_cargo_delivered"
+        | "oncargodelivered"
+        | "deliver_cargo" => ObjectTriggerHint {
+            has_explicit_object_trigger: true,
+            requires_destructible: false,
+            requires_container: true,
+        },
+        "ship_approached" | "approach" | "on_approach" | "onapproach" => ObjectTriggerHint {
+            has_explicit_object_trigger: true,
+            requires_destructible: false,
+            requires_container: false,
+        },
+        _ => ObjectTriggerHint::default(),
+    }
+}
+
+fn trigger_has_combat_npc_kind(tr: &WikiTrigger) -> bool {
+    let kind_lc = tr
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        kind_lc.as_str(),
+        "this_ship_destroyed"
+            | "thisshipdestroyed"
+            | "ship_destroyed"
+            | "npc_killed"
+            | "on_kill"
+            | "onkill"
+            | "group_destroyed"
+            | "last_in_group_destroyed"
+            | "on_kill_count"
+            | "kill_count"
+            | "killcount"
+            | "on_kill_tagged"
+            | "kill_tagged"
+            | "killtagged"
+            | "npc_damaged"
+            | "on_npc_damaged"
+            | "onnpcdamaged"
+            | "npc_attacked"
+            | "on_attack"
+    ) || tr.clauses.iter().any(trigger_has_combat_npc_kind)
+}
+
+pub(super) fn inline_spawn_object_trigger_hint(
+    tr: &WikiTrigger,
+    spawn_tag_lc: Option<&str>,
+    spawn_type_ids: &[u32],
+    has_valid_combat_npc_type: bool,
+) -> ObjectTriggerHint {
+    if has_valid_combat_npc_type && trigger_has_combat_npc_kind(tr) {
+        return ObjectTriggerHint::default();
+    }
+    trigger_target_object_hint(tr, spawn_tag_lc, spawn_type_ids, true)
+}
+
+pub(super) fn trigger_target_object_hint(
+    tr: &WikiTrigger,
+    spawn_tag_lc: Option<&str>,
+    spawn_type_ids: &[u32],
+    include_unbound: bool,
+) -> ObjectTriggerHint {
+    let leaf_hint = leaf_object_trigger_hint(tr.kind.as_deref());
+    let mut out = ObjectTriggerHint::default();
+    if leaf_hint.has_explicit_object_trigger {
+        let tag_matches = spawn_tag_lc.is_some_and(|want| {
+            [tr.target_tag.as_deref(), tr.trigger_ship_tag.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|t| !t.trim().is_empty() && t.trim().eq_ignore_ascii_case(want))
+        });
+        let tid_matches = tr
+            .target_type_id
+            .filter(|&tid| tid > 0)
+            .is_some_and(|tid| spawn_type_ids.contains(&tid));
+        let is_unbound = trimmed_opt_str(tr.target_tag.as_deref()).is_none()
+            && trimmed_opt_str(tr.trigger_ship_tag.as_deref()).is_none()
+            && tr.target_type_id.filter(|&tid| tid > 0).is_none()
+            && tr.target_object_index.is_none();
+        if tag_matches || tid_matches || (include_unbound && is_unbound) {
+            out.merge(leaf_hint);
+        }
+    }
+    for c in &tr.clauses {
+        out.merge(trigger_target_object_hint(
+            c,
+            spawn_tag_lc,
+            spawn_type_ids,
+            include_unbound,
+        ));
+    }
+    out
+}
+
+pub(super) fn bind_spawn_object_indices_if_omitted(
+    tr: &WikiTrigger,
+    kind: &mut DungeonTriggerKind,
+    obj_indices: &[usize],
+    objects: &[DungeonRuntimeObject],
+    depth: usize,
+) {
+    let Some(&first_oi) = obj_indices.first() else {
+        return;
+    };
+    if obj_indices.len() == 1 {
+        bind_spawn_object_index_if_omitted(tr, kind, first_oi, objects[first_oi].position);
+        return;
+    }
+    match kind {
+        DungeonTriggerKind::CompoundAnd { clauses }
+        | DungeonTriggerKind::CompoundOr { clauses } => {
+            for (c_tr, c_kind) in tr.clauses.iter().zip(clauses.iter_mut()) {
+                bind_spawn_object_indices_if_omitted(c_tr, c_kind, obj_indices, objects, depth + 1);
+            }
+        }
+        DungeonTriggerKind::OnLoot { .. }
+        | DungeonTriggerKind::OnCargoDelivered { .. }
+        | DungeonTriggerKind::OnApproach { .. }
+            if tr.target_object_index.is_none() =>
+        {
+            if depth < pve_dungeon_content_build::MAX_TRIGGER_COMPOUND_DEPTH {
+                let clauses = obj_indices
+                    .iter()
+                    .map(|&oi| {
+                        let mut c = kind.clone();
+                        bind_spawn_object_index_if_omitted(tr, &mut c, oi, objects[oi].position);
+                        c
+                    })
+                    .collect();
+                *kind = DungeonTriggerKind::CompoundOr { clauses };
+            } else {
+                bind_spawn_object_index_if_omitted(tr, kind, first_oi, objects[first_oi].position);
+            }
+        }
+        DungeonTriggerKind::OnStructureDestroyed {
+            target_tag,
+            target_type_id,
+            ..
+        } if tr.target_object_index.is_none()
+            && target_tag.is_none()
+            && target_type_id.is_none() =>
+        {
+            if depth < pve_dungeon_content_build::MAX_TRIGGER_COMPOUND_DEPTH {
+                let clauses = obj_indices
+                    .iter()
+                    .map(|&oi| {
+                        let mut c = kind.clone();
+                        bind_spawn_object_index_if_omitted(tr, &mut c, oi, objects[oi].position);
+                        c
+                    })
+                    .collect();
+                *kind = DungeonTriggerKind::CompoundOr { clauses };
+            } else {
+                bind_spawn_object_index_if_omitted(tr, kind, first_oi, objects[first_oi].position);
+            }
+        }
+        _ => bind_spawn_object_index_if_omitted(tr, kind, first_oi, objects[first_oi].position),
+    }
+}
+
+pub(super) fn bind_spawn_object_index_if_omitted(
+    tr: &WikiTrigger,
+    kind: &mut DungeonTriggerKind,
+    obj_idx: usize,
+    obj_pos: [f64; 3],
+) {
+    match kind {
+        DungeonTriggerKind::OnLoot {
+            target_object_index,
+            ..
+        }
+        | DungeonTriggerKind::OnCargoDelivered {
+            target_object_index,
+            ..
+        } if tr.target_object_index.is_none() => {
+            *target_object_index = Some(obj_idx);
+        }
+        DungeonTriggerKind::OnStructureDestroyed {
+            target_object_index,
+            target_tag,
+            target_type_id,
+            ..
+        } if tr.target_object_index.is_none()
+            && target_tag.is_none()
+            && target_type_id.is_none() =>
+        {
+            *target_object_index = Some(obj_idx);
+        }
+        DungeonTriggerKind::OnApproach {
+            target_object_index,
+            anchor_pos,
+            ..
+        } if tr.target_object_index.is_none() => {
+            *target_object_index = Some(obj_idx);
+            *anchor_pos = obj_pos;
+        }
+        DungeonTriggerKind::CompoundAnd { clauses }
+        | DungeonTriggerKind::CompoundOr { clauses } => {
+            for (c_tr, c_kind) in tr.clauses.iter().zip(clauses.iter_mut()) {
+                bind_spawn_object_index_if_omitted(c_tr, c_kind, obj_idx, obj_pos);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn has_omitted_object_trigger(tr: &WikiTrigger) -> bool {
+    let kind_lc = tr
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let has_tag = trimmed_opt_str(tr.target_tag.as_deref()).is_some()
+        || trimmed_opt_str(tr.trigger_ship_tag.as_deref()).is_some();
+    let has_tid = tr.target_type_id.is_some_and(|id| id > 0);
+    (tr.target_object_index.is_none()
+        && (matches!(
+            kind_lc.as_str(),
+            "ship_approached"
+                | "approach"
+                | "on_approach"
+                | "onapproach"
+                | "loot_taken"
+                | "on_loot"
+                | "onloot"
+                | "cargo_delivered"
+                | "on_cargo_delivered"
+                | "oncargodelivered"
+                | "deliver_cargo"
+        ) || (!has_tag
+            && !has_tid
+            && matches!(
+                kind_lc.as_str(),
+                "structure_destroyed"
+                    | "on_structure_destroyed"
+                    | "onstructuredestroyed"
+                    | "destroy_structure"
+                    | "object_destroyed"
+            ))))
+        || tr.clauses.iter().any(has_omitted_object_trigger)
+}
+
+fn rebind_triggered_obj_idx(
+    target_object_index: &mut Option<usize>,
+    objects: &[DungeonRuntimeObject],
+    pred: impl Fn(&DungeonRuntimeObject) -> bool,
+) {
+    if target_object_index.is_some_and(|oi| objects.get(oi).is_some_and(|o| o.spawn_on_trigger)) {
+        if let Some(oi) = objects.iter().position(|o| !o.spawn_on_trigger && pred(o)) {
+            *target_object_index = Some(oi);
+        }
+    }
+}
+
+pub(super) fn rebind_auto_object_targets(
+    tr: &WikiTrigger,
+    kind: &mut DungeonTriggerKind,
+    objects: &[DungeonRuntimeObject],
+    room_pos: [f64; 3],
+) {
+    match kind {
+        DungeonTriggerKind::OnApproach {
+            target_object_index,
+            anchor_pos,
+            ..
+        } if tr.target_object_index.is_none() => {
+            if target_object_index
+                .is_some_and(|oi| objects.get(oi).is_some_and(|o| o.spawn_on_trigger))
+            {
+                *target_object_index = objects.iter().position(|o| !o.spawn_on_trigger);
+                *anchor_pos = target_object_index
+                    .and_then(|oi| objects.get(oi))
+                    .map(|o| o.position)
+                    .unwrap_or(room_pos);
+            }
+        }
+        DungeonTriggerKind::OnLoot {
+            target_object_index,
+            ..
+        }
+        | DungeonTriggerKind::OnCargoDelivered {
+            target_object_index,
+            ..
+        } if tr.target_object_index.is_none() => {
+            rebind_triggered_obj_idx(target_object_index, objects, |o| o.is_container);
+        }
+        DungeonTriggerKind::OnStructureDestroyed {
+            target_object_index,
+            target_tag,
+            target_type_id,
+            ..
+        } if tr.target_object_index.is_none()
+            && target_tag.is_none()
+            && target_type_id.is_none() =>
+        {
+            rebind_triggered_obj_idx(target_object_index, objects, |o| o.destructible);
+        }
+        DungeonTriggerKind::CompoundAnd { clauses }
+        | DungeonTriggerKind::CompoundOr { clauses } => {
+            for (c_tr, c_kind) in tr.clauses.iter().zip(clauses.iter_mut()) {
+                rebind_auto_object_targets(c_tr, c_kind, objects, room_pos);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

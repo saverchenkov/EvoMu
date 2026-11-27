@@ -459,9 +459,8 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                     }
                     for b in balls {
                         if b.id == cycle.ship_id
-                            || !is_combatant_ship_or_entity_ball(
-                                Some(&ctx.sde),
-                                Some(&ctx.db),
+                            || !crate::services::combat_crimewatch::combat_missiles_aoe::is_combatant_ship_or_entity_ball(
+                                ctx,
                                 b.id,
                                 b.type_id,
                             )
@@ -543,9 +542,8 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                     for b in balls {
                         if b.id == cycle.ship_id
                             || already_hit_balls.contains(&b.id)
-                            || !is_combatant_ship_or_entity_ball(
-                                Some(&ctx.sde),
-                                Some(&ctx.db),
+                            || !crate::services::combat_crimewatch::combat_missiles_aoe::is_combatant_ship_or_entity_ball(
+                                ctx,
                                 b.id,
                                 b.type_id,
                             )

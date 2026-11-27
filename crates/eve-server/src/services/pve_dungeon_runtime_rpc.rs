@@ -500,6 +500,10 @@ fn parse_rooms_and_objectives_from_pyrep(
                             .dict_get("destructible")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false),
+                        tag: o_rep
+                            .dict_get("tag")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
                         ..Default::default()
                     });
                 }
@@ -1486,7 +1490,7 @@ pub async fn check_dungeon_triggers(
 
 const MAX_TRIGGER_COMPOUND_DEPTH: usize = 4;
 
-fn parse_dungeon_trigger_kind(
+pub(crate) fn parse_dungeon_trigger_kind(
     t_rep: &PyRep,
     objects: &[DungeonRuntimeObject],
     room_pos: [f64; 3],
@@ -1513,6 +1517,18 @@ fn parse_dungeon_trigger_kind(
             container_ball_id: None,
             target_object_index: t_rep.dict_get("targetObjectIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()),
             item_type_id: t_rep.dict_get("itemTypeID").or_else(|| t_rep.dict_get("itemTypeId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()),
+        },
+        "cargo_delivered" | "oncargodelivered" | "on_cargo_delivered" | "deliver_cargo" => DungeonTriggerKind::OnCargoDelivered {
+            container_ball_id: None,
+            target_object_index: t_rep.dict_get("targetObjectIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()),
+            item_type_id: t_rep.dict_get("itemTypeID").or_else(|| t_rep.dict_get("itemTypeId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).filter(|&id| id > 0),
+            required_quantity: t_rep.dict_get("requiredQuantity").and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(1).max(1),
+        },
+        "structure_destroyed" | "onstructuredestroyed" | "on_structure_destroyed" | "destroy_structure" | "object_destroyed" => DungeonTriggerKind::OnStructureDestroyed {
+            target_ball_id: None,
+            target_object_index: t_rep.dict_get("targetObjectIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()),
+            target_tag: t_rep.dict_get("targetTag").or_else(|| t_rep.dict_get("tag")).and_then(|v| v.as_str()).map(str::to_string),
+            target_type_id: t_rep.dict_get("targetTypeID").or_else(|| t_rep.dict_get("targetTypeId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).filter(|&id| id > 0),
         },
         "kill_tagged" | "onkilltagged" | "killtagged" => DungeonTriggerKind::OnKillTagged {
             target_tag: t_rep.dict_get("targetTag").or_else(|| t_rep.dict_get("tag")).and_then(|v| v.as_str()).unwrap_or("").to_string(),

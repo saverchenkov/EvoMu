@@ -233,10 +233,20 @@ fn validate_tractor_ownership_and_range_readonly(
         ));
     }
     let now_unix = ctx.now_unix();
-    let wreck_owner = ctx
-        .db
-        .with_snapshot(|snap| snap.items.get(&wreck_id).map(|i| i.owner_id))
-        .unwrap_or(char_id);
+    let (wreck_owner, is_dungeon_obj) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id),
+            crate::services::pve_dungeon_runtime_hooks::is_any_live_dungeon_object_any_sys_in_snap(snap, wreck_id),
+        )
+    });
+    if is_dungeon_obj {
+        let msg = "Cannot tractor a dungeon structure or container".to_string();
+        return Err(BridgeRpcError::with_client_error(
+            "TractorBeamDungeonObjectRestricted",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        ));
+    }
     let is_abandoned = with_combat_runtime(ctx, |rt| {
         rt.container_lifetimes
             .get(&wreck_id)

@@ -186,16 +186,10 @@ pub(crate) async fn try_apply_drone_ecm_jam(
 /// Resolves the capsuleer pilot of `target_id` (if `target_id` is a player ship or capsule).
 pub(crate) fn resolve_victim_character_for_ball(ctx: &ServerContext, target_id: i64) -> Option<i64> {
     ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .values()
-            .find(|c| c.active_ship_id == target_id)
-            .map(|c| c.character_id)
-            .or_else(|| {
-                snap.items
-                    .get(&target_id)
-                    .map(|i| i.owner_id)
-                    .filter(|oid| snap.characters.contains_key(oid))
-            })
+        crate::services::combat_crimewatch::resolve_pvp_target_info_in_snap(
+            snap, None, target_id, false, false,
+        )
+        .map(|(vcid, _)| vcid)
     })
 }
 

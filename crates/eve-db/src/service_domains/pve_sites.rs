@@ -597,6 +597,26 @@ pub enum DungeonTriggerKind {
     CompoundOr {
         clauses: Vec<DungeonTriggerKind>,
     },
+    OnCargoDelivered {
+        #[serde(default)]
+        container_ball_id: Option<i64>,
+        #[serde(default)]
+        target_object_index: Option<usize>,
+        #[serde(default)]
+        item_type_id: Option<u32>,
+        #[serde(default)]
+        required_quantity: u32,
+    },
+    OnStructureDestroyed {
+        #[serde(default)]
+        target_ball_id: Option<i64>,
+        #[serde(default)]
+        target_object_index: Option<usize>,
+        #[serde(default)]
+        target_tag: Option<String>,
+        #[serde(default)]
+        target_type_id: Option<u32>,
+    },
 }
 
 impl Default for DungeonTriggerKind {
@@ -808,6 +828,8 @@ pub struct DungeonRuntimeObject {
     pub destructible: bool,
     #[serde(default)]
     pub destroyed: bool,
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 /// Per-NPC spawn metadata persisted by `npc_ball_id` so live kills and restart
@@ -933,6 +955,8 @@ pub struct DungeonRuntimeRoom {
     pub gate_explicitly_locked: bool,
     #[serde(default)]
     pub armed_timers: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub cargo_delivered_net: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1297,6 +1321,19 @@ impl HomefrontRuntimeRecord {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PendingDungeonEscalation {
+    pub char_id: i64,
+    pub solar_system_id: SolarSystemId,
+    pub source_dungeon_id: u32,
+    pub target_dungeon_id: Option<u32>,
+    pub chance_bps: u16,
+    pub target_title: Option<String>,
+    pub position: [f64; 3],
+    pub instance_id: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DungeonRuntimeStore {
@@ -1306,6 +1343,8 @@ pub struct DungeonRuntimeStore {
     pub homefront_runtimes: BTreeMap<i64, HomefrontRuntimeRecord>,
     #[serde(default = "default_next_dungeon_instance_id")]
     pub next_instance_id: i64,
+    #[serde(default)]
+    pub pending_escalations: Vec<PendingDungeonEscalation>,
 }
 
 impl Default for DungeonRuntimeStore {
@@ -1314,6 +1353,7 @@ impl Default for DungeonRuntimeStore {
             instances: BTreeMap::new(),
             homefront_runtimes: BTreeMap::new(),
             next_instance_id: default_next_dungeon_instance_id(),
+            pending_escalations: Vec::new(),
         }
     }
 }

@@ -1520,6 +1520,27 @@ pub(crate) fn is_war_interference_assistance(
 
 /// Pure read-only Crimewatch safety-level precheck (`SafetyLevel::Green` / `SafetyLevel::Yellow`)
 /// before consuming superweapon isotopes, draining capacitor, or mutating any Crimewatch timer.
+fn resolve_pvp_target_flags(
+    ctx: &ServerContext,
+    sys_id: u32,
+    target_id: i64,
+) -> (f64, Option<i64>, bool, bool, bool) {
+    let sys_sec = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
+        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+    let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
+        let vcid = super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), target_id, true, false)
+            .map(|(vcid, _)| vcid);
+        let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
+        let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
+        let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
+        let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
+        (vcid, anchored && !is_mobile, secure, (it_tid == 23 && !anchored) || is_mobile)
+    });
+    (sys_sec, victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan)
+}
+
 pub fn precheck_pvp_aggression_safety(
     ctx: &ServerContext,
     attacker_char_id: i64,
@@ -1531,23 +1552,8 @@ pub fn precheck_pvp_aggression_safety(
         return Ok(());
     }
     let now_unix = ctx.now_unix();
-    let sys_sec = ctx
-        .db
-        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
-        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
-    let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
-        let vcid = if snap.characters.contains_key(&target_id) {
-            Some(target_id)
-        } else {
-            snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
-                .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
-        };
-        let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
-        let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
-        let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
-        let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
-        (vcid, anchored && !is_mobile, secure, (it_tid == 23 && !anchored) || is_mobile)
-    });
+    let (sys_sec, victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) =
+        resolve_pvp_target_flags(ctx, sys_id, target_id);
 
     if let Some(vcid) = victim_char_opt.filter(|&v| v != attacker_char_id) {
         let v_suspect_or_crim = {
@@ -1596,23 +1602,8 @@ pub fn evaluate_and_record_pvp_aggression(
     }
     precheck_pvp_aggression_safety(ctx, attacker_char_id, sys_id, target_id, is_pod_target)?;
     let now_unix = ctx.now_unix();
-    let sys_sec = ctx
-        .db
-        .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
-        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
-    let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
-        let vcid = if snap.characters.contains_key(&target_id) {
-            Some(target_id)
-        } else {
-            snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
-                .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
-        };
-        let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
-        let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
-        let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
-        let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
-        (vcid, anchored && !is_mobile, secure, (it_tid == 23 && !anchored) || is_mobile)
-    });
+    let (sys_sec, victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) =
+        resolve_pvp_target_flags(ctx, sys_id, target_id);
 
     if let Some(vcid) = victim_char_opt.filter(|&v| v != attacker_char_id) {
         let v_suspect_or_crim = {
@@ -1697,12 +1688,8 @@ fn inspect_remote_assistance_context(
         .with_snapshot(|s| s.combat_crimewatch_state.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
     let beneficiary_opt = ctx.db.with_snapshot(|snap| {
-        if snap.characters.contains_key(&target_id) {
-            Some(target_id)
-        } else {
-            snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
-                .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
-        }
+        super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), target_id, true, false)
+            .map(|(vcid, _)| vcid)
     });
     let ben_id = beneficiary_opt.filter(|&b| b != helper_char_id)?;
     let (ben_outlaw, ben_le_partners) = ctx.db.with_snapshot(|snap| {
