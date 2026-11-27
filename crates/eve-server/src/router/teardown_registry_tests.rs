@@ -17,6 +17,7 @@ use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::session_transition::apply_session_from_character;
 use crate::router::{ServerContext, SessionTransitionSpec, TransitionKind};
@@ -788,8 +789,8 @@ async fn teardown_matrix_runtime_conformance_across_all_triggers() {
             mwd_active: false,
         },
     );
-    ctx.active_scanner_probes.write().unwrap().insert(
-        probe_tp,
+    probe_test_helpers::seed_probe(
+        &ctx,
         PersistedScannerProbe {
             probe_id: probe_tp,
             probe_type_id: 30013,
@@ -829,7 +830,7 @@ async fn teardown_matrix_runtime_conformance_across_all_triggers() {
     assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_tp)));
     assert_eq!(jita_handle.get_target_locks(ship_tp).await.unwrap().len(), 1);
     assert!(!fighter_test_helpers::active_fighter(&ctx, fighter_tp).unwrap().is_abandoned);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&probe_tp].state, 1);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, probe_tp).unwrap().state, 1);
     assert!(crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.contains_key(&ship_tp)));
 
     // Cross-system default Teleport runs all 5 departing-space hooks + trade + safe logoff + local chat + bounds.
@@ -847,7 +848,7 @@ async fn teardown_matrix_runtime_conformance_across_all_triggers() {
     assert!(jita_handle.get_ball_snapshot(ship_tp).await.unwrap().is_none());
     assert!(jita_handle.get_target_locks(ship_tp).await.unwrap().is_empty());
     assert!(fighter_test_helpers::active_fighter(&ctx, fighter_tp).unwrap().is_abandoned);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&probe_tp].state, 0);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, probe_tp).unwrap().state, 0);
     assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.contains_key(&ship_tp)));
     assert!(!crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_tp)));
     assert!(ctx.verify_bound_object(&sess_tp, tp_beyonce_bid).is_err());

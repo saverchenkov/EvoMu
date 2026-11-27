@@ -21,6 +21,7 @@ use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner;
+use eve_server::probe_test_helpers;
 use eve_server::router::{ActiveScannerProbe, ServerContext};
 use eve_server::services::combat_crimewatch::{
     record_killmail_assist_action, step_combat_system, ActiveBreacherDot, EntropicSpoolState,
@@ -589,10 +590,9 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
         snap.items.insert(cargo_probe_id, item_rec(cargo_probe_id, 30013, char_id, ship_id, InventoryFlag::Cargo, 4, false));
         snap.items.insert(analyzer_id, item_rec(analyzer_id, 22175, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
     });
-    {
-        let mut map = ctx.active_scanner_probes.write().expect("active_scanner_probes write lock");
-        map.insert(
-            probe_id,
+    probe_test_helpers::seed_probes(
+        &ctx,
+        [
             ActiveScannerProbe {
                 probe_id, probe_type_id: 30013, owner_char_id: char_id, ship_id, launcher_module_id: 0,
                 solar_system_id: sys_id, position: [0.0, 0.0, 0.0], destination: [0.0, 0.0, 0.0],
@@ -600,9 +600,6 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
                 max_flight_time_s: 3600.0, launched_at_unix: ctx.now_unix(), state: 1,
                 warp_end_ft: None,
             },
-        );
-        map.insert(
-            probe_id + 1,
             ActiveScannerProbe {
                 probe_id: probe_id + 1, probe_type_id: 30013, owner_char_id: char_id, ship_id, launcher_module_id: 0,
                 solar_system_id: sys_id, position: [0.0, 0.0, 0.0], destination: [0.0, 0.0, 0.0],
@@ -610,8 +607,8 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
                 max_flight_time_s: 3600.0, launched_at_unix: ctx.now_unix(), state: -1,
                 warp_end_ft: None,
             },
-        );
-    }
+        ],
+    );
 
     let rec_rep = {
         let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
@@ -627,11 +624,8 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
         "RecoverProbes with full cargo must recover 0 probes, got {recovered_ids:?}"
     );
     assert!(
-        ctx.active_scanner_probes
-            .read()
-            .expect("active_scanner_probes read lock")
-            .contains_key(&probe_id),
-        "Unrecovered probe must remain in active_scanner_probes"
+        probe_test_helpers::contains_probe(&ctx, probe_id),
+        "Unrecovered probe must remain active in probe store"
     );
 
     {

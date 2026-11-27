@@ -2951,11 +2951,8 @@ async fn test_mobile_scan_inhibitor_and_mobile_siphon_unit_end_to_end() {
     )
     .await
     .expect("Launch Combat Scanner Probes");
-    let probe_ids: Vec<i64> = ctx
-        .active_scanner_probes
-        .read()
-        .unwrap()
-        .values()
+    let probe_ids: Vec<i64> = eve_server::probe_test_helpers::probes_snapshot(&ctx)
+        .into_values()
         .filter(|p| p.owner_char_id == scanner_cid)
         .map(|p| p.probe_id)
         .collect();

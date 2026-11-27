@@ -265,11 +265,8 @@ async fn parity_shard_5_probe_scanning_events_and_sqlite_reload() {
         -DVec3::Z * d,
         DVec3::splat(d * 0.5),
     ];
-    let mut probe_ids: Vec<i64> = ctx
-        .active_scanner_probes
-        .read()
-        .unwrap()
-        .values()
+    let mut probe_ids: Vec<i64> = eve_server::probe_test_helpers::probes_snapshot(&ctx)
+        .into_values()
         .filter(|p| p.owner_char_id == CHAR_PLAYER && p.solar_system_id == JITA_SYSTEM)
         .map(|p| p.probe_id)
         .collect();

@@ -245,7 +245,7 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
         assert!(sys.get_ball_snapshot(pid).await.unwrap().is_some(), "Launched probe {pid} must exist in space");
     }
     {
-        let pmap = ctx.active_scanner_probes.read().unwrap();
+        let pmap = eve_server::probe_test_helpers::probes_snapshot(&ctx);
         for &pid in &launched_probe_ids {
             assert!(pmap[&pid].max_flight_time_s > 0.0, "Launched probe must have finite lifetime");
         }
@@ -374,12 +374,9 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
     assert!(scan_notifs.iter().any(|n| n.event == "OnSystemScanStopped"), "RequestScans must emit OnSystemScanStopped");
 
     // 4. Probe Reconnect, Recall, and Expiry after lifetime via real V24 scanMgr RPCs
-    {
-        let mut pmap = ctx.active_scanner_probes.write().unwrap();
-        if let Some(p) = pmap.get_mut(&launched_probe_ids[0]) {
-            p.state = 0;
-        }
-    }
+    eve_server::probe_test_helpers::mutate_probe(&ctx, launched_probe_ids[0], |p| {
+        p.state = 0;
+    });
     let recon_rep = ctx.dispatch_rpc(&mut sess, "scanMgr", Some(scan_bound_id), "ReconnectToLostProbes", &[], &kw, None).await.expect("ReconnectToLostProbes");
     let PyRep::KeyVal(recon_kv) = &recon_rep else { panic!() };
     let PyRep::List(recon_list) = &recon_kv["reconnectedProbeIDs"] else { panic!() };

@@ -1,6 +1,7 @@
 //! Comprehensive unit tests covering edge cases for `services::tactical_modules_superweapon_ops`.
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::ServerContext;
 use crate::services::tactical_modules::tactical_test_helpers::{
     active_fuel_reserve_count, active_fuel_reserve_item_count, begin_active_fuel_reserve,
@@ -2458,8 +2459,12 @@ async fn scan_probe_launcher_skips_bpc_and_courier_loaded_probes() {
     let courier_probe_id = 995_701_011_i64;
     let valid_probe_id = 995_701_012_i64;
 
-    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
-        probes.retain(|_, p| p.owner_char_id != char_id);
+    for pid in probe_test_helpers::probes_snapshot(&ctx)
+        .into_values()
+        .filter(|p| p.owner_char_id == char_id)
+        .map(|p| p.probe_id)
+    {
+        probe_test_helpers::remove_probe(&ctx, pid);
     }
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -2590,8 +2595,12 @@ async fn scan_probe_launcher_skips_bpc_and_courier_loaded_probes() {
         assert_eq!(snap.items[&courier_probe_id].quantity, 8);
         assert_eq!(snap.items[&valid_probe_id].quantity, 2);
     });
-    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
-        probes.retain(|_, p| p.owner_char_id != char_id);
+    for pid in probe_test_helpers::probes_snapshot(&ctx)
+        .into_values()
+        .filter(|p| p.owner_char_id == char_id)
+        .map(|p| p.probe_id)
+    {
+        probe_test_helpers::remove_probe(&ctx, pid);
     };
 }
 

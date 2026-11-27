@@ -1,5 +1,6 @@
 //! Edge-case unit tests for `fleet_social_scanning.rs`.
 
+use crate::probe_test_helpers;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
 use crate::services::fleet_social::fleet_social_scanning::{
     dispatch_signal_tracker_notifications, emit_signal_tracker_anomaly_delta,
@@ -295,7 +296,7 @@ async fn request_scans_delegate_none_explicit_probes_and_ghost_site_timer() {
 
     // Clear active probes and scan with explicit List(probes) as arg 0:
     // Cover both Dict probe descriptor and bare [x, y, z] list descriptor.
-    ctx.active_scanner_probes.write().unwrap().clear();
+    probe_test_helpers::clear_probes(&ctx);
     let probe_dict = PyRep::Dict(vec![
         (PyRep::String("probeID".into()), PyRep::Integer(801)),
         (

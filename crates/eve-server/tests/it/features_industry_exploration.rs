@@ -299,16 +299,17 @@ async fn test_mobile_scan_inhibitor_hides_ships_from_dscan_and_probes() {
 
     let inhib_pos = [base.x + 110_250.0, base.y, base.z];
     let vis_pos = [base.x + 200_000.0, base.y, base.z];
-    if let Ok(mut probes) = ctx.active_scanner_probes.write() {
-        for (pid, cid, sid, pos) in [(800_001, pilot_ext, scanner_ship_id, inhib_pos), (800_002, pilot_in, hidden_ship_id, vis_pos)] {
-            probes.insert(pid, ActiveScannerProbe {
+    eve_server::probe_test_helpers::seed_probes(
+        &ctx,
+        [(800_001, pilot_ext, scanner_ship_id, inhib_pos), (800_002, pilot_in, hidden_ship_id, vis_pos)]
+            .into_iter()
+            .map(|(pid, cid, sid, pos)| ActiveScannerProbe {
                 probe_id: pid, owner_char_id: cid, ship_id: sid, solar_system_id: LOWSEC_SYS_ID,
                 probe_type_id: 30_486, position: pos, destination: pos, range_step: 1,
                 scan_range_m: 1_000_000.0, base_sensor_strength: 44.0, launcher_module_id: 0,
                 max_flight_time_s: 7_200.0, launched_at_unix: ctx.now_unix(), state: 1, warp_end_ft: None,
-            });
-        }
-    }
+            }),
+    );
 
     // Negative 2: At t + 30s (during 60s warmup), inhibitor does NOT mask ships
     ctx.advance_secs(30);

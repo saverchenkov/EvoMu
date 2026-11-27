@@ -13,6 +13,7 @@ use eve_db::types::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord, T
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::probe_test_helpers;
 use eve_server::router::ServerContext;
 use eve_server::services::space_destiny::space_probe_scanning::{
     compute_probe_max_deviation_au, probe_allowed_ranges_au, probe_base_max_deviation_au,
@@ -1227,11 +1228,8 @@ async fn request_scans_started_stopped_payloads() {
         )
         .await;
     assert_eq!(launch_rep.dict_get("launchedCount").and_then(|v| v.as_i64()), Some(8));
-    let launched_count = ctx
-        .active_scanner_probes
-        .read()
-        .unwrap()
-        .values()
+    let launched_count = probe_test_helpers::probes_snapshot(&ctx)
+        .into_values()
         .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
         .count();
     assert_eq!(launched_count, 8, "first launch must deploy 8 active probes");
@@ -1253,11 +1251,8 @@ async fn request_scans_started_stopped_payloads() {
         .await
         .expect_err("9th+ probe launch must reject with MaxProbesLaunched");
     assert_eq!(cap_err.code, "MaxProbesLaunched");
-    let count_after_cap = ctx
-        .active_scanner_probes
-        .read()
-        .unwrap()
-        .values()
+    let count_after_cap = probe_test_helpers::probes_snapshot(&ctx)
+        .into_values()
         .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
         .count();
     assert_eq!(count_after_cap, 8, "8-probe cap rejection must not change active probe count");
@@ -1365,11 +1360,8 @@ async fn request_scans_started_stopped_payloads() {
     assert_eq!(absent_len, 0, "absent_targets must be empty list");
 
     let snapshot_probes = || -> Vec<(i64, [u64; 3], i32, u64)> {
-        let mut rows: Vec<_> = ctx
-            .active_scanner_probes
-            .read()
-            .unwrap()
-            .values()
+        let mut rows: Vec<_> = probe_test_helpers::probes_snapshot(&ctx)
+            .into_values()
             .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
             .map(|p| {
                 (

@@ -427,6 +427,7 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
     use eve_db::{OwnerNoteRecord, WorldRepository};
     use eve_proto::PyRep;
 
+    use crate::probe_test_helpers;
     use crate::router::cache_notifications::NotificationRecord;
     use crate::router::context::ActiveScannerProbe;
     use crate::router::context_runtime_persistence::SERVER_RUNTIME_STATE_BLOB_KEY;
@@ -496,14 +497,13 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         state,
         warp_end_ft: Some(133_500_000_000_000_000),
     };
-    ctx1.active_scanner_probes
-        .write()
-        .unwrap()
-        .insert(probe_active, make_probe(probe_active, 2));
-    ctx1.active_scanner_probes
-        .write()
-        .unwrap()
-        .insert(probe_neg_state, make_probe(probe_neg_state, -1));
+    probe_test_helpers::seed_probes(
+        &ctx1,
+        [
+            make_probe(probe_active, 2),
+            make_probe(probe_neg_state, -1),
+        ],
+    );
 
     // Seed legacy blob key to verify persist clears legacy keys once persisted to cluster_and_runtime.
     ctx1.db.with_mut_snapshot(|snap| {
@@ -685,9 +685,8 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
 
     // Verify scanner probes: state > 0 reset to 0, warp_end_ft cleared, state < 0 dropped
     {
-        let probes = ctx2.active_scanner_probes.read().unwrap();
-        assert!(!probes.contains_key(&probe_neg_state));
-        let p = &probes[&probe_active];
+        assert!(!probe_test_helpers::contains_probe(&ctx2, probe_neg_state));
+        let p = probe_test_helpers::get_probe(&ctx2, probe_active).unwrap();
         assert_eq!(p.state, 0);
         assert_eq!(p.warp_end_ft, None);
     }
@@ -764,7 +763,7 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
     assert_eq!(ctx2.ewar_starts_count_for_test(), 0);
 
     // 6. Diff sync of removed scanner probe & clearing empty server_runtime_json + legacy keys
-    ctx2.active_scanner_probes.write().unwrap().clear();
+    probe_test_helpers::clear_probes(&ctx2);
     ctx2.persist_server_runtime_to_db();
     ctx2.db.with_snapshot(|snap| {
         assert!(snap.cluster_and_runtime.server_runtime_json.is_none());

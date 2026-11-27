@@ -7,6 +7,7 @@ use crate::bug_reporting::{
     build_client_global_config, extract_text_files_from_zip, handle_bugs_http_request,
     BugIncidentBundle, BugReportingRuntime,
 };
+use crate::probe_test_helpers;
 use crate::router::{ActiveFighterSquadron, ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::combat_crimewatch::DroneSpaceState;
@@ -281,14 +282,15 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle.try_remove_ball(ship_id);
-    if let Ok(mut sp) = ctx.active_scanner_probes.write() {
-        sp.insert(700_001, ActiveScannerProbe {
+    probe_test_helpers::seed_probe(
+        &ctx,
+        ActiveScannerProbe {
             probe_id: 700_001, probe_type_id: 30013, owner_char_id: char_id, ship_id,
             launcher_module_id: 700_002, solar_system_id: sys_id, position: [0.0; 3],
             destination: [0.0; 3], range_step: 1, scan_range_m: 4.0, base_sensor_strength: 10.0,
             max_flight_time_s: 300.0, launched_at_unix: now, state: 1, warp_end_ft: None,
-        });
-    }
+        },
+    );
     assert!(
         handle_character_logoff_or_disconnect(&ctx, char_id).await.is_none(),
         "unspawned ball disconnect must not fabricate hold or phantom position"

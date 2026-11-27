@@ -325,9 +325,11 @@ pub async fn probe_scan(ctx: &ServerContext, sess: &mut SessionState, center: gl
     let kw = HashMap::new();
     let (char_id, sys_id, ship_id) = (sess.character_id.unwrap(), sess.solar_system_id.unwrap(), sess.ship_id.unwrap());
     let active = |ctx: &ServerContext| -> Vec<i64> {
-        let mut ids: Vec<i64> = ctx.active_scanner_probes.read().unwrap().values()
+        let mut ids: Vec<i64> = eve_server::probe_test_helpers::probes_snapshot(ctx)
+            .into_values()
             .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state != 0)
-            .map(|p| p.probe_id).collect();
+            .map(|p| p.probe_id)
+            .collect();
         ids.sort_unstable();
         ids
     };

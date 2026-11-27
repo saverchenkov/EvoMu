@@ -3,6 +3,7 @@
 //! `collapse_stranded_abyssal_if_needed_sync`, `on_advance_secs`, and `tick_background_cluster`).
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
 use crate::services::drone_test_helpers;
@@ -1482,7 +1483,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
     let npc_ball_id = -88_001_i64;
     let spawn_group_id = 777_u32;
 
-    // 1. Seed a live scanner probe in `ctx.active_scanner_probes` and `sp6_lifecycle.active_scanner_probes`.
+    // 1. Seed a live scanner probe via `probe_test_helpers` and `sp6_lifecycle.active_scanner_probes`.
     let probe = eve_db::PersistedScannerProbe {
         probe_id,
         probe_type_id: 30013,
@@ -1500,10 +1501,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
         state: 1,
         warp_end_ft: None,
     };
-    ctx.active_scanner_probes
-        .write()
-        .unwrap()
-        .insert(probe_id, probe.clone());
+    probe_test_helpers::seed_probe(&ctx, probe.clone());
     with_mut_sp6_state(&ctx.db, |st| {
         st.active_scanner_probes.insert(probe_id, probe);
     });

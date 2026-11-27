@@ -4,6 +4,7 @@
 //! `is_known_special_site_instance_id`).
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::{ActiveFighterSquadron, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
 use eve_db::{
@@ -109,10 +110,9 @@ async fn prepare_tube_fighter_stack_and_expire_overdue_probes_cover_splits_and_c
             },
         );
     });
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.insert(
-            probe1,
+    probe_test_helpers::seed_probes(
+        &ctx,
+        [
             ActiveScannerProbe {
                 probe_id: probe1,
                 probe_type_id: 30013,
@@ -130,9 +130,6 @@ async fn prepare_tube_fighter_stack_and_expire_overdue_probes_cover_splits_and_c
                 state: 1,
                 warp_end_ft: None,
             },
-        );
-        map.insert(
-            probe2,
             ActiveScannerProbe {
                 probe_id: probe2,
                 probe_type_id: 30013,
@@ -150,11 +147,11 @@ async fn prepare_tube_fighter_stack_and_expire_overdue_probes_cover_splits_and_c
                 state: 1,
                 warp_end_ft: None,
             },
-        );
-    }
+        ],
+    );
 
     expire_all_overdue_probes(&ctx, 1_000).await;
-    let map = ctx.active_scanner_probes.read().unwrap();
+    let map = probe_test_helpers::probes_snapshot(&ctx);
     assert!(map.values().any(|p| p.state < 0));
 }
 
@@ -481,10 +478,9 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
             },
         );
     });
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.insert(
-            98_400_201,
+    probe_test_helpers::seed_probes(
+        &ctx,
+        [
             ActiveScannerProbe {
                 probe_id: 98_400_201,
                 probe_type_id: 30013,
@@ -502,9 +498,6 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
                 state: 1,
                 warp_end_ft: None,
             },
-        );
-        map.insert(
-            98_400_202,
             ActiveScannerProbe {
                 probe_id: 98_400_202,
                 probe_type_id: 30013,
@@ -522,8 +515,8 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
                 state: 1,
                 warp_end_ft: None,
             },
-        );
-    }
+        ],
+    );
     let (ret, lost) = expire_overdue_probes_for_char(&ctx, char_id, 1_000).await;
     assert_eq!(ret, vec![98_400_201]);
     assert!(lost.is_empty());
@@ -533,7 +526,7 @@ async fn group_2b_fighter_no_split_concord_branches_lancer_annulus_probe_merge_a
         "expired probe must merge into existing Cargo stack"
     );
     assert_eq!(
-        ctx.active_scanner_probes.read().unwrap()[&98_400_202].state,
+        probe_test_helpers::get_probe(&ctx, 98_400_202).unwrap().state,
         1
     );
 

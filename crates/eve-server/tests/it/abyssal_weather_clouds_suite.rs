@@ -485,16 +485,16 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
     assert_eq!(trace_ball.1.type_id, 47_458, "Abyssal Trace must be SDE type 47458");
 
     // 2. Combat probe scan locates the Abyssal Trace
-    for i in 0..4 {
-        let pid = 999_100_i64 + i;
-        ctx.active_scanner_probes.write().unwrap().insert(pid, eve_server::router::ActiveScannerProbe {
-            probe_id: pid, probe_type_id: 30028, owner_char_id: char2, ship_id: ship2, launcher_module_id: 0,
+    eve_server::probe_test_helpers::seed_probes(
+        &ctx,
+        (0..4).map(|i| eve_server::router::ActiveScannerProbe {
+            probe_id: 999_100_i64 + i, probe_type_id: 30028, owner_char_id: char2, ship_id: ship2, launcher_module_id: 0,
             solar_system_id: origin_sys, position: [0.0, 0.0, 0.0], destination: [0.0, 0.0, 0.0],
             scan_range_m: 4.0 * 149_597_870_700.0, range_step: 4, base_sensor_strength: 50.0,
             max_flight_time_s: 3600.0, launched_at_unix: ctx.now_unix(), state: 1,
             warp_end_ft: None,
-        });
-    }
+        }),
+    );
     let scan_rep = ctx.dispatch_rpc(&mut sess2, "scanMgr", None, "RequestScans", &[PyRep::None, PyRep::Integer(4)], &kw, None).await.expect("RequestScans finds trace");
     let PyRep::List(scan_rows) = scan_rep else { panic!("Expected PyRep::List of scan results from combat probes"); };
     assert!(scan_rows.iter().any(|r| r.dict_get("targetID").and_then(|v| v.as_i64()) == Some(trace_id) && r.dict_get("targetClass").and_then(|v| v.as_str()) == Some("AbyssalTrace")));

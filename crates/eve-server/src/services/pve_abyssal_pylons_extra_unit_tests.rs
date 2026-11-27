@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::probe_test_helpers;
 use crate::router::{ActiveScannerProbe, ServerContext};
 use crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID;
 use crate::services::pve_abyssal_hazards::{
@@ -294,39 +295,36 @@ async fn probe_pruning_cloud_transitions_and_pocket_trace_cleanup_in_ballpark() 
     });
 
     // 1. prune_out_of_bounds_abyssal_probes: non-abyssal system is no-op; abyssal system prunes only probe > 75 km from (0, 0, 50_000)
-    {
-        let mut probes = ctx.active_scanner_probes.write().unwrap();
-        for (pid, pos) in [
+    probe_test_helpers::seed_probes(
+        &ctx,
+        [
             (probe_in_id, [0.0, 0.0, 60_000.0]),
             (probe_out_id, [0.0, 0.0, 150_000.0]),
-        ] {
-            probes.insert(
-                pid,
-                ActiveScannerProbe {
-                    probe_id: pid,
-                    probe_type_id: 30013,
-                    owner_char_id: cid,
-                    ship_id,
-                    launcher_module_id: 1,
-                    solar_system_id: ab_sys,
-                    position: pos,
-                    destination: [0.0; 3],
-                    range_step: 1,
-                    scan_range_m: 1_000_000.0,
-                    base_sensor_strength: 40.0,
-                    max_flight_time_s: 3600.0,
-                    launched_at_unix: 1_000,
-                    state: 1,
-                    warp_end_ft: None,
-                },
-            );
-        }
-    }
+        ]
+        .into_iter()
+        .map(|(pid, pos)| ActiveScannerProbe {
+            probe_id: pid,
+            probe_type_id: 30013,
+            owner_char_id: cid,
+            ship_id,
+            launcher_module_id: 1,
+            solar_system_id: ab_sys,
+            position: pos,
+            destination: [0.0; 3],
+            range_step: 1,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3600.0,
+            launched_at_unix: 1_000,
+            state: 1,
+            warp_end_ft: None,
+        }),
+    );
     prune_out_of_bounds_abyssal_probes(&ctx, 30_000_142);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap().len(), 2);
+    assert_eq!(probe_test_helpers::probe_count(&ctx), 2);
     prune_out_of_bounds_abyssal_probes(&ctx, ab_sys);
-    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&probe_in_id));
-    assert!(!ctx.active_scanner_probes.read().unwrap().contains_key(&probe_out_id));
+    assert!(probe_test_helpers::contains_probe(&ctx, probe_in_id));
+    assert!(!probe_test_helpers::contains_probe(&ctx, probe_out_id));
 
     // 2. step_abyssal_hazards_and_pylons_in_ballpark: non-abyssal and VOID_SPACE_SYSTEM_ID return early
     let mut bp = Ballpark::new(ab_sys);

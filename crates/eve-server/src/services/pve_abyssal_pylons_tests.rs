@@ -1,6 +1,7 @@
 //! Unit and integration tests for `pve_abyssal_pylons`.
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::ServerContext;
 use crate::services::pve_abyssal_hazards::{
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
@@ -681,7 +682,6 @@ async fn abyssal_pylons_npc_kill_probe_prune_and_cloud_transitions() {
     let in_probe_id = 1_050_200_102_i64;
     let other_probe_id = 1_050_200_103_i64;
     {
-        let mut probes = ctx.active_scanner_probes.write().unwrap();
         let make_probe = |pid: i64, sid: u32, pos: [f64; 3]| crate::router::ActiveScannerProbe {
             probe_id: pid,
             probe_type_id: probe_tid,
@@ -699,17 +699,19 @@ async fn abyssal_pylons_npc_kill_probe_prune_and_cloud_transitions() {
             state: 0,
             warp_end_ft: None,
         };
-        probes.insert(oob_probe_id, make_probe(oob_probe_id, ab_sys, [120_000.0, 0.0, 0.0]));
-        probes.insert(in_probe_id, make_probe(in_probe_id, ab_sys, [1_000.0, 0.0, 0.0]));
-        probes.insert(other_probe_id, make_probe(other_probe_id, 30_000_142, [500_000.0, 0.0, 0.0]));
+        probe_test_helpers::seed_probes(
+            &ctx,
+            [
+                make_probe(oob_probe_id, ab_sys, [120_000.0, 0.0, 0.0]),
+                make_probe(in_probe_id, ab_sys, [1_000.0, 0.0, 0.0]),
+                make_probe(other_probe_id, 30_000_142, [500_000.0, 0.0, 0.0]),
+            ],
+        );
     }
     prune_out_of_bounds_abyssal_probes(&ctx, ab_sys);
-    {
-        let probes = ctx.active_scanner_probes.read().unwrap();
-        assert!(!probes.contains_key(&oob_probe_id));
-        assert!(probes.contains_key(&in_probe_id));
-        assert!(probes.contains_key(&other_probe_id));
-    }
+    assert!(!probe_test_helpers::contains_probe(&ctx, oob_probe_id));
+    assert!(probe_test_helpers::contains_probe(&ctx, in_probe_id));
+    assert!(probe_test_helpers::contains_probe(&ctx, other_probe_id));
 
     // Spawn ship, drone (1 HP), suppressor, and tracking pylon in ab_sys for pulse_abyssal_automated_pylons
     for (bid, tid, pos, hp) in [

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::probe_test_helpers;
 use crate::router::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{DroneMiningState, DroneSpaceState};
@@ -220,45 +221,44 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
         DVec3::new(1_200.0, 3_400.0, 5_600.0),
     );
 
-    ctx.active_scanner_probes.write().unwrap().insert(
-        probe_in_sys,
-        ActiveScannerProbe {
-            probe_id: probe_in_sys,
-            probe_type_id: 30013,
-            owner_char_id: char_id,
-            ship_id,
-            launcher_module_id: 1,
-            solar_system_id: sys_id,
-            position: [0.0, 0.0, 0.0],
-            destination: [0.0, 0.0, 0.0],
-            range_step: 1,
-            scan_range_m: 149_597_870_700.0,
-            base_sensor_strength: 40.0,
-            max_flight_time_s: 3600.0,
-            launched_at_unix: 1_000,
-            state: 2,
-            warp_end_ft: None,
-        },
-    );
-    ctx.active_scanner_probes.write().unwrap().insert(
-        probe_other_sys,
-        ActiveScannerProbe {
-            probe_id: probe_other_sys,
-            probe_type_id: 30013,
-            owner_char_id: char_id,
-            ship_id,
-            launcher_module_id: 1,
-            solar_system_id: 30_000_144,
-            position: [0.0, 0.0, 0.0],
-            destination: [0.0, 0.0, 0.0],
-            range_step: 1,
-            scan_range_m: 149_597_870_700.0,
-            base_sensor_strength: 40.0,
-            max_flight_time_s: 3600.0,
-            launched_at_unix: 1_000,
-            state: 2,
-            warp_end_ft: None,
-        },
+    probe_test_helpers::seed_probes(
+        &ctx,
+        [
+            ActiveScannerProbe {
+                probe_id: probe_in_sys,
+                probe_type_id: 30013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 1,
+                solar_system_id: sys_id,
+                position: [0.0, 0.0, 0.0],
+                destination: [0.0, 0.0, 0.0],
+                range_step: 1,
+                scan_range_m: 149_597_870_700.0,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3600.0,
+                launched_at_unix: 1_000,
+                state: 2,
+                warp_end_ft: None,
+            },
+            ActiveScannerProbe {
+                probe_id: probe_other_sys,
+                probe_type_id: 30013,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: 1,
+                solar_system_id: 30_000_144,
+                position: [0.0, 0.0, 0.0],
+                destination: [0.0, 0.0, 0.0],
+                range_step: 1,
+                scan_range_m: 149_597_870_700.0,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3600.0,
+                launched_at_unix: 1_000,
+                state: 2,
+                warp_end_ft: None,
+            },
+        ],
     );
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -299,11 +299,11 @@ async fn abandon_probes_fighters_and_repeating_drone_miner_depletion_and_full_ho
     abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
 
     assert_eq!(
-        ctx.active_scanner_probes.read().unwrap()[&probe_in_sys].state,
+        probe_test_helpers::get_probe(&ctx, probe_in_sys).unwrap().state,
         0
     );
     assert_eq!(
-        ctx.active_scanner_probes.read().unwrap()[&probe_other_sys].state,
+        probe_test_helpers::get_probe(&ctx, probe_other_sys).unwrap().state,
         2
     );
     ctx.db.with_snapshot(|snap| {
@@ -848,7 +848,6 @@ async fn cluster_tick_downtime_probes_bounties_and_cluster_tick_sweeps() {
     // p3: live probe for ship_full -> unrecovered (cargo full, no launcher)
     // p4: live probe for missing ship -> unrecovered
     {
-        let mut probes = ctx.active_scanner_probes.write().unwrap();
         let mk_probe = |pid: i64, cid: i64, sid: i64, mid: i64, launched: u64| crate::router::ActiveScannerProbe {
             probe_id: pid,
             probe_type_id: 30013,
@@ -866,10 +865,15 @@ async fn cluster_tick_downtime_probes_bounties_and_cluster_tick_sweeps() {
             state: 1,
             warp_end_ft: None,
         };
-        probes.insert(942_100_001, mk_probe(942_100_001, char_id, ship1, mod_launcher, now));
-        probes.insert(942_100_002, mk_probe(942_100_002, char_id, ship1, mod_launcher, now.saturating_sub(10_000)));
-        probes.insert(942_100_003, mk_probe(942_100_003, char2, ship_full, 0, now));
-        probes.insert(942_100_004, mk_probe(942_100_004, char2, 942_999_999, 0, now));
+        probe_test_helpers::seed_probes(
+            &ctx,
+            [
+                mk_probe(942_100_001, char_id, ship1, mod_launcher, now),
+                mk_probe(942_100_002, char_id, ship1, mod_launcher, now.saturating_sub(10_000)),
+                mk_probe(942_100_003, char2, ship_full, 0, now),
+                mk_probe(942_100_004, char2, 942_999_999, 0, now),
+            ],
+        );
     }
 
     let (recovered, purged) = recover_scanner_probes_on_downtime(&ctx);

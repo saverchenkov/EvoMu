@@ -5,6 +5,7 @@ use super::{
     disconnect_drones_for_ship_on_warp_sync, handle_cmd_return_bay, step_repeating_drone_mining,
     step_returning_drones,
 };
+use crate::probe_test_helpers;
 use crate::router::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::DroneSpaceState;
@@ -312,8 +313,8 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
         }),
     );
 
-    ctx.active_scanner_probes.write().unwrap().insert(
-        555_001,
+    probe_test_helpers::seed_probe(
+        &ctx,
         ActiveScannerProbe {
             probe_id: 555_001,
             probe_type_id: 30013,
@@ -360,7 +361,7 @@ async fn warp_disconnect_and_abandon_drones_probes_and_fighters() {
     assert_eq!(d1_state.owner_char_id, 0);
 
     abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_id);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&555_001].state, 0);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, 555_001).unwrap().state, 0);
     assert!(
         crate::services::fighter_test_helpers::active_fighter(&ctx, fighter_id)
             .unwrap()

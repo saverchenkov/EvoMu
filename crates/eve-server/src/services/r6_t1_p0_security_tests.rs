@@ -1,6 +1,7 @@
 //! Exploit and security regression tests for Round 6 Track 1 P0 issues (#355-#362).
 #![forbid(unsafe_code)]
 
+use crate::probe_test_helpers;
 use crate::router::{ActiveScannerProbe, BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::{
     apply_damage_to_fighter_squadron, handle_fighters,
@@ -619,7 +620,7 @@ async fn r6_t1_05_and_06_scan_state_auth_redaction_and_atomic_probe_expiry() {
         .await.unwrap().expect("in-system GetFullState");
     assert!(!format!("{state_rep:?}").contains("123456789"), "raw unscanned signature X coordinate must not leak");
 
-    ctx.active_scanner_probes.write().unwrap().insert(555_001, ActiveScannerProbe {
+    probe_test_helpers::seed_probe(&ctx, ActiveScannerProbe {
         probe_id: 555_001, probe_type_id: 30_013, owner_char_id: char_id, ship_id: 81_000_050,
         launcher_module_id: 666_001, solar_system_id: my_sys, position: [1.0, 2.0, 3.0], destination: [1.0, 2.0, 3.0],
         range_step: 4, scan_range_m: 4.0 * 149_597_870_700.0, base_sensor_strength: 40.0,

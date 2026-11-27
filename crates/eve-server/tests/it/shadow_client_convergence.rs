@@ -424,7 +424,7 @@ async fn test_shadow_client_941_948_loaded_charges_across_login_undock_jump_and_
             .contains_key(&(ship_id, InventoryFlag::HiSlot1 as u16)),
         "expended probe sublocation must be cleared after launching all 8 probes"
     );
-    for probe_rec in ctx.active_scanner_probes.read().unwrap().values() {
+    for probe_rec in eve_server::probe_test_helpers::probes_snapshot(&ctx).into_values() {
         if probe_rec.owner_char_id == PILOT && probe_rec.solar_system_id == dest_sys_id {
             let sh_ball = shadow
                 .ballpark
