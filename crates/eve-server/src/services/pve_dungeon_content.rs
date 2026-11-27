@@ -1040,12 +1040,47 @@ fn leaf_object_trigger_hint(kind_raw: Option<&str>) -> ObjectTriggerHint {
     }
 }
 
-pub(super) fn trigger_object_hint(tr: &WikiTrigger) -> ObjectTriggerHint {
-    let mut hint = leaf_object_trigger_hint(tr.kind.as_deref());
-    for c in &tr.clauses {
-        hint.merge(trigger_object_hint(c));
+fn trigger_has_combat_npc_kind(tr: &WikiTrigger) -> bool {
+    let kind_lc = tr
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        kind_lc.as_str(),
+        "this_ship_destroyed"
+            | "thisshipdestroyed"
+            | "ship_destroyed"
+            | "npc_killed"
+            | "on_kill"
+            | "onkill"
+            | "group_destroyed"
+            | "last_in_group_destroyed"
+            | "on_kill_count"
+            | "kill_count"
+            | "killcount"
+            | "on_kill_tagged"
+            | "kill_tagged"
+            | "killtagged"
+            | "npc_damaged"
+            | "on_npc_damaged"
+            | "onnpcdamaged"
+            | "npc_attacked"
+            | "on_attack"
+    ) || tr.clauses.iter().any(trigger_has_combat_npc_kind)
+}
+
+pub(super) fn inline_spawn_object_trigger_hint(
+    tr: &WikiTrigger,
+    spawn_tag_lc: Option<&str>,
+    spawn_type_ids: &[u32],
+    has_valid_combat_npc_type: bool,
+) -> ObjectTriggerHint {
+    if has_valid_combat_npc_type && trigger_has_combat_npc_kind(tr) {
+        return ObjectTriggerHint::default();
     }
-    hint
+    trigger_target_object_hint(tr, spawn_tag_lc, spawn_type_ids, true)
 }
 
 pub(super) fn trigger_target_object_hint(

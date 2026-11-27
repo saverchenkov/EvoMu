@@ -2111,10 +2111,10 @@ pub(crate) fn resolve_pvp_target_info_in_snap(
         return None;
     }
     let is_dungeon_obj = match sys_id_opt {
-        Some(sys_id) => crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object_in_snap(
+        Some(sys_id) => crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_in_snap(
             snap, sys_id, ball_id,
         ),
-        None => crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object_any_sys_in_snap(
+        None => crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(
             snap, ball_id,
         ),
     };

@@ -3770,3 +3770,279 @@ async fn own_diff_p1_04_cmd_engage_drones_on_destructible_dungeon_containers_and
     });
 }
 
+#[tokio::test]
+async fn pre_exist_p1_01_and_p2_note_01_lowsec_disruptive_lance_and_indestructible_dungeon_can_zero_pvp_flags(
+) {
+    use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
+    use crate::services::combat_crimewatch::{is_npc_timer_active, set_char_safety_level, SafetyLevel};
+    use crate::services::r6_t1_p0_helpers::execute_lancer_beam_attack;
+    use eve_destiny::{CombatState, TargetLock};
+
+    let (lowsec_sys, highsec_sys, owner_char, lancer_char, green_char, inst_low, inst_high) = (
+        30_002_813u32,
+        30_000_142u32,
+        90_070_430i64,
+        90_070_431i64,
+        90_070_432i64,
+        995_430i64,
+        995_431i64,
+    );
+
+    let mut sde = (*build_hooks_test_sde()).clone();
+    sde.types.insert(
+        37_901,
+        mk_inv_type(37_901, 379, 7, "Target Painter I", 5.0, 0.0, None, &[(554, 25.0)]),
+    );
+    let (ctx, _clock, _owner_sess, _owner_ship) = make_space_pilot_ctx(
+        Arc::new(sde),
+        lowsec_sys,
+        owner_char,
+        "p101_owner",
+        587,
+        DVec3::ZERO,
+    )
+    .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .modified_system_securities
+            .insert(lowsec_sys, 0.30);
+    });
+
+    // Seed Red-safety Lancer shooter in low-sec and Green-safety fleetmate in high-sec.
+    let spawn_pilot = async |sys_id: u32, char_id: i64, user_tag: &str, safety: SafetyLevel, tp_id: Option<i64>| {
+        ctx.db.provision_gm_account(user_tag, "pw", char_id, user_tag);
+        let (uid, sid) = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            let sid = ch.active_ship_id;
+            let uid = ch.user_id;
+            if let Some(it) = snap.items.get_mut(&sid) {
+                it.type_id = 587;
+                it.location_id = i64::from(sys_id);
+                it.flag = InventoryFlag::None;
+            }
+            if let Some(mod_id) = tp_id {
+                snap.items.insert(
+                    mod_id,
+                    InventoryItemRecord {
+                        item_id: mod_id,
+                        type_id: 37_901,
+                        owner_id: char_id,
+                        location_id: sid,
+                        flag: InventoryFlag::MedSlot0,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+            (uid, sid)
+        });
+        let _ = ctx.db.acquire_online_lock_with_computer_hash(
+            uid,
+            char_id as u64,
+            Some(char_id),
+            None,
+            true,
+            1_785_100_000,
+        );
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 2_500.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 500.0,
+                    max_shield_hp: 500.0,
+                    armor_hp: 500.0,
+                    max_armor_hp: 500.0,
+                    structure_hp: 500.0,
+                    max_structure_hp: 500.0,
+                    capacitor: 500.0,
+                    max_capacitor: 500.0,
+                    is_tethered: false,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+        ctx.invalidate_ship_fitting(sid);
+        set_char_safety_level(&ctx, char_id, safety);
+        let mut sess = SessionState::new(char_id as u64);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(sid);
+        (sess, sid)
+    };
+
+    let (_lancer_sess, lancer_ship) =
+        spawn_pilot(lowsec_sys, lancer_char, "p101_lancer", SafetyLevel::Red, None).await;
+    let tp_mod_id = 883_001i64;
+    let (mut green_sess, green_ship) =
+        spawn_pilot(highsec_sys, green_char, "p101_green", SafetyLevel::Green, Some(tp_mod_id)).await;
+
+    let mut r_low = make_room(
+        1,
+        9740,
+        [0.0, 0.0, 0.0],
+        vec![DungeonRuntimeObject {
+            type_id: DEFAULT_CONTAINER_TYPE_ID,
+            name: "Lowsec Destructible Can".into(),
+            position: [10_000.0, 0.0, 0.0],
+            radius: 150.0,
+            is_container: true,
+            destructible: true,
+            ..Default::default()
+        }],
+        Vec::new(),
+    );
+    r_low.entered = true;
+    r_low.entered_unix = Some(1_785_100_000);
+
+    let mut r_high = make_room(
+        1,
+        9741,
+        [0.0, 0.0, 0.0],
+        vec![DungeonRuntimeObject {
+            type_id: DEFAULT_CONTAINER_TYPE_ID,
+            name: "Highsec Indestructible Can".into(),
+            position: [2_000.0, 0.0, 0.0],
+            radius: 150.0,
+            is_container: true,
+            destructible: false,
+            ..Default::default()
+        }],
+        Vec::new(),
+    );
+    r_high.entered = true;
+    r_high.entered_unix = Some(1_785_100_000);
+
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_low,
+            DungeonRuntimeInstance {
+                instance_id: inst_low,
+                dungeon_id: 1,
+                solar_system_id: lowsec_sys,
+                owner_char_id: owner_char,
+                base_position: [0.0, 0.0, 0.0],
+                rooms: vec![r_low],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+        s.instances.insert(
+            inst_high,
+            DungeonRuntimeInstance {
+                instance_id: inst_high,
+                dungeon_id: 1,
+                solar_system_id: highsec_sys,
+                owner_char_id: owner_char,
+                base_position: [0.0, 0.0, 0.0],
+                rooms: vec![r_high],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Low-sec Disruptive Lance cone hits destructible dungeon container (23):
+    // must hit without Suspect/Criminal/PvP flags and set only NPC aggression timer.
+    let mat_low = materialize_dungeon_room_entities(&ctx, lowsec_sys, inst_low, 0)
+        .await
+        .unwrap();
+    let cont_low = mat_low.object_ids[0];
+    let low_sys_h = ctx.systems.get_or_spawn(lowsec_sys);
+    let (_, cont_ball) = low_sys_h.get_ball_snapshot(cont_low).await.unwrap().unwrap();
+    let now_unix = ctx.now_unix();
+    let hits = execute_lancer_beam_attack(
+        &ctx,
+        &low_sys_h,
+        lowsec_sys,
+        lancer_char,
+        lancer_ship,
+        77_281,
+        77_398,
+        &[cont_ball],
+        DVec3::ZERO,
+        DVec3::X,
+        100_000.0,
+        5_000.0,
+        5_000.0,
+        DamageVector::new(100.0, 0.0, 0.0, 0.0),
+        100.0,
+        60,
+        now_unix,
+    )
+    .await
+    .expect("low-sec Disruptive Lance on destructible dungeon container must succeed");
+    assert!(hits.contains(&cont_low));
+    assert!(is_npc_timer_active(&ctx, lancer_char, now_unix));
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(lancer_char);
+        assert_eq!(st.suspect_flag_until_unix, 0, "PRE-EXIST-P1-01: Disruptive Lance on dungeon container must NOT incur Suspect flag");
+        assert_eq!(st.criminal_flag_until_unix, 0, "must NOT incur Criminal flag");
+        assert_eq!(st.pvp_timer_until_unix, 0, "must NOT incur PvP timer");
+    }
+
+    // 2. P2-NOTE-01: Green-safety fleetmate activating Target Painter (dogmaIM.Activate) on an
+    // indestructible dungeon container (is_container=true, destructible=false) in high-sec must NOT reject.
+    let mat_high = materialize_dungeon_room_entities(&ctx, highsec_sys, inst_high, 0)
+        .await
+        .unwrap();
+    let cont_high = mat_high.object_ids[0];
+    let high_sys_h = ctx.systems.get_or_spawn(highsec_sys);
+    high_sys_h
+        .add_target_lock(
+            green_ship,
+            TargetLock {
+                target_id: cont_high,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    let kwargs = HashMap::new();
+    handle_weapons(
+        &ctx,
+        &mut green_sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(tp_mod_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(cont_high),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("P2-NOTE-01: Green-safety EWAR on indestructible dungeon container must not reject");
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(green_char);
+        assert_eq!(st.suspect_flag_until_unix, 0);
+        assert_eq!(st.criminal_flag_until_unix, 0);
+        assert_eq!(st.pvp_timer_until_unix, 0);
+    }
+}
+

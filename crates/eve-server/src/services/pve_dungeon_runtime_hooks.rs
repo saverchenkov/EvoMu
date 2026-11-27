@@ -96,6 +96,31 @@ pub fn is_destructible_dungeon_object(
         .with_snapshot(|snap| is_destructible_dungeon_object_in_snap(snap, sys_id, ball_id))
 }
 
+fn is_owned_dungeon_object_matching_in_snap(
+    snap: &WorldStateSnapshot,
+    sys_id_opt: Option<SolarSystemId>,
+    ball_id: i64,
+    require_destructible: bool,
+) -> bool {
+    if ball_id <= 0 {
+        return false;
+    }
+    snap.dungeon_runtime.instances.values().any(|inst| {
+        sys_id_opt.is_none_or(|sid| inst.solar_system_id == sid)
+            && inst.rooms.iter().any(|r| {
+                r.objects.iter().any(|o| {
+                    o.ball_id == ball_id
+                        && (o.spawned || o.destroyed)
+                        && if require_destructible {
+                            o.destructible
+                        } else {
+                            o.is_container || o.destructible
+                        }
+                })
+            })
+    })
+}
+
 /// Returns `true` if `ball_id` belongs to a spawned or destroyed destructible dungeon object in
 /// `sys_id` regardless of whether `o.destroyed` or instance completion/despawn already transitioned
 /// (`BF-1` / `OWN-01` post-`npc_death_hook` combat-handler guard).
@@ -104,17 +129,7 @@ pub fn is_owned_destructible_dungeon_object_in_snap(
     sys_id: SolarSystemId,
     ball_id: i64,
 ) -> bool {
-    if ball_id <= 0 {
-        return false;
-    }
-    snap.dungeon_runtime.instances.values().any(|inst| {
-        inst.solar_system_id == sys_id
-            && inst.rooms.iter().any(|r| {
-                r.objects
-                    .iter()
-                    .any(|o| o.ball_id == ball_id && o.destructible && (o.spawned || o.destroyed))
-            })
-    })
+    is_owned_dungeon_object_matching_in_snap(snap, Some(sys_id), ball_id, true)
 }
 
 pub fn is_owned_destructible_dungeon_object(
@@ -129,22 +144,23 @@ pub fn is_owned_destructible_dungeon_object(
         .with_snapshot(|snap| is_owned_destructible_dungeon_object_in_snap(snap, sys_id, ball_id))
 }
 
-/// System-agnostic sibling of [`is_owned_destructible_dungeon_object_in_snap`] for paths that
-/// resolve CrimeWatch ownership by `ball_id` without a `SolarSystemId` parameter (`OWN-DIFF-P1-02`).
-pub fn is_owned_destructible_dungeon_object_any_sys_in_snap(
+/// Returns `true` if `ball_id` belongs to any spawned or destroyed dungeon container/destructible
+/// object in `sys_id` (`P2-NOTE-01` PvP/CrimeWatch exemption for non-destructible cans too).
+pub fn is_owned_dungeon_object_in_snap(
+    snap: &WorldStateSnapshot,
+    sys_id: SolarSystemId,
+    ball_id: i64,
+) -> bool {
+    is_owned_dungeon_object_matching_in_snap(snap, Some(sys_id), ball_id, false)
+}
+
+/// System-agnostic sibling of [`is_owned_dungeon_object_in_snap`] for CrimeWatch paths without a
+/// `SolarSystemId` (`OWN-DIFF-P1-02`, `P2-NOTE-01`).
+pub fn is_owned_dungeon_object_any_sys_in_snap(
     snap: &WorldStateSnapshot,
     ball_id: i64,
 ) -> bool {
-    if ball_id <= 0 {
-        return false;
-    }
-    snap.dungeon_runtime.instances.values().any(|inst| {
-        inst.rooms.iter().any(|r| {
-            r.objects
-                .iter()
-                .any(|o| o.ball_id == ball_id && o.destructible && (o.spawned || o.destroyed))
-        })
-    })
+    is_owned_dungeon_object_matching_in_snap(snap, None, ball_id, false)
 }
 
 pub fn is_dungeon_object_ball(ctx: &ServerContext, sys_id: SolarSystemId, ball_id: i64) -> bool {

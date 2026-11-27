@@ -7,12 +7,11 @@
 
 use super::{
     bind_spawn_object_indices_if_omitted, classify_dungeon_object_spawn,
-    get_active_wiki_pve_catalog, has_omitted_object_trigger,
+    get_active_wiki_pve_catalog, has_omitted_object_trigger, inline_spawn_object_trigger_hint,
     is_non_empty_object_or_structure_class, rebind_auto_object_targets,
-    select_entry_index_for_dungeon, trigger_object_hint, trigger_target_object_hint,
-    wiki_faction_name_to_id, ObjectTriggerHint, WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec,
-    WikiObjective, WikiPveEntry, WikiSpawn, WikiTrigger, WikiTriggerActionSpec, WikiWave,
-    WikiWaveDistance,
+    select_entry_index_for_dungeon, trigger_target_object_hint, wiki_faction_name_to_id,
+    ObjectTriggerHint, WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec, WikiObjective,
+    WikiPveEntry, WikiSpawn, WikiTrigger, WikiTriggerActionSpec, WikiWave, WikiWaveDistance,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_legacy_ess::{
@@ -1177,8 +1176,10 @@ fn resolve_spawn_entry(
     }
 
     let has_valid_combat_npc_type = spawn_has_valid_combat_npc_type(&ctx.sde, sp);
+    let force_object_for_npc =
+        trigger_hint.requires_destructible || trigger_hint.requires_container;
 
-    if !has_valid_combat_npc_type || trigger_hint.has_explicit_object_trigger {
+    if !has_valid_combat_npc_type || force_object_for_npc {
         if let Some(flags) = classify_dungeon_object_spawn(sp, trigger_hint) {
             let concrete_tid = sp
                 .resolution
@@ -1762,16 +1763,27 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     .copied()
                     .filter(|&tid| tid > 0)
                     .collect();
+                let has_valid_combat_npc_type = spawn_has_valid_combat_npc_type(&ctx.sde, sp);
                 let is_non_npc_struct_cls = is_non_empty_object_or_structure_class(&sp.raw_class)
-                    && !spawn_has_valid_combat_npc_type(&ctx.sde, sp);
+                    && !has_valid_combat_npc_type;
                 let mut trigger_hint = sp
                     .trigger
                     .as_ref()
-                    .map(trigger_object_hint)
+                    .map(|strig| {
+                        inline_spawn_object_trigger_hint(
+                            strig,
+                            spawn_tag_lc.as_deref(),
+                            &spawn_tids,
+                            has_valid_combat_npc_type,
+                        )
+                    })
                     .unwrap_or_default();
                 for (w_idx, w) in wroom.waves.iter().enumerate() {
                     if let Some(ref wtr) = w.wave_trigger {
-                        let include_unbound = w_idx == wwave_idx && is_non_npc_struct_cls;
+                        let include_unbound = is_non_npc_struct_cls
+                            && (w_idx == wwave_idx
+                                || wtr.source_wave_index == Some(wwave.wave_index)
+                                || wtr.source_wave_index.is_none());
                         trigger_hint.merge(trigger_target_object_hint(
                             wtr,
                             spawn_tag_lc.as_deref(),
