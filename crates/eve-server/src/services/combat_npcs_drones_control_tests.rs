@@ -1533,10 +1533,10 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     assert!((target_a_cs.web_velocity_multiplier - 1.0).abs() < 1e-6);
     assert!((target_a_cs.capacitor - 500.0).abs() < 1e-6, "OOR engage must not neut out-of-range target");
     assert_eq!(target_a_cs.tp_sig_multiplier, None, "OOR engage must not TP out-of-range target");
-    let npc_until_after_oor = with_combat_runtime(&ctx, |rt| {
+    with_combat_runtime(&ctx, |rt| {
         assert!(!rt.aggression_assist_log.contains_key(&target_a), "OOR engage must not log killmail assist");
-        rt.npc_timers.get(&char_id).copied().unwrap_or(0)
     });
+    let npc_until_after_oor = npc_timer_until(&ctx, char_id).unwrap_or(0);
 
     // 2. Drone moves within web range; step_engaged_drones applies web, logs assist, and renews aggression
     assert!(sys_handle.set_ball_position(web_bid, DVec3::new(23_000.0, 0.0, 0.0)).await);
@@ -1557,13 +1557,12 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     with_combat_runtime(&ctx, |rt| {
         let assists = rt.aggression_assist_log.get(&target_a).expect("assist recorded once in range");
         assert!(assists.iter().any(|a| a.attacker_char_id == char_id && a.is_ewar));
-        assert!(
-            rt.npc_timers
-                .get(&char_id)
-                .is_some_and(|&u| u >= t1 + 300 && u > npc_until_after_oor),
-            "step_engaged_drones must renew NPC aggression timer past initial OOR command"
-        );
     });
+    assert!(
+        npc_timer_until(&ctx, char_id)
+            .is_some_and(|u| u >= t1 + 300 && u > npc_until_after_oor),
+        "step_engaged_drones must renew NPC aggression timer past initial OOR command"
+    );
 
     // 3. Target switch while on cooldown clears target_a web immediately, and next step_engaged_drones applies web to target_b
     assert!(sys_handle.set_ball_position(web_bid, DVec3::new(500.0, 0.0, 0.0)).await);

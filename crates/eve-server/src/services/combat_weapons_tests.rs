@@ -2789,7 +2789,7 @@ async fn handle_weapons_special_target_ewar_surface_range_gate_1247() {
         0
     );
     assert!(ctx.crimewatch.read().unwrap().get_aggression(char_id, other_char_id, ctx.now_unix()).is_none());
-    assert!(with_combat_runtime(&ctx, |rt| rt.npc_timers.get(&char_id).copied()).is_none());
+    assert!(crate::services::combat_crimewatch::npc_timer_until(&ctx, char_id).is_none());
 
     // 2. Within surface range (34_650m <= 35_000m, center 41_500m) succeeds through is_special_target dispatch
     let in_ok = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(

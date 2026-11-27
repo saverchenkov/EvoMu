@@ -63,7 +63,7 @@ use crate::router::notify_registry::{
     OnSafeLogoffTimerStarted,
 };
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+use crate::services::combat_crimewatch::with_combat_runtime;
 pub use eve_db::{
     AbyssalPersistedSession, DisconnectedShipEntry, InventoryFlag, PersistedCombatHp,
     PersistedSpaceObjectMeta, SafeLogoffEntry, SelfDestructPersistedEntry, Sp6PersistedState,
@@ -1209,11 +1209,14 @@ pub fn active_timers_for_char(
             (0, 0, 0)
         }
     };
-    let rt_npc = with_combat_runtime(ctx, |rt| {
-        rt.npc_timers.get(&char_id).copied().unwrap_or(0)
-    });
-    let (sp_weap, sp_npc, sp_pvp, sp_crim) = with_sp6_state(&ctx.db, |st| {
+    let (rt_npc, sp_weap, sp_npc, sp_pvp, sp_crim) = ctx.db.with_snapshot(|snap| {
+        let st = &snap.sp6_lifecycle;
         (
+            snap.combat_crimewatch_state
+                .npc_timers
+                .get(&char_id)
+                .copied()
+                .unwrap_or(0),
             st.weapon_timers_until.get(&char_id).copied().unwrap_or(0),
             st.npc_timers_until.get(&char_id).copied().unwrap_or(0),
             st.pvp_timers_until.get(&char_id).copied().unwrap_or(0),
@@ -1408,11 +1411,15 @@ pub fn record_npc_aggression_timer(ctx: &ServerContext, char_id: i64, now_unix: 
         return;
     }
     let npc_until = now_unix.saturating_add(NPC_TIMER_SECS);
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.npc_timers.insert(char_id, npc_until);
-    });
-    with_mut_sp6_state(&ctx.db, |st| {
-        st.npc_timers_until.insert(char_id, npc_until);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .npc_timers
+            .insert(char_id, npc_until);
+        snap.sp6_lifecycle
+            .as_inner_mut()
+            .npc_timers_until
+            .insert(char_id, npc_until);
     });
     let _ = maybe_abort_safe_logoff_on_action(ctx, char_id, "SAFE_LOGOFF_ABORT_AGGRESSION");
     crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);

@@ -4,7 +4,9 @@ use super::super::cycle_ops::*;
 use super::super::*;
 use super::{make_drone_test_ctx, make_fighter_item, make_fighter_type};
 use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, seed_npc_entity};
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{
+    set_char_drone_settings, DroneBehaviorSettings, ExtendedNpcEntity,
+};
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, TargetLock};
@@ -425,9 +427,14 @@ async fn step_engaged_drones_and_auto_aggression_cloaked_tethered_missing_and_de
     d_ecm.damage_vector = DamageVector::default();
     d_ecm.ecm_strength = 500.0;
     crate::services::drone_test_helpers::seed_active_drone(&ctx, d_ecm.clone());
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_settings.entry(char_id).or_default().aggressive = true;
-    });
+    set_char_drone_settings(
+        &ctx,
+        char_id,
+        DroneBehaviorSettings {
+            aggressive: true,
+            focus_fire: true,
+        },
+    );
     sys_handle
         .set_drone_next_ready_unix(d_ecm.ball_id, 0)
         .await

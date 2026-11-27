@@ -37,18 +37,25 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now + 300));
 
     // NPC timer exact boundary: now_unix < exp vs now_unix == exp
-    assert!(!rt.is_npc_timer_active(101, now));
-    rt.trigger_npc_timer(101, now);
-    assert_eq!(rt.npc_timers[&101], now + 300);
-    assert!(rt.is_npc_timer_active(101, now + 299));
-    assert!(!rt.is_npc_timer_active(101, now + 300));
+    let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    assert!(!is_npc_timer_active(&ctx, char_id, now));
+    assert_eq!(npc_timer_until(&ctx, char_id), None);
+    trigger_npc_timer(&ctx, char_id, now);
+    assert_eq!(npc_timer_until(&ctx, char_id), Some(now + 300));
+    assert!(is_npc_timer_active(&ctx, char_id, now + 299));
+    assert!(!is_npc_timer_active(&ctx, char_id, now + 300));
 
-    // Full sync_from_persisted <-> to_persisted roundtrip across all safety levels & collections
+    // Full sync_from_persisted <-> to_persisted_preserving roundtrip across DB-owned & runtime collections
     let mut p = PersistedCombatCrimewatchState::default();
     p.safety_levels.extend([(1, 0), (2, 1), (3, 2), (4, 99)]);
     p.drone_settings.insert(1, (false, true));
     p.limited_engagements.insert(1, HashMap::from([(2, now + 120)]));
     p.npc_timers.insert(1, now + 60);
+    p.crimewatch_timer_states
+        .insert(1, (101, 201, 401, 300, 500));
+    p.crimewatch_timer_triggered_at
+        .insert(1, [now, now, now, 0, 0]);
+    p.npc_sec_gain_intervals.insert((1, 5), (now, 10_000.0));
     p.disapproval_flags.insert(2, now + 180);
     p.duel_challenges.insert((1, 2), now + 45);
     p.corp_aggression_settings.insert(98_000_001, true);
@@ -63,13 +70,16 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&2]), SafetyLevel::Yellow);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&3]), SafetyLevel::Green);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&4]), SafetyLevel::Green);
-    assert!(!rt.drone_settings[&1].aggressive && rt.drone_settings[&1].focus_fire);
+    assert_eq!(rt.disapproval_flags[&2], now + 180);
 
     let out = rt.to_persisted_preserving(&p);
     assert_eq!((out.safety_levels[&1], out.safety_levels[&2], out.safety_levels[&3]), (0, 1, 2));
     assert_eq!(out.drone_settings[&1], (false, true));
     assert_eq!(out.limited_engagements[&1][&2], now + 120);
     assert_eq!((out.npc_timers[&1], out.disapproval_flags[&2]), (now + 60, now + 180));
+    assert_eq!(out.crimewatch_timer_states[&1], (101, 201, 401, 300, 500));
+    assert_eq!(out.crimewatch_timer_triggered_at[&1], [now, now, now, 0, 0]);
+    assert_eq!(out.npc_sec_gain_intervals[&(1, 5)], (now, 10_000.0));
     assert_eq!(out.duel_challenges[&(1, 2)], now + 45);
     assert!(out.corp_aggression_settings[&98_000_001]);
     assert!((out.player_bounty_pool[&2] - 5_000_000.0).abs() < 1e-6);
@@ -630,12 +640,12 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
     // Explicit `&mut WorldStateSnapshot` runtime mutation inside `ctx.db.with_mut_snapshot` commits cleanly and survives subsequent reads.
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().security_status = 3.5;
-        snap.combat_crimewatch_state.npc_timers.insert(char_id, 100);
+        snap.combat_crimewatch_state.disapproval_flags.insert(char_id, 100);
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.npc_timers.insert(char_id, 999);
+            rt.disapproval_flags.insert(char_id, 999);
         });
     });
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.npc_timers[&char_id]), 999);
+    assert_eq!(with_combat_runtime(&ctx, |rt| rt.disapproval_flags[&char_id]), 999);
 }
 
 #[tokio::test]

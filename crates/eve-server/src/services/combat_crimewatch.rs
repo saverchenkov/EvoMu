@@ -289,6 +289,51 @@ impl Default for DroneBehaviorSettings {
     }
 }
 
+/// Returns a character's persisted [`DroneBehaviorSettings`] from SQLite snapshot storage.
+#[inline]
+pub fn char_drone_settings(ctx: &ServerContext, char_id: i64) -> DroneBehaviorSettings {
+    ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .drone_settings
+            .get(&char_id)
+            .map(|&(aggressive, focus_fire)| DroneBehaviorSettings { aggressive, focus_fire })
+            .unwrap_or_default()
+    })
+}
+
+/// Persists a character's [`DroneBehaviorSettings`] directly in SQLite snapshot storage.
+#[inline]
+pub fn set_char_drone_settings(ctx: &ServerContext, char_id: i64, settings: DroneBehaviorSettings) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .drone_settings
+            .insert(char_id, (settings.aggressive, settings.focus_fire));
+    });
+}
+
+/// Returns a character's persisted NPC aggression timer expiry (`unix_secs`), if set.
+#[inline]
+pub fn npc_timer_until(ctx: &ServerContext, char_id: i64) -> Option<u64> {
+    ctx.db
+        .with_snapshot(|snap| snap.combat_crimewatch_state.npc_timers.get(&char_id).copied())
+}
+
+/// Returns `true` when `char_id` has an active NPC aggression timer (`now_unix < exp`) in DB state.
+#[inline]
+pub fn is_npc_timer_active(ctx: &ServerContext, char_id: i64, now_unix: u64) -> bool {
+    npc_timer_until(ctx, char_id).is_some_and(|exp| now_unix < exp)
+}
+
+/// Sets or refreshes `char_id`'s 300s NPC aggression timer directly in SQLite snapshot storage.
+#[inline]
+pub fn trigger_npc_timer(ctx: &ServerContext, char_id: i64, now_unix: u64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .npc_timers
+            .insert(char_id, now_unix.saturating_add(300));
+    });
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedNpcEntity {
     pub ball_id: i64,
@@ -352,13 +397,8 @@ pub struct CombatRuntimeState {
     pub self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
     pub self_destruct_generations: HashMap<i64, u64>,
     pub sec_status_transactions: HashMap<i64, Vec<SecStatusTransaction>>,
-    pub corp_aggression_settings: HashMap<i64, bool>,
     pub disapproval_flags: HashMap<i64, u64>,
     pub sentry_gun_aggression: HashMap<(u32, i64), SentryAggressionState>,
-    pub npc_timers: HashMap<i64, u64>,
-    pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
-    pub crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
-    pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
@@ -368,7 +408,6 @@ pub struct CombatRuntimeState {
     pub destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
     pub ci_sentry_deployed_systems: std::collections::HashSet<u32>,
     pub npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
-    pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
     pub self_destruct_sim_remaining_secs: HashMap<i64, f64>,
     pub gm_logi_soaks: HashMap<u32, crate::services::gm_soak_commands::GmLogiSoakState>,
     pub gm_deadwarps: HashMap<i64, crate::services::gm_soak_commands::GmDeadwarpState>,
@@ -394,8 +433,6 @@ struct PersistedCombatExtendedPayload {
     #[serde(default)]
     self_destruct_generations: HashMap<i64, u64>,
     sentry_gun_aggression: Vec<((u32, i64), SentryAggressionState)>,
-    crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
-    crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
     npc_entities: HashMap<i64, ExtendedNpcEntity>,
     encounter_waves: HashMap<u32, EncounterWaveDirector>,
     behavior_debugging_active: std::collections::HashSet<i64>,
@@ -405,7 +442,6 @@ struct PersistedCombatExtendedPayload {
     destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
     ci_sentry_deployed_systems: std::collections::HashSet<u32>,
     npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
-    npc_sec_gain_intervals: Vec<((i64, i32), (u64, f64))>,
     self_destruct_sim_remaining_secs: HashMap<i64, f64>,
 }
 
@@ -537,16 +573,6 @@ impl CombatRuntimeState {
         }
     }
 
-    pub fn trigger_npc_timer(&mut self, char_id: i64, now_unix: u64) {
-        self.npc_timers.insert(char_id, now_unix.saturating_add(300));
-    }
-
-    pub fn is_npc_timer_active(&self, char_id: i64, now_unix: u64) -> bool {
-        self.npc_timers
-            .get(&char_id)
-            .is_some_and(|&exp| now_unix < exp)
-    }
-
     /// Returns the monotonic self-destruct generation counter for `ship_id` (`0` if never set) (`#1174`).
     pub fn self_destruct_generation(&self, ship_id: i64) -> u64 {
         self.self_destruct_generations.get(&ship_id).copied().unwrap_or(0)
@@ -567,22 +593,7 @@ impl CombatRuntimeState {
 
     pub fn sync_core_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
         self.sec_status_transactions = p.sec_status_transactions.clone();
-        self.drone_settings = p
-            .drone_settings
-            .iter()
-            .map(|(&cid, &(aggressive, focus_fire))| {
-                (
-                    cid,
-                    DroneBehaviorSettings {
-                        aggressive,
-                        focus_fire,
-                    },
-                )
-            })
-            .collect();
-        self.npc_timers = p.npc_timers.clone();
         self.disapproval_flags = p.disapproval_flags.clone();
-        self.corp_aggression_settings = p.corp_aggression_settings.clone();
     }
 
     pub fn sync_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
@@ -594,8 +605,6 @@ impl CombatRuntimeState {
             self.self_destruct_countdowns.clear();
             self.self_destruct_generations.clear();
             self.sentry_gun_aggression.clear();
-            self.crimewatch_timer_states.clear();
-            self.crimewatch_timer_triggered_at.clear();
             self.npc_entities.clear();
             self.encounter_waves.clear();
             self.behavior_debugging_active.clear();
@@ -605,7 +614,6 @@ impl CombatRuntimeState {
             self.destroyed_npc_cache.clear();
             self.ci_sentry_deployed_systems.clear();
             self.npc_scrambled_ships.clear();
-            self.npc_sec_gain_intervals.clear();
             self.self_destruct_sim_remaining_secs.clear();
         } else if let Ok(ext) =
             serde_json::from_str::<PersistedCombatExtendedPayload>(&p.extended_runtime_json)
@@ -615,8 +623,6 @@ impl CombatRuntimeState {
             self.self_destruct_countdowns = ext.self_destruct_countdowns;
             self.self_destruct_generations = ext.self_destruct_generations;
             self.sentry_gun_aggression = ext.sentry_gun_aggression.into_iter().collect();
-            self.crimewatch_timer_states = ext.crimewatch_timer_states;
-            self.crimewatch_timer_triggered_at = ext.crimewatch_timer_triggered_at;
             self.npc_entities = ext.npc_entities;
             self.encounter_waves = ext.encounter_waves;
             self.behavior_debugging_active = ext.behavior_debugging_active;
@@ -627,7 +633,6 @@ impl CombatRuntimeState {
             self.destroyed_npc_cache = ext.destroyed_npc_cache;
             self.ci_sentry_deployed_systems = ext.ci_sentry_deployed_systems;
             self.npc_scrambled_ships = ext.npc_scrambled_ships;
-            self.npc_sec_gain_intervals = ext.npc_sec_gain_intervals.into_iter().collect();
             self.self_destruct_sim_remaining_secs = ext.self_destruct_sim_remaining_secs;
         }
     }
@@ -639,8 +644,6 @@ impl CombatRuntimeState {
             || !self.self_destruct_generations.is_empty()
             || !self.self_destruct_sim_remaining_secs.is_empty()
             || !self.sentry_gun_aggression.is_empty()
-            || !self.crimewatch_timer_states.is_empty()
-            || !self.crimewatch_timer_triggered_at.is_empty()
             || !self.npc_entities.is_empty()
             || !self.encounter_waves.is_empty()
             || !self.behavior_debugging_active.is_empty()
@@ -650,7 +653,6 @@ impl CombatRuntimeState {
             || !self.destroyed_npc_cache.is_empty()
             || !self.ci_sentry_deployed_systems.is_empty()
             || !self.npc_scrambled_ships.is_empty()
-            || !self.npc_sec_gain_intervals.is_empty()
     }
 
     fn encode_extended_runtime_json_preserving(&self, existing_json: &str) -> String {
@@ -680,8 +682,6 @@ impl CombatRuntimeState {
                     .iter()
                     .map(|(k, v)| (*k, v.clone()))
                     .collect(),
-                crimewatch_timer_states: self.crimewatch_timer_states.clone(),
-                crimewatch_timer_triggered_at: self.crimewatch_timer_triggered_at.clone(),
                 npc_entities: self.npc_entities.clone(),
                 encounter_waves: self.encounter_waves.clone(),
                 behavior_debugging_active: self.behavior_debugging_active.clone(),
@@ -695,16 +695,10 @@ impl CombatRuntimeState {
                 destroyed_npc_cache: self.destroyed_npc_cache.clone(),
                 ci_sentry_deployed_systems: self.ci_sentry_deployed_systems.clone(),
                 npc_scrambled_ships: self.npc_scrambled_ships.clone(),
-                npc_sec_gain_intervals: self
-                    .npc_sec_gain_intervals
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect(),
                 self_destruct_sim_remaining_secs: self.self_destruct_sim_remaining_secs.clone(),
             };
             payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);
             payload.authorized_shipping_storage.sort_unstable();
-            payload.npc_sec_gain_intervals.sort_by_key(|(k, _)| *k);
             serde_json::to_string(&payload).unwrap_or_default()
         } else {
             String::new()
@@ -714,14 +708,7 @@ impl CombatRuntimeState {
     /// Writes only fields still owned by `CombatRuntimeState` onto `dst`, preserving DB-owned fields.
     pub fn apply_runtime_fields_to_persisted(&self, dst: &mut eve_db::PersistedCombatCrimewatchState) {
         dst.sec_status_transactions = self.sec_status_transactions.clone();
-        dst.drone_settings = self
-            .drone_settings
-            .iter()
-            .map(|(&cid, d)| (cid, (d.aggressive, d.focus_fire)))
-            .collect();
-        dst.npc_timers = self.npc_timers.clone();
         dst.disapproval_flags = self.disapproval_flags.clone();
-        dst.corp_aggression_settings = self.corp_aggression_settings.clone();
         dst.extended_runtime_json =
             self.encode_extended_runtime_json_preserving(&dst.extended_runtime_json);
     }
@@ -927,8 +914,6 @@ fn merge_extended_payload_3way(
         self_destruct_countdowns,
         self_destruct_generations,
         sentry_gun_aggression: merge_pair_vec_3way(&base.sentry_gun_aggression, &db.sentry_gun_aggression, &ram.sentry_gun_aggression),
-        crimewatch_timer_states: merge_map_3way(&base.crimewatch_timer_states, &db.crimewatch_timer_states, &ram.crimewatch_timer_states),
-        crimewatch_timer_triggered_at: merge_map_3way(&base.crimewatch_timer_triggered_at, &db.crimewatch_timer_triggered_at, &ram.crimewatch_timer_triggered_at),
         npc_entities: merge_map_3way(&base.npc_entities, &db.npc_entities, &ram.npc_entities),
         encounter_waves: merge_map_3way(&base.encounter_waves, &db.encounter_waves, &ram.encounter_waves),
         behavior_debugging_active: merge_set_3way(&base.behavior_debugging_active, &db.behavior_debugging_active, &ram.behavior_debugging_active),
@@ -938,7 +923,6 @@ fn merge_extended_payload_3way(
         destroyed_npc_cache: merge_map_3way(&base.destroyed_npc_cache, &db.destroyed_npc_cache, &ram.destroyed_npc_cache),
         ci_sentry_deployed_systems: merge_set_3way(&base.ci_sentry_deployed_systems, &db.ci_sentry_deployed_systems, &ram.ci_sentry_deployed_systems),
         npc_scrambled_ships: merge_map_3way(&base.npc_scrambled_ships, &db.npc_scrambled_ships, &ram.npc_scrambled_ships),
-        npc_sec_gain_intervals: merge_pair_vec_3way(&base.npc_sec_gain_intervals, &db.npc_sec_gain_intervals, &ram.npc_sec_gain_intervals),
         self_destruct_sim_remaining_secs,
     }
 }
@@ -975,12 +959,15 @@ fn merge_persisted_3way(
     eve_db::PersistedCombatCrimewatchState {
         sec_status_transactions: merge_map_3way(&base.sec_status_transactions, &db.sec_status_transactions, &ram.sec_status_transactions),
         safety_levels: db.safety_levels.clone(),
-        drone_settings: merge_map_3way(&base.drone_settings, &db.drone_settings, &ram.drone_settings),
+        drone_settings: db.drone_settings.clone(),
         limited_engagements: db.limited_engagements.clone(),
-        npc_timers: merge_map_3way(&base.npc_timers, &db.npc_timers, &ram.npc_timers),
+        npc_timers: db.npc_timers.clone(),
+        crimewatch_timer_states: db.crimewatch_timer_states.clone(),
+        crimewatch_timer_triggered_at: db.crimewatch_timer_triggered_at.clone(),
+        npc_sec_gain_intervals: db.npc_sec_gain_intervals.clone(),
         disapproval_flags: merge_map_3way(&base.disapproval_flags, &db.disapproval_flags, &ram.disapproval_flags),
         duel_challenges: db.duel_challenges.clone(),
-        corp_aggression_settings: merge_map_3way(&base.corp_aggression_settings, &db.corp_aggression_settings, &ram.corp_aggression_settings),
+        corp_aggression_settings: db.corp_aggression_settings.clone(),
         player_bounty_pool: db.player_bounty_pool.clone(),
         bounty_contributions: db.bounty_contributions.clone(),
         bounty_hunter_claimed: db.bounty_hunter_claimed.clone(),

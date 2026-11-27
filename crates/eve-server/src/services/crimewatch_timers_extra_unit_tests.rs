@@ -158,8 +158,12 @@ async fn crimewatch_timer_notifications_action_restrictions_and_sentry_grid() {
         st.pvp_timer_until_unix = now + 900;
         st.suspect_flag_until_unix = now + 900;
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .npc_timers
+            .insert(char_id, now + 300);
+    });
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.insert(char_id, now + 300);
         rt.disapproval_flags.insert(char_id, now + 900);
     });
     emit_crimewatch_timer_notifications(&ctx, char_id, now);
@@ -172,8 +176,10 @@ async fn crimewatch_timer_notifications_action_restrictions_and_sentry_grid() {
     }
     emit_crimewatch_timer_notifications(&ctx, char_id, now + 20);
     ctx.crimewatch.write().unwrap().states.clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state.as_inner_mut().npc_timers.clear();
+    });
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.clear();
         rt.disapproval_flags.clear();
     });
     emit_crimewatch_timer_notifications(&ctx, char_id, now + 1_000);

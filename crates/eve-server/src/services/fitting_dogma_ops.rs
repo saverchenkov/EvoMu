@@ -1047,21 +1047,14 @@ pub(crate) async fn handle_dogma_ops(
                 None => true,
             };
 
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.combat_crimewatch_state
-                    .drone_settings
-                    .insert(char_id, (aggressive, focus_fire));
-            });
-
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.drone_settings.insert(
-                    char_id,
-                    crate::services::combat_crimewatch::DroneBehaviorSettings {
-                        aggressive,
-                        focus_fire,
-                    },
-                );
-            });
+            crate::services::combat_crimewatch::set_char_drone_settings(
+                ctx,
+                char_id,
+                crate::services::combat_crimewatch::DroneBehaviorSettings {
+                    aggressive,
+                    focus_fire,
+                },
+            );
 
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),

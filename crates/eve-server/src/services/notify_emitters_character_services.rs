@@ -1578,10 +1578,15 @@ pub(crate) fn dispatch_cleartimers_slash(
         }
     }
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.npc_timers.remove(&target_cid);
         rt.disapproval_flags.remove(&target_cid);
     });
     let cleared_engagements: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+        if snap.combat_crimewatch_state.npc_timers.contains_key(&target_cid) {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .npc_timers
+                .remove(&target_cid);
+        }
         let has_any = snap
             .combat_crimewatch_state
             .limited_engagements
@@ -1618,9 +1623,15 @@ pub(crate) fn dispatch_cleartimers_slash(
             OnCrimewatchEngagementEnded { other_char_id: target_id },
         );
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.crimewatch_timer_states.remove(&target_cid);
-        rt.crimewatch_timer_triggered_at.remove(&target_cid);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        if cw.crimewatch_timer_states.contains_key(&target_cid)
+            || cw.crimewatch_timer_triggered_at.contains_key(&target_cid)
+        {
+            let cw_mut = snap.combat_crimewatch_state.as_inner_mut();
+            cw_mut.crimewatch_timer_states.remove(&target_cid);
+            cw_mut.crimewatch_timer_triggered_at.remove(&target_cid);
+        }
     });
     Ok(PyRep::keyval([
         ("command", PyRep::String(inv.raw.to_string())),

@@ -1167,17 +1167,14 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
             ch.jump_cooldown_until_unix = now + 600;
             ch.jump_fatigue_until_unix = now + 7_200;
         }
-        snap.combat_crimewatch_state
-            .as_inner_mut()
-            .limited_engagements
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.limited_engagements
             .entry(char_id)
             .or_default()
             .insert(90_000_002, now + 300);
-    });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.insert(char_id, now + 300);
-        rt.crimewatch_timer_states.insert(char_id, (1, 1, 1, 0, 0));
-        rt.crimewatch_timer_triggered_at.insert(char_id, [now; 5]);
+        cw.npc_timers.insert(char_id, now + 300);
+        cw.crimewatch_timer_states.insert(char_id, (1, 1, 1, 0, 0));
+        cw.crimewatch_timer_triggered_at.insert(char_id, [now; 5]);
     });
 
     let clear_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/cleartimers")
@@ -1191,15 +1188,11 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
         assert_eq!(ch.jump_fatigue_minutes, 0.0);
         assert_eq!(ch.jump_cooldown_until_unix, 0);
         assert_eq!(ch.jump_fatigue_until_unix, 0);
-        assert!(!snap
-            .combat_crimewatch_state
-            .limited_engagements
-            .contains_key(&char_id));
-    });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        assert!(!rt.npc_timers.contains_key(&char_id));
-        assert!(!rt.crimewatch_timer_states.contains_key(&char_id));
-        assert!(!rt.crimewatch_timer_triggered_at.contains_key(&char_id));
+        let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.limited_engagements.contains_key(&char_id));
+        assert!(!cw.npc_timers.contains_key(&char_id));
+        assert!(!cw.crimewatch_timer_states.contains_key(&char_id));
+        assert!(!cw.crimewatch_timer_triggered_at.contains_key(&char_id));
     });
 }
 
@@ -1524,9 +1517,10 @@ fn gm_bridge_batch3_slash_commands_target_explicit_player_char_id() {
         .acquire_online_lock(2, 502, Some(gm_cid), true, now);
     crate::services::space_destiny::record_session_change_timer(&ctx, gm_cid, now, gm_sys, 0, "gm");
     crate::services::space_destiny::record_session_change_timer(&ctx, player_cid, now, player_sys, 0, "pl");
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.insert(player_cid, now + 300);
-        rt.npc_timers.insert(gm_cid, now + 300);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.npc_timers.insert(player_cid, now + 300);
+        cw.npc_timers.insert(gm_cid, now + 300);
     });
     let _ = ctx.drain_notifications_for_char(gm_cid);
     let _ = ctx.drain_notifications_for_char(player_cid);
@@ -1594,10 +1588,8 @@ fn gm_bridge_batch3_slash_commands_target_explicit_player_char_id() {
         assert!(!snap.item_custom_names.contains_key(&(-8_800_000_i64 - player_cid)));
         assert_eq!(snap.characters[&gm_cid].jump_cooldown_until_unix, now + 600);
         assert!(snap.item_custom_names.contains_key(&(-8_800_000_i64 - gm_cid)));
-    });
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.npc_timers.contains_key(&player_cid));
-        assert!(rt.npc_timers.contains_key(&gm_cid));
+        assert!(!snap.combat_crimewatch_state.npc_timers.contains_key(&player_cid));
+        assert!(snap.combat_crimewatch_state.npc_timers.contains_key(&gm_cid));
     });
 
     let anom_res = handle_batch3_gm_slash_cmd(

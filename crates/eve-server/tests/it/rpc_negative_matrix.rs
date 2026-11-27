@@ -1173,6 +1173,10 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
         safety_level,
         duel_challenges,
         limited_engagements,
+        corp_aggression,
+        npc_timer,
+        timer_states,
+        timer_triggered,
     ) = fix.ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
         let detailed_killmail_ids = cw
@@ -1217,6 +1221,10 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
             safety_level,
             duel_challenges,
             limited_engagements,
+            cw.corp_aggression_settings.get(&CORP_B_ID).copied(),
+            cw.npc_timers.get(&CHAR_B_ID).copied(),
+            cw.crimewatch_timer_states.get(&CHAR_B_ID).copied(),
+            cw.crimewatch_timer_triggered_at.get(&CHAR_B_ID).copied(),
         )
     });
     let drone_miners_count = fix
@@ -1232,13 +1240,13 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
     .len();
     eve_server::services::combat_crimewatch::with_combat_runtime(&fix.ctx, |rt| CombatRuntimeBSig {
         duel_challenges,
-        corp_aggression: rt.corp_aggression_settings.get(&CORP_B_ID).copied(),
+        corp_aggression,
         disapproval_flag: rt.disapproval_flags.get(&CHAR_B_ID).copied(),
         safety_level,
         limited_engagements,
-        npc_timer: rt.npc_timers.get(&CHAR_B_ID).copied(),
-        timer_states: rt.crimewatch_timer_states.get(&CHAR_B_ID).copied(),
-        timer_triggered: rt.crimewatch_timer_triggered_at.get(&CHAR_B_ID).copied(),
+        npc_timer,
+        timer_states,
+        timer_triggered,
         sec_txs_len: rt.sec_status_transactions.get(&CHAR_B_ID).map_or(0, Vec::len),
         detailed_killmail_ids,
         bounty_pools,
@@ -5592,6 +5600,15 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
                     )
                 })
                 .collect::<BTreeMap<_, _>>(),
+            (
+                cw.crimewatch_timer_states.get(&CHAR_B_ID).copied(),
+                cw.crimewatch_timer_triggered_at.get(&CHAR_B_ID).copied(),
+                cw.npc_sec_gain_intervals
+                    .iter()
+                    .filter(|(&(cid, _), _)| cid == CHAR_B_ID)
+                    .map(|(&k, &(t, b))| (k, (t, b.to_bits())))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
         )
     };
     if filtered_entries_changed(

@@ -351,15 +351,14 @@ async fn step_engaged_drones_and_auto_aggression_assist_guard_destruction() {
     ecm_state.ecm_strength = 500.0;
 
     crate::services::drone_test_helpers::seed_active_drones(&ctx, [dmg_state, clk_state, ecm_state]);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_settings.insert(
-            owner_char,
-            DroneBehaviorSettings {
-                aggressive: true,
-                focus_fire: true,
-            },
-        );
-    });
+    set_char_drone_settings(
+        &ctx,
+        owner_char,
+        DroneBehaviorSettings {
+            aggressive: true,
+            focus_fire: true,
+        },
+    );
 
     // step_engaged_drones: destroys target_ship, disengages cloaked-target drone, sets drone_next_ready_unix
     step_engaged_drones(&ctx, 10_000).await;
