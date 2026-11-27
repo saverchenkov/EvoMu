@@ -483,9 +483,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             npc_pos,
         );
     npc_entity.bounty_isk = npc_entity.bounty_isk.max(10_000.0);
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.insert(700_000_001, npc_entity);
-    });
+    eve_server::combat::npc_ai::npc_test_helpers::seed_npc_entity(&ctx, npc_entity);
     let _ = hed_handle
         .spawn_ball(eve_destiny::Ball {
             id: 750_000_002,

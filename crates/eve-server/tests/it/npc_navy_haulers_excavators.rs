@@ -7,13 +7,14 @@ use crate::npc_spawns_pve::{bind_beyonce, rpc, setup_docked_pilot};
 use eve_db::{InventoryFlag, TrainedSkillRecord};
 use eve_destiny::MovementMode;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::{any_npc_entity, get_npc_entity};
 use eve_server::living_world::{
     hauler_type_for_system, ConvoyStepStatus, LivingWorldDirector, NpcArchetype,
 };
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     check_and_spawn_faction_police, destroy_specialized_npc_and_queue_bounty,
-    is_outlaw_ship_docking_refused, with_combat_runtime,
+    is_outlaw_ship_docking_refused,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -67,32 +68,28 @@ async fn test_navy_npc_faction_standing_response_and_ewar_scaling() {
     );
 
     let navy_ball_id = navy_spawned[0];
-    with_combat_runtime(&ctx, |rt| {
-        let npc = rt
-            .npc_entities
-            .get(&navy_ball_id)
-            .expect("Navy NPC entity must be active in combat runtime");
-        assert_eq!(
-            npc.archetype, "CaldariNavy",
-            "Caldari space must spawn distinct 'CaldariNavy' archetype"
-        );
-        assert_eq!(npc.faction_id, 500_001);
-        assert_eq!(npc.target_id, Some(ship_id));
-        // Authentic Caldari EWAR & warp disruption:
-        assert!(npc.scram_strength >= 2.0, "Navy must apply warp scrambler");
-        assert_eq!(npc.scram_range, 24_000.0, "Caldari Navy has 24km scram range");
-        assert_eq!(npc.web_speed_factor, -40.0);
-        // Kinetic / Thermal damage vector & scaled DPS:
-        assert!(npc.damage_vector.kinetic > 0.0);
-        assert!(npc.damage_vector.thermal > 0.0);
-        assert_eq!(npc.damage_vector.em, 0.0);
-        assert_eq!(npc.damage_vector.explosive, 0.0);
-        let total_dps = npc.damage_vector.kinetic + npc.damage_vector.thermal;
-        assert!(
-            total_dps > 240.0,
-            "DPS must be scaled up with standing deficit and highsec status (got {total_dps})"
-        );
-    });
+    let npc = get_npc_entity(&ctx, navy_ball_id)
+        .expect("Navy NPC entity must be active in combat runtime");
+    assert_eq!(
+        npc.archetype, "CaldariNavy",
+        "Caldari space must spawn distinct 'CaldariNavy' archetype"
+    );
+    assert_eq!(npc.faction_id, 500_001);
+    assert_eq!(npc.target_id, Some(ship_id));
+    // Authentic Caldari EWAR & warp disruption:
+    assert!(npc.scram_strength >= 2.0, "Navy must apply warp scrambler");
+    assert_eq!(npc.scram_range, 24_000.0, "Caldari Navy has 24km scram range");
+    assert_eq!(npc.web_speed_factor, -40.0);
+    // Kinetic / Thermal damage vector & scaled DPS:
+    assert!(npc.damage_vector.kinetic > 0.0);
+    assert!(npc.damage_vector.thermal > 0.0);
+    assert_eq!(npc.damage_vector.em, 0.0);
+    assert_eq!(npc.damage_vector.explosive, 0.0);
+    let total_dps = npc.damage_vector.kinetic + npc.damage_vector.thermal;
+    assert!(
+        total_dps > 240.0,
+        "DPS must be scaled up with standing deficit and highsec status (got {total_dps})"
+    );
 
     // 3. Pod Safety: Capsule (670) owned by pilot with <= -5.0 standing is NEVER engaged and allowed to dock
     let pod_char_id = 90_000_002i64;
@@ -110,12 +107,10 @@ async fn test_navy_npc_faction_standing_response_and_ewar_scaling() {
         .await
         .expect("Capsule undocks");
     let _pod_spawned = check_and_spawn_faction_police(&ctx, JITA_SYS).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert!(
-            !rt.npc_entities.values().any(|n| n.target_id == Some(pod_ship_id)),
-            "Empire Navy and Police must NEVER engage player capsules"
-        );
-    });
+    assert!(
+        !any_npc_entity(&ctx, |n| n.target_id == Some(pod_ship_id)),
+        "Empire Navy and Police must NEVER engage player capsules"
+    );
     assert!(
         !is_outlaw_ship_docking_refused(&ctx, JITA_SYS, pod_char_id, pod_ship_id),
         "Capsules must always be allowed to dock regardless of negative faction standing"
@@ -141,13 +136,11 @@ async fn test_navy_npc_faction_standing_response_and_ewar_scaling() {
     });
     let hek_spawned = check_and_spawn_faction_police(&ctx, hek_sys).await;
     assert!(!hek_spawned.is_empty(), "Minmatar Navy response must spawn in Hek");
-    with_combat_runtime(&ctx, |rt| {
-        let npc = rt.npc_entities.get(&hek_spawned[0]).unwrap();
-        assert_eq!(npc.archetype, "MinmatarNavy");
-        assert_eq!(npc.web_speed_factor, -65.0, "Minmatar Navy has authentic heavy -65% web");
-        assert!(npc.damage_vector.explosive > 0.0);
-        assert!(npc.damage_vector.kinetic > 0.0);
-    });
+    let npc = get_npc_entity(&ctx, hek_spawned[0]).unwrap();
+    assert_eq!(npc.archetype, "MinmatarNavy");
+    assert_eq!(npc.web_speed_factor, -65.0, "Minmatar Navy has authentic heavy -65% web");
+    assert!(npc.damage_vector.explosive > 0.0);
+    assert!(npc.damage_vector.kinetic > 0.0);
 }
 
 #[tokio::test]

@@ -9,8 +9,8 @@ use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
 use eve_server::services::pve_exploration::with_pve_exploration_reg;
 use eve_server::services::pve_hacking_sites::are_hacking_tiles_adjacent;
 use eve_server::services::wormhole_pve_escalations::sleeper_sentry_type_for_class;
@@ -435,10 +435,10 @@ fn phase1_sleeper_sentries_and_web<'a>(
                 (b.id, b.position, cs.signature_radius)
             })
             .await;
-        let (opt_range, dmg_em, dmg_thm, dmg_kin, dmg_exp) = with_combat_runtime(ctx, |rt| {
-            let e = rt.npc_entities.get(&sentry_bid).expect("sentry npc entity");
+        let (opt_range, dmg_em, dmg_thm, dmg_kin, dmg_exp) = {
+            let e = get_npc_entity(ctx, sentry_bid).expect("sentry npc entity");
             (e.optimal_range, e.damage_vector.em, e.damage_vector.thermal, e.damage_vector.kinetic, e.damage_vector.explosive)
-        });
+        };
 
         let bey_sentry = ctx.bind_object(&mut sess, "beyonce", sentry_sys as i64).unwrap();
         let dir_args = [PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)];
@@ -545,10 +545,10 @@ fn phase2_capital_escalations_and_downtime<'a>(
             .test_with_ballpark_async(|bp| bp.balls.values().find(|b| b.type_id == 37_472).unwrap().id)
             .await;
         let avenger_sig = c5_handle.get_combat_state(avenger_bid).await.unwrap().unwrap().signature_radius;
-        let (av_web, av_scram, av_neut) = with_combat_runtime(ctx, |rt| {
-            let e = rt.npc_entities.get(&avenger_bid).unwrap();
+        let (av_web, av_scram, av_neut) = {
+            let e = get_npc_entity(ctx, avenger_bid).unwrap();
             (e.web_speed_factor, e.scram_strength, e.neut_amount)
-        });
+        };
 
         let mut dread1_sess = dread1_sess_opt.unwrap();
         let c5_cel_id = ctx.sde.celestials_in_system(c5_sys).first().unwrap().celestial_id as i64;

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::combat::npc_ai::npc_test_helpers::has_npc_entity;
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
@@ -341,12 +342,7 @@ async fn capital_escalation_caps_despawn_on_grid_leave_and_auto_complete_data_si
         );
     });
     for bid in first_dread_avengers {
-        assert!(!ctx
-            .combat_ephemeral
-            .read()
-            .unwrap()
-            .npc_entities
-            .contains_key(&bid));
+        assert!(!has_npc_entity(&ctx, bid));
     }
 }
 

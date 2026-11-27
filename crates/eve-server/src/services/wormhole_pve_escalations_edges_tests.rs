@@ -3,11 +3,11 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, update_npc_entity};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
 };
-use crate::services::combat_crimewatch::{with_combat_ephemeral, with_mut_combat_ephemeral};
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta, WarpPhase};
@@ -459,10 +459,8 @@ async fn step_wormhole_pve_system_warping_cap_grid_leave_armor_attack_and_drifte
         )
         .await
         .unwrap();
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        if let Some(ent) = rt.npc_entities.get_mut(&drifter_warp_bid) {
-            ent.spawn_position = DVec3::new(42.0, 42.0, 42.0);
-        }
+    update_npc_entity(&ctx, drifter_warp_bid, |ent| {
+        ent.spawn_position = DVec3::new(42.0, 42.0, 42.0);
     });
 
     with_pve_exploration_reg(&ctx, |reg| {
@@ -501,12 +499,12 @@ async fn step_wormhole_pve_system_warping_cap_grid_leave_armor_attack_and_drifte
     for avg_id in avengers {
         assert!(sys_h.get_ball_snapshot(avg_id).await.unwrap().is_none());
     }
-    with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(
-            rt.npc_entities[&drifter_warp_bid].spawn_position,
-            DVec3::new(42.0, 42.0, 42.0)
-        );
-    });
+    assert_eq!(
+        get_npc_entity(&ctx, drifter_warp_bid)
+            .expect("drifter npc entity")
+            .spawn_position,
+        DVec3::new(42.0, 42.0, 42.0)
+    );
 }
 
 #[tokio::test]

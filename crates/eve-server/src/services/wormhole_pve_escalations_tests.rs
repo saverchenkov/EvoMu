@@ -1,4 +1,5 @@
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 
@@ -194,11 +195,8 @@ async fn r11_k12_escalation_slim_meta_sleeper_sde_stats_and_downtime_relay_clean
     });
     assert!(!wave_bids.is_empty());
 
-    {
-        let rt = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
-        let first_sleeper = rt.npc_entities.get(&wave_bids[0]).expect("sleeper entity");
-        assert!(first_sleeper.custom_cargo_loot.is_some());
-    }
+    let first_sleeper = get_npc_entity(&ctx, wave_bids[0]).expect("sleeper entity");
+    assert!(first_sleeper.custom_cargo_loot.is_some());
 
     let sys_handle = ctx.systems.get_or_spawn(wh_sys);
     let av0 = avenger_ids[0];
@@ -265,9 +263,6 @@ async fn r11_k12_escalation_slim_meta_sleeper_sde_stats_and_downtime_relay_clean
         .await;
     assert!(!has_relay);
     assert!(!has_drifter);
-    {
-        let rt = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
-        assert!(!rt.npc_entities.contains_key(&relay_bid));
-        assert!(!rt.npc_entities.contains_key(&drifter_bid));
-    }
+    assert!(!has_npc_entity(&ctx, relay_bid));
+    assert!(!has_npc_entity(&ctx, drifter_bid));
 }
