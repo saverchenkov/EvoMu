@@ -113,11 +113,12 @@ pub async fn handle(
 
         ("machoNet", "ForwardCharacterNotification") => {
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "machoNet.ForwardCharacterNotification requires GM privileges".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "machoNet.ForwardCharacterNotification",
+                    "machoNet.ForwardCharacterNotification requires GM privileges",
+                )));
             }
             let Some(char_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -131,11 +132,12 @@ pub async fn handle(
                 || session.character_id == Some(char_id)
                 || matches!(notif_name, "OnNotificationReceived" | "OnNewNotificationReceived");
             if !is_permitted {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "ForwardCharacterNotification targeting another character with unprivileged notification requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "machoNet.ForwardCharacterNotification",
+                    "ForwardCharacterNotification targeting another character with unprivileged notification requires GM role",
+                )));
             }
             let payload: Vec<PyRep> = match args.get(2) {
                 Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
@@ -181,11 +183,12 @@ pub async fn handle(
 
         ("machoNet", "SetGlobalConfigValue") => {
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "SetGlobalConfigValue requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "machoNet.SetGlobalConfigValue",
+                    "SetGlobalConfigValue requires GM role",
+                )));
             }
             let key = args
                 .first()
@@ -1218,11 +1221,12 @@ pub(crate) fn dispatch_createccpevent_slash(
     }
     let (_, cid) = ServerContext::require_character(session)?;
     if (session.role & eve_machonet::service_roles::ROLE_GMH) == 0 {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "ROLE_GMH required for /createccpevent".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GMH,
+            session.role,
+            "slash./createccpevent",
+            "ROLE_GMH required for /createccpevent",
+        ));
     }
     let mut parts = inv.rest.splitn(4, char::is_whitespace);
     let Some(dt) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {

@@ -2598,12 +2598,7 @@ pub async fn activate_homefront_acceleration_gate(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| {
-            hf_err(
-                "ShipNotInSpace",
-                format!("Ship {ship_id} is not present in solar system {sys_id}"),
-            )
-        })?;
+        .ok_or_else(|| BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "homefront_site", format!("Ship {ship_id} is not present in solar system {sys_id}")))?;
     let (_, gb) = sys_h
         .get_ball_snapshot(gate_ball_id)
         .await
@@ -2769,7 +2764,7 @@ pub async fn activate_homefront_gate_by_ball_id(
     };
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     if sys_h.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
-        return Some(Err(hf_err("ShipNotInSpace", "Active ship is not in space")));
+        return Some(Err(BridgeRpcError::ship_not_in_space(ship_id, session.character_id, Some(sys_id), "homefront_site", "Active ship is not in space")));
     }
     Some(
         activate_homefront_acceleration_gate(ctx, session, instance_id)

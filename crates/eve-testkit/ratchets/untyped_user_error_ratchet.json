@@ -50,7 +50,7 @@
     "services/pve_dungeon_cache.rs": 2,
     "services/pve_dungeon_editor.rs": 47,
     "services/pve_dungeon_runtime.rs": 10,
-    "services/pve_dungeon_runtime_rpc.rs": 6,
+    "services/pve_dungeon_runtime_rpc.rs": 5,
     "services/pve_ess_reserve_banks.rs": 1,
     "services/pve_exploration.rs": 1,
     "services/pve_hacking_board.rs": 2,

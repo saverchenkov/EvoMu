@@ -564,3 +564,7 @@ mod rpc_error_facts_t3a_tests;
 #[cfg(test)]
 #[path = "rpc_error_facts_domain_services_tests.rs"]
 mod rpc_error_facts_domain_services_tests;
+
+#[cfg(test)]
+#[path = "rpc_error_facts_services_closure_tests.rs"]
+mod rpc_error_facts_services_closure_tests;

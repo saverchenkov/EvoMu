@@ -1331,14 +1331,15 @@ pub(crate) async fn handle_public_qa_tools(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let has_gm_or_qa = session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
-            if !has_gm_or_qa {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "publicQaToolsServer.MoveMeTo requires GM/QA role".into(),
-                    client_error: None,
-                }));
+            let required_mask =
+                eve_machonet::service_roles::ROLE_GM_MASK | eve_machonet::service_roles::ROLE_QA;
+            if (session.role & required_mask) == 0 {
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    required_mask,
+                    session.role,
+                    "publicQaToolsServer.MoveMeTo",
+                    "publicQaToolsServer.MoveMeTo requires GM/QA role",
+                )));
             }
             Some(handle_qa_move_me_to(ctx, session, cid, args).await)
         }

@@ -368,11 +368,13 @@ pub(super) async fn handle_fleet_ops(
                 }));
             };
             if caller_docked {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Caller ship is docked and cannot warp".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    caller_ship_id,
+                    Some(char_id),
+                    session.solar_system_id,
+                    "fleet_warp",
+                    "Caller ship is docked and cannot warp",
+                )));
             }
             let validated = match ctx
                 .validate_ship_movement(
@@ -386,11 +388,13 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let Some(caller_ball) = validated.ball else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Caller ship is not in space".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    caller_ship_id,
+                    Some(char_id),
+                    session.solar_system_id,
+                    "fleet_warp",
+                    "Caller ship is not in space",
+                )));
             };
             if caller_ball.max_velocity <= 0.0 {
                 return Some(Err(BridgeRpcError {

@@ -289,11 +289,12 @@ pub async fn handle_gm_dungeon_editor_op(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: format!("{method} requires GM/Content role"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            format!("dungeon.{method}"),
+            format!("{method} requires GM/Content role"),
+        ));
     }
     let sys_id_opt = session.solar_system_id;
 

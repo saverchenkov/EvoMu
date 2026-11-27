@@ -33,18 +33,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-const CODE_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
+pub(super) const CODE_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
 const CODE_TARGETING_FAILED: &str = "TargetingFailed";
-const CODE_INVALID_TARGET: &str = "InvalidTarget";
+pub(super) const CODE_INVALID_TARGET: &str = "InvalidTarget";
 const CODE_OWNERSHIP_OR_LOCATION: &str = "OwnershipOrLocationViolation";
 const CODE_CONTRACT_OWNERSHIP: &str = "ContractOwnershipViolation";
 const CODE_INVALID_CONTRACT_STATE: &str = "InvalidContractState";
-const CODE_NOT_ENOUGH_CAPACITOR: &str = "NotEnoughCapacitor";
+pub(super) const CODE_NOT_ENOUGH_CAPACITOR: &str = "NotEnoughCapacitor";
 const CODE_WEAPONS_TIMER_ACTIVE: &str = "WeaponsTimerActive";
-const CODE_SHIP_IN_WARP: &str = "ShipInWarp";
-const CODE_MODULE_NOT_FOUND: &str = "ModuleNotFound";
-const CODE_INSUFFICIENT_ROLE: &str = "InsufficientRole";
-const CODE_GM_ROLE_REQUIRED: &str = "GMRoleRequired";
+pub(super) const CODE_SHIP_IN_WARP: &str = "ShipInWarp";
+pub(super) const CODE_MODULE_NOT_FOUND: &str = "ModuleNotFound";
+pub(super) const CODE_INSUFFICIENT_ROLE: &str = "InsufficientRole";
+pub(super) const CODE_GM_ROLE_REQUIRED: &str = "GMRoleRequired";
+pub(super) const CODE_FITTING_VALIDATION_FAILED: &str = "FittingValidationFailed";
 const CODE_INSUFFICIENT_ROLES: &str = "InsufficientRoles";
 
 const MIGRATED_LIVE_ERROR_FILES: &[&str] = &[
@@ -74,7 +75,7 @@ const MIGRATED_LIVE_ERROR_FILES: &[&str] = &[
     "sp6_lifecycle.rs",
 ];
 
-const AMENDED_LIVE_CLIENT_ERROR_CODES: &[&str] = &[
+pub(super) const AMENDED_LIVE_CLIENT_ERROR_CODES: &[&str] = &[
     "QuantumCoreRequired",
     "ShipAlreadyInWarp",
     "ShipInWarp",
@@ -106,7 +107,7 @@ const AMENDED_LIVE_CLIENT_ERROR_CODES: &[&str] = &[
     "UserError: GM_InsufficientRole",
 ];
 
-const AMENDED_RAW_USER_KEYS: &[&str] = &[
+pub(super) const AMENDED_RAW_USER_KEYS: &[&str] = &[
     "CantShipNotPresent",
     "ItemNotFound",
     "ModuleNoLongerPresentForCharges",
@@ -196,7 +197,7 @@ fn skip_raw_string_literal(bytes: &[u8], start: usize) -> Option<usize> {
     Some(bytes.len())
 }
 
-fn strip_rust_comments_keep_strings(src: &str) -> String {
+pub(super) fn strip_rust_comments_keep_strings(src: &str) -> String {
     let bytes = src.as_bytes();
     let n = bytes.len();
     let mut out = Vec::with_capacity(n);
@@ -343,7 +344,7 @@ fn find_attributed_item_end(bytes: &[u8], start: usize) -> usize {
     n
 }
 
-fn strip_cfg_test_items_preserving_strings(no_comments: &str) -> String {
+pub(super) fn strip_cfg_test_items_preserving_strings(no_comments: &str) -> String {
     let mut bytes = no_comments.as_bytes().to_vec();
     let n = bytes.len();
     let mut i = 0usize;
@@ -403,14 +404,18 @@ fn extract_delimited_span(bytes: &[u8], open_idx: usize, open_ch: u8, close_ch: 
     i
 }
 
-fn collect_raw_amended_sites_in_production_src(rel_file: &str, src: &str) -> Vec<String> {
+pub(super) fn collect_raw_amended_sites_with_helpers(
+    rel_file: &str,
+    src: &str,
+    extra_helpers: &[&str],
+) -> Vec<String> {
     let no_comments = strip_rust_comments_keep_strings(src);
     let prod = strip_cfg_test_items_preserving_strings(&no_comments);
     let bytes = prod.as_bytes();
     let n = bytes.len();
     let mut hits = Vec::new();
 
-    let patterns: &[(&str, u8, u8, bool)] = &[
+    let mut patterns: Vec<(&str, u8, u8, bool)> = vec![
         ("BridgeRpcError", b'{', b'}', false),
         ("BridgeRpcError::with_client_error", b'(', b')', true),
         ("BridgeRpcError::from_user_key", b'(', b')', true),
@@ -421,8 +426,11 @@ fn collect_raw_amended_sites_in_production_src(rel_file: &str, src: &str) -> Vec
         ("hacking_client_err", b'(', b')', false),
         ("session_attr_err", b'(', b')', false),
     ];
+    for &helper in extra_helpers {
+        patterns.push((helper, b'(', b')', false));
+    }
 
-    for &(pat, open_ch, close_ch, check_raw_user_keys) in patterns {
+    for (pat, open_ch, close_ch, check_raw_user_keys) in patterns {
         let mut cursor = 0usize;
         while let Some(rel) = prod[cursor..].find(pat) {
             let start = cursor + rel;
@@ -454,16 +462,24 @@ fn collect_raw_amended_sites_in_production_src(rel_file: &str, src: &str) -> Vec
             if pat == "BridgeRpcError" && open_ch == b'{' && !snippet.contains("code:") {
                 continue;
             }
+            let has_typed_rejection = pat == "BridgeRpcError::with_client_error"
+                && (snippet.contains("ClientError::rejected(")
+                    || snippet.contains("ClientError::Rejected"));
             let line_no = prod[..start].bytes().filter(|&b| b == b'\n').count() + 1;
-            for code in AMENDED_LIVE_CLIENT_ERROR_CODES {
-                let quoted = format!("\"{code}\"");
-                if snippet.contains(&quoted) {
-                    hits.push(format!("{rel_file}:{line_no} raw {pat} uses {quoted}"));
+            if !has_typed_rejection {
+                for code in AMENDED_LIVE_CLIENT_ERROR_CODES {
+                    let quoted = format!("\"{code}\"");
+                    if snippet.contains(&quoted) {
+                        hits.push(format!("{rel_file}:{line_no} raw {pat} uses {quoted}"));
+                    }
                 }
             }
-            if check_raw_user_keys
+            if !has_typed_rejection
+                && check_raw_user_keys
                 && (snippet.contains("ClientError::user(")
                     || snippet.contains("ClientError::user_with_args(")
+                    || snippet.contains("ClientError::User")
+                    || snippet.contains("ClientError::CustomInfo(")
                     || pat == "BridgeRpcError::from_user_key")
             {
                 for key in AMENDED_RAW_USER_KEYS {
@@ -486,7 +502,11 @@ fn collect_raw_amended_sites_in_production_src(rel_file: &str, src: &str) -> Vec
     hits
 }
 
-fn assert_wire_mapping_has_no_custom_info_fallback(
+fn collect_raw_amended_sites_in_production_src(rel_file: &str, src: &str) -> Vec<String> {
+    collect_raw_amended_sites_with_helpers(rel_file, src, &[])
+}
+
+pub(super) fn assert_wire_mapping_has_no_custom_info_fallback(
     service: &str,
     method: &str,
     char_id: Option<i64>,
@@ -511,7 +531,7 @@ fn assert_wire_mapping_has_no_custom_info_fallback(
     mapping.client_error
 }
 
-fn assert_rejected_wire_facts<'a>(
+pub(super) fn assert_rejected_wire_facts<'a>(
     service: &str,
     method: &str,
     char_id: Option<i64>,
@@ -535,7 +555,7 @@ fn assert_rejected_wire_facts<'a>(
     }
 }
 
-fn assert_ship_not_in_space(
+pub(super) fn assert_ship_not_in_space(
     service: &str,
     method: &str,
     char_id: Option<i64>,
@@ -596,7 +616,7 @@ fn assert_ownership_violation(
     );
 }
 
-async fn invoke_rpc_entry(
+pub(super) async fn invoke_rpc_entry(
     entries: &[RpcEntry],
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -622,7 +642,7 @@ async fn invoke_rpc_entry(
     }
 }
 
-fn seed_char_in_ctx(
+pub(super) fn seed_char_in_ctx(
     ctx: &ServerContext,
     uid: u64,
     char_id: i64,
@@ -644,7 +664,7 @@ fn seed_char_in_ctx(
     });
 }
 
-fn upsert_test_type(
+pub(super) fn upsert_test_type(
     sde: &mut Arc<SdeRegistry>,
     base_tid: u32,
     new_tid: u32,
@@ -672,7 +692,7 @@ fn upsert_test_type(
     reg.types.insert(new_tid, rec);
 }
 
-fn ensure_nullsec_system(sde: &mut Arc<SdeRegistry>) -> u32 {
+pub(super) fn ensure_nullsec_system(sde: &mut Arc<SdeRegistry>) -> u32 {
     if let Some(sys_id) = sde
         .solar_systems
         .values()

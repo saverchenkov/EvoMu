@@ -887,15 +887,21 @@ impl ServerContext {
             .map(|entry| entry.access)
     }
 
-    fn insufficient_role_error(service: &str, method: &str, requirement: &str) -> BridgeRpcError {
-        const ERR_INSUFFICIENT_ROLE: &str = "InsufficientRole";
-        BridgeRpcError {
-            code: ERR_INSUFFICIENT_ROLE.into(),
-            message: format!(
+    fn insufficient_role_error(
+        required_role_mask: u64,
+        actual_role_mask: u64,
+        service: &str,
+        method: &str,
+        requirement: &str,
+    ) -> BridgeRpcError {
+        BridgeRpcError::insufficient_role(
+            required_role_mask,
+            actual_role_mask,
+            format!("{service}.{method}"),
+            format!(
                 "UserError: GM_InsufficientRole: {service}.{method} requires {requirement}"
             ),
-            client_error: None,
-        }
+        )
     }
 
     fn extract_moniker_object_id(args: &[PyRep], rpc_name: &str) -> Result<i64, BridgeRpcError> {
@@ -1338,14 +1344,14 @@ impl ServerContext {
                 }
                 RpcCallerClass::SeniorGm => {
                     let _ = Self::require_auth(session)?;
-                    if (session.role
-                        & (eve_machonet::service_roles::ROLE_GMH
-                            | eve_machonet::service_roles::ROLE_GML
-                            | eve_machonet::service_roles::ROLE_GMS
-                            | eve_machonet::service_roles::ROLE_ADMIN))
-                        == 0
-                    {
+                    let required_mask = eve_machonet::service_roles::ROLE_GMH
+                        | eve_machonet::service_roles::ROLE_GML
+                        | eve_machonet::service_roles::ROLE_GMS
+                        | eve_machonet::service_roles::ROLE_ADMIN;
+                    if (session.role & required_mask) == 0 {
                         return Err(Self::insufficient_role_error(
+                            required_mask,
+                            session.role,
                             effective_service,
                             method,
                             "ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN",
@@ -1354,12 +1360,11 @@ impl ServerContext {
                 }
                 RpcCallerClass::Gm => {
                     let _ = Self::require_auth(session)?;
-                    let slash_subrole = effective_service == "slash"
-                        && (session.role
-                            & (eve_machonet::service_roles::ROLE_QA
-                                | eve_machonet::service_roles::ROLE_SPAWN
-                                | eve_machonet::service_roles::ROLE_ROLEADMIN))
-                            != 0;
+                    const SLASH_SUBROLE_MASK: u64 = eve_machonet::service_roles::ROLE_QA
+                        | eve_machonet::service_roles::ROLE_SPAWN
+                        | eve_machonet::service_roles::ROLE_ROLEADMIN;
+                    let slash_subrole =
+                        effective_service == "slash" && (session.role & SLASH_SUBROLE_MASK) != 0;
                     // V24.01 `svc_slash.FetchRemoteCommandList` calls `slash.SlashCmd("/")` for all
                     // `/localdevtools` sessions; denying it with `InsufficientRole` triggers `eval()`
                     // failure and a modal error popup, whereas `SlashError` `"Commands: []"` hides
@@ -1373,7 +1378,14 @@ impl ServerContext {
                         .map(str::trim)
                         == Some("/");
                     if !session.has_gm_role() && !slash_subrole && !slash_fetch_command_list {
+                        let required_mask = if effective_service == "slash" {
+                            eve_machonet::service_roles::ROLE_GM_MASK | SLASH_SUBROLE_MASK
+                        } else {
+                            eve_machonet::service_roles::ROLE_GM_MASK
+                        };
                         return Err(Self::insufficient_role_error(
+                            required_mask,
+                            session.role,
                             effective_service,
                             method,
                             "a V24.01 GM/Admin service role bitmask",
@@ -1382,10 +1394,12 @@ impl ServerContext {
                 }
                 RpcCallerClass::Qa => {
                     let _ = Self::require_auth(session)?;
-                    if !session.has_gm_role()
-                        && (session.role & eve_machonet::service_roles::ROLE_QA) == 0
-                    {
+                    let required_mask = eve_machonet::service_roles::ROLE_GM_MASK
+                        | eve_machonet::service_roles::ROLE_QA;
+                    if (session.role & required_mask) == 0 {
                         return Err(Self::insufficient_role_error(
+                            required_mask,
+                            session.role,
                             effective_service,
                             method,
                             "a V24.01 GM/QA/Admin service role bitmask",
