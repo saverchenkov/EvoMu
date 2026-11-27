@@ -1465,6 +1465,7 @@ pub(crate) async fn handle_invbroker_add(
                     src_ship_bay_owner: Option<i64>,
                     dst_ship_bay_foreign_owner: Option<i64>,
                     recursive_owner_changes: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)>,
+                    unfitted_charge_deltas: Vec<(i64, u32, i32)>,
                 },
             }
 
@@ -1726,6 +1727,7 @@ pub(crate) async fn handle_invbroker_add(
                                 src_ship_bay_owner: None,
                                 dst_ship_bay_foreign_owner: None,
                                 recursive_owner_changes: Vec::new(),
+                                unfitted_charge_deltas: Vec::new(),
                             });
                         }
                     }
@@ -2058,6 +2060,11 @@ pub(crate) async fn handle_invbroker_add(
                     src_ship_bay_owner,
                     dst_ship_bay_foreign_owner,
                     recursive_owner_changes,
+                    unfitted_charge_deltas: unfitted_charges
+                        .into_iter()
+                        .filter(|(pre, post)| pre.location_id != post.location_id)
+                        .map(|(pre, post)| (pre.location_id, post.type_id, post.quantity))
+                        .collect(),
                 })
             });
 
@@ -2152,6 +2159,7 @@ pub(crate) async fn handle_invbroker_add(
                     src_ship_bay_owner,
                     dst_ship_bay_foreign_owner,
                     recursive_owner_changes,
+                    unfitted_charge_deltas,
                 }) => {
                     item_id = effective_item_id;
                     if updated.owner_id != old_owner_id {
@@ -2209,6 +2217,18 @@ pub(crate) async fn handle_invbroker_add(
                             updated.location_id,
                             updated.type_id,
                             i64::from(updated.quantity),
+                        )
+                        .await;
+                    }
+                    for (chg_src, chg_tid, chg_qty) in unfitted_charge_deltas {
+                        crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
+                            ctx,
+                            char_id,
+                            session.solar_system_id,
+                            chg_src,
+                            updated.location_id,
+                            chg_tid,
+                            i64::from(chg_qty),
                         )
                         .await;
                     }

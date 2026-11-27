@@ -668,8 +668,43 @@ fn flush_trigger_notifications_and_completion_sync(
     }
 }
 
+pub(crate) fn queue_pending_escalations_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sys_id: SolarSystemId,
+    reqs: &mut Vec<(i64, u32, Option<u32>, u16, Option<String>, [f64; 3], i64)>,
+) {
+    for (
+        char_id,
+        source_dungeon_id,
+        target_dungeon_id,
+        chance_bps,
+        target_title,
+        position,
+        instance_id,
+    ) in reqs.drain(..)
+    {
+        snap.dungeon_runtime.pending_escalations.push(
+            eve_db::service_domains::pve_sites::PendingDungeonEscalation {
+                char_id,
+                solar_system_id: sys_id,
+                source_dungeon_id,
+                target_dungeon_id,
+                chance_bps,
+                target_title,
+                position,
+                instance_id,
+            },
+        );
+    }
+}
+
 pub(crate) fn flush_trigger_effects_sync(deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, mut effects: TriggerTxEffects) {
     effects.cancel_dead_spawns();
+    if !effects.escalation_requests.is_empty() {
+        deps.db.with_mut_snapshot(|snap| {
+            queue_pending_escalations_in_snap(snap, sys_id, &mut effects.escalation_requests);
+        });
+    }
     let sys_handle_opt = deps.systems.get_handle(sys_id);
     despawn_dungeon_npc_ids_sync(deps, sys_handle_opt.as_ref(), &effects.despawn_npc_ids);
     if let Some(sh) = sys_handle_opt.as_ref() { for bid in &effects.despawn_other_balls { let _ = sh.remove_ball_sync(*bid); } }

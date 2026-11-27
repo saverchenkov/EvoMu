@@ -264,7 +264,7 @@ pub async fn handle_ship_or_npc_destruction(
     let mut generated_kill_id: i64 = 0;
     let mut generated_wreck_id: i64 = 0;
     let generated_km_hash;
-    if crate::services::pve_dungeon_runtime_hooks::is_destructible_dungeon_object(
+    if crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object(
         ctx,
         sys_id,
         target_ball_id,

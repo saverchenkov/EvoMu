@@ -133,6 +133,27 @@ fn build_hooks_test_sde() -> Arc<SdeRegistry> {
             &[(9, 10_000.0), (263, 10_000.0), (265, 10_000.0)],
         ),
     );
+    sde.types.insert(
+        486,
+        mk_inv_type(
+            486,
+            55,
+            7,
+            "125mm Gatling AutoCannon I",
+            5.0,
+            1.0,
+            None,
+            &[(12, 1.0), (14, 1.0), (50, 1.0), (128, 1.0), (602, 83.0)],
+        ),
+    );
+    sde.types.insert(
+        179,
+        mk_inv_type(179, 83, 8, "Fusion S", 0.0025, 0.0, None, &[(128, 1.0)]),
+    );
+    sde.types.insert(
+        33_474,
+        mk_inv_type(33_474, 1246, 23, "Mobile Depot", 50.0, 3_000.0, None, &[]),
+    );
     Arc::new(sde)
 }
 
@@ -1527,3 +1548,629 @@ async fn on_structure_destroyed_pre_entry_replay_and_escalation() {
         assert_eq!(reg.escalations_by_char[&char_id].len(), 3);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf1_live_damage_followed_by_weapon_and_missile_handlers_no_wreck_loot_km_and_inline_esc() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_070_201i64, 995_201i64);
+    let r_pos = [60_000_000.0, 0.0, 0.0];
+    let mut sde_mut = (*build_hooks_test_sde()).clone();
+    let esc_did = 995_299u32;
+    sde_mut.dungeons.insert(
+        esc_did,
+        eve_sde::DungeonTemplate {
+            dungeon_id: esc_did,
+            name: "Relay Escalation Site".into(),
+            faction_id: Some(500_010),
+            archetype_id: Some(20),
+            difficulty: Some(2),
+        },
+    );
+    let (ctx, _clock, _sess, ship_id) = make_space_pilot_ctx(
+        Arc::new(sde_mut),
+        sys_id,
+        char_id,
+        "bf1_combat_pilot",
+        587,
+        DVec3::from_array(r_pos),
+    )
+    .await;
+
+    let mut room = make_room(
+        1,
+        9620,
+        r_pos,
+        vec![
+            DungeonRuntimeObject {
+                type_id: 16_757,
+                name: "Bunker Turret Target".into(),
+                position: [r_pos[0] + 600.0, 0.0, 0.0],
+                radius: 200.0,
+                destructible: true,
+                tag: Some("bunker_t".into()),
+                ..Default::default()
+            },
+            DungeonRuntimeObject {
+                type_id: 16_757,
+                name: "Bunker Missile Target".into(),
+                position: [r_pos[0] + 1_200.0, 0.0, 0.0],
+                radius: 200.0,
+                is_container: true,
+                destructible: true,
+                tag: Some("bunker_m".into()),
+                ..Default::default()
+            },
+        ],
+        vec![
+            make_trig(
+                1,
+                DungeonTriggerKind::OnStructureDestroyed {
+                    target_ball_id: None,
+                    target_object_index: None,
+                    target_tag: Some("bunker_t".into()),
+                    target_type_id: Some(16_757),
+                },
+                DungeonTriggerAction::StartEscalation {
+                    target_dungeon_id: Some(esc_did),
+                    chance_bps: 10_000,
+                    target_title: Some("Turret Escalation".into()),
+                },
+                false,
+            ),
+            make_trig(
+                2,
+                DungeonTriggerKind::OnStructureDestroyed {
+                    target_ball_id: None,
+                    target_object_index: None,
+                    target_tag: Some("bunker_m".into()),
+                    target_type_id: Some(16_757),
+                },
+                DungeonTriggerAction::StartEscalation {
+                    target_dungeon_id: Some(esc_did),
+                    chance_bps: 10_000,
+                    target_title: Some("Missile Escalation".into()),
+                },
+                false,
+            ),
+        ],
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: r_pos,
+                rooms: vec![room],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0)
+        .await
+        .expect("materialize room");
+    let (bunker_t, bunker_m) = (mat.object_ids[0], mat.object_ids[1]);
+
+    // Seed nested grandchild item & container_lifetime entry on bunker_m (Note #2 hygiene).
+    let (outer_pack_id, inner_ore_id) = (7_800_001i64, 7_800_002i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            outer_pack_id,
+            InventoryItemRecord {
+                item_id: outer_pack_id,
+                type_id: DEFAULT_CONTAINER_TYPE_ID,
+                owner_id: char_id,
+                location_id: bunker_m,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            inner_ore_id,
+            InventoryItemRecord {
+                item_id: inner_ore_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: outer_pack_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.container_lifetimes.insert(
+            bunker_m,
+            crate::services::combat_crimewatch::ContainerLifetimeEntry {
+                item_id: bunker_m,
+                solar_system_id: sys_id,
+                type_id: 16_757,
+                owner_id: char_id,
+                created_unix: 1_785_100_000,
+                lifetime_secs: 7_200,
+                is_abandoned: false,
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let (_, turret_ball) = sys_h.get_ball_snapshot(bunker_t).await.unwrap().unwrap();
+    let (_, missile_ball) = sys_h.get_ball_snapshot(bunker_m).await.unwrap().unwrap();
+    let lethal = DamageVector::new(100_000.0, 100_000.0, 100_000.0, 100_000.0);
+
+    // 1. Turret path: apply_damage_with_attacker (triggers npc_death_hook) THEN handle_ship_or_npc_destruction.
+    let (_, dead_t, _) = sys_h
+        .apply_damage_with_attacker(bunker_t, lethal, Some(char_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(dead_t);
+    let turret_res =
+        crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
+            &ctx,
+            &sys_h,
+            char_id,
+            ship_id,
+            587,
+            486,
+            bunker_t,
+            &turret_ball,
+            None,
+            sys_id,
+            100.0,
+            ctx.now_unix(),
+        )
+        .await;
+    assert_eq!(turret_res.wreck_id, 0, "BF-1: no bogus NPC wreck");
+    assert_eq!(turret_res.kill_id, 0, "BF-1: no bogus killmail");
+    ctx.db.with_snapshot(|s| {
+        assert!(s.killmails.is_empty());
+        assert!(s.standing_transactions.is_empty());
+        assert!(s.dungeon_runtime.pending_escalations.is_empty());
+        assert!(s.dungeon_runtime.instances[&inst_id].rooms[0].triggers[0].fired);
+        assert!(
+            !s.items.values().any(|i| i.location_id == i64::from(sys_id) && i.item_id != ship_id && i.item_id != bunker_m),
+            "BF-1: no bogus NPC wreck item spawned in space"
+        );
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        assert_eq!(reg.escalations_by_char[&char_id].len(), 1);
+    });
+
+    // 2. Missile/AOE path: apply_damage_with_attacker THEN handle_destroyed_ball_from_missile_or_aoe.
+    let (_, dead_m, _) = sys_h
+        .apply_damage_with_attacker(bunker_m, lethal, Some(char_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(dead_m);
+    crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+        &ctx,
+        sys_id,
+        char_id,
+        bunker_m,
+        16_757,
+        missile_ball.position,
+        ctx.now_unix(),
+    )
+    .await;
+    ctx.db.with_snapshot(|s| {
+        assert!(s.killmails.is_empty());
+        assert!(s.standing_transactions.is_empty());
+        assert!(s.dungeon_runtime.pending_escalations.is_empty());
+        assert!(!s.items.contains_key(&bunker_m));
+        assert!(!s.items.contains_key(&outer_pack_id));
+        assert!(!s.items.contains_key(&inner_ore_id), "Note #2: grandchild item cleaned up");
+        assert!(
+            !s.items.values().any(|i| i.location_id == i64::from(sys_id) && i.item_id != ship_id),
+            "BF-1: no bogus NPC wreck from missile/AOE path"
+        );
+    });
+    assert!(!with_combat_runtime(&ctx, |rt| rt.container_lifetimes.contains_key(&bunker_m)));
+    with_pve_exploration_reg(&ctx, |reg| {
+        assert_eq!(reg.escalations_by_char[&char_id].len(), 2);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf2_compound_and_with_compound_or_on_cargo_delivered_clears_latch_on_withdrawal() {
+    let (sys_id, char_id, inst_a, inst_b) =
+        (30_000_142u32, 90_070_202i64, 995_202i64, 995_203i64);
+    let r_pos = [61_000_000.0, 0.0, 0.0];
+    let (ctx, _clock, mut sess, ship_id) = make_space_pilot_ctx(
+        build_hooks_test_sde(),
+        sys_id,
+        char_id,
+        "bf2_compound_or",
+        587,
+        DVec3::from_array(r_pos),
+    )
+    .await;
+
+    let build_inst = |iid: i64, rid: i64, offset_x: f64| {
+        let pos = [r_pos[0] + offset_x, 0.0, 0.0];
+        let mut room = make_room(
+            1,
+            rid,
+            pos,
+            vec![
+                DungeonRuntimeObject {
+                    type_id: DEFAULT_CONTAINER_TYPE_ID,
+                    name: "Or Cargo Box".into(),
+                    position: pos,
+                    radius: 150.0,
+                    is_container: true,
+                    ..Default::default()
+                },
+                DungeonRuntimeObject {
+                    type_id: 16_757,
+                    name: "Or Target Bunker".into(),
+                    position: [pos[0] + 400.0, 0.0, 0.0],
+                    radius: 150.0,
+                    destructible: true,
+                    tag: Some("or_core".into()),
+                    ..Default::default()
+                },
+            ],
+            vec![make_trig(
+                1,
+                DungeonTriggerKind::CompoundAnd {
+                    clauses: vec![
+                        DungeonTriggerKind::CompoundOr {
+                            clauses: vec![
+                                DungeonTriggerKind::OnCargoDelivered {
+                                    container_ball_id: None,
+                                    target_object_index: Some(0),
+                                    item_type_id: Some(34),
+                                    required_quantity: 10,
+                                },
+                                DungeonTriggerKind::OnKillCount {
+                                    target_npc_group: Some(1),
+                                    required_kills: 1,
+                                },
+                            ],
+                        },
+                        DungeonTriggerKind::OnStructureDestroyed {
+                            target_ball_id: None,
+                            target_object_index: None,
+                            target_tag: Some("or_core".into()),
+                            target_type_id: None,
+                        },
+                    ],
+                },
+                DungeonTriggerAction::UnlockGate,
+                false,
+            )],
+        );
+        room.entered = true;
+        room.entered_unix = Some(1_785_100_000);
+        room.npc_groups = vec![DungeonNpcGroup {
+            group_id: 1,
+            wave: 1,
+            npc_specs: vec![(48_090, 1)],
+            spawn_immediately: true,
+            ..Default::default()
+        }];
+        DungeonRuntimeInstance {
+            instance_id: iid,
+            dungeon_id: 1,
+            solar_system_id: sys_id,
+            owner_char_id: char_id,
+            base_position: pos,
+            rooms: vec![room],
+            created_unix: 1_785_100_000,
+            ..Default::default()
+        }
+    };
+
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_a, build_inst(inst_a, 9621, 0.0));
+        s.instances.insert(inst_b, build_inst(inst_b, 9622, 10_000.0));
+    });
+    let mat_a = materialize_dungeon_room_entities(&ctx, sys_id, inst_a, 0)
+        .await
+        .unwrap();
+    let (cont_a, core_a, npc_a) = (mat_a.object_ids[0], mat_a.object_ids[1], mat_a.npc_ids[0]);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. Deposit 10 Tritanium (0 NPCs killed) -> withdraw all 10 Tritanium -> destroy structure.
+    // BF-2: CompoundOr sibling OnKillCount must NOT inherit already_satisfied=true!
+    insert_ship_item(&ctx, char_id, ship_id, 7_900_001, 34, InventoryFlag::Cargo, 10, false);
+    inv_add_to(&ctx, &mut sess, char_id, cont_a, 7_900_001, ship_id, Some(10)).await;
+    let stack_a = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .find(|i| i.location_id == cont_a && i.type_id == 34)
+            .unwrap()
+            .item_id
+    });
+    inv_add_to(&ctx, &mut sess, char_id, ship_id, stack_a, cont_a, Some(10)).await;
+    let _ = crate::combat::death_pipeline::on_ball_destroyed(
+        &ctx,
+        sys_id,
+        core_a,
+        Some(char_id),
+        DVec3::ZERO,
+    )
+    .await
+    .unwrap();
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_a].rooms[0];
+        assert!(
+            r.gate_locked && !r.triggers[0].fired,
+            "BF-2: withdrawing cargo must clear CompoundAnd+CompoundOr latch when OnKillCount never succeeded"
+        );
+    });
+
+    // Now actually satisfy OnKillCount while OnStructureDestroyed remains latched -> FIRES!
+    let _ = sys_h
+        .apply_damage_with_attacker(
+            npc_a,
+            DamageVector::new(100_000.0, 100_000.0, 100_000.0, 100_000.0),
+            Some(char_id),
+        )
+        .await;
+    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(&ctx, sys_id, npc_a, char_id).await;
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_a].rooms[0];
+        assert!(!r.gate_locked && r.triggers[0].fired);
+    });
+
+    // 2. When BOTH CompoundOr branches succeed (deposit cargo AND kill NPC), withdrawing cargo
+    // still preserves the genuinely satisfied OnKillCount branch.
+    let mat_b = materialize_dungeon_room_entities(&ctx, sys_id, inst_b, 0)
+        .await
+        .unwrap();
+    let (cont_b, core_b, npc_b) = (mat_b.object_ids[0], mat_b.object_ids[1], mat_b.npc_ids[0]);
+    assert!(sys_h
+        .set_ball_position(ship_id, DVec3::new(r_pos[0] + 10_050.0, 0.0, 0.0))
+        .await);
+    insert_ship_item(&ctx, char_id, ship_id, 7_900_002, 34, InventoryFlag::Cargo, 10, false);
+    inv_add_to(&ctx, &mut sess, char_id, cont_b, 7_900_002, ship_id, Some(10)).await;
+    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(&ctx, sys_id, npc_b, char_id).await;
+    let stack_b = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .find(|i| i.location_id == cont_b && i.type_id == 34)
+            .unwrap()
+            .item_id
+    });
+    inv_add_to(&ctx, &mut sess, char_id, ship_id, stack_b, cont_b, Some(10)).await;
+    let _ = crate::combat::death_pipeline::on_ball_destroyed(
+        &ctx,
+        sys_id,
+        core_b,
+        Some(char_id),
+        DVec3::ZERO,
+    )
+    .await
+    .unwrap();
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_b].rooms[0];
+        assert!(
+            !r.gate_locked && r.triggers[0].fired,
+            "legitimately satisfied OnKillCount branch in CompoundOr must remain latched after cargo withdrawal"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf3_on_dungeon_room_entered_sync_replays_pre_struct_destroy_escalation() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_070_203i64, 995_204i64);
+    let r_pos = [62_000_000.0, 0.0, 0.0];
+    let mut sde_mut = (*build_hooks_test_sde()).clone();
+    let esc_did = 995_298u32;
+    sde_mut.dungeons.insert(
+        esc_did,
+        eve_sde::DungeonTemplate {
+            dungeon_id: esc_did,
+            name: "Sync Replay Escalation Site".into(),
+            faction_id: Some(500_010),
+            archetype_id: Some(20),
+            difficulty: Some(2),
+        },
+    );
+    let (ctx, _clock, _sess, _ship_id) = make_space_pilot_ctx(
+        Arc::new(sde_mut),
+        sys_id,
+        char_id,
+        "bf3_sync_replay",
+        587,
+        DVec3::from_array(r_pos),
+    )
+    .await;
+
+    let room0 = make_room(
+        1,
+        9623,
+        r_pos,
+        vec![DungeonRuntimeObject {
+            type_id: 16_757,
+            name: "Sync Replay Bunker".into(),
+            position: [r_pos[0] + 400.0, 0.0, 0.0],
+            radius: 150.0,
+            destructible: true,
+            tag: Some("sync_bunker".into()),
+            ..Default::default()
+        }],
+        vec![DungeonTrigger {
+            trigger_id: 1,
+            kind: DungeonTriggerKind::OnStructureDestroyed {
+                target_ball_id: None,
+                target_object_index: None,
+                target_tag: Some("sync_bunker".into()),
+                target_type_id: None,
+            },
+            action: DungeonTriggerAction::UnlockGate,
+            extra_actions: vec![DungeonTriggerAction::StartEscalation {
+                target_dungeon_id: Some(esc_did),
+                chance_bps: 10_000,
+                target_title: Some("Sync Replay Citadel".into()),
+            }],
+            ..Default::default()
+        }],
+    );
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: r_pos,
+                rooms: vec![room0],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0)
+        .await
+        .unwrap();
+    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
+        &ctx,
+        sys_id,
+        mat.object_ids[0],
+        Some(char_id),
+        DVec3::ZERO,
+    )
+    .unwrap();
+    read_dungeon_runtime_store(&ctx, |s| {
+        assert!(s.instances[&inst_id].rooms[0].objects[0].destroyed);
+        assert!(s.instances[&inst_id].rooms[0].gate_locked);
+        assert!(s.pending_escalations.is_empty());
+    });
+
+    // Synchronous room-entry replay MUST preserve StartEscalation into pending_escalations.
+    crate::services::pve_dungeon_runtime::on_dungeon_room_entered_sync(
+        &ctx, sys_id, inst_id, 0, char_id,
+    );
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_id].rooms[0];
+        assert!(!r.gate_locked && r.triggers[0].fired);
+        assert_eq!(s.pending_escalations.len(), 1, "BF-3: sync replay must queue escalation");
+    });
+
+    crate::services::pve_dungeon_runtime::tick_background_dungeon_runtime(&ctx).await;
+    read_dungeon_runtime_store(&ctx, |s| {
+        assert!(s.pending_escalations.is_empty());
+        assert!(s.instances[&inst_id].escalation_instance_id.is_some());
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        assert_eq!(reg.escalations_by_char[&char_id].len(), 1);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn note3_unfitted_module_charges_moved_to_dungeon_container_credit_cargo_delivered() {
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 90_070_204i64, 995_205i64);
+    let r_pos = [63_000_000.0, 0.0, 0.0];
+    let (ctx, _clock, mut sess, ship_id) = make_space_pilot_ctx(
+        build_hooks_test_sde(),
+        sys_id,
+        char_id,
+        "note3_charges_pilot",
+        587,
+        DVec3::from_array(r_pos),
+    )
+    .await;
+
+    let mut room = make_room(
+        1,
+        9624,
+        r_pos,
+        vec![DungeonRuntimeObject {
+            type_id: DEFAULT_CONTAINER_TYPE_ID,
+            name: "Ordnance Hopper".into(),
+            position: r_pos,
+            radius: 150.0,
+            is_container: true,
+            ..Default::default()
+        }],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::OnCargoDelivered {
+                container_ball_id: None,
+                target_object_index: Some(0),
+                item_type_id: Some(179),
+                required_quantity: 20,
+            },
+            DungeonTriggerAction::UnlockGate,
+            false,
+        )],
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: r_pos,
+                rooms: vec![room],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0)
+        .await
+        .unwrap();
+    let cont_id = mat.object_ids[0];
+
+    let (depot_id, turret_id, charge_id) = (7_950_000i64, 7_950_001i64, 7_950_002i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            depot_id,
+            InventoryItemRecord {
+                item_id: depot_id,
+                type_id: 33_474,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: depot_id,
+            type_id: 33_474,
+            position: DVec3::new(r_pos[0] + 100.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    insert_ship_item(&ctx, char_id, ship_id, turret_id, 486, InventoryFlag::HiSlot0, 1, true);
+    insert_ship_item(&ctx, char_id, ship_id, charge_id, 179, InventoryFlag::HiSlot0, 20, false);
+
+    inv_add_to(&ctx, &mut sess, char_id, cont_id, turret_id, ship_id, None).await;
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_id].rooms[0];
+        assert_eq!(r.cargo_delivered_net.get(&format!("{cont_id}:179")), Some(&20));
+        assert!(!r.gate_locked && r.triggers[0].fired);
+    });
+}
+

@@ -1935,6 +1935,7 @@ pub fn on_ball_destroyed_sync(
     if crate::services::pve_dungeon_runtime_hooks::on_dungeon_structure_destroyed_sync(
         ctx, &sys_handle, sys_id, ball_id, resolved_killer_opt.unwrap_or(0),
     ) || crate::services::pve_dungeon_runtime_hooks::is_dungeon_object_ball(ctx, sys_id, ball_id)
+      || crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object(ctx, sys_id, ball_id)
     {
         return Ok(None);
     }

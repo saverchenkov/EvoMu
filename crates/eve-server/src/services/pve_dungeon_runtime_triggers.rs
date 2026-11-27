@@ -6,7 +6,8 @@
 use super::actions::{
     complete_and_flush_instance, finalize_terminal_in_snap, finish_instance_entities_in_snap,
     finish_room_clear_checks_in_inst, flush_trigger_effects, flush_trigger_effects_sync,
-    merge_effects, run_trigger_batch_in_inst, DungeonRuntimeDeps, TriggerBatch, TriggerTxEffects,
+    merge_effects, queue_pending_escalations_in_snap, run_trigger_batch_in_inst,
+    DungeonRuntimeDeps, TriggerBatch, TriggerTxEffects,
 };
 use super::{
     dist3, has_dungeon_runtime_store_db, has_unlooted_containers_in_snap, instance_is_finished,
@@ -148,10 +149,14 @@ fn reset_repeatable_trigger_state(
 ) {
     if path == "root" {
         let and_pfx = format!("__and:{r_idx}:{t_idx}:");
+        let or_pfx = format!("__or:{r_idx}:{t_idx}:");
         let tag_cnt_pfx = format!("__kill_tagged_cnt:{r_idx}:{t_idx}:");
         let grp_cnt_pfx = format!("__kill_cnt:{r_idx}:{t_idx}:");
         armed_timers.retain(|k, _| {
-            !k.starts_with(&and_pfx) && !k.starts_with(&tag_cnt_pfx) && !k.starts_with(&grp_cnt_pfx)
+            !k.starts_with(&and_pfx)
+                && !k.starts_with(&or_pfx)
+                && !k.starts_with(&tag_cnt_pfx)
+                && !k.starts_with(&grp_cnt_pfx)
         });
     }
     match kind {
@@ -759,21 +764,19 @@ fn evaluate_trigger_with_occurrence_latch(
                     &sub_path,
                     event,
                     now_unix,
-                    already_satisfied || was_latched,
+                    was_latched,
                 );
-                if !already_satisfied {
-                    if was_latched {
-                        if !ok_now {
-                            if contains_cargo_delivered_clause(clause) {
-                                armed_timers.remove(&key);
-                            }
-                            all_ok = false;
+                if was_latched {
+                    if !ok_now {
+                        if contains_cargo_delivered_clause(clause) {
+                            armed_timers.remove(&key);
                         }
-                    } else if ok_now {
-                        armed_timers.insert(key, now_unix);
-                    } else {
                         all_ok = false;
                     }
+                } else if ok_now {
+                    armed_timers.insert(key, now_unix);
+                } else {
+                    all_ok = false;
                 }
             }
             all_ok
@@ -782,7 +785,9 @@ fn evaluate_trigger_with_occurrence_latch(
             let mut any_ok = false;
             for (ci, c) in clauses.iter().enumerate() {
                 let sub_path = format!("{path}.{ci}");
-                if evaluate_trigger_with_occurrence_latch(
+                let or_key = format!("__or:{room_vec_idx}:{trig_idx}:{sub_path}");
+                let branch_latched = already_satisfied && armed_timers.contains_key(&or_key);
+                let ok = evaluate_trigger_with_occurrence_latch(
                     c,
                     inst,
                     room,
@@ -792,9 +797,15 @@ fn evaluate_trigger_with_occurrence_latch(
                     &sub_path,
                     event,
                     now_unix,
-                    already_satisfied,
-                ) {
+                    branch_latched,
+                );
+                if ok {
+                    if !branch_latched {
+                        armed_timers.insert(or_key, now_unix);
+                    }
                     any_ok = true;
+                } else if branch_latched && contains_cargo_delivered_clause(c) {
+                    armed_timers.remove(&or_key);
                 }
             }
             any_ok
@@ -1130,6 +1141,7 @@ fn prepare_on_dungeon_room_entered_in_snap(
     instance_id: i64,
     room_vec_idx: usize,
     char_id: i64,
+    queue_escalations_in_snap: bool,
 ) -> Option<TriggerTxEffects> {
     let now_unix = deps.db.clock().now_unix_secs();
     let needs = deps.db.with_snapshot(|snap| {
@@ -1248,6 +1260,10 @@ fn prepare_on_dungeon_room_entered_in_snap(
             }
         }
         finalize_terminal_in_snap(snap, inst, char_id, now_unix, &mut effects);
+        if queue_escalations_in_snap {
+            effects.cancel_dead_spawns();
+            queue_pending_escalations_in_snap(snap, sys_id, &mut effects.escalation_requests);
+        }
     });
     Some(effects)
 }
@@ -1259,9 +1275,9 @@ pub(crate) async fn on_dungeon_room_entered_impl(
     room_vec_idx: usize,
     char_id: i64,
 ) {
-    if let Some(effects) =
-        prepare_on_dungeon_room_entered_in_snap(deps, sys_id, instance_id, room_vec_idx, char_id)
-    {
+    if let Some(effects) = prepare_on_dungeon_room_entered_in_snap(
+        deps, sys_id, instance_id, room_vec_idx, char_id, false,
+    ) {
         flush_trigger_effects(deps, sys_id, effects).await;
     }
 }
@@ -1273,9 +1289,9 @@ pub(crate) fn on_dungeon_room_entered_sync_impl(
     room_vec_idx: usize,
     char_id: i64,
 ) {
-    if let Some(effects) =
-        prepare_on_dungeon_room_entered_in_snap(deps, sys_id, instance_id, room_vec_idx, char_id)
-    {
+    if let Some(effects) = prepare_on_dungeon_room_entered_in_snap(
+        deps, sys_id, instance_id, room_vec_idx, char_id, true,
+    ) {
         flush_trigger_effects_sync(deps, sys_id, effects);
     }
 }

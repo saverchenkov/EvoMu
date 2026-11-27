@@ -133,7 +133,7 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
     if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
         return;
     }
-    if crate::services::pve_dungeon_runtime_hooks::is_destructible_dungeon_object(ctx, sys_id, ball_id)
+    if crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object(ctx, sys_id, ball_id)
     {
         let _ = crate::combat::death_pipeline::on_ball_destroyed(
             ctx,

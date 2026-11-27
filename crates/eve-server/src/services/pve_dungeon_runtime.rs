@@ -2172,8 +2172,8 @@ pub async fn on_dungeon_npc_killed_core(
 }
 
 pub use crate::services::pve_dungeon_runtime_hooks::{
-    is_destructible_dungeon_object, is_dungeon_object_ball, on_dungeon_container_cargo_changed,
-    on_dungeon_structure_destroyed_sync,
+    is_destructible_dungeon_object, is_dungeon_object_ball, is_owned_destructible_dungeon_object,
+    on_dungeon_container_cargo_changed, on_dungeon_structure_destroyed_sync,
 };
 pub use crate::services::pve_dungeon_runtime_rpc::{
     check_dungeon_triggers, get_dungeon_instance_state, on_dungeon_approach,
