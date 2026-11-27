@@ -2436,10 +2436,12 @@ async fn handle_recover_probes(
         Vec::new()
     } else {
         let mut map = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
-        let ids: Vec<i64> = map.values()
+        let mut ids: Vec<i64> = map.values()
             .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 && (target_probe_ids.is_empty() || target_probe_ids.contains(&p.probe_id)))
             .map(|p| p.probe_id)
             .collect();
+        // Sort probe IDs before removal so recovery order, notifications, and clip/cargo placement are deterministic across HashMap bucket layouts.
+        ids.sort_unstable();
         ids.into_iter().filter_map(|id| map.remove(&id)).collect()
     };
 

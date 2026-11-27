@@ -846,3 +846,21 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[tokio::test]
+async fn recover_probes_returns_ascending_probe_ids_across_hash_layouts() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+    probe_test_helpers::seed_probes(&ctx, [900_003, 900_001, 900_004, 900_002].map(|probe_id| ActiveScannerProbe {
+        probe_id, probe_type_id: 30_013, owner_char_id: 90_000_001, ship_id: 100_000_001,
+        launcher_module_id: 0, solar_system_id: 30_000_142, position: [0.0; 3], destination: [0.0; 3],
+        range_step: 1, scan_range_m: 1_000.0, base_sensor_strength: 10.0, max_flight_time_s: 3_600.0,
+        launched_at_unix: now, state: PROBE_STATE_IDLE, warp_end_ft: None,
+    }));
+    let subset = handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "RecoverProbes", &[PyRep::List([900_003, 900_001].map(PyRep::Integer).to_vec())], &kw).await.unwrap().expect("subset");
+    assert_eq!(subset, PyRep::List([900_001, 900_003].map(PyRep::Integer).to_vec()));
+    let rest = handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "RecoverProbes", &[], &kw).await.unwrap().expect("bulk");
+    assert_eq!(rest, PyRep::List([900_002, 900_004].map(PyRep::Integer).to_vec()));
+    assert_eq!(probe_test_helpers::probe_count(&ctx), 0);
+}
