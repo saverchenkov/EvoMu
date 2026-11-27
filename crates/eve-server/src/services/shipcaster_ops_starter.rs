@@ -725,6 +725,44 @@ mod transition_regression_tests {
             .is_some(),
             "shipcaster jump must record session-change timer"
         );
+
+        let moved_pos = DVec3::new(33_000.0, -250.0, 400.0);
+        assert!(dest_handle.set_ball_position(ship_id, moved_pos).await);
+        dest_handle
+            .modify_combat_state(ship_id, |cs| {
+                cs.is_cloaked = false;
+                cs.gate_cloak_remaining_ticks = 0;
+                cs.undock_invulnerable_remaining_ticks = 0;
+            })
+            .await
+            .unwrap()
+            .expect("dest combat state");
+        dest_handle
+            .apply_true_damage(ship_id, 15.0)
+            .await
+            .expect("apply_true_damage");
+        assert_eq!(
+            dest_handle
+                .flush_condition_checkpoint()
+                .await
+                .expect("flush_condition_checkpoint"),
+            1,
+            "post-shipcaster ConditionCheckpoint must persist with synced epoch (`T2E-R3-01`)"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let p = snap
+                .item_positions
+                .get(&ship_id)
+                .copied()
+                .expect("item_positions persisted after shipcaster jump");
+            assert!((DVec3::from_array(p) - moved_pos).length() < 1e-3);
+            let hp = snap
+                .sp6_lifecycle
+                .ship_combat_hp
+                .get(&ship_id)
+                .expect("ship_combat_hp updated after shipcaster jump");
+            assert!((hp.shield_hp - 135.0).abs() < 1e-3);
+        });
     }
 
     #[tokio::test]

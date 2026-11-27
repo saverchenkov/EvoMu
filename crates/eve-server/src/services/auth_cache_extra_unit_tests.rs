@@ -1215,6 +1215,21 @@ async fn slash_tr_live_origin_abandons_drones_fighters_probes_and_aborts_self_de
     let probe_id = 555_891_001_i64;
     let live_handle = ctx.systems.get_or_spawn(live_sys);
     for (bid, tid) in [(ship_id, 587_u32), (drone_id, 2454_u32), (fighter_id, 23057_u32)] {
+        let cs = if bid == ship_id {
+            eve_destiny::CombatState {
+                shield_hp: 160.0,
+                max_shield_hp: 500.0,
+                armor_hp: 140.0,
+                max_armor_hp: 400.0,
+                structure_hp: 110.0,
+                max_structure_hp: 350.0,
+                capacitor: 75.0,
+                max_capacitor: 250.0,
+                ..Default::default()
+            }
+        } else {
+            eve_destiny::CombatState::default()
+        };
         let _ = live_handle
             .spawn_ball_with_meta(
                 eve_destiny::Ball {
@@ -1229,7 +1244,7 @@ async fn slash_tr_live_origin_abandons_drones_fighters_probes_and_aborts_self_de
                     speed_fraction: 0.0,
                     mode: eve_destiny::MovementMode::Stop,
                 },
-                eve_destiny::CombatState::default(),
+                cs,
                 ctx.build_ship_slim_meta(cid, tid),
             )
             .await;
@@ -1346,6 +1361,20 @@ async fn slash_tr_live_origin_abandons_drones_fighters_probes_and_aborts_self_de
             .self_destruct_countdowns
             .contains_key(&ship_id)
     );
+    // Post-`/tr` arrival combat state carries taken live HP, and destination checkpoints + positions commit (`T2E-R3-01`).
+    let dest_h = ctx.systems.get_handle(dest_sys).expect("dest system woken");
+    let tr_cs = dest_h.get_combat_state(ship_id).await.unwrap().expect("dest combat state");
+    assert!((tr_cs.shield_hp - 160.0).abs() < 1e-3 && (tr_cs.armor_hp - 140.0).abs() < 1e-3);
+    let moved_pos = glam::DVec3::new(25_000.0, 300.0, -150.0);
+    assert!(dest_h.set_ball_position(ship_id, moved_pos).await);
+    dest_h.apply_true_damage(ship_id, 20.0).await.expect("apply_true_damage");
+    assert_eq!(dest_h.flush_condition_checkpoint().await.expect("flush_condition_checkpoint"), 1);
+    ctx.db.with_snapshot(|snap| {
+        let p = snap.item_positions.get(&ship_id).copied().expect("item_positions persisted");
+        assert!((glam::DVec3::from_array(p) - moved_pos).length() < 1e-3);
+        let hp = snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).expect("ship_combat_hp updated");
+        assert!((hp.shield_hp - 140.0).abs() < 1e-3);
+    });
 
     // 2. Remote `/tr <other_cid> <dest_sys>` on cold origin keeps cold_sys unloaded while clearing probes & self-destruct.
     let remote_cid = 90_891_555_i64;

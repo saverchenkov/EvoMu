@@ -16,6 +16,11 @@ pub struct SpaceTransitionDbRollbackSnapshot {
     pub prev_station_id: Option<i64>,
     pub prev_structure_id: Option<i64>,
     pub prev_ship_location: Option<(i64, InventoryFlag)>,
+    pub prev_ship_combat_hp: Option<PersistedCombatHp>,
+    pub prev_meta_combat_hp: Option<PersistedCombatHp>,
+    pub prev_item_position: Option<[f64; 3]>,
+    pub prev_ship_armor_damage: Option<f64>,
+    pub prev_ship_hull_damage: Option<f64>,
     pub prev_module_damage_attrs: Vec<(i64, Option<f64>)>,
     pub prev_active_mods: Vec<i64>,
     pub prev_active_charges: Vec<(i64, u32)>,
@@ -772,6 +777,35 @@ impl WorldRepository {
                         .map(|it| (it.location_id, it.flag))
                 })
                 .flatten();
+            let prev_ship_combat_hp = (effective_ship_id > 0)
+                .then(|| snap.sp6_lifecycle.ship_combat_hp.get(&effective_ship_id).copied())
+                .flatten();
+            let prev_meta_combat_hp = (effective_ship_id > 0)
+                .then(|| {
+                    snap.sp6_lifecycle
+                        .ship_combat_hp
+                        .get(&(-effective_ship_id))
+                        .copied()
+                })
+                .flatten();
+            let prev_item_position = (effective_ship_id > 0)
+                .then(|| snap.item_positions.get(&effective_ship_id).copied())
+                .flatten();
+            let (prev_ship_armor_damage, prev_ship_hull_damage) = (effective_ship_id > 0)
+                .then(|| {
+                    snap.items.get(&effective_ship_id).map(|ship| {
+                        (
+                            ship.dynamic_attributes
+                                .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                                .copied(),
+                            ship.dynamic_attributes
+                                .get(&eve_sde::attr_ids::DAMAGE)
+                                .copied(),
+                        )
+                    })
+                })
+                .flatten()
+                .unwrap_or((None, None));
             let prev_module_damage_attrs = if effective_ship_id > 0 {
                 snap.items
                     .values()
@@ -796,6 +830,11 @@ impl WorldRepository {
                 prev_station_id: ch.and_then(|c| c.station_id),
                 prev_structure_id: ch.and_then(|c| c.structure_id),
                 prev_ship_location,
+                prev_ship_combat_hp,
+                prev_meta_combat_hp,
+                prev_item_position,
+                prev_ship_armor_damage,
+                prev_ship_hull_damage,
                 prev_module_damage_attrs,
                 prev_active_mods: Vec::new(),
                 prev_active_charges: Vec::new(),
@@ -865,23 +904,86 @@ impl WorldRepository {
                 }
                 if restore_ship_id > 0 {
                     if let Some(ship) = guard.items.get_mut(&restore_ship_id) {
-                        let (ship_loc, ship_flag) = rollback_opt
-                            .and_then(|rb| rb.prev_ship_location)
-                            .unwrap_or_else(|| match target_dock {
-                                Some((dock_id, false)) => (dock_id, InventoryFlag::Hangar),
-                                Some((dock_id, true)) if valid_structure => {
-                                    (dock_id, InventoryFlag::Hangar)
-                                }
-                                _ => (i64::from(restore_sys_id), InventoryFlag::None),
-                            });
+                        let (ship_loc, ship_flag) =
+                            if matches!(target_dock, Some((_, true))) && !valid_structure {
+                                (i64::from(restore_sys_id), InventoryFlag::None)
+                            } else {
+                                rollback_opt
+                                    .and_then(|rb| rb.prev_ship_location)
+                                    .unwrap_or_else(|| match target_dock {
+                                        Some((dock_id, false)) => (dock_id, InventoryFlag::Hangar),
+                                        Some((dock_id, true)) if valid_structure => {
+                                            (dock_id, InventoryFlag::Hangar)
+                                        }
+                                        _ => (i64::from(restore_sys_id), InventoryFlag::None),
+                                    })
+                            };
                         ship.location_id = ship_loc;
                         ship.flag = ship_flag;
+                        if let Some(rb) = rollback_opt.filter(|rb| rb.effective_ship_id == restore_ship_id) {
+                            match rb.prev_ship_armor_damage {
+                                Some(val) => {
+                                    ship.dynamic_attributes
+                                        .insert(eve_sde::attr_ids::ARMOR_DAMAGE, val);
+                                }
+                                None => {
+                                    ship.dynamic_attributes
+                                        .remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
+                                }
+                            }
+                            match rb.prev_ship_hull_damage {
+                                Some(val) => {
+                                    ship.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, val);
+                                }
+                                None => {
+                                    ship.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                                }
+                            }
+                        }
                         ship.version += 1;
                     }
                 }
             }
 
             if let Some(rb) = rollback_opt {
+                if rb.effective_ship_id > 0 {
+                    match rb.prev_ship_combat_hp {
+                        Some(hp) => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .insert(rb.effective_ship_id, hp);
+                        }
+                        None => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .remove(&rb.effective_ship_id);
+                        }
+                    }
+                    match rb.prev_meta_combat_hp {
+                        Some(meta) => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .insert(-rb.effective_ship_id, meta);
+                        }
+                        None => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .remove(&(-rb.effective_ship_id));
+                        }
+                    }
+                    match rb.prev_item_position {
+                        Some(pos) => {
+                            guard.item_positions.insert(rb.effective_ship_id, pos);
+                        }
+                        None => {
+                            guard.item_positions.remove(&rb.effective_ship_id);
+                        }
+                    }
+                }
                 for &mid in &rb.prev_active_mods {
                     guard.module_active_states.insert(mid);
                     guard.module_active_charges.remove(&mid);
@@ -903,15 +1005,21 @@ impl WorldRepository {
                 }
                 for &(mid, prev_dmg) in &rb.prev_module_damage_attrs {
                     if let Some(item) = guard.items.get_mut(&mid) {
-                        match prev_dmg {
-                            Some(val) => {
-                                item.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, val);
+                        let cur_dmg = item
+                            .dynamic_attributes
+                            .get(&eve_sde::attr_ids::DAMAGE)
+                            .copied();
+                        if cur_dmg != prev_dmg {
+                            match prev_dmg {
+                                Some(val) => {
+                                    item.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, val);
+                                }
+                                None => {
+                                    item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                                }
                             }
-                            None => {
-                                item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                            }
+                            item.version += 1;
                         }
-                        item.version += 1;
                     }
                 }
             }

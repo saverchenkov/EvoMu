@@ -1439,6 +1439,45 @@ async fn wormhole_jump_preserves_rollback_gate_cloak_combat_state_and_session_tr
         "wormhole jump must record session-change timer"
     );
 
+    let moved_pos = DVec3::new(19_000.0, 400.0, -200.0);
+    assert!(dest_h.set_ball_position(ship_id, moved_pos).await);
+    dest_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = false;
+            cs.gate_cloak_remaining_ticks = 0;
+            cs.undock_invulnerable_remaining_ticks = 0;
+        })
+        .await
+        .unwrap()
+        .expect("dest combat state");
+    dest_h
+        .apply_true_damage(ship_id, 10.0)
+        .await
+        .expect("apply_true_damage");
+    assert_eq!(
+        dest_h
+            .flush_condition_checkpoint()
+            .await
+            .expect("flush_condition_checkpoint"),
+        1,
+        "post-wormhole ConditionCheckpoint must persist with synced epoch (`T2E-R3-01`)"
+    );
+    let expected_shield = (dest_cs.shield_hp - 10.0).max(0.0);
+    ctx.db.with_snapshot(|snap| {
+        let p = snap
+            .item_positions
+            .get(&ship_id)
+            .copied()
+            .expect("item_positions persisted after wormhole jump");
+        assert!((DVec3::from_array(p) - moved_pos).length() < 1e-3);
+        let hp = snap
+            .sp6_lifecycle
+            .ship_combat_hp
+            .get(&ship_id)
+            .expect("ship_combat_hp updated after wormhole jump");
+        assert!((hp.shield_hp - expected_shield).abs() < 1e-2);
+    });
+
     // Verify DB rollback preserves ship ball on origin when shared wormhole transition hits DB failure.
     struct TempDbDir(std::path::PathBuf);
     impl Drop for TempDbDir {
