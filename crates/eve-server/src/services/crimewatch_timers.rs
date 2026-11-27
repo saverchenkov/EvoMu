@@ -242,16 +242,14 @@ fn compute_crimewatch_timer_states_with_state(
     st: &crate::combat::CharacterCrimeWatchState,
     now_unix: u64,
 ) -> ComputedCrimewatchTimerStates {
-    let (npc_exp, prev_opt, trig_at) = ctx.db.with_snapshot(|snap| {
+    let (npc_exp, dis_exp, prev_opt, trig_at) = ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
         (
             cw.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp),
+            cw.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp),
             cw.crimewatch_timer_states.get(&char_id).copied(),
             cw.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]),
         )
-    });
-    let dis_exp = with_combat_runtime(ctx, |rt| {
-        rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp)
     });
     let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
     let mut next_trig = trig_at;
@@ -728,15 +726,10 @@ pub fn apply_illegal_pvp_sec_status_loss(
     let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod_target, sys_sec);
     let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.security_status = new_sec;
-        }
-    });
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.sec_status_transactions
-            .entry(char_id)
-            .or_default()
-            .push(SecStatusTransaction {
+        record_sec_status_change_in_snap(
+            snap,
+            char_id,
+            SecStatusTransaction {
                 timestamp_unix: now_unix,
                 old_sec,
                 new_sec,
@@ -746,7 +739,8 @@ pub fn apply_illegal_pvp_sec_status_loss(
                 event_type_id: EVENT_SEC_STATUS_ILLEGAL_AGGRESSION,
                 other_owner_id: (victim_char_id > 0).then_some(victim_char_id),
                 other_type_id: None,
-            });
+            },
+        );
     });
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
@@ -1119,15 +1113,7 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status));
-            let txs = with_combat_runtime(ctx, |rt| {
-                rt.sec_status_transactions
-                    .get(&char_id)
-                    .cloned()
-                    .unwrap_or_default()
-            });
+            let txs = char_sec_status_transactions(ctx, char_id);
             let rows: Vec<Vec<PyRep>> = txs
                 .into_iter()
                 .map(|t| {
@@ -1654,9 +1640,7 @@ pub fn evaluate_and_record_pvp_aggression(
             }
         }
         if is_disapproval_system(&ctx.sde, sys_id) {
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.disapproval_flags.insert(attacker_char_id, now_unix.saturating_add(900));
-            });
+            set_char_disapproval_flag(ctx, attacker_char_id, now_unix.saturating_add(900));
         }
         crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, attacker_char_id, vcid, now_unix);
         let le_created = ensure_mutual_limited_engagement_if(

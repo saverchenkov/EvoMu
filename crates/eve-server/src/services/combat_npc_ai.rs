@@ -1049,25 +1049,23 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             HashMap::new()
         };
 
-        let (disapproval_cids, active_sentry_origins): (
-            HashSet<i64>,
-            HashMap<i64, (i64, DVec3)>,
-        ) = if owner_cids.is_empty() {
-            (HashSet::new(), HashMap::new())
+        let disapproval_cids: HashSet<i64> = if owner_cids.is_empty() {
+            HashSet::new()
         } else {
-            crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                let dis = owner_cids
+            ctx.db.with_snapshot(|snap| {
+                let flags = &snap.combat_crimewatch_state.disapproval_flags;
+                owner_cids
                     .iter()
                     .copied()
-                    .filter(|cid| {
-                        rt.disapproval_flags
-                            .get(cid)
-                            .copied()
-                            .is_some_and(|exp| now_unix < exp)
-                    })
-                    .collect();
-                let sentry_origins = rt
-                    .sentry_gun_aggression
+                    .filter(|cid| flags.get(cid).copied().is_some_and(|exp| now_unix < exp))
+                    .collect()
+            })
+        };
+        let active_sentry_origins: HashMap<i64, (i64, DVec3)> = if owner_cids.is_empty() {
+            HashMap::new()
+        } else {
+            crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.sentry_gun_aggression
                     .iter()
                     .filter(|(&(sid, key_ship), st)| {
                         sid == solar_system_id
@@ -1077,8 +1075,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     .map(|(&(_, key_ship), st)| {
                         (key_ship, (st.offender_char_id, st.sentry_origin))
                     })
-                    .collect();
-                (dis, sentry_origins)
+                    .collect()
             })
         };
 

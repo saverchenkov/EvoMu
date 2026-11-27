@@ -12,57 +12,60 @@ use crate::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, SecStatusTransaction,
 };
 
-/// Replaces the security status transaction list for `char_id` (clears entry when `txs` is empty).
+/// Replaces the persisted security status transaction list for `char_id` (clears entry when `txs` is empty).
 pub fn set_sec_status_txs(ctx: &ServerContext, char_id: i64, txs: Vec<SecStatusTransaction>) {
-    with_mut_combat_runtime(ctx, |rt| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let map = &mut snap.combat_crimewatch_state.sec_status_transactions;
         if txs.is_empty() {
-            rt.sec_status_transactions.remove(&char_id);
+            map.remove(&char_id);
         } else {
-            rt.sec_status_transactions.insert(char_id, txs);
+            map.insert(char_id, txs);
         }
     });
 }
 
-/// Appends a [`SecStatusTransaction`] entry for `char_id`.
+/// Appends a [`SecStatusTransaction`] entry for `char_id` in persisted snapshot storage.
 pub fn push_sec_status_tx(ctx: &ServerContext, char_id: i64, tx: SecStatusTransaction) {
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.sec_status_transactions
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .sec_status_transactions
             .entry(char_id)
             .or_default()
             .push(tx);
     });
 }
 
-/// Returns a cloned snapshot of security status transactions recorded for `char_id`.
+/// Returns a cloned snapshot of persisted security status transactions recorded for `char_id`.
 pub fn sec_status_txs(ctx: &ServerContext, char_id: i64) -> Vec<SecStatusTransaction> {
-    with_combat_runtime(ctx, |rt| {
-        rt.sec_status_transactions
-            .get(&char_id)
-            .cloned()
-            .unwrap_or_default()
+    crate::services::combat_crimewatch::char_sec_status_transactions(ctx, char_id)
+}
+
+/// Sets the persisted CrimeWatch / Zarzakh disapproval expiration timestamp (Unix seconds) for `char_id`.
+pub fn set_disapproval_flag(ctx: &ServerContext, char_id: i64, expires_unix: u64) {
+    crate::services::combat_crimewatch::set_char_disapproval_flag(ctx, char_id, expires_unix);
+}
+
+/// Clears any persisted disapproval flag entry for `char_id`, returning its prior expiration timestamp.
+pub fn clear_disapproval_flag(ctx: &ServerContext, char_id: i64) -> Option<u64> {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .remove(&char_id)
     })
 }
 
-/// Sets the CrimeWatch / Zarzakh disapproval expiration timestamp (Unix seconds) for `char_id`.
-pub fn set_disapproval_flag(ctx: &ServerContext, char_id: i64, expires_unix: u64) {
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, expires_unix);
-    });
-}
-
-/// Clears any disapproval flag entry for `char_id`, returning its prior expiration timestamp.
-pub fn clear_disapproval_flag(ctx: &ServerContext, char_id: i64) -> Option<u64> {
-    with_mut_combat_runtime(ctx, |rt| rt.disapproval_flags.remove(&char_id))
-}
-
-/// Returns `true` if `char_id` currently has a stored disapproval flag entry.
+/// Returns `true` if `char_id` currently has a stored disapproval flag entry in DB snapshot state.
 pub fn has_disapproval_flag(ctx: &ServerContext, char_id: i64) -> bool {
-    with_combat_runtime(ctx, |rt| rt.disapproval_flags.contains_key(&char_id))
+    ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .contains_key(&char_id)
+    })
 }
 
 /// Returns the stored disapproval expiration timestamp (Unix seconds) for `char_id`, if any.
 pub fn disapproval_flag_until(ctx: &ServerContext, char_id: i64) -> Option<u64> {
-    with_combat_runtime(ctx, |rt| rt.disapproval_flags.get(&char_id).copied())
+    crate::services::combat_crimewatch::char_disapproval_flag_until(ctx, char_id)
 }
 
 /// Authorizes `char_id` to access shipping/audit-log storage container `container_id`.

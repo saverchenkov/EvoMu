@@ -244,6 +244,21 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             let cw = snap.combat_crimewatch_state.as_inner_mut();
             cw.crimewatch_timer_states
                 .insert(cid, (1, 0, 1, 0, 0));
+            cw.disapproval_flags.insert(cid, 1_700_000_900);
+            cw.sec_status_transactions.insert(
+                cid,
+                vec![eve_db::PersistedSecStatusTransaction {
+                    timestamp_unix: 1_700_000_010,
+                    old_sec: 0.0,
+                    new_sec: 0.25,
+                    delta: 0.25,
+                    reason: "NPC Pirate Bounty".into(),
+                    solar_system_id: sys_id,
+                    event_type_id: 378,
+                    other_owner_id: None,
+                    other_type_id: Some(17_641),
+                }],
+            );
             cw.player_bounty_pool.insert(cid, 50_000_000.0);
             cw.modified_system_securities.insert(sys_id, 0.85);
             cw.ess_reserve_unlocked_until
@@ -425,6 +440,8 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
         db2.with_snapshot(|snap| {
             let cw = &snap.combat_crimewatch_state;
             assert_eq!(cw.crimewatch_timer_states.get(&cid), Some(&(1, 0, 1, 0, 0)));
+            assert_eq!(cw.disapproval_flags.get(&cid), Some(&1_700_000_900));
+            assert_eq!(cw.sec_status_transactions.get(&cid).map(Vec::len), Some(1));
             assert_eq!(cw.player_bounty_pool.get(&cid), Some(&50_000_000.0));
             assert_eq!(cw.modified_system_securities.get(&sys_id), Some(&0.85));
             assert_eq!(
@@ -568,9 +585,28 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         snap.combat_crimewatch_state
             .pending_bounty_ticks
             .insert((sys_id, cid), 10_000.0);
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .insert(cid, 555_555);
+        snap.combat_crimewatch_state
+            .sec_status_transactions
+            .insert(
+                cid,
+                vec![eve_db::PersistedSecStatusTransaction {
+                    timestamp_unix: 1_700_000_001,
+                    old_sec: 1.0,
+                    new_sec: 1.2,
+                    delta: 0.2,
+                    reason: "NPC Pirate Bounty".into(),
+                    solar_system_id: sys_id,
+                    event_type_id: 378,
+                    other_owner_id: None,
+                    other_type_id: None,
+                }],
+            );
     });
     with_mut_combat_ephemeral(&ctx, |st| {
-        st.disapproval_flags.insert(cid, 555_555);
+        st.clone_soldier_cooldown_until.insert(sys_id, 555_555);
     });
     ctx.quasar_gateway
         .set_server_hijack_mode(false, None, None);
@@ -615,7 +651,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     *ctx.combat_ephemeral.write().unwrap() = {
         let mut guard = CombatRuntimeState::default();
         guard.synced_db_epoch = db.combat_state_epoch();
-        guard.disapproval_flags.insert(cid, 999_999);
+        guard.clone_soldier_cooldown_until.insert(sys_id, 999_999);
         guard
     };
     *ctx.quasar_gateway.server_hijack_state.write().unwrap() =
@@ -640,6 +676,12 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
             .drone_settings
             .insert(cid, (true, false));
         snap.combat_crimewatch_state.npc_timers.insert(cid, 999_999);
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .insert(cid, 999_999);
+        snap.combat_crimewatch_state
+            .sec_status_transactions
+            .clear();
         snap.combat_crimewatch_state
             .pending_bounty_ticks
             .insert((sys_id, cid), 999_999.0);
@@ -672,9 +714,26 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
             Some(&10_000.0)
         );
         assert!(!snap.combat_crimewatch_state.npc_timers.contains_key(&cid));
+        assert_eq!(
+            snap.combat_crimewatch_state
+                .disapproval_flags
+                .get(&cid)
+                .copied(),
+            Some(555_555)
+        );
+        assert_eq!(
+            snap.combat_crimewatch_state
+                .sec_status_transactions
+                .get(&cid)
+                .map(Vec::len),
+            Some(1)
+        );
     });
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(st.disapproval_flags.get(&cid).copied(), Some(555_555));
+        assert_eq!(
+            st.clone_soldier_cooldown_until.get(&sys_id).copied(),
+            Some(555_555)
+        );
     });
     let list_after_abort = ctx.quasar_gateway.handle_public_request(
         &q_sess,
@@ -792,8 +851,11 @@ fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs()
         cw.disapproval_flags.insert(hunter_id, 1_700_000_500);
         cw.modified_system_securities.insert(sys_id, 0.4);
     });
+    assert_eq!(
+        crate::services::combat_crimewatch::char_disapproval_flag_until(&ctx, hunter_id),
+        Some(1_700_000_500)
+    );
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(st.disapproval_flags.get(&hunter_id), Some(&1_700_000_500));
         // Core snapshot sync must not clobber unflushed RAM extended state when `extended_runtime_json` is unchanged.
         assert_eq!(st.clone_soldier_cooldown_until.get(&sys_id), Some(&250));
     });

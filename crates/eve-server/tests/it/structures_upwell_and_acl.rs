@@ -482,9 +482,9 @@ async fn test_fulcrum_docking_allegiance_gating_and_alignment_speed_buff() {
     assert_eq!(rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_ID), PyRep::Integer(ship)]).await.unwrap_err().code, "FulcrumRefusesTimerActive");
     ctx.crimewatch.write().unwrap().states.entry(cid).or_default().weapon_timer_until_unix = 0;
 
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.disapproval_flags.insert(cid, now + 300); });
+    eve_server::combat::crimewatch_tail_test_helpers::set_disapproval_flag(&ctx, cid, now + 300);
     assert_eq!(rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_ID), PyRep::Integer(ship)]).await.unwrap_err().code, "FulcrumRefusesTimerActive");
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.disapproval_flags.remove(&cid); });
+    eve_server::combat::crimewatch_tail_test_helpers::clear_disapproval_flag(&ctx, cid);
 
     // 3. Neutral pilot with 15m PvP timer allowed to dock
     ctx.crimewatch.write().unwrap().states.entry(cid).or_default().pvp_timer_until_unix = now + 900;

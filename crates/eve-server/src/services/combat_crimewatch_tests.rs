@@ -52,7 +52,14 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
         }
     );
 
-    state.disapproval_flags.insert(404, now + 180);
+    assert!(!is_disapproval_flag_active(&ctx, char_id, now));
+    assert_eq!(char_disapproval_flag_until(&ctx, char_id), None);
+    set_char_disapproval_flag(&ctx, char_id, now + 180);
+    assert_eq!(char_disapproval_flag_until(&ctx, char_id), Some(now + 180));
+    assert!(is_disapproval_flag_active(&ctx, char_id, now + 179));
+    assert!(!is_disapproval_flag_active(&ctx, char_id, now + 180));
+
+    state.clone_soldier_cooldown_until.insert(30_000_142, now + 180);
     let mut current_db = PersistedCombatCrimewatchState::default();
     current_db.safety_levels.insert(1, 0);
     current_db.safety_levels.insert(2, 1);
@@ -69,6 +76,21 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     current_db
         .npc_sec_gain_intervals
         .insert((101, 5), (now, 50_000.0));
+    current_db.disapproval_flags.insert(404, now + 180);
+    current_db.sec_status_transactions.insert(
+        404,
+        vec![SecStatusTransaction {
+            timestamp_unix: now,
+            old_sec: 1.0,
+            new_sec: 0.9,
+            delta: -0.1,
+            reason: "Illegal Ship Aggression".into(),
+            solar_system_id: 30_000_142,
+            event_type_id: 379,
+            other_owner_id: Some(101),
+            other_type_id: None,
+        }],
+    );
     current_db
         .limited_engagements
         .insert(101, HashMap::from([(202, now + 300)]));
@@ -105,6 +127,7 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
         Some(&(now, 50_000.0))
     );
     assert_eq!(persisted.disapproval_flags.get(&404), Some(&(now + 180)));
+    assert_eq!(persisted.sec_status_transactions.get(&404).map(Vec::len), Some(1));
     assert_eq!(
         persisted
             .limited_engagements
@@ -118,7 +141,10 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
 
     let mut restored = CombatRuntimeState::default();
     restored.sync_from_persisted(&persisted);
-    assert_eq!(restored.disapproval_flags.get(&404), Some(&(now + 180)));
+    assert_eq!(
+        restored.clone_soldier_cooldown_until.get(&30_000_142),
+        Some(&(now + 180))
+    );
 }
 
 #[test]
@@ -685,6 +711,21 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         cw.drone_settings.insert(char_id, (false, true));
         cw.corp_aggression_settings.insert(98_000_001, true);
         cw.npc_timers.insert(char_id, 1_900_000_500);
+        cw.disapproval_flags.insert(char_id, 1_900_000_400);
+        cw.sec_status_transactions.insert(
+            char_id,
+            vec![SecStatusTransaction {
+                timestamp_unix: 1_900_000_050,
+                old_sec: 1.0,
+                new_sec: 0.85,
+                delta: -0.15,
+                reason: "Illegal Ship Aggression".into(),
+                solar_system_id: sys_id,
+                event_type_id: 379,
+                other_owner_id: Some(other_id),
+                other_type_id: None,
+            }],
+        );
         cw.crimewatch_timer_states
             .insert(char_id, (101, 201, 401, 300, 500));
         cw.crimewatch_timer_triggered_at
@@ -719,7 +760,6 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     // Mutate remaining runtime fields via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
     // `flush_combat_runtime_to_db`, and `sync_runtime_to_db`; none may clobber DB-owned fields.
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, 1_800_000_000);
         rt.clone_soldier_cooldown_until.insert(sys_id, 1_800_000_999);
     });
     crate::services::drone_test_helpers::seed_active_drone(
@@ -754,7 +794,7 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     );
     ctx.db.with_mut_snapshot(|snap| {
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.disapproval_flags.insert(other_id, 1_800_000_100);
+            rt.ci_sentry_deployed_systems.insert(sys_id);
         });
     });
     flush_combat_runtime_to_db(&ctx);
@@ -833,16 +873,30 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         assert_eq!(cw.safety_levels.get(&char_id), Some(&(SafetyLevel::Red as i32)));
         assert_eq!(char_safety_level_in_snap(snap, char_id), Some(SafetyLevel::Red));
         assert_eq!(char_safety_level_in_snap(snap, other_id), Some(SafetyLevel::Yellow));
-        assert_eq!(cw.disapproval_flags.get(&char_id), Some(&1_800_000_000));
-        assert_eq!(cw.disapproval_flags.get(&other_id), Some(&1_800_000_100));
+        assert_eq!(cw.disapproval_flags.get(&char_id), Some(&1_900_000_400));
+        assert_eq!(cw.sec_status_transactions.get(&char_id).map(Vec::len), Some(1));
     });
     assert!(crate::services::drone_test_helpers::has_active_drone(&ctx, 77_001));
+    assert!(with_combat_runtime(&ctx, |rt| rt.ci_sentry_deployed_systems.contains(&sys_id)));
 
-    // Direct 3-way merge no-clobber: DB always wins for all 6 retired fields even when base != ram.
+    // Direct 3-way merge no-clobber: DB always wins for all retired fields even when base != ram.
+    let db_tx = SecStatusTransaction {
+        timestamp_unix: 1_900_000_200,
+        old_sec: 0.5,
+        new_sec: 0.6,
+        delta: 0.1,
+        reason: "NPC Pirate Bounty".into(),
+        solar_system_id: sys_id,
+        event_type_id: 378,
+        other_owner_id: None,
+        other_type_id: Some(17_641),
+    };
     let mut base = PersistedCombatCrimewatchState::default();
     base.drone_settings.insert(char_id, (true, true));
     base.corp_aggression_settings.insert(98_000_001, false);
     base.npc_timers.insert(char_id, 100);
+    base.disapproval_flags.insert(char_id, 100);
+    base.sec_status_transactions.insert(char_id, Vec::new());
     base.crimewatch_timer_states.insert(char_id, (100, 200, 400, 300, 500));
     base.crimewatch_timer_triggered_at.insert(char_id, [1; 5]);
     base.npc_sec_gain_intervals.insert((char_id, 5), (10, 1.0));
@@ -851,6 +905,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     db.drone_settings.insert(char_id, (false, true));
     db.corp_aggression_settings.insert(98_000_001, true);
     db.npc_timers.insert(char_id, 999);
+    db.disapproval_flags.insert(char_id, 999);
+    db.sec_status_transactions.insert(char_id, vec![db_tx.clone()]);
     db.crimewatch_timer_states.insert(char_id, (101, 201, 401, 301, 500));
     db.crimewatch_timer_triggered_at.insert(char_id, [9; 5]);
     db.npc_sec_gain_intervals.insert((char_id, 5), (90, 99.0));
@@ -859,6 +915,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     ram.drone_settings.insert(other_id, (false, false));
     ram.corp_aggression_settings.insert(98_000_002, false);
     ram.npc_timers.insert(other_id, 555);
+    ram.disapproval_flags.insert(other_id, 555);
+    ram.sec_status_transactions.insert(other_id, vec![db_tx]);
     ram.crimewatch_timer_states.insert(other_id, (102, 200, 400, 300, 500));
     ram.crimewatch_timer_triggered_at.insert(other_id, [5; 5]);
     ram.npc_sec_gain_intervals.insert((other_id, 1), (50, 5.0));
@@ -867,6 +925,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     assert_eq!(merged.drone_settings, db.drone_settings);
     assert_eq!(merged.corp_aggression_settings, db.corp_aggression_settings);
     assert_eq!(merged.npc_timers, db.npc_timers);
+    assert_eq!(merged.disapproval_flags, db.disapproval_flags);
+    assert_eq!(merged.sec_status_transactions, db.sec_status_transactions);
     assert_eq!(merged.crimewatch_timer_states, db.crimewatch_timer_states);
     assert_eq!(merged.crimewatch_timer_triggered_at, db.crimewatch_timer_triggered_at);
     assert_eq!(merged.npc_sec_gain_intervals, db.npc_sec_gain_intervals);
@@ -902,6 +962,8 @@ fn combat_runtime_state_drops_limited_engagements_and_duel_challenges_and_helper
         "crimewatch_timer_states",
         "crimewatch_timer_triggered_at",
         "npc_sec_gain_intervals",
+        "sec_status_transactions",
+        "disapproval_flags",
         "trigger_npc_timer",
         "is_npc_timer_active",
     ] {
@@ -918,6 +980,8 @@ fn combat_runtime_state_drops_limited_engagements_and_duel_challenges_and_helper
         "crimewatch_timer_states",
         "crimewatch_timer_triggered_at",
         "npc_sec_gain_intervals",
+        "sec_status_transactions",
+        "disapproval_flags",
     ] {
         assert!(
             !payload_body.contains(forbidden_ext),
@@ -973,4 +1037,159 @@ fn combat_runtime_state_drops_limited_engagements_and_duel_challenges_and_helper
         ));
         assert!(unshared_limited_engagement_partners_in_snap(snap, char_c, char_b, now + 50).is_empty());
     });
+}
+
+#[tokio::test]
+async fn snapshot_and_former_memory_sec_status_writers_both_visible_in_get_security_status_transactions_without_flush() {
+    let (ctx, mut session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let victim_id = char_id + 1;
+    let kw = HashMap::new();
+    let t0 = 1_750_000_000_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = 0.0;
+        }
+        if let Some(vch) = snap.characters.get_mut(&victim_id) {
+            vch.security_status = 0.0;
+        }
+        // Former snapshot writer (ESS/ballpark bounty split).
+        crate::services::pve_ess_reserve_banks::credit_ballpark_npc_bounty_with_ess_split(
+            &ctx.sde,
+            snap,
+            sys_id,
+            char_id,
+            250_000.0,
+            250_000.0,
+            1.0,
+            17_641,
+            t0,
+        );
+    });
+
+    // Former memory writer (illegal PvP security status loss), with NO flush or rehydrate in between.
+    apply_illegal_pvp_sec_status_loss(&ctx, char_id, victim_id, sys_id, 1.0, false, t0 + 10);
+
+    let rep = dispatch_combat_rpc(
+        &ctx,
+        &mut session,
+        "crimewatch",
+        "GetSecurityStatusTransactions",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap();
+    let PyRep::Rowset { columns, rows } = rep else {
+        panic!("expected Rowset from GetSecurityStatusTransactions");
+    };
+    assert_eq!(columns[1], "eventTypeID");
+    assert_eq!(
+        rows.len(),
+        2,
+        "both former snapshot writer and former memory writer entries must appear without flush or rehydrate"
+    );
+    assert_eq!(rows[0][1].as_i64(), Some(378));
+    assert_eq!(rows[0][2].as_i64(), Some(sys_id as i64));
+    assert!(rows[0][3].as_f64().is_some_and(|d| d > 0.0));
+    assert_eq!(rows[0][6].as_i64(), Some(17_641));
+
+    assert_eq!(rows[1][1].as_i64(), Some(379));
+    assert_eq!(rows[1][2].as_i64(), Some(sys_id as i64));
+    assert!(rows[1][3].as_f64().is_some_and(|d| d < 0.0));
+    assert_eq!(rows[1][5].as_i64(), Some(victim_id));
+
+    let expected_final_sec = ctx.db.with_snapshot(|s| s.characters[&char_id].security_status);
+    assert_eq!(rows[1][4].as_f64(), Some(expected_final_sec));
+}
+
+#[test]
+fn flush_does_not_overwrite_db_written_sec_status_transactions_or_disapproval_flags() {
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let other_id = char_id + 1;
+
+    with_combat_runtime(&ctx, |_| {});
+
+    let db_tx_1 = SecStatusTransaction {
+        timestamp_unix: 1_800_000_010,
+        old_sec: 1.0,
+        new_sec: 1.05,
+        delta: 0.05,
+        reason: "NPC Pirate Bounty".into(),
+        solar_system_id: sys_id,
+        event_type_id: 378,
+        other_owner_id: None,
+        other_type_id: Some(17_641),
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.sec_status_transactions
+            .insert(char_id, vec![db_tx_1.clone()]);
+        cw.disapproval_flags.insert(char_id, 1_800_000_900);
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.clone_soldier_cooldown_until.insert(sys_id, 1_800_000_111);
+    });
+    flush_combat_runtime_to_db(&ctx);
+
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(
+            cw.sec_status_transactions.get(&char_id),
+            Some(&vec![db_tx_1.clone()])
+        );
+        assert_eq!(cw.disapproval_flags.get(&char_id), Some(&1_800_000_900));
+    });
+
+    // Even when RAM has dirty extended edits and a concurrent DB write updates both fields
+    // mid-flush, flush never overwrites the database-written values.
+    let db_tx_2 = SecStatusTransaction {
+        timestamp_unix: 1_800_000_020,
+        old_sec: 1.05,
+        new_sec: 0.90,
+        delta: -0.15,
+        reason: "Illegal Ship Aggression".into(),
+        solar_system_id: sys_id,
+        event_type_id: 379,
+        other_owner_id: Some(other_id),
+        other_type_id: None,
+    };
+    {
+        let mut guard = ctx.combat_ephemeral.write().unwrap();
+        guard
+            .clone_soldier_cooldown_until
+            .insert(sys_id + 1, 1_800_000_222);
+    }
+    let mut injected = false;
+    flush_combat_runtime_to_db_with_hooks(
+        &ctx,
+        || {
+            if !injected {
+                injected = true;
+                ctx.db.with_mut_snapshot(|snap| {
+                    let cw = snap.combat_crimewatch_state.as_inner_mut();
+                    cw.sec_status_transactions
+                        .entry(char_id)
+                        .or_default()
+                        .push(db_tx_2.clone());
+                    cw.disapproval_flags.insert(char_id, 1_800_001_500);
+                });
+            }
+        },
+        || {},
+    );
+    assert!(injected);
+
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(
+            cw.sec_status_transactions.get(&char_id),
+            Some(&vec![db_tx_1, db_tx_2])
+        );
+        assert_eq!(cw.disapproval_flags.get(&char_id), Some(&1_800_001_500));
+    });
+    assert_eq!(
+        with_combat_runtime(&ctx, |rt| rt.clone_soldier_cooldown_until.get(&(sys_id + 1)).copied()),
+        Some(1_800_000_222)
+    );
 }

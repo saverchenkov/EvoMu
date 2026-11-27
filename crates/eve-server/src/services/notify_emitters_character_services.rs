@@ -1577,10 +1577,17 @@ pub(crate) fn dispatch_cleartimers_slash(
             pst.pending_concord_arrival = None;
         }
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.disapproval_flags.remove(&target_cid);
-    });
     let cleared_engagements: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+        if snap
+            .combat_crimewatch_state
+            .disapproval_flags
+            .contains_key(&target_cid)
+        {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .disapproval_flags
+                .remove(&target_cid);
+        }
         if snap.combat_crimewatch_state.npc_timers.contains_key(&target_cid) {
             snap.combat_crimewatch_state
                 .as_inner_mut()

@@ -568,6 +568,20 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     p.safety_levels.insert(90_000_003, 2);
     p.drone_settings.insert(90_000_001, (true, false));
     p.disapproval_flags.insert(90_000_001, 1_700_000_100);
+    p.sec_status_transactions.insert(
+        90_000_001,
+        vec![SecStatusTransaction {
+            timestamp_unix: 1_700_000_050,
+            old_sec: 1.0,
+            new_sec: 0.8,
+            delta: -0.2,
+            reason: "Illegal Ship Aggression".into(),
+            solar_system_id: 30_000_142,
+            event_type_id: 379,
+            other_owner_id: Some(90_000_002),
+            other_type_id: None,
+        }],
+    );
 
     let mut rt = CombatRuntimeState::default();
     assert!(!rt.has_extended_runtime_state());
@@ -583,7 +597,8 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     let preserved = rt.to_persisted_preserving(&p);
     assert_eq!(preserved.safety_levels, p.safety_levels);
     assert_eq!(preserved.drone_settings, p.drone_settings);
-    assert_eq!(rt.disapproval_flags.get(&90_000_001).copied(), Some(1_700_000_100));
+    assert_eq!(preserved.disapproval_flags, p.disapproval_flags);
+    assert_eq!(preserved.sec_status_transactions, p.sec_status_transactions);
     assert_eq!(
         rt.container_lifetimes.get(&101).map(|e| e.lifetime_secs),
         Some(500)
@@ -607,7 +622,10 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     p.disapproval_flags.insert(90_000_001, 1_700_000_200);
     rt.rehydrate_from_persisted_epochs(&p, 11, false);
     assert_eq!(rt.synced_db_epoch, 11);
-    assert_eq!(rt.disapproval_flags.get(&90_000_001).copied(), Some(1_700_000_200));
+    assert_eq!(
+        rt.to_persisted_preserving(&p).disapproval_flags.get(&90_000_001).copied(),
+        Some(1_700_000_200)
+    );
     assert_eq!(
         rt.container_lifetimes.get(&202).map(|e| e.lifetime_secs),
         Some(999),

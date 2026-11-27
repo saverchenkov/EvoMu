@@ -36,14 +36,20 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     assert!(!has_limited_engagement_in_snap(&snap, 101, 202, now + 300));
     assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now + 300));
 
-    // NPC timer exact boundary: now_unix < exp vs now_unix == exp
-    let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    // NPC timer & disapproval flag exact boundary: now_unix < exp vs now_unix == exp
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
     assert!(!is_npc_timer_active(&ctx, char_id, now));
     assert_eq!(npc_timer_until(&ctx, char_id), None);
     trigger_npc_timer(&ctx, char_id, now);
     assert_eq!(npc_timer_until(&ctx, char_id), Some(now + 300));
     assert!(is_npc_timer_active(&ctx, char_id, now + 299));
     assert!(!is_npc_timer_active(&ctx, char_id, now + 300));
+    assert!(!is_disapproval_flag_active(&ctx, char_id, now));
+    assert_eq!(char_disapproval_flag_until(&ctx, char_id), None);
+    set_char_disapproval_flag(&ctx, char_id, now + 180);
+    assert_eq!(char_disapproval_flag_until(&ctx, char_id), Some(now + 180));
+    assert!(is_disapproval_flag_active(&ctx, char_id, now + 179));
+    assert!(!is_disapproval_flag_active(&ctx, char_id, now + 180));
 
     // Full sync_from_persisted <-> to_persisted_preserving roundtrip across DB-owned & runtime collections
     let mut p = PersistedCombatCrimewatchState::default();
@@ -57,6 +63,20 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
         .insert(1, [now, now, now, 0, 0]);
     p.npc_sec_gain_intervals.insert((1, 5), (now, 10_000.0));
     p.disapproval_flags.insert(2, now + 180);
+    p.sec_status_transactions.insert(
+        2,
+        vec![SecStatusTransaction {
+            timestamp_unix: now,
+            old_sec: 1.0,
+            new_sec: 1.2,
+            delta: 0.2,
+            reason: "NPC Pirate Bounty".into(),
+            solar_system_id: sys_id,
+            event_type_id: 378,
+            other_owner_id: None,
+            other_type_id: Some(17_641),
+        }],
+    );
     p.duel_challenges.insert((1, 2), now + 45);
     p.corp_aggression_settings.insert(98_000_001, true);
     p.player_bounty_pool.insert(2, 5_000_000.0);
@@ -70,13 +90,13 @@ fn combat_runtime_state_timers_roundtrip_and_probe_signal_boundaries() {
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&2]), SafetyLevel::Yellow);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&3]), SafetyLevel::Green);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&4]), SafetyLevel::Green);
-    assert_eq!(rt.disapproval_flags[&2], now + 180);
 
     let out = rt.to_persisted_preserving(&p);
     assert_eq!((out.safety_levels[&1], out.safety_levels[&2], out.safety_levels[&3]), (0, 1, 2));
     assert_eq!(out.drone_settings[&1], (false, true));
     assert_eq!(out.limited_engagements[&1][&2], now + 120);
     assert_eq!((out.npc_timers[&1], out.disapproval_flags[&2]), (now + 60, now + 180));
+    assert_eq!(out.sec_status_transactions[&2].len(), 1);
     assert_eq!(out.crimewatch_timer_states[&1], (101, 201, 401, 300, 500));
     assert_eq!(out.crimewatch_timer_triggered_at[&1], [now, now, now, 0, 0]);
     assert_eq!(out.npc_sec_gain_intervals[&(1, 5)], (now, 10_000.0));
@@ -580,19 +600,18 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
 
     // GetSecurityStatusTransactions: all 5 reason->eventTypeID mappings + explicit event_type_id.
     let now = ctx.now_unix();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.sec_status_transactions.insert(
-            char_id,
-            vec![
-                SecStatusTransaction { timestamp_unix: now, old_sec: 2.0, new_sec: 2.1, delta: 0.1, reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: Some(peer_id), other_type_id: Some(587) },
-                SecStatusTransaction { timestamp_unix: now, old_sec: 2.1, new_sec: 1.5, delta: -0.6, reason: "Illegal Ship Aggression".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
-                SecStatusTransaction { timestamp_unix: now, old_sec: 1.5, new_sec: 2.0, delta: 0.5, reason: "Clone Soldier Security Tag".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
-                SecStatusTransaction { timestamp_unix: now, old_sec: 2.0, new_sec: 2.5, delta: 0.5, reason: "eventSecStatusGmRollback".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
-                SecStatusTransaction { timestamp_unix: now, old_sec: 2.5, new_sec: 2.6, delta: 0.1, reason: "Miscellaneous".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
-                SecStatusTransaction { timestamp_unix: now, old_sec: 2.6, new_sec: 2.75, delta: 0.15, reason: "Ignored".into(), solar_system_id: sys_id, event_type_id: 399, other_owner_id: None, other_type_id: None },
-            ],
-        );
-    });
+    crate::combat::crimewatch_tail_test_helpers::set_sec_status_txs(
+        &ctx,
+        char_id,
+        vec![
+            SecStatusTransaction { timestamp_unix: now, old_sec: 2.0, new_sec: 2.1, delta: 0.1, reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: Some(peer_id), other_type_id: Some(587) },
+            SecStatusTransaction { timestamp_unix: now, old_sec: 2.1, new_sec: 1.5, delta: -0.6, reason: "Illegal Ship Aggression".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+            SecStatusTransaction { timestamp_unix: now, old_sec: 1.5, new_sec: 2.0, delta: 0.5, reason: "Clone Soldier Security Tag".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+            SecStatusTransaction { timestamp_unix: now, old_sec: 2.0, new_sec: 2.5, delta: 0.5, reason: "eventSecStatusGmRollback".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+            SecStatusTransaction { timestamp_unix: now, old_sec: 2.5, new_sec: 2.6, delta: 0.1, reason: "Miscellaneous".into(), solar_system_id: sys_id, event_type_id: 0, other_owner_id: None, other_type_id: None },
+            SecStatusTransaction { timestamp_unix: now, old_sec: 2.6, new_sec: 2.75, delta: 0.15, reason: "Ignored".into(), solar_system_id: sys_id, event_type_id: 399, other_owner_id: None, other_type_id: None },
+        ],
+    );
     let tx_rep = dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "GetSecurityStatusTransactions", &[], &kw)
         .await
         .unwrap();
@@ -642,10 +661,14 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
         snap.characters.get_mut(&char_id).unwrap().security_status = 3.5;
         snap.combat_crimewatch_state.disapproval_flags.insert(char_id, 100);
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.disapproval_flags.insert(char_id, 999);
+            rt.clone_soldier_cooldown_until.insert(sys_id, 999);
         });
     });
-    assert_eq!(with_combat_runtime(&ctx, |rt| rt.disapproval_flags[&char_id]), 999);
+    assert_eq!(char_disapproval_flag_until(&ctx, char_id), Some(100));
+    assert_eq!(
+        with_combat_runtime(&ctx, |rt| rt.clone_soldier_cooldown_until[&sys_id]),
+        999
+    );
 }
 
 #[tokio::test]

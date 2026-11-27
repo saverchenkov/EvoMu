@@ -1001,41 +1001,44 @@ pub fn handle_apply_tags_for_sec_status(
             new_bal,
             format!("CONCORD Security Office tag turn-in ({total_consumed}x tags)"),
         );
-        Ok((orig_sec, cur_sec, new_bal.to_wire_f64(), tier_txs))
+        let list = snap
+            .combat_crimewatch_state
+            .as_inner_mut()
+            .sec_status_transactions
+            .entry(char_id)
+            .or_default();
+        if tier_txs.is_empty() {
+            list.push(crate::services::combat_crimewatch::SecStatusTransaction {
+                timestamp_unix: now_unix,
+                old_sec: orig_sec,
+                new_sec: cur_sec,
+                delta: cur_sec - orig_sec,
+                reason: "Clone Soldier Security Tag".into(),
+                solar_system_id: sys_id,
+                event_type_id: 385,
+                other_owner_id: None,
+                other_type_id: None,
+            });
+        } else {
+            for (tag_type_id, t_old, t_new) in tier_txs {
+                list.push(crate::services::combat_crimewatch::SecStatusTransaction {
+                    timestamp_unix: now_unix,
+                    old_sec: t_old,
+                    new_sec: t_new,
+                    delta: t_new - t_old,
+                    reason: "Clone Soldier Security Tag".into(),
+                    solar_system_id: sys_id,
+                    event_type_id: 385,
+                    other_owner_id: None,
+                    other_type_id: Some(tag_type_id),
+                });
+            }
+        }
+        Ok((orig_sec, cur_sec, new_bal.to_wire_f64()))
     });
 
     match res {
-        Ok((old_sec, new_sec, _new_bal_f64, tier_txs)) => {
-            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                let list = rt.sec_status_transactions.entry(char_id).or_default();
-                if tier_txs.is_empty() {
-                    list.push(crate::services::combat_crimewatch::SecStatusTransaction {
-                        timestamp_unix: now_unix,
-                        old_sec,
-                        new_sec,
-                        delta: new_sec - old_sec,
-                        reason: "Clone Soldier Security Tag".into(),
-                        solar_system_id: sys_id,
-                        event_type_id: 385,
-                        other_owner_id: None,
-                        other_type_id: None,
-                    });
-                } else {
-                    for (tag_type_id, t_old, t_new) in tier_txs {
-                        list.push(crate::services::combat_crimewatch::SecStatusTransaction {
-                            timestamp_unix: now_unix,
-                            old_sec: t_old,
-                            new_sec: t_new,
-                            delta: t_new - t_old,
-                            reason: "Clone Soldier Security Tag".into(),
-                            solar_system_id: sys_id,
-                            event_type_id: 385,
-                            other_owner_id: None,
-                            other_type_id: Some(tag_type_id),
-                        });
-                    }
-                }
-            });
+        Ok((old_sec, new_sec, _new_bal_f64)) => {
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 OnSecurityStatusUpdate {

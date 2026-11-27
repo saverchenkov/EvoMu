@@ -2442,7 +2442,8 @@ async fn extended_npc_weapon_runtime_survives_concurrent_epoch_bumps_and_two_sys
     let tc = tokio::task::spawn_blocking(move || {
         for i in 0..30_i64 {
             crate::services::combat_crimewatch::with_mut_combat_runtime(&cc, |rt| {
-                rt.disapproval_flags.insert(char_id + i, 999);
+                rt.clone_soldier_cooldown_until
+                    .insert(sys_a.saturating_add(100 + i as u32), 999);
             });
         }
     });
