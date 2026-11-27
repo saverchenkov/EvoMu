@@ -728,7 +728,7 @@
     },
     "stringly_bridge_rpc_error_code": {
       "zero_required": false,
-      "owning_issue": 1195,
+      "owning_issue": 1659,
       "regex": "\\bcode\\s*:\\s*(?: {3,}\\.(?:into|to_string)\\s*\\(|String\\s*::\\s*from\\s*\\(\\s* {3,}\\s*\\))",
       "description": "BridgeRpcError error codes written as string literals (code: \"X\".into(), \"X\".to_string(), String::from(\"X\")) instead of typed error enum (#1195).",
       "files": {

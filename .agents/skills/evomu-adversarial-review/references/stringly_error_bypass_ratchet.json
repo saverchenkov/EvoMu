@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "owning_issue": 1195,
+  "owning_issue": 1659,
   "description": "Per-file companion bypass ratchet for #1195 stringly BridgeRpcError codes (TT-11 / #1538). Missing file = 0; tightened mechanically after landing.",
   "rules": {
     "const_err_str_defs": {
