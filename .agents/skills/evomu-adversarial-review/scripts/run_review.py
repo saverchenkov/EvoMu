@@ -17,6 +17,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -90,13 +91,43 @@ CONTINUE_PROMPT = (
 
 def sh(cmd, cwd, env=None, timeout=None):
     try:
-        p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
-                           timeout=timeout)
-        return p.returncode, p.stdout + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
-    except subprocess.TimeoutExpired as e:
-        return 124, "TIMEOUT after %ss\n%s" % (timeout, (e.stdout or ""))
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
     except FileNotFoundError as e:
         return 127, "NOT FOUND: %s" % e
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, (stdout or "") + (("\n[stderr]\n" + stderr) if stderr else "")
+    except subprocess.TimeoutExpired:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except OSError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except OSError:
+                pass
+            stdout, stderr = proc.communicate()
+        return 124, "TIMEOUT after %ss\n%s" % (
+            timeout,
+            (stdout or "") + (("\n[stderr]\n" + stderr) if stderr else ""),
+        )
 
 
 def detect_cli():
@@ -1484,15 +1515,42 @@ _TARGET_TEMPDIR_RACE_RE = re.compile(
 )
 _OS_ERR2_RE = re.compile(r"No such file or directory \(os error 2\)", re.I)
 _TARGET_PATH_RE = re.compile(r"(?:^|[\s`'\"(=/])target/[^\s`'\")]*", re.I)
+_TESTS_STARTED_RE = re.compile(r"^\s*Running\s+(?:unittests\b|tests/)", re.M)
+_RUNTIME_SIGKILL_RE = re.compile(
+    r"process didn['’]t exit successfully:[^\n]*(?:signal:\s*9\b|\bSIGKILL\b|\bkilled\b)"
+    r"|signal:\s*9(?:,\s*SIGKILL)?\b"
+    r"|\bSIGKILL\b"
+    r"|^Killed(?::\s*9)?$",
+    re.I | re.M,
+)
 
 DEFAULT_HOURLY_CI_STATE_PATH = (
     "/Users/sergeya/.gemini/antigravity/brain/3d6533b5-943c-48df-8b5c-4ccec1132b65/scratch/hourly_test_suite_state.json"
 )
 
 
+def _detect_runtime_sigkill_oom(out, rc, failed=0):
+    """Return a concise detail string when tests already started executing and got SIGKILLed (macOS OOM) with 0 failures."""
+    if rc == 0 or failed > 0 or not out:
+        return ""
+    if "This application has been blocked from executing" in out:
+        return ""
+    if not _TESTS_STARTED_RE.search(out):
+        return ""
+    m = _RUNTIME_SIGKILL_RE.search(out)
+    if not m:
+        return ""
+    return "test binary OOM/SIGKILL after test execution started (%s)" % m.group(0).strip()[:160]
+
+
 def _detect_cargo_target_infra_error(out, rc, failed=0, target_dir=None):
-    """Return a concise detail string iff a non-zero cargo invocation with 0 failed tests hit a `target/` race."""
-    if rc == 0 or rc < 0 or failed > 0 or not out:
+    """Return a concise detail string iff a non-zero cargo invocation with 0 failed tests hit a `target/` race or OOM/SIGKILL."""
+    if rc == 0 or failed > 0 or not out:
+        return ""
+    sigkill_detail = _detect_runtime_sigkill_oom(out, rc, failed=failed)
+    if sigkill_detail:
+        return sigkill_detail
+    if rc < 0:
         return ""
     m = _TARGET_TEMPDIR_RACE_RE.search(out)
     if m:
@@ -1643,7 +1701,7 @@ def _evaluate_post_review_test_gate(
         ) + so.get("summary", "")
         so["report_markdown"] = (
             "## Orchestrator Test Infrastructure Error\n\n"
-            "The test phase hit a `target/` filesystem/compile race (`%s`) with `0` failed tests and still failed "
+            "The test phase hit an infrastructure error (`%s`) with `0` failed tests and still failed "
             "after automatic retry. Recorded as infrastructure `ERROR` rather than code `FAIL`.\n\n```\n%s\n```\n\n"
             % (detail, err_tail)
         ) + so.get("report_markdown", "")
@@ -1755,9 +1813,17 @@ def _evaluate_post_review_test_gate(
 
 
 _CARGO_COMPILE_ERR_RE = re.compile(
-    r"(?:^error(?:\[E\d+\])?:|could not compile `|failed to compile `)",
+    r"(?:^error(?:\[E\d+\])?:(?!\s+test failed\b)|could not compile `|failed to compile `)",
     re.M,
 )
+
+EVE_SERVER_LIB_SHARD_SIZE = 400
+EVE_SERVER_IT_SHARD_SIZE = 120
+_CARGO_VALUE_OPTS = frozenset({
+    "-j", "--jobs", "-p", "--package", "--test", "--bin", "--example", "--bench",
+    "--features", "--target", "--target-dir", "--manifest-path", "--profile",
+    "--color", "--message-format", "--config", "-F",
+})
 
 
 def _diff_touches_rust(changed_files):
@@ -1774,12 +1840,97 @@ def _diff_touches_rust(changed_files):
 
 
 def _is_cargo_compile_error(out, rc, failed=0, target_dir=None):
-    """Return True iff a non-zero cargo invocation failed compilation (not test failures or target/ infra race)."""
+    """Return True iff a non-zero cargo invocation failed compilation (not test failures, target/ race, or runtime OOM/SIGKILL)."""
     if rc is None or rc <= 0 or failed != 0 or not out:
         return False
     if _detect_cargo_target_infra_error(out, rc, failed=failed, target_dir=target_dir):
         return False
     return bool(_CARGO_COMPILE_ERR_RE.search(out))
+
+
+def _parse_eve_server_shard_cmd(cmd):
+    """If `cmd` is a shardable `cargo test` targeting `-p eve-server` `--lib` or `--test it`,
+    return `(base_cmd, post_flags, filters, chunk_size)`. Otherwise return `None`."""
+    if not cmd or len(cmd) < 4 or os.path.basename(cmd[0]) != "cargo" or cmd[1] != "test":
+        return None
+    if "--list" in cmd or "--exact" in cmd or "--workspace" in cmd:
+        return None
+    if "--" in cmd:
+        sep = cmd.index("--")
+        pre = list(cmd[:sep])
+        post = list(cmd[sep + 1:])
+    else:
+        pre = list(cmd)
+        post = []
+    base_cmd = list(pre[:2])
+    pre_filters = []
+    is_eve_server = False
+    chunk_size = None
+    i = 2
+    while i < len(pre):
+        tok = pre[i]
+        if tok in _CARGO_VALUE_OPTS and i + 1 < len(pre):
+            val = pre[i + 1]
+            if tok in ("-p", "--package") and val == "eve-server":
+                is_eve_server = True
+            elif tok == "--test" and val == "it":
+                chunk_size = EVE_SERVER_IT_SHARD_SIZE
+            base_cmd.extend((tok, val))
+            i += 2
+            continue
+        if tok.startswith("-"):
+            if tok in ("-p=eve-server", "--package=eve-server"):
+                is_eve_server = True
+            elif tok == "--lib":
+                chunk_size = EVE_SERVER_LIB_SHARD_SIZE
+            elif tok == "--test=it":
+                chunk_size = EVE_SERVER_IT_SHARD_SIZE
+            base_cmd.append(tok)
+            i += 1
+            continue
+        pre_filters.append(tok)
+        i += 1
+    if not is_eve_server or chunk_size is None:
+        return None
+    post_flags = []
+    post_filters = []
+    j = 0
+    while j < len(post):
+        tok = post[j]
+        if tok in ("--test-threads", "--format", "--color", "--skip", "--logfile") and j + 1 < len(post):
+            post_flags.extend((tok, post[j + 1]))
+            j += 2
+            continue
+        if tok.startswith("-"):
+            post_flags.append(tok)
+        else:
+            post_filters.append(tok)
+        j += 1
+    return base_cmd, post_flags, pre_filters + post_filters, chunk_size
+
+
+def _parse_listed_test_names(out):
+    """Extract sorted unique Rust test names (`<name>: test`) from `cargo test ... -- --list` stdout."""
+    if not out:
+        return []
+    stdout_part = out.split("\n[stderr]\n", 1)[0]
+    names = set()
+    for ln in stdout_part.splitlines():
+        s = ln.strip()
+        if s.endswith(": test"):
+            name = s[:-6].strip()
+            if name and not any(ch.isspace() for ch in name):
+                names.add(name)
+    return sorted(names)
+
+
+def _fmt_cmd_for_log(cmd):
+    if "--exact" in cmd:
+        idx = cmd.index("--exact")
+        rest = cmd[idx + 1:]
+        if len(rest) > 10:
+            return "%s <%d exact tests: %s .. %s>" % (" ".join(cmd[:idx + 1]), len(rest), rest[0], rest[-1])
+    return " ".join(cmd)
 
 
 def _behind_trunk_ratchet_base(root, base_arg, target_commit):
@@ -1795,10 +1946,15 @@ def _review_cargo_env(sdir, attest_dir=None):
     # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so concurrent review slots stay lean.
     env["CARGO_TARGET_DIR"] = os.environ.get("EVOMU_REVIEW_TARGET_DIR") or os.path.join(sdir, "target")
     env["CARGO_INCREMENTAL"] = "0"
-    # Strictly enforce Workspace Rule 3 (`-j 4`, `RUST_TEST_THREADS=4`) on every child `cargo`
+    # Strictly enforce Workspace Rule 3 (`-j 4`, `RUST_TEST_THREADS` configurable 1..=6, default 4)
     # so concurrent review slots never exhaust macOS memory/swap.
     env["CARGO_BUILD_JOBS"] = "4"
-    env["RUST_TEST_THREADS"] = "4"
+    raw_threads = (os.environ.get("EVOMU_REVIEW_TEST_THREADS") or "4").strip()
+    try:
+        test_threads = max(1, min(6, int(raw_threads)))
+    except ValueError:
+        test_threads = 4
+    env["RUST_TEST_THREADS"] = str(test_threads)
     # Reuse sccache for fast compilation when available.
     if os.path.exists("/opt/homebrew/bin/sccache"):
         env["RUSTC_WRAPPER"] = "/opt/homebrew/bin/sccache"
@@ -1917,18 +2073,19 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     non_test_failure = False
     compile_error = False
 
-    def _run_one(cmd):
+    def _exec_one(cmd, log_label="affected test command", append_output=True):
         nonlocal infra_retried, infra_error, infra_error_detail, non_test_failure, compile_error
         is_cargo = bool(cmd and os.path.basename(cmd[0]) == "cargo")
-        print("[review] running affected test command: %s" % " ".join(cmd), flush=True)
+        cmd_log = _fmt_cmd_for_log(cmd)
+        print("[review] running %s: %s" % (log_label, cmd_log), flush=True)
         c_rc, c_out = sh(cmd, root, env=env, timeout=timeout)
         _, c_failed = _parse_test_counts(c_out)
         detail1 = _detect_cargo_target_infra_error(c_out, c_rc, failed=c_failed, target_dir=env["CARGO_TARGET_DIR"]) if is_cargo else ""
         if detail1:
             infra_retried = True
             print(
-                "[review] cargo target/ infra error detected (exit=%d, 0 failed tests: %s); retrying once: %s"
-                % (c_rc, detail1, " ".join(cmd)),
+                "[review] cargo infra error detected (exit=%d, 0 failed tests: %s); retrying once: %s"
+                % (c_rc, detail1, cmd_log),
                 flush=True,
             )
             os.makedirs(env["CARGO_TARGET_DIR"], exist_ok=True)
@@ -1936,34 +2093,75 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
             _, c_failed2 = _parse_test_counts(c_out2)
             detail2 = _detect_cargo_target_infra_error(c_out2, c_rc2, failed=c_failed2, target_dir=env["CARGO_TARGET_DIR"])
             if c_rc2 == 0:
-                outs.append(
-                    "$ %s\n[review] first attempt hit target/ infra race (exit=%d, 0 failed tests); retried once -> exit=0\n%s"
-                    % (" ".join(cmd), c_rc, c_out2)
-                )
-                return 0
+                if append_output:
+                    outs.append(
+                        "$ %s\n[review] first attempt hit infra error (exit=%d, 0 failed tests); retried once -> exit=0\n%s"
+                        % (cmd_log, c_rc, c_out2)
+                    )
+                return 0, c_out2
             if detail2:
                 infra_error = True
                 if not infra_error_detail:
                     infra_error_detail = detail2
                 outs.append(
-                    "$ %s\n[review] cargo target/ infra race persisted on retry (exit=%d, 0 failed tests: %s)\n%s"
-                    % (" ".join(cmd), c_rc2, detail2, c_out2)
+                    "$ %s\n[review] cargo infra error persisted on retry (exit=%d, 0 failed tests: %s)\n%s"
+                    % (cmd_log, c_rc2, detail2, c_out2)
                 )
-                return c_rc2
+                return c_rc2, c_out2
             if c_failed2 == 0:
                 non_test_failure = True
                 if is_cargo and _is_cargo_compile_error(c_out2, c_rc2, failed=c_failed2, target_dir=env["CARGO_TARGET_DIR"]):
                     compile_error = True
             outs.append(
-                "$ %s\n[review] first attempt hit target/ infra race; retry exited %d (non-infra failure)\n%s"
-                % (" ".join(cmd), c_rc2, c_out2)
+                "$ %s\n[review] first attempt hit infra error; retry exited %d (non-infra failure)\n%s"
+                % (cmd_log, c_rc2, c_out2)
             )
-            return c_rc2
+            return c_rc2, c_out2
         if c_rc != 0 and c_failed == 0:
             non_test_failure = True
             if is_cargo and _is_cargo_compile_error(c_out, c_rc, failed=c_failed, target_dir=env["CARGO_TARGET_DIR"]):
                 compile_error = True
-        outs.append("$ %s\n%s" % (" ".join(cmd), c_out))
+        if append_output or c_rc != 0:
+            outs.append("$ %s\n%s" % (cmd_log, c_out))
+        return c_rc, c_out
+
+    def _run_one(cmd):
+        shard_spec = _parse_eve_server_shard_cmd(cmd)
+        if shard_spec is not None:
+            base_cmd, post_flags, filters, chunk_size = shard_spec
+            list_cmd = base_cmd + ["--"] + post_flags + filters + ["--list"]
+            list_rc, list_out = _exec_one(list_cmd, log_label="test list probe", append_output=False)
+            if list_rc != 0:
+                return list_rc
+            names = _parse_listed_test_names(list_out)
+            if len(names) > chunk_size:
+                total_shards = (len(names) + chunk_size - 1) // chunk_size
+                print(
+                    "[review] sharding %d listed eve-server tests into %d sequential --exact chunks of <=%d"
+                    % (len(names), total_shards, chunk_size),
+                    flush=True,
+                )
+                shard_rc = 0
+                for s_idx in range(total_shards):
+                    chunk = names[s_idx * chunk_size:(s_idx + 1) * chunk_size]
+                    shard_cmd = base_cmd + ["--"] + post_flags + ["--exact"] + chunk
+                    c_rc, _ = _exec_one(
+                        shard_cmd,
+                        log_label="sharded test chunk %d/%d (%d tests)" % (s_idx + 1, total_shards, len(chunk)),
+                        append_output=True,
+                    )
+                    if c_rc != 0 and shard_rc == 0:
+                        shard_rc = c_rc
+                    if compile_error:
+                        remaining_shards = total_shards - s_idx - 1
+                        if remaining_shards > 0:
+                            outs.append(
+                                "[review] DOES_NOT_COMPILE: aborting %d remaining shard(s) after cargo compile failure."
+                                % remaining_shards
+                            )
+                        break
+                return shard_rc
+        c_rc, _ = _exec_one(cmd, log_label="affected test command", append_output=True)
         return c_rc
 
     try:
@@ -1992,8 +2190,10 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
                     rc = c_rc
     finally:
         _release_cargo_test_slot(slot_fh)
-    santa = max(out.count("This application has been blocked from executing"),
-                len(re.findall(r"signal: 9, SIGKILL", out)))  # Santa banner goes to the TTY
+    santa_banner = out.count("This application has been blocked from executing")
+    sigkill_hits = len(re.findall(r"signal: 9, SIGKILL", out))
+    # Santa kills binaries at exec before tests start; SIGKILL after `Running unittests`/`Running tests/` is macOS OOM.
+    santa = santa_banner if (santa_banner > 0 or _TESTS_STARTED_RE.search(out)) else sigkill_hits
     passed, failed = _parse_test_counts(out)
     killed = rc < 0
     is_infra = bool(infra_error and failed == 0 and not non_test_failure and not killed)
@@ -2003,7 +2203,7 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         "INCOMPLETE (test runner killed by signal %d; tests and parity are partial)" % -rc
         if killed
         else (
-            "INFRA_ERROR (cargo target/ race persisted after retry; 0 failed tests)"
+            "INFRA_ERROR (cargo infra/OOM error persisted after retry; 0 failed tests)"
             if is_infra
             else (
                 "DOES_NOT_COMPILE (cargo compile failure; remaining targets aborted)"
