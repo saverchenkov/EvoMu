@@ -648,6 +648,7 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         panic_next_command_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         panic_on_command_countdown_for_test: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         panic_after_destruction_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        panic_after_command_guards_for_test: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         before_step_reply_hook_for_test: Arc::new(eve_db::lock_rank::RankedMutex::new(None)),
         npc_death_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),

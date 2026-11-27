@@ -1196,4 +1196,313 @@ impl SystemCommand {
                 | Self::ShutdownActor { .. }
         )
     }
+
+    /// Returns `true` for spawn-with-meta commands whose caller already cancelled while queued.
+    ///
+    /// Checked before [`Self::park_reply_for_unwind`] so proxy channels never mask early caller drops
+    /// in `protection::handle_protection_or_lifecycle_command`.
+    pub(in crate::system_actor) fn is_cancelled_spawn_with_meta(&self) -> bool {
+        matches!(
+            self,
+            Self::SpawnBallWithMeta { reply, .. } | Self::SpawnBallWithMetaTagged { reply, .. }
+                if reply.is_closed()
+        )
+    }
+
+    /// Swaps this command's caller reply sender for an internal proxy sender so the real sender
+    /// stays owned outside `std::panic::catch_unwind` (`#1173`).
+    pub(in crate::system_actor) fn park_reply_for_unwind(&mut self) -> Option<ParkedActorReply> {
+        macro_rules! park_req {
+            ($($variant:ident),* $(,)?) => {
+                match self {
+                    Self::StepManual { reply, .. } | Self::StepManualTickOnly { reply, .. } => {
+                        Some(park_oneshot_with(reply, |real_tx, step_out, solar_system_id| {
+                            if let Err(unsent_step_out) = real_tx.send(step_out) {
+                                let retained_count = unsent_step_out.destroyed_balls.len();
+                                let step_tick = unsent_step_out.tick;
+                                drop(unsent_step_out);
+                                if retained_count > 0 {
+                                    tracing::warn!(
+                                        solar_system_id,
+                                        tick = step_tick,
+                                        retained_destroyed_balls = retained_count,
+                                        "SystemActor step reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                    );
+                                }
+                            }
+                        }))
+                    }
+                    Self::FireWeaponCycleVolley { reply, .. } => {
+                        Some(park_oneshot_with(reply, |real_tx, volley_out, solar_system_id| {
+                            if let Err(unsent_volley_out) = real_tx.send(volley_out) {
+                                let retained_count = unsent_volley_out.destroyed.len();
+                                drop(unsent_volley_out);
+                                if retained_count > 0 {
+                                    tracing::warn!(
+                                        solar_system_id,
+                                        retained_destroyed_balls = retained_count,
+                                        "SystemActor volley reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                    );
+                                }
+                            }
+                        }))
+                    }
+                    Self::ApplyFitProjection { reply, .. } => park_optional_oneshot(reply),
+                    Self::ApplyPersistedCooldownCommit { reply, .. } => park_optional_oneshot(reply),
+                    Self::RefreshStargateActivationStates { reply, .. } => park_optional_oneshot(reply),
+                    Self::ActivateStargateTransitionForDest { reply, .. } => {
+                        park_optional_oneshot(reply)
+                    }
+                    Self::TrackModuleReloadSim { .. } | Self::CancelShipNaniteRepairs { .. } => {
+                        None
+                    }
+                    #[cfg(any(test, feature = "testkit"))]
+                    Self::TestHelperFighterOp { reply, .. } => Some(park_oneshot(reply)),
+                    #[cfg(any(test, feature = "testkit"))]
+                    Self::TestAccess { reply, .. } => Some(park_oneshot(reply)),
+                    $(Self::$variant { reply, .. } => Some(park_oneshot(reply)),)*
+                }
+            };
+        }
+        park_req!(
+            SpawnBall,
+            SpawnBallWithCombat,
+            SpawnBallWithMeta,
+            SpawnBallWithMetaTagged,
+            ChangeSlimItem,
+            SetBallWormholeStages,
+            SetBallMaxVelocity,
+            SetBallMaxVelocityCap,
+            GetBallSlimItem,
+            SpawnAsteroid,
+            MineAsteroid,
+            GetAsteroidState,
+            BreakGateCloak,
+            PopulateAsteroids,
+            RemoveBall,
+            RemoveBallIfToken,
+            AcceptDocking,
+            TakeBall,
+            RestoreBall,
+            RestoreBallIfAbsent,
+            EmitPackagedActions,
+            SetMovementMode,
+            SetWarpMovementMode,
+            SetWarpScrambleStrength,
+            SetWarpCoreStrength,
+            AddWarpBubble,
+            RemoveWarpBubble,
+            SetSpeedFraction,
+            SetBallPosition,
+            EmitDestinyEvent,
+            EmitObserverDestinyEvent,
+            GotoPoint,
+            PushSetState,
+            GetBallSnapshot,
+            GetBallGroupId,
+            ListBalls,
+            ListBallsInBubble,
+            GetSetState,
+            GetSetStateWithSeq,
+            CurrentTick,
+            GetBubbleIdForBall,
+            DrainObserverUpdates,
+            DrainObserverUpdatesWithSeq,
+            ApplyDamage,
+            ApplyTrueDamage,
+            FlushConditionCheckpoint,
+            FastForwardClock,
+            GetTargetLocks,
+            AddTargetLock,
+            AddTargetLockBreakingProtection,
+            RemoveTargetLock,
+            RemoveTargetLockQuiet,
+            ClearTargetLocks,
+            ClearTargetLocksQuiet,
+            SetCapacitor,
+            HealCombatState,
+            SetCombatState,
+            GetCombatState,
+            ModifyCombatState,
+            RepairCombatState,
+            AddModuleCycle,
+            RemoveModuleCycle,
+            RequestCycleDeactivation,
+            HasModuleCycle,
+            ReconcileModuleCycleBeforeActivate,
+            SetInterdictionNullified,
+            MicroJump,
+            MicroJumpField,
+            IsBallScrambled,
+            AddInterdictionSphere,
+            AddMobileWarpDisruptor,
+            ApplyEcmJam,
+            ApplyEcmJamFrom,
+            ApplyEcmJamFromModule,
+            ApplyEcmBurst,
+            ScheduleMobileWarpDisruptor,
+            UpdateModuleOverload,
+            StartNaniteRepair,
+            StopNaniteRepair,
+            RecordIncomingArmorDamage,
+            StopNonWarpModuleCycles,
+            FlushPeerObserverUpdates,
+            BreakProtection,
+            ForceDecloak,
+            GetProtectionSnapshot,
+            ActivateModuleCycleAtomic,
+            CommitLancerActivationAtomic,
+            AddCapacitorClamped,
+            SetMovementModeBreakingProtection,
+            SetWarpMovementModeBreakingProtection,
+            SetSpeedFractionBreakingProtection,
+            GotoPointBreakingProtection,
+            ConvertBallToRigidAt,
+            SetBallTypeId,
+            SetCombatStateHpBounds,
+            ApplyNpcAiStepEffects,
+            ApplyNpcRemoteRepairs,
+            ExecuteExtendedNpcAttack,
+            ClearNpcScramTargets,
+            StepExtDeployables,
+            ReconnectLiveShipInSpace,
+            SpawnReconnectedShipInSpace,
+            StartDisconnectedEmergencyWarp,
+            PrepareDisconnectedWarp,
+            ReconcileDisconnectedWarp,
+            HandoffInSpacePilotObserver,
+            UpdateBallDbuffs,
+            EmitLogiSoakStopFx,
+            LaunchDeadwarpReturns,
+            StepLogiSoakCycle,
+            UpsertDroneMiner,
+            RescheduleDroneMiner,
+            SetDroneNextReadyUnix,
+            ClearDroneRuntime,
+            FlushFighterCheckpoint,
+            LoadOrUnloadFighterTube,
+            FighterLaunchOp,
+            FighterRecallOp,
+            ApplyDamageToFighterSquadron,
+            AbandonOwnedFighters,
+            ClaimOrRestoreAbandonedFighterForScoop,
+            MutateFighterAbilityState,
+            CleanupDestroyedFighter,
+            ExtractShipFighterTubes,
+            InsertShipFighterTubes,
+            SeedAbandonedFighters,
+            ReloadFighterStateClean,
+            MergeFighterState,
+            UpsertActiveDrones,
+            ReserveDroneLaunches,
+            FinalizeDroneLaunches,
+            ReconnectDrones,
+            MutateActiveDrones,
+            MutateActiveDronesWithClaims,
+            ScoopDroneClaimOp,
+            HydrateActiveDronesFromSqlite,
+            SnapshotDirtyActiveDrones,
+            CommitActiveDronesFlushed,
+            UpsertProjectedEwar,
+            RecordProjectedEwarSource,
+            RemoveProjectedEwarByModule,
+            ClearProjectedEwarForTarget,
+            RecordActiveEwarStart,
+            ReplaceActiveEwarStarts,
+            FlushModuleEwar,
+            ClearEwarState,
+            RecordModuleCooldown,
+            SeedModuleCooldownEntry,
+            RemoveModuleCooldown,
+            ClearShipModuleCooldowns,
+            ClearAllModuleCooldowns,
+            ReplaceModuleCooldowns,
+            PruneExpiredModuleCooldowns,
+            SnapshotModuleCooldownCheckpoint,
+            RecordModuleReloadSimDeadlines,
+            ClearModuleReloadSimDeadline,
+            ApplyLoadingCooldownTransitions,
+            HydrateWeaponEffects,
+            UpsertEntropicSpoolActivation,
+            AdvanceEntropicSpoolCycle,
+            UpdateEntropicSpool,
+            RemoveEntropicSpool,
+            CollectAndClearEntropicSpoolsForShip,
+            UpsertInFlightMissile,
+            RemoveInFlightMissile,
+            DamageInFlightMissile,
+            InterceptInFlightMissile,
+            UpsertActiveBreacherDot,
+            RemoveActiveBreacherDot,
+            FlushWeaponEffectsCheckpoint,
+            ShutdownActor,
+            ActivateStargateTransition,
+            SetStargateActivationState,
+            SettleStargateActivationStates,
+            MutateExternalActiveModule,
+            RepairCombatStateSync,
+            SetBallPositionSync,
+            StopBall,
+            RemoveBallSync,
+            CancelShipNaniteRepairsSync,
+            CancelNaniteRepairsForShip,
+            TrySpawnAsteroid,
+            SyncAsteroidQuantity,
+            TrySpawnBallWithMeta,
+            MarkBallNonFree,
+            TrackModuleReloadSimSync,
+            TryHandoffInSpaceObserver,
+            TrySpawnBallWithCombat,
+            UpdateCombatState,
+            ApplyDirectCombatDamage,
+            SyncShipBallparkStats,
+            RespawnDepletedBeltsOnDowntime,
+            TryStepManual,
+            TakePendingCycleActions,
+            MutateWarpState,
+            FinishWarpForDock,
+            FlushDirtyConditionCheckpointSync,
+            StepFullTick,
+            TryRemoveModuleCycle,
+        )
+    }
+}
+
+/// Real caller reply sender parked outside `std::panic::catch_unwind` while a proxy sender
+/// executes inside `SystemActor` (`#1173`).
+pub(in crate::system_actor) struct ParkedActorReply {
+    forward_fn: Box<dyn FnOnce(SolarSystemId) + Send>,
+}
+
+impl ParkedActorReply {
+    pub(in crate::system_actor) fn forward(self, solar_system_id: SolarSystemId) {
+        (self.forward_fn)(solar_system_id);
+    }
+}
+
+fn park_oneshot_with<T: Send + 'static>(
+    reply: &mut oneshot::Sender<T>,
+    send_fn: impl FnOnce(oneshot::Sender<T>, T, SolarSystemId) + Send + 'static,
+) -> ParkedActorReply {
+    let (proxy_tx, mut proxy_rx) = oneshot::channel::<T>();
+    let real_tx = std::mem::replace(reply, proxy_tx);
+    ParkedActorReply {
+        forward_fn: Box::new(move |solar_system_id| {
+            if let Ok(val) = proxy_rx.try_recv() {
+                send_fn(real_tx, val, solar_system_id);
+            }
+        }),
+    }
+}
+
+fn park_oneshot<T: Send + 'static>(reply: &mut oneshot::Sender<T>) -> ParkedActorReply {
+    park_oneshot_with(reply, |real_tx, val, _solar_system_id| {
+        let _ = real_tx.send(val);
+    })
+}
+
+fn park_optional_oneshot<T: Send + 'static>(
+    reply: &mut Option<oneshot::Sender<T>>,
+) -> Option<ParkedActorReply> {
+    reply.as_mut().map(park_oneshot)
 }
