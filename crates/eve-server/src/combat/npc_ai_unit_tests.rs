@@ -1009,20 +1009,20 @@ async fn npc_ai_chase_idle_ewar_logi_threat_and_ball_destruction_branches() {
             tp_sig_bonus_pct: 0.0,
         },
     );
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.entry(player_ship).or_default().push(
-            crate::services::combat_crimewatch::AssistLogEntry {
-                attacker_char_id: 90_000_003,
-                corporation_id: 1_000_035,
-                alliance_id: None,
-                ship_type_id: 587,
-                weapon_type_id: 486,
-                damage_done: 10.0,
-                is_ewar: false,
-                last_action_unix: now,
-            },
-        );
-    });
+    crate::services::gm_soak_commands::combat_ephemeral_test_helpers::push_assist_log(
+        &ctx,
+        player_ship,
+        crate::services::combat_crimewatch::AssistLogEntry {
+            attacker_char_id: 90_000_003,
+            corporation_id: 1_000_035,
+            alliance_id: None,
+            ship_type_id: 587,
+            weapon_type_id: 486,
+            damage_done: 10.0,
+            is_ewar: false,
+            last_action_unix: now,
+        },
+    );
     crate::combat::npc_ai::npc_test_helpers::seed_npc_entity(
         &ctx,
         crate::services::combat_crimewatch::ExtendedNpcEntity {

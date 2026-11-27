@@ -1,7 +1,7 @@
 //! Semantic unit tests split from `downtime_cleanup_tests`.
 
 use super::*;
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_self_destruct;
 use crate::sp6_lifecycle::with_sp6_state;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -443,18 +443,17 @@ async fn cluster_advance_aborts_blocked_logoff_prunes_docked_disc_and_reload_ski
         );
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.self_destruct_countdowns.insert(
-            ship_sd,
-            crate::services::combat_crimewatch::SelfDestructCountdown {
-                ship_id: ship_sd,
-                char_id: char_sd,
-                solar_system_id: sys_id,
-                started_unix: now,
-                detonate_at_unix: now + 60,
-            },
-        );
-    });
+    seed_self_destruct(
+        &ctx,
+        ship_sd,
+        crate::services::combat_crimewatch::SelfDestructCountdown {
+            ship_id: ship_sd,
+            char_id: char_sd,
+            solar_system_id: sys_id,
+            started_unix: now,
+            detonate_at_unix: now + 60,
+        },
+    );
     with_mut_sp6_state(&ctx.db, |st| {
         st.space_object_meta.insert(
             expired_wreck_id,

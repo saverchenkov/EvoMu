@@ -13,7 +13,8 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, ContainerLifetimeEntry};
+use eve_server::services::combat_crimewatch::ContainerLifetimeEntry;
+use eve_server::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_container_lifetime;
 use eve_server::services::tactical_modules::tactical_test_helpers::{
     clear_lance_caster_lock, set_lance_caster_lock_until_for_scope, TacticalKeyScope,
 };
@@ -521,20 +522,19 @@ async fn test_beyonce_structures_containers_and_siphons() {
         .await;
     assert!(can_err.is_err(), "missing container must return error");
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.container_lifetimes.insert(
-            can_id,
-            ContainerLifetimeEntry {
-                item_id: can_id,
-                solar_system_id: SYS_ORIGIN,
-                type_id: 23,
-                owner_id: C1,
-                created_unix: 1_000,
-                lifetime_secs: 7_200,
-                is_abandoned: false,
-            },
-        );
-    });
+    seed_container_lifetime(
+        &ctx,
+        can_id,
+        ContainerLifetimeEntry {
+            item_id: can_id,
+            solar_system_id: SYS_ORIGIN,
+            type_id: 23,
+            owner_id: C1,
+            created_unix: 1_000,
+            lifetime_secs: 7_200,
+            is_abandoned: false,
+        },
+    );
     let expiry = ctx
         .dispatch_rpc(&mut sess, "beyonce", None, "GetContainerExpiryDate", &[PyRep::Integer(can_id)], &HashMap::new(), None)
         .await

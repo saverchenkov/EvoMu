@@ -8,7 +8,8 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::combat_weapons_spool::*;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, AssistLogEntry};
+use crate::services::combat_crimewatch::AssistLogEntry;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_assist_log;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, TargetLock};
 use eve_dogma::{FittedModule, ModuleState, ShipFittingEngine};
@@ -395,33 +396,32 @@ async fn handle_destruction_player_capsule_ejection_zarzakh_podding_and_abyssal_
         snap.items.insert(orphan_id, make_fighter_item(orphan_id, 587, victim_id, cont_id, InventoryFlag::Cargo, 3));
     });
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            victim_ship,
-            vec![
-                AssistLogEntry {
-                    attacker_char_id: attacker_id,
-                    corporation_id: 1_000_009,
-                    alliance_id: None,
-                    ship_type_id: 47_271,
-                    weapon_type_id: 47_240,
-                    damage_done: 1_500.0,
-                    is_ewar: false,
-                    last_action_unix: now_unix,
-                },
-                AssistLogEntry {
-                    attacker_char_id: 90_000_099,
-                    corporation_id: 1_000_009,
-                    alliance_id: None,
-                    ship_type_id: 47_271,
-                    weapon_type_id: 47_240,
-                    damage_done: 500.0,
-                    is_ewar: false,
-                    last_action_unix: now_unix.saturating_sub(10_000), // expired assist
-                },
-            ],
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        victim_ship,
+        vec![
+            AssistLogEntry {
+                attacker_char_id: attacker_id,
+                corporation_id: 1_000_009,
+                alliance_id: None,
+                ship_type_id: 47_271,
+                weapon_type_id: 47_240,
+                damage_done: 1_500.0,
+                is_ewar: false,
+                last_action_unix: now_unix,
+            },
+            AssistLogEntry {
+                attacker_char_id: 90_000_099,
+                corporation_id: 1_000_009,
+                alliance_id: None,
+                ship_type_id: 47_271,
+                weapon_type_id: 47_240,
+                damage_done: 500.0,
+                is_ewar: false,
+                last_action_unix: now_unix.saturating_sub(10_000), // expired assist
+            },
+        ],
+    );
 
     let v_ball = spawn_spool_ball(&ctx, sys_id, victim_ship, 47_271, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 0.0, 5.0, 0.0).await;
     let ShipOrNpcDestructionResult {

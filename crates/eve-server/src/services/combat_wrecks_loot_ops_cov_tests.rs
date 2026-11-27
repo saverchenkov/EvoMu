@@ -5,9 +5,9 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::combat_crimewatch::{
-    set_char_safety_level, with_mut_combat_runtime, DetailedKillmail, KillmailAttackerEntry,
-    SafetyLevel,
+    set_char_safety_level, DetailedKillmail, KillmailAttackerEntry, SafetyLevel,
 };
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_container_lifetime;
 use crate::services::inventory_fitting::fitting_containers_ships::{
     set_alsc_item_locked_snap, set_container_password_snap, set_container_unlocked_snap,
 };
@@ -442,20 +442,19 @@ async fn loot_all_abandoned_fleet_safety_stale_dock_and_war_ally_killmail_mutant
     }
 
     set_char_safety_level(&ctx, char_id, SafetyLevel::Green);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.container_lifetimes.insert(
-            rt_abandoned_wreck,
-            crate::services::combat_crimewatch::ContainerLifetimeEntry {
-                item_id: rt_abandoned_wreck,
-                solar_system_id: sys_id,
-                type_id: 26_557,
-                owner_id: outsider_id,
-                created_unix: now.saturating_sub(60),
-                lifetime_secs: 7_200,
-                is_abandoned: true,
-            },
-        );
-    });
+    seed_container_lifetime(
+        &ctx,
+        rt_abandoned_wreck,
+        crate::services::combat_crimewatch::ContainerLifetimeEntry {
+            item_id: rt_abandoned_wreck,
+            solar_system_id: sys_id,
+            type_id: 26_557,
+            owner_id: outsider_id,
+            created_unix: now.saturating_sub(60),
+            lifetime_secs: 7_200,
+            is_abandoned: true,
+        },
+    );
 
     // 1. Stale DB station_id while ship_item.location_id != station_id must NOT fail CantDoThatWhileDocked (kills L34 `== -> !=`);
     //    own wreck + active_ball_id == ship_id on Green succeeds without suspect (kills L210-213 mutants).
@@ -815,22 +814,21 @@ async fn loot_all_emits_on_item_change_for_whole_and_split_moves_to_looter() {
     });
 
     let now = ctx.now_unix();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        for wid in [wreck_whole_id, wreck_split_id] {
-            rt.container_lifetimes.insert(
-                wid,
-                crate::services::combat_crimewatch::ContainerLifetimeEntry {
-                    item_id: wid,
-                    solar_system_id: sys_id,
-                    type_id: 26_557,
-                    owner_id: foreign_owner_id,
-                    created_unix: now.saturating_sub(60),
-                    lifetime_secs: 7_200,
-                    is_abandoned: true,
-                },
-            );
-        }
-    });
+    for wid in [wreck_whole_id, wreck_split_id] {
+        seed_container_lifetime(
+            &ctx,
+            wid,
+            crate::services::combat_crimewatch::ContainerLifetimeEntry {
+                item_id: wid,
+                solar_system_id: sys_id,
+                type_id: 26_557,
+                owner_id: foreign_owner_id,
+                created_unix: now.saturating_sub(60),
+                lifetime_secs: 7_200,
+                is_abandoned: true,
+            },
+        );
+    }
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     for (bid, btype, pos) in [
@@ -1127,22 +1125,21 @@ async fn loot_all_partial_split_does_not_duplicate_on_item_change_for_non_charac
             .await
             .unwrap();
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        for &(owner_id, wreck_id, _, _) in &cases {
-            rt.container_lifetimes.insert(
-                wreck_id,
-                crate::services::combat_crimewatch::ContainerLifetimeEntry {
-                    item_id: wreck_id,
-                    solar_system_id: sys_id,
-                    type_id: 26_557,
-                    owner_id,
-                    created_unix: now.saturating_sub(60),
-                    lifetime_secs: 7_200,
-                    is_abandoned: false,
-                },
-            );
-        }
-    });
+    for &(owner_id, wreck_id, _, _) in &cases {
+        seed_container_lifetime(
+            &ctx,
+            wreck_id,
+            crate::services::combat_crimewatch::ContainerLifetimeEntry {
+                item_id: wreck_id,
+                solar_system_id: sys_id,
+                type_id: 26_557,
+                owner_id,
+                created_unix: now.saturating_sub(60),
+                lifetime_secs: 7_200,
+                is_abandoned: false,
+            },
+        );
+    }
 
     let kw = std::collections::HashMap::new();
     for &(owner_id, wreck_id, stack_id, is_foreign_char) in &cases {

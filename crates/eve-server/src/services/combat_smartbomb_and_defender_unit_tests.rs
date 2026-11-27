@@ -4,6 +4,9 @@
 
 use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    seed_assist_log, seed_self_destruct,
+};
 use eve_db::InventoryFlag;
 use eve_destiny::DamageVector;
 use eve_proto::PyRep;
@@ -98,31 +101,31 @@ async fn missile_multi_step_flight_destroyed_ball_missing_target_and_assisted_se
             ch.active_ship_id = sd_ship;
         }
     });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            sd_ship,
-            vec![AssistLogEntry {
-                attacker_char_id: char_id,
-                corporation_id: 1_000_009,
-                alliance_id: None,
-                ship_type_id: 587,
-                weapon_type_id: 2_410,
-                damage_done: 450.0,
-                is_ewar: false,
-                last_action_unix: now_unix.saturating_sub(10),
-            }],
-        );
-        rt.self_destruct_countdowns.insert(
-            sd_ship,
-            SelfDestructCountdown {
-                ship_id: sd_ship,
-                char_id: sd_char,
-                solar_system_id: sys_id,
-                started_unix: now_unix.saturating_sub(120),
-                detonate_at_unix: now_unix,
-            },
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        sd_ship,
+        vec![AssistLogEntry {
+            attacker_char_id: char_id,
+            corporation_id: 1_000_009,
+            alliance_id: None,
+            ship_type_id: 587,
+            weapon_type_id: 2_410,
+            damage_done: 450.0,
+            is_ewar: false,
+            last_action_unix: now_unix.saturating_sub(10),
+        }],
+    );
+    seed_self_destruct(
+        &ctx,
+        sd_ship,
+        SelfDestructCountdown {
+            ship_id: sd_ship,
+            char_id: sd_char,
+            solar_system_id: sys_id,
+            started_unix: now_unix.saturating_sub(120),
+            detonate_at_unix: now_unix,
+        },
+    );
 
     let _ = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
     let has_assisted_km = ctx.db.with_snapshot(|snap| {

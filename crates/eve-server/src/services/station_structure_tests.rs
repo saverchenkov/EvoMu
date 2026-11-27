@@ -6,6 +6,9 @@ use super::*;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, test_ctx_with_clock,
 };
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    contains_self_destruct, seed_self_destruct,
+};
 use eve_db::{CorporationRecord, InventoryItemRecord, SystemDynamicState, UpwellStructureRecord};
 
 #[tokio::test]
@@ -436,18 +439,17 @@ async fn docking_aborts_active_self_destruct_countdown() {
         .expect("spawn ball");
     let now_u = ctx.now_unix();
     crate::sp6_lifecycle::register_self_destruct_countdown(&ctx, ship_id, char_id, jita_sys, now_u, now_u + 120);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.self_destruct_countdowns.insert(
+    seed_self_destruct(
+        &ctx,
+        ship_id,
+        crate::services::combat_crimewatch::SelfDestructCountdown {
             ship_id,
-            crate::services::combat_crimewatch::SelfDestructCountdown {
-                ship_id,
-                char_id,
-                solar_system_id: jita_sys,
-                started_unix: now_u,
-                detonate_at_unix: now_u + 120,
-            },
-        );
-    });
+            char_id,
+            solar_system_id: jita_sys,
+            started_unix: now_u,
+            detonate_at_unix: now_u + 120,
+        },
+    );
 
     let mut session = SessionState::new(1);
     session.user_id = Some(char_id as u64);
@@ -463,9 +465,7 @@ async fn docking_aborts_active_self_destruct_countdown() {
     crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
         assert!(!st.self_destructs.contains_key(&ship_id));
     });
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.self_destruct_countdowns.contains_key(&ship_id));
-    });
+    assert!(!contains_self_destruct(&ctx, ship_id));
 }
 
 #[tokio::test]

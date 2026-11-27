@@ -6,6 +6,7 @@ use crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_b
 use crate::services::combat_crimewatch::{
     set_char_safety_level, ActiveBreacherDot, SafetyLevel,
 };
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::assist_log_for_ship;
 use crate::services::space_destiny::space_cyno_filaments;
 use crate::services::tactical_modules::apply_projected_remote_assistance;
 use crate::system_actor::ActiveModuleCycle;
@@ -188,14 +189,7 @@ async fn issue_366_breacher_dot_respects_tether_and_records_killmail_assist_and_
     let after_tick = sys.get_combat_state(victim_ship).await.unwrap().unwrap();
     assert!(after_tick.shield_hp < 1_000.0);
 
-    let assist_entries = ctx
-        .combat_ephemeral
-        .read()
-        .unwrap()
-        .aggression_assist_log
-        .get(&victim_ship)
-        .cloned()
-        .unwrap_or_default();
+    let assist_entries = assist_log_for_ship(&ctx, victim_ship);
     assert!(assist_entries.iter().any(|e| e.attacker_char_id == attacker_char && e.damage_done > 0.0));
 
     let (recipient_id, notif) = notify_rx.try_recv().expect("Breacher DoT tick must emit damage notification");

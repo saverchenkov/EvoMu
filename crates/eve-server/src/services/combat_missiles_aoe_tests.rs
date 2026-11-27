@@ -2,6 +2,9 @@ pub(super) use super::super::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use super::*;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    contains_self_destruct, seed_self_destruct, self_destruct_count,
+};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -415,20 +418,19 @@ async fn missile_launch_breacher_dot_expiration_and_self_destruct_step() {
     // 4. Elapsed self-destruct countdown in step_missiles_and_breachers detonate ship
     let sd_ship = 200_000_999i64;
     spawn_missile_target_ball(&ctx, sys_id, sd_ship, 587, DVec3::new(500.0, 0.0, 0.0), 100.0, 100.0, 100.0, 100.0).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.self_destruct_countdowns.insert(
-            sd_ship,
-            SelfDestructCountdown {
-                ship_id: sd_ship,
-                char_id,
-                solar_system_id: sys_id,
-                started_unix: ctx.now_unix().saturating_sub(120),
-                detonate_at_unix: ctx.now_unix(),
-            },
-        );
-    });
+    seed_self_destruct(
+        &ctx,
+        sd_ship,
+        SelfDestructCountdown {
+            ship_id: sd_ship,
+            char_id,
+            solar_system_id: sys_id,
+            started_unix: ctx.now_unix().saturating_sub(120),
+            detonate_at_unix: ctx.now_unix(),
+        },
+    );
     let _ = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
-    assert!(with_combat_runtime(&ctx, |rt| !rt.self_destruct_countdowns.contains_key(&sd_ship)));
+    assert!(!contains_self_destruct(&ctx, sd_ship));
 }
 
 #[tokio::test]
@@ -877,7 +879,7 @@ async fn self_destruct_abort_before_aoe_tick_persist_not_resurrected_gh_1174() {
         0
     );
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.len()),
+        self_destruct_count(&ctx),
         0
     );
 
@@ -924,7 +926,7 @@ async fn self_destruct_abort_before_aoe_tick_persist_not_resurrected_gh_1174() {
         0
     );
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.len()),
+        self_destruct_count(&ctx),
         0
     );
     ctx.db.with_snapshot(|snap| {

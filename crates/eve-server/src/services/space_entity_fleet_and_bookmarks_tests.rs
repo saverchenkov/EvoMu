@@ -6,8 +6,10 @@ use super::*;
 
 use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, ContainerLifetimeEntry, DroneSpaceState,
-    ExtendedNpcEntity,
+    ContainerLifetimeEntry, DroneSpaceState, ExtendedNpcEntity,
+};
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    get_container_lifetime, seed_container_lifetime,
 };
 use crate::services::inventory_fitting::fitting_containers_ships;
 use eve_db::types::FleetRole;
@@ -180,27 +182,26 @@ async fn open_shipping_unit_storage_and_abandon_loot_flows() {
 
     let mut owner_sess = make_session(owner_id, corp_id, Some(sys_id), Some(ship_id), service_roles::ROLE_PLAYER_DEFAULT);
     assert_eq!(handle(&ctx, &mut owner_sess, None, "beyonce", "CmdAbandonLoot", &[PyRep::Integer(ore_item_id)], &HashMap::new()).await.unwrap().unwrap_err().code, "InvalidItemType");
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.container_lifetimes.insert(
-            alsc_id,
-            ContainerLifetimeEntry {
-                item_id: alsc_id,
-                solar_system_id: sys_id,
-                type_id: 991_001,
-                owner_id,
-                created_unix: 1_000,
-                lifetime_secs: 7_200,
-                is_abandoned: false,
-            },
-        );
-    });
+    seed_container_lifetime(
+        &ctx,
+        alsc_id,
+        ContainerLifetimeEntry {
+            item_id: alsc_id,
+            solar_system_id: sys_id,
+            type_id: 991_001,
+            owner_id,
+            created_unix: 1_000,
+            lifetime_secs: 7_200,
+            is_abandoned: false,
+        },
+    );
     let ab_ok = handle(&ctx, &mut owner_sess, None, "beyonce", "CmdAbandonLoot", &[PyRep::List(vec![PyRep::Integer(alsc_id)])], &HashMap::new()).await.unwrap().unwrap();
     assert_eq!(kv_field(&ab_ok, "abandoned").and_then(|v| v.as_bool()), Some(true));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.get(&alsc_id).map(|i| i.owner_id), Some(0));
         assert_eq!(snap.items.get(&child_item_id).map(|i| i.owner_id), Some(0));
     });
-    assert!(with_combat_runtime(&ctx, |rt| rt.container_lifetimes.get(&alsc_id).is_some_and(|c| c.is_abandoned)));
+    assert!(get_container_lifetime(&ctx, alsc_id).is_some_and(|c| c.is_abandoned));
 }
 
 #[tokio::test]

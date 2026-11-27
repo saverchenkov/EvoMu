@@ -7,8 +7,10 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::combat_crimewatch::combat_wrecks_killmails::*;
 use crate::services::combat_crimewatch::{
-    with_combat_runtime, DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry,
-    SELF_DESTRUCT_COUNTDOWN_SECS,
+    DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, SELF_DESTRUCT_COUNTDOWN_SECS,
+};
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    assist_log_for_ship, get_container_lifetime,
 };
 use crate::services::inventory_fitting::set_container_password_snap;
 use eve_db::{
@@ -145,13 +147,11 @@ fn corp_insurance_payout_contract_sync_voiding_assist_aggregation_and_destructio
     record_killmail_assist_action(&ctx, ship_id, 90_000_077, 2_456, 2_456, 150.0, false, now);
     record_killmail_assist_action(&ctx, ship_id, 90_000_077, 23_915, 2_905, -50.0, true, now + 5);
     record_killmail_assist_action(&ctx, ship_id, 90_000_077, 23_915, 2_905, 200.0, false, now + 10);
-    with_combat_runtime(&ctx, |rt| {
-        let list = &rt.aggression_assist_log[&ship_id];
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].damage_done, 350.0);
-        assert!(list[0].is_ewar);
-        assert_eq!(list[0].last_action_unix, now + 10);
-    });
+    let list = assist_log_for_ship(&ctx, ship_id);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].damage_done, 350.0);
+    assert!(list[0].is_ewar);
+    assert_eq!(list[0].last_action_unix, now + 10);
 
     // process_ship_destruction_with_aggression sums hull + fitted item values
     ctx.db.with_mut_snapshot(|snap| {
@@ -212,12 +212,12 @@ async fn bubble_decay_precursor_deactivate_loot_all_split_and_killmail_variants(
     let bubble_id = 890_002i64;
     let bubble_child_id = 890_003i64;
     register_container_lifetime(&ctx, sec_cont_id, sys_id, 17_366, char_id, now, false);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(
-            rt.container_lifetimes[&sec_cont_id].lifetime_secs,
-            crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS
-        );
-    });
+    assert_eq!(
+        get_container_lifetime(&ctx, sec_cont_id)
+            .expect("secure container lifetime")
+            .lifetime_secs,
+        crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             bubble_id,

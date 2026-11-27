@@ -4,6 +4,9 @@ use super::*;
 use crate::formulas::compute_insurance_quote;
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::AssistLogEntry;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    contains_self_destruct, seed_assist_log, seed_self_destruct,
+};
 use eve_db::{
     ContractRecord, DisconnectedShipEntry, InventoryFlag, InventoryItemRecord, IskCents,
     PersistedInsurgencyCampaign,
@@ -374,53 +377,52 @@ async fn self_destruct_assist_attribution_and_timer_boundaries() {
     spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::ZERO, 0.0);
 
     // Record assist entries: expired entry, older entry, most recent valid entry, and self entry
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            ship_id,
-            vec![
-                AssistLogEntry {
-                    attacker_char_id: 90_000_099,
-                    corporation_id: 98_000_001,
-                    alliance_id: None,
-                    ship_type_id: 587,
-                    weapon_type_id: 587,
-                    damage_done: 500.0,
-                    is_ewar: false,
-                    last_action_unix: now.saturating_sub(2_000), // expired (> 900s)
-                },
-                AssistLogEntry {
-                    attacker_char_id: attacker_old,
-                    corporation_id: 98_000_001,
-                    alliance_id: None,
-                    ship_type_id: 587,
-                    weapon_type_id: 587,
-                    damage_done: 100.0,
-                    is_ewar: false,
-                    last_action_unix: now.saturating_sub(50),
-                },
-                AssistLogEntry {
-                    attacker_char_id: attacker_recent,
-                    corporation_id: 98_000_001,
-                    alliance_id: None,
-                    ship_type_id: 587,
-                    weapon_type_id: 587,
-                    damage_done: 200.0,
-                    is_ewar: false,
-                    last_action_unix: now.saturating_sub(10),
-                },
-                AssistLogEntry {
-                    attacker_char_id: victim, // self is ignored for final_blow override
-                    corporation_id: 98_000_001,
-                    alliance_id: None,
-                    ship_type_id: 587,
-                    weapon_type_id: 587,
-                    damage_done: 300.0,
-                    is_ewar: false,
-                    last_action_unix: now,
-                },
-            ],
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        ship_id,
+        vec![
+            AssistLogEntry {
+                attacker_char_id: 90_000_099,
+                corporation_id: 98_000_001,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 587,
+                damage_done: 500.0,
+                is_ewar: false,
+                last_action_unix: now.saturating_sub(2_000), // expired (> 900s)
+            },
+            AssistLogEntry {
+                attacker_char_id: attacker_old,
+                corporation_id: 98_000_001,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 587,
+                damage_done: 100.0,
+                is_ewar: false,
+                last_action_unix: now.saturating_sub(50),
+            },
+            AssistLogEntry {
+                attacker_char_id: attacker_recent,
+                corporation_id: 98_000_001,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 587,
+                damage_done: 200.0,
+                is_ewar: false,
+                last_action_unix: now.saturating_sub(10),
+            },
+            AssistLogEntry {
+                attacker_char_id: victim, // self is ignored for final_blow override
+                corporation_id: 98_000_001,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 587,
+                damage_done: 300.0,
+                is_ewar: false,
+                last_action_unix: now,
+            },
+        ],
+    );
 
     let sd_res = execute_self_destruct(&ctx, sys_id, victim, ship_id, DVec3::ZERO, 99)
         .await
@@ -542,21 +544,20 @@ async fn live_self_destruct_sync_denies_uncontested_insurance_loot_validates_own
             make_item(tackled_cargo, 34, victim, tackled_ship, InventoryFlag::Cargo, 500, 0.0),
         );
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            tackled_ship,
-            vec![AssistLogEntry {
-                attacker_char_id: attacker,
-                corporation_id: 98_000_001,
-                alliance_id: None,
-                ship_type_id: 587,
-                weapon_type_id: 2_905,
-                damage_done: 150.0,
-                is_ewar: false,
-                last_action_unix: now.saturating_sub(20),
-            }],
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        tackled_ship,
+        vec![AssistLogEntry {
+            attacker_char_id: attacker,
+            corporation_id: 98_000_001,
+            alliance_id: None,
+            ship_type_id: 587,
+            weapon_type_id: 2_905,
+            damage_done: 150.0,
+            is_ewar: false,
+            last_action_unix: now.saturating_sub(20),
+        }],
+    );
     let res_tackled = execute_live_self_destruct_sync(
         &ctx,
         sys_id,
@@ -2043,18 +2044,17 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
             },
         );
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.self_destruct_countdowns.insert(
+    seed_self_destruct(
+        &ctx,
+        ship_id,
+        crate::services::combat_crimewatch::SelfDestructCountdown {
             ship_id,
-            crate::services::combat_crimewatch::SelfDestructCountdown {
-                ship_id,
-                char_id: victim,
-                solar_system_id: sys_id,
-                started_unix: now,
-                detonate_at_unix: now + 120,
-            },
-        );
-    });
+            char_id: victim,
+            solar_system_id: sys_id,
+            started_unix: now,
+            detonate_at_unix: now + 120,
+        },
+    );
     {
         let mut fittings = ctx.ship_fittings.write().unwrap();
         fittings.insert(
@@ -2109,9 +2109,7 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
             }
         }
     });
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.self_destruct_countdowns.contains_key(&ship_id));
-    });
+    assert!(!contains_self_destruct(&ctx, ship_id));
     assert!(!ctx.ship_fittings.read().unwrap().contains_key(&ship_id));
     assert!(!ctx
         .systems

@@ -1,5 +1,8 @@
 //! Unit tests for `gm_soak_commands` (`#1088`).
 
+use super::combat_ephemeral_test_helpers::{
+    get_gm_deadwarp, seed_gm_deadwarp, seed_gm_logi_soak,
+};
 use super::*;
 use eve_db::WorldRepository;
 use eve_sde::{InvType, RaceInfo, SdeRegistry, TypeMaterialEntry};
@@ -401,26 +404,25 @@ async fn test_stop_logi_soak_flushes_stop_fx_before_remove_ball() {
     .await;
     let mut rx = sys.subscribe();
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.gm_logi_soaks.insert(
-            sys_id,
-            GmLogiSoakState {
-                solar_system_id: sys_id,
-                target_char_id: cid,
-                target_ship_id,
-                npc_type_id: 29_768,
-                npc_ids: vec![npc_id],
-                seed: 1,
-                cycle_count: 1,
-                cycle_interval_ticks: SOAK_LOGI_CYCLE_INTERVAL_TICKS,
-                last_cycle_tick: 5,
-                started_unix: 100,
-                last_cycle_unix: 102,
-                total_shield_repaired: 450.0,
-                total_armor_repaired: 450.0,
-            },
-        );
-    });
+    seed_gm_logi_soak(
+        &ctx,
+        sys_id,
+        GmLogiSoakState {
+            solar_system_id: sys_id,
+            target_char_id: cid,
+            target_ship_id,
+            npc_type_id: 29_768,
+            npc_ids: vec![npc_id],
+            seed: 1,
+            cycle_count: 1,
+            cycle_interval_ticks: SOAK_LOGI_CYCLE_INTERVAL_TICKS,
+            last_cycle_tick: 5,
+            started_unix: 100,
+            last_cycle_unix: 102,
+            total_shield_repaired: 450.0,
+            total_armor_repaired: 450.0,
+        },
+    );
 
     let stopped = stop_logi_soak_in_system(&ctx, sys_id)
         .await
@@ -589,22 +591,21 @@ async fn test_deadwarp_return_warp_uses_system_actor_and_updates_warp_state() {
     .expect("spawn deadwarp ship");
 
     let now_unix = ctx.now_unix();
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.gm_deadwarps.insert(
+    seed_gm_deadwarp(
+        &ctx,
+        ship_id,
+        GmDeadwarpState {
+            char_id: cid,
+            solar_system_id: sys_id,
             ship_id,
-            GmDeadwarpState {
-                char_id: cid,
-                solar_system_id: sys_id,
-                ship_id,
-                origin_pos: origin.to_array(),
-                anchor_pos: anchor.to_array(),
-                warp_speed_au_s: 3.0,
-                phase: DeadwarpPhase::AtAnchorDelay,
-                started_unix: now_unix.saturating_sub(10),
-                reached_anchor_unix: Some(now_unix),
-            },
-        );
-    });
+            origin_pos: origin.to_array(),
+            anchor_pos: anchor.to_array(),
+            warp_speed_au_s: 3.0,
+            phase: DeadwarpPhase::AtAnchorDelay,
+            started_unix: now_unix.saturating_sub(10),
+            reached_anchor_unix: Some(now_unix),
+        },
+    );
 
     step_gm_soak_and_deadwarp_for_system(&ctx, sys_id);
 
@@ -617,7 +618,7 @@ async fn test_deadwarp_return_warp_uses_system_actor_and_updates_warp_state() {
         Some(crate::system_actor::WarpProvenance::PlayerOrFleetWarp)
     );
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.gm_deadwarps.get(&ship_id).map(|s| s.phase)),
+        get_gm_deadwarp(&ctx, ship_id).map(|s| s.phase),
         Some(DeadwarpPhase::Returning)
     );
 }

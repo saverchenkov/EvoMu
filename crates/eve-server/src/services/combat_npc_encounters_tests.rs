@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::get_container_lifetime;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
@@ -564,14 +565,12 @@ async fn finalize_cycle_destroyed_npcs_spawns_owner_slim_meta_and_allows_green_s
 
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.destroyed_npc_cache.contains_key(&951_001));
-        let lifetime = rt
-            .container_lifetimes
-            .get(&wreck_id)
-            .expect("container lifetime registered for cycle-killed NPC wreck");
-        assert_eq!(lifetime.owner_id, char_id);
-        assert_eq!(lifetime.type_id, 26_573);
-        assert!(!lifetime.is_abandoned);
     });
+    let lifetime = get_container_lifetime(&ctx, wreck_id)
+        .expect("container lifetime registered for cycle-killed NPC wreck");
+    assert_eq!(lifetime.owner_id, char_id);
+    assert_eq!(lifetime.type_id, 26_573);
+    assert!(!lifetime.is_abandoned);
 
     let mut loot_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
         snap.items
@@ -688,14 +687,10 @@ async fn finalize_cycle_destroyed_npcs_spawns_owner_slim_meta_and_allows_green_s
     let unknown_wire = eve_destiny::wire::slim_item_dict(unknown_ball, unknown_meta);
     assert_eq!(unknown_wire.dict_get("ownerID"), Some(&eve_proto::PyRep::Integer(1)));
 
-    with_combat_runtime(&ctx, |rt| {
-        let lifetime = rt
-            .container_lifetimes
-            .get(&unknown_wreck_id)
-            .expect("abandoned lifetime registered");
-        assert_eq!(lifetime.owner_id, 0);
-        assert!(lifetime.is_abandoned);
-    });
+    let lifetime =
+        get_container_lifetime(&ctx, unknown_wreck_id).expect("abandoned lifetime registered");
+    assert_eq!(lifetime.owner_id, 0);
+    assert!(lifetime.is_abandoned);
 
     // Ensure at least one item in unknown_wreck_id and confirm Green-safety pilot can loot abandoned wreck cleanly.
     let unknown_has_loot = ctx
