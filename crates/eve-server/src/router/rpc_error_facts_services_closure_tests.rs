@@ -10,7 +10,7 @@ use super::rpc_error_facts_domain_services_tests::{
     strip_cfg_test_items_preserving_strings, strip_rust_comments_keep_strings, upsert_test_type,
     AMENDED_LIVE_CLIENT_ERROR_CODES, CODE_FITTING_VALIDATION_FAILED, CODE_GM_ROLE_REQUIRED,
     CODE_INSUFFICIENT_ROLE, CODE_INVALID_TARGET, CODE_MODULE_NOT_FOUND,
-    CODE_NOT_ENOUGH_CAPACITOR, CODE_SHIP_IN_WARP, CODE_SHIP_NOT_IN_SPACE,
+    CODE_NOT_ENOUGH_CAPACITOR, CODE_SHIP_IN_WARP,
 };
 use crate::router::slash_registry::SlashInvocation;
 use crate::services;
@@ -22,7 +22,7 @@ use eve_db::{
 use eve_destiny::{Ball, CombatState, MovementMode, WarpPhase};
 use eve_dogma::{FittedModule, ModuleState};
 use eve_machonet::service_roles;
-use eve_proto::{BridgeRpcError, PyRep, RejectionFacts, UserErrorKey};
+use eve_proto::{PyRep, RejectionFacts, UserErrorKey};
 use eve_sde::{DungeonAsteroidEntry, DungeonTemplate};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -643,16 +643,14 @@ async fn space_warp_jump_handlers_emit_typed_facts_for_target_cap_warp_and_space
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let _ = sys_h
-        .try_spawn_ball_with_combat(
-            ship_ball.clone(),
-            CombatState {
-                capacitor: 0.01,
-                max_capacitor: 500.0,
-                ..Default::default()
-            },
-        )
-        .await;
+    let _ = sys_h.try_spawn_ball_with_combat(
+        ship_ball.clone(),
+        CombatState {
+            capacitor: 0.01,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+    );
 
     let cap_err = ctx
         .dispatch_rpc(
@@ -923,27 +921,25 @@ async fn pve_dungeon_cache_editor_and_runtime_rpc_emit_typed_facts() {
     let unseeded_ore_iid = inst_ids[0].as_i64().expect("unseeded ore instanceID");
 
     let sys_h = ctx.systems.get_or_spawn(ore_sys_id);
-    let _ = sys_h
-        .try_spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: 587,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 1_000_000_000_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            CombatState {
-                capacitor: 0.01,
-                max_capacitor: 500.0,
-                ..Default::default()
-            },
-        )
-        .await;
+    let _ = sys_h.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            capacitor: 0.01,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+    );
 
     let agency_cap_err = services::pve_dungeon_cache::handle(
         &ctx,
@@ -1378,7 +1374,7 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
         "fleet_warp",
     );
 
-    let generic_gate_err = services::fleet_social::fleet_social_scanning::handle(
+    let generic_gate_err = services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
         &ctx,
         &mut player_sess,
         "beyonce",
@@ -1484,16 +1480,14 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let _ = sys_h
-        .try_spawn_ball_with_combat(
-            attacker_ball.clone(),
-            CombatState {
-                capacitor: 12.0,
-                max_capacitor: 500.0,
-                ..Default::default()
-            },
-        )
-        .await;
+    let _ = sys_h.try_spawn_ball_with_combat(
+        attacker_ball.clone(),
+        CombatState {
+            capacitor: 12.0,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+    );
     let smartbomb_type = ctx.sde.types.get(&smartbomb_tid).cloned().expect("smartbomb type");
     let smartbomb_mod = FittedModule {
         item_id: smartbomb_id,
