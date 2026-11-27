@@ -832,7 +832,7 @@ pub(crate) async fn group_jump_to_resolved_beacon(
                 "clientID",
                 OnSessionChanged {
                     is_remote: false,
-                    session: PyRep::Integer(0),
+                    session: crate::router::build_character_session_state_keyval(ctx, *m_char),
                     change: PyRep::Dict(vec![
                         (
                             PyRep::String("solarsystemid".into()),

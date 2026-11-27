@@ -48,13 +48,13 @@ fn player_channel_create_ownership_transfer_and_system_channel_guards() {
     )
     .unwrap()
     .unwrap();
-    let chan_id = created
-        .dict_get("channelID")
-        .and_then(|v| v.as_str())
-        .unwrap()
-        .to_string();
+    let PyRep::String(chan_id) = created else {
+        panic!("expected CreatePlayerOwnedChannel String");
+    };
+    assert_eq!(chan_id, "player_fleetopsedge");
     assert_eq!(
-        created.dict_get("ownerID").and_then(|v| v.as_i64()),
+        ctx.db
+            .with_snapshot(|snap| snap.chat_channels["channel:fleetopsedge"].owner_id),
         Some(90_000_001)
     );
 
@@ -144,9 +144,13 @@ fn player_channel_create_ownership_transfer_and_system_channel_guards() {
     );
 
     // Owner transfers ownership -> clears ACL restrictions & sets transferred=true
+    let db_chan_id = chan_id
+        .strip_prefix("player_")
+        .map(|r| format!("channel:{r}"))
+        .unwrap_or_else(|| chan_id.clone());
     ctx.db.with_mut_snapshot(|snap| {
         snap.chat_channel_acl
-            .entry(chan_id.to_ascii_lowercase())
+            .entry(db_chan_id.to_ascii_lowercase())
             .or_default()
             .deny_list
             .insert(90_000_002);
@@ -165,7 +169,7 @@ fn player_channel_create_ownership_transfer_and_system_channel_guards() {
     assert_eq!(res.dict_get("ownerID").and_then(|v| v.as_i64()), Some(90_000_002));
     ctx.db.with_snapshot(|snap| {
         assert!(
-            !snap.chat_channel_acl[&chan_id.to_ascii_lowercase()]
+            !snap.chat_channel_acl[&db_chan_id.to_ascii_lowercase()]
                 .deny_list
                 .contains(&90_000_002)
         );
@@ -192,7 +196,7 @@ fn chat_moderation_motd_mute_unmute_and_send_validation_edges() {
     )
     .unwrap()
     .unwrap();
-    let chan_id = created.dict_get("channelID").unwrap().as_str().unwrap().to_string();
+    let chan_id = created.as_str().unwrap().to_string();
 
     // Non-member SendMessage rejected
     assert_eq!(
@@ -267,8 +271,12 @@ fn chat_moderation_motd_mute_unmute_and_send_validation_edges() {
         .code,
         "ChatAccessDenied"
     );
+    let db_chan_id = chan_id
+        .strip_prefix("player_")
+        .map(|r| format!("channel:{r}"))
+        .unwrap_or_else(|| chan_id.clone());
     ctx.db.with_mut_snapshot(|snap| {
-        snap.chat_channels.get_mut(&chan_id).unwrap().operators.insert(90_000_002);
+        snap.chat_channels.get_mut(&db_chan_id).unwrap().operators.insert(90_000_002);
     });
     assert_eq!(
         handle_chat_and_social(
@@ -466,7 +474,7 @@ fn channel_rename_destroy_rookie_age_and_custom_hostname_edges() {
     )
     .unwrap()
     .unwrap();
-    let chan_id = created.dict_get("channelID").unwrap().as_str().unwrap().to_string();
+    let chan_id = created.as_str().unwrap().to_string();
 
     assert_eq!(
         handle_chat_and_social(
@@ -541,8 +549,12 @@ fn channel_rename_destroy_rookie_age_and_custom_hostname_edges() {
 
     // Direct unit checks for `resolve_channel_key`, `apply_post_access_control_social_op`,
     // `clear_channel_acl_restrictions`, and `clear_social_extras_channel_restrictions`
+    let db_chan_id = chan_id
+        .strip_prefix("player_")
+        .map(|r| format!("channel:{r}"))
+        .unwrap_or_else(|| chan_id.clone());
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(super::resolve_channel_key(snap, &chan_id.to_uppercase()), chan_id);
+        assert_eq!(super::resolve_channel_key(snap, &chan_id.to_uppercase()), db_chan_id);
         assert_eq!(super::resolve_channel_key(snap, "nonexistent_chan"), "nonexistent_chan");
     });
     super::apply_post_access_control_social_op(

@@ -872,7 +872,7 @@ pub(super) fn handle_add_corporation(
                 "clientID",
                 crate::router::notify_registry::OnSessionChanged {
                     is_remote: false,
-                    session: PyRep::Integer(session.session_id as i64),
+                    session: crate::router::build_session_state_keyval(session, char_id),
                     change: PyRep::Dict(sess_changes),
                 },
             );

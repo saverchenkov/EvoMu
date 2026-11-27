@@ -46,9 +46,8 @@ fn chat_channels_creation_join_leave_messages_and_acl_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::KeyVal(cr_kv) = created else { panic!() };
-    let chan_id = cr_kv.get("channelID").unwrap().as_str().unwrap().to_string();
-    assert_eq!(chan_id, "channel:fleet_intel");
+    let chan_id = created.as_str().unwrap().to_string();
+    assert_eq!(chan_id, "player_fleet_intel");
 
     // Wrong password rejected; right password succeeds
     assert_eq!(
@@ -366,7 +365,7 @@ fn chat_rename_motd_password_lang_destroy_and_acl_permissions() {
     )
     .unwrap()
     .unwrap();
-    let chan_id = created.dict_get("channelID").unwrap().as_str().unwrap().to_string();
+    let chan_id = created.as_str().unwrap().to_string();
 
     // Missing channel & missing arg validation
     assert_eq!(
@@ -651,8 +650,12 @@ fn chat_rename_motd_password_lang_destroy_and_acl_permissions() {
     );
 
     // Owner bans & mutes op2 via GM role temporarily? Or tests AccessControl(3) ownership transfer clears restrictions
+    let db_chan_id = chan_id
+        .strip_prefix("player_")
+        .map(|r| format!("channel:{r}"))
+        .unwrap_or_else(|| chan_id.clone());
     ctx.db.with_mut_snapshot(|snap| {
-        let acl = snap.chat_channel_acl.entry(chan_id.clone()).or_default();
+        let acl = snap.chat_channel_acl.entry(db_chan_id.clone()).or_default();
         acl.deny_list.insert(op2_id);
         acl.muted_until.insert(op2_id, (ctx.now_unix() + 500, "test".into()));
     });
@@ -667,9 +670,9 @@ fn chat_rename_motd_password_lang_destroy_and_acl_permissions() {
     .unwrap()
     .unwrap();
     ctx.db.with_snapshot(|snap| {
-        let ch = snap.chat_channels.get(&chan_id).unwrap();
+        let ch = snap.chat_channels.get(&db_chan_id).unwrap();
         assert_eq!(ch.owner_id, Some(op2_id));
-        let acl = snap.chat_channel_acl.get(&chan_id).unwrap();
+        let acl = snap.chat_channel_acl.get(&db_chan_id).unwrap();
         assert!(!acl.deny_list.contains(&op2_id));
         assert!(!acl.muted_until.contains_key(&op2_id));
     });
@@ -687,11 +690,13 @@ fn chat_rename_motd_password_lang_destroy_and_acl_permissions() {
     .unwrap()
     .unwrap();
     assert_eq!(destroyed, PyRep::Bool(true));
-    assert!(ctx.db.with_snapshot(|s| !s.chat_channels.contains_key(&chan_id) && !s.chat_channel_acl.contains_key(&chan_id)));
+    assert!(ctx.db.with_snapshot(|s| {
+        !s.chat_channels.contains_key(&db_chan_id) && !s.chat_channel_acl.contains_key(&db_chan_id)
+    }));
     assert!(ctx
         .drain_notifications_for_char(owner_id)
         .iter()
-        .any(|n| n.event == "OnChannelDeleted" && n.args == vec![PyRep::String(chan_id.clone())]));
+        .any(|n| n.event == "OnChannelDeleted" && n.args == vec![PyRep::String(db_chan_id.clone())]));
 
     // System & org channels forbid RenameChannel, SetChannelPassword, GrantChannelOwnership, DestroyChannel
     for sys_chan in ["solarsystemid2:30000142", "corpid:98000001"] {
@@ -1012,8 +1017,6 @@ fn mute_expiry_boundary_quasar_ban_message_limits_rate_reset_and_offline_target_
         &kw,
     )
     .unwrap()
-    .unwrap()
-    .dict_get("channelID")
     .unwrap()
     .as_str()
     .unwrap()

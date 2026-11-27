@@ -9,6 +9,10 @@ use std::collections::{HashMap, HashSet};
 #[path = "fleet_social_chat_auth_ops.rs"]
 pub(crate) mod fleet_social_chat_auth_ops;
 
+use crate::services::fleet_social_chat_acl_helpers::{
+    find_existing_channel_key, format_xmpp_channel_wire_id, resolve_channel_key,
+    xmpp_alias_to_channel_key,
+};
 use fleet_social_chat_auth_ops::{
     build_initial_channel_record, check_channel_or_global_mute,
     handle_contacts_notifications_calendar, has_channel_operator_auth, has_channel_owner_auth,
@@ -142,9 +146,18 @@ fn handle_chat_rpc(
                     return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Target character has blocked caller".into(), client_error: None }));
                 }
             }
-            let is_delayed = is_delayed_local_channel(chan_id);
-            let sys_id_opt = parse_channel_system_id(chan_id);
-            let blocked_in_social_chan = is_character_blocked_in_social_extras(ctx, chan_id, target_char);
+            let resolved_chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
+            if let Err(e) = crate::services::pve_special_sites_abyssal::check_abyssal_local_channel_access(
+                chan_id,
+                &resolved_chan_key,
+                session.solar_system_id,
+            ) {
+                return Some(Err(e));
+            }
+            let is_delayed = is_delayed_local_channel(&resolved_chan_key);
+            let sys_id_opt = parse_channel_system_id(&resolved_chan_key);
+            let blocked_in_social_chan = is_character_blocked_in_social_extras(ctx, chan_id, target_char)
+                || is_character_blocked_in_social_extras(ctx, &resolved_chan_key, target_char);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let chan_key = resolve_channel_key(snap, chan_id);
                 validate_channel_join_auth(ctx, snap, session, caller_id, target_char, &chan_key)?;
@@ -272,7 +285,13 @@ fn handle_chat_rpc(
                 let local_id = if method == "EnsureResourceWarsChannelExists" {
                     explicit_arg.map(|s| s.to_string()).unwrap_or_else(|| format!("resourcewars:{sys_id}"))
                 } else {
-                    explicit_arg.filter(|s| !s.starts_with("solarsystemid2:")).map(|s| s.to_string()).unwrap_or_else(|| format!("solarsystemid2:{sys_id}"))
+                    explicit_arg
+                        .map(|s| {
+                            let localpart = s.split('@').next().unwrap_or(s);
+                            crate::services::fleet_social_chat_acl_helpers::xmpp_alias_to_channel_key(localpart)
+                                .unwrap_or_else(|| s.to_string())
+                        })
+                        .unwrap_or_else(|| format!("solarsystemid2:{sys_id}"))
                 };
                 let corp_chan = format!("corpid:{corp_id}");
                 let mut target_chans = if (32_000_000..=32_999_999).contains(&sys_id) && method != "EnsureResourceWarsChannelExists" {
@@ -337,12 +356,24 @@ fn handle_chat_rpc(
             for (lcid, dropped) in dropped_by_channel {
                 remove_delayed_local_speakers(ctx, &lcid, &dropped);
             }
-            Some(Ok(PyRep::keyval([
-                ("channelID", PyRep::String(local_chan)),
-                ("exists", PyRep::Bool(true)),
-                ("isDelayedLocal", PyRep::Bool(is_delayed)),
-                ("channels", PyRep::List(synced_channels.into_iter().map(PyRep::String).collect())),
-            ])))
+            if method == "ResyncSystemChannelAccess" {
+                Some(Ok(PyRep::List(
+                    synced_channels
+                        .into_iter()
+                        .map(|c| PyRep::String(format_xmpp_channel_wire_id(&c)))
+                        .collect(),
+                )))
+            } else {
+                Some(Ok(PyRep::keyval([
+                    ("channelID", PyRep::String(local_chan)),
+                    ("exists", PyRep::Bool(true)),
+                    ("isDelayedLocal", PyRep::Bool(is_delayed)),
+                    (
+                        "channels",
+                        PyRep::List(synced_channels.into_iter().map(PyRep::String).collect()),
+                    ),
+                ])))
+            }
         }
 
         ("XmppChatMgr", "CreatePlayerOwnedChannel") => {
@@ -390,11 +421,7 @@ fn handle_chat_rpc(
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("channelID", PyRep::String(chan_id)),
-                    ("name", PyRep::String(name.to_string())),
-                    ("ownerID", PyRep::Integer(char_id)),
-                ]))),
+                Ok(()) => Some(Ok(PyRep::String(format_xmpp_channel_wire_id(&chan_id)))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -472,11 +499,12 @@ fn handle_chat_rpc(
             let chan_id = args.first().and_then(|a| a.as_str()).unwrap_or("local");
             let motd = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let chan_key = resolve_channel_key(snap, chan_id);
                 let can_op = {
-                    let chan_ref = snap.chat_channels.get(chan_id);
-                    has_channel_operator_auth(snap, session, char_id, chan_id, chan_ref)
+                    let chan_ref = snap.chat_channels.get(&chan_key);
+                    has_channel_operator_auth(snap, session, char_id, &chan_key, chan_ref)
                 };
-                let Some(chan) = snap.chat_channels.get_mut(chan_id) else {
+                let Some(chan) = snap.chat_channels.get_mut(&chan_key) else {
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
@@ -592,14 +620,21 @@ fn handle_chat_rpc(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let filter_key = args.first().and_then(|a| a.as_str()).filter(|s| !s.is_empty());
+            let filter_raw = args.first().and_then(|a| a.as_str()).filter(|s| !s.is_empty());
+            let resolved_filter = filter_raw
+                .map(|fk| ctx.db.with_snapshot(|snap| resolve_channel_key(snap, fk)));
             let mut entries: Vec<(PyRep, PyRep)> =
                 crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
                     st.char_settings
                         .get(&char_id)
                         .map(|m| {
                             m.iter()
-                                .filter(|(k, _)| filter_key.is_none_or(|fk| k.as_str() == fk))
+                                .filter(|(k, _)| {
+                                    filter_raw.is_none_or(|fk| {
+                                        k.as_str() == fk
+                                            || resolved_filter.as_deref() == Some(k.as_str())
+                                    })
+                                })
                                 .map(|(k, v)| (PyRep::String(k.clone()), v.clone()))
                                 .collect()
                         })
@@ -607,8 +642,12 @@ fn handle_chat_rpc(
                 });
             ctx.db.with_snapshot(|snap| {
                 for c in snap.chat_channels.values().filter(|c| c.members.contains(&char_id)) {
-                    if filter_key.is_some_and(|fk| c.channel_id != fk) {
-                        continue;
+                    if let Some(fk) = filter_raw {
+                        if c.channel_id != fk
+                            && resolved_filter.as_deref() != Some(c.channel_id.as_str())
+                        {
+                            continue;
+                        }
                     }
                     if !entries.iter().any(|(k, _)| k.as_str() == Some(c.channel_id.as_str())) {
                         entries.push((
@@ -666,15 +705,21 @@ fn handle_chat_rpc(
                 }
             };
             let chan_id = chan_id_owned.as_str();
-            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id) {
-                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into(), client_error: None }));
+            let resolved_chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
+            if let Err(e) = crate::services::pve_special_sites_abyssal::check_abyssal_local_channel_access(
+                chan_id,
+                &resolved_chan_key,
+                session.solar_system_id,
+            ) {
+                return Some(Err(e));
             }
             let password_arg = args.get(1).and_then(|a| a.as_str());
             let motd_arg = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
 
-            let is_delayed = is_delayed_local_channel(chan_id);
-            let sys_id_opt = parse_channel_system_id(chan_id);
-            let blocked_in_social_chan = is_character_blocked_in_social_extras(ctx, chan_id, char_id);
+            let is_delayed = is_delayed_local_channel(&resolved_chan_key);
+            let sys_id_opt = parse_channel_system_id(&resolved_chan_key);
+            let blocked_in_social_chan = is_character_blocked_in_social_extras(ctx, chan_id, char_id)
+                || is_character_blocked_in_social_extras(ctx, &resolved_chan_key, char_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let chan_key = resolve_channel_key(snap, chan_id);
                 validate_channel_join_auth(ctx, snap, session, char_id, char_id, &chan_key)?;
@@ -780,14 +825,15 @@ fn handle_chat_rpc(
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LeaveChannel requires channelID string".into(), client_error: None }));
             };
-            let is_delayed = is_delayed_local_channel(chan_id);
+            let chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
+            let is_delayed = is_delayed_local_channel(&chan_key);
             let candidate_speakers = if is_delayed {
-                get_delayed_local_speakers(ctx, chan_id)
+                get_delayed_local_speakers(ctx, &chan_key)
             } else {
                 Vec::new()
             };
             let dropped_speakers = ctx.db.with_mut_snapshot(|snap| {
-                let rem_members = if let Some(chan) = snap.chat_channels.get_mut(chan_id) {
+                let rem_members = if let Some(chan) = snap.chat_channels.get_mut(&chan_key) {
                     chan.members.remove(&char_id);
                     chan.members.clone()
                 } else {
@@ -796,7 +842,7 @@ fn handle_chat_rpc(
                 if is_delayed {
                     collect_wh_local_witness_speakers_to_drop_in_snap(
                         snap,
-                        chan_id,
+                        &chan_key,
                         char_id,
                         &rem_members,
                         &candidate_speakers,
@@ -805,7 +851,7 @@ fn handle_chat_rpc(
                     Vec::new()
                 }
             });
-            remove_delayed_local_speakers(ctx, chan_id, &dropped_speakers);
+            remove_delayed_local_speakers(ctx, &chan_key, &dropped_speakers);
             if !is_delayed {
                 ctx.emit_typed(
                     NotificationTarget::All,
@@ -822,8 +868,13 @@ fn handle_chat_rpc(
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SendMessage requires channelID string".into(), client_error: None }));
             };
-            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id) {
-                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into(), client_error: None }));
+            let chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
+            if let Err(e) = crate::services::pve_special_sites_abyssal::check_abyssal_local_channel_access(
+                chan_id,
+                &chan_key,
+                session.solar_system_id,
+            ) {
+                return Some(Err(e));
             }
             let text = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             if text.is_empty() || text.chars().count() > 2_000 {
@@ -832,7 +883,6 @@ fn handle_chat_rpc(
             if !crate::services::lookup_svc::is_word_allowed(text) {
                 return Some(Err(BridgeRpcError { code: "UserError".into(), message: "ChatContentInvalidBannedWords".into(), client_error: None }));
             }
-            let chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
             let chan_lower = chan_key.to_ascii_lowercase();
             let now_unix = ctx.now_unix();
             if let Ok(cid_u32) = u32::try_from(char_id) {
@@ -1089,7 +1139,7 @@ fn handle_chat_rpc(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .delayed_local_speakers
-                    .get(chan_id)
+                    .get(&chan.channel_id)
                     .map(|s| s.iter().copied().collect())
                     .unwrap_or_default()
             } else {
@@ -1159,7 +1209,11 @@ fn handle_chat_rpc(
                 }));
             };
             if method == "DestroyChannel" {
-                if is_system_or_org_channel(chan_id) {
+                if is_system_or_org_channel(chan_id)
+                    || xmpp_alias_to_channel_key(chan_id.split('@').next().unwrap_or(chan_id))
+                        .as_deref()
+                        .is_some_and(is_system_or_org_channel)
+                {
                     return Some(Err(BridgeRpcError {
                         code: "NotChannelOwner".into(),
                         message: "System and organization channels cannot be destroyed".into(),
@@ -1394,40 +1448,6 @@ fn is_delayed_local_channel(chan_id: &str) -> bool {
         || crate::services::wormhole_lifecycle_ops::system_wormhole_profile(sys_id).0 > 0
 }
 
-fn find_existing_channel_key(snap: &eve_db::WorldStateSnapshot, chan_id: &str) -> Option<String> {
-    if snap.chat_channels.contains_key(chan_id) {
-        return Some(chan_id.to_string());
-    }
-    if let Some(found) = snap
-        .chat_channels
-        .keys()
-        .find(|k| k.eq_ignore_ascii_case(chan_id))
-    {
-        return Some(found.clone());
-    }
-    let localpart = chan_id.split('@').next().unwrap_or(chan_id);
-    if let Some(slug) = localpart
-        .strip_prefix("player_")
-        .or_else(|| localpart.strip_prefix("PLAYER_"))
-        .or_else(|| localpart.strip_prefix("channel_"))
-        .or_else(|| localpart.strip_prefix("CHANNEL_"))
-    {
-        let candidate = format!("channel:{slug}");
-        if let Some(found) = snap
-            .chat_channels
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(&candidate))
-        {
-            return Some(found.clone());
-        }
-    }
-    None
-}
-
-fn resolve_channel_key(snap: &eve_db::WorldStateSnapshot, chan_id: &str) -> String {
-    find_existing_channel_key(snap, chan_id).unwrap_or_else(|| chan_id.to_string())
-}
-
 enum PostAccessControlSocialOp {
     None,
     ClearRestrictions(i64),
@@ -1614,9 +1634,10 @@ fn validate_scoped_channel_sender(
 }
 
 fn parse_channel_system_id(chan_id: &str) -> Option<u32> {
-    let lower = chan_id.to_ascii_lowercase();
+    let lower = chan_id.split('@').next().unwrap_or(chan_id).to_ascii_lowercase();
     lower
         .strip_prefix("solarsystemid2:")
+        .or_else(|| lower.strip_prefix("local_"))
         .and_then(|s| s.parse().ok())
 }
 
@@ -2202,40 +2223,6 @@ fn xmpp_is_service_jid(target_ref: &str) -> bool {
         && (trimmed.is_empty()
             || trimmed.eq_ignore_ascii_case("conference.chat.evomu.local")
             || trimmed.eq_ignore_ascii_case("chat.evomu.local"))
-}
-
-fn xmpp_alias_to_channel_key(localpart: &str) -> Option<String> {
-    let lower = localpart.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("local_") {
-        if let Ok(id) = rest.parse::<u32>() {
-            return Some(format!("solarsystemid2:{id}"));
-        }
-    } else if let Some(rest) = lower.strip_prefix("corp_") {
-        if let Ok(id) = rest.parse::<i64>() {
-            return Some(format!("corpid:{id}"));
-        }
-    } else if let Some(rest) = lower.strip_prefix("alliance_") {
-        if let Ok(id) = rest.parse::<i64>() {
-            return Some(format!("allianceid:{id}"));
-        }
-    } else if let Some(rest) = lower.strip_prefix("fleet_") {
-        if let Ok(id) = rest.parse::<i64>() {
-            return Some(format!("fleetid:{id}"));
-        }
-    } else if let Some(rest) = lower.strip_prefix("faction_") {
-        if let Ok(id) = rest.parse::<i64>() {
-            return Some(format!("factionid:{id}"));
-        }
-    } else if let Some(rest) = lower.strip_prefix("constellation_") {
-        if let Ok(id) = rest.parse::<u32>() {
-            return Some(format!("constellationid:{id}"));
-        }
-    } else if let Some(rest) = lower.strip_prefix("region_") {
-        if let Ok(id) = rest.parse::<u32>() {
-            return Some(format!("regionid:{id}"));
-        }
-    }
-    None
 }
 
 fn xmpp_scoped_channel_allowed(

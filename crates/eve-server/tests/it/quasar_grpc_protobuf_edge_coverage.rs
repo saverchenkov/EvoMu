@@ -16,13 +16,13 @@ use eve_proto::quasar::{
     EvePublicRequest, EvePublicResponse, EvePublicUserId, GoogleAny, InternalGatewayRequest,
     QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_OK,
     STATUS_PRECONDITION_FAILED, STATUS_SERVICE_UNAVAILABLE, STATUS_UNAUTHORIZED,
 };
 use eve_server::quasar_grpc::{frame_grpc_message, handle_quasar_grpc_connection};
-use eve_server::router::client_compat::{normalize_macho_notification, normalize_macho_rpc_reply};
+use eve_server::router::client_compat::normalize_macho_notification;
 use eve_server::router::ServerContext;
 use flate2::write::{GzEncoder, ZlibEncoder};
 use flate2::Compression;
@@ -464,16 +464,6 @@ async fn quasar_grpc_h2c_transport_auth_compression_and_normalizer_edges() {
     );
     assert!(normalize_macho_notification("OnOrganizationContactsUpdated", vec![PyRep::Integer(5)]).len() >= 1);
     assert!(normalize_macho_notification("OnSharedBookmarksFolderUpdated", vec![PyRep::Integer(5)]).len() >= 1);
-
-    let err_res = Err(BridgeRpcError::user_error("InvalidArgument"));
-    assert!(normalize_macho_rpc_reply("structureDirectory", "GetJumpBridgesWithMyAccess", err_res).is_err());
-    let jb = normalize_macho_rpc_reply(
-        "structureDirectory",
-        "GetJumpBridgesWithMyAccess",
-        Ok(PyRep::List(vec![])),
-    )
-    .expect("jb ok");
-    assert!(matches!(jb, PyRep::Tuple(_)));
 }
 
 // ============================================================================

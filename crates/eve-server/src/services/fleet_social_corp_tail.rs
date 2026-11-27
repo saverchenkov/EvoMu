@@ -995,7 +995,7 @@ fn emit_member_removed_notifications(
         "clientID",
         crate::router::notify_registry::OnSessionChanged {
             is_remote: false,
-            session: PyRep::Integer(tid),
+            session: crate::router::build_character_session_state_keyval(ctx, tid),
             change: sess_changes,
         },
     );

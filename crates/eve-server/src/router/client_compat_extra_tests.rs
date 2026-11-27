@@ -8,7 +8,7 @@ use crate::router::ServerContext;
 use crate::services::mission_fixture::{self, MissionFixture};
 use eve_db::{UpwellStructureRecord, WorldRepository};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -88,40 +88,6 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
     assert_eq!(anom_missing.dict_get("dungeonID"), Some(&PyRep::Integer(1001)));
     let anom_present = ensure_anomaly_dungeon_id(PyRep::keyval([("dungeonID", PyRep::Integer(4242))]));
     assert_eq!(anom_present.dict_get("dungeonID"), Some(&PyRep::Integer(4242)));
-}
-
-#[test]
-fn normalize_macho_rpc_reply_covers_all_service_adapters() {
-    // XmppChatMgr.ResyncSystemChannelAccess
-    let chans = PyRep::keyval([(
-        "channels",
-        PyRep::List(vec![
-            PyRep::String("solarsystemid2:30000142".into()),
-            PyRep::String("corpid:98000001".into()),
-            PyRep::String("allianceid:99000001".into()),
-            PyRep::String("fleetid:12345".into()),
-            PyRep::String("constellation:20000020".into()),
-        ]),
-    )]);
-    let xmpp_out = normalize_macho_rpc_reply("XmppChatMgr", "ResyncSystemChannelAccess", Ok(chans)).unwrap();
-    assert_eq!(
-        xmpp_out,
-        PyRep::List(vec![
-            PyRep::String("local_30000142".into()),
-            PyRep::String("corp_98000001".into()),
-            PyRep::String("alliance_99000001".into()),
-            PyRep::String("fleet_12345".into()),
-            PyRep::String("constellation_20000020".into()),
-        ])
-    );
-
-    // Error passthrough
-    let err = BridgeRpcError {
-        code: "Err".into(),
-        message: "boom".into(),
-        client_error: None,
-    };
-    assert!(normalize_macho_rpc_reply("XmppChatMgr", "ResyncSystemChannelAccess", Err(err)).is_err());
 }
 
 #[test]

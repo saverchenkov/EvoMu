@@ -118,46 +118,6 @@ pub fn normalize_macho_rpc_reply_at(
     rpc_res: Result<PyRep, BridgeRpcError>,
     _now_unix: Option<u64>,
 ) -> Result<PyRep, BridgeRpcError> {
-    if service == "XmppChatMgr" && method == "ResyncSystemChannelAccess" {
-        if let Ok(ref rep) = rpc_res {
-            if let Some(PyRep::List(chans)) = rep.dict_get("channels") {
-                return Ok(PyRep::List(
-                    chans
-                        .iter()
-                        .filter_map(|c| c.as_str())
-                        .map(|s| {
-                            [
-                                ("solarsystemid2:", "local_"),
-                                ("corpid:", "corp_"),
-                                ("allianceid:", "alliance_"),
-                                ("fleetid:", "fleet_"),
-                            ]
-                            .iter()
-                            .find_map(|&(pfx, prefix)| s.strip_prefix(pfx).map(|r| format!("{prefix}{r}")))
-                            .unwrap_or_else(|| s.replace(':', "_"))
-                        })
-                        .map(PyRep::String)
-                        .collect(),
-                ));
-            }
-        }
-    }
-    if service == "XmppChatMgr" && method == "CreatePlayerOwnedChannel" {
-        if let Ok(ref rep) = rpc_res {
-            if let Some(s) = rep
-                .dict_get("channelID")
-                .and_then(|v| v.as_str())
-                .or_else(|| rep.as_str())
-            {
-                let normalized = if let Some(rest) = s.strip_prefix("channel:") {
-                    format!("player_{rest}")
-                } else {
-                    s.replace(':', "_")
-                };
-                return Ok(PyRep::String(normalized));
-            }
-        }
-    }
     if service == "dungeonInstanceCacheMgr" && method == "GetSignatureInstances" {
         if let Ok(PyRep::Dict(entries)) = rpc_res {
             let out = entries
@@ -253,55 +213,7 @@ pub fn normalize_macho_rpc_reply_at(
             return Ok(PyRep::Dict(out));
         }
     }
-    if service == "structureDirectory" && method == "GetJumpBridgesWithMyAccess" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            let mut pairs = Vec::with_capacity(items.len());
-            let mut accessible_ids = Vec::with_capacity(items.len());
-            for item in items {
-                let sid = item
-                    .dict_get("structureID")
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let sys_a = item
-                    .dict_get("solarSystemID")
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let linked_id = item
-                    .dict_get("linkedStructureID")
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                let sys_b = item
-                    .dict_get("destinationSolarSystemID")
-                    .or_else(|| item.dict_get("linkedSolarSystemID"))
-                    .cloned()
-                    .unwrap_or(PyRep::Integer(0));
-                accessible_ids.push(sid.clone());
-                pairs.push(PyRep::Tuple(vec![
-                    PyRep::keyval([("structureID", sid), ("solarSystemID", sys_a)]),
-                    PyRep::keyval([("structureID", linked_id), ("solarSystemID", sys_b)]),
-                ]));
-            }
-            return Ok(PyRep::Tuple(vec![
-                PyRep::List(pairs),
-                PyRep::List(accessible_ids),
-                PyRep::Dict(Vec::new()),
-            ]));
-        }
-    }
-    if service == "structureDirectory"
-        && matches!(
-            method,
-            "GetMyCorporationStructures"
-                | "GetMyCharacterStructures"
-                | "GetStructures"
-                | "GetCorporationStructures"
-                | "GetStructureInfo"
-        )
-    {
-        if let Ok(rep) = rpc_res {
-            return Ok(normalize_structure_directory_reply(rep));
-        }
-    } else if service == "dogmaIM" && method == "AddTarget" {
+    if service == "dogmaIM" && method == "AddTarget" {
         if let Ok(PyRep::KeyVal(map)) = rpc_res {
             let locked = map
                 .get("locked")
@@ -1540,44 +1452,6 @@ fn normalize_on_godma_ship_effect(
         PyRep::None,
         PyRep::None,
     ]
-}
-
-fn normalize_structure_dir_entry_wire(rep: PyRep) -> PyRep {
-    use crate::services::station_structure::structure_lifecycle::structure_state_wire_code;
-    match rep {
-        PyRep::KeyVal(mut entries) => {
-            if let Some(v) = entries.get_mut("state") {
-                if let Some(s) = v.as_str() {
-                    *v = PyRep::Integer(structure_state_wire_code(s));
-                }
-            }
-            PyRep::KeyVal(entries)
-        }
-        PyRep::Dict(mut entries) => {
-            for (k, v) in &mut entries {
-                if k.as_str() == Some("state") {
-                    if let Some(s) = v.as_str() {
-                        *v = PyRep::Integer(structure_state_wire_code(s));
-                    }
-                }
-            }
-            PyRep::Dict(entries)
-        }
-        other => other,
-    }
-}
-
-fn normalize_structure_directory_reply(rep: PyRep) -> PyRep {
-    match rep {
-        PyRep::Dict(items) => PyRep::Dict(
-            items
-                .into_iter()
-                .map(|(k, v)| (k, normalize_structure_dir_entry_wire(v)))
-                .collect(),
-        ),
-        PyRep::KeyVal(entries) => normalize_structure_dir_entry_wire(PyRep::KeyVal(entries)),
-        other => other,
-    }
 }
 
 #[cfg(test)]

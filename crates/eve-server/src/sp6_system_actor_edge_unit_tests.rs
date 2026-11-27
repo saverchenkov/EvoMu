@@ -1970,8 +1970,7 @@ async fn xmpp_chat_auth_acl_moderation_and_quasar_social_edges() {
     .unwrap()
     .unwrap();
     let chan_id = created
-        .dict_get("channelID")
-        .and_then(|v| v.as_str())
+        .as_str()
         .unwrap()
         .to_string();
 

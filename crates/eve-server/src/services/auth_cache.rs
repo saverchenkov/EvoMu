@@ -1014,7 +1014,9 @@ pub(crate) fn dispatch_role_slash(
                         NotificationTarget::Character(target_cid),
                         OnSessionChanged {
                             is_remote: false,
-                            session: PyRep::String("role".into()),
+                            session: crate::router::build_character_session_state_keyval(
+                                ctx, target_cid,
+                            ),
                             change: sess_change.clone(),
                         },
                     );

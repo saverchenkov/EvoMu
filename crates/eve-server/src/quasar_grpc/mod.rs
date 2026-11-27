@@ -1142,7 +1142,6 @@ mod tests {
         reader.body.flow_control().used_capacity()
     }
     use crate::quasar_gateway::{NoticeScope, STATUS_FORBIDDEN, STATUS_OK};
-    use crate::router::client_compat::normalize_macho_rpc_reply;
     use eve_proto::quasar::{
         AuthoritativeContext, EvePublicNotice, EvePublicResponse, GoogleAny, GoogleTimestamp,
         TYPE_GOOGLEAPIS_PREFIX,
@@ -1150,48 +1149,6 @@ mod tests {
     use eve_proto::PyRep;
     use std::collections::HashMap;
     use tokio::net::TcpListener;
-
-    #[test]
-    fn test_normalize_jump_bridges_macho_reply_wraps_list_as_3_tuple() {
-        let empty = normalize_macho_rpc_reply(
-            "structureDirectory",
-            "GetJumpBridgesWithMyAccess",
-            Ok(PyRep::List(Vec::new())),
-        )
-        .expect("empty list normalized");
-        assert_eq!(
-            empty,
-            PyRep::Tuple(vec![
-                PyRep::List(Vec::new()),
-                PyRep::List(Vec::new()),
-                PyRep::Dict(Vec::new()),
-            ])
-        );
-
-        let populated = normalize_macho_rpc_reply(
-            "structureDirectory",
-            "GetJumpBridgesWithMyAccess",
-            Ok(PyRep::List(vec![PyRep::keyval([
-                ("structureID", PyRep::Integer(1_000_000_000_101)),
-                ("solarSystemID", PyRep::Integer(30_000_142)),
-                ("linkedStructureID", PyRep::Integer(1_000_000_000_102)),
-                ("destinationSolarSystemID", PyRep::Integer(30_000_144)),
-            ])])),
-        )
-        .expect("populated list normalized");
-        let PyRep::Tuple(parts) = populated else {
-            panic!("expected 3-tuple");
-        };
-        assert_eq!(parts.len(), 3);
-        let PyRep::List(pairs) = &parts[0] else {
-            panic!("expected pairs list");
-        };
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(
-            parts[1],
-            PyRep::List(vec![PyRep::Integer(1_000_000_000_101)])
-        );
-    }
 
     #[tokio::test]
     async fn test_skill_mgr2_get_skill_changes_for_isis_bound_and_unbound() {
