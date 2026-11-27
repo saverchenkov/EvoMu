@@ -30,19 +30,7 @@ pub struct ProjectedRemoteAssistance {
     pub tracking_speed_bonus_pct: f64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ActiveEntosisLinkState {
-    pub ship_id: i64,
-    pub char_id: i64,
-    pub side_id: i64,
-    pub module_id: i64,
-    pub target_id: i64,
-    pub cycle_index: u32,
-    pub cycle_duration_s: f64,
-    pub started_unix: u64,
-    pub expires_unix: u64,
-    pub is_capital: bool,
-}
+pub use eve_db::ActiveEntosisLinkRecord as ActiveEntosisLinkState;
 
 #[derive(Debug, Default)]
 struct ActiveFuelReserveEntry {
@@ -251,8 +239,6 @@ pub struct TacticalModulesState {
     pub remote_assistance: HashMap<(usize, i64), Vec<ProjectedRemoteAssistance>>,
     pub lance_caster_lock_until: HashMap<(usize, i64), u64>,
     pub lance_victim_debuff_until: HashMap<(usize, i64), u64>,
-    pub entosis_active_links: HashMap<(usize, i64), ActiveEntosisLinkState>,
-    pub entosis_target_cycles: HashMap<(usize, i64, i64), u32>,
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
     pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
@@ -292,21 +278,25 @@ pub fn ship_navigation_lock_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u6
             if let Some(&u) = st.lance_victim_debuff_until.get(&(k, ship_id)) {
                 max_exp = max_exp.max(u);
             }
-            if let Some(ent) = st.entosis_active_links.get(&(k, ship_id)) {
-                max_exp = max_exp.max(ent.expires_unix);
-            }
         }
     }
-    let skyhook_exp = ctx.db.with_snapshot(|snap| {
-        snap.sov_runtime
+    let db_exp = ctx.db.with_snapshot(|snap| {
+        let ent_exp = snap
+            .sov_runtime
+            .entosis_active_links
+            .get(&ship_id)
+            .map_or(0, |ent| ent.expires_unix);
+        let skyhook_exp = snap
+            .sov_runtime
             .skyhook_silo_links
             .values()
             .filter(|&&(_, sid, _, _)| sid == ship_id)
             .map(|&(_, _, completes_at, _)| completes_at)
             .max()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        ent_exp.max(skyhook_exp)
     });
-    max_exp = max_exp.max(skyhook_exp);
+    max_exp = max_exp.max(db_exp);
     max_exp = max_exp.max(crate::services::pve_crab_beacons::ship_crab_link_expiry_unix(ctx, ship_id));
     max_exp
 }
@@ -334,12 +324,17 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
             return Err(BridgeRpcError { code: "DisruptiveLanceDebuffActive".into(), message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix), client_error: None });
         }
     }
-    if let Some(ent) = st.entosis_active_links.get(&(db_key, ship_id)).or_else(|| st.entosis_active_links.get(&(inst_key, ship_id))) {
-        if now_unix < ent.expires_unix {
-            return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix), client_error: None });
+    drop(st);
+    if let Some(expires_unix) = ctx.db.with_snapshot(|snap| {
+        snap.sov_runtime
+            .entosis_active_links
+            .get(&ship_id)
+            .map(|ent| ent.expires_unix)
+    }) {
+        if now_unix < expires_unix {
+            return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", expires_unix - now_unix), client_error: None });
         }
     }
-    drop(st);
     if crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(ctx, ship_id) {
         return Err(BridgeRpcError { code: "CynosuralFieldActive".into(), message: format!("Cannot {action} while Cynosural Field Generator is active"), client_error: None });
     }
@@ -362,25 +357,52 @@ pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i6
 
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
 pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_id_opt: Option<i64>) {
-    let db_key = db_key_of(ctx);
-    let removed_module_id = {
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+    let needs_clear = ctx.db.with_snapshot(|snap| {
         if let Some(tid) = target_id_opt {
-            st.entosis_target_cycles.remove(&(db_key, tid, ship_id));
-            if st.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|e| e.target_id == tid) {
-                st.entosis_active_links
-                    .remove(&(db_key, ship_id))
+            snap.sov_runtime.entosis_target_cycles.contains_key(&(tid, ship_id))
+                || snap
+                    .sov_runtime
+                    .entosis_active_links
+                    .get(&ship_id)
+                    .is_some_and(|e| e.target_id == tid)
+        } else {
+            snap.sov_runtime.entosis_active_links.contains_key(&ship_id)
+                || snap
+                    .sov_runtime
+                    .entosis_target_cycles
+                    .keys()
+                    .any(|&(_, sid)| sid == ship_id)
+        }
+    });
+    if !needs_clear {
+        return;
+    }
+    let removed_module_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(tid) = target_id_opt {
+            snap.sov_runtime.entosis_target_cycles.remove(&(tid, ship_id));
+            if snap
+                .sov_runtime
+                .entosis_active_links
+                .get(&ship_id)
+                .is_some_and(|e| e.target_id == tid)
+            {
+                snap.sov_runtime
+                    .entosis_active_links
+                    .remove(&ship_id)
                     .map(|l| l.module_id)
             } else {
                 None
             }
         } else {
-            st.entosis_target_cycles.retain(|&(k, _, sid), _| k != db_key || sid != ship_id);
-            st.entosis_active_links
-                .remove(&(db_key, ship_id))
+            snap.sov_runtime
+                .entosis_target_cycles
+                .retain(|&(_, sid), _| sid != ship_id);
+            snap.sov_runtime
+                .entosis_active_links
+                .remove(&ship_id)
                 .map(|l| l.module_id)
         }
-    };
+    });
     if let Some(module_id) = removed_module_id {
         ctx.systems
             .unregister_external_active_module_in_loaded_systems(ship_id, module_id);
@@ -923,7 +945,7 @@ pub async fn handle_entosis_link_activation(
         return Err(BridgeRpcError { code: "TargetRequired".into(), message: "Entosis Link requires a locked target sovereignty structure or node".into(), client_error: None });
     };
 
-    let (ship_group_id, side_id, is_vulnerable, adm, stront_avail_id) = ctx.db.with_snapshot(|snap| {
+    let (ship_group_id, side_id, is_vulnerable, adm, stront_avail_id, existing_link) = ctx.db.with_snapshot(|snap| {
         let sg = snap.items.get(&ship_id).and_then(|s| ctx.sde.types.get(&s.type_id)).map(|t| t.group_id).unwrap_or(0);
         let ch = snap.characters.get(&char_id);
         let side = ch.and_then(|c| c.alliance_id).or_else(|| ch.map(|c| c.corporation_id)).unwrap_or(char_id);
@@ -947,7 +969,12 @@ pub async fn handle_entosis_link_activation(
             })
             .map(|i| i.item_id)
             .min();
-        (sg, side, vuln_item && vuln_struct, adm_val, stront_id)
+        let existing = snap
+            .sov_runtime
+            .entosis_active_links
+            .get(&ship_id)
+            .map(|e| (e.module_id, e.expires_unix));
+        (sg, side, vuln_item && vuln_struct, adm_val, stront_id, existing)
     });
 
     if ship_group_id == 831 {
@@ -957,11 +984,10 @@ pub async fn handle_entosis_link_activation(
         return Err(BridgeRpcError { code: "TargetNotVulnerable".into(), message: format!("Target {target_id} is outside its vulnerability window"), client_error: None });
     }
 
-    let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
-    if let Some(existing) = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).entosis_active_links.get(&(db_key, ship_id)) {
-        if now_unix < existing.expires_unix {
-            if existing.module_id != module_id {
+    if let Some((existing_module_id, existing_expires_unix)) = existing_link {
+        if now_unix < existing_expires_unix {
+            if existing_module_id != module_id {
                 return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: "Only 1 Entosis Link can be active per ship".into(), client_error: None });
             }
             return Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: "Entosis Link is already cycling".into(), client_error: None });
@@ -1016,41 +1042,51 @@ pub async fn handle_entosis_link_activation(
         }
     }
 
-    let (cycle_index, is_warmup, is_paused, capture_rate, capture_time_s, replaced_module_id) = {
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        let c_idx = st.entosis_target_cycles.entry((db_key, target_id, ship_id)).and_modify(|c| *c += 1).or_insert(1);
-        let cycle_index = *c_idx;
-        let is_warmup = cycle_index == 1;
-        let expires_unix = now_unix + (cycle_duration_s.round() as u64);
-        let replaced_module_id = st
-            .entosis_active_links
-            .insert(
-                (db_key, ship_id),
-                ActiveEntosisLinkState {
+    let (cycle_index, is_warmup, is_paused, capture_rate, capture_time_s, replaced_module_id) =
+        ctx.db.with_mut_snapshot(|snap| {
+            let c_idx = snap
+                .sov_runtime
+                .entosis_target_cycles
+                .entry((target_id, ship_id))
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+            let cycle_index = *c_idx;
+            let is_warmup = cycle_index == 1;
+            let expires_unix = now_unix + (cycle_duration_s.round() as u64);
+            let replaced_module_id = snap
+                .sov_runtime
+                .entosis_active_links
+                .insert(
                     ship_id,
-                    char_id,
-                    side_id,
-                    module_id,
-                    target_id,
-                    cycle_index,
-                    cycle_duration_s,
-                    started_unix: now_unix,
-                    expires_unix,
-                    is_capital,
-                },
-            )
-            .map(|old| old.module_id)
-            .filter(|&old_id| old_id != module_id);
-        let mut active_sides = Vec::new();
-        for (&(k, _), link) in st.entosis_active_links.iter() {
-            if k == db_key && link.target_id == target_id && link.cycle_index >= 2 && now_unix < link.expires_unix && !active_sides.contains(&link.side_id) {
-                active_sides.push(link.side_id);
+                    ActiveEntosisLinkState {
+                        ship_id,
+                        char_id,
+                        side_id,
+                        module_id,
+                        target_id,
+                        cycle_index,
+                        cycle_duration_s,
+                        started_unix: now_unix,
+                        expires_unix,
+                        is_capital,
+                    },
+                )
+                .map(|old| old.module_id)
+                .filter(|&old_id| old_id != module_id);
+            let mut active_sides = Vec::new();
+            for link in snap.sov_runtime.entosis_active_links.values() {
+                if link.target_id == target_id
+                    && link.cycle_index >= 2
+                    && now_unix < link.expires_unix
+                    && !active_sides.contains(&link.side_id)
+                {
+                    active_sides.push(link.side_id);
+                }
             }
-        }
-        let paused = active_sides.len() > 1;
-        let rate = if is_warmup || paused { 0.0 } else { 1.0 };
-        (cycle_index, is_warmup, paused, rate, 600.0 * adm, replaced_module_id)
-    };
+            let paused = active_sides.len() > 1;
+            let rate = if is_warmup || paused { 0.0 } else { 1.0 };
+            (cycle_index, is_warmup, paused, rate, 600.0 * adm, replaced_module_id)
+        });
     if let Some(old_mod_id) = replaced_module_id {
         sys.unregister_external_active_module_sync(ship_id, old_mod_id);
         set_module_active_in_db(ctx, old_mod_id, false);
@@ -1605,46 +1641,23 @@ pub mod tactical_test_helpers {
         ship_id: i64,
         state: ActiveEntosisLinkState,
     ) {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_active_links
-            .insert((db_key, ship_id), state);
-    }
-
-    /// Inserts an active Entosis Link under a foreign DB key for cross-world isolation tests.
-    #[cfg(test)]
-    pub(crate) fn insert_foreign_active_entosis_link(
-        ctx: &ServerContext,
-        ship_id: i64,
-        state: ActiveEntosisLinkState,
-    ) {
-        let foreign_key = db_key_of(ctx).wrapping_add(1);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_active_links
-            .insert((foreign_key, ship_id), state);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.entosis_active_links.insert(ship_id, state);
+        });
     }
 
     /// Removes any active Entosis Link entry for `ship_id`.
     pub fn remove_active_entosis_link(ctx: &ServerContext, ship_id: i64) {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_active_links
-            .remove(&(db_key, ship_id));
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.entosis_active_links.remove(&ship_id);
+        });
     }
 
     /// Clears all active Entosis Link entries on `ctx`.
     pub fn clear_active_entosis_links(ctx: &ServerContext) {
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_active_links
-            .clear();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.entosis_active_links.clear();
+        });
     }
 
     /// Updates `expires_unix` on an existing active Entosis Link entry for `ship_id`.
@@ -1654,44 +1667,18 @@ pub mod tactical_test_helpers {
         ship_id: i64,
         expires_unix: u64,
     ) {
-        let db_key = db_key_of(ctx);
-        if let Some(link) = ctx
-            .tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_active_links
-            .get_mut(&(db_key, ship_id))
-        {
-            link.expires_unix = expires_unix;
-        }
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(link) = snap.sov_runtime.entosis_active_links.get_mut(&ship_id) {
+                link.expires_unix = expires_unix;
+            }
+        });
     }
 
     /// Returns `true` if `ship_id` currently has an active Entosis Link entry on `ctx`.
     #[cfg(test)]
     pub(crate) fn has_active_entosis_link(ctx: &ServerContext, ship_id: i64) -> bool {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_active_links
-            .contains_key(&(db_key, ship_id))
-    }
-
-    /// Sets the Entosis cycle count for `(target_id, ship_id)` under `scope`.
-    #[cfg(test)]
-    pub(crate) fn set_entosis_target_cycles_for_scope(
-        ctx: &ServerContext,
-        scope: TacticalKeyScope,
-        target_id: i64,
-        ship_id: i64,
-        cycles: u32,
-    ) {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_target_cycles
-            .insert((key, target_id, ship_id), cycles);
+        ctx.db
+            .with_snapshot(|snap| snap.sov_runtime.entosis_active_links.contains_key(&ship_id))
     }
 
     /// Sets the Entosis cycle count for `(target_id, ship_id)`.
@@ -1702,7 +1689,11 @@ pub mod tactical_test_helpers {
         ship_id: i64,
         cycles: u32,
     ) {
-        set_entosis_target_cycles_for_scope(ctx, TacticalKeyScope::Db, target_id, ship_id, cycles);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime
+                .entosis_target_cycles
+                .insert((target_id, ship_id), cycles);
+        });
     }
 
     /// Returns `true` if `(target_id, ship_id)` has a recorded Entosis cycle count.
@@ -1712,22 +1703,18 @@ pub mod tactical_test_helpers {
         target_id: i64,
         ship_id: i64,
     ) -> bool {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_target_cycles
-            .contains_key(&(db_key, target_id, ship_id))
+        ctx.db.with_snapshot(|snap| {
+            snap.sov_runtime
+                .entosis_target_cycles
+                .contains_key(&(target_id, ship_id))
+        })
     }
 
     /// Returns `true` if any Entosis target cycle entries exist in `ctx`.
     #[cfg(test)]
     pub(crate) fn has_any_entosis_target_cycles(ctx: &ServerContext) -> bool {
-        !ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entosis_target_cycles
-            .is_empty()
+        ctx.db
+            .with_snapshot(|snap| !snap.sov_runtime.entosis_target_cycles.is_empty())
     }
 
     /// Inserts an active Stasis Webification Probe debuff for `ship_id`.

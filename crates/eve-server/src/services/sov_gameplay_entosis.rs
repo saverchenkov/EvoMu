@@ -190,14 +190,6 @@ pub async fn precheck_entosis_activation(
         ctx.db.with_mut_snapshot(|snap| expire_hacked_hubs_in_snap(snap, &ctx.sde, now));
     }
     let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    let active_link_sides: Vec<i64> = {
-        let tst = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-        tst.entosis_active_links
-            .iter()
-            .filter_map(|(&(k, _), l)| (k == db_key && l.target_id == target_id).then_some(l.side_id))
-            .collect()
-    };
     let info = ctx.db.with_snapshot(|snap| {
         let is_hub = snap
             .structures
@@ -226,9 +218,11 @@ pub async fn precheck_entosis_activation(
             let sys_id = st.solar_system_id;
             let holder = snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id);
             if holder == Some(attacker_alliance) {
-                let has_attacker_link = active_link_sides
-                    .iter()
-                    .any(|&side_id| side_id != attacker_alliance);
+                let has_attacker_link = snap
+                    .sov_runtime
+                    .entosis_active_links
+                    .values()
+                    .any(|l| l.target_id == target_id && l.side_id != attacker_alliance);
                 let has_progress = snap
                     .sov_runtime
                     .entosis_capture_progress

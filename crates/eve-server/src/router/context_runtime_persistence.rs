@@ -22,7 +22,7 @@ use crate::services::fleet_social::fleet_social_persistence::{
 use crate::services::space_mining_harvest::PhasedAsteroidFieldState;
 use crate::services::tactical_module_mechanics::{ActiveInterdictionProbe, LauncherFireStamp};
 use crate::services::tactical_modules::{
-    db_ptr_key, ActiveEntosisLinkState, ProjectedRemoteAssistance, TacticalModulesState,
+    db_ptr_key, ProjectedRemoteAssistance, TacticalModulesState,
 };
 use crate::services::tactical_modules_probes::{ActiveWubbleDebuff, PendingWubbleProbe};
 use eve_db::sqlite_store::domain_rows::{from_checked_domain_json, to_checked_domain_json};
@@ -62,8 +62,6 @@ struct PersistedTacticalModulesPayload {
     remote_assistance: Vec<((u8, i64), Vec<ProjectedRemoteAssistance>)>,
     lance_caster_lock_until: Vec<((u8, i64), u64)>,
     lance_victim_debuff_until: Vec<((u8, i64), u64)>,
-    entosis_active_links: Vec<((u8, i64), ActiveEntosisLinkState)>,
-    entosis_target_cycles: Vec<((u8, i64, i64), u32)>,
     pending_wubble_probes: Vec<(u8, PendingWubbleProbe)>,
     active_wubble_debuffs: Vec<((u8, i64), ActiveWubbleDebuff)>,
     tsb_self_penalty_until: Vec<((u8, i64), u64)>,
@@ -107,18 +105,6 @@ impl PersistedTacticalModulesPayload {
                 .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
                 .collect(),
-            entosis_active_links: st
-                .entosis_active_links
-                .iter()
-                .filter(|(&(k, _), _)| keep_key(k))
-                .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
-                .collect(),
-            entosis_target_cycles: st
-                .entosis_target_cycles
-                .iter()
-                .filter(|(&(k, _, _), _)| keep_key(k))
-                .map(|(&(k, sid, tid), &v)| ((tag_of(k), sid, tid), v))
-                .collect(),
             pending_wubble_probes: st
                 .pending_wubble_probes
                 .iter()
@@ -159,8 +145,6 @@ impl PersistedTacticalModulesPayload {
         payload.remote_assistance.sort_by_key(|(k, _)| *k);
         payload.lance_caster_lock_until.sort_by_key(|(k, _)| *k);
         payload.lance_victim_debuff_until.sort_by_key(|(k, _)| *k);
-        payload.entosis_active_links.sort_by_key(|(k, _)| *k);
-        payload.entosis_target_cycles.sort_by_key(|(k, _)| *k);
         payload.active_wubble_debuffs.sort_by_key(|(k, _)| *k);
         payload.tsb_self_penalty_until.sort_by_key(|(k, _)| *k);
         payload.active_interdiction_probes.sort_by_key(|(k, _)| *k);
@@ -174,8 +158,6 @@ impl PersistedTacticalModulesPayload {
         self.remote_assistance.is_empty()
             && self.lance_caster_lock_until.is_empty()
             && self.lance_victim_debuff_until.is_empty()
-            && self.entosis_active_links.is_empty()
-            && self.entosis_target_cycles.is_empty()
             && self.pending_wubble_probes.is_empty()
             && self.active_wubble_debuffs.is_empty()
             && self.tsb_self_penalty_until.is_empty()
@@ -200,16 +182,6 @@ impl PersistedTacticalModulesPayload {
             .lance_victim_debuff_until
             .into_iter()
             .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
-        st.entosis_active_links = self
-            .entosis_active_links
-            .into_iter()
-            .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
-        st.entosis_target_cycles = self
-            .entosis_target_cycles
-            .into_iter()
-            .map(|((tag, sid, tid), v)| ((untag(tag), sid, tid), v))
             .collect();
         st.pending_wubble_probes = self
             .pending_wubble_probes
@@ -571,14 +543,21 @@ fn clear_crash_lost_runtime_maps(ctx: &ServerContext) {
     {
         let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
         tac.remote_assistance.clear();
-        tac.entosis_active_links.clear();
-        tac.entosis_target_cycles.clear();
         tac.pending_wubble_probes.clear();
         tac.active_wubble_debuffs.clear();
         tac.active_interdiction_probes.clear();
         tac.launcher_last_fire.clear();
     }
     ctx.systems.clear_all_external_active_modules();
+    if ctx.db.with_snapshot(|snap| {
+        !snap.sov_runtime.entosis_active_links.is_empty()
+            || !snap.sov_runtime.entosis_target_cycles.is_empty()
+    }) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.entosis_active_links.clear();
+            snap.sov_runtime.entosis_target_cycles.clear();
+        });
+    }
 }
 
 fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, Vec<(u32, String, String)>)> {
@@ -1181,22 +1160,6 @@ mod tests {
         st.lance_caster_lock_until.insert((inst_k, 30), 100);
         st.lance_caster_lock_until.insert((db_k, 40), 200);
         st.lance_victim_debuff_until.insert((db_k, 50), 300);
-        st.entosis_active_links.insert(
-            (inst_k, 60),
-            ActiveEntosisLinkState {
-                ship_id: 60,
-                char_id: 9_001,
-                side_id: 500_001,
-                module_id: 70,
-                target_id: 80,
-                cycle_index: 1,
-                cycle_duration_s: 120.0,
-                started_unix: 10,
-                expires_unix: 130,
-                is_capital: false,
-            },
-        );
-        st.entosis_target_cycles.insert((db_k, 60, 80), 3);
         st.pending_wubble_probes.push((
             inst_k,
             PendingWubbleProbe {
@@ -1256,8 +1219,6 @@ mod tests {
         assert_eq!(restored.lance_caster_lock_until[&(new_db_k, 40)], 200);
         assert_eq!(restored.lance_caster_lock_until[&(new_inst_k, 30)], 100);
         assert_eq!(restored.lance_victim_debuff_until[&(new_db_k, 50)], 300);
-        assert!(restored.entosis_active_links.contains_key(&(new_inst_k, 60)));
-        assert_eq!(restored.entosis_target_cycles[&(new_db_k, 60, 80)], 3);
         assert_eq!(restored.pending_wubble_probes[0].0, new_inst_k);
         assert!(restored.active_wubble_debuffs.contains_key(&(new_db_k, 100)));
         assert_eq!(restored.tsb_self_penalty_until[&(new_inst_k, 110)], 400);
@@ -1583,41 +1544,69 @@ mod tests {
         let ctx = test_ctx();
         let sys_id = 30_000_142_u32;
         let sys_h = ctx.systems.get_or_spawn(sys_id);
-        let db_k = db_ptr_key(&ctx.db);
 
         // 1. Direct `clear_crash_lost_runtime_maps` must drop `tactical_state` before
         //    acquiring `SystemActorState` (`RANK_ACTOR_STATE < RANK_LEAF`), clearing both
-        //    tactical maps and actor-owned external active modules + cached views.
+        //    `sov_runtime` entosis maps and actor-owned external active modules + cached views.
         ctx.systems.register_external_active_module(sys_id, 700_001, 800_001);
         assert!(ctx.systems.is_module_active_sync(sys_id, 700_001, 800_001));
         assert!(sys_h.active_module_ships.read().unwrap().contains(&700_001));
         assert!(sys_h.view().has_active_module(700_001));
 
-        ctx.tactical_state.write().unwrap().entosis_active_links.insert(
-            (db_k, 700_001),
-            ActiveEntosisLinkState {
-                ship_id: 700_001,
-                char_id: 90_000_001,
-                side_id: 500_001,
-                module_id: 800_001,
-                target_id: 80,
-                cycle_index: 1,
-                cycle_duration_s: 120.0,
-                started_unix: 10,
-                expires_unix: 130,
-                is_capital: false,
-            },
-        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.entosis_active_links.insert(
+                700_001,
+                eve_db::ActiveEntosisLinkRecord {
+                    ship_id: 700_001,
+                    char_id: 90_000_001,
+                    side_id: 500_001,
+                    module_id: 800_001,
+                    target_id: 80,
+                    cycle_index: 1,
+                    cycle_duration_s: 120.0,
+                    started_unix: 10,
+                    expires_unix: 130,
+                    is_capital: false,
+                },
+            );
+            snap.sov_runtime.entosis_target_cycles.insert((80, 700_001), 2);
+        });
         clear_crash_lost_runtime_maps(&ctx);
-        assert!(ctx.tactical_state.read().unwrap().entosis_active_links.is_empty());
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.sov_runtime.entosis_active_links.is_empty());
+            assert!(snap.sov_runtime.entosis_target_cycles.is_empty());
+        });
         assert!(!ctx.systems.is_module_active_sync(sys_id, 700_001, 800_001));
         assert!(!sys_h.active_module_ships.read().unwrap().contains(&700_001));
         assert!(!sys_h.view().has_active_module(700_001));
 
-        // 2. Full `hydrate_server_runtime_from_db()` path with a loaded system handle executes cleanly.
+        // 2. Full `hydrate_server_runtime_from_db()` path clears seeded `sov_runtime` entosis maps
+        //    and actor external active modules cleanly.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.sov_runtime.entosis_active_links.insert(
+                700_001,
+                eve_db::ActiveEntosisLinkRecord {
+                    ship_id: 700_001,
+                    char_id: 90_000_001,
+                    side_id: 500_001,
+                    module_id: 800_002,
+                    target_id: 81,
+                    cycle_index: 1,
+                    cycle_duration_s: 120.0,
+                    started_unix: 10,
+                    expires_unix: 130,
+                    is_capital: false,
+                },
+            );
+            snap.sov_runtime.entosis_target_cycles.insert((81, 700_001), 3);
+        });
         ctx.systems.register_external_active_module(sys_id, 700_001, 800_002);
         assert!(sys_h.view().has_active_module(700_001));
         ctx.hydrate_server_runtime_from_db();
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.sov_runtime.entosis_active_links.is_empty());
+            assert!(snap.sov_runtime.entosis_target_cycles.is_empty());
+        });
         assert!(!ctx.systems.is_module_active_sync(sys_id, 700_001, 800_002));
         assert!(!sys_h.active_module_ships.read().unwrap().contains(&700_001));
         assert!(!sys_h.view().has_active_module(700_001));
@@ -1729,6 +1718,19 @@ mod tests {
             "map_landmarks": [[1, "LegacyMark", 1.0, 2.0, 3.0]],
             "tactical_state": {
                 legacy_field: [[0, 120], [1, 121]],
+                "entosis_active_links": [[[0, 700_001], {
+                    "ship_id": 700_001,
+                    "char_id": 90_000_001,
+                    "side_id": 500_001,
+                    "module_id": 800_001,
+                    "target_id": 80,
+                    "cycle_index": 1,
+                    "cycle_duration_s": 120.0,
+                    "started_unix": 10,
+                    "expires_unix": 130,
+                    "is_capital": false
+                }]],
+                "entosis_target_cycles": [[[0, 80, 700_001], 2]],
                 "lance_caster_lock_until": [[[0, 500], 1_800_000_777]]
             }
         });
@@ -1746,5 +1748,9 @@ mod tests {
             Some(&1_800_000_777)
         );
         assert_eq!(ctx_legacy.map_landmarks.read().unwrap().len(), 1);
+        ctx_legacy.db.with_snapshot(|snap| {
+            assert!(snap.sov_runtime.entosis_active_links.is_empty());
+            assert!(snap.sov_runtime.entosis_target_cycles.is_empty());
+        });
     }
 }

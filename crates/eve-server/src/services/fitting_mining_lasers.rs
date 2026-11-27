@@ -181,17 +181,35 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
-            let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-            let removed_entosis_module = {
-                let mut tst = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-                if tst.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|l| l.module_id == module_id) {
-                    tst.entosis_active_links.remove(&(db_key, ship_id)).map(|link| {
-                        tst.entosis_target_cycles.remove(&(db_key, link.target_id, ship_id));
-                        link.module_id
-                    })
-                } else {
-                    None
-                }
+            let has_entosis_link = ctx.db.with_snapshot(|snap| {
+                snap.sov_runtime
+                    .entosis_active_links
+                    .get(&ship_id)
+                    .is_some_and(|l| l.module_id == module_id)
+            });
+            let removed_entosis_module = if has_entosis_link {
+                ctx.db.with_mut_snapshot(|snap| {
+                    if snap
+                        .sov_runtime
+                        .entosis_active_links
+                        .get(&ship_id)
+                        .is_some_and(|l| l.module_id == module_id)
+                    {
+                        snap.sov_runtime
+                            .entosis_active_links
+                            .remove(&ship_id)
+                            .map(|link| {
+                                snap.sov_runtime
+                                    .entosis_target_cycles
+                                    .remove(&(link.target_id, ship_id));
+                                link.module_id
+                            })
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
             };
             if let Some(entosis_mod_id) = removed_entosis_module {
                 if let Some(sys_id) = session.solar_system_id {

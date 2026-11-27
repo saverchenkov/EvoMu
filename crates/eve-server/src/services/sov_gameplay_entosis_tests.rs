@@ -6,7 +6,7 @@ use super::*;
 use crate::router::ServerContext;
 use crate::services::sov_services::TYPE_SOVEREIGNTY_HUB;
 use crate::services::tactical_modules::tactical_test_helpers::{
-    clear_active_entosis_links, insert_active_entosis_link, insert_foreign_active_entosis_link,
+    clear_active_entosis_links, has_active_entosis_link, insert_active_entosis_link,
     remove_active_entosis_link, set_active_entosis_link_expires_unix,
 };
 use crate::services::tactical_modules::ActiveEntosisLinkState;
@@ -223,9 +223,10 @@ async fn entosis_precheck_capture_progress_strontium_and_reinforcement() {
         .await
         .unwrap());
 
-    // Register attacker link & capture target
-    insert_foreign_active_entosis_link(
-        &ctx,
+    // Link in a separate ServerContext must not leak across contexts into `ctx`
+    let foreign_ctx = test_ctx();
+    insert_active_entosis_link(
+        &foreign_ctx,
         701,
         ActiveEntosisLinkState {
             module_id: mod_id + 701,
@@ -240,6 +241,8 @@ async fn entosis_precheck_capture_progress_strontium_and_reinforcement() {
             is_capital: false,
         },
     );
+    assert!(has_active_entosis_link(&foreign_ctx, 701));
+    assert!(!has_active_entosis_link(&ctx, 701));
     for (sid, tid, side) in [(702, hub_id + 99, att_ally), (703, hub_id, def_ally)] {
         insert_active_entosis_link(
             &ctx,

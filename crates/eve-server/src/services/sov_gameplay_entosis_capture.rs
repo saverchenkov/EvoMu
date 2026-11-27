@@ -62,33 +62,34 @@ pub fn register_entosis_capture_target(
 }
 
 pub(super) fn remove_ship_entosis_link(ctx: &ServerContext, ship_id: i64) {
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    let removed = {
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        let link = st.entosis_active_links.remove(&(db_key, ship_id));
-        if let Some(ref l) = link {
-            st.entosis_target_cycles.remove(&(db_key, l.target_id, ship_id));
-        }
-        link
-    };
-    if let Some(link) = removed {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.module_active_states.remove(&link.module_id);
-        });
+    let has_link = ctx
+        .db
+        .with_snapshot(|snap| snap.sov_runtime.entosis_active_links.contains_key(&ship_id));
+    if !has_link {
+        return;
+    }
+    let removed_module_id = ctx.db.with_mut_snapshot(|snap| {
+        let link = snap.sov_runtime.entosis_active_links.remove(&ship_id)?;
+        snap.sov_runtime
+            .entosis_target_cycles
+            .remove(&(link.target_id, ship_id));
+        snap.module_active_states.remove(&link.module_id);
+        Some(link.module_id)
+    });
+    if let Some(module_id) = removed_module_id {
         ctx.systems
-            .unregister_external_active_module_in_loaded_systems(ship_id, link.module_id);
+            .unregister_external_active_module_in_loaded_systems(ship_id, module_id);
     }
 }
 
 fn renew_or_expire_entosis_cycle(
     ctx: &ServerContext,
-    db_key: usize,
     now_unix: u64,
     last_ts: u64,
     ship_id: i64,
     mod_id: i64,
     cycle_dur_s: f64,
-    mut exp_u: u64,
+    exp_u: u64,
 ) -> (bool, f64) {
     let dt = now_unix.saturating_sub(last_ts) as f64;
     if now_unix < exp_u {
@@ -96,6 +97,7 @@ fn renew_or_expire_entosis_cycle(
     }
     let cycle_len = (cycle_dur_s.round() as u64).max(120);
     let extra_cycles = ((now_unix - exp_u) / cycle_len) + 1;
+    let new_exp_u = exp_u.saturating_add(extra_cycles * cycle_len);
     let stront_ok = ctx.db.with_mut_snapshot(|snap| {
         let needed = extra_cycles as i32;
         let stront_id = snap
@@ -110,21 +112,19 @@ fn renew_or_expire_entosis_cycle(
                     snap.items.remove(&sid_item);
                 }
             }
+            if let Some(l) = snap.sov_runtime.entosis_active_links.get_mut(&ship_id) {
+                if l.module_id == mod_id {
+                    l.started_unix = new_exp_u.saturating_sub(cycle_len);
+                    l.expires_unix = new_exp_u;
+                    l.cycle_index = l.cycle_index.saturating_add(extra_cycles as u32);
+                }
+            }
             true
         } else {
             false
         }
     });
     if stront_ok {
-        exp_u = exp_u.saturating_add(extra_cycles * cycle_len);
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(l) = st.entosis_active_links.get_mut(&(db_key, ship_id)) {
-            if l.module_id == mod_id {
-                l.started_unix = exp_u - cycle_len;
-                l.expires_unix = exp_u;
-                l.cycle_index = l.cycle_index.saturating_add(extra_cycles as u32);
-            }
-        }
         (true, dt)
     } else {
         (false, exp_u.saturating_sub(last_ts) as f64)
@@ -142,7 +142,6 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
     if entries.is_empty() {
         return;
     }
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
     let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
 
     for (target_id, (mut char_id, mut alliance_id, mut ship_id, mut accrued_secs, last_ts)) in entries {
@@ -191,16 +190,16 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
             .map(|(_, b)| b.position)
             .unwrap_or(fallback_pos);
 
-        let all_links: Vec<(i64, i64, i64, i64, f64, u64)> = {
-            let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-            st.entosis_active_links
+        let all_links: Vec<(i64, i64, i64, i64, f64, u64)> = ctx.db.with_snapshot(|snap| {
+            snap.sov_runtime
+                .entosis_active_links
                 .iter()
-                .filter(|(&(k, _), l)| k == db_key && l.target_id == target_id)
-                .map(|(&(_, sid), l)| {
+                .filter(|(_, l)| l.target_id == target_id)
+                .map(|(&sid, l)| {
                     (sid, l.char_id, l.side_id, l.module_id, l.cycle_duration_s, l.expires_unix)
                 })
                 .collect()
-        };
+        });
         let mut valid_links = Vec::new();
         for (sid, cid, side, mid, cdur, exp) in all_links {
             let in_range = sys_handle
@@ -280,7 +279,6 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
             .unwrap_or(valid_links[0]);
         let (stront_alive, eff_dt) = renew_or_expire_entosis_cycle(
             ctx,
-            db_key,
             now_unix,
             last_ts,
             active_link.0,

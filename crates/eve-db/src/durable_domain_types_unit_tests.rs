@@ -321,8 +321,27 @@ fn empty_collections_negative_sorting_and_remaining_durable_domain_roundtrips() 
             infomorph_bonus: 15,
         },
     );
+    sov_state.entosis_active_links.insert(
+        100_001,
+        ActiveEntosisLinkRecord {
+            ship_id: 100_001,
+            char_id: 90_001,
+            side_id: 99_001,
+            module_id: 800_001,
+            target_id: 1_000_000_001,
+            cycle_index: 2,
+            cycle_duration_s: 300.0,
+            started_unix: 1_700_000_000,
+            expires_unix: 1_700_000_300,
+            is_capital: false,
+        },
+    );
+    sov_state
+        .entosis_target_cycles
+        .insert((1_000_000_001, 100_001), 2);
     let sov_json = serde_json::to_string(&sov_state).unwrap();
     assert_eq!(serde_json::from_str::<PersistedSovState>(&sov_json).unwrap(), sov_state);
+    assert!(serde_json::from_str::<PersistedSovState>("{}").unwrap().entosis_active_links.is_empty());
 
     // PersistedFwState, PersistedInsurgencyState, PersistedAllianceWarState, Ally neg kind, bounty ticks
     let mut fw = PersistedFwState::default();

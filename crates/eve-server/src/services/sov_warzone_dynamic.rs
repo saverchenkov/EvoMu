@@ -545,16 +545,6 @@ pub(crate) async fn regenerate_unattended_command_nodes(ctx: &ServerContext, now
         return;
     }
 
-    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
-    let active_targets: std::collections::HashSet<i64> = {
-        let tst = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-        tst.entosis_active_links
-            .iter()
-            .filter(|(&(k, _), _)| k == db_key)
-            .map(|(_, l)| l.target_id)
-            .collect()
-    };
-
     let mut defender_won_hubs: Vec<(i64, u32, Vec<(i64, u32)>)> = Vec::new();
     ctx.db.with_mut_snapshot(|snap| {
         let hub_ids: Vec<i64> = snap.sov_campaign_scores.keys().copied().collect();
@@ -569,9 +559,12 @@ pub(crate) async fn regenerate_unattended_command_nodes(ctx: &ServerContext, now
             if nodes.is_empty() {
                 continue;
             }
-            let any_active = nodes.iter().any(|(nid, _)| {
-                active_targets.contains(nid)
-                    || snap.sov_runtime.entosis_capture_progress.contains_key(nid)
+            let any_active = nodes.iter().any(|&(nid, _)| {
+                snap.sov_runtime
+                    .entosis_active_links
+                    .values()
+                    .any(|l| l.target_id == nid)
+                    || snap.sov_runtime.entosis_capture_progress.contains_key(&nid)
             });
             if snap.structures.get(&hub_id).is_some_and(|st| now_unix < st.reinforced_until_unix) {
                 snap.sov_runtime.command_node_regen_last_unix.insert(hub_id, now_unix);

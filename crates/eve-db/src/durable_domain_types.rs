@@ -676,6 +676,22 @@ pub struct PersistedMercenaryActivity {
     pub infomorph_bonus: u32,
 }
 
+/// Active Entosis Link cycle state stored in `PersistedSovState` (cleared on restart hydrate, `#1541` Track G2b-2).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActiveEntosisLinkRecord {
+    pub ship_id: i64,
+    pub char_id: i64,
+    pub side_id: i64,
+    pub module_id: i64,
+    pub target_id: i64,
+    pub cycle_index: u32,
+    pub cycle_duration_s: f64,
+    pub started_unix: u64,
+    pub expires_unix: u64,
+    pub is_capital: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PersistedSovState {
@@ -764,6 +780,12 @@ pub struct PersistedSovState {
     /// Last unix timestamp when unattended Command Nodes were regenerated for `hub_id`.
     #[serde(default)]
     pub command_node_regen_last_unix: HashMap<i64, u64>,
+    /// Active Entosis Link cycles keyed by `ship_id` (crash-lost across restarts, `#1541` Track G2b-2).
+    #[serde(default)]
+    pub entosis_active_links: HashMap<i64, ActiveEntosisLinkRecord>,
+    /// Entosis Link per-target cycle counts keyed by `(target_id, ship_id)` (crash-lost across restarts, `#1541` Track G2b-2).
+    #[serde(default, with = "crate::durable_domain_types::tuple_map_serde")]
+    pub entosis_target_cycles: HashMap<(i64, i64), u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

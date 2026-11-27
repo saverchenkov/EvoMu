@@ -96,8 +96,8 @@ pub use snapshot_ext::{
     StarbaseDetailSettings,
 };
 pub use durable_domain_types::{
-    DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent,
-    SessionChangeTimerRecord, SocialContactNotificationRecord,
+    ActiveEntosisLinkRecord, DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry,
+    PersistedFwStatEvent, SessionChangeTimerRecord, SocialContactNotificationRecord,
 };
 pub use types::*;
 

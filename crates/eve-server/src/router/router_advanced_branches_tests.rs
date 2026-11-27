@@ -434,11 +434,12 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
     use crate::services::tactical_modules::tactical_test_helpers::{
         ctx_db_keys_differ, get_lance_caster_lock_until_for_scope,
         get_lance_victim_debuff_until_for_scope, get_system_sim_time_for_scope,
-        get_tsb_self_penalty_until_for_scope, has_any_entosis_target_cycles,
-        set_entosis_target_cycles_for_scope, set_lance_caster_lock_until_for_scope,
-        set_lance_victim_debuff_until_for_scope, set_system_sim_time_for_scope,
-        set_tsb_self_penalty_until_for_scope, TacticalKeyScope,
+        get_tsb_self_penalty_until_for_scope, has_active_entosis_link,
+        has_any_entosis_target_cycles, insert_active_entosis_link, set_entosis_target_cycles,
+        set_lance_caster_lock_until_for_scope, set_lance_victim_debuff_until_for_scope,
+        set_system_sim_time_for_scope, set_tsb_self_penalty_until_for_scope, TacticalKeyScope,
     };
+    use crate::services::tactical_modules::ActiveEntosisLinkState;
 
     let ctx1 = test_ctx();
     let sde = Arc::clone(&ctx1.sde);
@@ -471,8 +472,23 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
     set_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 2_002);
     set_tsb_self_penalty_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 3_001);
     set_tsb_self_penalty_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 3_002);
-    set_entosis_target_cycles_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 99, 4);
-    set_entosis_target_cycles_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 98, 5);
+    insert_active_entosis_link(
+        &ctx1,
+        ship_a,
+        ActiveEntosisLinkState {
+            ship_id: ship_a,
+            char_id: 90_000_001,
+            side_id: 99_000_001,
+            module_id: 800_101,
+            target_id: 99,
+            cycle_index: 1,
+            cycle_duration_s: 300.0,
+            started_unix: 1_700_000_000,
+            expires_unix: 1_700_000_300,
+            is_capital: false,
+        },
+    );
+    set_entosis_target_cycles(&ctx1, 99, ship_a, 4);
     set_system_sim_time_for_scope(&ctx1, TacticalKeyScope::Instance, 30_000_142, 12.5);
     set_system_sim_time_for_scope(&ctx1, TacticalKeyScope::Db, 30_000_144, 25.0);
 
@@ -533,6 +549,25 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
     let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
     assert_ne!(ctx1.instance_id, ctx2.instance_id);
     assert!(ctx_db_keys_differ(&ctx1, &ctx2));
+    assert!(!has_active_entosis_link(&ctx2, ship_a));
+    assert!(!has_any_entosis_target_cycles(&ctx2));
+    insert_active_entosis_link(
+        &ctx2,
+        ship_b,
+        ActiveEntosisLinkState {
+            ship_id: ship_b,
+            char_id: 90_000_002,
+            side_id: 99_000_002,
+            module_id: 800_102,
+            target_id: 98,
+            cycle_index: 2,
+            cycle_duration_s: 300.0,
+            started_unix: 1_700_000_000,
+            expires_unix: 1_700_000_300,
+            is_capital: false,
+        },
+    );
+    set_entosis_target_cycles(&ctx2, 98, ship_b, 5);
 
     // Export durable tactical checkpoints from ctx1's SQLite into db2's SQLite `system_checkpoint`
     // and also inject a legacy `SERVER_RUNTIME_STATE_BLOB_KEY` payload containing crash-lost EWAR
@@ -583,7 +618,22 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         .expect("seed db2 system checkpoints");
 
     let legacy_crash_lost_json = serde_json::json!({
-        "active_ewar_starts": [[[ship_a, ship_b], [[1, "warpScramblerMWD"]]]]
+        "active_ewar_starts": [[[ship_a, ship_b], [[1, "warpScramblerMWD"]]]],
+        "tactical_state": {
+            "entosis_active_links": [[[0, ship_b], {
+                "ship_id": ship_b,
+                "char_id": 90_000_002,
+                "side_id": 99_000_002,
+                "module_id": 800_102,
+                "target_id": 98,
+                "cycle_index": 2,
+                "cycle_duration_s": 300.0,
+                "started_unix": 1_700_000_000,
+                "expires_unix": 1_700_000_300,
+                "is_capital": false
+            }]],
+            "entosis_target_cycles": [[[0, 98, ship_b], 5]]
+        }
     })
     .to_string();
 
@@ -713,7 +763,10 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         get_tsb_self_penalty_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),
         Some(3_002)
     );
+    assert!(!has_active_entosis_link(&ctx2, ship_b));
     assert!(!has_any_entosis_target_cycles(&ctx2));
+    assert!(has_active_entosis_link(&ctx1, ship_a));
+    assert!(has_any_entosis_target_cycles(&ctx1));
     assert_eq!(
         get_system_sim_time_for_scope(&ctx2, TacticalKeyScope::Instance, 30_000_142),
         Some(12.5)
