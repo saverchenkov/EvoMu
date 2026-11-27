@@ -1343,16 +1343,15 @@ impl NpcSpawnManager {
         self.step_ai_sync(ctx, sys_id, current_tick, dt);
     }
 
-    /// Handles death of an NPC: credits dynamic bounty based on `ENTITY_KILL_BOUNTY`,
-    /// spawns a wreck with loot drops, raises killer's security status, records a killmail with the exact bounty value, and updates respawn timers.
-    pub fn handle_npc_destroyed(
+    /// Handles death of an NPC and returns full wreck/killmail/bounty outcome details (`#1193`).
+    pub(crate) fn handle_npc_destroyed_detailed(
         &mut self,
         ctx: &ServerContext,
         sys_id: u32,
         npc_ball_id: i64,
         killer_char_id: i64,
         now_unix: u64,
-    ) -> Result<f64, String> {
+    ) -> Result<DestroyedNpcOutcome, String> {
         let Some((entity, cs_until)) =
             self.remove_npc_and_record_cooldown(ctx, sys_id, npc_ball_id, now_unix)
         else {
@@ -1367,6 +1366,30 @@ impl NpcSpawnManager {
         }
         finalize_destroyed_npc_side_effects(ctx, sys_id, &entity, killer_char_id, now_unix)
     }
+
+    /// Handles death of an NPC: credits dynamic bounty based on `ENTITY_KILL_BOUNTY`,
+    /// spawns a wreck with loot drops, raises killer's security status, records a killmail with the exact bounty value, and updates respawn timers.
+    pub fn handle_npc_destroyed(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        npc_ball_id: i64,
+        killer_char_id: i64,
+        now_unix: u64,
+    ) -> Result<f64, String> {
+        self.handle_npc_destroyed_detailed(ctx, sys_id, npc_ball_id, killer_char_id, now_unix)
+            .map(|outcome| outcome.bounty_isk)
+    }
+}
+
+/// Result of finalizing a tracked NPC's destruction side effects (`#1193`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DestroyedNpcOutcome {
+    pub bounty_isk: f64,
+    pub wreck_id: i64,
+    pub wreck_type_id: u32,
+    pub wreck_pos: DVec3,
+    pub killmail_id: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2096,7 +2119,7 @@ fn finalize_destroyed_npc_side_effects(
     entity: &NpcCombatEntity,
     killer_char_id: i64,
     now_unix: u64,
-) -> Result<f64, String> {
+) -> Result<DestroyedNpcOutcome, String> {
     let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, sys_id);
     let bounty = entity.bounty_isk * supp_mult;
     let npc_ball_id = entity.ball_id;
@@ -2129,7 +2152,7 @@ fn finalize_destroyed_npc_side_effects(
                 now_unix,
             );
 
-            if !(32_000_000..=32_999_999).contains(&sys_id) {
+            let (wreck_id, wreck_type_id) = if !(32_000_000..=32_999_999).contains(&sys_id) {
                 let wreck_type_id =
                     resolve_npc_wreck_type_id(&ctx.sde, Some(entity.type_id), None);
                 let size_class = NpcSizeClass::from_sde(&ctx.sde, Some(entity.type_id));
@@ -2148,7 +2171,7 @@ fn finalize_destroyed_npc_side_effects(
                 ) {
                     loot_entries.push((ammo_tid, ammo_qty, false));
                 }
-                spawn_npc_wreck_and_loot_in_snap(
+                let wreck_id = spawn_npc_wreck_and_loot_in_snap(
                     snap,
                     sys_id,
                     killer_char_id,
@@ -2157,9 +2180,18 @@ fn finalize_destroyed_npc_side_effects(
                     wreck_type_id,
                     &loot_entries,
                 );
-            }
+                (wreck_id, wreck_type_id)
+            } else {
+                (0, 0)
+            };
 
-            Ok::<_, String>(bounty)
+            Ok::<_, String>(DestroyedNpcOutcome {
+                bounty_isk: bounty,
+                wreck_id,
+                wreck_type_id,
+                wreck_pos: entity.spawn_pos,
+                killmail_id: kid,
+            })
         });
     if res.is_ok() && killer_char_id > 0 {
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(

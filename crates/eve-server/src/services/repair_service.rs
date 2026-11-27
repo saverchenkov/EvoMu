@@ -771,20 +771,16 @@ pub async fn handle_repair_items_in_location(
                     live_ship_hp.contains_key(tid),
                 );
             } else {
-                crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, *tid);
+                crate::domain::combat_ops::clear_ship_and_fitted_damage_in_snap(
+                    snap,
+                    *tid,
+                    false,
+                );
             }
         }
         Ok((target_ids, ship_heals, total_cents.to_f64_isk(), bal))
     })?;
-    if let Ok(mut fits) = ctx.ship_fittings.write() {
-        for fit in fits.values_mut() {
-            for m in fit.modules.values_mut() {
-                if repaired_ids.contains(&m.item_id) {
-                    m.damage_hp = 0.0;
-                }
-            }
-        }
-    }
+    crate::domain::combat_ops::clear_fitted_module_damage_in_cache(ctx, &repaired_ids);
     for (iid, hull_heal, armor_heal, shield_heal) in repaired_ship_heals {
         let sys_opt = ctx
             .systems

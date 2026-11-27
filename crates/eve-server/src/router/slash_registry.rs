@@ -719,6 +719,83 @@ impl GiveItemArgs {
     }
 }
 
+const HEAL_USAGE: &str = "Usage: /heal [me|self|myship|<targetID>]";
+const KILL_USAGE: &str = "Usage: /kill <me|self|myship|targetID>";
+
+fn is_self_ship_alias(tok: &str) -> bool {
+    crate::services::character_skills::character_gm_tools::is_me_or_myship(tok)
+        || tok.eq_ignore_ascii_case("self")
+}
+
+/// Target parsed for `/heal [me|self|myship|<targetID>]` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HealSlashTarget {
+    SelfShip,
+    EntityOrCharId(i64),
+}
+
+/// Typed arguments parsed for `/heal` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HealSlashArgs {
+    pub target: HealSlashTarget,
+}
+
+/// Parses `/heal` arguments, accepting empty args, self aliases, or a single positive entity/character ID.
+pub(crate) fn parse_heal_slash_args(rest: &str) -> Result<HealSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    match token_strs.as_slice() {
+        [] => Ok(HealSlashArgs {
+            target: HealSlashTarget::SelfShip,
+        }),
+        [tok] if is_self_ship_alias(tok) => Ok(HealSlashArgs {
+            target: HealSlashTarget::SelfShip,
+        }),
+        [tok] => tok
+            .parse::<i64>()
+            .ok()
+            .filter(|&id| id > 0)
+            .map(|id| HealSlashArgs {
+                target: HealSlashTarget::EntityOrCharId(id),
+            })
+            .ok_or_else(|| invalid_slash_arg_error(HEAL_USAGE)),
+        _ => Err(invalid_slash_arg_error(HEAL_USAGE)),
+    }
+}
+
+/// Target parsed for `/kill <me|self|myship|targetID>` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KillSlashTarget {
+    SelfChar,
+    EntityOrCharId(i64),
+}
+
+/// Typed arguments parsed for `/kill` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KillSlashArgs {
+    pub target: KillSlashTarget,
+}
+
+/// Parses `/kill` arguments, requiring either a self alias or a single positive target entity/character ID.
+pub(crate) fn parse_kill_slash_args(rest: &str) -> Result<KillSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    match token_strs.as_slice() {
+        [tok] if is_self_ship_alias(tok) => Ok(KillSlashArgs {
+            target: KillSlashTarget::SelfChar,
+        }),
+        [tok] => tok
+            .parse::<i64>()
+            .ok()
+            .filter(|&id| id > 0)
+            .map(|id| KillSlashArgs {
+                target: KillSlashTarget::EntityOrCharId(id),
+            })
+            .ok_or_else(|| invalid_slash_arg_error(KILL_USAGE)),
+        _ => Err(invalid_slash_arg_error(KILL_USAGE)),
+    }
+}
+
 enum PreparedSlashDispatch<'a> {
     Immediate(Result<PyRep, BridgeRpcError>),
     Execute {

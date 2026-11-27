@@ -2082,6 +2082,41 @@ impl ServerContext {
         self.notify(NotificationTarget::Character(char_id), "OnModuleAttributeChanges", "charid", vec![PyRep::List(changes)])
     }
 
+    /// Emits a batched `OnModuleAttributeChanges` notification for `(item_id, attr_id, new_val, old_val)`
+    /// tuples timestamped on `ship_id`'s system simulation clock (`#1268`, `#1193`).
+    pub(crate) fn notify_module_attribute_changes(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        changes: &[(i64, u16, f64, f64)],
+    ) {
+        if char_id <= 0 || ship_id <= 0 || changes.is_empty() {
+            return;
+        }
+        let now_ft = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+        let entries = changes
+            .iter()
+            .map(|&(item_id, attr_id, new_val, old_val)| {
+                PyRep::Tuple(vec![
+                    PyRep::String("OnModuleAttributeChange".into()),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(item_id),
+                    PyRep::Integer(i64::from(attr_id)),
+                    PyRep::Integer(now_ft),
+                    PyRep::Real(new_val),
+                    PyRep::Real(old_val),
+                    PyRep::None,
+                ])
+            })
+            .collect();
+        let _ = self.emit_typed(
+            NotificationTarget::Character(char_id),
+            crate::router::notify_registry::OnModuleAttributeChanges {
+                changes: PyRep::List(entries),
+            },
+        );
+    }
+
     /// Builds a V24 `OnModuleAttributeChange` entry for `CHARGE` (attr 18 — current capacitor GJ)
     /// matching `godma.StateManager.OnModuleAttributeChanges` (`#1002`).
     pub(crate) fn build_ship_capacitor_attr_change_rep(

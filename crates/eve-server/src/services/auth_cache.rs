@@ -1203,8 +1203,9 @@ pub(crate) fn dispatch_heal_slash<'a>(
 ) -> SlashBoxFuture<'a> {
     Box::pin(async move {
         let (_, cid) = ServerContext::require_character(session)?;
-        crate::services::character_skills::character_gm_tools::execute_gm_heal(
-            ctx, session, cid, inv.raw,
+        let parsed = crate::router::slash_registry::parse_heal_slash_args(inv.rest)?;
+        crate::services::character_skills::character_gm_tools::execute_gm_heal_parsed(
+            ctx, session, cid, inv.raw, parsed,
         )
         .await
     })
