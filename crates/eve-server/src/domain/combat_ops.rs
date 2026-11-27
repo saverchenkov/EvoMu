@@ -524,6 +524,7 @@ pub async fn destroy_entity_in_system(
         });
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.npc_entities.remove(&req.victim_ship_id);
+        rt.destroyed_npc_cache.remove(&req.victim_ship_id);
     });
 
     let (wreck_id, killmail_id, wreck_type_id, wreck_pos) = match tracked_res {
@@ -842,7 +843,7 @@ mod tests {
             corp.set_division_balance(1, IskCents::from_isk(1_000_000));
             corp_id
         });
-        let (pid, _) = create_canonical_project(
+        let (pid, goal_uuid) = create_canonical_project(
             &ctx.db,
             CanonicalProjectSpec {
                 corp_id,
@@ -866,6 +867,41 @@ mod tests {
             },
         )
         .expect("create DestroyNPCShips corp project");
+        let goal_hex = crate::services::quasar_progression_extra::uuid_to_hex(&goal_uuid);
+        {
+            let mut ggoals = ctx
+                .quasar_gateway
+                .progression
+                .extra
+                .generic_goals
+                .write()
+                .unwrap();
+            ggoals.insert(
+                goal_hex.clone(),
+                crate::services::quasar_progression_extra::GenericGoalRecord {
+                    uuid: goal_uuid,
+                    creator_id: cid as u32,
+                    name: "Single NPC Kill Payout".into(),
+                    description: "Verify destroy_entity_in_system credits +1 once".into(),
+                    desired_progress: 5,
+                    current_progress: 0,
+                    closed: false,
+                    matcher_type: "DestroyNPCShips".into(),
+                    created_unix: ctx.now_unix(),
+                    ..Default::default()
+                },
+            );
+        }
+        let sub_sess = eve_machonet::SessionState {
+            session_id: 99_101,
+            user_id: Some(1),
+            character_id: Some(cid),
+            corporation_id: Some(corp_id),
+            ..eve_machonet::SessionState::new(99_101)
+        };
+        let _notice_rx = ctx
+            .quasar_gateway
+            .subscribe_session(&sub_sess, Vec::new(), ctx.now_unix());
 
         let handle = ctx.systems.get_or_spawn(sys_id);
         handle
@@ -993,5 +1029,103 @@ mod tests {
                 "entityGroupDestroyed condition ({ach_id}, {cond_id}) must increment by 1"
             );
         }
+        let generic_progress = ctx
+            .quasar_gateway
+            .progression
+            .extra
+            .generic_goals
+            .read()
+            .unwrap()
+            .get(&goal_hex)
+            .map(|g| g.current_progress);
+        assert_eq!(
+            generic_progress,
+            Some(1),
+            "quasar generic_goals must synchronize +1 alongside snap.corp_projects"
+        );
+        let notices = ctx.quasar_gateway.poll_notices(sub_sess.session_id);
+        let contrib_notices = notices
+            .iter()
+            .filter(|n| {
+                n.payload
+                    .as_ref()
+                    .is_some_and(|p| p.type_url.ends_with("eve_public.goal.contribution.api.ContributedNotice"))
+            })
+            .count();
+        let redeemed_notices = notices
+            .iter()
+            .filter(|n| {
+                n.payload
+                    .as_ref()
+                    .is_some_and(|p| p.type_url.ends_with("eve_public.corporationgoal.api.RedeemedNotice"))
+            })
+            .count();
+        assert_eq!(contrib_notices, 1, "expected 1 ContributedNotice, got {contrib_notices}");
+        assert_eq!(redeemed_notices, 1, "expected 1 RedeemedNotice, got {redeemed_notices}");
+    }
+
+    #[tokio::test]
+    async fn destroy_entity_untracked_spawnnpc_clears_destroyed_npc_cache_across_cycle_cleanup() {
+        let ctx = ServerContext::new();
+        let cid = 90_000_001_i64;
+        let sys_id = 30_000_142_u32;
+        let npc_type_id = ctx
+            .sde
+            .types
+            .iter()
+            .find(|(_, t)| t.category_id == 11 && ctx.sde.resolve_wreck_type_id(t.type_id, None).is_some())
+            .map(|(&tid, _)| tid)
+            .unwrap_or(16_997);
+        let npc_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_npc_entity_from_sde(
+            &ctx,
+            sys_id,
+            npc_type_id,
+            0,
+            DVec3::new(1_500.0, 0.0, 0.0),
+        )
+        .await;
+        assert!(crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.npc_entities.contains_key(&npc_id)
+        }));
+
+        let out = destroy_entity_in_system(
+            &ctx,
+            DestroyEntityRequest {
+                target_id: npc_id,
+                victim_char_id: cid,
+                victim_ship_id: npc_id,
+                sys_id,
+                killer_char_id: cid,
+                in_db_items: false,
+            },
+        )
+        .await
+        .expect("untracked /spawnnpc destroy succeeds");
+        assert!(out.wreck_id > 0);
+
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            assert!(!rt.npc_entities.contains_key(&npc_id));
+            assert!(
+                !rt.destroyed_npc_cache.contains_key(&npc_id),
+                "destroy_entity_in_system must clear destroyed_npc_cache entry"
+            );
+        });
+
+        let (items_before, km_before, standings_before) = ctx.db.with_snapshot(|snap| {
+            (
+                snap.items.len(),
+                snap.killmails.len(),
+                snap.characters[&cid].standings.clone(),
+            )
+        });
+        crate::services::combat_npc_encounters::finalize_cycle_destroyed_npcs(&ctx, sys_id).await;
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items.len(), items_before, "finalize_cycle_destroyed_npcs must not spawn duplicate wreck/loot");
+            assert_eq!(snap.killmails.len(), km_before);
+            assert_eq!(snap.characters[&cid].standings, standings_before);
+        });
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            assert!(!rt.destroyed_npc_cache.contains_key(&npc_id));
+        });
     }
 }
