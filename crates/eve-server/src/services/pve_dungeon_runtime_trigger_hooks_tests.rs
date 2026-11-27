@@ -4376,3 +4376,44 @@ async fn own_diff_p1_12_and_p2_new_04_post_completion_loot_container_destroy_and
     assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx, sys_id, inst_id).await, 0);
     assert!(sys_h.get_ball_snapshot(loot_box).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn own_diff_p1_14_15_16_trash_dedupe_salvage_guard_and_withdraw_order() {
+    use crate::combat::drones_salvage_tractor::{attempt_salvage_wreck, commit_salvaged_wreck_inventory_and_notify, validate_wreck_salvage_target, CommitSalvageError};
+    use crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext;
+    let mut sde = build_hooks_test_sde();
+    Arc::get_mut(&mut sde).unwrap().types.insert(26_468, mk_inv_type(26_468, 186, 2, "Amarr Wreck", 1_000.0, 27_500.0, None, &[]));
+    let (sys_id, char_id, inst_id, r_pos) = (30_000_142u32, 95_008_951i64, 8_951_001i64, [40_000.0, 0.0, 0.0]);
+    let (ctx, _clock, mut sess, ship_id) = make_space_pilot_ctx(sde, sys_id, char_id, "r10_t14_16", 587, DVec3::new(r_pos[0] + 50.0, 0.0, 0.0)).await;
+    let mut room = make_room(0, 9_951, r_pos, vec![
+        DungeonRuntimeObject { type_id: DEFAULT_CONTAINER_TYPE_ID, name: "Drop Can".into(), position: [r_pos[0] + 100.0, 0.0, 0.0], radius: 150.0, is_container: true, ..Default::default() },
+        DungeonRuntimeObject { type_id: 26_468, name: "Dungeon Wreck".into(), position: [r_pos[0] + 200.0, 0.0, 0.0], radius: 150.0, is_container: true, loot_items: vec![(35, 2)], ..Default::default() },
+    ], vec![make_trig(1, DungeonTriggerKind::CompoundAnd { clauses: vec![
+        DungeonTriggerKind::OnCargoDelivered { container_ball_id: None, target_object_index: Some(0), item_type_id: Some(34), required_quantity: 2 },
+        DungeonTriggerKind::OnLoot { container_ball_id: None, target_object_index: Some(0), item_type_id: Some(34) },
+    ] }, DungeonTriggerAction::CompleteDungeon, false)]);
+    room.entered = true; room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| { s.instances.insert(inst_id, DungeonRuntimeInstance { instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id, base_position: r_pos, rooms: vec![room], created_unix: 1_785_100_000, ..Default::default() }); });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.expect("mat");
+    let (cont_23, wreck_can, sys_h) = (mat.object_ids[0], mat.object_ids[1], ctx.systems.get_or_spawn(sys_id));
+    insert_ship_item(&ctx, char_id, ship_id, 8_951_101, 35, InventoryFlag::Cargo, 2, false);
+    inv_add_to(&ctx, &mut sess, char_id, cont_23, 8_951_101, ship_id, Some(2)).await;
+    let pyer_id = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == cont_23 && i.type_id == 35).unwrap().item_id);
+    handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "invbroker", "TrashItems", &[PyRep::List(vec![PyRep::Integer(pyer_id); 3])], &HashMap::new()).await.unwrap().unwrap();
+    read_dungeon_runtime_store(&ctx, |s| assert_eq!(s.instances[&inst_id].rooms[0].cargo_delivered_net.get(&format!("{cont_23}:35")).copied().unwrap_or(0), 0));
+    assert_eq!(validate_wreck_salvage_target(&ctx, sys_id, char_id, ship_id, wreck_can, None).await.unwrap_err().code, "InvalidSalvageTarget");
+    assert_eq!(attempt_salvage_wreck(&ctx, sys_id, char_id, ship_id, wreck_can, 0.5, 0.0).await.unwrap_err(), "InvalidSalvageTarget");
+    assert!(matches!(commit_salvaged_wreck_inventory_and_notify(&ctx, sys_id, char_id, ship_id, wreck_can, [0.0; 3], &[]), Err(CommitSalvageError::WreckMissing)));
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&wreck_can)) && sys_h.get_ball_snapshot(wreck_can).await.unwrap().is_some());
+    for mode in 0..3 {
+        insert_ship_item(&ctx, char_id, ship_id, 8_951_200 + mode, 34, InventoryFlag::Cargo, 2, false);
+        inv_add_to(&ctx, &mut sess, char_id, cont_23, 8_951_200 + mode, ship_id, Some(2)).await;
+        let tid = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == cont_23 && i.type_id == 34).unwrap().item_id);
+        match mode {
+            0 => inv_add_to(&ctx, &mut sess, char_id, ship_id, tid, cont_23, Some(2)).await,
+            1 => inv_multi_add_to(&ctx, &mut sess, char_id, ship_id, vec![tid]).await,
+            _ => { crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails(&ctx, &mut sess, "invbroker", "LootAll", &[PyRep::Integer(cont_23)], &HashMap::new()).await.unwrap().unwrap(); }
+        }
+        read_dungeon_runtime_store(&ctx, |s| { let inst = &s.instances[&inst_id]; assert!(!inst.completed && !inst.rooms[0].triggers[0].fired && inst.rooms[0].cargo_delivered_net.get(&format!("{cont_23}:34")).copied().unwrap_or(0) == 0); });
+    }
+}

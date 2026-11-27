@@ -2084,9 +2084,6 @@ pub(crate) async fn handle_invbroker_add(
                         crate::services::notify_emitters_character_services::emit_fleet_loot_event_if_in_fleet(ctx, char_id, fid, &[(moved_tid, moved_qty)]);
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, orig_source_loc_id).await;
                     }
-                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
-                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
-                    }
                     if old_loc_id != new_loc {
                         crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
                             ctx,
@@ -2105,6 +2102,9 @@ pub(crate) async fn handle_invbroker_add(
                             moved_tid,
                             u64::try_from(moved_qty).unwrap_or(0),
                         );
+                    }
+                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
@@ -2192,25 +2192,6 @@ pub(crate) async fn handle_invbroker_add(
                         )
                         .await;
                     }
-                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
-                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
-                            ctx,
-                            char_id,
-                            session.solar_system_id,
-                            orig_source_loc_id,
-                            updated.type_id,
-                        )
-                        .await;
-                        if orig_source_loc_id != updated.location_id {
-                            crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
-                                ctx,
-                                char_id,
-                                updated.location_id,
-                                updated.type_id,
-                                u64::try_from(updated.quantity).unwrap_or(0),
-                            );
-                        }
-                    }
                     if old_loc_id != updated.location_id {
                         crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
                             ctx,
@@ -2234,6 +2215,25 @@ pub(crate) async fn handle_invbroker_add(
                             i64::from(chg_qty),
                         )
                         .await;
+                    }
+                    if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                            ctx,
+                            char_id,
+                            session.solar_system_id,
+                            orig_source_loc_id,
+                            updated.type_id,
+                        )
+                        .await;
+                        if orig_source_loc_id != updated.location_id {
+                            crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
+                                ctx,
+                                char_id,
+                                updated.location_id,
+                                updated.type_id,
+                                u64::try_from(updated.quantity).unwrap_or(0),
+                            );
+                        }
                     }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);

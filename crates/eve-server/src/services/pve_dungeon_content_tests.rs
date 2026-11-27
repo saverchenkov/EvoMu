@@ -5077,6 +5077,7 @@ async fn own_diff_p1_13_structure_destroyed_trigger_ship_tag_binds_target_tag_no
     let mut sde = (*shared_sde()).clone();
     sde.types.entry(16_757).or_insert_with(|| mk_s(16_757, "Angel Bunker"));
     sde.types.entry(16_758).or_insert_with(|| mk_s(16_758, "Radio Tower"));
+    sde.types.entry(23).or_insert_with(|| { let mut t = mk_s(23, "Cargo Container"); t.group_id = 12; t.category_id = 2; t });
     let ctx = make_ctx(Arc::new(sde));
     let (sys_id, did) = (30_000_142u32, 993_304u32);
     let payload = format!(r#"{{
@@ -5097,6 +5098,13 @@ async fn own_diff_p1_13_structure_destroyed_trigger_ship_tag_binds_target_tag_no
            "spawns": [
              {{ "raw_class": "Structure", "raw_name": "Radio Tower", "tag": "radio_tower", "count": {{"min": 2, "max": 2}}, "resolution": {{"status": "resolved_exact", "type_ids": [16758]}} }}
            ]
+        }},
+        {{ "wave_index": 3, "timing": "sequential_wave",
+           "wave_trigger": {{ "kind": "cargo_delivered", "target_tag": "can_b", "item_type_id": 34, "required_quantity": 2, "unlocks_gate": true }},
+           "spawns": [
+             {{ "raw_class": "Container", "raw_name": "Can A", "tag": "can_a", "count": {{"min": 1, "max": 1}}, "resolution": {{"status": "resolved_exact", "type_ids": [23]}} }},
+             {{ "raw_class": "Container", "raw_name": "Can B", "tag": "can_b", "count": {{"min": 1, "max": 1}}, "resolution": {{"status": "resolved_exact", "type_ids": [23]}} }}
+           ]
         }}
       ]
     }},
@@ -5108,9 +5116,10 @@ async fn own_diff_p1_13_structure_destroyed_trigger_ship_tag_binds_target_tag_no
     install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
     let built = build_wiki_deadspace_rooms(&ctx, sys_id, DungeonTemplateId::new(did), "Trigger Ship Tag Test", [75_000_000.0, 0.0, 0.0], false).expect("build p1_13");
     let r = &built.rooms[0];
-    assert_eq!(r.objects.len(), 3, "Front Bunker + 2 Radio Tower copies");
+    assert_eq!(r.objects.len(), 5, "Front Bunker + 2 Radio Tower copies + 2 Cans");
     assert!(r.objects[1].destructible && r.objects[2].destructible);
     assert_eq!(r.objects[1].tag.as_deref(), Some("radio_tower"));
     assert_eq!(r.objects[2].tag.as_deref(), Some("radio_tower"));
     assert!(r.triggers.iter().any(|t| matches!(&t.kind, DungeonTriggerKind::OnStructureDestroyed { target_object_index: None, target_tag: Some(tag), .. } if tag == "radio_tower") && matches!(t.action, DungeonTriggerAction::UnlockGate)));
+    assert!(r.triggers.iter().any(|t| matches!(&t.kind, DungeonTriggerKind::OnCargoDelivered { target_object_index: Some(4), item_type_id: Some(34), required_quantity: 2, .. })));
 }

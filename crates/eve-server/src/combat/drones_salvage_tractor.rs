@@ -21,7 +21,7 @@ pub enum SalvageOutcome {
 }
 
 #[derive(Debug)]
-enum CommitSalvageError {
+pub(crate) enum CommitSalvageError {
     Capacity {
         ship_cap: f64,
         used_cargo: f64,
@@ -77,7 +77,7 @@ fn salvage_vol_for_materials(ctx: &ServerContext, materials: &[(u32, i32)]) -> f
 /// tagging `char_id` on `wtx.effects.acting_char_id` so commit-driven item projection notifies the
 /// salvager on both RPC and tick-driven salvaging cycles.
 #[allow(clippy::too_many_arguments)]
-fn commit_salvaged_wreck_inventory_and_notify(
+pub(crate) fn commit_salvaged_wreck_inventory_and_notify(
     ctx: &ServerContext,
     sys_id: u32,
     char_id: i64,
@@ -94,7 +94,12 @@ fn commit_salvaged_wreck_inventory_and_notify(
         let Some(old_wreck) = snap.items.get(&wreck_id).cloned() else {
             return Err(CommitSalvageError::WreckMissing);
         };
-        if old_wreck.location_id != sys_id as i64 {
+        if old_wreck.location_id != sys_id as i64
+            || crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(
+                snap,
+                wreck_id,
+            )
+        {
             return Err(CommitSalvageError::WreckMissing);
         }
         if let Some(ship_cap) = ship_cap_opt {
@@ -454,7 +459,12 @@ pub async fn attempt_salvage_wreck(
         .map(|t| t.capacity)
         .filter(|&c| c > 0.0 && c <= 27_500.0)
         .unwrap_or(27_500.0);
+    let mut is_dungeon = false;
     let loot_volume: f64 = ctx.db.with_snapshot(|snap| {
+        if crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(snap, wreck_item_id) {
+            is_dungeon = true;
+            return 0.0;
+        }
         snap.items
             .values()
             .filter(|i| i.location_id == wreck_item_id)
@@ -469,6 +479,9 @@ pub async fn attempt_salvage_wreck(
             })
             .sum()
     });
+    if is_dungeon {
+        return Err("InvalidSalvageTarget".to_string());
+    }
     if loot_volume > can_capacity + 1e-4 {
         return Err("SalvageTooMuchLootBody".to_string());
     }
@@ -570,6 +583,17 @@ pub async fn validate_wreck_salvage_target(
             return Err(target_not_in_space_error(format!(
                 "Target {wreck_id} is not in solar system {sys_id}"
             )));
+        }
+        if crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(
+            snap,
+            wreck_id,
+        ) {
+            let msg = format!("Target {wreck_id} is a dungeon object and cannot be salvaged");
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidSalvageTarget",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
         }
         let is_wreck = it.type_id == 26468
             || ctx

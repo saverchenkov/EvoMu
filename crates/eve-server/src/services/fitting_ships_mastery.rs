@@ -1889,13 +1889,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let item_ids: Vec<i64> = match args.first() {
+            let mut item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list) | PyRep::Tuple(list)) => {
                     list.iter().filter_map(|v| v.as_i64()).collect()
                 }
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
             };
+            let mut seen_ids = std::collections::HashSet::with_capacity(item_ids.len());
+            item_ids.retain(|id| seen_ids.insert(*id));
             if item_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "DeleteFailed".into(),
@@ -2047,18 +2049,22 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     trashed.push(item.clone());
                 }
                 let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
+                let mut removed_items: Vec<eve_db::InventoryItemRecord> = Vec::with_capacity(trashed.len());
                 for old_item in &trashed {
                     let item_id = old_item.item_id;
                     let old_location_id = old_item.location_id;
-                    snap.items.remove(&item_id);
+                    let Some(removed) = snap.items.remove(&item_id) else {
+                        continue;
+                    };
                     snap.item_custom_names.remove(&item_id);
                     snap.item_positions.remove(&item_id);
                     snap.sp6_lifecycle.space_object_meta.remove(&item_id);
                     if (30_000_000..=50_000_000).contains(&old_location_id) {
                         balls_to_remove.push((old_location_id as u32, item_id));
                     }
+                    removed_items.push(removed);
                 }
-                for old_item in &trashed {
+                for old_item in &removed_items {
                     let old_location_id = old_item.location_id;
                     let is_empty_jetcan = snap
                         .items
@@ -2083,7 +2089,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         }
                     }
                 }
-                Ok((trashed, balls_to_remove))
+                Ok((removed_items, balls_to_remove))
             });
 
             let (trashed, balls_to_remove) = match res {

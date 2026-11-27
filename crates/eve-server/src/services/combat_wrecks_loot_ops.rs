@@ -340,14 +340,6 @@ pub(super) async fn handle_loot_all(
         },
     );
     for (ltid, lqty) in looted_items {
-        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
-            ctx,
-            char_id,
-            Some(sys_id),
-            wreck_id,
-            ltid,
-        )
-        .await;
         crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
             ctx,
             char_id,
@@ -356,6 +348,14 @@ pub(super) async fn handle_loot_all(
             ship_id,
             ltid,
             i64::from(lqty),
+        )
+        .await;
+        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+            ctx,
+            char_id,
+            Some(sys_id),
+            wreck_id,
+            ltid,
         )
         .await;
     }

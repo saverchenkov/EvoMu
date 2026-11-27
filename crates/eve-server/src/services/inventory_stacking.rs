@@ -574,17 +574,6 @@ pub(crate) async fn handle_multi_add(
         Ok((moved, old_containers, dst_ship_bay_foreign_owner))
     })?;
     let mut despawn_set = HashSet::new();
-    for (old_cont, _item_id, it_tid, _it_qty) in old_containers {
-        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
-            ctx,
-            char_id,
-            session.solar_system_id,
-            old_cont,
-            it_tid,
-        )
-        .await;
-        despawn_set.insert(old_cont);
-    }
     let mut moved_ids = Vec::with_capacity(moved.len());
     for (pre_item, post_it, fin_opt, it_tid, it_qty, src_ship_bay_owner, recursive_owner_changes) in moved {
         let fin_id = fin_opt
@@ -698,6 +687,17 @@ pub(crate) async fn handle_multi_add(
             }
         }
         moved_ids.push(fin_id);
+    }
+    for (old_cont, _item_id, it_tid, _it_qty) in old_containers {
+        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+            ctx,
+            char_id,
+            session.solar_system_id,
+            old_cont,
+            it_tid,
+        )
+        .await;
+        despawn_set.insert(old_cont);
     }
     for old_cont in despawn_set {
         let _ = despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, old_cont).await;
@@ -1151,14 +1151,6 @@ async fn handle_multi_add_auto_fit(
     for (plan, updated, old_loc) in committed {
         let target_flag_enum = InventoryFlag::from_u16(plan.target_flag);
         if old_loc != ship_id {
-            crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
-                ctx,
-                char_id,
-                session.solar_system_id,
-                old_loc,
-                updated.type_id,
-            )
-            .await;
             crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
                 ctx,
                 char_id,
@@ -1167,6 +1159,14 @@ async fn handle_multi_add_auto_fit(
                 ship_id,
                 updated.type_id,
                 i64::from(updated.quantity),
+            )
+            .await;
+            crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                old_loc,
+                updated.type_id,
             )
             .await;
             crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
