@@ -442,11 +442,6 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     .await;
     assert_eq!(drone_res, PyRep::None);
 
-    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let settings = rt.drone_settings.get(&C1).expect("drone settings recorded");
-        assert!(settings.aggressive);
-        assert!(!settings.focus_fire);
-    });
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.combat_crimewatch_state.drone_settings.get(&C1), Some(&(true, false)));
     });
@@ -466,10 +461,8 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     )
     .await;
     assert_eq!(drone_int_res, PyRep::None);
-    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        let settings = rt.drone_settings.get(&C1).expect("drone settings recorded");
-        assert!(settings.aggressive);
-        assert!(settings.focus_fire);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.combat_crimewatch_state.drone_settings.get(&C1), Some(&(true, true)));
     });
 
     // Validation: invalid arguments rejected with InvalidArgument

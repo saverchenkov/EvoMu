@@ -443,14 +443,12 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
             cw.aggression_mgr.record_aggression(PILOT, OTHER, 30_000_142, false, true, t0);
         }
         eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-            rt.npc_timers.insert(PILOT, t0 + 120);
             rt.disapproval_flags.insert(PILOT, t0 + 180);
         });
         ctx.db.with_mut_snapshot(|snap| {
-            snap.combat_crimewatch_state
-                .as_inner_mut()
-                .kill_right_expires_unix
-                .insert(77_001, t0 + 30 * 86_400);
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.npc_timers.insert(PILOT, t0 + 120);
+            cw.kill_right_expires_unix.insert(77_001, t0 + 30 * 86_400);
         });
     }
 

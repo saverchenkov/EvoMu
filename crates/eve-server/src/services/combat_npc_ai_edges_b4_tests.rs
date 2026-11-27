@@ -542,9 +542,7 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
     assert!(c1.shield_hp < c1.max_shield_hp);
     assert!(get_npc_entity(&ctx, 72_000_012).unwrap().drifter_doomsday_fired);
     assert!(get_npc_entity(&ctx, 72_000_013).unwrap().entropic_cycles >= 3);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.npc_timers.contains_key(&char_id));
-    });
+    assert!(crate::services::combat_crimewatch::npc_timer_until(&ctx, char_id).is_some());
 
     // Prune warped/out-of-range target when ships move far away
     let _ = sys_handle

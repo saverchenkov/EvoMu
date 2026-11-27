@@ -881,6 +881,12 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
             HashMap::from([(90_000_002, 1_700_000_900)]),
         )]),
         npc_timers: HashMap::from([(90_000_001, 1_700_000_300)]),
+        crimewatch_timer_states: HashMap::from([(90_000_001, (101, 201, 401, 301, 500))]),
+        crimewatch_timer_triggered_at: HashMap::from([(
+            90_000_001,
+            [1_700_000_100, 1_700_000_110, 1_700_000_120, 1_700_000_130, 0],
+        )]),
+        npc_sec_gain_intervals: HashMap::from([((90_000_001, 5), (1_700_000_250, 125_000.0))]),
         disapproval_flags: HashMap::from([(90_000_001, 1_700_000_400)]),
         duel_challenges: HashMap::from([((90_000_001, 90_000_002), 1_700_000_500)]),
         corp_aggression_settings: HashMap::from([(98_000_001, true)]),
@@ -1587,6 +1593,209 @@ fn corp_crimewatch_legacy_extended_runtime_json_hydrates_bounty_ticks_and_recent
         assert!(s
             .combat_crimewatch_state
             .is_recently_destroyed_item_id(1_030));
+        assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
+    });
+    drop(reopened);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn corp_crimewatch_legacy_extended_runtime_json_hydrates_crimewatch_timers_and_sec_gain_intervals() {
+    use crate::persistence::WorldRepository;
+    use crate::sqlite_store::quarantine::LoadContext;
+
+    let legacy_ext_json = serde_json::json!({
+        "crimewatch_timer_states": { "90000001": [101, 201, 401, 301, 500] },
+        "crimewatch_timer_triggered_at": {
+            "90000001": [1_700_000_100u64, 1_700_000_110u64, 1_700_000_120u64, 1_700_000_130u64, 0u64]
+        },
+        "npc_sec_gain_intervals": [[[90_000_001i64, 5i32], [1_700_000_250u64, 125_000.0f64]]],
+        "bounty_flush": 11
+    })
+    .to_string();
+
+    // 1. SQLite `domain_rows` one-way load fallback populates typed fields & strips promoted keys.
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    let encoded_scalar = serde_json::to_string(&legacy_ext_json).unwrap();
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'combat_crimewatch_state.extended_runtime_json', ?2)",
+        params![DOMAIN_CRIMEWATCH, encoded_scalar],
+    )
+    .unwrap();
+
+    let mut snap = WorldStateSnapshot::default();
+    assert!(
+        load_corp_crimewatch_domain_rows(&conn, &mut snap, &mut LoadContext::new(false)).unwrap(),
+        "loading legacy promoted A6 keys from extended_runtime_json should report had_legacy=true"
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state.crimewatch_timer_states.get(&90_000_001),
+        Some(&(101, 201, 401, 301, 500))
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state
+            .crimewatch_timer_triggered_at
+            .get(&90_000_001),
+        Some(&[
+            1_700_000_100,
+            1_700_000_110,
+            1_700_000_120,
+            1_700_000_130,
+            0
+        ])
+    );
+    assert_eq!(
+        snap.combat_crimewatch_state
+            .npc_sec_gain_intervals
+            .get(&(90_000_001, 5)),
+        Some(&(1_700_000_250, 125_000.0))
+    );
+    let rem_ext: serde_json::Value =
+        serde_json::from_str(&snap.combat_crimewatch_state.extended_runtime_json).unwrap();
+    assert_eq!(rem_ext.get("bounty_flush"), Some(&serde_json::json!(11)));
+    assert!(rem_ext.get("crimewatch_timer_states").is_none());
+    assert!(rem_ext.get("crimewatch_timer_triggered_at").is_none());
+    assert!(rem_ext.get("npc_sec_gain_intervals").is_none());
+
+    // Saving writes canonical decomposed `domain_rows` and keeps promoted keys stripped.
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_corp_crimewatch_domain_rows(&tx, &snap).unwrap());
+        tx.commit().unwrap();
+    }
+    let stored_interval_raw: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.npc_sec_gain_intervals/90000001|5'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<(u64, f64)>(&stored_interval_raw).unwrap(),
+        (1_700_000_250, 125_000.0)
+    );
+    let stored_ext_raw: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'combat_crimewatch_state.extended_runtime_json'",
+            params![DOMAIN_CRIMEWATCH],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored_ext_str: String = serde_json::from_str(&stored_ext_raw).unwrap();
+    assert!(!stored_ext_str.contains("crimewatch_timer_states"));
+    assert!(!stored_ext_str.contains("crimewatch_timer_triggered_at"));
+    assert!(!stored_ext_str.contains("npc_sec_gain_intervals"));
+
+    let mut clean_reload = WorldStateSnapshot::default();
+    assert!(
+        !load_corp_crimewatch_domain_rows(&conn, &mut clean_reload, &mut LoadContext::new(false))
+            .unwrap()
+    );
+    assert_eq!(clean_reload.combat_crimewatch_state, snap.combat_crimewatch_state);
+
+    // 2. Non-empty typed fields take precedence over stale `extended_runtime_json` while stripping legacy keys.
+    let mut prec_state = PersistedCombatCrimewatchState::default();
+    prec_state
+        .crimewatch_timer_states
+        .insert(90_000_001, (102, 202, 400, 300, 500));
+    prec_state
+        .npc_sec_gain_intervals
+        .insert((90_000_001, 5), (1_700_000_999, 999_000.0));
+    prec_state.extended_runtime_json = legacy_ext_json;
+    assert!(hydrate_legacy_combat_extended_fields(&mut prec_state));
+    assert_eq!(
+        prec_state.crimewatch_timer_states.get(&90_000_001),
+        Some(&(102, 202, 400, 300, 500))
+    );
+    assert_eq!(
+        prec_state.npc_sec_gain_intervals.get(&(90_000_001, 5)),
+        Some(&(1_700_000_999, 999_000.0))
+    );
+    assert!(prec_state
+        .crimewatch_timer_triggered_at
+        .contains_key(&90_000_001));
+    assert!(!prec_state.extended_runtime_json.contains("crimewatch_timer_states"));
+    assert!(!prec_state.extended_runtime_json.contains("crimewatch_timer_triggered_at"));
+    assert!(!prec_state.extended_runtime_json.contains("npc_sec_gain_intervals"));
+
+    // 3. Old JSON snapshot fallback (`migrate_legacy_service_state`) + empty clear + SQLite reopen.
+    let only_promoted_json = serde_json::json!({
+        "crimewatch_timer_states": { "90000002": [101, 200, 400, 300, 500] },
+        "crimewatch_timer_triggered_at": { "90000002": [1_700_001_000u64, 0u64, 0u64, 0u64, 0u64] },
+        "npc_sec_gain_intervals": [[[90_000_002i64, -2i32], [1_700_001_500u64, 75_000.0f64]]]
+    })
+    .to_string();
+    let mut json_snap = WorldStateSnapshot::default();
+    json_snap.combat_crimewatch_state.extended_runtime_json = only_promoted_json.clone();
+    json_snap.migrate_legacy_service_state();
+    assert_eq!(
+        json_snap.combat_crimewatch_state.crimewatch_timer_states.get(&90_000_002),
+        Some(&(101, 200, 400, 300, 500))
+    );
+    assert_eq!(
+        json_snap
+            .combat_crimewatch_state
+            .crimewatch_timer_triggered_at
+            .get(&90_000_002),
+        Some(&[1_700_001_000, 0, 0, 0, 0])
+    );
+    assert_eq!(
+        json_snap
+            .combat_crimewatch_state
+            .npc_sec_gain_intervals
+            .get(&(90_000_002, -2)),
+        Some(&(1_700_001_500, 75_000.0))
+    );
+    assert!(json_snap.combat_crimewatch_state.extended_runtime_json.is_empty());
+
+    let db_path = temp_corp_crimewatch_db_path("legacy_a6_ext_runtime_migration_reopen");
+    let _ = std::fs::remove_file(&db_path);
+    {
+        let raw_conn = Connection::open(&db_path).unwrap();
+        apply_migrations(&raw_conn).unwrap();
+        let raw_scalar = serde_json::to_string(&only_promoted_json).unwrap();
+        raw_conn
+            .execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'combat_crimewatch_state.extended_runtime_json', ?2)",
+                params![DOMAIN_CRIMEWATCH, raw_scalar],
+            )
+            .unwrap();
+    }
+    {
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite migrate A6");
+        repo.with_snapshot(|s| {
+            assert_eq!(
+                s.combat_crimewatch_state.crimewatch_timer_states.get(&90_000_002),
+                Some(&(101, 200, 400, 300, 500))
+            );
+            assert_eq!(
+                s.combat_crimewatch_state
+                    .npc_sec_gain_intervals
+                    .get(&(90_000_002, -2)),
+                Some(&(1_700_001_500, 75_000.0))
+            );
+            assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
+        });
+    }
+    let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen clean A6");
+    reopened.with_snapshot(|s| {
+        assert_eq!(
+            s.combat_crimewatch_state.crimewatch_timer_states.get(&90_000_002),
+            Some(&(101, 200, 400, 300, 500))
+        );
+        assert_eq!(
+            s.combat_crimewatch_state
+                .crimewatch_timer_triggered_at
+                .get(&90_000_002),
+            Some(&[1_700_001_000, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            s.combat_crimewatch_state
+                .npc_sec_gain_intervals
+                .get(&(90_000_002, -2)),
+            Some(&(1_700_001_500, 75_000.0))
+        );
         assert!(s.combat_crimewatch_state.extended_runtime_json.is_empty());
     });
     drop(reopened);

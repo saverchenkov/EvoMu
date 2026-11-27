@@ -1231,16 +1231,12 @@ pub fn on_advance_secs_internal(
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
 
-    let mut cw_pilots: std::collections::BTreeSet<i64> = with_combat_runtime(ctx, |rt| {
-        rt.crimewatch_timer_states
-            .keys()
-            .chain(rt.disapproval_flags.keys())
-            .chain(rt.npc_timers.keys())
-            .copied()
-            .collect()
-    });
+    let mut cw_pilots: std::collections::BTreeSet<i64> =
+        with_combat_runtime(ctx, |rt| rt.disapproval_flags.keys().copied().collect());
     let pilot_states: Vec<(i64, crate::combat::CharacterCrimeWatchState)> =
         ctx.db.with_snapshot(|s| {
+            cw_pilots.extend(s.combat_crimewatch_state.crimewatch_timer_states.keys().copied());
+            cw_pilots.extend(s.combat_crimewatch_state.npc_timers.keys().copied());
             for (&cid, st) in &s.crimewatch_states {
                 if st.weapon_timer_until_unix > 0
                     || st.pvp_timer_until_unix > 0
@@ -1294,12 +1290,10 @@ pub fn on_advance_secs_internal(
     }
     let has_expired_rt_cw = with_combat_runtime(ctx, |rt| {
         rt.disapproval_flags.values().any(|&exp| now_unix >= exp)
-            || rt.npc_timers.values().any(|&exp| now_unix >= exp)
     });
     if has_expired_rt_cw {
         with_mut_combat_runtime(ctx, |rt| {
             rt.disapproval_flags.retain(|_, &mut exp| now_unix < exp);
-            rt.npc_timers.retain(|_, &mut exp| now_unix < exp);
         });
     }
     let has_expired_db_cw = ctx.db.with_snapshot(|snap| {
@@ -1307,6 +1301,7 @@ pub fn on_advance_secs_internal(
         cw.kill_right_expires_unix
             .values()
             .any(|&exp| now_unix >= exp)
+            || cw.npc_timers.values().any(|&exp| now_unix >= exp)
             || cw.duel_challenges.values().any(|&exp| now_unix >= exp)
             || cw
                 .limited_engagements
@@ -1328,6 +1323,7 @@ pub fn on_advance_secs_internal(
             for &kr_id in &expired_kr_ids {
                 cw.kill_right_restricted_to.remove(&kr_id);
             }
+            cw.npc_timers.retain(|_, &mut exp| now_unix < exp);
             cw.duel_challenges.retain(|_, &mut exp| now_unix < exp);
             for m in cw.limited_engagements.values_mut() {
                 m.retain(|_, &mut exp| now_unix < exp);

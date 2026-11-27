@@ -567,6 +567,7 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     p.safety_levels.insert(90_000_002, 1);
     p.safety_levels.insert(90_000_003, 2);
     p.drone_settings.insert(90_000_001, (true, false));
+    p.disapproval_flags.insert(90_000_001, 1_700_000_100);
 
     let mut rt = CombatRuntimeState::default();
     assert!(!rt.has_extended_runtime_state());
@@ -579,13 +580,10 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&90_000_001]), SafetyLevel::Red);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&90_000_002]), SafetyLevel::Yellow);
     assert_eq!(SafetyLevel::from_persisted_i32(p.safety_levels[&90_000_003]), SafetyLevel::Green);
-    assert_eq!(rt.to_persisted_preserving(&p).safety_levels, p.safety_levels);
-    let ds = rt
-        .drone_settings
-        .get(&90_000_001)
-        .expect("drone settings present");
-    assert!(ds.aggressive);
-    assert!(!ds.focus_fire);
+    let preserved = rt.to_persisted_preserving(&p);
+    assert_eq!(preserved.safety_levels, p.safety_levels);
+    assert_eq!(preserved.drone_settings, p.drone_settings);
+    assert_eq!(rt.disapproval_flags.get(&90_000_001).copied(), Some(1_700_000_100));
     assert_eq!(
         rt.container_lifetimes.get(&101).map(|e| e.lifetime_secs),
         Some(500)
@@ -606,15 +604,10 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
             is_abandoned: false,
         },
     );
-    p.drone_settings.insert(90_000_001, (false, true));
+    p.disapproval_flags.insert(90_000_001, 1_700_000_200);
     rt.rehydrate_from_persisted_epochs(&p, 11, false);
     assert_eq!(rt.synced_db_epoch, 11);
-    let ds2 = rt
-        .drone_settings
-        .get(&90_000_001)
-        .expect("updated drone settings present");
-    assert!(!ds2.aggressive);
-    assert!(ds2.focus_fire);
+    assert_eq!(rt.disapproval_flags.get(&90_000_001).copied(), Some(1_700_000_200));
     assert_eq!(
         rt.container_lifetimes.get(&202).map(|e| e.lifetime_secs),
         Some(999),

@@ -339,6 +339,9 @@ impl_decomposed_domain_struct!(
         drone_settings,
         limited_engagements,
         npc_timers,
+        crimewatch_timer_states,
+        crimewatch_timer_triggered_at,
+        npc_sec_gain_intervals,
         disapproval_flags,
         duel_challenges,
         corp_aggression_settings,
@@ -906,12 +909,13 @@ struct CrimewatchDomainPayload {
     structure_docking_acl_denied: HashMap<i64, Vec<i64>>,
 }
 
-/// One-way legacy load fallback (`#1541` Track B1 + B2): promotes `modified_system_securities`,
-/// `ess_reserve_unlocked_until`, `ess_reserve_bank_thefts`, `ess_main_bank_thefts`,
-/// `pending_bounty_ticks`, `bounty_tick_next_flush_unix`, `pending_bounty_tick_started_unix`, and
-/// `recently_destroyed_item_ids` from `extended_runtime_json` into the typed fields on
-/// [`PersistedCombatCrimewatchState`] (without overwriting non-empty typed fields) and strips those
-/// keys from `extended_runtime_json`.
+/// One-way legacy load fallback (`#1541` Track B1 + B2 + A6): promotes
+/// `crimewatch_timer_states`, `crimewatch_timer_triggered_at`, `npc_sec_gain_intervals`,
+/// `modified_system_securities`, `ess_reserve_unlocked_until`, `ess_reserve_bank_thefts`,
+/// `ess_main_bank_thefts`, `pending_bounty_ticks`, `bounty_tick_next_flush_unix`,
+/// `pending_bounty_tick_started_unix`, and `recently_destroyed_item_ids` from
+/// `extended_runtime_json` into the typed fields on [`PersistedCombatCrimewatchState`]
+/// (without overwriting non-empty typed fields) and strips those keys from `extended_runtime_json`.
 ///
 /// Returns `true` when any promoted key was extracted or stripped from `extended_runtime_json`.
 pub(crate) fn hydrate_legacy_combat_extended_fields(
@@ -939,12 +943,12 @@ pub(crate) fn hydrate_legacy_combat_extended_fields(
         };
     }
     macro_rules! hydrate_tuple_map_key {
-        ($key:literal, $field:ident, $val_ty:ty) => {
+        ($key:literal, $field:ident, $key_ty:ty, $val_ty:ty) => {
             if let Some(raw_val) = obj.remove($key) {
                 changed = true;
                 if state.$field.is_empty() {
                     if let Ok(entries) =
-                        serde_json::from_value::<Vec<((u32, i64), $val_ty)>>(raw_val)
+                        serde_json::from_value::<Vec<($key_ty, $val_ty)>>(raw_val)
                     {
                         state.$field = entries.into_iter().collect();
                     }
@@ -952,15 +956,29 @@ pub(crate) fn hydrate_legacy_combat_extended_fields(
             }
         };
     }
+    hydrate_map_key!("crimewatch_timer_states", crimewatch_timer_states);
+    hydrate_map_key!("crimewatch_timer_triggered_at", crimewatch_timer_triggered_at);
     hydrate_map_key!("modified_system_securities", modified_system_securities);
     hydrate_map_key!("ess_reserve_unlocked_until", ess_reserve_unlocked_until);
     hydrate_map_key!("ess_reserve_bank_thefts", ess_reserve_bank_thefts);
     hydrate_map_key!("ess_main_bank_thefts", ess_main_bank_thefts);
-    hydrate_tuple_map_key!("pending_bounty_ticks", pending_bounty_ticks, f64);
-    hydrate_tuple_map_key!("bounty_tick_next_flush_unix", bounty_tick_next_flush_unix, u64);
+    hydrate_tuple_map_key!(
+        "npc_sec_gain_intervals",
+        npc_sec_gain_intervals,
+        (i64, i32),
+        (u64, f64)
+    );
+    hydrate_tuple_map_key!("pending_bounty_ticks", pending_bounty_ticks, (u32, i64), f64);
+    hydrate_tuple_map_key!(
+        "bounty_tick_next_flush_unix",
+        bounty_tick_next_flush_unix,
+        (u32, i64),
+        u64
+    );
     hydrate_tuple_map_key!(
         "pending_bounty_tick_started_unix",
         pending_bounty_tick_started_unix,
+        (u32, i64),
         u64
     );
     if let Some(raw_val) = obj.remove("recently_destroyed_item_ids") {

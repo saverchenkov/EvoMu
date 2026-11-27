@@ -2329,15 +2329,14 @@ pub async fn handle_npcs_drones(
                 Ok(v) => v.unwrap_or(true),
                 Err(e) => return Some(Err(e)),
             };
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.drone_settings.insert(
-                    char_id,
-                    DroneBehaviorSettings {
-                        aggressive,
-                        focus_fire,
-                    },
-                );
-            });
+            set_char_drone_settings(
+                ctx,
+                char_id,
+                DroneBehaviorSettings {
+                    aggressive,
+                    focus_fire,
+                },
+            );
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 OnDroneSettingChanged {

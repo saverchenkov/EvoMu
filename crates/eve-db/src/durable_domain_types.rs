@@ -949,6 +949,12 @@ pub struct PersistedCombatCrimewatchState {
     #[serde(default)]
     pub npc_timers: HashMap<i64, u64>,
     #[serde(default)]
+    pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
+    #[serde(default)]
+    pub crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
+    #[serde(default)]
     pub disapproval_flags: HashMap<i64, u64>,
     #[serde(default, with = "tuple_map_serde")]
     pub duel_challenges: HashMap<(i64, i64), u64>,

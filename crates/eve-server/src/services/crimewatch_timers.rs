@@ -242,12 +242,17 @@ fn compute_crimewatch_timer_states_with_state(
     st: &crate::combat::CharacterCrimeWatchState,
     now_unix: u64,
 ) -> ComputedCrimewatchTimerStates {
-    let (npc_exp, dis_exp, prev_opt, trig_at) = with_combat_runtime(ctx, |rt| (
-        rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp),
-        rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp),
-        rt.crimewatch_timer_states.get(&char_id).copied(),
-        rt.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]),
-    ));
+    let (npc_exp, prev_opt, trig_at) = ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        (
+            cw.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp),
+            cw.crimewatch_timer_states.get(&char_id).copied(),
+            cw.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]),
+        )
+    });
+    let dis_exp = with_combat_runtime(ctx, |rt| {
+        rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp)
+    });
     let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
     let mut next_trig = trig_at;
     let eval = |slot: usize, prev_sig: i64, exp: u64, active_c: i64, cd_c: i64, nt: &mut [u64; 5]| -> (i64, Option<SimFileTime>, i64) {
@@ -372,8 +377,13 @@ fn emit_crimewatch_timer_notifications_inner(
     }
     let new_sigs = (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig);
     if !force_reemit_active && !is_all_idle && prev_opt == Some(new_sigs) {
-        let same_trig = with_combat_runtime(ctx, |rt| {
-            rt.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]) == next_trig
+        let same_trig = ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .crimewatch_timer_triggered_at
+                .get(&char_id)
+                .copied()
+                .unwrap_or([0; 5])
+                == next_trig
         });
         if same_trig {
             return;
@@ -382,49 +392,57 @@ fn emit_crimewatch_timer_notifications_inner(
     let mut updates: Vec<(&str, i64, Option<SimFileTime>)> = Vec::new();
     let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
     let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
-    with_mut_combat_runtime(ctx, |rt| {
-        if prev_opt.is_none() && is_all_idle { return; }
-        let slots = [
-            ("OnWeaponsTimerUpdate", prev.0, weap_sig, weap_code, weap_val),
-            ("OnPvpTimerUpdate", prev.1, pvp_sig, pvp_code, pvp_val),
-            ("OnNpcTimerUpdate", prev.2, npc_sig, npc_code, npc_val),
-            ("OnCriminalTimerUpdate", prev.3, crim_sig, crim_code, crim_val),
-            ("OnDisapprovalTimerUpdate", prev.4, dis_sig, dis_code, dis_val),
-        ];
-        for (ev, prev_sig, sig, code, val) in slots {
-            let slot_changed = prev_sig != sig && !(prev_sig == 0 && val.is_none());
-            if slot_changed || (force_reemit_active && val.is_some()) {
-                updates.push((ev, code, val));
-            }
+    let slots = [
+        ("OnWeaponsTimerUpdate", prev.0, weap_sig, weap_code, weap_val),
+        ("OnPvpTimerUpdate", prev.1, pvp_sig, pvp_code, pvp_val),
+        ("OnNpcTimerUpdate", prev.2, npc_sig, npc_code, npc_val),
+        ("OnCriminalTimerUpdate", prev.3, crim_sig, crim_code, crim_val),
+        ("OnDisapprovalTimerUpdate", prev.4, dis_sig, dis_code, dis_val),
+    ];
+    for (ev, prev_sig, sig, code, val) in slots {
+        let slot_changed = prev_sig != sig && !(prev_sig == 0 && val.is_none());
+        if slot_changed || (force_reemit_active && val.is_some()) {
+            updates.push((ev, code, val));
         }
-        if prev.3 != crim_sig && !(prev.3 == 0 && crim_code == 300) {
-            let prev_c = prev.3 >> 40;
-            if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
-                crim_transition = Some((vec![], vec![], vec![char_id]));
-            } else if matches!(crim_code, 302 | 304) && !matches!(prev_c, 302 | 304) {
-                crim_transition = Some((vec![], vec![char_id], vec![]));
-            } else if crim_code == 300 && prev.3 != 0 && prev.3 != 300 {
-                crim_transition = Some((vec![char_id], vec![], vec![]));
-            }
+    }
+    if prev.3 != crim_sig && !(prev.3 == 0 && crim_code == 300) {
+        let prev_c = prev.3 >> 40;
+        if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
+            crim_transition = Some((vec![], vec![], vec![char_id]));
+        } else if matches!(crim_code, 302 | 304) && !matches!(prev_c, 302 | 304) {
+            crim_transition = Some((vec![], vec![char_id], vec![]));
+        } else if crim_code == 300 && prev.3 != 0 && prev.3 != 300 {
+            crim_transition = Some((vec![char_id], vec![], vec![]));
         }
-        if prev.4 != dis_sig && !(prev.4 == 0 && dis_code == 500) {
-            let prev_d = prev.4 >> 40;
-            if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {
-                dis_transition = Some((vec![], vec![char_id]));
-            } else if dis_code == 500 && prev.4 != 0 && prev.4 != 500 {
-                dis_transition = Some((vec![char_id], vec![]));
-            }
+    }
+    if prev.4 != dis_sig && !(prev.4 == 0 && dis_code == 500) {
+        let prev_d = prev.4 >> 40;
+        if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {
+            dis_transition = Some((vec![], vec![char_id]));
+        } else if dis_code == 500 && prev.4 != 0 && prev.4 != 500 {
+            dis_transition = Some((vec![char_id], vec![]));
         }
+    }
+    let sys_id_opt = ctx.db.with_mut_snapshot(|snap| {
         if is_all_idle {
-            rt.crimewatch_timer_states.remove(&char_id);
-            rt.crimewatch_timer_triggered_at.remove(&char_id);
-        } else {
-            rt.crimewatch_timer_states.insert(char_id, new_sigs);
-            rt.crimewatch_timer_triggered_at.insert(char_id, next_trig);
+            if snap.combat_crimewatch_state.crimewatch_timer_states.contains_key(&char_id)
+                || snap.combat_crimewatch_state.crimewatch_timer_triggered_at.contains_key(&char_id)
+            {
+                let cw = snap.combat_crimewatch_state.as_inner_mut();
+                cw.crimewatch_timer_states.remove(&char_id);
+                cw.crimewatch_timer_triggered_at.remove(&char_id);
+            }
+        } else if snap.combat_crimewatch_state.crimewatch_timer_states.get(&char_id) != Some(&new_sigs)
+            || snap.combat_crimewatch_state.crimewatch_timer_triggered_at.get(&char_id) != Some(&next_trig)
+        {
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.crimewatch_timer_states.insert(char_id, new_sigs);
+            cw.crimewatch_timer_triggered_at.insert(char_id, next_trig);
         }
+        snap.characters.get(&char_id).map(|c| c.solar_system_id)
     });
     dispatch_crimewatch_timer_updates(ctx, char_id, &updates);
-    if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
+    if let Some(sys_id) = sys_id_opt {
         if let Some((new_idles, new_suspects, new_criminals)) = crim_transition {
             crate::services::notify_emitters_fleet_combat::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
         }
@@ -759,7 +777,7 @@ pub fn on_weapon_aggression_post_hook(
     now_unix: u64,
 ) {
     if victim_char_opt.is_none() {
-        with_mut_combat_runtime(ctx, |rt| rt.trigger_npc_timer(attacker_char_id, now_unix));
+        trigger_npc_timer(ctx, attacker_char_id, now_unix);
     }
     emit_crimewatch_timer_notifications(ctx, attacker_char_id, now_unix);
 }

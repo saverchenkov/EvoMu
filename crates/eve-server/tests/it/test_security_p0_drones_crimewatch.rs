@@ -8,9 +8,7 @@ use eve_destiny::{Ball, DVec3, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{
-    with_combat_runtime, DroneSpaceState,
-};
+use eve_server::services::combat_crimewatch::DroneSpaceState;
 use eve_testkit::client_harness::extract_bound_id_from_wire_rep;
 use std::collections::HashMap;
 
@@ -83,13 +81,13 @@ async fn test_crimewatch_states_timer_updates() {
     assert!(exp_notifs.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates" && n.args == vec![PyRep::List(vec![PyRep::Integer(char_id)]), PyRep::List(vec![]), PyRep::List(vec![])]));
 
     // Pilot must be pruned from crimewatch_timer_states once all timers are idle
-    let is_tracked = with_combat_runtime(&ctx, |rt| rt.crimewatch_timer_states.contains_key(&char_id));
+    let is_tracked = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.crimewatch_timer_states.contains_key(&char_id));
     assert!(!is_tracked, "Pilot state must be pruned when all timers return to idle");
 
     // Subsequent sweeps for an idle pilot must NOT recreate or re-notify
     eve_server::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(&ctx, char_id, exp_now + 10);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
-    assert!(!with_combat_runtime(&ctx, |rt| rt.crimewatch_timer_states.contains_key(&char_id)));
+    assert!(!ctx.db.with_snapshot(|s| s.combat_crimewatch_state.crimewatch_timer_states.contains_key(&char_id)));
 }
 
 #[tokio::test]

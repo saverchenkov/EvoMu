@@ -591,10 +591,10 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
     with_mut_combat_runtime(&ctx, |rt| {
         rt.disapproval_flags.insert(char_id, now + 10);
         rt.disapproval_flags.insert(active_char_id, now + 300);
-        rt.npc_timers.insert(char_id, now + 10);
     });
     ctx.db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.npc_timers.insert(char_id, now + 10);
         cw.duel_challenges.insert((char_id, target_id), now + 10);
         cw.limited_engagements
             .entry(char_id)
@@ -620,23 +620,23 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.disapproval_flags.contains_key(&char_id));
         assert!(rt.disapproval_flags.contains_key(&active_char_id));
-        assert!(!rt.npc_timers.contains_key(&char_id));
     });
     ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.npc_timers.contains_key(&char_id));
         assert!(!cw.duel_challenges.contains_key(&(char_id, target_id)));
         assert!(!cw.limited_engagements.contains_key(&char_id));
         assert!(!cw.kill_right_expires_unix.contains_key(&5001));
     });
 
     // Boundary check: timer expiring at now + 11 (> now + 10) is NOT swept at now + 10
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.insert(active_char_id, now + 11);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .npc_timers
+            .insert(active_char_id, now + 11);
     });
     crate::sp6_lifecycle::on_advance_secs_internal(&ctx, now + 10, 0, false, false);
-    with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.npc_timers.get(&active_char_id).copied(), Some(now + 11));
-    });
+    assert_eq!(npc_timer_until(&ctx, active_char_id), Some(now + 11));
 }
 
 #[test]

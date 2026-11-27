@@ -696,12 +696,7 @@ pub async fn step_drone_auto_aggression_and_assist(
     attacker_of_guarded_opt: Option<(i64, i64)>,
 ) -> Vec<i64> {
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let settings = with_combat_runtime(ctx, |rt| {
-        rt.drone_settings
-            .get(&owner_char_id)
-            .cloned()
-            .unwrap_or_default()
-    });
+    let settings = char_drone_settings(ctx, owner_char_id);
     let drones: Vec<DroneSpaceState> = sys_handle
         .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
             let out = drones

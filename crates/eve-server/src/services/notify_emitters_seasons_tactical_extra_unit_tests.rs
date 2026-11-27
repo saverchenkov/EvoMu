@@ -1074,8 +1074,12 @@ fn issue_961_cleartimers_resets_crimewatch_and_emits_timer_cleared_notices() {
         st.pvp_timer_until_unix = now + 900;
         st.criminal_flag_until_unix = now + 900;
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .npc_timers
+            .insert(char_id, now + 300);
+    });
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.insert(char_id, now + 300);
         rt.disapproval_flags.insert(char_id, now + 300);
     });
     crate::services::combat_crimewatch::add_limited_engagement(&ctx, char_id, target_id, now);

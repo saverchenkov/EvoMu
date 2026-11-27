@@ -8,7 +8,9 @@ use eve_destiny::{Ball, DVec3, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
+use eve_server::services::combat_crimewatch::{
+    char_drone_settings, set_char_drone_settings, DroneBehaviorSettings, DroneSpaceState,
+};
 use std::collections::HashMap;
 
 fn new_ctx() -> ServerContext {
@@ -791,9 +793,14 @@ async fn issue_1008_1020_fighting_drones_return_bay_and_destroyed_drone_clear_it
         assert_eq!(far.activity_state, 4);
         assert_eq!(far.target_id, Some(ship_id));
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.drone_settings.entry(char_id).or_default().aggressive = true;
-    });
+    set_char_drone_settings(
+        &ctx,
+        char_id,
+        DroneBehaviorSettings {
+            aggressive: true,
+            ..char_drone_settings(&ctx, char_id)
+        },
+    );
     let hijacked = eve_server::services::combat_crimewatch::combat_npcs_drones::step_drone_auto_aggression_and_assist(
         &ctx, sys_id, char_id, Some(npc_id), None, None,
     ).await;

@@ -55,9 +55,9 @@ fn faction_police_thresholds_kill_right_restrictions_and_timer_state_matrix() {
     // Direct emit_crimewatch_timer_notifications_with_state coverage (idle no-op -> active -> cooldown -> clear)
     let idle_st = crate::combat::CharacterCrimeWatchState::default();
     emit_crimewatch_timer_notifications(&ctx, char_id, now + 20);
-    assert!(with_combat_runtime(&ctx, |rt| !rt.crimewatch_timer_states.contains_key(&char_id)));
+    assert!(ctx.db.with_snapshot(|s| !s.combat_crimewatch_state.crimewatch_timer_states.contains_key(&char_id)));
     emit_crimewatch_timer_notifications_with_state(&ctx, char_id, &idle_st, now + 20);
-    assert!(with_combat_runtime(&ctx, |rt| !rt.crimewatch_timer_states.contains_key(&char_id)));
+    assert!(ctx.db.with_snapshot(|s| !s.combat_crimewatch_state.crimewatch_timer_states.contains_key(&char_id)));
 
     let active_st = crate::combat::CharacterCrimeWatchState {
         character_id: char_id,
@@ -68,19 +68,19 @@ fn faction_police_thresholds_kill_right_restrictions_and_timer_state_matrix() {
         pending_concord_arrival: None,
     };
     emit_crimewatch_timer_notifications_with_state(&ctx, char_id, &active_st, now + 25);
-    let sig_active = with_combat_runtime(&ctx, |rt| rt.crimewatch_timer_states[&char_id]);
+    let sig_active = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.crimewatch_timer_states[&char_id]);
     assert_eq!(sig_active.0 >> 40, 101);
     assert_eq!(sig_active.1 >> 40, 201);
     assert_eq!(sig_active.3 >> 40, 301);
 
     emit_crimewatch_timer_notifications_with_state(&ctx, char_id, &active_st, now + 30);
-    let sig_cd = with_combat_runtime(&ctx, |rt| rt.crimewatch_timer_states[&char_id]);
+    let sig_cd = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.crimewatch_timer_states[&char_id]);
     assert_eq!(sig_cd.0 >> 40, 102);
     assert_eq!(sig_cd.1 >> 40, 202);
     assert_eq!(sig_cd.3 >> 40, 303);
 
     emit_crimewatch_timer_notifications_with_state(&ctx, char_id, &idle_st, now + 1_000);
-    assert!(with_combat_runtime(&ctx, |rt| !rt.crimewatch_timer_states.contains_key(&char_id)));
+    assert!(ctx.db.with_snapshot(|s| !s.combat_crimewatch_state.crimewatch_timer_states.contains_key(&char_id)));
 
     // check_kill_right_restriction: char match, corp match, alliance match, mismatch
     ctx.db.with_mut_snapshot(|snap| {

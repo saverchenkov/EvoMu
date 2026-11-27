@@ -919,11 +919,11 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.disapproval_flags.insert(p_dis, now);
         rt.disapproval_flags.insert(p_alive, now + 1);
-        rt.npc_timers.insert(p_npc, now);
-        rt.npc_timers.insert(p_alive, now + 1);
     });
     ctx.db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.npc_timers.insert(p_npc, now);
+        cw.npc_timers.insert(p_alive, now + 1);
         cw.duel_challenges.insert((p_weap, p_pvp), now);
         cw.duel_challenges.insert((p_alive, p_pvp), now + 1);
         cw.limited_engagements
@@ -979,13 +979,13 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.disapproval_flags.contains_key(&p_dis));
         assert!(rt.disapproval_flags.contains_key(&p_alive));
-        assert!(!rt.npc_timers.contains_key(&p_npc));
-        assert!(rt.npc_timers.contains_key(&p_alive));
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.kill_rights.contains_key(&77_001));
         assert!(snap.kill_rights.contains_key(&77_002));
         let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.npc_timers.contains_key(&p_npc));
+        assert!(cw.npc_timers.contains_key(&p_alive));
         assert!(!cw.duel_challenges.contains_key(&(p_weap, p_pvp)));
         assert!(cw.duel_challenges.contains_key(&(p_alive, p_pvp)));
         assert!(!cw.limited_engagements.contains_key(&p_weap));

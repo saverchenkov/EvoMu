@@ -28,22 +28,47 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     assert!(is_in_any_limited_engagement_in_snap(&snap, 101, now + 299));
     assert!(!is_in_any_limited_engagement_in_snap(&snap, 101, now + 300));
 
-    assert!(!state.is_npc_timer_active(101, now));
-    state.trigger_npc_timer(101, now);
-    assert!(state.is_npc_timer_active(101, now + 299));
-    assert!(!state.is_npc_timer_active(101, now + 300));
-
-    state.drone_settings.insert(
-        1,
+    let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    assert!(!is_npc_timer_active(&ctx, char_id, now));
+    assert_eq!(npc_timer_until(&ctx, char_id), None);
+    trigger_npc_timer(&ctx, char_id, now);
+    assert_eq!(npc_timer_until(&ctx, char_id), Some(now + 300));
+    assert!(is_npc_timer_active(&ctx, char_id, now + 299));
+    assert!(!is_npc_timer_active(&ctx, char_id, now + 300));
+    assert_eq!(char_drone_settings(&ctx, char_id), DroneBehaviorSettings::default());
+    set_char_drone_settings(
+        &ctx,
+        char_id,
         DroneBehaviorSettings {
             aggressive: true,
             focus_fire: false,
         },
     );
+    assert_eq!(
+        char_drone_settings(&ctx, char_id),
+        DroneBehaviorSettings {
+            aggressive: true,
+            focus_fire: false,
+        }
+    );
+
+    state.disapproval_flags.insert(404, now + 180);
     let mut current_db = PersistedCombatCrimewatchState::default();
     current_db.safety_levels.insert(1, 0);
     current_db.safety_levels.insert(2, 1);
     current_db.safety_levels.insert(3, 2);
+    current_db.drone_settings.insert(1, (true, false));
+    current_db.corp_aggression_settings.insert(98_000_001, true);
+    current_db.npc_timers.insert(101, now + 300);
+    current_db
+        .crimewatch_timer_states
+        .insert(101, (101, 201, 401, 300, 500));
+    current_db
+        .crimewatch_timer_triggered_at
+        .insert(101, [now, now, now, 0, 0]);
+    current_db
+        .npc_sec_gain_intervals
+        .insert((101, 5), (now, 50_000.0));
     current_db
         .limited_engagements
         .insert(101, HashMap::from([(202, now + 300)]));
@@ -65,6 +90,21 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
     assert_eq!(SafetyLevel::from_persisted_i32(2), SafetyLevel::Green);
     assert_eq!(SafetyLevel::from_persisted_i32(99), SafetyLevel::Green);
     assert_eq!(persisted.drone_settings.get(&1), Some(&(true, false)));
+    assert_eq!(persisted.corp_aggression_settings.get(&98_000_001), Some(&true));
+    assert_eq!(persisted.npc_timers.get(&101), Some(&(now + 300)));
+    assert_eq!(
+        persisted.crimewatch_timer_states.get(&101),
+        Some(&(101, 201, 401, 300, 500))
+    );
+    assert_eq!(
+        persisted.crimewatch_timer_triggered_at.get(&101),
+        Some(&[now, now, now, 0, 0])
+    );
+    assert_eq!(
+        persisted.npc_sec_gain_intervals.get(&(101, 5)),
+        Some(&(now, 50_000.0))
+    );
+    assert_eq!(persisted.disapproval_flags.get(&404), Some(&(now + 180)));
     assert_eq!(
         persisted
             .limited_engagements
@@ -78,9 +118,7 @@ fn combat_runtime_state_timers_and_persistence_roundtrip() {
 
     let mut restored = CombatRuntimeState::default();
     restored.sync_from_persisted(&persisted);
-    let ds = restored.drone_settings.get(&1).expect("drone settings");
-    assert!(ds.aggressive);
-    assert!(!ds.focus_fire);
+    assert_eq!(restored.disapproval_flags.get(&404), Some(&(now + 180)));
 }
 
 #[test]
@@ -644,6 +682,15 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         set_char_safety_level_in_snap(snap, char_id, SafetyLevel::Red);
         set_char_safety_level_in_snap(snap, other_id, SafetyLevel::Yellow);
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.drone_settings.insert(char_id, (false, true));
+        cw.corp_aggression_settings.insert(98_000_001, true);
+        cw.npc_timers.insert(char_id, 1_900_000_500);
+        cw.crimewatch_timer_states
+            .insert(char_id, (101, 201, 401, 300, 500));
+        cw.crimewatch_timer_triggered_at
+            .insert(char_id, [1_900_000_001, 1_900_000_002, 1_900_000_003, 0, 0]);
+        cw.npc_sec_gain_intervals
+            .insert((char_id, 5), (1_900_000_100, 250_000.0));
         cw.limited_engagements
             .insert(char_id, HashMap::from([(other_id, 1_900_000_300)]));
         cw.duel_challenges
@@ -670,9 +717,10 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     });
 
     // Mutate remaining runtime fields via `with_mut_combat_runtime`, `with_mut_combat_runtime_in_snap`,
-    // and an explicit runtime flush; none may clobber DB-owned fields.
+    // `flush_combat_runtime_to_db`, and `sync_runtime_to_db`; none may clobber DB-owned fields.
     with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_timers.insert(char_id, 1_800_000_000);
+        rt.disapproval_flags.insert(char_id, 1_800_000_000);
+        rt.clone_soldier_cooldown_until.insert(sys_id, 1_800_000_999);
     });
     crate::services::drone_test_helpers::seed_active_drone(
         &ctx,
@@ -706,13 +754,32 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     );
     ctx.db.with_mut_snapshot(|snap| {
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.npc_timers.insert(other_id, 1_800_000_100);
+            rt.disapproval_flags.insert(other_id, 1_800_000_100);
         });
     });
     flush_combat_runtime_to_db(&ctx);
+    ctx.sync_runtime_to_db();
 
     ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.drone_settings.get(&char_id), Some(&(false, true)));
+        assert_eq!(cw.corp_aggression_settings.get(&98_000_001), Some(&true));
+        assert_eq!(cw.npc_timers.get(&char_id), Some(&1_900_000_500));
+        assert_eq!(
+            cw.crimewatch_timer_states.get(&char_id),
+            Some(&(101, 201, 401, 300, 500))
+        );
+        assert_eq!(
+            cw.crimewatch_timer_triggered_at.get(&char_id),
+            Some(&[1_900_000_001, 1_900_000_002, 1_900_000_003, 0, 0])
+        );
+        assert_eq!(
+            cw.npc_sec_gain_intervals.get(&(char_id, 5)),
+            Some(&(1_900_000_100, 250_000.0))
+        );
+        assert!(!cw.extended_runtime_json.contains("crimewatch_timer_states"));
+        assert!(!cw.extended_runtime_json.contains("crimewatch_timer_triggered_at"));
+        assert!(!cw.extended_runtime_json.contains("npc_sec_gain_intervals"));
         assert_eq!(
             cw.limited_engagements
                 .get(&char_id)
@@ -766,10 +833,43 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
         assert_eq!(cw.safety_levels.get(&char_id), Some(&(SafetyLevel::Red as i32)));
         assert_eq!(char_safety_level_in_snap(snap, char_id), Some(SafetyLevel::Red));
         assert_eq!(char_safety_level_in_snap(snap, other_id), Some(SafetyLevel::Yellow));
-        assert_eq!(cw.npc_timers.get(&char_id), Some(&1_800_000_000));
-        assert_eq!(cw.npc_timers.get(&other_id), Some(&1_800_000_100));
+        assert_eq!(cw.disapproval_flags.get(&char_id), Some(&1_800_000_000));
+        assert_eq!(cw.disapproval_flags.get(&other_id), Some(&1_800_000_100));
     });
     assert!(crate::services::drone_test_helpers::has_active_drone(&ctx, 77_001));
+
+    // Direct 3-way merge no-clobber: DB always wins for all 6 retired fields even when base != ram.
+    let mut base = PersistedCombatCrimewatchState::default();
+    base.drone_settings.insert(char_id, (true, true));
+    base.corp_aggression_settings.insert(98_000_001, false);
+    base.npc_timers.insert(char_id, 100);
+    base.crimewatch_timer_states.insert(char_id, (100, 200, 400, 300, 500));
+    base.crimewatch_timer_triggered_at.insert(char_id, [1; 5]);
+    base.npc_sec_gain_intervals.insert((char_id, 5), (10, 1.0));
+
+    let mut db = PersistedCombatCrimewatchState::default();
+    db.drone_settings.insert(char_id, (false, true));
+    db.corp_aggression_settings.insert(98_000_001, true);
+    db.npc_timers.insert(char_id, 999);
+    db.crimewatch_timer_states.insert(char_id, (101, 201, 401, 301, 500));
+    db.crimewatch_timer_triggered_at.insert(char_id, [9; 5]);
+    db.npc_sec_gain_intervals.insert((char_id, 5), (90, 99.0));
+
+    let mut ram = PersistedCombatCrimewatchState::default();
+    ram.drone_settings.insert(other_id, (false, false));
+    ram.corp_aggression_settings.insert(98_000_002, false);
+    ram.npc_timers.insert(other_id, 555);
+    ram.crimewatch_timer_states.insert(other_id, (102, 200, 400, 300, 500));
+    ram.crimewatch_timer_triggered_at.insert(other_id, [5; 5]);
+    ram.npc_sec_gain_intervals.insert((other_id, 1), (50, 5.0));
+
+    let merged = merge_persisted_3way(&base, &db, &ram);
+    assert_eq!(merged.drone_settings, db.drone_settings);
+    assert_eq!(merged.corp_aggression_settings, db.corp_aggression_settings);
+    assert_eq!(merged.npc_timers, db.npc_timers);
+    assert_eq!(merged.crimewatch_timer_states, db.crimewatch_timer_states);
+    assert_eq!(merged.crimewatch_timer_triggered_at, db.crimewatch_timer_triggered_at);
+    assert_eq!(merged.npc_sec_gain_intervals, db.npc_sec_gain_intervals);
 }
 
 #[test]
@@ -785,12 +885,25 @@ fn combat_runtime_state_drops_limited_engagements_and_duel_challenges_and_helper
         .nth(1)
         .and_then(|s| s.split("\nfn merge_map_3way").next())
         .expect("impl CombatRuntimeState body");
+    let payload_body = src
+        .split("struct PersistedCombatExtendedPayload {")
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .expect("PersistedCombatExtendedPayload struct body");
     for forbidden in [
         "limited_engagements",
         "duel_challenges",
         "has_limited_engagement_with",
         "add_limited_engagement",
         "is_in_any_limited_engagement",
+        "drone_settings",
+        "corp_aggression_settings",
+        "npc_timers",
+        "crimewatch_timer_states",
+        "crimewatch_timer_triggered_at",
+        "npc_sec_gain_intervals",
+        "trigger_npc_timer",
+        "is_npc_timer_active",
     ] {
         assert!(
             !struct_body.contains(forbidden),
@@ -799,6 +912,16 @@ fn combat_runtime_state_drops_limited_engagements_and_duel_challenges_and_helper
         assert!(
             !impl_body.contains(forbidden),
             "impl CombatRuntimeState must not contain `{forbidden}` (#1541)"
+        );
+    }
+    for forbidden_ext in [
+        "crimewatch_timer_states",
+        "crimewatch_timer_triggered_at",
+        "npc_sec_gain_intervals",
+    ] {
+        assert!(
+            !payload_body.contains(forbidden_ext),
+            "PersistedCombatExtendedPayload must not contain `{forbidden_ext}` (#1541)"
         );
     }
 

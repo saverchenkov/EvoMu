@@ -16,9 +16,10 @@ use eve_sde::SdeRegistry;
 use super::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use super::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{
-    char_safety_level, char_safety_level_in_snap, flush_combat_runtime_to_db,
-    set_char_safety_level, with_combat_ephemeral, with_mut_combat_ephemeral, CombatRuntimeState,
-    DroneBehaviorSettings, SafetyLevel, SelfDestructCountdown,
+    char_drone_settings, char_safety_level, char_safety_level_in_snap, flush_combat_runtime_to_db,
+    set_char_drone_settings, set_char_safety_level, with_combat_ephemeral,
+    with_mut_combat_ephemeral, CombatRuntimeState, DroneBehaviorSettings, SafetyLevel,
+    SelfDestructCountdown,
 };
 use crate::services::fighter_test_helpers;
 use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
@@ -238,9 +239,11 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             },
         );
 
-        // 2) CombatRuntimeState (#544 & #592) + DB-owned bounty/sys-security/ESS & safety_levels (#1541)
+        // 2) CombatRuntimeState (#544 & #592) + DB-owned bounty/sys-security/ESS, safety_levels & timer states (#1541)
         db.with_mut_snapshot(|snap| {
             let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.crimewatch_timer_states
+                .insert(cid, (1, 0, 1, 0, 0));
             cw.player_bounty_pool.insert(cid, 50_000_000.0);
             cw.modified_system_securities.insert(sys_id, 0.85);
             cw.ess_reserve_unlocked_until
@@ -255,8 +258,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             cw.record_destroyed_item_id(888_777_666);
         });
         with_mut_combat_ephemeral(&ctx, |st| {
-            st.crimewatch_timer_states
-                .insert(cid, (1, 0, 1, 0, 0));
             st.self_destruct_countdowns.insert(
                 ship_id,
                 SelfDestructCountdown {
@@ -420,9 +421,10 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             "bound_objects handle table must remain transient across restarts"
         );
 
-        // 2) CombatRuntimeState persisted & restored + DB-owned bounty/sys-security/ESS fields preserved
+        // 2) CombatRuntimeState persisted & restored + DB-owned bounty/sys-security/ESS & timer fields preserved
         db2.with_snapshot(|snap| {
             let cw = &snap.combat_crimewatch_state;
+            assert_eq!(cw.crimewatch_timer_states.get(&cid), Some(&(1, 0, 1, 0, 0)));
             assert_eq!(cw.player_bounty_pool.get(&cid), Some(&50_000_000.0));
             assert_eq!(cw.modified_system_securities.get(&sys_id), Some(&0.85));
             assert_eq!(
@@ -448,10 +450,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             assert!(cw.is_recently_destroyed_item_id(888_777_666));
         });
         with_combat_ephemeral(&ctx2, |st| {
-            assert_eq!(
-                st.crimewatch_timer_states.get(&cid),
-                Some(&(1, 0, 1, 0, 0))
-            );
             assert_eq!(
                 st.self_destruct_countdowns
                     .get(&ship_id)
@@ -558,19 +556,21 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
         },
     );
     set_char_safety_level(&ctx, cid, SafetyLevel::Yellow);
+    set_char_drone_settings(
+        &ctx,
+        cid,
+        DroneBehaviorSettings {
+            aggressive: false,
+            focus_fire: true,
+        },
+    );
     db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state
             .pending_bounty_ticks
             .insert((sys_id, cid), 10_000.0);
     });
     with_mut_combat_ephemeral(&ctx, |st| {
-        st.drone_settings.insert(
-            cid,
-            DroneBehaviorSettings {
-                aggressive: false,
-                focus_fire: true,
-            },
-        );
+        st.disapproval_flags.insert(cid, 555_555);
     });
     ctx.quasar_gateway
         .set_server_hijack_mode(false, None, None);
@@ -615,14 +615,7 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     *ctx.combat_ephemeral.write().unwrap() = {
         let mut guard = CombatRuntimeState::default();
         guard.synced_db_epoch = db.combat_state_epoch();
-        guard.drone_settings.insert(
-            cid,
-            DroneBehaviorSettings {
-                aggressive: true,
-                focus_fire: false,
-            },
-        );
-        guard.npc_timers.insert(cid, 999_999);
+        guard.disapproval_flags.insert(cid, 999_999);
         guard
     };
     *ctx.quasar_gateway.server_hijack_state.write().unwrap() =
@@ -644,6 +637,10 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
             .safety_levels
             .insert(cid, SafetyLevel::Red as i32);
         snap.combat_crimewatch_state
+            .drone_settings
+            .insert(cid, (true, false));
+        snap.combat_crimewatch_state.npc_timers.insert(cid, 999_999);
+        snap.combat_crimewatch_state
             .pending_bounty_ticks
             .insert((sys_id, cid), 999_999.0);
         snap.combat_crimewatch_state.extended_runtime_json.clear();
@@ -660,6 +657,13 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
     ctx.quasar_gateway.rehydrate_all_from_db();
     ctx.rehydrate_runtime_from_db();
     assert_eq!(char_safety_level(&ctx, cid), Some(SafetyLevel::Yellow));
+    assert_eq!(
+        char_drone_settings(&ctx, cid),
+        DroneBehaviorSettings {
+            aggressive: false,
+            focus_fire: true,
+        }
+    );
     db.with_snapshot(|snap| {
         assert_eq!(
             snap.combat_crimewatch_state
@@ -667,16 +671,10 @@ fn rollback_reverts_dirty_runtime_state_across_all_caches_and_rehydrates_from_sq
                 .get(&(sys_id, cid)),
             Some(&10_000.0)
         );
+        assert!(!snap.combat_crimewatch_state.npc_timers.contains_key(&cid));
     });
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(
-            st.drone_settings.get(&cid),
-            Some(&DroneBehaviorSettings {
-                aggressive: false,
-                focus_fire: true,
-            })
-        );
-        assert!(!st.npc_timers.contains_key(&cid));
+        assert_eq!(st.disapproval_flags.get(&cid).copied(), Some(555_555));
     });
     let list_after_abort = ctx.quasar_gateway.handle_public_request(
         &q_sess,
@@ -791,11 +789,11 @@ fn combat_runtime_rehydrates_on_mut_snapshot_without_clobbering_unflushed_npcs()
     db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
         cw.bounty_hunter_claimed.insert(hunter_id, 1_250_000.0);
-        cw.npc_timers.insert(hunter_id, 1_700_000_500);
+        cw.disapproval_flags.insert(hunter_id, 1_700_000_500);
         cw.modified_system_securities.insert(sys_id, 0.4);
     });
     with_combat_ephemeral(&ctx, |st| {
-        assert_eq!(st.npc_timers.get(&hunter_id), Some(&1_700_000_500));
+        assert_eq!(st.disapproval_flags.get(&hunter_id), Some(&1_700_000_500));
         // Core snapshot sync must not clobber unflushed RAM extended state when `extended_runtime_json` is unchanged.
         assert_eq!(st.clone_soldier_cooldown_until.get(&sys_id), Some(&250));
     });
