@@ -787,7 +787,7 @@ mod tests {
         assert!(handle.get_ball_snapshot(out.wreck_id).await.unwrap().is_some());
         ctx.db.with_snapshot(|snap| {
             assert!(snap.items.contains_key(&out.wreck_id));
-            assert!(snap.killmails.iter().any(|k| k.kill_id == out.killmail_id));
+            assert!(snap.killmails.contains_key(&out.killmail_id));
             assert!(snap.characters[&cid].security_status >= pre_sec);
         });
     }

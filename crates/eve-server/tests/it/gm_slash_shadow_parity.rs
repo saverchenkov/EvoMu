@@ -822,7 +822,7 @@ async fn gm_kill_npc_updates_shadow_client_and_invalid_args_reject_over_wire() {
     );
     ctx.db.with_snapshot(|snap| {
         assert!(snap.items.contains_key(&wreck_id));
-        assert!(snap.killmails.iter().any(|k| k.kill_id == killmail_id));
+        assert!(snap.killmails.contains_key(&killmail_id));
     });
 
     for (bad_cmd, expected_code) in [
