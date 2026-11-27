@@ -3,6 +3,10 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::services::tactical_modules::tactical_test_helpers::{
+    clear_clone_vat_bay_activated, clear_lance_caster_lock, mark_clone_vat_bay_activated,
+    set_lance_caster_lock_until,
+};
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, MovementMode, TargetLock, WarpPhase};
@@ -165,38 +169,21 @@ async fn emergency_warp_blocking_tactical_engagement_and_hold_timers_cover_all_s
     let _ = sys.remove_module_cycle(ship_id, 9001).await.unwrap();
 
     // 3. Lance caster lock triggers nav lock & compute_disconnect_hold_until_unix
-    let db_key = Arc::as_ptr(&ctx.db) as usize;
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((db_key, ship_id), now + 240);
+    set_lance_caster_lock_until(&ctx, ship_id, now + 240);
     assert!(is_disconnect_emergency_warp_blocked(&ctx, &sys, ship_id));
     assert!(has_tactical_engagement_on_disconnect(&ctx, ship_id));
     assert!(compute_disconnect_hold_until_unix(&ctx, sys_id, ship_id, now) >= now + 240);
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .clear();
+    clear_lance_caster_lock(&ctx, ship_id);
 
     // 4. Clone vat bay activated ship blocks warp & adds NPC_TIMER_SECS hold
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .clone_vat_bay_activated_ships
-        .insert((db_key, ship_id));
+    mark_clone_vat_bay_activated(&ctx, ship_id);
     assert!(is_disconnect_emergency_warp_blocked(&ctx, &sys, ship_id));
     assert!(has_tactical_engagement_on_disconnect(&ctx, ship_id));
     assert_eq!(
         compute_disconnect_hold_until_unix(&ctx, sys_id, ship_id, now),
         now + NPC_TIMER_SECS
     );
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .clone_vat_bay_activated_ships
-        .clear();
+    clear_clone_vat_bay_activated(&ctx, ship_id);
 
     // 5. Fitted active siege module in snap.module_active_states triggers immobilizing check
     ctx.db.with_mut_snapshot(|snap| {
@@ -327,12 +314,7 @@ async fn collect_expired_and_finalize_disconnected_ships_handle_filtering_extens
     });
 
     // Hold c_held via clone_vat_bay_activated_ships
-    let db_key = Arc::as_ptr(&ctx.db) as usize;
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .clone_vat_bay_activated_ships
-        .insert((db_key, sh_held));
+    mark_clone_vat_bay_activated(&ctx, sh_held);
 
     // Spawn ball only for sh_stationary to test ball-present vs ball-absent finalization
     let _ = sys

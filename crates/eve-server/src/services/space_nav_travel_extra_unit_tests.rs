@@ -324,6 +324,9 @@ fn jump_drive_skills_pochven_multistack_fuel_fatigue_decay_and_timer_errors() {
 mod w4_ops_pve_mut_extra_tests {
     use super::{attr_id_by_name, bound_sys, clone_type_with, put_item, ship_ball, test_ctx};
     use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
+    use crate::services::tactical_modules::tactical_test_helpers::{
+        clear_all_lance_caster_locks, set_lance_caster_lock_until_for_scope, TacticalKeyScope,
+    };
     use crate::services::pve_crab_beacons::{
         handle_crab_component_call, register_crab_beacon, TYPE_CRAB_BEACON,
     };
@@ -860,11 +863,12 @@ mod w4_ops_pve_mut_extra_tests {
         assert!(ensure_not_mjd_spooling(&sys_h, ship_id).await.is_ok());
 
         // 6. lance caster lock allows Stop, blocks SetSpeedFraction, AlignTo, Orbit/Follow, GotoDirection, GotoPoint
-        ctx.tactical_state
-            .write()
-            .unwrap()
-            .lance_caster_lock_until
-            .insert((ctx.instance_id as usize, ship_id), ctx.now_unix_secs() + 60);
+        set_lance_caster_lock_until_for_scope(
+            &ctx,
+            TacticalKeyScope::Instance,
+            ship_id,
+            ctx.now_unix_secs() + 60,
+        );
         assert!(handle_cmd_stop(&ctx, &sess, Some(&bound)).await.is_ok());
         for code in [
             handle_cmd_set_speed_fraction(&ctx, &sess, Some(&bound), &[PyRep::Real(0.5)]).await.unwrap_err().code,
@@ -875,7 +879,7 @@ mod w4_ops_pve_mut_extra_tests {
         ] {
             assert_eq!(code, "CantMoveWhileModuleActive");
         }
-        ctx.tactical_state.write().unwrap().lance_caster_lock_until.clear();
+        clear_all_lance_caster_locks(&ctx);
 
         // Command validation negative paths (short args, zero vec, self target, missing target)
         assert!(handle_cmd_goto_direction(&ctx, &sess, Some(&bound), &[]).await.is_err());

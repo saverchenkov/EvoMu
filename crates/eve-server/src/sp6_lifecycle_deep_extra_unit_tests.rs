@@ -4,6 +4,9 @@ use super::*;
 use crate::router::{ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::DroneSpaceState;
 use crate::services::drone_test_helpers;
+use crate::services::tactical_modules::tactical_test_helpers::{
+    clear_all_lance_caster_locks, set_lance_caster_lock_until_for_scope, TacticalKeyScope,
+};
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedCombatHp, WorldRepository};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_machonet::SessionState;
@@ -892,11 +895,12 @@ async fn filament_jump_locks_and_reconnect_in_space_sync_pre_warp_and_distance()
             bp.combat_states.get_mut(&ship_id).unwrap().lance_disrupted_remaining_s = 0.0;
         })
         .await;
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((ctx.instance_id as usize, ship_id), ctx.now_unix() + 300);
+    set_lance_caster_lock_until_for_scope(
+        &ctx,
+        TacticalKeyScope::Instance,
+        ship_id,
+        ctx.now_unix() + 300,
+    );
     assert!(
         require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).is_err(),
         "navigation lock must block filament"
@@ -945,11 +949,7 @@ async fn filament_jump_locks_and_reconnect_in_space_sync_pre_warp_and_distance()
         .await;
 
     // Clear nav lock so pre_warp_eligible == true.
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .clear();
+    clear_all_lance_caster_locks(&ctx);
 
     // Case C: clean respawn with distance <= 10_000.0 stays Stop.
     ctx.systems.get_or_spawn(sys_id).try_remove_ball(ship_id);

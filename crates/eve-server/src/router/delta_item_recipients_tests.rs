@@ -18,7 +18,7 @@ use crate::services::industry_pi::{ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE};
 use crate::services::notify_emitters_character_services::{
     save_industry_material_monitors, IndustryMaterialMonitorSub,
 };
-use crate::services::tactical_modules::db_ptr_key;
+use crate::services::tactical_modules::tactical_test_helpers::begin_active_fuel_reserve;
 
 use super::cache_notifications::{
     assemble_pending_notification, enqueue_or_stage_pending_batch,
@@ -956,7 +956,7 @@ async fn commit_bpc_tombstone_effects_suppression_and_generalized_char_shadow_co
     assert_eq!((mod_ev.len(), mod_ev[0].args[0].dbrow_get("locationID"), mod_ev[0].args[0].dbrow_get("flagID")), (1, Some(&PyRep::Integer(10)), Some(&PyRep::Integer(147))));
     assert_eq!((chg_ev.len(), chg_ev[0].args[0].dbrow_get("locationID")), (1, Some(&PyRep::Integer(6))));
 
-    let _guard = ctx.active_fuel_reserves.begin_reserve(db_ptr_key(&ctx.db), [resv_id]);
+    let _guard = begin_active_fuel_reserve(&ctx, [resv_id]);
     ctx.db.tx("outside_reserved", |tx| -> Result<(), eve_db::TxError> { tx.snap.items.insert(resv_id, mk_item(resv_id, 34, pilot_id, station_id, InventoryFlag::Hangar, 50, false)); Ok(()) }).expect("resv");
     drop(_guard);
     assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());

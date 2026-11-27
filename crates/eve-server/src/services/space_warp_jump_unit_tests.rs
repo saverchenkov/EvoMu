@@ -7028,13 +7028,9 @@ async fn cmd_stargate_jump_cleans_attacker_cycles_ewar_remote_assist_and_notices
         "projected_ewar on ship_a must be flushed on jump"
     );
     assert!(
-        !ctx.tactical_state
-            .read()
-            .unwrap()
-            .remote_assistance
-            .values()
-            .flatten()
-            .any(|e| e.source_ship_id == ship_b),
+        !crate::services::tactical_modules::tactical_test_helpers::has_projected_remote_assistance_from_source(
+            &ctx, ship_b,
+        ),
         "remote_assistance from ship_b must be flushed on jump"
     );
 

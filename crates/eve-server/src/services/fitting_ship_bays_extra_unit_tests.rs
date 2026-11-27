@@ -11,6 +11,9 @@ use super::inventory_fitting::fitting_containers_ships::{
     set_custom_item_flag_snap, set_ship_access_config_snap, ShipAccessConfig,
 };
 use super::inventory_fitting::fitting_ship_bays::*;
+use super::tactical_modules::tactical_test_helpers::{
+    clear_lance_caster_lock, set_lance_caster_lock_until_for_scope, TacticalKeyScope,
+};
 use crate::router::ServerContext;
 use eve_db::{
     corp_roles, InventoryFlag, InventoryItemRecord, VirtualServerClock,
@@ -1017,11 +1020,7 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
 
     // 2e. Disruptive Lance / Navigation lock
     let now_s = ctx.now_unix_secs();
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((ctx.instance_id as usize, target_cruiser), now_s + 60);
+    set_lance_caster_lock_until_for_scope(&ctx, TacticalKeyScope::Instance, target_cruiser, now_s + 60);
     assert_eq!(
         ship_scoop_and_store(&ctx, &mut sess, "StoreVessel", &[PyRep::Integer(target_cruiser), PyRep::Integer(host_id)], &kw)
             .await
@@ -1029,11 +1028,7 @@ async fn workstream_2a2_in_space_store_guards_cleanup_active_capsule_reuse_and_k
             .code,
         "LanceFiringLockActive"
     );
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .clear();
+    clear_lance_caster_lock(&ctx, target_cruiser);
 
     // 2f. Gate cloak AND active cloak
     assert!(sys_h.try_update_combat_state(target_cruiser, |cs| cs.gate_cloak_remaining_ticks = 5));

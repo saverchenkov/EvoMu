@@ -1374,13 +1374,15 @@ pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attr
     ctx.db.with_snapshot(|snap| if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) { merged_attrs.extend(tr_attrs.iter().map(|(&k, &v)| (k, v))); });
 }
 
-#[cfg(test)]
-pub(crate) mod tactical_test_helpers {
+#[cfg(any(test, feature = "testkit"))]
+pub mod tactical_test_helpers {
+    //! Test-only façade over tactical module runtime state (`#1541` Track G2a/G2a-2).
+
     use super::*;
 
     /// Key scope used by persistence re-key tests (`tag 1` = `instance_id`, `tag 0` = `db_ptr_key`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum TacticalKeyScope {
+    pub enum TacticalKeyScope {
         Instance,
         Db,
     }
@@ -1393,12 +1395,13 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns `true` when two contexts have distinct database identity keys (`db_ptr_key`).
+    #[cfg(test)]
     pub(crate) fn ctx_db_keys_differ(a: &ServerContext, b: &ServerContext) -> bool {
         db_key_of(a) != db_key_of(b)
     }
 
     /// Sets the Disruptive Lance caster navigation lock expiry timestamp for `ship_id` under `scope`.
-    pub(crate) fn set_lance_caster_lock_until_for_scope(
+    pub fn set_lance_caster_lock_until_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
         ship_id: i64,
@@ -1413,11 +1416,12 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Sets the Disruptive Lance caster navigation lock expiry timestamp for `ship_id`.
-    pub(crate) fn set_lance_caster_lock_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
+    pub fn set_lance_caster_lock_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
         set_lance_caster_lock_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
     }
 
     /// Returns the stored Disruptive Lance caster lock expiry timestamp for `ship_id` under `scope`.
+    #[cfg(test)]
     pub(crate) fn get_lance_caster_lock_until_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1433,7 +1437,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Clears any Disruptive Lance caster lock on `ship_id` across both DB and instance scopes.
-    pub(crate) fn clear_lance_caster_lock(ctx: &ServerContext, ship_id: i64) {
+    pub fn clear_lance_caster_lock(ctx: &ServerContext, ship_id: i64) {
         let db_key = db_key_of(ctx);
         let inst_key = ctx.instance_id as usize;
         let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
@@ -1441,8 +1445,15 @@ pub(crate) mod tactical_test_helpers {
         st.lance_caster_lock_until.remove(&(inst_key, ship_id));
     }
 
+    /// Clears all Disruptive Lance caster navigation locks on `ctx` across DB and instance scopes.
+    pub fn clear_all_lance_caster_locks(ctx: &ServerContext) {
+        let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
+        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner())
+            .lance_caster_lock_until.retain(|&(k, _), _| k != db_key && k != inst_key);
+    }
+
     /// Sets the Disruptive Lance victim debuff expiry timestamp for `ship_id` under `scope`.
-    pub(crate) fn set_lance_victim_debuff_until_for_scope(
+    pub fn set_lance_victim_debuff_until_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
         ship_id: i64,
@@ -1457,11 +1468,12 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Sets the Disruptive Lance victim debuff expiry timestamp for `ship_id`.
-    pub(crate) fn set_lance_victim_debuff_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
+    pub fn set_lance_victim_debuff_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
         set_lance_victim_debuff_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
     }
 
     /// Returns the stored Disruptive Lance victim debuff expiry timestamp for `ship_id` under `scope`.
+    #[cfg(test)]
     pub(crate) fn get_lance_victim_debuff_until_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1477,7 +1489,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Clears any Disruptive Lance victim debuff on `ship_id` across both DB and instance scopes.
-    pub(crate) fn clear_lance_victim_debuff(ctx: &ServerContext, ship_id: i64) {
+    pub fn clear_lance_victim_debuff(ctx: &ServerContext, ship_id: i64) {
         let db_key = db_key_of(ctx);
         let inst_key = ctx.instance_id as usize;
         let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
@@ -1486,6 +1498,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id` under `scope`.
+    #[cfg(test)]
     pub(crate) fn set_tsb_self_penalty_until_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1501,11 +1514,13 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id`.
+    #[cfg(test)]
     pub(crate) fn set_tsb_self_penalty_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
         set_tsb_self_penalty_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
     }
 
     /// Returns the stored Target Spectrum Breaker self penalty expiry timestamp for `ship_id` under `scope`.
+    #[cfg(test)]
     pub(crate) fn get_tsb_self_penalty_until_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1521,7 +1536,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Marks `ship_id` as having an active Clone Vat Bay under `scope`.
-    pub(crate) fn mark_clone_vat_bay_activated_for_scope(
+    pub fn mark_clone_vat_bay_activated_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
         ship_id: i64,
@@ -1535,11 +1550,12 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Marks `ship_id` as having an active Clone Vat Bay.
-    pub(crate) fn mark_clone_vat_bay_activated(ctx: &ServerContext, ship_id: i64) {
+    pub fn mark_clone_vat_bay_activated(ctx: &ServerContext, ship_id: i64) {
         mark_clone_vat_bay_activated_for_scope(ctx, TacticalKeyScope::Db, ship_id);
     }
 
     /// Returns `true` if `ship_id` is marked as Clone Vat Bay activated under `scope`.
+    #[cfg(test)]
     pub(crate) fn has_clone_vat_bay_activated_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1553,7 +1569,23 @@ pub(crate) mod tactical_test_helpers {
             .contains(&(key, ship_id))
     }
 
+    /// Clears Clone Vat Bay activation tracking for `ship_id` across both DB and instance scopes.
+    pub fn clear_clone_vat_bay_activated(ctx: &ServerContext, ship_id: i64) {
+        let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
+        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+        st.clone_vat_bay_activated_ships.remove(&(db_key, ship_id));
+        st.clone_vat_bay_activated_ships.remove(&(inst_key, ship_id));
+    }
+
+    /// Clears all Clone Vat Bay activation tracking on `ctx` across DB and instance scopes.
+    pub fn clear_all_clone_vat_bay_activated(ctx: &ServerContext) {
+        let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
+        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner())
+            .clone_vat_bay_activated_ships.retain(|&(k, _)| k != db_key && k != inst_key);
+    }
+
     /// Sets the simulation time for `sys_id` under `scope`.
+    #[cfg(test)]
     pub(crate) fn set_system_sim_time_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1569,6 +1601,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns the stored simulation time for `sys_id` under `scope`.
+    #[cfg(test)]
     pub(crate) fn get_system_sim_time_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1584,6 +1617,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Replaces the projected remote assistance list for `ship_id`.
+    #[cfg(test)]
     pub(crate) fn set_projected_remote_assistance(
         ctx: &ServerContext,
         ship_id: i64,
@@ -1597,8 +1631,19 @@ pub(crate) mod tactical_test_helpers {
             .insert((db_key, ship_id), entries);
     }
 
+    /// Returns `true` if any projected remote assistance entry on `ctx` originates from `source_ship_id`.
+    #[cfg(test)]
+    pub(crate) fn has_projected_remote_assistance_from_source(ctx: &ServerContext, source_ship_id: i64) -> bool {
+        let db_key = db_key_of(ctx);
+        ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner())
+            .remote_assistance.iter()
+            .filter(|(&(k, _), _)| k == db_key)
+            .flat_map(|(_, entries)| entries.iter())
+            .any(|e| e.source_ship_id == source_ship_id)
+    }
+
     /// Inserts or replaces an active Entosis Link entry for `ship_id`.
-    pub(crate) fn insert_active_entosis_link(
+    pub fn insert_active_entosis_link(
         ctx: &ServerContext,
         ship_id: i64,
         state: ActiveEntosisLinkState,
@@ -1612,6 +1657,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Inserts an active Entosis Link under a foreign DB key for cross-world isolation tests.
+    #[cfg(test)]
     pub(crate) fn insert_foreign_active_entosis_link(
         ctx: &ServerContext,
         ship_id: i64,
@@ -1626,7 +1672,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Removes any active Entosis Link entry for `ship_id`.
-    pub(crate) fn remove_active_entosis_link(ctx: &ServerContext, ship_id: i64) {
+    pub fn remove_active_entosis_link(ctx: &ServerContext, ship_id: i64) {
         let db_key = db_key_of(ctx);
         ctx.tactical_state
             .write()
@@ -1636,7 +1682,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Clears all active Entosis Link entries on `ctx`.
-    pub(crate) fn clear_active_entosis_links(ctx: &ServerContext) {
+    pub fn clear_active_entosis_links(ctx: &ServerContext) {
         ctx.tactical_state
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1645,6 +1691,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Updates `expires_unix` on an existing active Entosis Link entry for `ship_id`.
+    #[cfg(test)]
     pub(crate) fn set_active_entosis_link_expires_unix(
         ctx: &ServerContext,
         ship_id: i64,
@@ -1663,6 +1710,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns `true` if `ship_id` currently has an active Entosis Link entry on `ctx`.
+    #[cfg(test)]
     pub(crate) fn has_active_entosis_link(ctx: &ServerContext, ship_id: i64) -> bool {
         let db_key = db_key_of(ctx);
         ctx.tactical_state
@@ -1673,6 +1721,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Sets the Entosis cycle count for `(target_id, ship_id)` under `scope`.
+    #[cfg(test)]
     pub(crate) fn set_entosis_target_cycles_for_scope(
         ctx: &ServerContext,
         scope: TacticalKeyScope,
@@ -1689,6 +1738,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Sets the Entosis cycle count for `(target_id, ship_id)`.
+    #[cfg(test)]
     pub(crate) fn set_entosis_target_cycles(
         ctx: &ServerContext,
         target_id: i64,
@@ -1699,6 +1749,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns `true` if `(target_id, ship_id)` has a recorded Entosis cycle count.
+    #[cfg(test)]
     pub(crate) fn has_entosis_target_cycles(
         ctx: &ServerContext,
         target_id: i64,
@@ -1713,6 +1764,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns `true` if any Entosis target cycle entries exist in `ctx`.
+    #[cfg(test)]
     pub(crate) fn has_any_entosis_target_cycles(ctx: &ServerContext) -> bool {
         !ctx.tactical_state
             .read()
@@ -1722,6 +1774,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Inserts an active Stasis Webification Probe debuff for `ship_id`.
+    #[cfg(test)]
     pub(crate) fn insert_active_wubble_debuff(
         ctx: &ServerContext,
         ship_id: i64,
@@ -1736,6 +1789,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns the probe IDs of all pending Stasis Webification Probes tracked for `ctx`.
+    #[cfg(test)]
     pub(crate) fn pending_wubble_probe_ids(ctx: &ServerContext) -> Vec<i64> {
         let db_key = db_key_of(ctx);
         ctx.tactical_state
@@ -1748,6 +1802,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Steps pending wubble probes and debuffs in `ballpark` using `ctx` tactical state.
+    #[cfg(test)]
     pub(crate) fn step_wubble_probes_and_debuffs_for_ctx(
         ctx: &ServerContext,
         ballpark: &mut eve_destiny::Ballpark,
@@ -1759,6 +1814,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Inserts an active interdiction probe record for `probe_id`.
+    #[cfg(test)]
     pub(crate) fn insert_active_interdiction_probe(
         ctx: &ServerContext,
         probe_id: i64,
@@ -1773,6 +1829,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns `true` if `probe_id` is tracked as an active interdiction probe.
+    #[cfg(test)]
     pub(crate) fn has_active_interdiction_probe(ctx: &ServerContext, probe_id: i64) -> bool {
         let db_key = db_key_of(ctx);
         ctx.tactical_state
@@ -1783,6 +1840,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Cleans up warp bubble and probe tracking in `ballpark` using `ctx` tactical state.
+    #[cfg(test)]
     pub(crate) fn on_probe_ball_removed_in_actor_for_ctx(
         ctx: &ServerContext,
         ballpark: &mut eve_destiny::Ballpark,
@@ -1798,6 +1856,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Advances interdiction probe lifetimes in `ballpark` using `ctx` tactical state.
+    #[cfg(test)]
     pub(crate) fn step_interdiction_probes_lifetime_for_ctx(
         ctx: &ServerContext,
         ballpark: &mut eve_destiny::Ballpark,
@@ -1813,6 +1872,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Executes Disruptive Lance warmup beam damage in `ballpark` using `ctx` tactical state.
+    #[cfg(test)]
     pub(crate) fn fire_lance_warmup_in_ballpark_for_ctx(
         ctx: &ServerContext,
         ballpark: &mut eve_destiny::Ballpark,
@@ -1834,6 +1894,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns `true` if any in-flight superweapon guard is active on `ctx`.
+    #[cfg(test)]
     pub(crate) fn has_in_flight_superweapons(ctx: &ServerContext) -> bool {
         let db_key = db_key_of(ctx);
         ctx.tactical_state
@@ -1845,7 +1906,7 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Begins a test silent fuel reservation guard for `item_ids` on `ctx`.
-    pub(crate) fn begin_active_fuel_reserve(
+    pub fn begin_active_fuel_reserve(
         ctx: &ServerContext,
         item_ids: impl IntoIterator<Item = i64>,
     ) -> ActiveFuelReserveGuard {
@@ -1854,12 +1915,12 @@ pub(crate) mod tactical_test_helpers {
     }
 
     /// Returns the number of distinct item stacks currently holding active fuel reserves.
-    pub(crate) fn active_fuel_reserve_item_count(ctx: &ServerContext) -> usize {
+    pub fn active_fuel_reserve_item_count(ctx: &ServerContext) -> usize {
         ctx.active_fuel_reserves.active_item_count()
     }
 
     /// Returns the total active silent fuel reserve guard count on `ctx`.
-    pub(crate) fn active_fuel_reserve_count(ctx: &ServerContext) -> usize {
+    pub fn active_fuel_reserve_count(ctx: &ServerContext) -> usize {
         ctx.active_fuel_reserves.active_reserve_count()
     }
 }

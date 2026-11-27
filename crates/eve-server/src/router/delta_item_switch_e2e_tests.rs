@@ -4,6 +4,9 @@
 
 use super::ServerContext;
 use crate::router::delta_item_switch::ItemWireFingerprint;
+use crate::services::tactical_modules::tactical_test_helpers::{
+    active_fuel_reserve_item_count, clear_all_lance_caster_locks,
+};
 use eve_db::{
     FleetRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
 };
@@ -257,7 +260,7 @@ async fn cargo_fueled_cyno_dispatch_rpc_rollback_is_silent_and_success_emits_onc
         "silent Cargo fuel rollback must emit 0 OnItemChange/OnMultipleItemChange, got {rollback_notifs:?}"
     );
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 1_000);
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
 
     // Clear conflicting cycle and activate again -> succeeds with exactly 1 OnItemChange on Cargo fuel.
     sys.remove_module_cycle(ship_id, mod_id).await.unwrap();
@@ -284,7 +287,7 @@ async fn cargo_fueled_cyno_dispatch_rpc_rollback_is_silent_and_success_emits_onc
         0
     );
     assert!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity) < 1_000);
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
 }
 
 #[tokio::test]
@@ -460,16 +463,12 @@ async fn cargo_fueled_superweapon_slash_dispatch_rpc_rollback_is_silent_and_succ
         "silent superweapon Cargo fuel rollback must emit 0 OnItemChange/OnMultipleItemChange, got {rollback_notifs:?}"
     );
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), start_fuel);
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
 
     // Remove conflicting cycle, clear cooldown/lock if any, and fire again -> exact 1 OnItemChange.
     sys.remove_module_cycle(ship_id, mod_id).await.unwrap();
     ctx.clear_all_reactivation_delays();
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .clear();
+    clear_all_lance_caster_locks(&ctx);
     let _ = ctx.drain_notifications_for_char(char_id);
 
     ctx.dispatch_rpc(
@@ -502,7 +501,7 @@ async fn cargo_fueled_superweapon_slash_dispatch_rpc_rollback_is_silent_and_succ
         0
     );
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fuel_id].quantity), 500);
-    assert_eq!(ctx.active_fuel_reserves.active_item_count(), 0);
+    assert_eq!(active_fuel_reserve_item_count(&ctx), 0);
 }
 
 #[tokio::test]

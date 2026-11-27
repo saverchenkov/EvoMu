@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::services::tactical_modules::tactical_test_helpers::fire_lance_warmup_in_ballpark_for_ctx;
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, SlimItemMeta, TargetLock};
@@ -568,12 +569,12 @@ async fn fire_lance_warmup_in_ballpark_edge_cases() {
     };
     let mut pending = Vec::new();
     let mut destroyed = Vec::new();
-    fire_lance_warmup_in_ballpark(
+    fire_lance_warmup_in_ballpark_for_ctx(
+        &ctx,
         &mut bp,
         &cyc_missing,
         &Some(ctx.sde.clone()),
         &Some(ctx.db.clone()),
-        &ctx.tactical_state,
         &mut pending,
         &mut destroyed,
     );
@@ -647,12 +648,12 @@ async fn fire_lance_warmup_in_ballpark_edge_cases() {
         lance_beam_dir: Some(DVec3::X),
         ..Default::default()
     };
-    fire_lance_warmup_in_ballpark(
+    fire_lance_warmup_in_ballpark_for_ctx(
+        &ctx,
         &mut bp,
         &cyc,
         &Some(ctx.sde.clone()),
         &Some(ctx.db.clone()),
-        &ctx.tactical_state,
         &mut pending,
         &mut destroyed,
     );
@@ -762,12 +763,12 @@ async fn fire_lance_warmup_hits_module_cloaked_and_skips_protected() {
     };
     let mut pending = Vec::new();
     let mut destroyed = Vec::new();
-    fire_lance_warmup_in_ballpark(
+    fire_lance_warmup_in_ballpark_for_ctx(
+        &ctx,
         &mut bp,
         &cyc,
         &Some(ctx.sde.clone()),
         &Some(ctx.db.clone()),
-        &ctx.tactical_state,
         &mut pending,
         &mut destroyed,
     );
