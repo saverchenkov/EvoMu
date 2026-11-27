@@ -1635,10 +1635,21 @@ async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_b
     });
     held_rx.recv().unwrap();
 
-    // Keep the actor blocked on `ballpark.write()` via one `SetSpeedFraction` command, then fill
-    // the remaining 256-slot mpsc buffer so `try_send` hits `Full`.
-    let mut dummy_replies = Vec::new();
-    for _ in 0..300 {
+    // Keep the actor blocked on `ballpark.write()` via one `SetSpeedFraction` command first,
+    // then fill the remaining 256-slot mpsc buffer until `try_send` stably hits `Full`.
+    let (blk_tx, blk_rx) = tokio::sync::oneshot::channel();
+    sys.cmd_sender()
+        .try_send(SystemCommand::SetSpeedFraction {
+            ball_id: ship2_id,
+            fraction: 0.25,
+            reply: blk_tx,
+        })
+        .expect("enqueue actor blocker");
+    let mut dummy_replies = vec![blk_rx];
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let mut hit_full = false;
+    for _ in 0..512 {
         let (tx, rx) = tokio::sync::oneshot::channel();
         match sys.cmd_sender().try_send(SystemCommand::SetSpeedFraction {
             ball_id: ship2_id,
@@ -1646,18 +1657,29 @@ async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_b
             reply: tx,
         }) {
             Ok(()) => dummy_replies.push(rx),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                if matches!(
+                    sys.cmd_sender().try_reserve(),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                ) {
+                    hit_full = true;
+                    break;
+                }
+            }
             Err(err) => panic!("unexpected try_send error: {err:?}"),
         }
-        std::thread::yield_now();
     }
-    assert_eq!(
-        sys.try_repair_combat_state_sync(ship2_id, 50.0, 40.0, 0.0),
-        crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback
-    );
+    let outcome = hit_full.then(|| sys.try_repair_combat_state_sync(ship2_id, 50.0, 40.0, 0.0));
 
     release_tx.send(()).unwrap();
     bg.join().unwrap();
+
+    assert!(hit_full, "mailbox must stably hit Full while actor is blocked on ballpark.write()");
+    assert_eq!(
+        outcome,
+        Some(crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback)
+    );
 
     let updated = sys
         .repair_combat_state(ship2_id, 50.0, 40.0, 0.0)
