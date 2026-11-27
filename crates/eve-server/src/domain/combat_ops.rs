@@ -831,13 +831,12 @@ mod tests {
         let corp_id = ctx.db.with_mut_snapshot(|snap| {
             let corp_id = snap.characters[&cid].corporation_id;
             let corp = snap.corporations.entry(corp_id).or_insert_with(|| {
-                eve_db::CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Test Corp".into(),
-                    ticker: "TSTC".into(),
-                    ceo_id: cid,
-                    ..Default::default()
-                }
+                let mut rec = eve_db::CorporationRecord::default();
+                rec.corporation_id = corp_id;
+                rec.name = "Test Corp".into();
+                rec.ticker = "TSTC".into();
+                rec.ceo_id = cid;
+                rec
             });
             corp.ensure_wallet_divisions();
             corp.set_division_balance(1, IskCents::from_isk(1_000_000));
