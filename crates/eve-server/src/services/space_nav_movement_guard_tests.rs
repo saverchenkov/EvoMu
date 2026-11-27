@@ -6,6 +6,9 @@ use crate::services::mobile_deployables::{
     handle_activate_micro_jump_unit, register_mobile_deployable, GROUP_MOBILE_MICRO_JUMP_UNIT,
     MMJU_ACTIVATION_DELAY_SECS, TYPE_MOBILE_MJU,
 };
+use crate::services::tactical_modules::tactical_test_helpers::{
+    clear_lance_caster_lock, set_lance_caster_lock_until_for_scope, TacticalKeyScope,
+};
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
 use eve_sde::SdeRegistry;
@@ -254,14 +257,12 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
     });
 
     // 5. Doomsday / Disruptive Lance caster navigation lock blocks movement.
-    {
-        let now = ctx.now_unix();
-        ctx.tactical_state
-            .write()
-            .unwrap()
-            .lance_caster_lock_until
-            .insert((ctx.instance_id as usize, ship_id), now + 60);
-    }
+    set_lance_caster_lock_until_for_scope(
+        &ctx,
+        TacticalKeyScope::Instance,
+        ship_id,
+        ctx.now_unix() + 60,
+    );
     assert_eq!(
         ctx.validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id })
             .await
@@ -269,11 +270,7 @@ async fn validate_ship_movement_enforces_bubbles_immobilizers_cloaks_hulls_and_s
             .code,
         "LanceFiringLockActive"
     );
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .remove(&(ctx.instance_id as usize, ship_id));
+    clear_lance_caster_lock(&ctx, ship_id);
 
     // 6. Non-covert cloak blocks Warp; covert cloak allows Warp.
     sys_handle
@@ -615,11 +612,7 @@ async fn sync_pre_movement_helpers_and_piloted_structure_guard() {
 
     // 2. Navigation lock (lance caster lock) blocks validate_pre_movement_locks & sync eligibility.
     let now = ctx.now_unix();
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((ctx.instance_id as usize, ship_id), now + 60);
+    set_lance_caster_lock_until_for_scope(&ctx, TacticalKeyScope::Instance, ship_id, now + 60);
     assert_eq!(
         validate_pre_movement_locks(&ctx, ship_id, &MovementIntent::Warp { sys_id })
             .unwrap_err()
@@ -627,11 +620,7 @@ async fn sync_pre_movement_helpers_and_piloted_structure_guard() {
         "LanceFiringLockActive"
     );
     assert!(!check_sync_pre_warp_eligibility(&ctx, ship_id));
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .remove(&(ctx.instance_id as usize, ship_id));
+    clear_lance_caster_lock(&ctx, ship_id);
     assert!(check_sync_pre_warp_eligibility(&ctx, ship_id));
 
     // 3. Active immobilizing module (Bastion 33400) blocks sync eligibility.
@@ -1549,11 +1538,7 @@ async fn acceleration_gate_fw_ess_generic_and_anomic_burner() {
 
     // Tactical lock on FwComplex -> ShipNavigationLocked vs EssBank -> LanceFiringLockActive
     let now = ctx.now_unix();
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((ctx.instance_id as usize, fw_ship), now + 60);
+    set_lance_caster_lock_until_for_scope(&ctx, TacticalKeyScope::Instance, fw_ship, now + 60);
     assert_eq!(
         ctx.validate_ship_movement(
             char_id,
@@ -1582,11 +1567,7 @@ async fn acceleration_gate_fw_ess_generic_and_anomic_burner() {
         .code,
         "LanceFiringLockActive"
     );
-    ctx.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .remove(&(ctx.instance_id as usize, fw_ship));
+    clear_lance_caster_lock(&ctx, fw_ship);
 
     // Immobilizing module (Bastion 33400) on FwComplex -> ImmobilizingModuleActive vs EssBank ("warp") -> WarpDisrupted.
     let mod_id = 10_006_002i64;

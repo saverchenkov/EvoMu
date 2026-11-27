@@ -14,6 +14,9 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, ContainerLifetimeEntry};
+use eve_server::services::tactical_modules::tactical_test_helpers::{
+    clear_lance_caster_lock, set_lance_caster_lock_until_for_scope, TacticalKeyScope,
+};
 
 use crate::common;
 
@@ -321,10 +324,15 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     sess1.station_id = None;
 
     // BF-01: Navigation lock enforcement
-    ctx.tactical_state.write().unwrap().lance_caster_lock_until.insert((ctx.instance_id as usize, ship1), ctx.now_unix_secs() + 300);
+    set_lance_caster_lock_until_for_scope(
+        &ctx,
+        TacticalKeyScope::Instance,
+        ship1,
+        ctx.now_unix_secs() + 300,
+    );
     let nav_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(nav_err.code, "LanceFiringLockActive");
-    ctx.tactical_state.write().unwrap().lance_caster_lock_until.remove(&(ctx.instance_id as usize, ship1));
+    clear_lance_caster_lock(&ctx, ship1);
 
     // BF-01: Scrambled ship cannot initiate warp (>= 150km)
     handle

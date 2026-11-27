@@ -23,6 +23,9 @@ use eve_server::services::pve_exploration::{
 use eve_server::services::pve_special_sites::{
     classify_abyssal_filament, read_abyssal_state,
 };
+use eve_server::services::tactical_modules::tactical_test_helpers::{
+    set_lance_caster_lock_until_for_scope, TacticalKeyScope,
+};
 
 pub(crate) fn fast_ctx() -> ServerContext {
     static WORLD: std::sync::OnceLock<(
@@ -4854,11 +4857,12 @@ async fn test_p1_track_d_regressions_issues_12_55_56_57() {
     assert!(eve_server::services::space_destiny::get_session_change_timer(&ctx1, 90_000_001).is_some());
     assert!(eve_server::services::space_destiny::get_session_change_timer(&ctx2, 90_000_001).is_none());
 
-    ctx1.tactical_state
-        .write()
-        .unwrap()
-        .lance_caster_lock_until
-        .insert((ctx1.instance_id as usize, 750_000_101), ctx1.now_unix_secs() + 300);
+    set_lance_caster_lock_until_for_scope(
+        &ctx1,
+        TacticalKeyScope::Instance,
+        750_000_101,
+        ctx1.now_unix_secs() + 300,
+    );
     assert!(eve_server::services::tactical_modules::check_ship_navigation_lock(&ctx1, 750_000_101, "warp").is_err());
     assert!(eve_server::services::tactical_modules::check_ship_navigation_lock(&ctx2, 750_000_101, "warp").is_ok());
 

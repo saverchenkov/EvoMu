@@ -20,9 +20,10 @@ use super::tactical_modules::{
     activate_target_spectrum_breaker, apply_projected_remote_assistance,
     apply_projected_rtc_to_module_attrs, apply_tactical_module_ship_attributes,
     apply_transient_item_attrs, check_ship_navigation_lock, clear_entosis_warmup_on_unlock,
-    fire_lance_warmup_in_ballpark, handle_entosis_link_activation,
-    incoming_remote_repair_multiplier, is_clone_vat_bay_active_required,
-    prepare_ship_for_wormhole_jump, remove_projected_remote_assistance,
+    handle_entosis_link_activation, incoming_remote_repair_multiplier,
+    is_clone_vat_bay_active_required, prepare_ship_for_wormhole_jump,
+    remove_projected_remote_assistance,
+    tactical_test_helpers::fire_lance_warmup_in_ballpark_for_ctx,
 };
 use crate::router::ServerContext;
 use crate::system_actor::{ActiveModuleCycle, PendingCycleAction};
@@ -344,11 +345,11 @@ async fn tactical_superweapons_lance_entosis_and_command_bursts() {
     };
     let mut actions: Vec<PendingCycleAction> = Vec::new();
     let mut destroyed = Vec::new();
-    fire_lance_warmup_in_ballpark(&mut bp, &cycle, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &ctx.tactical_state, &mut actions, &mut destroyed);
+    fire_lance_warmup_in_ballpark_for_ctx(&ctx, &mut bp, &cycle, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &mut actions, &mut destroyed);
     assert!(!bp.combat_states[&lancer_id].is_tethered);
     assert_eq!(bp.combat_states[&victim_id].armor_hp, 10_000.0);
     bp.combat_states.get_mut(&victim_id).unwrap().is_tethered = false;
-    fire_lance_warmup_in_ballpark(&mut bp, &cycle, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &ctx.tactical_state, &mut actions, &mut destroyed);
+    fire_lance_warmup_in_ballpark_for_ctx(&ctx, &mut bp, &cycle, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &mut actions, &mut destroyed);
     assert!(bp.combat_states[&victim_id].armor_hp < 10_000.0);
 
     let ent_type = ctx.sde.types.get(&997_004).unwrap().clone();

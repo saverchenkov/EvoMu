@@ -14,6 +14,10 @@ use eve_server::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_a
 use eve_server::services::pve_crab_beacons::{
     CrabBeaconPhase, CrabBeaconRecord, TYPE_CRAB_BEACON,
 };
+use eve_server::services::tactical_modules::tactical_test_helpers::{
+    clear_active_entosis_links, clear_clone_vat_bay_activated, clear_lance_victim_debuff,
+    insert_active_entosis_link, mark_clone_vat_bay_activated, set_lance_victim_debuff_until,
+};
 use eve_server::services::tactical_modules::ActiveEntosisLinkState;
 use eve_server::sp6_lifecycle::{
     handle_character_logoff_or_disconnect, reconnect_character_in_space_sync,
@@ -184,7 +188,6 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
     });
 
     // 2. CRAB beacon link, Entosis link, Lance victim debuff, Clone Vat Bay, Immobilizer, Upwell Structure
-    let db_key = Arc::as_ptr(&ctx.db) as usize;
     ctx.db.with_mut_snapshot(|snap| {
         snap.crab_beacons.beacons.insert(
             99_002,
@@ -214,37 +217,27 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
     assert!(crab_entry.emergency_warp_dest.is_none());
     ctx.db.with_mut_snapshot(|snap| snap.crab_beacons.beacons.clear());
 
-    {
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        st.entosis_active_links.insert(
-            (db_key, ship_id),
-            ActiveEntosisLinkState {
-                ship_id,
-                char_id: CHAR_PRIMARY,
-                side_id: 1_000_009,
-                module_id: 99_003,
-                target_id: 1_091_200_099,
-                cycle_index: 1,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                is_capital: true,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        ship_id,
+        ActiveEntosisLinkState {
+            ship_id,
+            char_id: CHAR_PRIMARY,
+            side_id: 1_000_009,
+            module_id: 99_003,
+            target_id: 1_091_200_099,
+            cycle_index: 1,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            is_capital: true,
+        },
+    );
     let ent_entry = handle_character_logoff_or_disconnect(&ctx, CHAR_PRIMARY).await.unwrap();
     assert!(ent_entry.emergency_warp_dest.is_none());
-    ctx.tactical_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .entosis_active_links
-        .clear();
+    clear_active_entosis_links(&ctx);
 
-    ctx.tactical_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .lance_victim_debuff_until
-        .insert((db_key, ship_id), now + 60);
+    set_lance_victim_debuff_until(&ctx, ship_id, now + 60);
     assert!(
         handle_character_logoff_or_disconnect(&ctx, CHAR_PRIMARY)
             .await
@@ -252,17 +245,9 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
             .emergency_warp_dest
             .is_none()
     );
-    ctx.tactical_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .lance_victim_debuff_until
-        .clear();
+    clear_lance_victim_debuff(&ctx, ship_id);
 
-    ctx.tactical_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone_vat_bay_activated_ships
-        .insert((db_key, ship_id));
+    mark_clone_vat_bay_activated(&ctx, ship_id);
     assert!(
         handle_character_logoff_or_disconnect(&ctx, CHAR_PRIMARY)
             .await
@@ -270,11 +255,7 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
             .emergency_warp_dest
             .is_none()
     );
-    ctx.tactical_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone_vat_bay_activated_ships
-        .clear();
+    clear_clone_vat_bay_activated(&ctx, ship_id);
 
     seed_stack(&ctx, 99_004, 28_583, CHAR_PRIMARY, ship_id, InventoryFlag::HiSlot0, 1, true);
     ctx.db.with_mut_snapshot(|snap| {

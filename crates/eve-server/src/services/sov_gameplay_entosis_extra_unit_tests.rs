@@ -5,7 +5,10 @@
 use crate::router::ServerContext;
 use crate::services::sov_gameplay::sov_gameplay_entosis::*;
 use crate::services::sov_services::{TYPE_PHAROLUX_CYNO_BEACON, TYPE_SOVEREIGNTY_HUB};
-use crate::services::tactical_modules::{db_ptr_key, ActiveEntosisLinkState};
+use crate::services::tactical_modules::tactical_test_helpers::{
+    insert_active_entosis_link, insert_foreign_active_entosis_link,
+};
+use crate::services::tactical_modules::ActiveEntosisLinkState;
 use eve_db::durable_domain_types::PersistedHubUpgrade;
 use eve_db::{CosmicAnomalyRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -334,25 +337,22 @@ async fn defender_counter_entosis_decay_node_respawn_and_hub_loot_drop() {
             .unwrap();
     }
 
-    let db_key = db_ptr_key(&ctx.db);
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, att_ship),
-            ActiveEntosisLinkState {
-                module_id: 88_001,
-                char_id: att_char,
-                ship_id: att_ship,
-                side_id: att_ally,
-                target_id: node_mid,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        att_ship,
+        ActiveEntosisLinkState {
+            module_id: 88_001,
+            char_id: att_char,
+            ship_id: att_ship,
+            side_id: att_ally,
+            target_id: node_mid,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
 
     // Tick via tick_sov_gameplay: decays unattended hub progress, updates strategic_index to 5, and captures node_mid!
     tick_sov_gameplay(&ctx, now + 100).await;
@@ -371,24 +371,22 @@ async fn defender_counter_entosis_decay_node_respawn_and_hub_loot_drop() {
             .entosis_capture_progress
             .insert(node_win, (att_char, att_ally, att_ship, 5_000.0, now + 100));
     });
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, att_ship),
-            ActiveEntosisLinkState {
-                module_id: 88_001,
-                char_id: att_char,
-                ship_id: att_ship,
-                side_id: att_ally,
-                target_id: node_win,
-                cycle_duration_s: 300.0,
-                started_unix: now + 100,
-                expires_unix: now + 400,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        att_ship,
+        ActiveEntosisLinkState {
+            module_id: 88_001,
+            char_id: att_char,
+            ship_id: att_ship,
+            side_id: att_ally,
+            target_id: node_win,
+            cycle_duration_s: 300.0,
+            started_unix: now + 100,
+            expires_unix: now + 400,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     tick_sov_gameplay(&ctx, now + 120).await;
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.structures[&hub_id].state, "Destroyed");
@@ -1783,58 +1781,57 @@ async fn precheck_entosis_link_filter_clauses_and_tick_merc_den_precheck_mutants
     }
 
     // Seed distractor active links covering every clause of `(k == db_key && l.target_id == target_id)` and `side_id != attacker_alliance`
-    let db_key = db_ptr_key(&ctx.db);
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        // Wrong db_key, matching target_id, hostile side_id
-        tst.entosis_active_links.insert(
-            (db_key.wrapping_add(1), 8_001),
-            ActiveEntosisLinkState {
-                module_id: 8_001,
-                char_id: att_char,
-                ship_id: 8_001,
-                side_id: ally_att,
-                target_id: hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-        // Matching db_key, wrong target_id, hostile side_id
-        tst.entosis_active_links.insert(
-            (db_key, 8_002),
-            ActiveEntosisLinkState {
-                module_id: 8_002,
-                char_id: att_char,
-                ship_id: 8_002,
-                side_id: ally_att,
-                target_id: other_hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-        // Matching db_key and target_id, friendly side_id (NOT attacker!)
-        tst.entosis_active_links.insert(
-            (db_key, 8_003),
-            ActiveEntosisLinkState {
-                module_id: 8_003,
-                char_id: def_char,
-                ship_id: 8_003,
-                side_id: ally_def,
-                target_id: hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    // Wrong db_key, matching target_id, hostile side_id
+    insert_foreign_active_entosis_link(
+        &ctx,
+        8_001,
+        ActiveEntosisLinkState {
+            module_id: 8_001,
+            char_id: att_char,
+            ship_id: 8_001,
+            side_id: ally_att,
+            target_id: hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
+    // Matching db_key, wrong target_id, hostile side_id
+    insert_active_entosis_link(
+        &ctx,
+        8_002,
+        ActiveEntosisLinkState {
+            module_id: 8_002,
+            char_id: att_char,
+            ship_id: 8_002,
+            side_id: ally_att,
+            target_id: other_hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
+    // Matching db_key and target_id, friendly side_id (NOT attacker!)
+    insert_active_entosis_link(
+        &ctx,
+        8_003,
+        ActiveEntosisLinkState {
+            module_id: 8_003,
+            char_id: def_char,
+            ship_id: 8_003,
+            side_id: ally_def,
+            target_id: hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
 
     // Friendly defender still blocked because no matching hostile link on (db_key, hub_id) exists; attacker succeeds!
     assert_eq!(
@@ -1849,24 +1846,22 @@ async fn precheck_entosis_link_filter_clauses_and_tick_merc_den_precheck_mutants
         .expect("hostile attacker permitted"));
 
     // Adding a real attacker link on (db_key, hub_id) unlocks counter-entosis for friendly defender
-    {
-        let mut tst = ctx.tactical_state.write().unwrap();
-        tst.entosis_active_links.insert(
-            (db_key, att_ship),
-            ActiveEntosisLinkState {
-                module_id: 8_004,
-                char_id: att_char,
-                ship_id: att_ship,
-                side_id: ally_att,
-                target_id: hub_id,
-                cycle_duration_s: 300.0,
-                started_unix: now,
-                expires_unix: now + 300,
-                cycle_index: 1,
-                is_capital: false,
-            },
-        );
-    }
+    insert_active_entosis_link(
+        &ctx,
+        att_ship,
+        ActiveEntosisLinkState {
+            module_id: 8_004,
+            char_id: att_char,
+            ship_id: att_ship,
+            side_id: ally_att,
+            target_id: hub_id,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            cycle_index: 1,
+            is_capital: false,
+        },
+    );
     assert!(precheck_entosis_activation(&ctx, hub_id, def_ship, def_char)
         .await
         .expect("contested friendly defense permitted"));

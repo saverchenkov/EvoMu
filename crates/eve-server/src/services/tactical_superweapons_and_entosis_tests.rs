@@ -4,6 +4,7 @@
 
 use super::*;
 
+use crate::services::tactical_modules::tactical_test_helpers::fire_lance_warmup_in_ballpark_for_ctx;
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{
     FleetRecord, InventoryFlag, VirtualServerClock,
@@ -171,12 +172,12 @@ async fn disruptive_lance_superweapon_and_warmup_ballpark_hit() {
     };
     let mut pending = Vec::new();
     let mut destroyed = Vec::new();
-    fire_lance_warmup_in_ballpark(
+    fire_lance_warmup_in_ballpark_for_ctx(
+        &ctx,
         &mut bp,
         &cyc,
         &Some(ctx.sde.clone()),
         &Some(ctx.db.clone()),
-        &ctx.tactical_state,
         &mut pending,
         &mut destroyed,
     );
