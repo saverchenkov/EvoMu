@@ -85,7 +85,8 @@ impl MiningStopReason {
             Self::Warping => "CannotActivateWhileWarping",
             Self::NotInSpace => "NotInSpace",
             Self::Cloaked => "CannotActivateWhileCloaked",
-            Self::CapacitorEmpty => "NotEnoughCapacitor",
+            // RPC rejections use BridgeRpcError::not_enough_capacitor; stop-reason label only.
+            Self::CapacitorEmpty => "CapacitorEmpty",
             Self::ModuleOffline => "ModuleOffline",
             Self::Deactivated => "Deactivated",
         }
@@ -184,6 +185,10 @@ pub fn can_harvest(module: &InvType, kind: MiningKind, target: &InvType) -> bool
 }
 
 fn err(reason: MiningStopReason, message: String) -> BridgeRpcError {
+    debug_assert!(
+        !matches!(reason, MiningStopReason::CapacitorEmpty),
+        "use BridgeRpcError::not_enough_capacitor for low-capacitor rejections"
+    );
     BridgeRpcError { code: reason.code().into(), message, client_error: None }
 }
 
@@ -379,8 +384,26 @@ async fn consume_cycle_capacitor(ctx: &ServerContext, cycle: &ActiveMiningCycle)
                 ("moduleID", PyRep::Integer(cycle.module_id)),
             ],
         );
-        return Err(err(
-            MiningStopReason::CapacitorEmpty,
+        let module_name = fit
+            .modules
+            .get(&cycle.module_id)
+            .map(|m| m.type_id)
+            .or_else(|| ctx.db.with_snapshot(|s| s.items.get(&cycle.module_id).map(|i| i.type_id)))
+            .and_then(|tid| ctx.sde.types.get(&tid))
+            .map(|t| t.name.as_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| {
+                if cycle.effect_name.trim().is_empty() {
+                    "Mining Module"
+                } else {
+                    cycle.effect_name.as_str()
+                }
+            });
+        return Err(BridgeRpcError::not_enough_capacitor(
+            Some(cycle.ship_id),
+            module_name,
+            need,
+            cs.capacitor,
             format!("Module needs {need} GJ, capacitor has {:.2} GJ", cs.capacitor),
         ));
     }
