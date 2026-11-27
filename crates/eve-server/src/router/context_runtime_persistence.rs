@@ -117,12 +117,7 @@ impl PersistedTacticalModulesPayload {
                 .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
                 .collect(),
-            tsb_self_penalty_until: st
-                .tsb_self_penalty_until
-                .iter()
-                .filter(|(&(k, _), _)| keep_key(k))
-                .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
-                .collect(),
+            tsb_self_penalty_until: Vec::new(),
             active_interdiction_probes: st
                 .active_interdiction_probes
                 .iter()
@@ -146,7 +141,6 @@ impl PersistedTacticalModulesPayload {
         payload.lance_caster_lock_until.sort_by_key(|(k, _)| *k);
         payload.lance_victim_debuff_until.sort_by_key(|(k, _)| *k);
         payload.active_wubble_debuffs.sort_by_key(|(k, _)| *k);
-        payload.tsb_self_penalty_until.sort_by_key(|(k, _)| *k);
         payload.active_interdiction_probes.sort_by_key(|(k, _)| *k);
         payload.launcher_last_fire.sort_by_key(|(k, _)| *k);
         payload.system_sim_time_s.sort_by_key(|(k, _)| *k);
@@ -166,7 +160,12 @@ impl PersistedTacticalModulesPayload {
             && self.system_sim_time_s.is_empty()
     }
 
-    fn apply_to_state(self, st: &mut TacticalModulesState, cur_db_key: usize, cur_inst_key: usize) {
+    fn apply_to_state(
+        self,
+        st: &mut TacticalModulesState,
+        cur_db_key: usize,
+        cur_inst_key: usize,
+    ) -> Vec<(i64, u64)> {
         let untag = |tag: u8| -> usize { if tag == 1 { cur_inst_key } else { cur_db_key } };
         st.remote_assistance = self
             .remote_assistance
@@ -193,11 +192,6 @@ impl PersistedTacticalModulesPayload {
             .into_iter()
             .map(|((tag, sid), v)| ((untag(tag), sid), v))
             .collect();
-        st.tsb_self_penalty_until = self
-            .tsb_self_penalty_until
-            .into_iter()
-            .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
         st.active_interdiction_probes = self
             .active_interdiction_probes
             .into_iter()
@@ -213,7 +207,49 @@ impl PersistedTacticalModulesPayload {
             .into_iter()
             .map(|((tag, sys), v)| ((untag(tag), sys), v))
             .collect();
+        self.tsb_self_penalty_until
+            .into_iter()
+            .map(|((_, sid), v)| (sid, v))
+            .collect()
     }
+}
+
+/// One-way legacy migration (`#1541` Track G2b-3): merges legacy TSB penalty rows/payload entries
+/// into `WorldStateSnapshot.combat_crimewatch_state.tsb_self_penalty_until` via `max(existing, v)`,
+/// strictly outside any `ctx.tactical_state` lock (`RANK_WORLD_INNER` 40 < `RANK_LEAF` 60) and
+/// performing zero DB writes when empty or already dominated.
+fn merge_legacy_tsb_self_penalty_into_db(
+    db: &eve_db::WorldRepository,
+    entries: Vec<(i64, u64)>,
+    can_write_db: bool,
+) {
+    if entries.is_empty() || !can_write_db {
+        return;
+    }
+    let needs_write = db.with_snapshot(|snap| {
+        let existing = &snap.combat_crimewatch_state.tsb_self_penalty_until;
+        entries
+            .iter()
+            .any(|&(sid, v)| existing.get(&sid).is_none_or(|&cur| v > cur))
+    });
+    if !needs_write {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        let map = &mut snap
+            .combat_crimewatch_state
+            .as_inner_mut()
+            .tsb_self_penalty_until;
+        for (ship_id, until_unix) in entries {
+            map.entry(ship_id)
+                .and_modify(|cur| {
+                    if until_unix > *cur {
+                        *cur = until_unix;
+                    }
+                })
+                .or_insert(until_unix);
+        }
+    });
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -469,7 +505,7 @@ impl PersistedServerRuntimeState {
             && self.social_extras_runtime.is_empty()
     }
 
-    fn apply_to_ctx(self, ctx: &ServerContext) {
+    fn apply_to_ctx(self, ctx: &ServerContext, can_write_db: bool) {
         // Legacy monolith migration keeps ONLY declared checkpointed kinds; crash-lost kinds
         // (`module_cycles`, `target_locks`, `active_warps`) are intentionally dropped.
         *ctx.active_moon_probes
@@ -522,11 +558,12 @@ impl PersistedServerRuntimeState {
 
         let cur_db_key = db_ptr_key(&ctx.db);
         let cur_inst_key = ctx.instance_id as usize;
-        {
+        let legacy_tsb = {
             let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
             self.tactical_state
-                .apply_to_state(&mut tac, cur_db_key, cur_inst_key);
-        }
+                .apply_to_state(&mut tac, cur_db_key, cur_inst_key)
+        };
+        merge_legacy_tsb_self_penalty_into_db(&ctx.db, legacy_tsb, can_write_db);
 
         self.fleet_extras_runtime.apply_to_ctx(ctx);
         self.social_extras_runtime.apply_to_ctx(ctx);
@@ -621,15 +658,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
                 dur.push((
                     format!("lvd|{tag}|{sid}"),
                     DurableTacticalEntry::LanceVictimDebuffUntil(tag, sid, v),
-                ));
-            }
-        }
-        for (&(k, sid), &v) in &tac.tsb_self_penalty_until {
-            if keep_tac_key(k) {
-                let tag = tac_tag(k);
-                dur.push((
-                    format!("tsb|{tag}|{sid}"),
-                    DurableTacticalEntry::TsbSelfPenaltyUntil(tag, sid, v),
                 ));
             }
         }
@@ -739,7 +767,7 @@ enum CheckpointLoadOutcome {
     Error(String),
 }
 
-fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
+fn load_checkpoints_into_ctx(ctx: &ServerContext, can_write_db: bool) -> CheckpointLoadOutcome {
     let loaded = ctx.db.with_sqlite_conn(|conn| -> Result<Option<_>, String> {
         ensure_system_checkpoint_schema(conn)?;
         let _ = purge_crash_lost_checkpoints(conn);
@@ -832,11 +860,11 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             cur_db_key
         }
     };
+    let mut legacy_tsb = Vec::new();
     {
         let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
         tac.lance_caster_lock_until.clear();
         tac.lance_victim_debuff_until.clear();
-        tac.tsb_self_penalty_until.clear();
         tac.system_sim_time_s.clear();
         for (_, _, ((tag, sys), sim_s)) in sim_times {
             tac.system_sim_time_s.insert((untag(tag), sys), sim_s);
@@ -849,12 +877,13 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
                 DurableTacticalEntry::LanceVictimDebuffUntil(tag, sid, v) => {
                     tac.lance_victim_debuff_until.insert((untag(tag), sid), v);
                 }
-                DurableTacticalEntry::TsbSelfPenaltyUntil(tag, sid, v) => {
-                    tac.tsb_self_penalty_until.insert((untag(tag), sid), v);
+                DurableTacticalEntry::TsbSelfPenaltyUntil(_tag, sid, v) => {
+                    legacy_tsb.push((sid, v));
                 }
             }
         }
     }
+    merge_legacy_tsb_self_penalty_into_db(&ctx.db, legacy_tsb, can_write_db);
 
     if let Some((_, _, payload)) = fleet_extras.into_iter().next() {
         payload.apply_to_ctx(ctx);
@@ -873,7 +902,8 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
 impl ServerContext {
     /// Hydrates all gameplay-affecting `ServerContext` runtime maps from `WorldRepository` (`#592`).
     pub fn hydrate_server_runtime_from_db(&self) {
-        if !self.db.is_write_locked_by_current_thread()
+        let can_write_db = !self.db.is_write_locked_by_current_thread();
+        if can_write_db
             && self
                 .db
                 .with_snapshot(|snap| snap.owner_notes.values().any(|n| n.character_id == -73))
@@ -965,7 +995,7 @@ impl ServerContext {
                     .and_then(|s| serde_json::from_str::<PersistedServerRuntimeState>(&s).ok())
             });
 
-        match load_checkpoints_into_ctx(self) {
+        match load_checkpoints_into_ctx(self, can_write_db) {
             CheckpointLoadOutcome::Loaded => {
                 crate::system_actor::reload_live_fighters_from_db(
                     &self.systems,
@@ -991,10 +1021,10 @@ impl ServerContext {
         }
 
         if let Some(legacy_state) = state {
-            legacy_state.apply_to_ctx(self);
+            legacy_state.apply_to_ctx(self, can_write_db);
             self.persist_server_runtime_to_db();
         } else {
-            PersistedServerRuntimeState::default().apply_to_ctx(self);
+            PersistedServerRuntimeState::default().apply_to_ctx(self, can_write_db);
             crate::system_actor::reload_live_fighters_from_db(
                 &self.systems,
                 &self.db,
@@ -1180,7 +1210,6 @@ mod tests {
                 velocity_multiplier: 0.5,
             },
         );
-        st.tsb_self_penalty_until.insert((inst_k, 110), 400);
         st.active_interdiction_probes.insert(
             (db_k, 130),
             ActiveInterdictionProbe {
@@ -1213,7 +1242,8 @@ mod tests {
         let new_db_k = 8_888_usize;
         let new_inst_k = 9_999_usize;
         let mut restored = TacticalModulesState::default();
-        payload.apply_to_state(&mut restored, new_db_k, new_inst_k);
+        let legacy_tsb = payload.apply_to_state(&mut restored, new_db_k, new_inst_k);
+        assert!(legacy_tsb.is_empty());
         assert!(restored.remote_assistance.contains_key(&(new_db_k, 10)));
         assert!(restored.remote_assistance.contains_key(&(new_inst_k, 20)));
         assert_eq!(restored.lance_caster_lock_until[&(new_db_k, 40)], 200);
@@ -1221,7 +1251,6 @@ mod tests {
         assert_eq!(restored.lance_victim_debuff_until[&(new_db_k, 50)], 300);
         assert_eq!(restored.pending_wubble_probes[0].0, new_inst_k);
         assert!(restored.active_wubble_debuffs.contains_key(&(new_db_k, 100)));
-        assert_eq!(restored.tsb_self_penalty_until[&(new_inst_k, 110)], 400);
         assert!(restored.active_interdiction_probes.contains_key(&(new_db_k, 130)));
         assert_eq!(restored.launcher_last_fire[&(new_inst_k, 140)].fired_unix, 500);
         assert_eq!(restored.system_sim_time_s[&(new_db_k, 30_000_142)], 42.5);
@@ -1631,7 +1660,7 @@ mod tests {
             })
             .expect("seed solo legacy cvb checkpoint");
         assert!(matches!(
-            load_checkpoints_into_ctx(&ctx_solo),
+            load_checkpoints_into_ctx(&ctx_solo, true),
             CheckpointLoadOutcome::Loaded
         ));
         ctx_solo.hydrate_server_runtime_from_db();
@@ -1666,7 +1695,7 @@ mod tests {
             })
             .expect("seed mixed legacy cvb + valid durable tactical checkpoints");
         assert!(matches!(
-            load_checkpoints_into_ctx(&ctx),
+            load_checkpoints_into_ctx(&ctx, true),
             CheckpointLoadOutcome::Loaded
         ));
         let db_k = db_ptr_key(&ctx.db);
@@ -1706,7 +1735,7 @@ mod tests {
             })
             .expect("seed corrupt non-cvb checkpoint");
         assert!(matches!(
-            load_checkpoints_into_ctx(&ctx),
+            load_checkpoints_into_ctx(&ctx, true),
             CheckpointLoadOutcome::Error(_)
         ));
 
@@ -1751,6 +1780,180 @@ mod tests {
         ctx_legacy.db.with_snapshot(|snap| {
             assert!(snap.sov_runtime.entosis_active_links.is_empty());
             assert!(snap.sov_runtime.entosis_target_cycles.is_empty());
+        });
+    }
+
+    #[test]
+    fn legacy_tsb_checkpoint_and_payload_migrate_with_max_and_clean_hydrate_is_zero_write() {
+        // 1. Legacy `tsb|...` checkpoint rows migrate via `max(existing, v)` into
+        //    `combat_crimewatch_state.tsb_self_penalty_until`, outside any `tactical_state` lock.
+        let ctx = test_ctx();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .tsb_self_penalty_until
+                .insert(110, 700);
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .tsb_self_penalty_until
+                .insert(111, 200);
+        });
+        ctx.db
+            .with_sqlite_conn(|conn| -> Result<(), String> {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "tsb|0|110",
+                    &DurableTacticalEntry::TsbSelfPenaltyUntil(0, 110, 400),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "tsb|1|111",
+                    &DurableTacticalEntry::TsbSelfPenaltyUntil(1, 111, 300),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "tsb|0|112",
+                    &DurableTacticalEntry::TsbSelfPenaltyUntil(0, 112, 500),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "tsb|1|112",
+                    &DurableTacticalEntry::TsbSelfPenaltyUntil(1, 112, 600),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lcl|0|500",
+                    &DurableTacticalEntry::LanceCasterLockUntil(0, 500, 1_800_000_888),
+                    1_800_000_000,
+                )
+            })
+            .expect("seed legacy tsb checkpoints");
+
+        ctx.hydrate_server_runtime_from_db();
+        ctx.db.with_snapshot(|snap| {
+            let map = &snap.combat_crimewatch_state.tsb_self_penalty_until;
+            assert_eq!(map.get(&110), Some(&700), "existing higher timestamp must win");
+            assert_eq!(map.get(&111), Some(&300), "legacy higher timestamp must upgrade existing");
+            assert_eq!(map.get(&112), Some(&600), "duplicate legacy tags must take max");
+        });
+
+        // Re-hydrating when already dominated performs ZERO DB writes.
+        let tx_before_noop = ctx.db.tx_commit_count();
+        let epoch_before_noop = ctx.db.state_epoch();
+        ctx.hydrate_server_runtime_from_db();
+        assert_eq!(ctx.db.tx_commit_count(), tx_before_noop);
+        assert_eq!(ctx.db.state_epoch(), epoch_before_noop);
+
+        // Re-persisting drops legacy `tsb|...` checkpoint rows while preserving DB-owned state.
+        ctx.persist_server_runtime_to_db();
+        let remaining_keys: Vec<String> = ctx
+            .db
+            .with_sqlite_conn(|conn| {
+                load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_TACTICAL_DURABLE)
+            })
+            .expect("reload tactical durable keys")
+            .into_iter()
+            .map(|(_, k, _)| k)
+            .collect();
+        assert_eq!(remaining_keys, vec!["lcl|0|500".to_string()]);
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.combat_crimewatch_state.tsb_self_penalty_until.get(&112),
+                Some(&600)
+            );
+        });
+
+        // Clean hydrate with non-TSB checkpoints performs ZERO DB writes.
+        let tx_clean = ctx.db.tx_commit_count();
+        let epoch_clean = ctx.db.state_epoch();
+        ctx.hydrate_server_runtime_from_db();
+        assert_eq!(ctx.db.tx_commit_count(), tx_clean);
+        assert_eq!(ctx.db.state_epoch(), epoch_clean);
+
+        // 2. Clean hydrate on an empty repository also performs ZERO DB writes.
+        let ctx_empty = test_ctx();
+        let tx_empty = ctx_empty.db.tx_commit_count();
+        let epoch_empty = ctx_empty.db.state_epoch();
+        ctx_empty.hydrate_server_runtime_from_db();
+        assert_eq!(ctx_empty.db.tx_commit_count(), tx_empty);
+        assert_eq!(ctx_empty.db.state_epoch(), epoch_empty);
+
+        // 3. Legacy `PersistedTacticalModulesPayload` JSON carrying `tsb_self_penalty_until`
+        //    is non-empty and migrates via `max(existing, v)` without deadlock.
+        let ctx_json = test_ctx();
+        ctx_json.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .tsb_self_penalty_until
+                .insert(210, 750);
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .tsb_self_penalty_until
+                .insert(211, 150);
+        });
+        let legacy_json = serde_json::json!({
+            "tactical_state": {
+                "tsb_self_penalty_until": [[[0, 210], 400], [[1, 211], 650], [[0, 212], 500]]
+            }
+        });
+        let parsed_legacy: PersistedServerRuntimeState =
+            serde_json::from_value(legacy_json.clone()).expect("parse legacy payload");
+        assert!(!parsed_legacy.tactical_state.is_empty());
+
+        ctx_json.db.with_mut_snapshot(|snap| {
+            snap.cluster_and_runtime.server_runtime_json = Some(legacy_json.to_string());
+        });
+        ctx_json.hydrate_server_runtime_from_db();
+        ctx_json.db.with_snapshot(|snap| {
+            let map = &snap.combat_crimewatch_state.tsb_self_penalty_until;
+            assert_eq!(map.get(&210), Some(&750));
+            assert_eq!(map.get(&211), Some(&650));
+            assert_eq!(map.get(&212), Some(&500));
+            assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
+        });
+        let json_keys: Vec<String> = ctx_json
+            .db
+            .with_sqlite_conn(|conn| {
+                load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_TACTICAL_DURABLE)
+            })
+            .expect("check no tsb checkpoints emitted")
+            .into_iter()
+            .map(|(_, k, _)| k)
+            .collect();
+        assert!(json_keys.is_empty());
+
+        // 4. Write-lock guard: calling legacy TSB migration / apply_to_ctx while holding
+        //    `with_mut_snapshot` must skip DB writes without deadlocking.
+        let ctx_locked = test_ctx();
+        let legacy_locked: PersistedServerRuntimeState = serde_json::from_value(serde_json::json!({
+            "tactical_state": {
+                "tsb_self_penalty_until": [[[0, 333], 999]]
+            }
+        }))
+        .expect("parse legacy locked payload");
+        ctx_locked.db.with_mut_snapshot(|snap| {
+            let can_write = !ctx_locked.db.is_write_locked_by_current_thread();
+            assert!(!can_write);
+            merge_legacy_tsb_self_penalty_into_db(&ctx_locked.db, vec![(333, 999)], can_write);
+            legacy_locked.apply_to_ctx(&ctx_locked, can_write);
+            assert!(!snap
+                .combat_crimewatch_state
+                .tsb_self_penalty_until
+                .contains_key(&333));
         });
     }
 }

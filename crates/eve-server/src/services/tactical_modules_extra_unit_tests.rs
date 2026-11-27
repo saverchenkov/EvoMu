@@ -1174,3 +1174,277 @@ fn clear_entosis_warmup_on_unlock_is_noop_when_absent() {
     assert!(!tactical_test_helpers::has_entosis_target_cycles(&ctx, target_a, entosis_ship));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activate_tsb_persists_atomically_across_restart_without_checkpoints_and_honors_expiry() {
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = TempDirGuard(std::env::temp_dir().join(format!(
+        "evomu_tsb_restart_{}_{nanos}",
+        std::process::id()
+    )));
+    std::fs::create_dir_all(&dir.0).expect("create temp dir");
+    let db_path = dir.0.join("tsb_world.sqlite");
+
+    let mut sde = (*shared_sde()).clone();
+    sde.types.insert(
+        4_409,
+        custom_inv_type(
+            &sde,
+            4_409,
+            1154,
+            7,
+            "Target Spectrum Breaker",
+            &[(6, 250.0), (3114, 0.25), (3115, 12_000.0), (669, 150_000.0)],
+        ),
+    );
+    let sde = Arc::new(sde);
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 945_001_i64;
+    let ship_id = 945_100_i64;
+    let mod_id = 945_200_i64;
+    let now = 1_800_000_000_u64;
+    let expected_until = now + 12;
+
+    {
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 1"));
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.insert(
+                char_id,
+                eve_db::CharacterRecord {
+                    character_id: char_id,
+                    user_id: char_id as u64,
+                    name: format!("Pilot {char_id}"),
+                    corporation_id: 1_000_125,
+                    solar_system_id: sys_id,
+                    active_ship_id: ship_id,
+                    security_status: 5.0,
+                    clone_grade: 2,
+                    ..Default::default()
+                },
+            );
+        });
+        ensure_char(&ctx, char_id, 1_000_125, sys_id, ship_id, 2);
+        insert_item(
+            &ctx,
+            ship_id,
+            587,
+            char_id,
+            i64::from(sys_id),
+            InventoryFlag::Hangar,
+            1,
+            true,
+        );
+        insert_item(
+            &ctx,
+            mod_id,
+            4_409,
+            char_id,
+            ship_id,
+            InventoryFlag::MedSlot0,
+            1,
+            true,
+        );
+        spawn_ship_ball_with_cs(
+            &ctx,
+            sys_id,
+            ship_id,
+            587,
+            char_id,
+            1_000_125,
+            DVec3::ZERO,
+            1_000.0,
+        )
+        .await;
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        let tsb_type = ctx.sde.types.get(&4_409).expect("tsb type").clone();
+        let tsb_state = DogmaItemState::from_sde(mod_id, 4_409, &ctx.sde);
+
+        let observed_commits: Arc<std::sync::Mutex<Vec<(bool, Option<u64>)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let obs_clone = Arc::clone(&observed_commits);
+        let listener_id = db.register_post_commit_listener(Arc::new(move |snap, _cs, _eff| {
+            obs_clone.lock().unwrap().push((
+                snap.module_active_states.contains(&mod_id),
+                snap.combat_crimewatch_state.tsb_self_penalty_until.get(&ship_id).copied(),
+            ));
+        }));
+
+        let tx_before = db.tx_commit_count();
+        let rep = activate_target_spectrum_breaker(
+            &ctx,
+            &sys,
+            char_id,
+            ship_id,
+            mod_id,
+            &tsb_type,
+            &tsb_state,
+        )
+        .await
+        .expect("activate target spectrum breaker");
+        db.remove_post_commit_listener(listener_id);
+        assert_eq!(rep.dict_get("active"), Some(&PyRep::Bool(true)));
+        let commits = observed_commits.lock().unwrap().clone();
+        assert!(
+            !commits.contains(&(true, None)) && !commits.contains(&(false, Some(expected_until))),
+            "activate_target_spectrum_breaker must never split module_active_states and tsb_self_penalty_until across separate txs (tx_before={tx_before}, commits={commits:?})"
+        );
+        assert!(
+            commits.contains(&(true, Some(expected_until))),
+            "activate_target_spectrum_breaker must commit penalty and module_active_states atomically in the same tx (commits={commits:?})"
+        );
+        db.with_snapshot(|snap| {
+            assert!(snap.module_active_states.contains(&mod_id));
+            assert_eq!(
+                snap.combat_crimewatch_state.tsb_self_penalty_until.get(&ship_id),
+                Some(&expected_until)
+            );
+        });
+        // Intentionally drop `ctx` and `db` WITHOUT calling `persist_server_runtime_to_db`.
+    }
+
+    let db2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 2"));
+    db2.with_snapshot(|snap| {
+        assert_eq!(
+            snap.combat_crimewatch_state.tsb_self_penalty_until.get(&ship_id),
+            Some(&expected_until)
+        );
+    });
+    let tac_rows = db2
+        .with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<serde_json::Value>(
+                conn,
+                eve_db::sqlite_store::system_checkpoint::KIND_TACTICAL_DURABLE,
+            )
+        })
+        .expect("load tactical durable checkpoints");
+    assert!(
+        tac_rows.is_empty(),
+        "TSB activation must not write KIND_TACTICAL_DURABLE (`tsb|...`) system_checkpoint rows (got {tac_rows:?})"
+    );
+
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now + 5)));
+    assert_eq!(
+        tactical_test_helpers::get_tsb_self_penalty_until(&ctx2, ship_id),
+        Some(expected_until)
+    );
+
+    let mut active_attrs = HashMap::from([
+        (564u16, 200.0),
+        (208u16, 20.0),
+        (209u16, 24.0),
+        (210u16, 28.0),
+        (211u16, 32.0),
+    ]);
+    apply_tactical_module_ship_attributes(&ctx2, ship_id, &mut active_attrs);
+    assert!((active_attrs[&564] - 150.0).abs() < 1e-6);
+    assert!((active_attrs[&208] - 15.0).abs() < 1e-6);
+    assert!((active_attrs[&209] - 18.0).abs() < 1e-6);
+    assert!((active_attrs[&210] - 21.0).abs() < 1e-6);
+    assert!((active_attrs[&211] - 24.0).abs() < 1e-6);
+
+    // Exact boundary: `now_unix == expected_until` (`now_unix < until` is false) lifts penalty.
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(expected_until)));
+    let mut expired_attrs = HashMap::from([
+        (564u16, 200.0),
+        (208u16, 20.0),
+        (209u16, 24.0),
+        (210u16, 28.0),
+        (211u16, 32.0),
+    ]);
+    apply_tactical_module_ship_attributes(&ctx2, ship_id, &mut expired_attrs);
+    assert!((expired_attrs[&564] - 200.0).abs() < 1e-6);
+    assert!((expired_attrs[&208] - 20.0).abs() < 1e-6);
+    assert!((expired_attrs[&211] - 32.0).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_server_contexts_isolate_tsb_self_penalty_until() {
+    let setup_sde = |sde: &mut SdeRegistry| {
+        sde.types.insert(
+            4_409,
+            custom_inv_type(
+                sde,
+                4_409,
+                1154,
+                7,
+                "Target Spectrum Breaker",
+                &[(6, 250.0), (3114, 0.25), (3115, 12_000.0), (669, 150_000.0)],
+            ),
+        );
+    };
+    let ctx_a = test_ctx_with_custom_types(setup_sde);
+    let ctx_b = test_ctx_with_custom_types(setup_sde);
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 946_001_i64;
+    let ship_id = 946_100_i64;
+    let mod_id = 946_200_i64;
+
+    for ctx in [&ctx_a, &ctx_b] {
+        ensure_char(ctx, char_id, 1_000_125, sys_id, ship_id, 2);
+        insert_item(
+            ctx,
+            ship_id,
+            587,
+            char_id,
+            i64::from(sys_id),
+            InventoryFlag::Hangar,
+            1,
+            true,
+        );
+        insert_item(
+            ctx,
+            mod_id,
+            4_409,
+            char_id,
+            ship_id,
+            InventoryFlag::MedSlot0,
+            1,
+            true,
+        );
+        spawn_ship_ball_with_cs(
+            ctx,
+            sys_id,
+            ship_id,
+            587,
+            char_id,
+            1_000_125,
+            DVec3::ZERO,
+            1_000.0,
+        )
+        .await;
+    }
+
+    let sys_a = ctx_a.systems.get_or_spawn(sys_id);
+    let tsb_type = ctx_a.sde.types.get(&4_409).expect("tsb type").clone();
+    let tsb_state = DogmaItemState::from_sde(mod_id, 4_409, &ctx_a.sde);
+    activate_target_spectrum_breaker(&ctx_a, &sys_a, char_id, ship_id, mod_id, &tsb_type, &tsb_state)
+        .await
+        .expect("activate TSB on ctx_a");
+
+    assert!(tactical_test_helpers::get_tsb_self_penalty_until(&ctx_a, ship_id).is_some());
+    assert_eq!(tactical_test_helpers::get_tsb_self_penalty_until(&ctx_b, ship_id), None);
+
+    let mut attrs_a = HashMap::from([(564u16, 200.0), (208u16, 20.0)]);
+    let mut attrs_b = HashMap::from([(564u16, 200.0), (208u16, 20.0)]);
+    apply_tactical_module_ship_attributes(&ctx_a, ship_id, &mut attrs_a);
+    apply_tactical_module_ship_attributes(&ctx_b, ship_id, &mut attrs_b);
+    assert!((attrs_a[&564] - 150.0).abs() < 1e-6);
+    assert!((attrs_a[&208] - 15.0).abs() < 1e-6);
+    assert!((attrs_b[&564] - 200.0).abs() < 1e-6);
+    assert!((attrs_b[&208] - 20.0).abs() < 1e-6);
+}
+

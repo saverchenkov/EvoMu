@@ -951,6 +951,7 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
             30_000_142,
             vec![(90_000_002, 500_000.0, 1_700_008_500)],
         )]),
+        tsb_self_penalty_until: HashMap::from([(80_001, 1_700_009_500)]),
         recently_destroyed_item_ids: VecDeque::from([1_897_080_352, 1_897_080_353]),
         extended_runtime_json: "{\"bounty_flush\":1}".to_string(),
     };

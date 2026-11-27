@@ -417,12 +417,19 @@ fn empty_collections_negative_sorting_and_remaining_durable_domain_roundtrips() 
     combat.pending_bounty_ticks.insert((30_000_142, 90_001), 125_000.0);
     combat.bounty_tick_next_flush_unix.insert((30_000_142, 90_001), 1_700_001_200);
     combat.pending_bounty_tick_started_unix.insert((30_000_142, 90_001), 1_700_000_000);
+    combat.tsb_self_penalty_until.insert(80_001, 1_700_009_500);
     combat.record_destroyed_item_id(1_897_080_352);
     combat.record_destroyed_item_id(1_897_080_353);
     let combat_json = serde_json::to_string(&combat).unwrap();
     assert_eq!(
         serde_json::from_str::<PersistedCombatCrimewatchState>(&combat_json).unwrap(),
         combat
+    );
+    assert!(
+        serde_json::from_str::<PersistedCombatCrimewatchState>("{}")
+            .unwrap()
+            .tsb_self_penalty_until
+            .is_empty()
     );
 
     // FIFO ring-buffer cap (1,024) + deduplication + <= 0 guard on PersistedCombatCrimewatchState
