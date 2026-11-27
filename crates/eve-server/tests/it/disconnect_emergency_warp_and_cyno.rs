@@ -15,8 +15,8 @@ use eve_server::services::pve_crab_beacons::{
     CrabBeaconPhase, CrabBeaconRecord, TYPE_CRAB_BEACON,
 };
 use eve_server::services::tactical_modules::tactical_test_helpers::{
-    clear_active_entosis_links, clear_clone_vat_bay_activated, clear_lance_victim_debuff,
-    insert_active_entosis_link, mark_clone_vat_bay_activated, set_lance_victim_debuff_until,
+    clear_active_entosis_links, clear_lance_victim_debuff, insert_active_entosis_link,
+    set_lance_victim_debuff_until,
 };
 use eve_server::services::tactical_modules::ActiveEntosisLinkState;
 use eve_server::sp6_lifecycle::{
@@ -247,7 +247,20 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
     );
     clear_lance_victim_debuff(&ctx, ship_id);
 
-    mark_clone_vat_bay_activated(&ctx, ship_id);
+    let cvb_mod_id: i64 = 99_005;
+    seed_stack(&ctx, cvb_mod_id, 23_735, CHAR_PRIMARY, ship_id, InventoryFlag::HiSlot1, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.type_id = 28_352;
+        }
+        snap.module_online_states.insert(cvb_mod_id, true);
+        snap.module_active_states.insert(cvb_mod_id);
+        snap.cluster_and_runtime
+            .clone_vat_bay_state
+            .active_by_ship
+            .insert(ship_id, (cvb_mod_id, now + 300));
+        snap.sp6_lifecycle.disconnected_ships.remove(&CHAR_PRIMARY);
+    });
     assert!(
         handle_character_logoff_or_disconnect(&ctx, CHAR_PRIMARY)
             .await
@@ -255,7 +268,17 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
             .emergency_warp_dest
             .is_none()
     );
-    clear_clone_vat_bay_activated(&ctx, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.type_id = 77_283;
+        }
+        snap.module_active_states.remove(&cvb_mod_id);
+        snap.cluster_and_runtime
+            .clone_vat_bay_state
+            .active_by_ship
+            .remove(&ship_id);
+        snap.sp6_lifecycle.disconnected_ships.remove(&CHAR_PRIMARY);
+    });
 
     seed_stack(&ctx, 99_004, 28_583, CHAR_PRIMARY, ship_id, InventoryFlag::HiSlot0, 1, true);
     ctx.db.with_mut_snapshot(|snap| {
@@ -474,4 +497,146 @@ async fn mid_tunnel_warp_preservation_gatecamp_bubble_interception_and_active_cy
         assert!(!snap.module_active_states.contains(&cyno_mod_id));
         assert!(!snap.module_active_charges.contains_key(&cyno_mod_id));
     });
+}
+
+#[tokio::test]
+async fn clone_vat_bay_activation_refuses_safe_logoff_and_holds_disconnect_until_cycle_end() {
+    let ctx = Arc::new(ServerContext::new());
+    pin_clock(&ctx);
+
+    let lowsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status < 0.45 && s.region_id != 10_000_070 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_813);
+    let mut pilot = gm_pilot_in_space(&ctx, 9205, 90_992_005, 28_352, lowsec_sys).await;
+    let kw = HashMap::new();
+
+    grant_skills_for(&ctx, pilot.char_id, &[28_352, 23_735]);
+    let (cvb_mod_id, ozone_id) = ctx.db.with_mut_snapshot(|snap| {
+        (snap.alloc_entity_id(), snap.alloc_entity_id())
+    });
+    seed_stack(
+        &ctx,
+        cvb_mod_id,
+        23_735,
+        pilot.char_id,
+        pilot.ship_id,
+        InventoryFlag::HiSlot0,
+        1,
+        true,
+    );
+    seed_stack(
+        &ctx,
+        ozone_id,
+        16_273,
+        pilot.char_id,
+        pilot.ship_id,
+        InventoryFlag::SpecializedFuelBay,
+        1_000,
+        false,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(cvb_mod_id, true);
+    });
+    ctx.invalidate_ship_fitting(pilot.ship_id);
+
+    // Activate Clone Vat Bay through the real `dogmaIM.Activate` wire handler.
+    let cvb_rep = borrow_wire_harness(&ctx, &mut pilot.sess)
+        .call_ok("dogmaIM", None, "Activate", &[PyRep::Integer(cvb_mod_id)], &kw)
+        .await;
+    assert_eq!(
+        cvb_rep.dict_get("cloneVatBayActive").and_then(PyRep::as_bool),
+        Some(true)
+    );
+    let until_unix = cvb_rep
+        .dict_get("activeUntilUnix")
+        .and_then(PyRep::as_i64)
+        .expect("activeUntilUnix") as u64;
+    let activated_at = ctx.now_unix();
+    assert!(until_unix > activated_at);
+
+    // 1. While Clone Vat Bay cycle is active, `ship.SafeLogoff` is refused.
+    let safe_out = borrow_wire_harness(&ctx, &mut pilot.sess)
+        .call_exchange("ship", None, "SafeLogoff", &[], &kw)
+        .await;
+    let safe_res = safe_out.result.expect("SafeLogoff refusal list");
+    let PyRep::List(refused_conds) = safe_res else {
+        panic!("expected SafeLogoff refusal list, got {safe_res:?}");
+    };
+    assert!(
+        refused_conds.contains(&PyRep::String("SAFE_LOGOFF_ACTIVE_MODULES".into())),
+        "active Clone Vat Bay must refuse SafeLogoff, got {refused_conds:?}"
+    );
+    assert!(
+        safe_out
+            .notifications
+            .iter()
+            .any(|(ev, _)| ev == "OnSafeLogoffFailed"),
+        "refused SafeLogoff must emit OnSafeLogoffFailed"
+    );
+
+    // 2. While Clone Vat Bay cycle is active, ungraceful disconnect blocks emergency warp
+    //    and holds the ship in space for at least `NPC_TIMER_SECS` (past unaggressed 60s).
+    let disc_active = handle_character_logoff_or_disconnect(&ctx, pilot.char_id)
+        .await
+        .expect("disconnected ship entry while Clone Vat Bay active");
+    assert!(
+        disc_active.emergency_warp_dest.is_none(),
+        "active Clone Vat Bay must block emergency warp on disconnect"
+    );
+    assert!(
+        disc_active.remove_at_unix
+            >= disc_active.disconnected_at_unix + eve_server::sp6_lifecycle::NPC_TIMER_SECS,
+        "active Clone Vat Bay must hold ship for NPC_TIMER_SECS"
+    );
+    let sys = ctx.systems.get_or_spawn(lowsec_sys);
+    ctx.advance_secs(eve_server::sp6_lifecycle::UNAGGRESSED_LOGOFF_REMOVE_SECS + 30);
+    assert!(
+        sys.get_ball_snapshot(pilot.ship_id).await.unwrap().is_some(),
+        "held ship must remain in space past unaggressed timer while Clone Vat Bay is active"
+    );
+
+    // 3. Reconnect and advance past the cycle's end time: neither SafeLogoff nor disconnect holds.
+    let recon = reconnect_character_in_space_sync(&ctx, pilot.char_id);
+    assert!(recon.is_some(), "pilot reconnect in space");
+    ctx.sync_session(&mut pilot.sess);
+
+    let rem_secs = until_unix.saturating_sub(ctx.now_unix()) + 5;
+    ctx.advance_secs(rem_secs);
+    let cycle_span_s = (until_unix.saturating_sub(activated_at) + 5) as f64;
+    sys.step_manual(cycle_span_s).await.unwrap();
+
+    let safe_ok = borrow_wire_harness(&ctx, &mut pilot.sess)
+        .call_ok("ship", None, "SafeLogoff", &[], &kw)
+        .await;
+    assert_eq!(
+        safe_ok,
+        PyRep::List(vec![]),
+        "SafeLogoff must succeed after Clone Vat Bay cycle ends"
+    );
+    let abort_ok = borrow_wire_harness(&ctx, &mut pilot.sess)
+        .call_ok("ship", None, "AbortSafeLogoff", &[], &kw)
+        .await;
+    assert_eq!(abort_ok, PyRep::Bool(true));
+
+    let disc_after = handle_character_logoff_or_disconnect(&ctx, pilot.char_id)
+        .await
+        .expect("disconnected ship entry after Clone Vat Bay cycle end");
+    assert!(
+        disc_after.emergency_warp_dest.is_some(),
+        "expired Clone Vat Bay must not block emergency warp on disconnect"
+    );
+    assert_eq!(
+        disc_after.remove_at_unix,
+        disc_after.disconnected_at_unix + eve_server::sp6_lifecycle::UNAGGRESSED_LOGOFF_REMOVE_SECS,
+        "expired Clone Vat Bay must not extend disconnect hold beyond unaggressed timer"
+    );
+    ctx.advance_secs(eve_server::sp6_lifecycle::UNAGGRESSED_LOGOFF_REMOVE_SECS + 1);
+    assert!(
+        sys.get_ball_snapshot(pilot.ship_id).await.unwrap().is_none(),
+        "unheld ship must despawn after unaggressed logoff timer once Clone Vat Bay ended"
+    );
 }

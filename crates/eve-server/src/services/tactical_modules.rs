@@ -256,18 +256,24 @@ pub struct TacticalModulesState {
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
     pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
-    pub clone_vat_bay_activated_ships: std::collections::HashSet<(usize, i64)>,
     pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
     pub launcher_last_fire: HashMap<(usize, i64), super::tactical_module_mechanics::LauncherFireStamp>,
     pub system_sim_time_s: HashMap<(usize, u32), f64>,
     pub(crate) in_flight_superweapons: std::collections::HashSet<(usize, i64)>,
 }
 
+/// Returns `true` if `ship_id` has an active Clone Vat Bay cycle at `now_unix` recorded in `WorldStateSnapshot`.
+pub fn is_clone_vat_bay_active_at(ctx: &ServerContext, ship_id: i64, now_unix: u64) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        crate::services::character_clone_jump_rules::is_ship_clone_vat_bay_active(
+            ctx, snap, ship_id, now_unix,
+        )
+    })
+}
+
+/// Returns `true` if `ship_id` has an active Clone Vat Bay cycle at the current server time.
 pub fn is_clone_vat_bay_active_required(ctx: &ServerContext, ship_id: i64) -> bool {
-    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    st.clone_vat_bay_activated_ships.contains(&(db_key, ship_id))
-        || st.clone_vat_bay_activated_ships.contains(&(inst_key, ship_id))
+    is_clone_vat_bay_active_at(ctx, ship_id, ctx.now_unix())
 }
 
 fn db_key_of(ctx: &ServerContext) -> usize { db_ptr_key(&ctx.db) }
@@ -1533,55 +1539,6 @@ pub mod tactical_test_helpers {
             .tsb_self_penalty_until
             .get(&(key, ship_id))
             .copied()
-    }
-
-    /// Marks `ship_id` as having an active Clone Vat Bay under `scope`.
-    pub fn mark_clone_vat_bay_activated_for_scope(
-        ctx: &ServerContext,
-        scope: TacticalKeyScope,
-        ship_id: i64,
-    ) {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_vat_bay_activated_ships
-            .insert((key, ship_id));
-    }
-
-    /// Marks `ship_id` as having an active Clone Vat Bay.
-    pub fn mark_clone_vat_bay_activated(ctx: &ServerContext, ship_id: i64) {
-        mark_clone_vat_bay_activated_for_scope(ctx, TacticalKeyScope::Db, ship_id);
-    }
-
-    /// Returns `true` if `ship_id` is marked as Clone Vat Bay activated under `scope`.
-    #[cfg(test)]
-    pub(crate) fn has_clone_vat_bay_activated_for_scope(
-        ctx: &ServerContext,
-        scope: TacticalKeyScope,
-        ship_id: i64,
-    ) -> bool {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_vat_bay_activated_ships
-            .contains(&(key, ship_id))
-    }
-
-    /// Clears Clone Vat Bay activation tracking for `ship_id` across both DB and instance scopes.
-    pub fn clear_clone_vat_bay_activated(ctx: &ServerContext, ship_id: i64) {
-        let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        st.clone_vat_bay_activated_ships.remove(&(db_key, ship_id));
-        st.clone_vat_bay_activated_ships.remove(&(inst_key, ship_id));
-    }
-
-    /// Clears all Clone Vat Bay activation tracking on `ctx` across DB and instance scopes.
-    pub fn clear_all_clone_vat_bay_activated(ctx: &ServerContext) {
-        let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner())
-            .clone_vat_bay_activated_ships.retain(|&(k, _)| k != db_key && k != inst_key);
     }
 
     /// Sets the simulation time for `sys_id` under `scope`.

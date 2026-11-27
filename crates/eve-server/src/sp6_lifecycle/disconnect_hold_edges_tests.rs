@@ -4,8 +4,7 @@
 
 use super::*;
 use crate::services::tactical_modules::tactical_test_helpers::{
-    clear_clone_vat_bay_activated, clear_lance_caster_lock, mark_clone_vat_bay_activated,
-    set_lance_caster_lock_until,
+    clear_lance_caster_lock, set_lance_caster_lock_until,
 };
 use crate::system_actor::ActiveModuleCycle;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
@@ -61,6 +60,42 @@ fn make_sde_with_siege() -> SdeRegistry {
             default_attributes: attrs,
         },
     );
+    for (type_id, group_id, category_id, name) in [
+        (28_352_u32, 883_u32, 6_u32, "Rorqual"),
+        (23_735_u32, 815_u32, 7_u32, "Clone Vat Bay I"),
+    ] {
+        sde.types.insert(
+            type_id,
+            InvType {
+                type_id,
+                group_id,
+                category_id,
+                name: name.into(),
+                mass: 100.0,
+                volume: 100.0,
+                capacity: 0.0,
+                radius: 1.0,
+                base_price: 0.0,
+                published: true,
+                portion_size: 1,
+                market_group_id: None,
+                race_id: None,
+                faction_id: None,
+                variation_parent_type_id: None,
+                description_id: None,
+                icon_id: None,
+                graphic_id: None,
+                sound_id: None,
+                meta_group_id: None,
+                meta_level: None,
+                tech_level: None,
+                default_effect_id: None,
+                description: String::new(),
+                effect_ids: Vec::new(),
+                default_attributes: HashMap::new(),
+            },
+        );
+    }
     sde
 }
 
@@ -175,15 +210,61 @@ async fn emergency_warp_blocking_tactical_engagement_and_hold_timers_cover_all_s
     assert!(compute_disconnect_hold_until_unix(&ctx, sys_id, ship_id, now) >= now + 240);
     clear_lance_caster_lock(&ctx, ship_id);
 
-    // 4. Clone vat bay activated ship blocks warp & adds NPC_TIMER_SECS hold
-    mark_clone_vat_bay_activated(&ctx, ship_id);
+    // 4. Active Clone Vat Bay cycle on a Rorqual (`28_352`, group `883`) blocks warp & adds NPC_TIMER_SECS hold
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 28_352,
+                owner_id: 1,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            700_009,
+            InventoryItemRecord {
+                item_id: 700_009,
+                type_id: 23_735,
+                owner_id: 1,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(700_009, true);
+        snap.module_active_states.insert(700_009);
+        snap.cluster_and_runtime
+            .clone_vat_bay_state
+            .active_by_ship
+            .insert(ship_id, (700_009, now + 300));
+    });
     assert!(is_disconnect_emergency_warp_blocked(&ctx, &sys, ship_id));
     assert!(has_tactical_engagement_on_disconnect(&ctx, ship_id));
     assert_eq!(
         compute_disconnect_hold_until_unix(&ctx, sys_id, ship_id, now),
         now + NPC_TIMER_SECS
     );
-    clear_clone_vat_bay_activated(&ctx, ship_id);
+    assert_eq!(
+        compute_disconnect_hold_until_unix(&ctx, sys_id, ship_id, now + 300),
+        0
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&700_009);
+        snap.cluster_and_runtime
+            .clone_vat_bay_state
+            .active_by_ship
+            .remove(&ship_id);
+    });
+    assert!(!is_disconnect_emergency_warp_blocked(&ctx, &sys, ship_id));
 
     // 5. Fitted active siege module in snap.module_active_states triggers immobilizing check
     ctx.db.with_mut_snapshot(|snap| {
@@ -232,11 +313,12 @@ async fn collect_expired_and_finalize_disconnected_ships_handle_filtering_extens
 
     ctx.db.with_mut_snapshot(|snap| {
         for sh in [sh_warping, sh_stationary, sh_held] {
+            let tid = if sh == sh_held { 28_352 } else { 587 };
             snap.items.insert(
                 sh,
                 InventoryItemRecord {
                     item_id: sh,
-                    type_id: 587,
+                    type_id: tid,
                     owner_id: 1,
                     location_id: i64::from(sys_id),
                     flag: InventoryFlag::None,
@@ -284,7 +366,7 @@ async fn collect_expired_and_finalize_disconnected_ships_handle_filtering_extens
             DisconnectedShipEntry {
                 char_id: c_held,
                 ship_id: sh_held,
-                ship_type_id: 587,
+                ship_type_id: 28_352,
                 solar_system_id: sys_id,
                 disconnected_at_unix: now - 100,
                 remove_at_unix: now - 5,
@@ -313,8 +395,29 @@ async fn collect_expired_and_finalize_disconnected_ships_handle_filtering_extens
         );
     });
 
-    // Hold c_held via clone_vat_bay_activated_ships
-    mark_clone_vat_bay_activated(&ctx, sh_held);
+    // Hold c_held via an active Clone Vat Bay cycle on Rorqual `sh_held`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            710_013,
+            InventoryItemRecord {
+                item_id: 710_013,
+                type_id: 23_735,
+                owner_id: 1,
+                location_id: sh_held,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(710_013, true);
+        snap.module_active_states.insert(710_013);
+        snap.cluster_and_runtime
+            .clone_vat_bay_state
+            .active_by_ship
+            .insert(sh_held, (710_013, now + 300));
+    });
 
     // Spawn ball only for sh_stationary to test ball-present vs ball-absent finalization
     let _ = sys

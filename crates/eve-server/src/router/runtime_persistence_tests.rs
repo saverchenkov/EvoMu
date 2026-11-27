@@ -1027,9 +1027,6 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
         assert_tac_persists("tsb_self_penalty_until", &|ts, k| {
             ts.tsb_self_penalty_until.insert((k, 18), 700);
         });
-        assert_tac_persists("clone_vat_bay_activated_ships", &|ts, k| {
-            ts.clone_vat_bay_activated_ships.insert((k, 19));
-        });
         assert_tac_persists("system_sim_time_s", &|ts, k| {
             ts.system_sim_time_s.insert((k, 30_000_142), 12.5);
         });

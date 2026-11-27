@@ -67,7 +67,6 @@ struct PersistedTacticalModulesPayload {
     pending_wubble_probes: Vec<(u8, PendingWubbleProbe)>,
     active_wubble_debuffs: Vec<((u8, i64), ActiveWubbleDebuff)>,
     tsb_self_penalty_until: Vec<((u8, i64), u64)>,
-    clone_vat_bay_activated_ships: Vec<(u8, i64)>,
     active_interdiction_probes: Vec<((u8, i64), ActiveInterdictionProbe)>,
     launcher_last_fire: Vec<((u8, i64), LauncherFireStamp)>,
     system_sim_time_s: Vec<((u8, u32), f64)>,
@@ -138,12 +137,6 @@ impl PersistedTacticalModulesPayload {
                 .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
                 .collect(),
-            clone_vat_bay_activated_ships: st
-                .clone_vat_bay_activated_ships
-                .iter()
-                .filter(|&&(k, _)| keep_key(k))
-                .map(|&(k, sid)| (tag_of(k), sid))
-                .collect(),
             active_interdiction_probes: st
                 .active_interdiction_probes
                 .iter()
@@ -170,7 +163,6 @@ impl PersistedTacticalModulesPayload {
         payload.entosis_target_cycles.sort_by_key(|(k, _)| *k);
         payload.active_wubble_debuffs.sort_by_key(|(k, _)| *k);
         payload.tsb_self_penalty_until.sort_by_key(|(k, _)| *k);
-        payload.clone_vat_bay_activated_ships.sort_unstable();
         payload.active_interdiction_probes.sort_by_key(|(k, _)| *k);
         payload.launcher_last_fire.sort_by_key(|(k, _)| *k);
         payload.system_sim_time_s.sort_by_key(|(k, _)| *k);
@@ -187,7 +179,6 @@ impl PersistedTacticalModulesPayload {
             && self.pending_wubble_probes.is_empty()
             && self.active_wubble_debuffs.is_empty()
             && self.tsb_self_penalty_until.is_empty()
-            && self.clone_vat_bay_activated_ships.is_empty()
             && self.active_interdiction_probes.is_empty()
             && self.launcher_last_fire.is_empty()
             && self.system_sim_time_s.is_empty()
@@ -234,11 +225,6 @@ impl PersistedTacticalModulesPayload {
             .tsb_self_penalty_until
             .into_iter()
             .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
-        st.clone_vat_bay_activated_ships = self
-            .clone_vat_bay_activated_ships
-            .into_iter()
-            .map(|(tag, sid)| (untag(tag), sid))
             .collect();
         st.active_interdiction_probes = self
             .active_interdiction_probes
@@ -381,7 +367,6 @@ enum DurableTacticalEntry {
     LanceCasterLockUntil(u8, i64, u64),
     LanceVictimDebuffUntil(u8, i64, u64),
     TsbSelfPenaltyUntil(u8, i64, u64),
-    CloneVatBayActivatedShip(u8, i64),
 }
 
 fn resolve_entity_solar_system_id(snap: &WorldStateSnapshot, entity_id: i64) -> u32 {
@@ -669,15 +654,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
                 ));
             }
         }
-        for &(k, sid) in &tac.clone_vat_bay_activated_ships {
-            if keep_tac_key(k) {
-                let tag = tac_tag(k);
-                dur.push((
-                    format!("cvb|{tag}|{sid}"),
-                    DurableTacticalEntry::CloneVatBayActivatedShip(tag, sid),
-                ));
-            }
-        }
         (sim, dur)
     };
     let fleet_extras = PersistedFleetExtrasPayload::from_ctx(ctx);
@@ -805,8 +781,18 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
             load_all_checkpoints_for_kind::<(i64, String, f64, f64, f64)>(conn, KIND_MAP_LANDMARKS)?;
         let sim_times =
             load_all_checkpoints_for_kind::<((u8, u32), f64)>(conn, KIND_SYSTEM_SIM_TIME)?;
-        let durable_tac =
-            load_all_checkpoints_for_kind::<DurableTacticalEntry>(conn, KIND_TACTICAL_DURABLE)?;
+        let durable_tac_raw =
+            load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_TACTICAL_DURABLE)?;
+        let mut durable_tac = Vec::with_capacity(durable_tac_raw.len());
+        for (sys_id, key, raw_val) in durable_tac_raw {
+            // Skip legacy `cvb|...` rows written before `#1541` Track G2b-1.
+            if key.starts_with("cvb|") {
+                continue;
+            }
+            let entry: DurableTacticalEntry = serde_json::from_value(raw_val)
+                .map_err(|e| format!("decode durable tactical entry '{key}': {e}"))?;
+            durable_tac.push((sys_id, key, entry));
+        }
         let fleet_extras =
             load_all_checkpoints_for_kind::<PersistedFleetExtrasPayload>(conn, KIND_FLEET_EXTRAS)?;
         let social_extras = load_all_checkpoints_for_kind::<PersistedSocialExtrasRuntimePayload>(
@@ -872,7 +858,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
         tac.lance_caster_lock_until.clear();
         tac.lance_victim_debuff_until.clear();
         tac.tsb_self_penalty_until.clear();
-        tac.clone_vat_bay_activated_ships.clear();
         tac.system_sim_time_s.clear();
         for (_, _, ((tag, sys), sim_s)) in sim_times {
             tac.system_sim_time_s.insert((untag(tag), sys), sim_s);
@@ -887,9 +872,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext) -> CheckpointLoadOutcome {
                 }
                 DurableTacticalEntry::TsbSelfPenaltyUntil(tag, sid, v) => {
                     tac.tsb_self_penalty_until.insert((untag(tag), sid), v);
-                }
-                DurableTacticalEntry::CloneVatBayActivatedShip(tag, sid) => {
-                    tac.clone_vat_bay_activated_ships.insert((untag(tag), sid));
                 }
             }
         }
@@ -1236,8 +1218,6 @@ mod tests {
             },
         );
         st.tsb_self_penalty_until.insert((inst_k, 110), 400);
-        st.clone_vat_bay_activated_ships.insert((db_k, 120));
-        st.clone_vat_bay_activated_ships.insert((inst_k, 121));
         st.active_interdiction_probes.insert(
             (db_k, 130),
             ActiveInterdictionProbe {
@@ -1281,8 +1261,6 @@ mod tests {
         assert_eq!(restored.pending_wubble_probes[0].0, new_inst_k);
         assert!(restored.active_wubble_debuffs.contains_key(&(new_db_k, 100)));
         assert_eq!(restored.tsb_self_penalty_until[&(new_inst_k, 110)], 400);
-        assert!(restored.clone_vat_bay_activated_ships.contains(&(new_db_k, 120)));
-        assert!(restored.clone_vat_bay_activated_ships.contains(&(new_inst_k, 121)));
         assert!(restored.active_interdiction_probes.contains_key(&(new_db_k, 130)));
         assert_eq!(restored.launcher_last_fire[&(new_inst_k, 140)].fired_unix, 500);
         assert_eq!(restored.system_sim_time_s[&(new_db_k, 30_000_142)], 42.5);
@@ -1643,5 +1621,130 @@ mod tests {
         assert!(!ctx.systems.is_module_active_sync(sys_id, 700_001, 800_002));
         assert!(!sys_h.active_module_ships.read().unwrap().contains(&700_001));
         assert!(!sys_h.view().has_active_module(700_001));
+    }
+
+    #[test]
+    fn legacy_cvb_checkpoint_row_and_payload_field_are_skipped_without_error() {
+        // 1. Old `cvb|...` checkpoint rows (both solo and alongside valid durable tactical rows)
+        //    must load cleanly without error, while non-`cvb|` corrupt rows still fail loudly.
+        let ctx_solo = test_ctx();
+        ctx_solo
+            .db
+            .with_sqlite_conn(|conn| {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "cvb|0|120",
+                    &serde_json::json!({ "CloneVatBayActivatedShip": [0, 120] }),
+                    1_800_000_000,
+                )
+            })
+            .expect("seed solo legacy cvb checkpoint");
+        assert!(matches!(
+            load_checkpoints_into_ctx(&ctx_solo),
+            CheckpointLoadOutcome::Loaded
+        ));
+        ctx_solo.hydrate_server_runtime_from_db();
+
+        let ctx = test_ctx();
+        ctx.db
+            .with_sqlite_conn(|conn| -> Result<(), String> {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "cvb|0|120",
+                    &serde_json::json!({ "CloneVatBayActivatedShip": [0, 120] }),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "cvb|1|121",
+                    &serde_json::json!({ "CloneVatBayActivatedShip": [1, 121] }),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lcl|0|500",
+                    &DurableTacticalEntry::LanceCasterLockUntil(0, 500, 1_800_000_999),
+                    1_800_000_000,
+                )
+            })
+            .expect("seed mixed legacy cvb + valid durable tactical checkpoints");
+        assert!(matches!(
+            load_checkpoints_into_ctx(&ctx),
+            CheckpointLoadOutcome::Loaded
+        ));
+        let db_k = db_ptr_key(&ctx.db);
+        assert_eq!(
+            ctx.tactical_state
+                .read()
+                .unwrap()
+                .lance_caster_lock_until
+                .get(&(db_k, 500)),
+            Some(&1_800_000_999)
+        );
+
+        // Re-persisting drops the obsolete `cvb|...` rows while keeping valid durable entries.
+        ctx.persist_server_runtime_to_db();
+        let remaining_keys: Vec<String> = ctx
+            .db
+            .with_sqlite_conn(|conn| {
+                load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_TACTICAL_DURABLE)
+            })
+            .expect("reload tactical durable keys")
+            .into_iter()
+            .map(|(_, k, _)| k)
+            .collect();
+        assert_eq!(remaining_keys, vec!["lcl|0|500".to_string()]);
+
+        // Genuinely corrupt non-`cvb|` row still produces CheckpointLoadOutcome::Error.
+        ctx.db
+            .with_sqlite_conn(|conn| {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lcl|0|999",
+                    &serde_json::json!({ "UnexpectedVariant": [0, 999] }),
+                    1_800_000_000,
+                )
+            })
+            .expect("seed corrupt non-cvb checkpoint");
+        assert!(matches!(
+            load_checkpoints_into_ctx(&ctx),
+            CheckpointLoadOutcome::Error(_)
+        ));
+
+        // 2. Legacy PersistedServerRuntimeState / PersistedTacticalModulesPayload JSON carrying
+        //    the removed field deserializes cleanly and hydrates remaining fields.
+        let ctx_legacy = test_ctx();
+        let legacy_field = ["clone_vat_bay", "activated_ships"].join("_");
+        let legacy_payload = serde_json::json!({
+            "map_landmarks": [[1, "LegacyMark", 1.0, 2.0, 3.0]],
+            "tactical_state": {
+                legacy_field: [[0, 120], [1, 121]],
+                "lance_caster_lock_until": [[[0, 500], 1_800_000_777]]
+            }
+        });
+        ctx_legacy.db.with_mut_snapshot(|snap| {
+            snap.cluster_and_runtime.server_runtime_json = Some(legacy_payload.to_string());
+        });
+        ctx_legacy.hydrate_server_runtime_from_db();
+        assert_eq!(
+            ctx_legacy
+                .tactical_state
+                .read()
+                .unwrap()
+                .lance_caster_lock_until
+                .get(&(db_ptr_key(&ctx_legacy.db), 500)),
+            Some(&1_800_000_777)
+        );
+        assert_eq!(ctx_legacy.map_landmarks.read().unwrap().len(), 1);
     }
 }
