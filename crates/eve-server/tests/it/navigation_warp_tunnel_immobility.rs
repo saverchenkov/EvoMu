@@ -587,18 +587,14 @@ async fn venture_jita_to_maurasi_gate_cloak_break_52au_warp_and_next_jump() {
     let decloaked_cs = dest_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(!decloaked_cs.is_cloaked, "CmdWarpToStuff must break gate cloak");
 
-    // Drain the Destiny stream queued on the system actor before stepping (normalizing like macho_listener does)
+    // Drain the Destiny stream queued on the system actor before stepping — raw_updates is natively V24
     let (_tick, _evs, raw_updates) = dest_handle
         .drain_observer_updates(ship_id)
         .await
         .expect("drain observer updates");
-    let norm_args = eve_server::router::client_compat::normalize_macho_notification(
-        "DoDestinyUpdate",
-        vec![raw_updates, PyRep::Bool(false)],
-    );
     let mut saw_uncloak_ball = false;
     let mut saw_fx_uncloak = false;
-    if let Some(PyRep::List(updates)) = norm_args.first() {
+    if let PyRep::List(updates) = &raw_updates {
         for entry in updates {
             let PyRep::Tuple(outer) = entry else { continue };
             let Some(PyRep::Tuple(inner)) = outer.get(1) else { continue };

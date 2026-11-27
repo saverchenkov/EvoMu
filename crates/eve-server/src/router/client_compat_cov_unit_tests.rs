@@ -82,7 +82,7 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     );
 
     // raffleProxy, scanMgr, ship, skillMgr2; direct builder preserves CRowset marshal layout
-    let quotes = build_v24_reprocessing_quotes_tuple(
+    let quotes = crate::services::space_entity_mining::build_v24_reprocessing_quotes_tuple(
         PyRep::Real(0.05),
         PyRep::Real(0.55),
         vec![PyRep::keyval([
@@ -180,14 +180,12 @@ fn issue_776_reprocess_list_and_fw_battlefield_compat() {
     assert_eq!(sys_bfs[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
 
     // #952, #960, #963: OnDamageMessage, OnDamageMessages, OnCombatMessage, and OnGodmaPrimeItem sublocation 805
-    assert!(should_suppress_macho_notification(
-        "OnCombatMessage",
-        &[PyRep::String("AttackHit".into()), PyRep::Dict(Vec::new())]
-    ));
-    assert!(should_suppress_macho_notification(
-        "OnCombatMessage",
-        &[PyRep::String("AttackedBy".into()), PyRep::Dict(Vec::new())]
-    ));
+    for key in ["AttackHit", "AttackedBy"] {
+        assert!(should_suppress_macho_notification(
+            "OnCombatMessage",
+            &[PyRep::String(key.into()), PyRep::Dict(Vec::new())]
+        ));
+    }
     let cm_norm = normalize_macho_notification(
         "OnCombatMessage",
         vec![PyRep::String("AttackedBy".into()), PyRep::Dict(Vec::new())],
@@ -836,56 +834,70 @@ fn signature_instances_normalize_nested_dungeon_map_to_system_counts() {
 }
 
 #[test]
-fn cloak_ball_and_special_fx_uncloak_normalize_to_v24_client_format() {
+fn cloak_ball_and_special_fx_uncloak_emit_native_v24_format_and_pass_through_notify() {
     let ship_id = 100_000_042_i64;
 
-    let uncloak_bool = normalize_destiny_payload_arg(PyRep::Tuple(vec![
-        PyRep::String("CloakBall".into()),
-        PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Bool(false)]),
-    ]));
-    assert_eq!(
-        uncloak_bool,
+    let uncloak_ev = eve_destiny::wire::encode_destiny_event(
+        10,
+        &eve_destiny::DestinyEvent::CloakBall {
+            ball_id: ship_id,
+            cloaked: 0,
+        },
+        None,
+    );
+    let expected_uncloak = PyRep::Tuple(vec![
+        PyRep::Integer(10),
         PyRep::Tuple(vec![
             PyRep::String("UncloakBall".into()),
             PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
-        ])
-    );
-
-    let uncloak_int = normalize_destiny_payload_arg(PyRep::Tuple(vec![
-        PyRep::String("CloakBall".into()),
-        PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Integer(0)]),
-    ]));
-    assert_eq!(
-        uncloak_int,
-        PyRep::Tuple(vec![
-            PyRep::String("UncloakBall".into()),
-            PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
-        ])
-    );
-
-    let cloak_on = PyRep::Tuple(vec![
-        PyRep::String("CloakBall".into()),
-        PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Bool(true)]),
-    ]);
-    assert_eq!(normalize_destiny_payload_arg(cloak_on.clone()), cloak_on);
-
-    let fx_uncloak = normalize_destiny_payload_arg(PyRep::Tuple(vec![
-        PyRep::String("OnSpecialFX".into()),
-        PyRep::Tuple(vec![
-            PyRep::Integer(ship_id),
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-            PyRep::String("effects.Cloak".into()),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(1),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
         ]),
-    ]));
-    let PyRep::Tuple(outer) = fx_uncloak else {
+    ]);
+    assert_eq!(uncloak_ev, expected_uncloak);
+
+    let cloak_ev = eve_destiny::wire::encode_destiny_event(
+        11,
+        &eve_destiny::DestinyEvent::CloakBall {
+            ball_id: ship_id,
+            cloaked: 1,
+        },
+        None,
+    );
+    let expected_cloak = PyRep::Tuple(vec![
+        PyRep::Integer(11),
+        PyRep::Tuple(vec![
+            PyRep::String("CloakBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Bool(true)]),
+        ]),
+    ]);
+    assert_eq!(cloak_ev, expected_cloak);
+
+    let fx_uncloak_ev = eve_destiny::wire::encode_destiny_event(
+        12,
+        &eve_destiny::DestinyEvent::OnSpecialFX {
+            ball_id: ship_id,
+            module_id: None,
+            guid: "effects.Cloak".into(),
+            is_active: false,
+        },
+        None,
+    );
+    let passthrough_args = vec![
+        PyRep::List(vec![
+            uncloak_ev.clone(),
+            cloak_ev.clone(),
+            fx_uncloak_ev.clone(),
+        ]),
+        PyRep::Bool(false),
+    ];
+    assert_eq!(
+        normalize_macho_notification("DoDestinyUpdate", passthrough_args.clone()),
+        passthrough_args
+    );
+
+    let PyRep::Tuple(stamped) = fx_uncloak_ev else {
+        panic!("expected stamped tuple");
+    };
+    let PyRep::Tuple(outer) = &stamped[1] else {
         panic!("expected OnSpecialFX tuple");
     };
     assert_eq!(outer[0], PyRep::String("OnSpecialFX".into()));

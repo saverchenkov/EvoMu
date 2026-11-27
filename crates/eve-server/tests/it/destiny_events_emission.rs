@@ -316,16 +316,18 @@ async fn test_cloak_ball_emitted_on_cloak_toggle() {
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce), "CmdStop", &[], &kw, None).await.expect("CmdStop");
     assert!(!handle.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
     let actions = drain_actions(&handle, ship_id).await;
-    let off = find(&actions, "CloakBall");
-    assert_eq!(off.len(), 1, "deactivating the cloak emits one CloakBall");
-    assert_eq!(off[0].as_slice(), &[PyRep::Integer(ship_id), PyRep::Bool(false)]);
+    let off = find(&actions, "UncloakBall");
+    assert_eq!(off.len(), 1, "deactivating the cloak emits one UncloakBall");
+    assert_eq!(off[0].as_slice(), &[PyRep::Integer(ship_id)]);
     assert!(
         find(&actions, "OnShipStateUpdate").is_empty(),
         "decloak must not emit OnShipStateUpdate attributeIsOnline=0.0"
     );
-    // No state change, no CloakBall.
+    // No state change, no CloakBall or UncloakBall.
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce), "CmdStop", &[], &kw, None).await.expect("CmdStop");
-    assert!(find(&drain_actions(&handle, ship_id).await, "CloakBall").is_empty());
+    let idle_actions = drain_actions(&handle, ship_id).await;
+    assert!(find(&idle_actions, "CloakBall").is_empty());
+    assert!(find(&idle_actions, "UncloakBall").is_empty());
 }
 
 #[tokio::test]
@@ -474,6 +476,7 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
     let (mut sess, _beyonce, ship_id) = login_and_undock(&ctx, 8108).await;
     let handle = ctx.systems.get_or_spawn(JITA);
     clear_invulnerability(&handle, ship_id).await;
+    let _ = drain_actions(&handle, ship_id).await;
     let kw = HashMap::new();
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Eject", &[], &kw, None).await.expect("Eject");

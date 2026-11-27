@@ -838,212 +838,222 @@ fn extract_destiny_rewrites(
     known_rules: &mut BTreeSet<String>,
 ) -> Result<usize, String> {
     let mut rewrites = 0usize;
-
-    // 1. `normalize_destiny_update_arg`: top-level `if` checks on `name`.
-    let (u_open, u_close) = find_fn_body_span(clean, "normalize_destiny_update_arg")?;
     let b = clean.as_bytes();
-    let mut pdepth = 0usize;
-    let mut brdepth = 0usize;
-    let mut i = u_open + 1;
-    while i < u_close {
-        if pdepth == 0 && brdepth == 0 && is_word_at(b, i, b"if") {
-            let hdr_end = find_if_header_end(b, i, u_close)?;
-            let names = extract_var_string_matches(&clean[i..hdr_end], &raw[i..hdr_end], "name");
-            if !names.is_empty() {
-                rewrites += 1;
-                for name in names {
-                    known_rules.insert(format!("destiny:update:{name}"));
+
+    // 1. `normalize_destiny_update_arg`: top-level `if` checks on `name` (0 when deleted).
+    if let Ok((u_open, u_close)) = find_fn_body_span(clean, "normalize_destiny_update_arg") {
+        let mut pdepth = 0usize;
+        let mut brdepth = 0usize;
+        let mut i = u_open + 1;
+        while i < u_close {
+            if pdepth == 0 && brdepth == 0 && is_word_at(b, i, b"if") {
+                let hdr_end = find_if_header_end(b, i, u_close)?;
+                let names = extract_var_string_matches(&clean[i..hdr_end], &raw[i..hdr_end], "name");
+                if !names.is_empty() {
+                    rewrites += 1;
+                    for name in names {
+                        known_rules.insert(format!("destiny:update:{name}"));
+                    }
                 }
             }
+            match b[i] {
+                b'(' => pdepth += 1,
+                b')' => pdepth = pdepth.saturating_sub(1),
+                b'[' => brdepth += 1,
+                b']' => brdepth = brdepth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
         }
-        match b[i] {
-            b'(' => pdepth += 1,
-            b')' => pdepth = pdepth.saturating_sub(1),
-            b'[' => brdepth += 1,
-            b']' => brdepth = brdepth.saturating_sub(1),
-            _ => {}
-        }
-        i += 1;
     }
 
-    // 2. `normalize_destiny_payload_arg`:
+    // 2. `normalize_destiny_payload_arg` (0 when deleted or trivial):
     //    (a) `fname` filter clauses in `PyRep::List(items)`
     //    (b) condition headers in `PyRep::Tuple(mut items)` (`name` branches + `effects.*` guards)
-    let (p_open, p_close) = find_fn_body_span(clean, "normalize_destiny_payload_arg")?;
-
-    let mut filter_pos = p_open + 1;
-    let mut closure_span = None;
-    while let Some(rel) = clean[filter_pos..p_close].find(".filter") {
-        let pos = filter_pos + rel;
-        let after_dot = pos + ".filter".len();
-        if !b.get(after_dot).copied().is_some_and(is_ident_byte) {
-            let open_paren = skip_ws_and_comments(b, after_dot);
-            if b.get(open_paren) == Some(&b'(') {
-                let mut cur = open_paren + 1;
-                let mut cp = 1usize;
-                while cur < p_close && cp > 0 {
-                    if cp == 1 && b[cur] == b'{' {
-                        let c_start = cur + 1;
-                        let mut cb = 1usize;
-                        let mut c_end = c_start;
-                        while c_end < p_close && cb > 0 {
-                            match b[c_end] {
-                                b'{' => cb += 1,
-                                b'}' => {
-                                    cb -= 1;
-                                    if cb == 0 {
-                                        break;
+    if let Ok((p_open, p_close)) = find_fn_body_span(clean, "normalize_destiny_payload_arg") {
+        let mut filter_pos = p_open + 1;
+        let mut closure_span = None;
+        while let Some(rel) = clean[filter_pos..p_close].find(".filter") {
+            let pos = filter_pos + rel;
+            let after_dot = pos + ".filter".len();
+            if !b.get(after_dot).copied().is_some_and(is_ident_byte) {
+                let open_paren = skip_ws_and_comments(b, after_dot);
+                if b.get(open_paren) == Some(&b'(') {
+                    let mut cur = open_paren + 1;
+                    let mut cp = 1usize;
+                    while cur < p_close && cp > 0 {
+                        if cp == 1 && b[cur] == b'{' {
+                            let c_start = cur + 1;
+                            let mut cb = 1usize;
+                            let mut c_end = c_start;
+                            while c_end < p_close && cb > 0 {
+                                match b[c_end] {
+                                    b'{' => cb += 1,
+                                    b'}' => {
+                                        cb -= 1;
+                                        if cb == 0 {
+                                            break;
+                                        }
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
+                                c_end += 1;
                             }
-                            c_end += 1;
+                            closure_span = Some((c_start, c_end));
+                            break;
                         }
-                        closure_span = Some((c_start, c_end));
+                        match b[cur] {
+                            b'(' => cp += 1,
+                            b')' => cp -= 1,
+                            _ => {}
+                        }
+                        cur += 1;
+                    }
+                    if closure_span.is_some() {
                         break;
                     }
-                    match b[cur] {
-                        b'(' => cp += 1,
-                        b')' => cp -= 1,
-                        _ => {}
-                    }
-                    cur += 1;
-                }
-                if closure_span.is_some() {
-                    break;
                 }
             }
+            filter_pos = after_dot;
         }
-        filter_pos = after_dot;
-    }
 
-    let (c_start, c_end) = closure_span
-        .ok_or_else(|| "missing `.filter(|...| { ... })` in `normalize_destiny_payload_arg`".to_string())?;
-    let mut last_semi = None;
-    let mut lb = 0usize;
-    let mut lp = 0usize;
-    let mut lbr = 0usize;
-    for k in c_start..c_end {
-        match b[k] {
-            b'{' => lb += 1,
-            b'}' => lb = lb.saturating_sub(1),
-            b'(' => lp += 1,
-            b')' => lp = lp.saturating_sub(1),
-            b'[' => lbr += 1,
-            b']' => lbr = lbr.saturating_sub(1),
-            b';' if lb == 0 && lp == 0 && lbr == 0 => last_semi = Some(k),
-            _ => {}
-        }
-    }
-    let expr_start = last_semi.map_or(c_start, |s| s + 1);
-    let mut conj_start = expr_start;
-    let mut cp = 0usize;
-    let mut cb = 0usize;
-    let mut cbr = 0usize;
-    let mut conjuncts = Vec::new();
-    let mut k = expr_start;
-    while k < c_end {
-        if cb == 0 && cp == 0 && cbr == 0 && k + 1 < c_end && b[k] == b'&' && b[k + 1] == b'&' {
-            conjuncts.push((conj_start, k));
-            conj_start = k + 2;
-            k += 2;
-            continue;
-        }
-        match b[k] {
-            b'{' => cb += 1,
-            b'}' => cb = cb.saturating_sub(1),
-            b'(' => cp += 1,
-            b')' => cp = cp.saturating_sub(1),
-            b'[' => cbr += 1,
-            b']' => cbr = cbr.saturating_sub(1),
-            _ => {}
-        }
-        k += 1;
-    }
-    conjuncts.push((conj_start, c_end));
-
-    for (cs, ce) in conjuncts {
-        let mut has_fname = false;
-        for pos in cs..ce {
-            if is_word_at(b, pos, b"fname") {
-                has_fname = true;
-                break;
-            }
-        }
-        if has_fname {
-            rewrites += 1;
-            for lit in extract_string_literals_ignoring_comments(&raw[cs..ce]) {
-                known_rules.insert(format!("destiny:payload:{lit}"));
-            }
-        }
-    }
-
-    let mut tuple_search = p_open;
-    let mut tuple_arm_open = None;
-    while let Some(tuple_rel) = clean[tuple_search..p_close].find("PyRep::Tuple") {
-        let mut after_pat = skip_ws_and_comments(b, tuple_search + tuple_rel + "PyRep::Tuple".len());
-        if b.get(after_pat) == Some(&b'(') {
-            let mut pat_p = 1usize;
-            after_pat += 1;
-            while after_pat < p_close && pat_p > 0 {
-                match b[after_pat] {
-                    b'(' => pat_p += 1,
-                    b')' => pat_p -= 1,
+        if let Some((c_start, c_end)) = closure_span {
+            let mut last_semi = None;
+            let mut lb = 0usize;
+            let mut lp = 0usize;
+            let mut lbr = 0usize;
+            for k in c_start..c_end {
+                match b[k] {
+                    b'{' => lb += 1,
+                    b'}' => lb = lb.saturating_sub(1),
+                    b'(' => lp += 1,
+                    b')' => lp = lp.saturating_sub(1),
+                    b'[' => lbr += 1,
+                    b']' => lbr = lbr.saturating_sub(1),
+                    b';' if lb == 0 && lp == 0 && lbr == 0 => last_semi = Some(k),
                     _ => {}
                 }
-                after_pat += 1;
             }
-            let arrow_pos = skip_ws_and_comments(b, after_pat);
-            if arrow_pos + 1 < p_close && b[arrow_pos] == b'=' && b[arrow_pos + 1] == b'>' {
-                let open = skip_ws_and_comments(b, arrow_pos + 2);
-                if b.get(open) == Some(&b'{') {
-                    tuple_arm_open = Some(open);
-                    break;
+            let expr_start = last_semi.map_or(c_start, |s| s + 1);
+            let mut conj_start = expr_start;
+            let mut cp = 0usize;
+            let mut cb = 0usize;
+            let mut cbr = 0usize;
+            let mut conjuncts = Vec::new();
+            let mut k = expr_start;
+            while k < c_end {
+                if cb == 0
+                    && cp == 0
+                    && cbr == 0
+                    && k + 1 < c_end
+                    && b[k] == b'&'
+                    && b[k + 1] == b'&'
+                {
+                    conjuncts.push((conj_start, k));
+                    conj_start = k + 2;
+                    k += 2;
+                    continue;
                 }
-            }
-        }
-        tuple_search = tuple_search + tuple_rel + "PyRep::Tuple".len();
-    }
-    let arm_open = tuple_arm_open
-        .ok_or_else(|| "missing `PyRep::Tuple(...) => {` arm in `normalize_destiny_payload_arg`".to_string())?;
-    let mut arm_b = 1usize;
-    let mut arm_close = arm_open + 1;
-    while arm_close < p_close && arm_b > 0 {
-        match b[arm_close] {
-            b'{' => arm_b += 1,
-            b'}' => {
-                arm_b -= 1;
-                if arm_b == 0 {
-                    break;
+                match b[k] {
+                    b'{' => cb += 1,
+                    b'}' => cb = cb.saturating_sub(1),
+                    b'(' => cp += 1,
+                    b')' => cp = cp.saturating_sub(1),
+                    b'[' => cbr += 1,
+                    b']' => cbr = cbr.saturating_sub(1),
+                    _ => {}
                 }
+                k += 1;
             }
-            _ => {}
-        }
-        arm_close += 1;
-    }
+            conjuncts.push((conj_start, c_end));
 
-    let mut tp = 0usize;
-    let mut tbr = 0usize;
-    let mut ti = arm_open + 1;
-    while ti < arm_close {
-        if tp == 0 && tbr == 0 && is_word_at(b, ti, b"if") {
-            let hdr_end = find_if_header_end(b, ti, arm_close)?;
-            let names = extract_var_string_matches(&clean[ti..hdr_end], &raw[ti..hdr_end], "name");
-            if !names.is_empty() {
-                rewrites += 1;
-            }
-            for lit in extract_string_literals_ignoring_comments(&raw[ti..hdr_end]) {
-                known_rules.insert(format!("destiny:payload:{lit}"));
+            for (cs, ce) in conjuncts {
+                let mut has_fname = false;
+                for pos in cs..ce {
+                    if is_word_at(b, pos, b"fname") {
+                        has_fname = true;
+                        break;
+                    }
+                }
+                if has_fname {
+                    rewrites += 1;
+                    for lit in extract_string_literals_ignoring_comments(&raw[cs..ce]) {
+                        known_rules.insert(format!("destiny:payload:{lit}"));
+                    }
+                }
             }
         }
-        match b[ti] {
-            b'(' => tp += 1,
-            b')' => tp = tp.saturating_sub(1),
-            b'[' => tbr += 1,
-            b']' => tbr = tbr.saturating_sub(1),
-            _ => {}
+
+        let mut tuple_search = p_open;
+        let mut tuple_arm_open = None;
+        while let Some(tuple_rel) = clean[tuple_search..p_close].find("PyRep::Tuple") {
+            let mut after_pat =
+                skip_ws_and_comments(b, tuple_search + tuple_rel + "PyRep::Tuple".len());
+            if b.get(after_pat) == Some(&b'(') {
+                let mut pat_p = 1usize;
+                after_pat += 1;
+                while after_pat < p_close && pat_p > 0 {
+                    match b[after_pat] {
+                        b'(' => pat_p += 1,
+                        b')' => pat_p -= 1,
+                        _ => {}
+                    }
+                    after_pat += 1;
+                }
+                let arrow_pos = skip_ws_and_comments(b, after_pat);
+                if arrow_pos + 1 < p_close && b[arrow_pos] == b'=' && b[arrow_pos + 1] == b'>' {
+                    let open = skip_ws_and_comments(b, arrow_pos + 2);
+                    if b.get(open) == Some(&b'{') {
+                        tuple_arm_open = Some(open);
+                        break;
+                    }
+                }
+            }
+            tuple_search = tuple_search + tuple_rel + "PyRep::Tuple".len();
         }
-        ti += 1;
+
+        if let Some(arm_open) = tuple_arm_open {
+            let mut arm_b = 1usize;
+            let mut arm_close = arm_open + 1;
+            while arm_close < p_close && arm_b > 0 {
+                match b[arm_close] {
+                    b'{' => arm_b += 1,
+                    b'}' => {
+                        arm_b -= 1;
+                        if arm_b == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                arm_close += 1;
+            }
+
+            let mut tp = 0usize;
+            let mut tbr = 0usize;
+            let mut ti = arm_open + 1;
+            while ti < arm_close {
+                if tp == 0 && tbr == 0 && is_word_at(b, ti, b"if") {
+                    let hdr_end = find_if_header_end(b, ti, arm_close)?;
+                    let names =
+                        extract_var_string_matches(&clean[ti..hdr_end], &raw[ti..hdr_end], "name");
+                    if !names.is_empty() {
+                        rewrites += 1;
+                    }
+                    for lit in extract_string_literals_ignoring_comments(&raw[ti..hdr_end]) {
+                        known_rules.insert(format!("destiny:payload:{lit}"));
+                    }
+                }
+                match b[ti] {
+                    b'(' => tp += 1,
+                    b')' => tp = tp.saturating_sub(1),
+                    b'[' => tbr += 1,
+                    b']' => tbr = tbr.saturating_sub(1),
+                    _ => {}
+                }
+                ti += 1;
+            }
+        }
     }
 
     Ok(rewrites)
@@ -1512,5 +1522,66 @@ mod tests {
         assert!(report
             .it_dispatch_rpc_files
             .contains("new_dispatch_test.rs"));
+    }
+
+    #[test]
+    fn extract_destiny_rewrites_supports_zero_state_and_legacy_rewrite_counts() {
+        let zero_root = make_temp_tree("zero_destiny");
+        std::fs::write(
+            zero_root.join("src/router/client_compat.rs"),
+            r#"
+pub fn normalize_macho_rpc_reply_at(service: &str, method: &str, rpc_res: i32) -> i32 {
+    if service == "svcA" && method == "actOne" {
+        return rpc_res;
+    }
+    rpc_res
+}
+
+pub fn should_suppress_macho_notification(event: &str, args: &[i32]) -> bool {
+    if event == "DoDestinyUpdate" && args.is_empty() {
+        return true;
+    }
+    false
+}
+
+pub fn normalize_macho_notification_with_sde(event: &str) {
+    match event {
+        "DoDestinyUpdates" => {}
+        _ => {}
+    }
+}
+"#,
+        )
+        .unwrap();
+        let zero_report = scan_client_compat_in_dirs(&zero_root, &zero_root.join("tests/it"))
+            .expect("scan zero-destiny compat tree");
+        let _ = std::fs::remove_dir_all(&zero_root);
+        assert_eq!(zero_report.destiny_rewrites, 0);
+        assert!(zero_report.counters["destiny_rewrites"].is_empty());
+        assert!(!zero_report
+            .known_rules
+            .iter()
+            .any(|rule| rule.starts_with("destiny:")));
+        assert!(zero_report.known_rules.contains("suppress:DoDestinyUpdate"));
+        assert!(zero_report.known_rules.contains("notify:DoDestinyUpdates"));
+
+        let legacy_root = make_temp_tree("legacy_destiny");
+        write_minimal_compat_tree(&legacy_root, "");
+        let legacy_report =
+            scan_client_compat_in_dirs(&legacy_root, &legacy_root.join("tests/it"))
+                .expect("scan legacy-destiny compat tree");
+        let _ = std::fs::remove_dir_all(&legacy_root);
+        assert_eq!(legacy_report.destiny_rewrites, 4);
+        assert_eq!(
+            legacy_report.counters["destiny_rewrites"]
+                .get("crates/eve-server/src/router/client_compat.rs"),
+            Some(&4)
+        );
+        assert!(legacy_report
+            .known_rules
+            .contains("destiny:update:OnDockingAccepted"));
+        assert!(legacy_report
+            .known_rules
+            .contains("destiny:payload:CloakBall"));
     }
 }

@@ -963,6 +963,31 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                     .get(&key)
                     .or_else(|| p.pending_pruned_fx_meta.get(&key).map(|(_, m)| m))
             });
+            let is_uncloak_fx = guid == "effects.Cloak" && !*is_active;
+            let (wire_guid, start, active, duration, repeat) = if is_uncloak_fx {
+                // V24 decloak plays `effects.Uncloak` as a 6s one-shot (`start=1, active=0, duration=6000, repeat=1`).
+                (
+                    "effects.Uncloak".to_string(),
+                    1_i64,
+                    0_i64,
+                    PyRep::Integer(6000),
+                    PyRep::Integer(1),
+                )
+            } else {
+                (
+                    guid.clone(),
+                    i64::from(*is_active),
+                    i64::from(*is_active),
+                    fx_meta
+                        .and_then(|m| m.duration_ms)
+                        .map(PyRep::Real)
+                        .unwrap_or(PyRep::Integer(-1)),
+                    fx_meta
+                        .and_then(|m| m.repeat)
+                        .map(PyRep::Integer)
+                        .unwrap_or(PyRep::None),
+                )
+            };
             PyRep::Tuple(vec![
                 PyRep::String("OnSpecialFX".into()),
                 // V24 14-arg layout (`michelle.py:2087`, `spaceMgr.py:605`):
@@ -983,18 +1008,12 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                         .and_then(|m| m.other_type_id)
                         .map(|t| PyRep::Integer(i64::from(t)))
                         .unwrap_or(PyRep::None),
-                    PyRep::String(guid.clone()),
+                    PyRep::String(wire_guid),
                     PyRep::Bool(fx_meta.is_some_and(|m| m.is_offensive)),
-                    PyRep::Integer(i64::from(*is_active)),
-                    PyRep::Integer(i64::from(*is_active)),
-                    fx_meta
-                        .and_then(|m| m.duration_ms)
-                        .map(PyRep::Real)
-                        .unwrap_or(PyRep::Integer(-1)),
-                    fx_meta
-                        .and_then(|m| m.repeat)
-                        .map(PyRep::Integer)
-                        .unwrap_or(PyRep::None),
+                    PyRep::Integer(start),
+                    PyRep::Integer(active),
+                    duration,
+                    repeat,
                     PyRep::None,
                     PyRep::Integer(0),
                     PyRep::None,
@@ -1036,11 +1055,21 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                     .unwrap_or(PyRep::None),
             ]),
         ]),
-        DestinyEvent::CloakBall { ball_id, cloaked } => PyRep::Tuple(vec![
-            // evemu_Crucible `Destiny.xmlp:670-681` (`SetBallCloak`): `(entityID, bool cloaked)`.
-            PyRep::String("CloakBall".into()),
-            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Bool(*cloaked != 0)]),
-        ]),
+        DestinyEvent::CloakBall { ball_id, cloaked } => {
+            if *cloaked == 0 {
+                // V24 `Park.UncloakBall(entityID)` (`michelle.pyj`) takes a 1-element `(entityID,)` tuple.
+                PyRep::Tuple(vec![
+                    PyRep::String("UncloakBall".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(*ball_id)]),
+                ])
+            } else {
+                // evemu_Crucible `Destiny.xmlp:670-681` (`SetBallCloak`): `(entityID, bool cloaked)`.
+                PyRep::Tuple(vec![
+                    PyRep::String("CloakBall".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Bool(true)]),
+                ])
+            }
+        }
         DestinyEvent::GotoPoint { ball_id, point } => PyRep::Tuple(vec![
             PyRep::String("GotoPoint".into()),
             PyRep::Tuple(vec![
