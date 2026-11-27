@@ -126,6 +126,7 @@ pub(crate) struct CompletedDungeonCleanup {
     pub(crate) npc_balls_to_remove: Vec<i64>,
     pub(crate) emit_completed: bool,
     pub(crate) emit_failed: bool,
+    pub(crate) is_mission: bool,
 }
 
 pub(super) fn apply_complete_dungeon_instance_snap(
@@ -237,6 +238,7 @@ pub(crate) fn apply_finish_dungeon_instance_snap(
         let recipient = resolve_dungeon_recipient(inst, char_id);
         let emit_failed = is_fail && !was_finished && recipient > 0;
         let emit_completed = !is_fail && !was_completed && !was_failed;
+        let is_mission = inst.category == "Mission";
         result = Some(CompletedDungeonCleanup {
             dungeon_id: inst.dungeon_id,
             recipient_char_id: recipient,
@@ -244,6 +246,7 @@ pub(crate) fn apply_finish_dungeon_instance_snap(
             npc_balls_to_remove,
             emit_completed,
             emit_failed,
+            is_mission,
         });
     }
 
@@ -269,22 +272,25 @@ pub(super) fn finalize_completed_dungeon_effects_sync(
     dungeon_id: u32,
     recipient_char_id: i64,
     emit_completed: bool,
+    clear_exploration_sites: bool,
     now_unix: u64,
 ) {
     if !emit_completed {
         return;
     }
     let mut cleared_sig_ids = Vec::new();
-    crate::services::pve_exploration::with_pve_exploration_reg_db(db, now_unix, |reg| {
-        if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
-            for s in sites.iter_mut() {
-                if !s.cleared && s.dungeon_id == dungeon_id && s.site_category == "Deadspace" {
-                    s.cleared = true;
-                    cleared_sig_ids.push(s.site_id.clone());
+    if clear_exploration_sites {
+        crate::services::pve_exploration::with_pve_exploration_reg_db(db, now_unix, |reg| {
+            if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
+                for s in sites.iter_mut() {
+                    if !s.cleared && s.dungeon_id == dungeon_id && s.site_category == "Deadspace" {
+                        s.cleared = true;
+                        cleared_sig_ids.push(s.site_id.clone());
+                    }
                 }
             }
-        }
-    });
+        });
+    }
     if !cleared_sig_ids.is_empty() {
         let mut collapsed_now = Vec::new();
         db.with_mut_snapshot(|snap| {
@@ -349,7 +355,11 @@ pub(crate) fn expire_due_dungeon_loot_grace_sync(ctx: &ServerContext) -> usize {
     let mut swept = 0usize;
     for (sys_id, inst_id) in due {
         let cleanup = ctx.db.with_mut_snapshot(|snap| {
-            apply_complete_dungeon_instance_snap(snap, inst_id, 0, true, now_unix)
+            let done = apply_complete_dungeon_instance_snap(snap, inst_id, 0, true, now_unix);
+            if done.as_ref().is_some_and(|d| d.is_mission) {
+                crate::services::agents_missions::agents_missions_dungeon::sync_mission_from_dungeon_in_snap(snap, inst_id);
+            }
+            done
         });
         if let Some(done) = cleanup {
             swept += 1;
@@ -381,6 +391,7 @@ pub(crate) fn expire_due_dungeon_loot_grace_sync(ctx: &ServerContext) -> usize {
                 done.dungeon_id,
                 done.recipient_char_id,
                 done.emit_completed,
+                !done.is_mission,
                 now_unix,
             );
         }

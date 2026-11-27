@@ -103,7 +103,7 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
         );
         mission_fixture::insert(
             snap,
-            MissionFixture::new(90_000_002, 502, 3_000_002, sys_id, "Completed")
+            MissionFixture::offered(90_000_002, 502, 3_000_002, sys_id)
                 .current_room_id(1)
                 .initial_wave_count(Some(3)),
         );
@@ -191,7 +191,7 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
         assert!(snap.items.contains_key(&player_wreck_id));
         let m = mission_fixture::get(snap, char_id, 501).unwrap();
         assert_eq!(m.current_room_id, 1);
-        assert_eq!(m.npcs_remaining, 4);
+        assert_eq!(m.npcs_remaining, 2);
         assert!(m.spawned_npc_ball_ids.is_empty());
         assert!(m.awaiting_downtime_respawn);
         assert!(mission_fixture::get(snap, 90_000_002, 502)
@@ -204,17 +204,17 @@ async fn downtime_purges_npc_wrecks_resets_missions_and_respawns_wave() {
     });
     assert!(!has_npc_entity(&ctx, old_mission_npc_id));
 
-    // Pocket entry respawns the initial mission NPC wave and clears awaiting flag
+    // Pocket entry respawns the surviving mission NPC wave and clears awaiting flag (`PVE-019`)
     let spawned = spawn_mission_wave_on_pocket_entry_if_needed(
         &ctx,
         char_id,
         sys_id,
         DVec3::new(5_000.0, 0.0, 0.0),
     );
-    assert_eq!(spawned, 4);
+    assert_eq!(spawned, 2);
     ctx.db.with_snapshot(|snap| {
         let m = mission_fixture::get(snap, char_id, 501).unwrap();
-        assert_eq!(m.spawned_npc_ball_ids.len(), 4);
+        assert_eq!(m.spawned_npc_ball_ids.len(), 2);
         assert!(!m.awaiting_downtime_respawn);
     });
 }

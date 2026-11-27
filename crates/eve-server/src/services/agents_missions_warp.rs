@@ -260,14 +260,15 @@ async fn materialize_matched_mission_pocket(
     mid: u32,
     pocket_pos: DVec3,
 ) {
-    super::reconcile_stale_mission_npcs(ctx, handle, mission_owner_id, mid);
-    let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+    let _ = super::agents_missions_dungeon::materialize_or_reconcile_mission_dungeon(
         ctx,
+        handle,
         mission_owner_id,
         sys_id,
-        pocket_pos,
         Some(mid),
-    );
+        pocket_pos,
+    )
+    .await;
     super::agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
         ctx,
         handle,

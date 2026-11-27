@@ -660,7 +660,7 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         assert!(!snap.last_mission_decline_times.contains_key(&P1));
         let mission = mission_fixture::get(snap, P1, 551_001).expect("mission preserved");
         assert_eq!(mission.current_room_id, 1);
-        assert_eq!(mission.npcs_remaining, 4);
+        assert_eq!(mission.npcs_remaining, 1);
         assert!(snap.market_orders.get(&expired_oid).map_or(true, |o| o.vol_remaining == 0));
     });
 }

@@ -716,6 +716,13 @@ pub async fn handle_ship_or_npc_destruction(
             target_ball_id,
             (attacker_char_id > 0).then_some(attacker_char_id),
         );
+        crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
+            ctx,
+            sys_id,
+            target_ball_id,
+            attacker_char_id,
+        )
+        .await;
         let bounty = if sys_id >= 31_000_000 || npc_arch == "Sleeper" {
             0.0
         } else {

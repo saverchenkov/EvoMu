@@ -1610,9 +1610,9 @@ async fn dungeon_completion_loot_grace_and_stale_retention_cleanup() {
     });
 
     clock.advance_secs(COMPLETED_INSTANCE_RETENTION_SECS + 1);
-    with_dungeon_runtime_store(&ctx, |store| {
-        prune_stale_despawned_instances(store, clock.now_unix_secs());
-        assert!(!store.instances.contains_key(&969_001));
+    ctx.db.with_mut_snapshot(|snap| {
+        prune_stale_despawned_instances_in_snap(snap, clock.now_unix_secs());
+        assert!(!snap.dungeon_runtime.instances.contains_key(&969_001));
     });
 }
 

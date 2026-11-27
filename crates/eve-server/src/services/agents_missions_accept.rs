@@ -30,12 +30,20 @@ pub(super) async fn handle_mission_accept_action(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
     let mission_id = match resolve_target_mission_id(ctx, char_id, lookup_agent_id, Some(MissionState::Offered), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let (is_alpha, agent_lvl, actual_agent_id) = ctx.db.with_snapshot(|snap| {
-        let alpha = snap.characters.get(&char_id).is_some_and(|c| c.clone_grade <= 1);
-        let mid_agent = snap.missions.get_by_character_template(char_id, mission_id).map(|m| m.agent_id).unwrap_or(agent_id);
-        let lvl = ctx.sde.agents.get(&mid_agent).map_or(1, |a| a.level);
-        (alpha, lvl, mid_agent)
-    });
+    let (is_alpha, agent_lvl, actual_agent_id, needs_encounter_wiki_check) =
+        ctx.db.with_snapshot(|snap| {
+            let alpha = snap
+                .characters
+                .get(&char_id)
+                .is_some_and(|c| c.clone_grade <= 1);
+            let m_opt = snap.missions.get_by_character_template(char_id, mission_id);
+            let mid_agent = m_opt.map(|m| m.agent_id).unwrap_or(agent_id);
+            let lvl = ctx.sde.agents.get(&mid_agent).map_or(1, |a| a.level);
+            let is_enc = m_opt.is_some_and(|m| {
+                m.kind == MissionKind::Encounter && m.npcs_remaining() > 0
+            });
+            (alpha, lvl, mid_agent, is_enc)
+        });
     if is_alpha && agent_lvl >= 4 {
         return Some(Err(BridgeRpcError {
             code: "CantDoMissionAlphaClone".into(),
@@ -107,6 +115,22 @@ pub(super) async fn handle_mission_accept_action(
         .as_ref()
         .map(|m| m.title.clone())
         .unwrap_or_else(|| format!("Mission {mission_id}"));
+    let wiki_dungeon_initial_npcs = if needs_encounter_wiki_check {
+        tmpl_opt
+            .as_ref()
+            .and_then(|t| t.dungeon_id)
+            .filter(|&d| d > 0)
+            .and_then(|sde_did| {
+                super::agents_missions_dungeon::count_wiki_dungeon_initial_npcs(
+                    ctx,
+                    mission_sys_id,
+                    sde_did,
+                    &mission_title,
+                )
+            })
+    } else {
+        None
+    };
 
     let expired_sys_cleanup = ctx.db.with_snapshot(|snap| {
         let m = snap.missions.get_by_character_template(char_id, mission_id)?;
@@ -119,16 +143,10 @@ pub(super) async fn handle_mission_accept_action(
         let (clean_sys, ast_id, ball_ids) = ctx.db.with_mut_snapshot(|snap| {
             finalize_mission_state_cleanup(snap, char_id, mission_id, MissionState::Expired, false, now)
         });
-        if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
-            if let Some(handle) = ctx.systems.get_handle(clean_sys) {
-                for bid in ball_ids {
-                    let _ = handle.remove_ball(bid).await;
-                }
-                if let Some(aid) = ast_id {
-                    let _ = handle.remove_ball(aid).await;
-                }
-            }
-        }
+        super::agents_missions_dungeon::despawn_mission_cleanup_balls(
+            ctx, clean_sys, ast_id, &ball_ids,
+        )
+        .await;
         return Some(Err(BridgeRpcError {
             code: "MissionOfferExpired".into(),
             message: format!("Mission {mission_id} offer has expired"),
@@ -202,18 +220,22 @@ pub(super) async fn handle_mission_accept_action(
         let mut wave_tids = Vec::new();
         let mut wave_count = 0_u32;
         if need_npc {
-            let count = enc_opt.as_ref().map(|e| e.wave_npc_count).unwrap_or(1) as usize;
-            let pool = enc_opt.as_ref().map(|e| e.npc_type_ids.as_slice()).unwrap_or(&[]);
-            wave_tids.reserve(count);
-            for i in 0..count {
-                let tid = if !pool.is_empty() {
-                    pool[i % pool.len()]
-                } else {
-                    resolve_mission_npc_type(ctx)
-                };
-                wave_tids.push(tid);
+            if let Some(wiki_cnt) = wiki_dungeon_initial_npcs {
+                wave_count = wiki_cnt;
+            } else {
+                let count = enc_opt.as_ref().map(|e| e.wave_npc_count).unwrap_or(1) as usize;
+                let pool = enc_opt.as_ref().map(|e| e.npc_type_ids.as_slice()).unwrap_or(&[]);
+                wave_tids.reserve(count);
+                for i in 0..count {
+                    let tid = if !pool.is_empty() {
+                        pool[i % pool.len()]
+                    } else {
+                        resolve_mission_npc_type(ctx)
+                    };
+                    wave_tids.push(tid);
+                }
+                wave_count = count as u32;
             }
-            wave_count = count as u32;
         }
 
         let mut new_courier_grant: Option<(i64, i32)> = None;

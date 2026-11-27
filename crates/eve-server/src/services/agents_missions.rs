@@ -35,6 +35,9 @@ mod agents_missions_accept;
 #[path = "agents_missions_complete.rs"]
 mod agents_missions_complete;
 
+#[path = "agents_missions_dungeon.rs"]
+pub(crate) mod agents_missions_dungeon;
+
 use crate::router::notify_registry::{OnAgentMissionChange, OnAgentMissionObjectivesFailed};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::agents_mission_delivery;
@@ -334,14 +337,15 @@ async fn handle_agent_warp_to_location(
                 .iter()
                 .any(|&(_, pos)| pos.distance(anchor_pos) <= 200_000.0)
             {
-                reconcile_stale_mission_npcs(ctx, &sys_handle, char_id, mission_id);
-                let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
+                let _ = agents_missions_dungeon::materialize_or_reconcile_mission_dungeon(
                     ctx,
+                    &sys_handle,
                     char_id,
                     sys_id,
-                    anchor_pos,
                     Some(mission_id),
-                );
+                    anchor_pos,
+                )
+                .await;
                 agents_missions_helpers::ensure_mission_asteroid_spawned_with_handle(
                     ctx,
                     &sys_handle,
@@ -393,38 +397,6 @@ fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
         .max(2)
 }
 
-/// Clears stale `spawned_npc_ball_ids` when none of a mission's previously spawned NPCs
-/// remain alive in the target system's ballpark (e.g., after system eviction/restart).
-pub(super) fn reconcile_stale_mission_npcs(
-    ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
-    char_id: i64,
-    mission_id: u32,
-) {
-    let stale_ids = ctx.db.with_snapshot(|snap| {
-        snap.missions
-            .get_by_character_template(char_id, mission_id)
-            .filter(|m| m.npcs_remaining() > 0 && !m.spawned_npc_ball_ids().is_empty())
-            .map(|m| m.spawned_npc_ball_ids().to_vec())
-    });
-    if let Some(npc_ids) = stale_ids {
-        let any_alive = npc_ids
-            .iter()
-            .any(|&npc_id| sys_handle.get_ball_position_sync(npc_id).is_some());
-        if !any_alive {
-            ctx.db.with_mut_snapshot(|snap| {
-                let _ = snap
-                    .missions
-                    .update_by_character_template(char_id, mission_id, |m| {
-                        if let Some(enc) = m.encounter_mut() {
-                            enc.spawned_npc_ball_ids.clear();
-                        }
-                    });
-            });
-        }
-    }
-}
-
 fn extract_fleet_warp_outcome(fleet_reply: &PyRep) -> (i64, Vec<(i64, glam::DVec3)>) {
     let PyRep::KeyVal(kv) = fleet_reply else {
         return (0, Vec::new());
@@ -462,11 +434,13 @@ fn finalize_mission_state_cleanup(
     let mut bmid = None;
     let mut m_sys_id = 0_u32;
     let mut ast_id = None;
+    let mut dungeon_inst_id = None;
     let mut ball_ids = Vec::new();
     let _ = snap.missions
         .update_by_character_template(char_id, mission_id, |m| {
             m_sys_id = m.solar_system_id;
             ast_id = m.asteroid_entity_id.take();
+            dungeon_inst_id = m.dungeon_instance_id.take();
             ball_ids = m.spawned_npc_ball_ids().to_vec();
             if zero_npcs {
                 if let Some(enc) = m.encounter_mut() {
@@ -476,6 +450,14 @@ fn finalize_mission_state_cleanup(
             }
             bmid = m.bookmark_id.take();
         });
+    agents_missions_dungeon::finish_mission_dungeon_in_snap(
+        snap,
+        dungeon_inst_id,
+        char_id,
+        new_state != MissionState::Completed,
+        ended_at_unix,
+        &mut ball_ids,
+    );
     if let Some(aid) = ast_id {
         snap.asteroids.remove(&aid);
     }
@@ -1301,16 +1283,10 @@ pub async fn handle_with_bound(
                 );
             }
             for (clean_sys, ast_id, ball_ids) in expired_cleanups {
-                if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
-                    if let Some(handle) = ctx.systems.get_handle(clean_sys) {
-                        for bid in ball_ids {
-                            let _ = handle.remove_ball(bid).await;
-                        }
-                        if let Some(aid) = ast_id {
-                            let _ = handle.remove_ball(aid).await;
-                        }
-                    }
-                }
+                agents_missions_dungeon::despawn_mission_cleanup_balls(
+                    ctx, clean_sys, ast_id, &ball_ids,
+                )
+                .await;
             }
             Some(Ok(PyRep::Tuple(vec![PyRep::List(missions), PyRep::List(research)])))
         }
