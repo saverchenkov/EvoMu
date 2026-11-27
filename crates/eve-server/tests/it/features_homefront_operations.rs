@@ -1515,8 +1515,11 @@ mod homefront_operations_it {
 
             if w == 1 {
                 // Drain 90s setup window and advance 1 tick so wave 2 spawns its rocks and escorts
+                let jita_h = ctx.systems.get_or_spawn(jita);
+                jita_h.step_manual(90.0).await.unwrap();
                 ctx.advance_secs(90);
                 tick_homefront_operations_sync(&ctx);
+                jita_h.step_manual(1.0).await.unwrap();
                 ctx.advance_secs(1);
                 tick_homefront_operations_sync(&ctx);
             } else {
@@ -1564,6 +1567,7 @@ mod homefront_operations_it {
         assert!(ctx.drain_notifications_for_char(miner_cid).iter().any(|n| n.event == "OnAccountChange"));
 
         // Advance 60s evacuation countdown -> spawns Basileus (77_702) + Abyssal Cache (77_727)
+        ctx.systems.get_or_spawn(jita).step_manual(60.0).await.unwrap();
         ctx.advance_secs(60);
         tick_homefront_operations_sync(&ctx);
         let cache_id = ctx.db.with_snapshot(|snap| {

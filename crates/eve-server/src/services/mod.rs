@@ -113,6 +113,7 @@ pub mod pve_exploration_sites;
 pub mod pve_hacking_board;
 pub mod pve_hacking_sites;
 pub mod insurgency_complex_ops_ext;
+pub mod pve_homefront_runtime;
 pub mod pve_homefront_sites;
 pub mod pve_incursion_lifecycle;
 pub mod pve_incursion_sites;

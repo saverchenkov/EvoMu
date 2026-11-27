@@ -1169,6 +1169,8 @@ pub enum HomefrontProgressRecord {
         #[serde(default)]
         basileus_spawned: bool,
         #[serde(default)]
+        basileus_ball_id: Option<i64>,
+        #[serde(default)]
         cache_ball_id: Option<i64>,
         mutanite_units_remaining: u32,
         wave_hostiles_remaining: u8,
@@ -1268,6 +1270,31 @@ pub struct HomefrontRuntimeRecord {
     pub entered_pilots: BTreeMap<i64, HomefrontShipEligibilityRecord>,
     pub contributions: BTreeMap<i64, HomefrontContributionRecord>,
     pub progress: HomefrontProgressRecord,
+    #[serde(default)]
+    pub elapsed_sim_secs: f64,
+    #[serde(default)]
+    pub last_sim_elapsed_secs: Option<f64>,
+    #[serde(default)]
+    pub sim_clock_initialized: bool,
+}
+
+impl HomefrontRuntimeRecord {
+    /// Seeds `elapsed_sim_secs` from `last_tick_sec - started_at_sec` once when loading a
+    /// pre-migration started SQLite row (`#1196` R14), then marks `sim_clock_initialized`.
+    pub fn seed_legacy_elapsed_sim_secs(&mut self) {
+        if self.started && !self.sim_clock_initialized {
+            if self.elapsed_sim_secs == 0.0
+                && self.last_sim_elapsed_secs.is_none()
+                && self.last_tick_sec > self.started_at_sec
+            {
+                self.elapsed_sim_secs = self
+                    .last_tick_sec
+                    .saturating_sub(self.started_at_sec)
+                    .min(self.blueprint.time_limit_secs) as f64;
+            }
+            self.sim_clock_initialized = true;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

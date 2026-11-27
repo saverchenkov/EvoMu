@@ -1244,7 +1244,7 @@ async fn handle_launch_fighters_from_tubes(
             entry.launched_units,
         );
         let tube_flag = (159 + tube_idx) as i64;
-        let now_ft = ctx.now_client_sim_filetime_ticks();
+        let now_ft = ctx.now_system_sim_filetime_for_ship(char_id, ship_id);
         crate::router::notify_registry::push_typed_session_notification(
             session,
             crate::router::notify_registry::OnFighterTubeTaskStatus {
@@ -1619,8 +1619,8 @@ async fn handle_recall_fighters_to_tubes(
         }
         let tube_flag = (159 + f.tube_index) as i64;
         let recalled_qty = ctx.db.with_snapshot(|s| s.items.get(&f.item_id).map(|i| i.quantity).unwrap_or(f.squadron_size as i32)) as i64;
-        let now_ft = ctx.now_client_sim_filetime_ticks();
-        let end_ft = now_ft + (total_rearm_secs as i64) * 10_000_000;
+        let now_ft = ctx.now_system_sim_filetime_for_ship(char_id, ship_id);
+        let end_ft = now_ft.saturating_add_secs(total_rearm_secs as i64);
         crate::router::notify_registry::push_typed_session_notification(
             session,
             crate::router::notify_registry::OnFighterRemovedFromController {

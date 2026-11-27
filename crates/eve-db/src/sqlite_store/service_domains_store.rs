@@ -825,7 +825,13 @@ pub fn load_service_domains_checked(
     snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<bool, String> {
-    let (staged, had_legacy) = stage_service_domains_rows(conn, ctx)?;
+    let (mut staged, had_legacy) = stage_service_domains_rows(conn, ctx)?;
+    for rec in staged.dungeon_runtime.homefront_runtimes.values_mut() {
+        rec.seed_legacy_elapsed_sim_secs();
+        // `last_sim_elapsed_secs` is an ephemeral per-SystemActor cursor; clear across restarts
+        // so unrelated post-restart actor ticks before Homefront re-anchors never compute a delta.
+        rec.last_sim_elapsed_secs = None;
+    }
     let staged_entity_kv = read_entity_kv_map(conn, ctx, false)?;
     staged.apply_to(snap);
     snap.entity_kv = staged_entity_kv.into_iter().collect();

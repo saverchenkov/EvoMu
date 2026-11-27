@@ -544,6 +544,7 @@ mod multi_role_edge_tests {
             .set_ball_position(830_001, timed.site_position + DVec3::new(400.0, 0.0, 0.0))
             .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, timed.instance_id).await.unwrap();
+        sys_h.step_manual((timed.blueprint.time_limit_secs + 5) as f64).await.unwrap();
         ctx.advance_secs(timed.blueprint.time_limit_secs + 5);
         assert_eq!(
             record_homefront_combat_and_logistics(&ctx, &sess_caracal, timed.instance_id, 1_000.0, 0.0)
@@ -1288,6 +1289,7 @@ mod multi_role_edge_tests {
         };
 
         // Advance near original 90s escape deadline before destroying untackled hauler h1.
+        ctx.systems.get_or_spawn(sys_id).step_manual(80.0).await.unwrap();
         ctx.advance_secs(80);
         tick_homefront_operations_sync(&ctx);
 
@@ -1333,6 +1335,7 @@ mod multi_role_edge_tests {
         );
 
         // Advance past h1's original escape deadline: h1 must not double-count, and h2 keeps its fresh 90s timer.
+        sys_h.step_manual(20.0).await.unwrap();
         ctx.advance_secs(20);
         tick_homefront_operations_sync(&ctx);
         ctx.db.with_snapshot(|snap| {
@@ -1571,6 +1574,7 @@ mod multi_role_edge_tests {
         // 1. Exercise `advance_next_raid_hauler` through live escape ticks (270s < 600s sibling timer).
         for _ in 0..3 {
             let prev_hid = current_hid;
+            sys_h.step_manual(90.0).await.unwrap();
             ctx.advance_secs(90);
             tick_homefront_operations_sync(&ctx);
             let next_hid = match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress
@@ -1636,6 +1640,7 @@ mod multi_role_edge_tests {
         }
         assert!(sys_h.get_ball_snapshot(current_hid).await.unwrap().is_some());
         let pre_sat_tick_hid = current_hid;
+        sys_h.step_manual(90.0).await.unwrap();
         ctx.advance_secs(90);
         tick_homefront_operations_sync(&ctx);
         let post_sat_tick_hid =

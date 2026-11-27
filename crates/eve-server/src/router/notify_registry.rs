@@ -2024,8 +2024,8 @@ define_notifications! {
         fields: {
             tube_flag_id: i64,
             status_id: String,
-            status_start_time: i64,
-            status_end_time: i64,
+            status_start_time: SimFileTime,
+            status_end_time: SimFileTime,
             user_error: Option<PyRep>,
         },
         samples: || vec![vec![
@@ -3409,7 +3409,7 @@ define_notifications! {
             fighter_id: i64,
             ability_slot_id: i64,
             remaining_charge_count: Option<i64>,
-            start_time: i64,
+            start_time: SimFileTime,
             duration_ms: f64,
             cooldown: Option<f64>,
         },
@@ -3994,7 +3994,7 @@ define_notifications! {
             active: i64,
             duration: f64,
             repeat: i64,
-            start_time: i64,
+            start_time: SimFileTime,
             time_from_start: f64,
             graphic_info: Option<PyRep>,
         },

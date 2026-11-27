@@ -1932,6 +1932,204 @@ async fn test_mining_out_of_range_returns_typed_target_too_far_user_error() {
     }
 }
 
+#[tokio::test]
+async fn on_special_fx_start_time_uses_anchored_sim_filetime_under_tidi() {
+    use eve_db::clock::{FILETIME_TICKS_PER_MS, FILETIME_TICKS_PER_SEC, SimFileTime};
+
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 809_001_i64;
+    let mod_id = 809_002_i64;
+    let ast_id = 809_003_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 483,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.skills.entry(char_id).or_default().insert(
+            3386,
+            TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (2_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(Ball {
+        id: ast_id,
+        type_id: 1230,
+        position: DVec3::new(1_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e9,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .unwrap();
+    sys.spawn_ball(Ball {
+        id: ship_id,
+        type_id: 32880,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 200.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .unwrap();
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            signature_radius: 40.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id: ast_id,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(20_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    if let Some(m) = fit.modules.get_mut(&mod_id) {
+        m.state = eve_dogma::ModuleState::Online;
+    }
+    ctx.store_ship_fitting(ship_id, fit);
+
+    // Freeze virtual wall clock and anchor system sim clock -300s behind it at TiDi = 0.25.
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_775_400_000,
+    )));
+    let _ = ctx.anchor_system_sim_clock_with_offset_ms(sys_id, -300_000, 0.25);
+    let wall_0 = ctx.now_machonet_wall_filetime();
+    let sim_0 = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock");
+    assert_eq!(sim_0.as_ticks() - wall_0.as_ticks(), -300_000 * FILETIME_TICKS_PER_MS);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
+        .await
+        .expect("activate mining laser under TiDi + offset");
+    let start_notifs = ctx.drain_notifications_for_char(char_id);
+    let sfx_start = start_notifs
+        .iter()
+        .find(|n| n.event == "OnSpecialFX")
+        .expect("activate must emit OnSpecialFX");
+    let fx_start_ft = SimFileTime::from_ticks(
+        sfx_start.args[11]
+            .as_i64()
+            .expect("OnSpecialFX start_time integer"),
+    );
+    assert!(
+        (0..=5).contains(&(fx_start_ft.as_ticks() - sim_0.as_ticks())),
+        "OnSpecialFX start_time ({}) must align with anchored SimFileTime ({}), not WallFileTime ({})",
+        fx_start_ft.as_ticks(),
+        sim_0.as_ticks(),
+        wall_0.as_ticks(),
+    );
+
+    // Advance 12 wall seconds at TiDi = 0.25 -> sim clock advances +3s (wall - sim = 309s).
+    ctx.advance_secs(12);
+    let wall_1 = ctx.now_machonet_wall_filetime();
+    let sim_1 = ctx.peek_system_sim_filetime(sys_id).expect("anchored sim clock after advance");
+    assert_eq!(wall_1, wall_0.saturating_add_secs(12));
+    assert_eq!(sim_1, sim_0.saturating_add_secs(3));
+
+    let _ = deactivate(&ctx, char_id, Some(ship_id), mod_id)
+        .await
+        .expect("active mining cycle")
+        .expect("deactivate mining laser");
+    let stop_notifs = ctx.drain_notifications_for_char(char_id);
+    let sfx_stop = stop_notifs
+        .iter()
+        .find(|n| n.event == "OnSpecialFX")
+        .expect("deactivate must emit OnSpecialFX");
+    let fx_stop_ft = SimFileTime::from_ticks(
+        sfx_stop.args[11]
+            .as_i64()
+            .expect("OnSpecialFX stop start_time integer"),
+    );
+    assert!(
+        (0..=5).contains(&(fx_stop_ft.as_ticks() - sim_1.as_ticks())),
+        "OnSpecialFX deactivation start_time ({}) must track dilated SimFileTime ({})",
+        fx_stop_ft.as_ticks(),
+        sim_1.as_ticks(),
+    );
+    assert!(
+        ((3 * FILETIME_TICKS_PER_SEC - 5)..=(3 * FILETIME_TICKS_PER_SEC + 5))
+            .contains(&(fx_stop_ft.as_ticks() - fx_start_ft.as_ticks())),
+        "OnSpecialFX delta ({}) must equal +3 sim seconds under TiDi = 0.25",
+        fx_stop_ft.as_ticks() - fx_start_ft.as_ticks(),
+    );
+}
+
 #[cfg(test)]
 #[path = "mining_cycle_extra_unit_tests.rs"]
 mod extra_unit_tests;
