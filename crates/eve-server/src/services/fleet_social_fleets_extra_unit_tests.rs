@@ -1,12 +1,29 @@
 //! Extra unit and mutation-killing tests for `fleet_social_fleets.rs`.
 
+use crate::router::ServerContext;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, seed_multi_member_fleet, test_ctx_and_clock,
 };
 use crate::services::fleet_social::handle;
 use eve_machonet::SessionState;
-use eve_proto::PyRep;
+use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+
+/// Box each `fleet_social::handle` dispatch future so sequential `.await` sites
+/// inside a single `#[tokio::test]` state machine hold only a pointer rather than
+/// accumulating unboxed handler frames beyond macOS's 2 MiB test-thread stack.
+fn boxed_handle<'a>(
+    ctx: &'a ServerContext,
+    session: &'a mut SessionState,
+    service: &'a str,
+    method: &'a str,
+    args: &'a [PyRep],
+    kwargs: &'a HashMap<String, PyRep>,
+) -> Pin<Box<dyn Future<Output = Option<Result<PyRep, BridgeRpcError>>> + 'a>> {
+    Box::pin(handle(ctx, session, service, method, args, kwargs))
+}
 
 fn make_session(char_id: i64, fleet_id: Option<i64>) -> SessionState {
     let mut s = SessionState::new(char_id as u64);
@@ -27,7 +44,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
     // Init when not in fleet -> NotInFleet
     let mut sess = make_session(boss_id, None);
     assert_eq!(
-        handle(&ctx, &mut sess, "fleetObjectHandler", "Init", &[], &kw)
+        boxed_handle(&ctx, &mut sess, "fleetObjectHandler", "Init", &[], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -36,7 +53,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
     );
 
     // Zero-arg fleetObjectHandler.CreateFleet returns integer fleet_id
-    let fid_rep = handle(&ctx, &mut sess, "fleetObjectHandler", "CreateFleet", &[], &kw)
+    let fid_rep = boxed_handle(&ctx, &mut sess, "fleetObjectHandler", "CreateFleet", &[], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -45,7 +62,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
 
     // AlreadyInFleet when creating a second fleet
     assert_eq!(
-        handle(&ctx, &mut sess, "fleetMgr", "CreateFleet", &[], &kw)
+        boxed_handle(&ctx, &mut sess, "fleetMgr", "CreateFleet", &[], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -66,7 +83,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
             ("minSecurity", PyRep::Real(-2.0)),
         ]),
     );
-    let _ = handle(&ctx, &mut sess, "fleetObjectHandler", "Init", &[], &init_kw)
+    let _ = boxed_handle(&ctx, &mut sess, "fleetObjectHandler", "Init", &[], &init_kw)
         .await
         .unwrap()
         .unwrap();
@@ -86,7 +103,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
     // Create 4 more wings to reach max 5 wings, then verify MaxWingsReached on 6th
     let mut created_wings = Vec::new();
     for i in 2..=5 {
-        let w = handle(
+        let w = boxed_handle(
             &ctx,
             &mut sess,
             "fleetObjectHandler",
@@ -100,7 +117,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
         created_wings.push(w.dict_get("wingID").and_then(|v| v.as_i64()).unwrap());
     }
     assert_eq!(
-        handle(&ctx, &mut sess, "fleetObjectHandler", "CreateWing", &[], &kw)
+        boxed_handle(&ctx, &mut sess, "fleetObjectHandler", "CreateWing", &[], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -110,7 +127,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
 
     let extra_wing = created_wings[0];
     // Rename wing, then create 5 squads in extra_wing and verify MaxSquadsReached on 6th
-    let renamed_w = handle(
+    let renamed_w = boxed_handle(
         &ctx,
         &mut sess,
         "fleetObjectHandler",
@@ -128,7 +145,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
 
     let mut created_squads = Vec::new();
     for i in 1..=5 {
-        let s = handle(
+        let s = boxed_handle(
             &ctx,
             &mut sess,
             "fleetObjectHandler",
@@ -142,7 +159,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
         created_squads.push(s.dict_get("squadID").and_then(|v| v.as_i64()).unwrap());
     }
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut sess,
             "fleetObjectHandler",
@@ -159,7 +176,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
 
     // Rename squad, delete squad, and delete empty wing
     let sq0 = created_squads[0];
-    let renamed_s = handle(
+    let renamed_s = boxed_handle(
         &ctx,
         &mut sess,
         "fleetObjectHandler",
@@ -175,7 +192,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
         Some("Logi Alpha")
     );
 
-    let del_s = handle(
+    let del_s = boxed_handle(
         &ctx,
         &mut sess,
         "fleetObjectHandler",
@@ -210,7 +227,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
         bw
     });
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut sess,
             "fleetObjectHandler",
@@ -226,7 +243,7 @@ async fn init_ad_registration_zero_arg_create_and_wing_squad_management_guards()
     );
 
     // Deleting empty extra_wing -> succeeds and cleans up remaining squads in that wing
-    let del_w = handle(
+    let del_w = boxed_handle(
         &ctx,
         &mut sess,
         "fleetObjectHandler",
@@ -262,7 +279,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
 
     // 1. Offline character -> CharacterOffline
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut boss_sess,
             "fleetMgr",
@@ -285,7 +302,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
         .acquire_online_lock(1, 56, Some(90_000_002), true, 1_700_000_000)
         .unwrap();
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut boss_sess,
             "fleetMgr",
@@ -306,7 +323,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
     // 3. PositionOccupied when inviting as FleetCommander (1) or WingCommander (2) of Wing 710_001
     for occupied_role in [1_i64, 2_i64] {
         assert_eq!(
-            handle(
+            boxed_handle(
                 &ctx,
                 &mut boss_sess,
                 "fleetMgr",
@@ -325,7 +342,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
     // 4. FleetFull when max_size == current member count (5)
     ctx.fleet_extras.lock().unwrap().max_sizes.insert(fleet_id, 5);
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut boss_sess,
             "fleetMgr",
@@ -342,7 +359,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
     ctx.fleet_extras.lock().unwrap().max_sizes.insert(fleet_id, 256);
 
     // 5. Invite c5, verify InviteAlreadyPending on second invite, then RejectInvite(true)
-    let _ = handle(
+    let _ = boxed_handle(
         &ctx,
         &mut boss_sess,
         "fleetMgr",
@@ -354,7 +371,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
     .unwrap()
     .unwrap();
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut boss_sess,
             "fleetMgr",
@@ -370,7 +387,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
     );
 
     let mut c5_sess = make_session(c5, None);
-    let rej = handle(
+    let rej = boxed_handle(
         &ctx,
         &mut c5_sess,
         "fleetObjectHandler",
@@ -385,7 +402,7 @@ async fn invite_accept_reject_error_paths_and_role_occupation() {
 
     // Accepting after reject -> InviteExpired
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut c5_sess,
             "fleetObjectHandler",
@@ -413,7 +430,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
 
     // 1. SquadMember (90_000_004) cannot kick anyone else -> FleetPermissionDenied
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut sm_sess,
             "fleetMgr",
@@ -430,7 +447,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
 
     // 2. WingCommander (90_000_002) cannot kick Fleet Boss (90_000_001) -> CannotKickBoss
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut wc_sess,
             "fleetMgr",
@@ -447,7 +464,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
 
     // 3. SquadCommander (90_000_003) cannot kick WingCommander (90_000_002) -> FleetPermissionDenied
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut sc_sess,
             "fleetMgr",
@@ -464,7 +481,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
 
     // 4. MoveMember: when free_move == false, SquadMember self-move fails with FleetPermissionDenied
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut sm_sess,
             "fleetMgr",
@@ -489,7 +506,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
         snap.fleets.get_mut(&fleet_id).unwrap().free_move = true;
     });
     assert_eq!(
-        handle(
+        boxed_handle(
             &ctx,
             &mut sm_sess,
             "fleetMgr",
@@ -508,7 +525,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
         .code,
         "FleetPermissionDenied"
     );
-    let self_moved = handle(
+    let self_moved = boxed_handle(
         &ctx,
         &mut sm_sess,
         "fleetMgr",
@@ -527,7 +544,7 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
     assert_eq!(self_moved.dict_get("role").and_then(|v| v.as_i64()), Some(4));
 
     // 5. SquadCommander kicks SquadMember (90_000_004) in same squad -> succeeds
-    let kicked = handle(
+    let kicked = boxed_handle(
         &ctx,
         &mut sc_sess,
         "fleetMgr",
@@ -545,14 +562,14 @@ async fn kick_member_hierarchy_free_move_and_disband_fleet() {
 
     // 6. DisbandFleet: non-boss (WingCommander) denied -> FleetPermissionDenied; Boss succeeds!
     assert_eq!(
-        handle(&ctx, &mut wc_sess, "fleetObjectHandler", "DisbandFleet", &[], &kw)
+        boxed_handle(&ctx, &mut wc_sess, "fleetObjectHandler", "DisbandFleet", &[], &kw)
             .await
             .unwrap()
             .unwrap_err()
             .code,
         "FleetPermissionDenied"
     );
-    let disbanded = handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DisbandFleet", &[], &kw)
+    let disbanded = boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DisbandFleet", &[], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -596,7 +613,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         ("fleetObjectHandler", "MoveMember", vec![PyRep::Integer(wc_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)]),
     ] {
         assert_eq!(
-            handle(&ctx, &mut no_fleet_sess, svc, method, &args, &kw)
+            boxed_handle(&ctx, &mut no_fleet_sess, svc, method, &args, &kw)
                 .await
                 .unwrap()
                 .unwrap_err()
@@ -608,7 +625,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
 
     // 2. Seed multi-member fleet (boss FC + WC + SC + SM + SM2)
     let mut boss_sess = make_session(boss_id, None);
-    let fid = handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateFleet", &[], &kw)
+    let fid = boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateFleet", &[], &kw)
         .await
         .unwrap()
         .unwrap()
@@ -618,25 +635,25 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     let s1 = ctx.db.with_snapshot(|s| s.fleets[&fid].squads[0]);
 
     // InvalidArgument & NotFound errors on wing/squad/invite/kick
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteWing", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteWing", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "WingNotFound");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeWingName", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeWingName", &[PyRep::Integer(999_999), PyRep::String("W".into())], &kw).await.unwrap().unwrap_err().code, "WingNotFound");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateSquad", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "WingNotFound");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteSquad", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteSquad", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "SquadNotFound");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeSquadName", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeSquadName", &[PyRep::Integer(999_999), PyRep::String("S".into())], &kw).await.unwrap().unwrap_err().code, "SquadNotFound");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "KickMember", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "MemberNotFound");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteWing", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteWing", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "WingNotFound");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeWingName", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeWingName", &[PyRep::Integer(999_999), PyRep::String("W".into())], &kw).await.unwrap().unwrap_err().code, "WingNotFound");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateSquad", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "WingNotFound");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteSquad", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteSquad", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "SquadNotFound");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeSquadName", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "ChangeSquadName", &[PyRep::Integer(999_999), PyRep::String("S".into())], &kw).await.unwrap().unwrap_err().code, "SquadNotFound");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "KickMember", &[PyRep::Integer(999_999)], &kw).await.unwrap().unwrap_err().code, "MemberNotFound");
 
     // Create second wing + squad for hierarchy tests
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateWing", &[], &kw)
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateWing", &[], &kw)
         .await
         .unwrap()
         .unwrap();
     let w2 = ctx.db.with_snapshot(|s| *s.fleets[&fid].wings.last().unwrap());
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateSquad", &[PyRep::Integer(w2)], &kw)
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "CreateSquad", &[PyRep::Integer(w2)], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -644,13 +661,13 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
 
     // Invite with default wing/squad (None) and specific roles (WC=2 in w2, SC=3 in s2, SM=4), then AcceptInvite
     ctx.db.acquire_online_lock(1, 501, Some(wc_id), true, 1_700_000_000).unwrap();
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(wc_id), PyRep::Integer(w2), PyRep::None, PyRep::Integer(2)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(wc_id), PyRep::Integer(w2), PyRep::None, PyRep::Integer(2)], &kw).await.unwrap().unwrap();
     ctx.db.acquire_online_lock(1, 502, Some(sc_id), true, 1_700_000_000).unwrap();
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(sc_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(3)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(sc_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(3)], &kw).await.unwrap().unwrap();
     ctx.db.acquire_online_lock(1, 503, Some(sm_id), true, 1_700_000_000).unwrap();
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(sm_id)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(sm_id)], &kw).await.unwrap().unwrap();
     ctx.db.acquire_online_lock(1, 504, Some(sm2_id), true, 1_700_000_000).unwrap();
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(sm2_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(sm2_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw).await.unwrap().unwrap();
 
     let mut wc_sess = make_session(wc_id, None);
     let mut sc_sess = make_session(sc_id, None);
@@ -659,9 +676,9 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     let mut outsider_sess = make_session(outsider_id, None);
 
     // RejectInvite with false & AcceptInvite expired
-    handle(&ctx, &mut outsider_sess, "fleetObjectHandler", "RejectInvite", &[PyRep::Integer(fid), PyRep::Integer(0)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut outsider_sess, "fleetObjectHandler", "RejectInvite", &[PyRep::Integer(fid), PyRep::Integer(0)], &kw).await.unwrap().unwrap();
     assert_eq!(
-        handle(&ctx, &mut outsider_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
+        boxed_handle(&ctx, &mut outsider_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -669,14 +686,14 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         "InviteExpired"
     );
 
-    handle(&ctx, &mut wc_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
-    handle(&ctx, &mut sc_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
-    handle(&ctx, &mut sm_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
-    handle(&ctx, &mut sm2_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut wc_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut sc_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut sm_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut sm2_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw).await.unwrap().unwrap();
 
     // AcceptInvite when already in fleet (L606)
     assert_eq!(
-        handle(&ctx, &mut wc_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
+        boxed_handle(&ctx, &mut wc_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -686,7 +703,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
 
     // DeleteSquad with members -> SquadNotEmpty (L405)
     assert_eq!(
-        handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteSquad", &[PyRep::Integer(s1)], &kw)
+        boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "DeleteSquad", &[PyRep::Integer(s1)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -695,19 +712,19 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     );
 
     // Permission checks for SM / SC / WC on CreateWing, DeleteWing, ChangeWingName, CreateSquad, DeleteSquad, ChangeSquadName, Invite, KickMember, MoveMember
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "CreateWing", &[], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "DeleteWing", &[PyRep::Integer(w2)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "ChangeWingName", &[PyRep::Integer(w1), PyRep::String("X".into())], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sc_sess, "fleetObjectHandler", "CreateSquad", &[PyRep::Integer(w1)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sc_sess, "fleetObjectHandler", "DeleteSquad", &[PyRep::Integer(s2)], &kw).await.unwrap().unwrap_err().code, "SquadNotEmpty");
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "ChangeSquadName", &[PyRep::Integer(s1), PyRep::String("X".into())], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(outsider_id)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "KickMember", &[PyRep::Integer(sm2_id)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
-    assert_eq!(handle(&ctx, &mut sm_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm2_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "CreateWing", &[], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "DeleteWing", &[PyRep::Integer(w2)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "ChangeWingName", &[PyRep::Integer(w1), PyRep::String("X".into())], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sc_sess, "fleetObjectHandler", "CreateSquad", &[PyRep::Integer(w1)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sc_sess, "fleetObjectHandler", "DeleteSquad", &[PyRep::Integer(s2)], &kw).await.unwrap().unwrap_err().code, "SquadNotEmpty");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "ChangeSquadName", &[PyRep::Integer(s1), PyRep::String("X".into())], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(outsider_id)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "KickMember", &[PyRep::Integer(sm2_id)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(boxed_handle(&ctx, &mut sm_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm2_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
 
     // PositionOccupied checks on MoveMember (FC=1, WC=2, SC=3)
     assert_eq!(
-        handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(1)], &kw)
+        boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(1)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -715,7 +732,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         "PositionOccupied"
     );
     assert_eq!(
-        handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(2)], &kw)
+        boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(2)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -723,7 +740,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         "PositionOccupied"
     );
     assert_eq!(
-        handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(3)], &kw)
+        boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(sm_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(3)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -733,7 +750,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
 
     // Move WC to w1 as WC -> clears w2 commander_id & sets w1 commander_id (L1196, L1208); then FinishMove 0-arg (L779)
     clock.advance_secs(20);
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(wc_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(2)], &kw)
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(wc_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(2)], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -752,17 +769,17 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         },
     );
     assert_eq!(
-        handle(&ctx, &mut wc_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(wc_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(4)], &kw)
+        boxed_handle(&ctx, &mut wc_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(wc_id), PyRep::Integer(w2), PyRep::Integer(s2), PyRep::Integer(4)], &kw)
             .await
             .unwrap()
             .unwrap_err()
             .code,
         "SessionChangeTimerActive"
     );
-    assert_eq!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "FinishMove", &[], &kw).await.unwrap().unwrap(), PyRep::None);
+    assert_eq!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "FinishMove", &[], &kw).await.unwrap().unwrap(), PyRep::None);
 
     // Kick SC by boss (FC hierarchy L867)
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "KickMember", &[PyRep::Integer(sc_id)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "KickMember", &[PyRep::Integer(sc_id)], &kw).await.unwrap().unwrap();
 
     // Session stale fleet_id -> FleetNotFound across methods
     let mut stale_sess = make_session(outsider_id, Some(999_888_777));
@@ -780,7 +797,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     ] {
         stale_sess.fleet_id = Some(999_888_777);
         assert_eq!(
-            handle(&ctx, &mut stale_sess, svc, method, &args, &kw)
+            boxed_handle(&ctx, &mut stale_sess, svc, method, &args, &kw)
                 .await
                 .unwrap()
                 .unwrap_err()
@@ -792,10 +809,10 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
 
     // SessionChangeTimerActive & FleetFull on AcceptInvite (L622, L645)
     ctx.db.acquire_online_lock(1, 505, Some(outsider_id), true, 1_700_000_000).unwrap();
-    handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(outsider_id)], &kw).await.unwrap().unwrap();
+    boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "Invite", &[PyRep::Integer(outsider_id)], &kw).await.unwrap().unwrap();
     ctx.fleet_extras.lock().unwrap().max_sizes.insert(fid, 2);
     assert_eq!(
-        handle(&ctx, &mut outsider_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
+        boxed_handle(&ctx, &mut outsider_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -815,7 +832,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         },
     );
     assert_eq!(
-        handle(&ctx, &mut outsider_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
+        boxed_handle(&ctx, &mut outsider_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fid)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -824,7 +841,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     );
 
     // Active RejectInvite(true) cleans invite & emits OnFleetJoinReject (L770-797)
-    handle(&ctx, &mut outsider_sess, "fleetObjectHandler", "RejectInvite", &[PyRep::Bool(true)], &kw)
+    boxed_handle(&ctx, &mut outsider_sess, "fleetObjectHandler", "RejectInvite", &[PyRep::Bool(true)], &kw)
         .await
         .unwrap()
         .unwrap();
@@ -843,7 +860,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         ("fleetObjectHandler", "DisbandFleet", vec![]),
         ("fleetObjectHandler", "MoveMember", vec![PyRep::Integer(sm_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)]),
     ] {
-        assert_eq!(handle(&ctx, &mut spoof_sess, svc, method, &args, &kw).await.unwrap().unwrap_err().code, "NotInFleet");
+        assert_eq!(boxed_handle(&ctx, &mut spoof_sess, svc, method, &args, &kw).await.unwrap().unwrap_err().code, "NotInFleet");
     }
 
     // SquadMember lacks permission on commander/boss actions -> FleetPermissionDenied (L255, L290, L331, L363, L401, L447, L506, L864, L965, L1097)
@@ -862,12 +879,12 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         ("fleetObjectHandler", "DisbandFleet", vec![]),
         ("fleetObjectHandler", "MoveMember", vec![PyRep::Integer(sm2_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)]),
     ] {
-        assert_eq!(handle(&ctx, &mut sm_sess, svc, method, &args, &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
+        assert_eq!(boxed_handle(&ctx, &mut sm_sess, svc, method, &args, &kw).await.unwrap().unwrap_err().code, "FleetPermissionDenied");
     }
 
     // MoveMember MemberNotFound (L1104) & WC trying to move Boss -> FleetPermissionDenied (L1128)
     assert_eq!(
-        handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(outsider_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw)
+        boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(outsider_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -875,7 +892,7 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
         "MemberNotFound"
     );
     assert_eq!(
-        handle(&ctx, &mut wc_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(boss_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw)
+        boxed_handle(&ctx, &mut wc_sess, "fleetObjectHandler", "MoveMember", &[PyRep::Integer(boss_id), PyRep::Integer(w1), PyRep::Integer(s1), PyRep::Integer(4)], &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -884,5 +901,5 @@ async fn coverage_sweep_fleets_error_guards_hierarchy_invite_accept_and_move() {
     );
 
     // Fallback to handle_fleet_ops (L1255)
-    assert!(handle(&ctx, &mut boss_sess, "fleetObjectHandler", "GetFleetComposition", &[], &kw).await.is_some());
+    assert!(boxed_handle(&ctx, &mut boss_sess, "fleetObjectHandler", "GetFleetComposition", &[], &kw).await.is_some());
 }
