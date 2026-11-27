@@ -360,6 +360,7 @@ async fn execute_legacy_wormhole_jump(
             char_id,
             ship_id,
             old_sys_id: old_sys,
+            old_dock: None,
             dest_sys_id,
             was_in_space: true,
             arrival_position: Some(arrival_pos),

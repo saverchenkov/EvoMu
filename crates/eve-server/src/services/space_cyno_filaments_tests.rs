@@ -1440,15 +1440,21 @@ async fn wormhole_jump_preserves_rollback_gate_cloak_combat_state_and_session_tr
     );
 
     // Verify DB rollback preserves ship ball on origin when shared wormhole transition hits DB failure.
-    let tmp_dir = std::env::temp_dir().join(format!(
+    struct TempDbDir(std::path::PathBuf);
+    impl Drop for TempDbDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let tmp_dir = TempDbDir(std::env::temp_dir().join(format!(
         "evomu_wh_rollback_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
-    ));
-    let db = Arc::new(eve_db::WorldRepository::open_sqlite(tmp_dir.join("world.sqlite")).expect("sqlite"));
+    )));
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(tmp_dir.0.join("world.sqlite")).expect("sqlite"));
     let rb_ctx = ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), db);
     rb_ctx.db.with_mut_snapshot(|snap| {
         let mut ch = eve_db::CharacterRecord::default();
@@ -1480,6 +1486,7 @@ async fn wormhole_jump_preserves_rollback_gate_cloak_combat_state_and_session_tr
             char_id,
             ship_id,
             old_sys_id: old_sys,
+            old_dock: None,
             dest_sys_id: dest_sys,
             was_in_space: true,
             arrival_position: Some(DVec3::new(2_000.0, 0.0, 0.0)),
@@ -1514,5 +1521,4 @@ async fn wormhole_jump_preserves_rollback_gate_cloak_combat_state_and_session_tr
     assert_eq!(rb_sess.solar_system_id, Some(old_sys));
     assert!(rb_ctx.systems.get_handle(dest_sys).is_none());
     assert!(rb_old.get_ball_snapshot(ship_id).await.unwrap().is_some());
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

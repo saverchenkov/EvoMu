@@ -438,65 +438,80 @@ pub async fn execute_shipcaster_jump(
     let (_, _, pre_cs) =
         prevalidate_shipcaster_jump(ctx, char_id, ship_id, origin_sys).await?;
     let saved_heat = ctx.snapshot_rack_heat_and_damage(ship_id);
-
-    let outcome = crate::domain::transitions::relocate_character_in_space(
-        ctx,
-        Some(session),
-        crate::domain::transitions::RelocateInSpaceRequest {
-            char_id,
-            ship_id,
-            old_sys_id: origin_sys,
-            dest_sys_id: dest_sys,
-            was_in_space: true,
-            arrival_position: Some(arrival_pos),
-            fallback_arrival_position: arrival_pos,
-            arrival_velocity: launch_vector * 100.0,
-            require_take_ball: true,
-            take_ball_missing_code: "SystemTransitionFailed",
-            db_transition_failed_code: "SystemTransitionFailed",
-            destination_wake: crate::domain::transitions::DestinationWakePolicy::SessionArrival(
-                crate::system_actor::SessionArrivalWakeReason::Jump,
-            ),
-            transition_kind: crate::domain::transitions::SpaceTransitionKind::JumpSystem,
-            transition_reason: "shipcaster",
-            combat_state_preservation:
-                crate::domain::transitions::CombatStatePreservation::PreserveClamped {
-                    fallback: pre_cs,
-                },
-            gate_cloak_invuln: crate::domain::transitions::GateCloakInvulnPolicy::standard_jump_cloak(),
-            cleanup: crate::domain::transitions::LeaveSpaceCleanupPolicy::gameplay_jump(),
-            sync_local_chat: true,
-            persist_item_position: false,
-            record_session_change_timer: true,
-            record_solar_system_jump: true,
-            bind_beyonce: true,
-            push_set_state: false,
-        },
-    )
-    .await
-    .map_err(crate::services::domain_err_to_rpc)?;
-
     let has_damage = saved_heat
         .as_ref()
         .is_some_and(|(_, dmg)| !dmg.is_empty());
-    let cleared_zarzakh_gate = if has_damage || origin_sys == 30_100_000 {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some((_, ref dmg_list)) = saved_heat {
-                for &(mid, dhp) in dmg_list {
-                    if let Some(it) = snap.items.get_mut(&mid) {
-                        it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, dhp);
+
+    let (outcome, cleared_zarzakh_gate) =
+        crate::domain::transitions::relocate_character_in_space_with_pre_spawn(
+            ctx,
+            Some(session),
+            crate::domain::transitions::RelocateInSpaceRequest {
+                char_id,
+                ship_id,
+                old_sys_id: origin_sys,
+                old_dock: None,
+                dest_sys_id: dest_sys,
+                was_in_space: true,
+                arrival_position: Some(arrival_pos),
+                fallback_arrival_position: arrival_pos,
+                arrival_velocity: launch_vector * 100.0,
+                require_take_ball: true,
+                take_ball_missing_code: "SystemTransitionFailed",
+                db_transition_failed_code: "SystemTransitionFailed",
+                destination_wake:
+                    crate::domain::transitions::DestinationWakePolicy::SessionArrival(
+                        crate::system_actor::SessionArrivalWakeReason::Jump,
+                    ),
+                transition_kind: crate::domain::transitions::SpaceTransitionKind::JumpSystem,
+                transition_reason: "shipcaster",
+                combat_state_preservation:
+                    crate::domain::transitions::CombatStatePreservation::PreserveClamped {
+                        fallback: pre_cs,
+                    },
+                gate_cloak_invuln:
+                    crate::domain::transitions::GateCloakInvulnPolicy::standard_jump_cloak(),
+                cleanup: crate::domain::transitions::LeaveSpaceCleanupPolicy::gameplay_jump(),
+                sync_local_chat: true,
+                persist_item_position: false,
+                record_session_change_timer: true,
+                record_solar_system_jump: true,
+                bind_beyonce: true,
+                push_set_state: false,
+            },
+            || {
+                let cleared_zarzakh = if has_damage || origin_sys == 30_100_000 {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some((_, ref dmg_list)) = saved_heat {
+                            for &(mid, dhp) in dmg_list {
+                                if let Some(it) = snap.items.get_mut(&mid) {
+                                    it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, dhp);
+                                }
+                            }
+                        }
+                        if origin_sys == 30_100_000 {
+                            snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                if has_damage {
+                    ctx.invalidate_ship_fitting(ship_id);
+                }
+                if let Some((rack_heat, _)) = saved_heat {
+                    if rack_heat.iter().any(|&h| h.is_finite() && h > 0.0) {
+                        ctx.update_ship_rack_heat(char_id, ship_id, rack_heat, false);
                     }
                 }
-            }
-            if origin_sys == 30_100_000 {
-                snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
-            } else {
-                None
-            }
-        })
-    } else {
-        None
-    };
+                cleared_zarzakh
+            },
+        )
+        .await
+        .map_err(crate::services::domain_err_to_rpc)?;
+
     if let Some(locked_gate_id) = cleared_zarzakh_gate {
         crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
             &ctx.quasar_gateway,
@@ -505,11 +520,6 @@ pub async fn execute_shipcaster_jump(
             locked_gate_id,
             now_unix,
         );
-    }
-    if let Some((rack_heat, _)) = saved_heat {
-        if rack_heat.iter().any(|&h| h.is_finite() && h > 0.0) {
-            ctx.update_ship_rack_heat(char_id, ship_id, rack_heat, false);
-        }
     }
 
     apply_shipcaster_arrival_fx(&outcome.dest_handle, ship_id).await;
@@ -717,6 +727,145 @@ mod transition_regression_tests {
             )
             .is_some(),
             "shipcaster jump must record session-change timer"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_shipcaster_jump_preserves_active_overloaded_module_damage_and_fit_cache() {
+        let ctx = ServerContext::new();
+        let origin_sys = 30_000_142_u32;
+        let dest_sys = 30_000_144_u32;
+        let cid = 90_881_222_i64;
+        let ship_id = 91_881_222_i64;
+        let mod_id = 92_881_222_i64;
+        let corp_id = 98_000_001_i64;
+        let now_u = ctx.now_unix();
+        // Pick a real hi-slot module (`2889`, matching shipcaster edge tests) from SDE.
+        let mod_type_id = ctx
+            .sde
+            .types
+            .get(&2889)
+            .map(|t| t.type_id)
+            .unwrap_or(2046);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = CharacterRecord::default();
+            ch.character_id = cid;
+            ch.name = "OverheatedRookie".into();
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = origin_sys;
+            ch.active_ship_id = ship_id;
+            ch.create_date_unix = now_u.saturating_sub(3_600);
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+
+            let mut ship = InventoryItemRecord::default();
+            ship.item_id = ship_id;
+            ship.type_id = 587;
+            ship.owner_id = cid;
+            ship.location_id = i64::from(origin_sys);
+            ship.flag = InventoryFlag::None;
+            ship.quantity = 1;
+            ship.singleton = true;
+            snap.items.insert(ship_id, ship);
+
+            let mut module = InventoryItemRecord::default();
+            module.item_id = mod_id;
+            module.type_id = mod_type_id;
+            module.owner_id = cid;
+            module.location_id = ship_id;
+            module.flag = InventoryFlag::HiSlot0;
+            module.quantity = 1;
+            module.singleton = true;
+            snap.items.insert(mod_id, module);
+
+            // Active AND overloaded so `deactivate_ship_modules_on_leave_space` invalidates `ship_fittings`.
+            snap.module_active_states.insert(mod_id);
+            snap.ship_fit_inputs.insert(
+                ship_id,
+                eve_db::ShipFitInputsRecord {
+                    active_stance_type_id: None,
+                    last_stance_switch_ms: None,
+                    overloaded_modules: std::collections::BTreeSet::from([mod_id]),
+                },
+            );
+        });
+
+        // Prime `ctx.ship_fittings` with live rack heat and live module heat damage (`T2E-P1-01`).
+        let mut primed = ctx.fit(cid, ship_id).expect("prime ship fit");
+        primed.rack_heat = [12.5, 4.25, 0.0];
+        primed
+            .modules
+            .get_mut(&mod_id)
+            .expect("fitted module present in primed fit")
+            .damage_hp = 37.5;
+        ctx.ship_fittings
+            .write()
+            .unwrap()
+            .insert(ship_id, primed);
+
+        let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+        origin_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::new(1_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(cid, ship_id, 587),
+                ctx.build_ship_slim_meta(cid, 587),
+            )
+            .await
+            .expect("spawn origin ship");
+
+        let mut sess = SessionState::new(7702);
+        sess.user_id = Some(7702);
+        sess.character_id = Some(cid);
+        sess.corporation_id = Some(corp_id);
+        sess.solar_system_id = Some(origin_sys);
+        sess.ship_id = Some(ship_id);
+
+        execute_shipcaster_jump(
+            &ctx,
+            &mut sess,
+            cid,
+            ship_id,
+            origin_sys,
+            dest_sys,
+            DVec3::new(5_000.0, 0.0, 0.0),
+            DVec3::X,
+        )
+        .await
+        .expect("shipcaster jump succeeds with active/overloaded module");
+
+        ctx.db.with_snapshot(|snap| {
+            let db_dmg = snap.items[&mod_id]
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .copied();
+            assert_eq!(db_dmg, Some(37.5), "DB DAMAGE attr must persist saved_heat");
+            assert!(!snap.module_active_states.contains(&mod_id));
+        });
+        let cached_fit = ctx
+            .ship_fittings
+            .read()
+            .unwrap()
+            .get(&ship_id)
+            .cloned()
+            .expect("ship_fittings cache populated after jump");
+        assert_eq!(cached_fit.rack_heat, [12.5, 4.25, 0.0]);
+        assert_eq!(
+            cached_fit.modules.get(&mod_id).map(|m| m.damage_hp),
+            Some(37.5),
+            "cached ctx.ship_fittings[ship_id].modules[mod_id].damage_hp must not be wiped (`T2E-P1-01`)"
         );
     }
 }

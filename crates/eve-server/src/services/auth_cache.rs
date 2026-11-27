@@ -1412,7 +1412,7 @@ async fn handle_slash_teleport(
     };
     let target_id = parsed.location_id;
 
-    let (old_sys_id, _old_station_id, old_structure_id, ship_id, was_in_space) = ctx
+    let (old_sys_id, old_station_id, old_structure_id, ship_id, was_in_space) = ctx
         .db
         .with_snapshot(|snap| {
             snap.characters.get(&target_cid).map(|c| {
@@ -1539,6 +1539,9 @@ async fn handle_slash_teleport(
     } else {
         "slash_teleport"
     };
+    let old_dock = old_station_id
+        .map(|id| (id, false))
+        .or_else(|| old_structure_id.map(|id| (id, true)));
     let sess_target = (target_cid == cid).then_some(session);
     let outcome = crate::domain::transitions::relocate_character_in_space(
         ctx,
@@ -1547,6 +1550,7 @@ async fn handle_slash_teleport(
             char_id: target_cid,
             ship_id,
             old_sys_id,
+            old_dock,
             dest_sys_id,
             was_in_space,
             arrival_position: explicit_pos,
@@ -1556,7 +1560,11 @@ async fn handle_slash_teleport(
             take_ball_missing_code: "TeleportFailed",
             db_transition_failed_code: "TeleportFailed",
             destination_wake: crate::domain::transitions::DestinationWakePolicy::GmCommand(
-                cmd.to_string(),
+                if cmd.trim().is_empty() {
+                    "/tr".to_string()
+                } else {
+                    cmd.to_string()
+                },
             ),
             transition_kind: crate::domain::transitions::SpaceTransitionKind::Teleport,
             transition_reason: teleport_reason,
@@ -1564,6 +1572,8 @@ async fn handle_slash_teleport(
                 crate::domain::transitions::CombatStatePreservation::Fresh,
             gate_cloak_invuln: crate::domain::transitions::GateCloakInvulnPolicy::none(),
             cleanup: crate::domain::transitions::LeaveSpaceCleanupPolicy {
+                abandon_drones: was_in_space,
+                abort_self_destruct: was_in_space,
                 deactivate_modules: was_in_space,
                 ..crate::domain::transitions::LeaveSpaceCleanupPolicy::gm_teleport()
             },

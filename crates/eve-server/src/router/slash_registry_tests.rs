@@ -1816,7 +1816,10 @@ fn track2_transition_domain_parity_source_guard() {
         .find("pub async fn execute_shipcaster_jump(")
         .expect("execute_shipcaster_jump");
     let sc_fn = &shipcaster_prod[sc_start..];
-    assert!(sc_fn.contains("relocate_character_in_space("));
+    assert!(
+        sc_fn.contains("relocate_character_in_space(")
+            || sc_fn.contains("relocate_character_in_space_with_pre_spawn(")
+    );
     for forbidden in [
         "get_or_spawn",
         "take_ball(",

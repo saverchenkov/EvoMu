@@ -114,11 +114,11 @@ pub struct LeaveSpaceCleanupPolicy {
 }
 
 impl LeaveSpaceCleanupPolicy {
-    /// Cleanup policy for GM `/tr` / `/moveme` relocations.
+    /// Cleanup policy for GM `/tr` / `/moveme` relocations (`#1193`, `#1542`).
     pub fn gm_teleport() -> Self {
         Self {
-            abandon_drones: false,
-            abort_self_destruct: false,
+            abandon_drones: true,
+            abort_self_destruct: true,
             deactivate_modules: true,
             leave_space_in_snap: LeaveSpaceSnapMode::OnlyIfTakenBall,
             stop_and_flush_warp_on_cross_system: true,
@@ -143,6 +143,7 @@ pub struct RelocateInSpaceRequest {
     pub char_id: i64,
     pub ship_id: i64,
     pub old_sys_id: u32,
+    pub old_dock: Option<(i64, bool)>,
     pub dest_sys_id: u32,
     pub was_in_space: bool,
     /// Explicit destination position; when `None`, cross-system or undock arrival spawns use
@@ -205,8 +206,9 @@ async fn wake_destination_handle(
                 .await
         }
         DestinationWakePolicy::GmCommand(cmd) => {
-            let cmd = if cmd.trim().is_empty() { "/tr" } else { cmd.as_str() };
-            ctx.systems.wake_for_gm_command_async(dest_sys_id, cmd).await
+            ctx.systems
+                .wake_for_gm_command_async(dest_sys_id, cmd.as_str())
+                .await
         }
     };
     res.map_err(|e| {
@@ -215,6 +217,24 @@ async fn wake_destination_handle(
             format!("Failed to wake solar system {dest_sys_id}: {e}"),
         )
     })
+}
+
+async fn rollback_failed_destination(
+    ctx: &ServerContext,
+    req: &RelocateInSpaceRequest,
+    old_handle: Option<&SystemHandle>,
+    taken: Option<crate::system_actor::TakenBall>,
+) {
+    if let Some((dock_id, is_structure)) = req.old_dock {
+        let _ = ctx.db.dock_character(req.char_id, dock_id, is_structure);
+    } else if req.old_sys_id > 0 {
+        let _ = ctx
+            .db
+            .set_character_solar_system(req.char_id, req.old_sys_id, &ctx.sde);
+    }
+    if let (Some(oh), Some(ball)) = (old_handle, taken) {
+        let _ = oh.restore_ball(ball).await;
+    }
 }
 
 async fn detect_and_stop_warp(handle: &SystemHandle, ship_id: i64, flush_peers: bool) -> bool {
@@ -304,14 +324,14 @@ async fn spawn_arrival_ship_ball(
     req: &RelocateInSpaceRequest,
     ship_id: i64,
     arrival_pos: DVec3,
-    taken: Option<crate::system_actor::TakenBall>,
-) -> (u64, u32) {
+    taken: Option<&crate::system_actor::TakenBall>,
+) -> Result<(u64, u32), DomainError> {
     if ship_id <= 0 {
-        return (0, 0);
+        return Ok((0, 0));
     }
     let (mut new_ball, ship_type_id, taken_cs) = if let Some(t) = taken {
         let tid = t.ball.type_id;
-        (t.ball, tid, t.combat_state)
+        (t.ball.clone(), tid, t.combat_state.clone())
     } else {
         let tid = lookup_ship_type_id(ctx, ship_id);
         let ball = Ball {
@@ -345,8 +365,16 @@ async fn spawn_arrival_ship_ball(
     let dest_tick = dest_handle
         .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
         .await
-        .unwrap_or(0);
-    (dest_tick, ship_type_id)
+        .map_err(|msg| {
+            DomainError::internal(
+                req.db_transition_failed_code,
+                format!(
+                    "Failed to spawn ship ball {ship_id} in solar system {}: {msg}",
+                    req.dest_sys_id
+                ),
+            )
+        })?;
+    Ok((dest_tick, ship_type_id))
 }
 
 fn finish_session_and_post_hooks(
@@ -396,13 +424,29 @@ fn finish_session_and_post_hooks(
 /// Shared space relocation operation for GM `/tr` / `/moveme` and gameplay cross-system jumps.
 ///
 /// Cold origin system actors are never woken (`#1542`): departure looks up `old_sys_id` with
-/// `ctx.systems.get_handle(old_sys_id)`. On DB persistence failure after `take_ball`, the removed
-/// ball is restored to `old_handle`.
+/// `ctx.systems.get_handle(old_sys_id)`. On DB persistence, destination-wake, or arrival-spawn
+/// failure after `take_ball`, character location and the removed ball are rolled back.
 pub async fn relocate_character_in_space(
+    ctx: &ServerContext,
+    session: Option<&mut SessionState>,
+    req: RelocateInSpaceRequest,
+) -> Result<RelocateInSpaceOutcome, DomainError> {
+    let (outcome, ()) = relocate_character_in_space_with_pre_spawn(ctx, session, req, || ()).await?;
+    Ok(outcome)
+}
+
+/// Variant of [`relocate_character_in_space`] invoking `pre_spawn_hook` after departure cleanups
+/// (such as `deactivate_ship_modules_on_leave_space`) and immediately before destination
+/// `spawn_arrival_ship_ball` / `build_ship_combat_state` so fitting heat/damage state stays synced.
+pub async fn relocate_character_in_space_with_pre_spawn<F, T>(
     ctx: &ServerContext,
     mut session: Option<&mut SessionState>,
     req: RelocateInSpaceRequest,
-) -> Result<RelocateInSpaceOutcome, DomainError> {
+    pre_spawn_hook: F,
+) -> Result<(RelocateInSpaceOutcome, T), DomainError>
+where
+    F: FnOnce() -> T + Send,
+{
     if req.dest_sys_id == 0 {
         return Err(DomainError::not_found(
             "SolarSystemNotFound",
@@ -436,14 +480,21 @@ pub async fn relocate_character_in_space(
                     format!("Failed to update character solar system: {e:?}"),
                 )
             })?;
-        let effective_ship_id = if req.ship_id > 0 {
-            req.ship_id
-        } else {
+        let effective_ship_id = if updated_ch.active_ship_id > 0 {
             updated_ch.active_ship_id
+        } else {
+            req.ship_id
         };
 
         let dest_handle =
-            wake_destination_handle(ctx, req.dest_sys_id, &req.destination_wake).await?;
+            match wake_destination_handle(ctx, req.dest_sys_id, &req.destination_wake).await {
+                Ok(h) => h,
+                Err(err) => {
+                    rollback_failed_destination(ctx, &req, None, None).await;
+                    return Err(err);
+                }
+            };
+        let hook_out = pre_spawn_hook();
         let (dest_tick, ship_type_id, persisted_pos) = if effective_ship_id > 0 {
             if dest_handle
                 .get_ball_snapshot(effective_ship_id)
@@ -461,7 +512,7 @@ pub async fn relocate_character_in_space(
                 (0, lookup_ship_type_id(ctx, effective_ship_id), req.arrival_position)
             } else {
                 let spawn_pos = req.arrival_position.unwrap_or(req.fallback_arrival_position);
-                let (tick, tid) = spawn_arrival_ship_ball(
+                let (tick, tid) = match spawn_arrival_ship_ball(
                     ctx,
                     &dest_handle,
                     &req,
@@ -469,7 +520,14 @@ pub async fn relocate_character_in_space(
                     spawn_pos,
                     None,
                 )
-                .await;
+                .await
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        rollback_failed_destination(ctx, &req, None, None).await;
+                        return Err(err);
+                    }
+                };
                 (tick, tid, Some(spawn_pos))
             }
         } else {
@@ -494,15 +552,18 @@ pub async fn relocate_character_in_space(
         }
 
         finish_session_and_post_hooks(ctx, session.as_deref_mut(), &req, dest_tick);
-        return Ok(RelocateInSpaceOutcome {
-            updated_ch,
-            dest_handle,
-            dest_tick,
-            ship_type_id,
-            same_system_in_space,
-            stopped_mid_warp,
-            arrival_position: persisted_pos,
-        });
+        return Ok((
+            RelocateInSpaceOutcome {
+                updated_ch,
+                dest_handle,
+                dest_tick,
+                ship_type_id,
+                same_system_in_space,
+                stopped_mid_warp,
+                arrival_position: persisted_pos,
+            },
+            hook_out,
+        ));
     }
 
     let mut stopped_mid_warp = false;
@@ -558,6 +619,15 @@ pub async fn relocate_character_in_space(
         }
     };
 
+    let dest_handle =
+        match wake_destination_handle(ctx, req.dest_sys_id, &req.destination_wake).await {
+            Ok(h) => h,
+            Err(err) => {
+                rollback_failed_destination(ctx, &req, old_handle.as_ref(), taken).await;
+                return Err(err);
+            }
+        };
+
     let effective_ship_id = if updated_ch.active_ship_id > 0 {
         updated_ch.active_ship_id
     } else {
@@ -566,11 +636,11 @@ pub async fn relocate_character_in_space(
     let spawn_pos = req.arrival_position.unwrap_or(req.fallback_arrival_position);
 
     if effective_ship_id > 0 {
-        if req.cleanup.abort_self_destruct {
+        if req.cleanup.abort_self_destruct && req.was_in_space {
             crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, effective_ship_id);
         }
-        if req.cleanup.abandon_drones && req.old_sys_id > 0 {
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+        if req.cleanup.abandon_drones && req.was_in_space && req.old_sys_id > 0 {
+            crate::sp6_lifecycle::abandon_drones_and_fighters_without_wake_sync(
                 ctx,
                 req.char_id,
                 effective_ship_id,
@@ -614,25 +684,33 @@ pub async fn relocate_character_in_space(
         }
     }
 
-    if req.sync_local_chat && req.old_sys_id > 0 {
-        ctx.sync_character_local_chat(req.char_id, Some(req.old_sys_id), req.dest_sys_id);
-    }
+    let hook_out = pre_spawn_hook();
 
-    let dest_handle =
-        wake_destination_handle(ctx, req.dest_sys_id, &req.destination_wake).await?;
     let (dest_tick, ship_type_id) = if effective_ship_id > 0 {
-        spawn_arrival_ship_ball(
+        match spawn_arrival_ship_ball(
             ctx,
             &dest_handle,
             &req,
             effective_ship_id,
             spawn_pos,
-            taken,
+            taken.as_ref(),
         )
         .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                rollback_failed_destination(ctx, &req, old_handle.as_ref(), taken).await;
+                return Err(err);
+            }
+        }
     } else {
         (0, 0)
     };
+    drop(taken);
+
+    if req.sync_local_chat && req.old_sys_id > 0 {
+        ctx.sync_character_local_chat(req.char_id, Some(req.old_sys_id), req.dest_sys_id);
+    }
 
     if req.push_set_state && effective_ship_id > 0 {
         let _ = dest_handle.push_set_state(effective_ship_id).await;
@@ -640,15 +718,18 @@ pub async fn relocate_character_in_space(
 
     finish_session_and_post_hooks(ctx, session.as_deref_mut(), &req, dest_tick);
 
-    Ok(RelocateInSpaceOutcome {
-        updated_ch,
-        dest_handle,
-        dest_tick,
-        ship_type_id,
-        same_system_in_space: false,
-        stopped_mid_warp,
-        arrival_position: (effective_ship_id > 0).then_some(spawn_pos),
-    })
+    Ok((
+        RelocateInSpaceOutcome {
+            updated_ch,
+            dest_handle,
+            dest_tick,
+            ship_type_id,
+            same_system_in_space: false,
+            stopped_mid_warp,
+            arrival_position: (effective_ship_id > 0).then_some(spawn_pos),
+        },
+        hook_out,
+    ))
 }
 
 #[cfg(test)]
@@ -706,6 +787,7 @@ mod tests {
                 char_id: cid,
                 ship_id,
                 old_sys_id: MAURASI,
+                old_dock: None,
                 dest_sys_id: PERIMETER,
                 was_in_space: true,
                 arrival_position: Some(DVec3::new(1_000.0, 2_000.0, 3_000.0)),
@@ -788,6 +870,7 @@ mod tests {
                 char_id: missing_cid,
                 ship_id,
                 old_sys_id: JITA,
+                old_dock: None,
                 dest_sys_id: PERIMETER,
                 was_in_space: true,
                 arrival_position: Some(DVec3::ZERO),
@@ -826,5 +909,87 @@ mod tests {
                 .is_some(),
             "taken ball must be restored to origin system on DB transition failure"
         );
+    }
+
+    #[tokio::test]
+    async fn destination_wake_failure_rolls_back_db_and_restores_ball() {
+        let ctx = ServerContext::new();
+        let cid = 90_991_888_i64;
+        let ship_id = 91_991_888_i64;
+        seed_test_pilot(&ctx, cid, ship_id, JITA);
+        let origin_handle = ctx
+            .systems
+            .wake_for_session_arrival_async(JITA, SessionArrivalWakeReason::Undock)
+            .await
+            .expect("wake jita");
+        origin_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::new(750.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+                ctx.build_ship_slim_meta(cid, 587),
+            )
+            .await
+            .expect("spawn origin ball");
+
+        let mut sess = make_session(cid, 1_000_167, JITA);
+        // Empty GM command string rejects inside `wake_for_gm_command_async` AFTER `take_ball` and
+        // DB transition, exercising destination-wake rollback (`P2`).
+        let err = relocate_character_in_space(
+            &ctx,
+            Some(&mut sess),
+            RelocateInSpaceRequest {
+                char_id: cid,
+                ship_id,
+                old_sys_id: JITA,
+                old_dock: None,
+                dest_sys_id: PERIMETER,
+                was_in_space: true,
+                arrival_position: Some(DVec3::ZERO),
+                fallback_arrival_position: DVec3::ZERO,
+                arrival_velocity: DVec3::ZERO,
+                require_take_ball: true,
+                take_ball_missing_code: "SystemTransitionFailed",
+                db_transition_failed_code: "SystemTransitionFailed",
+                destination_wake: DestinationWakePolicy::GmCommand(String::new()),
+                transition_kind: SpaceTransitionKind::Teleport,
+                transition_reason: "teleport",
+                combat_state_preservation: CombatStatePreservation::Fresh,
+                gate_cloak_invuln: GateCloakInvulnPolicy::none(),
+                cleanup: LeaveSpaceCleanupPolicy::gm_teleport(),
+                sync_local_chat: true,
+                persist_item_position: true,
+                record_session_change_timer: false,
+                record_solar_system_jump: false,
+                bind_beyonce: false,
+                push_set_state: false,
+            },
+        )
+        .await
+        .expect_err("destination wake failure must return Err and roll back");
+
+        assert_eq!(err.code, "SystemTransitionFailed");
+        assert_eq!(sess.solar_system_id, Some(JITA));
+        assert!(ctx.systems.get_handle(PERIMETER).is_none());
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&cid].solar_system_id, JITA);
+            assert_eq!(snap.items[&ship_id].location_id, i64::from(JITA));
+        });
+        let (_, restored) = origin_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .expect("origin snapshot")
+            .expect("taken ball must be restored to origin on wake failure");
+        assert!((restored.position - DVec3::new(750.0, 0.0, 0.0)).length() < 1e-6);
     }
 }
