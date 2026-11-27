@@ -6,9 +6,10 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    get_active_wiki_pve_catalog, select_entry_index_for_dungeon, wiki_faction_name_to_id,
-    WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec, WikiObjective, WikiPveEntry, WikiSpawn,
-    WikiTrigger, WikiTriggerActionSpec, WikiWave, WikiWaveDistance,
+    bind_spawn_object_index_if_omitted, classify_dungeon_object_spawn, get_active_wiki_pve_catalog,
+    has_omitted_object_trigger, rebind_auto_object_targets, select_entry_index_for_dungeon,
+    wiki_faction_name_to_id, WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec, WikiObjective,
+    WikiPveEntry, WikiSpawn, WikiTrigger, WikiTriggerActionSpec, WikiWave, WikiWaveDistance,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_legacy_ess::{
@@ -394,91 +395,6 @@ fn collect_wave_backref_tags(tr: &WikiTrigger, out: &mut HashMap<(usize, usize),
     }
 }
 
-fn bind_spawn_object_index_if_omitted(
-    tr: &WikiTrigger,
-    kind: &mut DungeonTriggerKind,
-    obj_idx: usize,
-    obj_pos: [f64; 3],
-) {
-    match kind {
-        DungeonTriggerKind::OnLoot {
-            target_object_index,
-            ..
-        } if tr.target_object_index.is_none() => {
-            *target_object_index = Some(obj_idx);
-        }
-        DungeonTriggerKind::OnApproach {
-            target_object_index,
-            anchor_pos,
-            ..
-        } if tr.target_object_index.is_none() => {
-            *target_object_index = Some(obj_idx);
-            *anchor_pos = obj_pos;
-        }
-        DungeonTriggerKind::CompoundAnd { clauses }
-        | DungeonTriggerKind::CompoundOr { clauses } => {
-            for (c_tr, c_kind) in tr.clauses.iter().zip(clauses.iter_mut()) {
-                bind_spawn_object_index_if_omitted(c_tr, c_kind, obj_idx, obj_pos);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn has_omitted_object_trigger(tr: &WikiTrigger) -> bool {
-    let kind_lc = tr.kind.as_deref().map(str::trim).unwrap_or("").to_ascii_lowercase();
-    (tr.target_object_index.is_none()
-        && matches!(
-            kind_lc.as_str(),
-            "ship_approached" | "approach" | "on_approach" | "onapproach" | "loot_taken" | "on_loot" | "onloot"
-        ))
-        || tr.clauses.iter().any(has_omitted_object_trigger)
-}
-
-fn rebind_auto_object_targets(
-    tr: &WikiTrigger,
-    kind: &mut DungeonTriggerKind,
-    objects: &[DungeonRuntimeObject],
-    room_pos: [f64; 3],
-) {
-    match kind {
-        DungeonTriggerKind::OnApproach {
-            target_object_index,
-            anchor_pos,
-            ..
-        } if tr.target_object_index.is_none() => {
-            if target_object_index
-                .is_some_and(|oi| objects.get(oi).is_some_and(|o| o.spawn_on_trigger))
-            {
-                *target_object_index = objects.iter().position(|o| !o.spawn_on_trigger);
-                *anchor_pos = target_object_index
-                    .and_then(|oi| objects.get(oi))
-                    .map(|o| o.position)
-                    .unwrap_or(room_pos);
-            }
-        }
-        DungeonTriggerKind::OnLoot {
-            target_object_index,
-            ..
-        } if tr.target_object_index.is_none() => {
-            if target_object_index
-                .is_some_and(|oi| objects.get(oi).is_some_and(|o| o.spawn_on_trigger))
-            {
-                if let Some(oi) = objects.iter().position(|o| !o.spawn_on_trigger && o.is_container) {
-                    *target_object_index = Some(oi);
-                }
-            }
-        }
-        DungeonTriggerKind::CompoundAnd { clauses }
-        | DungeonTriggerKind::CompoundOr { clauses } => {
-            for (c_tr, c_kind) in tr.clauses.iter().zip(clauses.iter_mut()) {
-                rebind_auto_object_targets(c_tr, c_kind, objects, room_pos);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn build_npc_damaged_kind(
     tr: &WikiTrigger,
     wave_to_group_id: &HashMap<usize, u8>,
@@ -833,8 +749,39 @@ fn translate_trigger_kind_inner(
                 item_type_id: tr.item_type_id.filter(|&id| id > 0),
             })
         }
-        // Fail closed on unimplemented Track 2c trigger kinds ("structure_destroyed",
-        // "can_hacked", "cargo_delivered", "ore_depleted") and any unknown trigger kind.
+        "cargo_delivered" | "on_cargo_delivered" | "oncargodelivered" | "deliver_cargo" => {
+            let target_object_index = tr
+                .target_object_index
+                .or_else(|| objects.iter().position(|o| o.is_container));
+            let required_quantity = tr.required_quantity.unwrap_or(1).max(1);
+            Ok(DungeonTriggerKind::OnCargoDelivered {
+                container_ball_id: None,
+                target_object_index,
+                item_type_id: tr.item_type_id.filter(|&id| id > 0),
+                required_quantity,
+            })
+        }
+        "structure_destroyed"
+        | "on_structure_destroyed"
+        | "onstructuredestroyed"
+        | "destroy_structure"
+        | "object_destroyed" => {
+            let target_tag = trimmed_opt(tr.target_tag.as_deref());
+            let target_type_id = tr.target_type_id.filter(|&id| id > 0);
+            let target_object_index = tr.target_object_index.or_else(|| {
+                (target_tag.is_none() && target_type_id.is_none())
+                    .then(|| objects.iter().position(|o| o.destructible))
+                    .flatten()
+            });
+            Ok(DungeonTriggerKind::OnStructureDestroyed {
+                target_ball_id: None,
+                target_object_index,
+                target_tag,
+                target_type_id,
+            })
+        }
+        // Fail closed on unimplemented Track 2c trigger kinds ("can_hacked", "ore_depleted")
+        // and any unknown trigger kind.
         _ => Err(TriggerTranslationError::UnsupportedKind(kind_lc)),
     }
 }
@@ -1083,38 +1030,6 @@ fn raw_class_to_standin_ship_class(raw_class: &str) -> Option<u32> {
     }
 }
 
-fn has_non_empty_loot(loot: &Option<serde_json::Value>) -> bool {
-    match loot {
-        None | Some(serde_json::Value::Null) => false,
-        Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
-        Some(serde_json::Value::Array(a)) => !a.is_empty(),
-        Some(serde_json::Value::Object(o)) => !o.is_empty(),
-        Some(_) => true,
-    }
-}
-
-fn is_container_or_prop_row(sp: &WikiSpawn) -> bool {
-    let cls = sp.raw_class.trim().to_lowercase();
-    if matches!(
-        cls.as_str(),
-        "container"
-            | "wreck"
-            | "cache"
-            | "hackable"
-            | "hacking"
-            | "destructible object"
-            | "large collidable object"
-            | "hangar array"
-    ) {
-        return true;
-    }
-    has_non_empty_loot(&sp.loot)
-        && matches!(
-            cls.as_str(),
-            "" | "structure" | "prop" | "object" | "container" | "wreck" | "depot" | "silo" | "warehouse"
-        )
-}
-
 pub(crate) fn is_valid_combat_npc_type(sde: &eve_sde::SdeRegistry, tid: u32) -> bool {
     if tid == 0 {
         return false;
@@ -1223,10 +1138,12 @@ enum ResolvedSpawn {
         count: usize,
         is_standin: bool,
     },
-    ContainerObject {
+    DungeonObject {
         type_id: u32,
         name: String,
         is_concrete: bool,
+        is_container: bool,
+        destructible: bool,
     },
     Skipped,
 }
@@ -1241,7 +1158,7 @@ fn resolve_spawn_entry(
     if is_zero_spawn_count(sp.count.min, sp.count.max) {
         return ResolvedSpawn::Skipped;
     }
-    if is_container_or_prop_row(sp) {
+    if let Some(flags) = classify_dungeon_object_spawn(sp) {
         let concrete_tid = sp
             .resolution
             .type_ids
@@ -1249,16 +1166,18 @@ fn resolve_spawn_entry(
             .chain(sp.resolution.candidate_type_ids.iter())
             .copied()
             .find(|&tid| tid > 0);
-        let type_id = concrete_tid.unwrap_or(23);
+        let type_id = concrete_tid.unwrap_or(flags.default_type_id);
         let name = if sp.raw_name.trim().is_empty() {
-            "Cargo Container".to_string()
+            flags.default_name.to_string()
         } else {
             sp.raw_name.trim().to_string()
         };
-        return ResolvedSpawn::ContainerObject {
+        return ResolvedSpawn::DungeonObject {
             type_id,
             name,
             is_concrete: concrete_tid.is_some(),
+            is_container: flags.is_container,
+            destructible: flags.destructible,
         };
     }
 
@@ -1426,6 +1345,15 @@ fn is_non_kill_or_compound_wave_trigger(tr: &WikiTrigger) -> bool {
             | "loot_taken"
             | "on_loot"
             | "onloot"
+            | "cargo_delivered"
+            | "on_cargo_delivered"
+            | "oncargodelivered"
+            | "deliver_cargo"
+            | "structure_destroyed"
+            | "on_structure_destroyed"
+            | "onstructuredestroyed"
+            | "destroy_structure"
+            | "object_destroyed"
             | "compound_and"
             | "compoundand"
             | "compound_or"
@@ -1855,16 +1783,20 @@ pub(crate) fn build_wiki_deadspace_rooms(
                             });
                         }
                     }
-                    ResolvedSpawn::ContainerObject {
+                    ResolvedSpawn::DungeonObject {
                         type_id,
                         name,
                         is_concrete,
+                        is_container,
+                        destructible,
                     } => {
                         materialized_spawns.insert((wwave.wave_index, sp_idx));
                         if is_concrete {
                             stats.concrete_rows += 1;
                         }
-                        stats.container_objects += 1;
+                        if is_container {
+                            stats.container_objects += 1;
+                        }
                         let obj_idx = objects.len();
                         spawn_object_index.insert((wwave.wave_index, sp_idx), obj_idx);
                         let dist = wwave
@@ -1882,10 +1814,11 @@ pub(crate) fn build_wiki_deadspace_rooms(
                                 room_pos[2] + angle.sin() * dist,
                             ],
                             radius: 350.0,
-                            is_container: true,
+                            is_container,
                             loot_items: Vec::new(),
                             spawned: false,
-                            destructible: sp.destructible.unwrap_or(false),
+                            destructible,
+                            tag,
                             ..Default::default()
                         });
                     }

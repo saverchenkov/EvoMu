@@ -1707,9 +1707,9 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
     "by_dungeon_id": {{
       "991001": ["valid_site_1"],
       "991002": ["valid_site_2"],
-      "991003": ["rej_structure"],
+      "991003": ["valid_structure"],
       "991004": ["rej_can"],
-      "991005": ["rej_cargo"],
+      "991005": ["valid_cargo"],
       "991006": ["rej_ore_compound"],
       "991007": ["rej_unknown"]
     }}
@@ -1745,8 +1745,8 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
       }}]
     }},
     {{
-      "entry_id": "rej_structure",
-      "base_title": "Rejected Structure Trigger",
+      "entry_id": "valid_structure",
+      "base_title": "Valid Structure Trigger",
       "sde_matches": {{"dungeon_ids": [991003], "mission_ids": []}},
       "rooms": [{{
         "room_index": 1,
@@ -1754,7 +1754,13 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
           "wave_index": 1,
           "timing": "sequential_wave",
           "wave_trigger": {{ "kind": "structure_destroyed" }},
-          "spawns": []
+          "spawns": [{{
+            "raw_class": "Structure",
+            "raw_name": "Signal Relay",
+            "destructible": true,
+            "count": {{"min": 1, "max": 1}},
+            "resolution": {{"status": "resolved_exact", "type_ids": [16757], "candidate_type_ids": [], "had_ellipsis": false}}
+          }}]
         }}]
       }}]
     }},
@@ -1773,8 +1779,8 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
       }}]
     }},
     {{
-      "entry_id": "rej_cargo",
-      "base_title": "Rejected Cargo Trigger",
+      "entry_id": "valid_cargo",
+      "base_title": "Valid Cargo Trigger",
       "sde_matches": {{"dungeon_ids": [991005], "mission_ids": []}},
       "rooms": [{{
         "room_index": 1,
@@ -1782,8 +1788,11 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
           "wave_index": 1,
           "timing": "initial_spawn",
           "spawns": [{{
-            "raw_class": "Frigate",
-            "trigger": {{ "kind": "cargo_delivered" }}
+            "raw_class": "Container",
+            "raw_name": "Drop Box",
+            "count": {{"min": 1, "max": 1}},
+            "resolution": {{"status": "resolved_exact", "type_ids": [23], "candidate_type_ids": [], "had_ellipsis": false}},
+            "trigger": {{ "kind": "cargo_delivered", "item_type_id": 34, "required_quantity": 5 }}
           }}]
         }}]
       }}]
@@ -1852,33 +1861,35 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
     );
 
     let cat = parse_and_validate_wiki_pve_json(&payload).expect("catalog with unsupported entries loads valid subset");
-    assert_eq!(cat.entries.len(), 2);
-    assert_eq!(cat.stats.entries_total, 2);
-    assert_eq!(cat.stats.rejected_unsupported_trigger_entries, 5);
-    assert_eq!(cat.stats.rejected_by_trigger_kind.len(), 5);
-    assert_eq!(cat.stats.rejected_by_trigger_kind.get("structure_destroyed"), Some(&1));
+    assert_eq!(cat.entries.len(), 4);
+    assert_eq!(cat.stats.entries_total, 4);
+    assert_eq!(cat.stats.rejected_unsupported_trigger_entries, 3);
+    assert_eq!(cat.stats.rejected_by_trigger_kind.len(), 3);
     assert_eq!(cat.stats.rejected_by_trigger_kind.get("can_hacked"), Some(&1));
-    assert_eq!(cat.stats.rejected_by_trigger_kind.get("cargo_delivered"), Some(&1));
     assert_eq!(cat.stats.rejected_by_trigger_kind.get("ore_depleted"), Some(&1));
     assert_eq!(cat.stats.rejected_by_trigger_kind.get("unknown_future_trigger"), Some(&1));
 
     assert!(cat.by_entry_id.contains_key("valid_site_1"));
     assert!(cat.by_entry_id.contains_key("valid_site_2"));
+    assert!(cat.by_entry_id.contains_key("valid_structure"));
+    assert!(cat.by_entry_id.contains_key("valid_cargo"));
     assert!(cat.by_dungeon_id.contains_key(&991_001));
     assert!(cat.by_dungeon_id.contains_key(&991_002));
+    assert!(cat.by_dungeon_id.contains_key(&991_003));
+    assert!(cat.by_dungeon_id.contains_key(&991_005));
     assert!(cat.by_site_name.contains_key("valid complex one"));
     assert!(cat.by_site_name.contains_key("valid complex two"));
+    assert!(cat.by_site_name.contains_key("valid structure trigger"));
+    assert!(cat.by_site_name.contains_key("valid cargo trigger"));
 
-    for bad_id in ["rej_structure", "rej_can", "rej_cargo", "rej_ore_compound", "rej_unknown"] {
+    for bad_id in ["rej_can", "rej_ore_compound", "rej_unknown"] {
         assert!(!cat.by_entry_id.contains_key(bad_id));
     }
-    for bad_did in [991_003_u32, 991_004, 991_005, 991_006, 991_007] {
+    for bad_did in [991_004_u32, 991_006, 991_007] {
         assert!(!cat.by_dungeon_id.contains_key(&bad_did));
     }
     for bad_name in [
-        "rejected structure trigger",
         "rejected can trigger",
-        "rejected cargo trigger",
         "rejected ore compound trigger",
         "rejected unknown future trigger",
     ] {
@@ -1887,10 +1898,18 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
 
     let empty_w = std::collections::HashMap::new();
     let empty_r = std::collections::HashMap::new();
+    for ok_kind in ["cargo_delivered", "structure_destroyed"] {
+        let tr = WikiTrigger {
+            kind: Some(ok_kind.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            translate_wiki_trigger_kind(&tr, None, [0.0; 3], &[], &empty_w, &empty_r, None, false).is_ok(),
+            "expected Track 2c-1 trigger kind '{ok_kind}' to translate"
+        );
+    }
     for bad_kind in [
-        "structure_destroyed",
         "can_hacked",
-        "cargo_delivered",
         "ore_depleted",
         "unknown_future_trigger",
     ] {
@@ -1922,7 +1941,7 @@ fn rejects_unimplemented_and_unknown_trigger_kinds_with_counted_reasons() {
                 timing: "initial_spawn".to_string(),
                 spawn_chance_bps: Some(0),
                 wave_trigger: Some(WikiTrigger {
-                    kind: Some("structure_destroyed".to_string()),
+                    kind: Some("can_hacked".to_string()),
                     ..Default::default()
                 }),
                 spawns: vec![WikiSpawn {

@@ -336,19 +336,29 @@ pub(super) async fn handle_loot_all(
             items: looted_ids.clone(),
         },
     );
-    let looted_types: Vec<u32> = ctx.db.with_snapshot(|snap| {
+    let looted_items: Vec<(u32, i32)> = ctx.db.with_snapshot(|snap| {
         looted_ids
             .iter()
-            .filter_map(|lid| snap.items.get(lid).map(|it| it.type_id))
+            .filter_map(|lid| snap.items.get(lid).map(|it| (it.type_id, it.quantity)))
             .collect()
     });
-    for ltid in looted_types {
+    for (ltid, lqty) in looted_items {
         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
             ctx,
             char_id,
             Some(sys_id),
             wreck_id,
             ltid,
+        )
+        .await;
+        crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
+            ctx,
+            char_id,
+            Some(sys_id),
+            wreck_id,
+            ship_id,
+            ltid,
+            i64::from(lqty),
         )
         .await;
     }

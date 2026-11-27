@@ -255,7 +255,7 @@ pub(crate) fn apply_finish_dungeon_instance_snap(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn finalize_completed_dungeon_effects_sync(
+pub(crate) fn finalize_completed_dungeon_effects_sync(
     db: &std::sync::Arc<eve_db::WorldRepository>,
     pending_notifications: Option<
         &dyn AnyRwLock<

@@ -628,6 +628,18 @@ pub(crate) async fn handle_multi_add(
             moved_ids.push(fin_id);
             continue;
         }
+        if pre_item.location_id != new_loc {
+            crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                pre_item.location_id,
+                new_loc,
+                it_tid,
+                i64::try_from(it_qty).unwrap_or(i64::MAX),
+            )
+            .await;
+        }
         if let Some(fin) = fin_opt {
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -1145,6 +1157,16 @@ async fn handle_multi_add_auto_fit(
                 session.solar_system_id,
                 old_loc,
                 updated.type_id,
+            )
+            .await;
+            crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                old_loc,
+                ship_id,
+                updated.type_id,
+                i64::from(updated.quantity),
             )
             .await;
             crate::services::pve_homefront_sites::on_homefront_item_moved_sync(

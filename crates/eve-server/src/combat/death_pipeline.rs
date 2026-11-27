@@ -1843,7 +1843,7 @@ pub fn on_ball_destroyed_sync(
     }
 
     // 3. Capsuleer or unpiloted corporation ship (`category_id == 6` in `snap.items`)
-    let (ship_victim_and_killer_opt, mto_entity_opt, mto_killer_opt) = ctx.db.with_snapshot(|snap| {
+    let (ship_victim_and_killer_opt, mto_entity_opt, mto_killer_opt, resolved_killer_opt) = ctx.db.with_snapshot(|snap| {
         let resolved_killer = killer_id_opt.map(|kid| {
             snap.characters
                 .get(&kid)
@@ -1859,15 +1859,15 @@ pub fn on_ball_destroyed_sync(
         if snap.sov_runtime.mto_site_balls.contains_key(&ball_id) {
             let mto_type_id = snap.items.get(&ball_id).map(|it| it.type_id).unwrap_or(0);
             let mto_killer = resolved_killer.filter(|k| snap.characters.contains_key(k));
-            return (None, Some(mto_type_id), mto_killer);
+            return (None, Some(mto_type_id), mto_killer, resolved_killer);
         }
         if let Some(vic) = resolve_capsuleer_ship_char_in_snap(snap, &ctx.sde, ball_id) {
-            return (Some((vic, resolved_killer)), None, None);
+            return (Some((vic, resolved_killer)), None, None, resolved_killer);
         }
         if resolve_corp_ship_owner_in_snap(snap, &ctx.sde, ball_id).is_some() {
-            return (Some((0, resolved_killer)), None, None);
+            return (Some((0, resolved_killer)), None, None, resolved_killer);
         }
-        (None, None, None)
+        (None, None, None, resolved_killer)
     });
 
     if let Some((victim_char_id, resolved_killer_opt)) = ship_victim_and_killer_opt {
@@ -1932,6 +1932,12 @@ pub fn on_ball_destroyed_sync(
     }
 
     // 5. Non-ship space object (fighter, wreck, jetcan, deployable, POCO, or NPC structure)
+    if crate::services::pve_dungeon_runtime_hooks::on_dungeon_structure_destroyed_sync(
+        ctx, &sys_handle, sys_id, ball_id, resolved_killer_opt.unwrap_or(0),
+    ) || crate::services::pve_dungeon_runtime_hooks::is_dungeon_object_ball(ctx, sys_id, ball_id)
+    {
+        return Ok(None);
+    }
     let destroyed_npc_item_meta: Option<(u32, i64)> = if killer_id_opt.is_some() {
         ctx.db.with_snapshot(|snap| {
             snap.items.get(&ball_id).and_then(|it| {
@@ -1980,7 +1986,9 @@ pub async fn on_ball_destroyed(
         .flatten()
         .map(|(_, b)| b.position)
         .unwrap_or(fallback_pos);
-    on_ball_destroyed_sync(ctx, sys_id, ball_id, killer_id_opt, pos)
+    let res = on_ball_destroyed_sync(ctx, sys_id, ball_id, killer_id_opt, pos);
+    let _ = crate::services::pve_dungeon_runtime::flush_pending_dungeon_escalations(ctx).await;
+    res
 }
 
 /// Synchronous cleanup of a destroyed non-ship ball (fighter, wreck, jetcan, deployable, POCO).

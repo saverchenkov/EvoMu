@@ -649,6 +649,10 @@ impl ServerContext {
             let ctx_w = npc_ctx_w.clone();
             Box::pin(async move {
                 let Some(ctx) = ctx_w.upgrade() else { return; };
+                if crate::services::pve_dungeon_runtime_hooks::is_destructible_dungeon_object(&ctx, sys_id, npc_id) {
+                    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_id, npc_id, killer_opt, glam::DVec3::ZERO);
+                    return;
+                }
                 let is_capsuleer_or_corp_ship = !crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
                     rt.npc_entities.contains_key(&npc_id)
                 }) && ctx.db.with_snapshot(|snap| {

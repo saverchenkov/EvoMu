@@ -6,7 +6,7 @@
 #[path = "pve_dungeon_runtime_actions.rs"]
 pub(crate) mod actions;
 #[path = "pve_dungeon_runtime_ops.rs"]
-mod ops;
+pub(crate) mod ops;
 pub(crate) use ops::apply_finish_dungeon_instance_snap;
 #[path = "pve_dungeon_runtime_triggers.rs"]
 pub(crate) mod triggers;
@@ -16,7 +16,6 @@ use crate::services::notify_emitters_space_dungeons::{
     emit_dungeon_progression_notifications, emit_exiting_dungeon_on_warp_if_present,
 };
 use crate::services::pve_exploration::{read_pve_exploration_reg, with_pve_exploration_reg};
-use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_special_sites::make_site_npc_ball;
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
@@ -1318,7 +1317,7 @@ pub(crate) async fn spawn_object_ball(
 ) {
     let (ball, tid) = build_object_ball(ball_id, type_id, pos, radius);
     if destructible {
-        let cs = build_type_combat_state_from_sde(sde, tid);
+        let cs = crate::services::pve_dungeon_runtime_hooks::build_destructible_object_combat_state(sde, tid);
         let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
     } else {
         let _ = sys_handle.spawn_ball(ball).await;
@@ -1336,7 +1335,7 @@ pub(crate) fn spawn_object_ball_sync(
 ) {
     let (ball, tid) = build_object_ball(ball_id, type_id, pos, radius);
     if destructible {
-        let cs = build_type_combat_state_from_sde(sde, tid);
+        let cs = crate::services::pve_dungeon_runtime_hooks::build_destructible_object_combat_state(sde, tid);
         let _ = sys_handle.spawn_ball_with_combat_sync(ball, cs);
     } else {
         let _ = sys_handle.spawn_ball_sync(ball);
@@ -2172,6 +2171,10 @@ pub async fn on_dungeon_npc_killed_core(
     .await;
 }
 
+pub use crate::services::pve_dungeon_runtime_hooks::{
+    is_destructible_dungeon_object, is_dungeon_object_ball, on_dungeon_container_cargo_changed,
+    on_dungeon_structure_destroyed_sync,
+};
 pub use crate::services::pve_dungeon_runtime_rpc::{
     check_dungeon_triggers, get_dungeon_instance_state, on_dungeon_approach,
     spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
@@ -2180,10 +2183,16 @@ pub(crate) use ops::{
     expire_all_due_dungeon_loot_grace, expire_due_dungeon_loot_grace_sync,
 };
 
-/// Sweeps due dungeon loot-grace expiry and armed delayed triggers during cluster ticks.
+/// Flushes queued escalations recorded by synchronous `OnStructureDestroyed` handlers.
+pub(crate) async fn flush_pending_dungeon_escalations(ctx: &ServerContext) -> usize {
+    actions::flush_pending_dungeon_escalations_impl(actions::DungeonRuntimeDeps::from_ctx(ctx)).await
+}
+
+/// Sweeps due dungeon loot-grace expiry, pending escalations, and armed delayed triggers during cluster ticks.
 pub(crate) async fn tick_background_dungeon_runtime(ctx: &ServerContext) {
     let _ = expire_all_due_dungeon_loot_grace(ctx).await;
     let _ = tick_due_delayed_dungeon_triggers(ctx).await;
+    let _ = flush_pending_dungeon_escalations(ctx).await;
 }
 
 /// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons.

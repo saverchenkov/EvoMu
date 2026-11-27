@@ -53,6 +53,17 @@ pub(crate) enum DungeonEvent<'a> {
         container_ball_id: i64,
         item_type_id: TypeId,
     },
+    CargoDelivered {
+        container_ball_id: i64,
+        item_type_id: TypeId,
+        is_deposit: bool,
+    },
+    StructureDestroyed {
+        target_ball_id: i64,
+        object_index: usize,
+        object_tag: Option<&'a str>,
+        object_type_id: TypeId,
+    },
     TimerTick,
 }
 
@@ -486,6 +497,126 @@ fn eval_leaf_outcome(
                 LeafOccurrence::Inactive { subject, sticky: *on_first_attack }
             }
         }
+        DungeonTriggerKind::OnCargoDelivered {
+            container_ball_id,
+            target_object_index,
+            item_type_id,
+            required_quantity,
+        } => {
+            let DungeonEvent::CargoDelivered {
+                container_ball_id: cont_id,
+                item_type_id: ev_tid,
+                is_deposit,
+            } = event
+            else {
+                return LeafOccurrence::Irrelevant;
+            };
+            if *cont_id <= 0 || item_type_id.is_some_and(|et| et != *ev_tid) {
+                return LeafOccurrence::Irrelevant;
+            }
+            let resolved_cont = if let Some(cid) = *container_ball_id {
+                if cid <= 0
+                    || room
+                        .objects
+                        .iter()
+                        .any(|o| o.ball_id == cid && (!o.spawned || o.destroyed))
+                {
+                    return LeafOccurrence::Irrelevant;
+                }
+                Some(cid)
+            } else if let Some(idx) = *target_object_index {
+                let Some(obj) = room.objects.get(idx) else {
+                    return LeafOccurrence::Irrelevant;
+                };
+                if !obj.spawned || obj.destroyed || obj.ball_id <= 0 {
+                    return LeafOccurrence::Irrelevant;
+                }
+                Some(obj.ball_id)
+            } else {
+                None
+            };
+            let cont_ok = resolved_cont.is_none_or(|cid| cid == *cont_id);
+            let room_has_cont = room
+                .objects
+                .iter()
+                .any(|o| o.ball_id == *cont_id && o.spawned && !o.destroyed && o.is_container);
+            if !(cont_ok && (resolved_cont.is_some() || room_has_cont)) {
+                return LeafOccurrence::Irrelevant;
+            }
+            let net_delivered: i64 = if let Some(tid) = *item_type_id {
+                room.cargo_delivered_net
+                    .get(&format!("{cont_id}:{tid}"))
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                let prefix = format!("{cont_id}:");
+                room.cargo_delivered_net
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(_, &v)| v)
+                    .fold(0i64, |acc, v| acc.saturating_add(v))
+            };
+            let req = i64::from((*required_quantity).max(1));
+            let subject = format!("cargo:{cont_id}:{}", item_type_id.unwrap_or(0));
+            if *is_deposit && net_delivered >= req {
+                LeafOccurrence::Active {
+                    subject,
+                    discrete_event: false,
+                }
+            } else {
+                LeafOccurrence::Inactive {
+                    subject,
+                    sticky: false,
+                }
+            }
+        }
+        DungeonTriggerKind::OnStructureDestroyed {
+            target_ball_id,
+            target_object_index,
+            target_tag,
+            target_type_id,
+        } => {
+            let DungeonEvent::StructureDestroyed {
+                target_ball_id: ev_bid,
+                object_index: ev_oi,
+                object_tag: ev_tag,
+                object_type_id: ev_tid,
+            } = event
+            else {
+                return LeafOccurrence::Irrelevant;
+            };
+            if *ev_bid <= 0 {
+                return LeafOccurrence::Irrelevant;
+            }
+            let bid_ok = target_ball_id.is_none_or(|bid| bid == *ev_bid);
+            let idx_ok = target_object_index.is_none_or(|oi| {
+                oi == *ev_oi
+                    || room
+                        .objects
+                        .get(oi)
+                        .is_some_and(|o| o.ball_id == *ev_bid)
+            });
+            let tag_ok = target_tag
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none_or(|want| {
+                    ev_tag.is_some_and(|have| have.trim().eq_ignore_ascii_case(want))
+                });
+            let tid_ok = target_type_id.is_none_or(|tid| tid == *ev_tid);
+            let room_has = room
+                .objects
+                .get(*ev_oi)
+                .is_some_and(|o| o.ball_id == *ev_bid && o.spawned);
+            if bid_ok && idx_ok && tag_ok && tid_ok && room_has {
+                LeafOccurrence::Active {
+                    subject: format!("struct:{ev_bid}"),
+                    discrete_event: true,
+                }
+            } else {
+                LeafOccurrence::Irrelevant
+            }
+        }
         DungeonTriggerKind::CompoundAnd { .. } | DungeonTriggerKind::CompoundOr { .. } => {
             LeafOccurrence::Irrelevant
         }
@@ -528,6 +659,73 @@ fn evaluate_leaf_clause_with_latch(
     }
 }
 
+fn cargo_delivered_clause_satisfied_in_room(
+    room: &DungeonRuntimeRoom,
+    kind: &DungeonTriggerKind,
+) -> bool {
+    let DungeonTriggerKind::OnCargoDelivered {
+        container_ball_id,
+        target_object_index,
+        item_type_id,
+        required_quantity,
+    } = kind
+    else {
+        return false;
+    };
+    let req = i64::from((*required_quantity).max(1));
+    let matching_containers: Vec<i64> = if let Some(cid) = *container_ball_id {
+        if cid > 0
+            && !room
+                .objects
+                .iter()
+                .any(|o| o.ball_id == cid && (!o.spawned || o.destroyed))
+        {
+            vec![cid]
+        } else {
+            Vec::new()
+        }
+    } else if let Some(idx) = *target_object_index {
+        room.objects
+            .get(idx)
+            .filter(|o| o.spawned && !o.destroyed && o.ball_id > 0)
+            .map(|o| vec![o.ball_id])
+            .unwrap_or_default()
+    } else {
+        room.objects
+            .iter()
+            .filter(|o| o.is_container && o.spawned && !o.destroyed && o.ball_id > 0)
+            .map(|o| o.ball_id)
+            .collect()
+    };
+    matching_containers.into_iter().any(|cont_id| {
+        let net: i64 = if let Some(tid) = *item_type_id {
+            room.cargo_delivered_net
+                .get(&format!("{cont_id}:{tid}"))
+                .copied()
+                .unwrap_or(0)
+        } else {
+            let prefix = format!("{cont_id}:");
+            room.cargo_delivered_net
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(_, &v)| v)
+                .fold(0i64, |acc, v| acc.saturating_add(v))
+        };
+        net >= req
+    })
+}
+
+fn contains_cargo_delivered_clause(kind: &DungeonTriggerKind) -> bool {
+    match kind {
+        DungeonTriggerKind::OnCargoDelivered { .. } => true,
+        DungeonTriggerKind::CompoundAnd { clauses }
+        | DungeonTriggerKind::CompoundOr { clauses } => {
+            clauses.iter().any(contains_cargo_delivered_clause)
+        }
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evaluate_trigger_with_occurrence_latch(
     kind: &DungeonTriggerKind,
@@ -550,7 +748,7 @@ fn evaluate_trigger_with_occurrence_latch(
             for (ci, clause) in clauses.iter().enumerate() {
                 let sub_path = format!("{path}.{ci}");
                 let key = format!("__and:{room_vec_idx}:{trig_idx}:{sub_path}");
-                let already = armed_timers.contains_key(&key);
+                let was_latched = armed_timers.contains_key(&key);
                 let ok_now = evaluate_trigger_with_occurrence_latch(
                     clause,
                     inst,
@@ -561,10 +759,17 @@ fn evaluate_trigger_with_occurrence_latch(
                     &sub_path,
                     event,
                     now_unix,
-                    already_satisfied || already,
+                    already_satisfied || was_latched,
                 );
-                if !already_satisfied && !already {
-                    if ok_now {
+                if !already_satisfied {
+                    if was_latched {
+                        if !ok_now {
+                            if contains_cargo_delivered_clause(clause) {
+                                armed_timers.remove(&key);
+                            }
+                            all_ok = false;
+                        }
+                    } else if ok_now {
                         armed_timers.insert(key, now_unix);
                     } else {
                         all_ok = false;
@@ -595,17 +800,26 @@ fn evaluate_trigger_with_occurrence_latch(
             any_ok
         }
         leaf => {
-            if already_satisfied
-                && matches!(
+            if already_satisfied {
+                if matches!(leaf, DungeonTriggerKind::OnCargoDelivered { .. }) {
+                    let ok = cargo_delivered_clause_satisfied_in_room(room, leaf);
+                    if !ok {
+                        let _ = evaluate_leaf_clause_with_latch(
+                            leaf, inst, room, armed_timers, room_vec_idx, trig_idx, path, event, now_unix,
+                        );
+                    }
+                    return ok;
+                } else if matches!(
                     leaf,
                     DungeonTriggerKind::OnTimer { .. }
                         | DungeonTriggerKind::OnKillTagged { .. }
                         | DungeonTriggerKind::OnKillCount { .. }
                         | DungeonTriggerKind::OnRoomEntered { .. }
                         | DungeonTriggerKind::OnLoot { .. }
-                )
-            {
-                return true;
+                        | DungeonTriggerKind::OnStructureDestroyed { .. }
+                ) {
+                    return true;
+                }
             }
             evaluate_leaf_clause_with_latch(
                 leaf, inst, room, armed_timers, room_vec_idx, trig_idx, path, event, now_unix,
@@ -615,7 +829,7 @@ fn evaluate_trigger_with_occurrence_latch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_room_triggers_in_inst(
+pub(crate) fn evaluate_room_triggers_in_inst(
     snap: &mut WorldStateSnapshot,
     sys_id: SolarSystemId,
     inst: &mut DungeonRuntimeInstance,
@@ -937,7 +1151,7 @@ fn prepare_on_dungeon_room_entered_in_snap(
             snap.dungeon_runtime.instances.insert(instance_id, inst);
             return;
         }
-        let Some((was_ent, has_prior_kills, pre_kills)) = inst.rooms.get_mut(room_vec_idx).map(|r| {
+        let Some((was_ent, has_prior_kills, pre_kills, pre_struct_destroys)) = inst.rooms.get_mut(room_vec_idx).map(|r| {
             let was = r.entered;
             r.entered = true;
             r.entered_unix.get_or_insert(now_unix);
@@ -960,7 +1174,20 @@ fn prepare_on_dungeon_room_entered_in_snap(
                 }
             }
             recorded.sort_by_key(|e| e.0);
-            (was, !was && prior, recorded)
+            let sprefix = format!("__pre_struct_destroy:{room_vec_idx}:");
+            let mut pre_sd = Vec::new();
+            let skeys: Vec<String> = r.armed_timers.keys().filter(|k| k.starts_with(&sprefix)).cloned().collect();
+            for k in skeys {
+                r.armed_timers.remove(&k);
+                let parts: Vec<&str> = k.splitn(6, ':').collect();
+                if parts.len() == 6 {
+                    if let (Ok(oi), Ok(bid), Ok(tid)) = (parts[2].parse::<usize>(), parts[3].parse::<i64>(), parts[4].parse::<u32>()) {
+                        pre_sd.push((oi, bid, tid, (!parts[5].is_empty()).then(|| parts[5].to_string())));
+                    }
+                }
+            }
+            pre_sd.sort_by_key(|e| (e.0, e.1));
+            (was, !was && prior, recorded, pre_sd)
         }) else {
             snap.dungeon_runtime.instances.insert(instance_id, inst);
             return;
@@ -1000,6 +1227,20 @@ fn prepare_on_dungeon_room_entered_in_snap(
                     npc_tag: None,
                     npc_type_id: 0,
                     retroactive_room_check: true,
+                };
+                let _ = evaluate_room_triggers_in_inst(
+                    snap, sys_id, &mut inst, deps.sde, room_vec_idx, &ev, char_id, now_unix, true, true, &mut effects,
+                );
+            }
+            for (obj_idx, target_ball_id, object_type_id, tag_opt) in pre_struct_destroys {
+                if effects.fail_reason.is_some() || effects.complete_now {
+                    break;
+                }
+                let ev = DungeonEvent::StructureDestroyed {
+                    target_ball_id,
+                    object_index: obj_idx,
+                    object_tag: tag_opt.as_deref(),
+                    object_type_id,
                 };
                 let _ = evaluate_room_triggers_in_inst(
                     snap, sys_id, &mut inst, deps.sde, room_vec_idx, &ev, char_id, now_unix, true, true, &mut effects,

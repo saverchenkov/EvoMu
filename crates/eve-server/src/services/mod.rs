@@ -105,6 +105,7 @@ pub mod pve_dungeon_cache;
 pub mod pve_dungeon_content;
 pub mod pve_dungeon_editor;
 pub mod pve_dungeon_runtime;
+pub mod pve_dungeon_runtime_hooks;
 pub mod pve_dungeon_runtime_rpc;
 pub mod pve_expeditions;
 pub mod pve_exploration;

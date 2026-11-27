@@ -702,14 +702,86 @@ pub(crate) async fn flush_trigger_effects(deps: DungeonRuntimeDeps<'_>, sys_id: 
     flush_trigger_notifications_and_completion_sync(
         deps, sys_id, effects.notify_actions, effects.progression_notices, effects.failed_notices, effects.completed_sites,
     );
-    if let Some(sde_arc) = deps.sde_arc {
-        for (cid, src_did, target_did, chance_bps, target_title, pos, inst_id) in effects.escalation_requests {
-            if cid <= 0 || chance_bps == 0 || (chance_bps < 10_000 && deterministic_roll_bps(inst_id ^ cid, (u64::from(src_did) << 16) ^ u64::from(chance_bps)) >= chance_bps) { continue; }
-            if let Some(entry) = create_escalation_expedition_with_options_core(deps.db, sde_arc, deps.systems, cid, sys_id, src_did, target_did, target_title.as_deref(), pos).await {
-                finalize_runtime_escalation(deps, sde_arc, inst_id, cid, entry).await;
-            }
+    for (cid, src_did, target_did, chance_bps, target_title, pos, inst_id) in effects.escalation_requests {
+        let _ = dispatch_dungeon_escalation_request(
+            deps, sys_id, cid, src_did, target_did, chance_bps, target_title, pos, inst_id,
+        )
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_dungeon_escalation_request(
+    deps: DungeonRuntimeDeps<'_>,
+    sys_id: SolarSystemId,
+    cid: i64,
+    src_did: u32,
+    target_did: Option<u32>,
+    chance_bps: u16,
+    target_title: Option<String>,
+    pos: [f64; 3],
+    inst_id: i64,
+) -> bool {
+    let Some(sde_arc) = deps.sde_arc else {
+        return false;
+    };
+    if cid <= 0
+        || chance_bps == 0
+        || (chance_bps < 10_000
+            && deterministic_roll_bps(inst_id ^ cid, (u64::from(src_did) << 16) ^ u64::from(chance_bps))
+                >= chance_bps)
+    {
+        return false;
+    }
+    if let Some(entry) = create_escalation_expedition_with_options_core(
+        deps.db,
+        sde_arc,
+        deps.systems,
+        cid,
+        sys_id,
+        src_did,
+        target_did,
+        target_title.as_deref(),
+        pos,
+    )
+    .await
+    {
+        finalize_runtime_escalation(deps, sde_arc, inst_id, cid, entry).await;
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) async fn flush_pending_dungeon_escalations_impl(deps: DungeonRuntimeDeps<'_>) -> usize {
+    if deps
+        .db
+        .with_snapshot(|snap| snap.dungeon_runtime.pending_escalations.is_empty())
+    {
+        return 0;
+    }
+    let pending = deps
+        .db
+        .with_mut_snapshot(|snap| std::mem::take(&mut snap.dungeon_runtime.pending_escalations));
+    let mut created = 0usize;
+    for req in pending {
+        if dispatch_dungeon_escalation_request(
+            deps,
+            req.solar_system_id,
+            req.char_id,
+            req.source_dungeon_id,
+            req.target_dungeon_id,
+            req.chance_bps,
+            req.target_title,
+            req.position,
+            req.instance_id,
+        )
+        .await
+        {
+            created += 1;
         }
     }
+    created
 }
 
 async fn finalize_runtime_escalation(

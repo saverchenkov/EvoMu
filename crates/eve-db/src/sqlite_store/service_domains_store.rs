@@ -257,7 +257,7 @@ impl_service_domain_persist!(
     DungeonRuntimeStore,
     maps: [instances, homefront_runtimes],
     sets: [],
-    scalars: [next_instance_id]
+    scalars: [next_instance_id, pending_escalations]
 );
 
 impl_service_domain_persist!(
