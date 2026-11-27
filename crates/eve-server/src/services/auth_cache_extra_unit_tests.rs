@@ -1123,3 +1123,73 @@ async fn gm_giveitem_typed_parser_rejects_invalid_args_and_never_wakes_cold_syst
     });
 }
 
+#[tokio::test]
+async fn slash_tr_does_not_wake_cold_origin_system_on_valid_or_invalid_target() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let cold_origin_sys = 30_000_140_u32; // Maurasi
+    let dest_sys = 30_000_144_u32; // Perimeter
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid).expect("pilot");
+        ch.solar_system_id = cold_origin_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+    });
+    assert!(
+        ctx.systems.get_handle(cold_origin_sys).is_none(),
+        "precondition: origin system must be cold before /tr"
+    );
+
+    let mut sess = auth_session(1, cid, 98_000_001, cold_origin_sys);
+    sess.role = service_roles::ROLE_GMH;
+
+    let bad_err = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 99999999".into())],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect_err("unknown location must fail without waking cold origin");
+    assert_eq!(bad_err.code, "SolarSystemNotFound");
+    assert!(
+        ctx.systems.get_handle(cold_origin_sys).is_none(),
+        "failed /tr lookup must not wake cold origin system"
+    );
+    assert!(
+        ctx.systems.get_handle(0).is_none(),
+        "system 0 must never be spawned"
+    );
+
+    let ok_rep = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {dest_sys}"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("/tr me <dest_sys> succeeds from cold origin");
+    assert_eq!(ok_rep.dict_get("solarSystemID").and_then(PyRep::as_i64), Some(i64::from(dest_sys)));
+    assert_eq!(sess.solar_system_id, Some(dest_sys));
+    assert!(
+        ctx.systems.get_handle(cold_origin_sys).is_none(),
+        "cross-system /tr from cold origin system must NOT spawn an actor for old_sys_id"
+    );
+    assert!(
+        ctx.systems.get_handle(dest_sys).is_some(),
+        "destination solar system must be woken"
+    );
+    assert!(
+        ctx.systems.get_handle(0).is_none(),
+        "system 0 must never be spawned"
+    );
+}
+

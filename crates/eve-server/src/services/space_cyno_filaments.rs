@@ -352,76 +352,46 @@ async fn execute_legacy_wormhole_jump(
         }
     };
 
-    let Some(taken) = old_handle.take_ball(ship_id).await else {
-        return Err(BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: format!("Ship {ship_id} is no longer in solar system {old_sys}"),
-            client_error: None,
-        });
-    };
-    let prev_combat_state = taken.combat_state.clone();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let updated_ch = match ctx
-        .db
-        .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
-    {
-        Ok(ch) => ch,
-        Err(e) => {
-            let _ = old_handle.restore_ball(taken).await;
-            return Err(BridgeRpcError {
-                code: "SystemTransitionFailed".into(),
-                message: e.to_string(),
-                client_error: None,
-            });
-        }
-    };
-    ctx.db.with_mut_snapshot(|snap| {
-        crate::sp6_lifecycle::leave_space_in_snap(
-            snap,
-            ship_id,
-            prev_combat_state.as_ref(),
-            Some(dest_sys_id),
-            None,
-        );
-    });
-    ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
-
     let arrival_pos = dest_sig_pos + DVec3::new(2_000.0, 0.0, 0.0);
-
-    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let mut new_ball = taken.ball;
-    new_ball.position = arrival_pos;
-    new_ball.velocity = DVec3::ZERO;
-    new_ball.speed_fraction = 0.0;
-    new_ball.mode = MovementMode::Stop;
-    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_combat_state);
-    combat_state.is_cloaked = true;
-    combat_state.gate_cloak_remaining_ticks = 60;
-    combat_state.undock_invulnerable_remaining_ticks = 60;
-    combat_state.sync_invuln_with_undock_timer = true;
-    let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
-    slim_meta.is_cloaked = true;
-    let dest_tick = new_handle
-        .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
-        .await
-        .unwrap_or(0);
-    let _ = new_handle.push_set_state(ship_id).await;
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.item_positions
-            .insert(ship_id, [arrival_pos.x, arrival_pos.y, arrival_pos.z]);
-    });
-    crate::services::space_destiny::record_session_change_timer(
+    let outcome = crate::domain::transitions::relocate_character_in_space(
         ctx,
-        char_id,
-        now_unix,
-        dest_sys_id,
-        dest_tick,
-        "wormhole_jump",
-    );
+        Some(session),
+        crate::domain::transitions::RelocateInSpaceRequest {
+            char_id,
+            ship_id,
+            old_sys_id: old_sys,
+            dest_sys_id,
+            was_in_space: true,
+            arrival_position: Some(arrival_pos),
+            fallback_arrival_position: arrival_pos,
+            arrival_velocity: DVec3::ZERO,
+            require_take_ball: true,
+            take_ball_missing_code: "SystemTransitionFailed",
+            db_transition_failed_code: "SystemTransitionFailed",
+            destination_wake: crate::domain::transitions::DestinationWakePolicy::SessionArrival(
+                crate::system_actor::SessionArrivalWakeReason::Jump,
+            ),
+            transition_kind: crate::domain::transitions::SpaceTransitionKind::JumpSystem,
+            transition_reason: "wormhole_jump",
+            combat_state_preservation:
+                crate::domain::transitions::CombatStatePreservation::PreserveNormalized {
+                    fallback: None,
+                },
+            gate_cloak_invuln: crate::domain::transitions::GateCloakInvulnPolicy::standard_jump_cloak(),
+            cleanup: crate::domain::transitions::LeaveSpaceCleanupPolicy::gameplay_jump(),
+            sync_local_chat: true,
+            persist_item_position: true,
+            record_session_change_timer: true,
+            record_solar_system_jump: true,
+            bind_beyonce: false,
+            push_set_state: true,
+        },
+    )
+    .await
+    .map_err(crate::services::domain_err_to_rpc)?;
+
+    let new_handle = outcome.dest_handle;
+    let now_unix = ctx.now_unix();
     let _ = ctx
         .living_world
         .materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde)
@@ -438,20 +408,6 @@ async fn execute_legacy_wormhole_jump(
     )
     .await;
 
-    let _ = updated_ch;
-    let _ = ctx.execute_session_transition_sync(
-        Some(session),
-        crate::router::SessionTransitionSpec::for_kind(
-            char_id,
-            crate::router::TransitionKind::JumpSystem { solar_system_id: dest_sys_id },
-            "wormhole_jump",
-        )
-        .with_apply_db(false)
-        .with_cleanup_departing_space(false)
-        .with_sync_local_chat(false)
-        .with_emit_on_session_changed(false),
-    );
-    crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
     crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
         ctx,
         char_id,

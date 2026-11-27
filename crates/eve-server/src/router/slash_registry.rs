@@ -796,6 +796,76 @@ pub(crate) fn parse_kill_slash_args(rest: &str) -> Result<KillSlashArgs, BridgeR
     }
 }
 
+const TELEPORT_USAGE: &str =
+    "Usage: /teleport|/tr|/translocate|/moveme [me|myship|<char_id>] <location_id> [noblock]";
+
+/// Target resolved syntactically for `/teleport`, `/tr`, `/translocate`, and `/moveme` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TeleportSlashTarget {
+    SelfChar,
+    CharId(i64),
+}
+
+/// Typed arguments parsed for `/teleport`, `/tr`, `/translocate`, and `/moveme` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TeleportSlashArgs {
+    pub target: TeleportSlashTarget,
+    pub location_id: i64,
+    pub noblock: bool,
+}
+
+/// Parses `/teleport`, `/tr`, `/translocate`, and `/moveme` arguments, accepting
+/// `[me|myship|<char_id>] <location_id> [noblock]` and `<location_id> [me|myship] [noblock]`.
+pub(crate) fn parse_teleport_slash_args(rest: &str) -> Result<TeleportSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let mut noblock = false;
+    let mut positional: Vec<&str> = Vec::with_capacity(tokens.len());
+    for tok in &tokens {
+        if tok.eq_ignore_ascii_case("noblock") {
+            noblock = true;
+        } else {
+            positional.push(tok.as_str());
+        }
+    }
+    let parse_pos_id = |tok: &str| tok.parse::<i64>().ok().filter(|&id| id > 0);
+    let usage_err = || invalid_slash_arg_error(TELEPORT_USAGE);
+    match positional.as_slice() {
+        [loc_tok] => Ok(TeleportSlashArgs {
+            target: TeleportSlashTarget::SelfChar,
+            location_id: parse_pos_id(loc_tok).ok_or_else(usage_err)?,
+            noblock,
+        }),
+        [first, loc_tok]
+            if crate::services::character_skills::character_gm_tools::is_me_or_myship(first) =>
+        {
+            Ok(TeleportSlashArgs {
+                target: TeleportSlashTarget::SelfChar,
+                location_id: parse_pos_id(loc_tok).ok_or_else(usage_err)?,
+                noblock,
+            })
+        }
+        [loc_tok, second]
+            if crate::services::character_skills::character_gm_tools::is_me_or_myship(second) =>
+        {
+            Ok(TeleportSlashArgs {
+                target: TeleportSlashTarget::SelfChar,
+                location_id: parse_pos_id(loc_tok).ok_or_else(usage_err)?,
+                noblock,
+            })
+        }
+        [char_tok, loc_tok] => {
+            let char_id = parse_pos_id(char_tok).ok_or_else(usage_err)?;
+            let location_id = parse_pos_id(loc_tok).ok_or_else(usage_err)?;
+            Ok(TeleportSlashArgs {
+                target: TeleportSlashTarget::CharId(char_id),
+                location_id,
+                noblock,
+            })
+        }
+        _ => Err(usage_err()),
+    }
+}
+
 enum PreparedSlashDispatch<'a> {
     Immediate(Result<PyRep, BridgeRpcError>),
     Execute {
