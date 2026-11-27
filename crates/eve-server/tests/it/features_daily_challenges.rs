@@ -909,20 +909,20 @@ async fn test_b36_storyline_offer_counter() {
                 continue;
             }
             let mid = m["missionID"].as_i64().unwrap();
-            let briefing = kv_map(
+            let journal = kv_map(
                 &ctx.dispatch_rpc(
                     sess,
                     "agentMgr",
                     None,
-                    "GetMissionBriefingInfo",
+                    "GetMissionJournalInfo",
                     &[PyRep::Integer(aid), PyRep::Integer(mid)],
                     &kw,
                     None,
                 )
                 .await
-                .expect("GetMissionBriefingInfo for storyline offer"),
+                .expect("GetMissionJournalInfo for storyline offer"),
             );
-            let lvl = briefing.get("level").and_then(|v| v.as_i64()).unwrap_or(0);
+            let lvl = journal.get("level").and_then(|v| v.as_i64()).unwrap_or(0);
             offers.push((aid, mid, lvl));
         }
         offers
@@ -1093,12 +1093,12 @@ async fn test_b36_storyline_offer_counter() {
     let (first_sl_aid, first_sl_mid, first_sl_lvl) = sl_offers_1[0];
     assert_eq!(first_sl_lvl, 3);
 
-    let briefing_1 = kv_map(
-        &ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMissionBriefingInfo", &[PyRep::Integer(first_sl_mid)], &kw, None)
+    let journal_1 = kv_map(
+        &ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMissionJournalInfo", &[PyRep::Integer(first_sl_mid)], &kw, None)
             .await
             .unwrap(),
     );
-    assert_eq!(briefing_1["level"].as_i64(), Some(3));
+    assert_eq!(journal_1["level"].as_i64(), Some(3));
     let sl_tmpl_diff = ctx
         .sde
         .missions
@@ -1174,7 +1174,7 @@ async fn test_b36_storyline_offer_counter() {
             .expect("Accept Storyline mission"),
     );
     let sl_npcs_rem = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, char_id, first_sl_mid as u32).unwrap().npcs_remaining);
-    if let Some(dest_sta) = briefing_1.get("destinationStationID").and_then(|v| v.as_i64()) {
+    if let Some(dest_sta) = journal_1.get("destinationStationID").and_then(|v| v.as_i64()) {
         let courier_tag = format!("courier_cargo:{char_id}:{first_sl_mid}");
         let cargo_iid = ctx.db.with_snapshot(|s| {
             s.item_custom_names.iter().find_map(|(&iid, tag)| (tag == &courier_tag).then_some(iid)).unwrap()
@@ -1210,7 +1210,7 @@ async fn test_b36_storyline_offer_counter() {
             let _ = sys_h.remove_module_cycle(ship_id, weapon_id).await;
         }
         dock_at_station(&ctx, &mut sess, char_id, sl_sys, Some(sl_sta));
-    } else if let Some(req_tid) = sl_acc.get("requiredTypeID").and_then(|v| v.as_i64()).or_else(|| briefing_1.get("requiredTypeID").and_then(|v| v.as_i64())) {
+    } else if let Some(req_tid) = sl_acc.get("requiredTypeID").and_then(|v| v.as_i64()).or_else(|| journal_1.get("requiredTypeID").and_then(|v| v.as_i64())) {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(826_500, InventoryItemRecord { item_id: 826_500, type_id: req_tid as u32, owner_id: char_id, location_id: sl_sta, flag: InventoryFlag::Hangar, quantity: 100_000, singleton: false, ..Default::default() });
         });

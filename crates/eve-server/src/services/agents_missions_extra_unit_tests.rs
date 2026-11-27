@@ -916,7 +916,8 @@ async fn agents_missions_push_over_90_regions() {
     let mut jita_s = char_session(char_id, Some(30_000_142), Some(60_003_760));
     assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "DoAction", &[PyRep::Integer(2), PyRep::Integer(99_999_888)], &kw).await.unwrap_err().code, "UnknownAgent");
     assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "DoAction", &[PyRep::Integer(99), PyRep::Integer(99_999_888)], &kw).await.unwrap_err().code, "UnknownAgent");
-    assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "GetMissionBriefingInfo", &[PyRep::Integer(3_008_416)], &kw).await.unwrap_err().code, "MissionNotActive");
+    assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "GetMissionBriefingInfo", &[PyRep::Integer(3_008_416)], &kw).await.unwrap(), PyRep::None);
+    assert_eq!(call_agent_mgr(&ctx, &mut jita_s, "GetMissionJournalInfo", &[PyRep::Integer(3_008_416)], &kw).await.unwrap_err().code, "MissionNotActive");
 
     // Journal terminal mission state + Quit (L1433) + RemoveOfferFromJournal (L1462-1474)
     assert!(eve_db::MissionState::parse("UnknownWeirdState").is_none());

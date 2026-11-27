@@ -774,6 +774,25 @@ async fn pve_012_persisted_objectives_match_briefing_and_reoffer() {
     assert_eq!(fetch_args[2].dict_get("typeID"), Some(&PyRep::Integer(34)));
     assert_eq!(fetch_args[2].dict_get("quantity"), Some(&PyRep::Integer(77)));
 
+    let journal_info = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GetMissionJournalInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(i64::from(trade_mid))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetMissionJournalInfo");
+    let info_text = journal_info
+        .dict_get("objectives")
+        .and_then(PyRep::as_str)
+        .expect("objectives");
+    assert!(info_text.contains("77") && info_text.contains("Tritanium"), "got {info_text}");
+    assert_eq!(journal_info.dict_get("requiredTypeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(journal_info.dict_get("requiredQuantity"), Some(&PyRep::Integer(77)));
+
     let brief_info = handle(
         &ctx,
         &mut sess,
@@ -785,13 +804,11 @@ async fn pve_012_persisted_objectives_match_briefing_and_reoffer() {
     .await
     .unwrap()
     .expect("GetMissionBriefingInfo");
-    let info_text = brief_info
-        .dict_get("objectives")
+    assert_eq!(brief_info.dict_get("ContentID"), Some(&PyRep::Integer(i64::from(trade_mid))));
+    assert!(brief_info
+        .dict_get("Mission Briefing ID")
         .and_then(PyRep::as_str)
-        .expect("objectives");
-    assert!(info_text.contains("77") && info_text.contains("Tritanium"), "got {info_text}");
-    assert_eq!(brief_info.dict_get("requiredTypeID"), Some(&PyRep::Integer(34)));
-    assert_eq!(brief_info.dict_get("requiredQuantity"), Some(&PyRep::Integer(77)));
+        .is_some_and(|s| s.contains("77") && s.contains("Tritanium")));
 }
 
 #[tokio::test]
@@ -3861,20 +3878,20 @@ async fn site_origin_precedes_bookmark_across_briefing_warp_and_materialization(
     });
 
     for (ag_id, mid, expected_site) in [(agents[0], mid_1, site_1), (agents[1], mid_2, site_2)] {
-        let brief = f
+        let journal = f
             .ctx
             .dispatch_rpc(
                 &mut f.sess_a,
                 "agentMgr",
                 None,
-                "GetMissionBriefingInfo",
+                "GetMissionJournalInfo",
                 &[PyRep::Integer(ag_id), PyRep::Integer(i64::from(mid))],
                 &kw,
                 None,
             )
             .await
-            .expect("GetMissionBriefingInfo");
-        let PyRep::List(locs) = brief.dict_get("locations").expect("locations list") else {
+            .expect("GetMissionJournalInfo");
+        let PyRep::List(locs) = journal.dict_get("locations").expect("locations list") else {
             panic!("expected locations PyRep::List");
         };
         let dun_loc = locs
@@ -3884,14 +3901,14 @@ async fn site_origin_precedes_bookmark_across_briefing_warp_and_materialization(
         let PyRep::Tuple(coords) = dun_loc.dict_get("coords").expect("dungeon coords") else {
             panic!("expected coords tuple");
         };
-        let brief_pos = glam::DVec3::new(
+        let journal_pos = glam::DVec3::new(
             coords[0].as_f64().unwrap(),
             coords[1].as_f64().unwrap(),
             coords[2].as_f64().unwrap(),
         );
         assert!(
-            brief_pos.distance(expected_site) <= 1.0,
-            "briefing dungeon coords {brief_pos:?} must match site_origin_m {expected_site:?}"
+            journal_pos.distance(expected_site) <= 1.0,
+            "journal dungeon coords {journal_pos:?} must match site_origin_m {expected_site:?}"
         );
     }
 

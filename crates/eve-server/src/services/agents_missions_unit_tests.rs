@@ -543,14 +543,17 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
     .unwrap()
     .unwrap();
     assert_eq!(
-        briefing.dict_get("missionID"),
+        briefing.dict_get("ContentID"),
         Some(&PyRep::Integer(mid as i64))
     );
-    assert_eq!(briefing.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(offer_win)));
+    assert_eq!(briefing.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
+    assert_eq!(briefing.dict_get("Expiration Time"), Some(&PyRep::None));
+    assert_eq!(briefing.dict_get("Mission Image"), Some(&PyRep::String(String::new())));
+    assert_eq!(briefing.dict_get("Mission Keywords"), Some(&PyRep::Dict(Vec::new())));
     let briefing_str = briefing
-        .dict_get("briefing")
+        .dict_get("Mission Briefing ID")
         .and_then(|v| v.as_str())
-        .expect("GetMissionBriefingInfo must include briefing string");
+        .expect("GetMissionBriefingInfo must include Mission Briefing ID string");
     assert!(!briefing_str.is_empty());
     assert!(
         !briefing_str.contains("Execute objectives in system"),
@@ -558,6 +561,10 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
     );
     if let Some(tmpl) = ctx.sde.missions.get(&mid) {
         if !tmpl.title.is_empty() {
+            assert_eq!(
+                briefing.dict_get("Mission Title ID"),
+                Some(&PyRep::String(tmpl.title.clone()))
+            );
             assert!(
                 briefing_str.contains(&tmpl.title),
                 "briefing must include mission title {:?}, got: {briefing_str}",
@@ -565,6 +572,25 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
             );
         }
     }
+    let journal_info = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GetMissionJournalInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(mid as i64)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        journal_info.dict_get("missionID"),
+        Some(&PyRep::Integer(mid as i64))
+    );
+    assert_eq!(
+        journal_info.dict_get("bonusWindowSecs"),
+        Some(&PyRep::Integer(offer_win))
+    );
 
     // 4. Mark mission objectives ready (0 NPCs remaining and satisfy any required delivery item) and complete (action 6)
     ctx.db.with_mut_snapshot(|snap| {

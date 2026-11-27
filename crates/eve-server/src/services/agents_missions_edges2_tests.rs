@@ -472,11 +472,23 @@ async fn mission_briefing_objective_journal_state_mapping_and_expiry_sweeps() {
     assert_eq!(err_nosys.code, "NoSolarSystem");
 
     let mut sess = char_session(char_id, sys_id, Some(st_id));
-    let err_missing = handle(
+    let none_missing = handle(
         &ctx,
         &mut sess,
         "agentMgr",
         "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(88_888_001)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(none_missing, PyRep::None);
+    let err_missing = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GetMissionJournalInfo",
         &[PyRep::Integer(ag.agent_id), PyRep::Integer(88_888_001)],
         &HashMap::new(),
     )

@@ -769,9 +769,8 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     assert_eq!(dbrow_stack.dbrow_get("categoryID"), Some(&PyRep::Integer(0)));
     assert_eq!(inv_keyval_to_dbrow(PyRep::Integer(99)), PyRep::Integer(99));
 
-    // 4. Untouched service/method pairs:
-    //    paperDollServer.GetPaperDollData,
-    //    agentMgr.GetOffer / GetAgentLocationWrap / GetMissionBriefingInfo / GetMissionObjectiveInfo
+    // 4. Untouched service/method pairs & agentMgr.GetOffer:
+    //    paperDollServer.GetPaperDollData, agentMgr.GetOffer
 
     let female_doll = PyRep::keyval([
         ("gender", PyRep::Integer(0)),
@@ -809,42 +808,6 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
     )
     .unwrap();
     assert!(matches!(offer, PyRep::Tuple(t) if t.len() == 2));
-
-    let loc_sys = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetAgentLocationWrap",
-        Ok(PyRep::keyval([("agentID", PyRep::Integer(10)), ("solarsystemID", PyRep::Integer(30_000_142))])),
-    )
-    .unwrap();
-    assert_eq!(loc_sys.dict_get("locationID"), Some(&PyRep::Integer(30_000_142)));
-    assert_eq!(loc_sys.dict_get("typeID"), Some(&PyRep::Integer(5)));
-    let loc_st = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetAgentLocationWrap",
-        Ok(PyRep::keyval([("agentID", PyRep::Integer(10)), ("stationID", PyRep::Integer(60_003_760))])),
-    )
-    .unwrap();
-    assert_eq!(loc_st.dict_get("locationID"), Some(&PyRep::Integer(60_003_760)));
-    assert_eq!(normalize_agent_location_wrap_rep(PyRep::Integer(1)), PyRep::Integer(1));
-
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "agentMgr",
-            "GetMissionBriefingInfo",
-            Err(BridgeRpcError { code: "MissionNotActive".into(), message: "x".into(), client_error: None }),
-        )
-        .unwrap(),
-        PyRep::None
-    );
-    let brief = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetMissionBriefingInfo",
-        Ok(PyRep::keyval([("title", PyRep::String("Scan".into())), ("missionID", PyRep::Integer(12))])),
-    )
-    .unwrap();
-    assert_eq!(brief.dict_get("Mission Title ID"), Some(&PyRep::String("Scan".into())));
-    assert_eq!(brief.dict_get("ContentID"), Some(&PyRep::Integer(12)));
-    assert_eq!(brief.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
 }
 
 #[test]

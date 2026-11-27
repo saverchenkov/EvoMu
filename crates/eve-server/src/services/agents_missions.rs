@@ -1304,13 +1304,19 @@ pub async fn handle_with_bound(
             let mission_id =
                 match resolve_target_mission_id(ctx, char_id, lookup_agent_id, None, args, _kwargs) {
                     Ok(v) => v,
-                    Err(ref e) if e.code == "MissionNotActive" && method == "GetMissionObjectiveInfo" => {
+                    Err(ref e)
+                        if e.code == "MissionNotActive"
+                            && matches!(
+                                method,
+                                "GetMissionObjectiveInfo" | "GetMissionBriefingInfo"
+                            ) =>
+                    {
                         return Some(Ok(PyRep::None));
                     }
                     Err(e) => return Some(Err(e)),
                 };
             let not_active_reply = |msg: String| {
-                if method == "GetMissionObjectiveInfo" {
+                if matches!(method, "GetMissionObjectiveInfo" | "GetMissionBriefingInfo") {
                     Ok(PyRep::None)
                 } else {
                     Err(BridgeRpcError {
@@ -1865,6 +1871,32 @@ pub async fn handle_with_bound(
                     (
                         PyRep::String("contentID".into()),
                         PyRep::Integer(mission_id as i64),
+                    ),
+                ])));
+            }
+            if method == "GetMissionBriefingInfo" {
+                return Some(Ok(PyRep::Dict(vec![
+                    (
+                        PyRep::String("Mission Title ID".into()),
+                        PyRep::String(title),
+                    ),
+                    (
+                        PyRep::String("ContentID".into()),
+                        PyRep::Integer(mission_id as i64),
+                    ),
+                    (
+                        PyRep::String("Mission Briefing ID".into()),
+                        PyRep::String(briefing),
+                    ),
+                    (PyRep::String("Decline Time".into()), PyRep::Integer(-1)),
+                    (PyRep::String("Expiration Time".into()), PyRep::None),
+                    (
+                        PyRep::String("Mission Image".into()),
+                        PyRep::String(String::new()),
+                    ),
+                    (
+                        PyRep::String("Mission Keywords".into()),
+                        PyRep::Dict(Vec::new()),
                     ),
                 ])));
             }
