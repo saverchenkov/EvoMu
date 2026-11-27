@@ -4189,7 +4189,6 @@ async fn own_diff_p1_08_and_09_trash_and_launch_from_container_preserve_dungeon_
 #[tokio::test]
 async fn own_diff_p1_10_and_11_mtu_tractor_and_scoop_cannot_touch_dungeon_containers() {
     use crate::services::combat_crimewatch::combat_npcs_drones::precheck_tractor_beam_activation;
-    use crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext;
     use crate::services::mobile_deployables::{
         apply_mobile_deployable_in_snap, register_mobile_deployable,
         step_mobile_deployables_in_actor_collecting, write_deployable_state, MobileDeployableDbOp,
@@ -4245,8 +4244,9 @@ async fn own_diff_p1_10_and_11_mtu_tractor_and_scoop_cannot_touch_dungeon_contai
             inv_add_to(&ctx, &mut sess, char_id, cont_16757, 8_801_201, ship_id, Some(5)).await;
         }
         for method in ["Scoop", "ScoopToFleetHangar"] {
-            let err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", method, &[PyRep::Integer(cont_16757)], &HashMap::new())
-                .await.expect("handled").unwrap_err();
+            let err = crate::services::inventory_fitting::fitting_ship_bays::ship_scoop_and_store(
+                &ctx, &mut sess, method, &[PyRep::Integer(cont_16757)], &HashMap::new(),
+            ).await.unwrap_err();
             assert_eq!(err.code, "CannotScoop");
             assert!(ctx.db.with_snapshot(|s| s.items.get(&cont_16757).is_some_and(|i| i.location_id == i64::from(sys_id))));
             assert!(sys_h.get_ball_snapshot(cont_16757).await.unwrap().is_some());
