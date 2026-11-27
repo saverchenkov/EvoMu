@@ -1,4 +1,5 @@
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use eve_db::{PersistedInsurgencyCampaign, SystemDynamicState};
 
@@ -398,42 +399,40 @@ async fn test_active_ci_sentries_ewar_boundaries_and_nearest_sentry_origin() {
     assert!(!has_active_counter_insurgency_sentries(&ctx, sys_id));
 
     let sentry_ball_id = 9_795_070_i64;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.npc_entities.insert(
-            sentry_ball_id,
-            crate::services::combat_crimewatch::ExtendedNpcEntity {
-                ball_id: sentry_ball_id,
-                type_id: 79_507,
-                faction_id: 500_001,
-                archetype: "CounterInsurgencySentry".into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 0,
-                target_id: None,
-                aggression_threat: HashMap::new(),
-                threat_table: HashMap::new(),
-                bounty_isk: 0.0,
-                optimal_range: 250_000.0,
-                orbit_range: 0.0,
-                damage_vector: Default::default(),
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 1.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: DVec3::ZERO,
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
-            },
-        );
-    });
+    seed_npc_entity(
+        &ctx,
+        crate::services::combat_crimewatch::ExtendedNpcEntity {
+            ball_id: sentry_ball_id,
+            type_id: 79_507,
+            faction_id: 500_001,
+            archetype: "CounterInsurgencySentry".into(),
+            solar_system_id: sys_id,
+            spawn_group_id: 0,
+            target_id: None,
+            aggression_threat: HashMap::new(),
+            threat_table: HashMap::new(),
+            bounty_isk: 0.0,
+            optimal_range: 250_000.0,
+            orbit_range: 0.0,
+            damage_vector: Default::default(),
+            entropic_cycles: 0,
+            drifter_overshield_hp: 0.0,
+            drifter_doomsday_fired: false,
+            web_speed_factor: 1.0,
+            web_range: 0.0,
+            scram_strength: 0.0,
+            scram_range: 0.0,
+            neut_amount: 0.0,
+            ecm_jammed: false,
+            remote_shield_rep: 0.0,
+            remote_armor_rep: 0.0,
+            remote_rep_range: 0.0,
+            tag_drop_type_id: None,
+            spawn_position: DVec3::ZERO,
+            sleeper_wh_class: 0,
+            custom_cargo_loot: None,
+        },
+    );
     // Not in ballpark yet -> false
     assert!(!has_active_counter_insurgency_sentries(&ctx, sys_id));
 

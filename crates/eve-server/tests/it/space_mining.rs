@@ -2852,11 +2852,11 @@ use crate::features_market_orders_rpcs::{rpc, select_pilot, PILOT_1, PILOT_2};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::npc_ai::npc_test_helpers::list_npc_entities_in_system;
 use eve_server::living_world::{sde_ball_and_combat, LivingWorldConvoy, NpcArchetype};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     is_outlaw_ship_docking_refused, step_empire_navy_patrols, step_extended_npc_ai_sync,
-    with_combat_runtime,
 };
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use eve_server::system_actor::AsteroidState;
@@ -2963,21 +2963,17 @@ async fn test_parity_navy_npc_and_faction_police() {
     let _ = step_empire_navy_patrols(&ctx, JITA_SYS).await;
     step_extended_npc_ai_sync(&ctx, JITA_SYS);
 
-    let (police_targets, navy_targets) = with_combat_runtime(&ctx, |rt| {
-        let pol: Vec<Option<i64>> = rt
-            .npc_entities
-            .values()
-            .filter(|n| n.solar_system_id == JITA_SYS && n.archetype == "FactionPolice")
-            .map(|n| n.target_id)
-            .collect();
-        let nav: Vec<Option<i64>> = rt
-            .npc_entities
-            .values()
-            .filter(|n| n.solar_system_id == JITA_SYS && n.archetype == "Navy")
-            .map(|n| n.target_id)
-            .collect();
-        (pol, nav)
-    });
+    let jita_npcs = list_npc_entities_in_system(&ctx, JITA_SYS);
+    let police_targets: Vec<Option<i64>> = jita_npcs
+        .iter()
+        .filter(|n| n.archetype == "FactionPolice")
+        .map(|n| n.target_id)
+        .collect();
+    let navy_targets: Vec<Option<i64>> = jita_npcs
+        .iter()
+        .filter(|n| n.archetype == "Navy")
+        .map(|n| n.target_id)
+        .collect();
 
     assert!(
         police_targets.contains(&Some(outlaw_ship)),

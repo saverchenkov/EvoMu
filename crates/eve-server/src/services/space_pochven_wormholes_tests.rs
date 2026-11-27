@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::get_npc_entity;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     clone_char_with, test_ctx_with_clock,
 };
@@ -193,17 +194,14 @@ async fn r11_k12_collapsed_pochven_wormhole_skips_spawn_and_guards_have_slim_met
 
     let guards = ensure_pochven_side_guards(&ctx, poch_sys, 889_200, DVec3::ZERO, true).await;
     assert_eq!(guards.len(), 6);
-    let guard_entities: Vec<(i64, u32)> = {
-        let rt = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
-        guards
-            .iter()
-            .map(|&gid| {
-                let ent = rt.npc_entities.get(&gid).expect("guard entity");
-                assert_eq!(ent.spawn_group_id, 0);
-                (gid, ent.faction_id)
-            })
-            .collect()
-    };
+    let guard_entities: Vec<(i64, u32)> = guards
+        .iter()
+        .map(|&gid| {
+            let ent = get_npc_entity(&ctx, gid).expect("guard entity");
+            assert_eq!(ent.spawn_group_id, 0);
+            (gid, ent.faction_id)
+        })
+        .collect();
     let guard_metas = poch_handle
         .test_with_ballpark_async(move |bp| {
             guard_entities
